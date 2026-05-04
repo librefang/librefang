@@ -1426,7 +1426,7 @@
           "memory"
         ],
         "summary": "POST /api/agents/:id/memory/import — Import KV memory from JSON into an agent.",
-        "description": "Accepts a JSON body with a `kv` object mapping string keys to JSON values.\nOptionally accepts `clear_existing: true` to wipe existing memory before import.",
+        "description": "Accepts a JSON body with a `kv` object mapping string keys to JSON values.\nOptionally accepts `clear_existing: true` to wipe existing memory before import.\n\n**Response contract — clients MUST inspect `body.status`, not just the\nHTTP status code.** A 200 may indicate either:\n  - `{ \"status\": \"imported\", \"keys_imported\": N }` — every key written.\n  - `{ \"status\": \"partial\", \"keys_imported\": N, \"failed_keys\": [...] }` —\n    one or more keys failed at the substrate layer; the rest were\n    written. The endpoint deliberately does not surface partial as\n    207 Multi-Status to avoid breaking existing callers that gate on\n    `status == 200`. Treat any non-`\"imported\"` body status as a\n    soft failure that requires retrying the listed keys.",
         "operationId": "import_agent_memory",
         "parameters": [
           {
@@ -1451,7 +1451,7 @@
         },
         "responses": {
           "200": {
-            "description": "Memory imported",
+            "description": "Memory imported (status=\"imported\") OR partial failure (status=\"partial\" with failed_keys list — clients must check body)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1459,6 +1459,15 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Missing or malformed `kv` object"
+          },
+          "404": {
+            "description": "Agent not found, or caller is not the agent's author and not an admin"
+          },
+          "500": {
+            "description": "Backend failure clearing existing memory before import"
           }
         }
       }
@@ -3575,6 +3584,7 @@
           "system"
         ],
         "summary": "POST /api/bindings — Add a new agent binding.",
+        "description": "Validation is **advisory**: a binding referencing an unknown agent is\nstill accepted (kernel-side `add_binding` is infallible and binding\nstate may be primed before the target agent spawns), but a `WARN` is\nlogged so misconfiguration is visible. Both name lookup and UUID\nresolution check the registry — the previous form passed any\nwell-formed UUID even if no such agent existed, so the warn would\nnever fire on a UUID typo.",
         "operationId": "add_binding",
         "requestBody": {
           "content": {
@@ -3587,7 +3597,7 @@
           "required": true
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Binding added",
             "content": {
               "application/json": {
@@ -3681,7 +3691,7 @@
           "budget"
         ],
         "summary": "GET /api/budget/agents — Per-agent cost ranking (top spenders).",
-        "description": "Uses a single `GROUP BY agent_id` query instead of one `SUM` per agent to\neliminate the N+1 SQLite pattern that caused ~1200 queries/min under normal\ndashboard polling at 100 agents. See #3684.",
+        "description": "Uses a single `GROUP BY agent_id` query instead of one `SUM` per agent to\neliminate the N+1 SQLite pattern that caused ~1200 queries/min under normal\ndashboard polling at 100 agents. See #3684.\n\nEnvelope is the canonical `PaginatedResponse{items,total,offset,limit}` per\n#3842; the underlying GROUP BY returns the full ranking in a single shot, so\n`offset=0`, `limit=None`.",
         "operationId": "agent_budget_ranking",
         "responses": {
           "200": {
@@ -3689,8 +3699,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {}
+                  "$ref": "#/components/schemas/JsonObject"
                 }
               }
             }
@@ -5599,7 +5608,7 @@
           "system"
         ],
         "summary": "GET /api/logs/stream — SSE endpoint for real-time audit log streaming.",
-        "description": "Streams new audit entries as Server-Sent Events. Accepts optional query\nparameters for filtering:\n  - `level`  — filter by classified level (info, warn, error)\n  - `filter` — text substring filter across action/detail/agent_id\n  - `token`  — auth token (for EventSource clients that cannot set headers)\n\nA heartbeat ping is sent every 15 seconds to keep the connection alive.\nThe endpoint polls the audit log every second and sends only new entries\n(tracked by sequence number). On first connect, existing entries are sent\nas a backfill so the client has immediate context.",
+        "description": "Streams new audit entries as Server-Sent Events. Accepts optional query\nparameters for filtering:\n  - `level`  — filter by classified level (info, warn, error)\n  - `filter` — text substring filter across action/detail/agent_id\n\nA heartbeat ping is sent every 15 seconds to keep the connection alive.\nThe endpoint polls the audit log every second. The first poll sends up\nto the most recent 200 entries as a bounded backfill (prevents a flood\nwhen subscribing against a long-running daemon); every subsequent poll\nuses a cursor (`since_seq`) so bursts faster than the previous\n`recent(200)` sliding window are no longer silently truncated.",
         "operationId": "logs_stream",
         "responses": {
           "200": {

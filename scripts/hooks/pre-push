@@ -1,80 +1,56 @@
 #!/bin/sh
-# Pre-push hook (#3303).
+# Pre-push hook (#3303 → #4531 → this rewrite).
 #
-# This is where the heavy stuff lives — anything that takes more than
-# a couple of seconds belongs here, not in pre-commit. Push is rarer
-# than commit, so a 30-90s wait is acceptable; a 30s wait per commit
-# is not.
+# Philosophy
+# ----------
+# Local pre-push is NOT a CI replacement. The previous version ran
+# `cargo clippy --workspace --all-targets` and `cargo xtask codegen
+# --openapi` on every push, which made a typical push wait 5-25 min
+# (worse with multiple worktrees competing for the build dir lock).
+# That's wrong design — no major Rust project does this. CI is the
+# authoritative gate; pre-push at most refuses obviously-dangerous
+# pushes and exits in milliseconds.
 #
-# Install: git config core.hooksPath scripts/hooks
+# What CI covers (`.github/workflows/ci.yml`)
+#   - `quality` job:        cargo fmt + cargo clippy (selective on PR,
+#                           full on push to main)
+#   - `openapi-drift` job:  regenerates openapi.json + SDKs, fails on
+#                           `git diff --exit-code` against committed
+#   - `security` job:       cargo audit + npm audit + license check
+#   - `test-*` jobs:        nextest matrix on Linux / macOS / Windows
 #
-# Checks performed:
-#   1. cargo clippy --workspace --all-targets -- -D warnings
-#   2. openapi.json drift (regen if route signatures changed since @{push})
-#   3. SDK drift (regen if openapi.json changed since @{push})
+# Want to lint locally? Run `just lint` or `cargo clippy --workspace
+# --all-targets -- -D warnings` on demand. That belongs in YOUR loop,
+# not gating every push.
 #
-# Skip with `git push --no-verify` (only when CI is the safety net you
-# want — this hook exists so you don't push red builds to the team).
+# Skip even this hook with `git push --no-verify` or
+# `LIBREFANG_PREPUSH_SKIP=1 git push`.
 
 set -eu
 
-# 1. Workspace-wide clippy. This is the load-bearing lint gate; it used
-# to live in pre-commit and made every commit wait 10+ seconds.
-echo "[pre-push] cargo clippy --workspace --all-targets ..."
-if ! cargo clippy --workspace --all-targets -- -D warnings; then
-    echo "Error: clippy failed. Fix warnings before pushing, or rerun with --no-verify."
-    exit 1
+if [ "${LIBREFANG_PREPUSH_SKIP:-0}" = "1" ]; then
+    exit 0
 fi
 
-# 2. openapi.json drift detection.
-#
-# Heuristic: scan added/removed lines under crates/librefang-api/src/routes/
-# in commits being pushed. utoipa derives the spec from attributes,
-# signatures, and derives only — body-only diffs are safe.
-#
-# Range: `@{upstream}..HEAD` if a tracking branch exists, otherwise
-# fall back to the staged-cache form (covers first-push of new branch
-# by approximating "everything in this branch").
-if git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>&1; then
-    RANGE='@{upstream}..HEAD'
-else
-    # New branch — diff against origin/main as a reasonable default.
-    RANGE='origin/main..HEAD'
-fi
+# Only check: refuse direct push to protected branches. GitHub branch
+# protection rules also enforce this on the server, but rejecting
+# locally saves the round-trip and avoids a confusing "fetch first" /
+# "branch is protected" error after a long clippy wait.
+PROTECTED='main master'
+while read -r local_ref local_sha remote_ref remote_sha; do
+    # Standard sentinel for branch deletion — let it through; GitHub
+    # will refuse if the branch is protected.
+    [ "$local_sha" = '0000000000000000000000000000000000000000' ] && continue
 
-ROUTES_CHANGED=$(git diff --name-only "$RANGE" 2>/dev/null | grep "crates/librefang-api/src/routes/" || true)
-if [ -n "$ROUTES_CHANGED" ]; then
-    SPEC_RELEVANT=$(git diff -U0 "$RANGE" -- crates/librefang-api/src/routes/ 2>/dev/null \
-        | grep -E '^[+-][^+-]' \
-        | grep -E '^[+-][[:space:]]*(#\[|pub |use |fn |struct |enum |impl |type |trait )' \
-        || true)
-
-    if [ -n "$SPEC_RELEVANT" ]; then
-        echo "[pre-push] regenerating openapi.json (spec-relevant route changes detected)..."
-        if ! cargo xtask codegen --openapi; then
-            echo "Error: openapi.json regeneration failed — fix build/codegen before pushing."
+    for p in $PROTECTED; do
+        if [ "$remote_ref" = "refs/heads/$p" ]; then
+            echo "Refusing direct push to protected branch '$p'."
+            echo "Open a pull request from a feature branch instead, or"
+            echo "set LIBREFANG_PREPUSH_SKIP=1 if this is a one-off"
+            echo "release / hotfix that the maintainers have agreed to."
             exit 1
         fi
-        if ! git diff --quiet -- openapi.json; then
-            echo "Error: openapi.json is stale. Commit the regenerated spec before pushing:"
-            echo "  git add openapi.json && git commit --amend --no-edit"
-            exit 1
-        fi
-    fi
-fi
-
-# 3. SDK drift — if openapi.json changed in this push, SDKs must be in sync.
-if git diff --name-only "$RANGE" 2>/dev/null | grep -qx "openapi.json"; then
-    echo "[pre-push] regenerating SDKs from openapi.json..."
-    if ! python3 scripts/codegen-sdks.py; then
-        echo "Error: SDK regeneration failed — fix scripts/codegen-sdks.py before pushing."
-        exit 1
-    fi
-    if ! git diff --quiet -- sdk/python sdk/javascript sdk/go sdk/rust; then
-        echo "Error: SDKs are stale. Commit the regenerated SDKs before pushing:"
-        echo "  git add sdk/python sdk/javascript sdk/go sdk/rust && git commit --amend --no-edit"
-        exit 1
-    fi
-fi
+    done
+done
 
 exit 0

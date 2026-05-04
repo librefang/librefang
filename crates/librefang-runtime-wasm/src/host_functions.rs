@@ -1231,7 +1231,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl librefang_kernel_handle::KernelHandle for RecordingKernel {
+    impl librefang_kernel_handle::AgentControl for RecordingKernel {
         async fn spawn_agent(&self, _: &str, _: Option<&str>) -> Result<(String, String), String> {
             Err("not implemented".to_string())
         }
@@ -1244,6 +1244,12 @@ mod tests {
         fn kill_agent(&self, _: &str) -> Result<(), String> {
             Err("not implemented".to_string())
         }
+        fn find_agents(&self, _: &str) -> Vec<librefang_kernel_handle::AgentInfo> {
+            vec![]
+        }
+    }
+
+    impl librefang_kernel_handle::MemoryAccess for RecordingKernel {
         fn memory_store(
             &self,
             key: &str,
@@ -1264,9 +1270,10 @@ mod tests {
         fn memory_list(&self, _: Option<&str>) -> Result<Vec<String>, String> {
             Ok(vec![])
         }
-        fn find_agents(&self, _: &str) -> Vec<librefang_kernel_handle::AgentInfo> {
-            vec![]
-        }
+    }
+
+    #[async_trait::async_trait]
+    impl librefang_kernel_handle::TaskQueue for RecordingKernel {
         async fn task_post(
             &self,
             _: &str,
@@ -1297,9 +1304,17 @@ mod tests {
         async fn task_update_status(&self, _: &str, _: &str) -> Result<bool, String> {
             Ok(false)
         }
+    }
+
+    #[async_trait::async_trait]
+    impl librefang_kernel_handle::EventBus for RecordingKernel {
         async fn publish_event(&self, _: &str, _: serde_json::Value) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[async_trait::async_trait]
+    impl librefang_kernel_handle::KnowledgeGraph for RecordingKernel {
         async fn knowledge_add_entity(
             &self,
             _: &librefang_types::memory::Entity,
@@ -1319,6 +1334,16 @@ mod tests {
             Ok(vec![])
         }
     }
+
+    impl librefang_kernel_handle::CronControl for RecordingKernel {}
+    impl librefang_kernel_handle::ApprovalGate for RecordingKernel {}
+    impl librefang_kernel_handle::HandsControl for RecordingKernel {}
+    impl librefang_kernel_handle::A2ARegistry for RecordingKernel {}
+    impl librefang_kernel_handle::ChannelSender for RecordingKernel {}
+    impl librefang_kernel_handle::PromptStore for RecordingKernel {}
+    impl librefang_kernel_handle::WorkflowRunner for RecordingKernel {}
+    impl librefang_kernel_handle::GoalControl for RecordingKernel {}
+    impl librefang_kernel_handle::ToolPolicy for RecordingKernel {}
 
     fn state_with_kernel(
         agent_id: &str,

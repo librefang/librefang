@@ -82,6 +82,17 @@ pub trait AuditStore: Send + Sync {
     /// Most recent `n` entries in chronological order.
     fn recent(&self, n: usize) -> Vec<AuditEntry>;
 
+    /// All entries with `seq` strictly greater than `cursor`, in chronological order.
+    ///
+    /// Defaults to filtering `recent(usize::MAX)`; concrete impls should override
+    /// with an O(log n) binary-search implementation.
+    fn since_seq(&self, cursor: u64) -> Vec<AuditEntry> {
+        self.recent(usize::MAX)
+            .into_iter()
+            .filter(|e| e.seq > cursor)
+            .collect()
+    }
+
     /// Drop entries older than `retention_days`. Returns the number pruned.
     fn prune(&self, retention_days: u32) -> usize;
 
@@ -147,6 +158,10 @@ impl AuditStore for AuditLog {
 
     fn recent(&self, n: usize) -> Vec<AuditEntry> {
         AuditLog::recent(self, n)
+    }
+
+    fn since_seq(&self, cursor: u64) -> Vec<AuditEntry> {
+        AuditLog::since_seq(self, cursor)
     }
 
     fn prune(&self, retention_days: u32) -> usize {

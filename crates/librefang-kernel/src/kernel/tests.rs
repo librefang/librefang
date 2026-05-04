@@ -2466,7 +2466,7 @@ async fn no_upstream_when_parent_has_no_active_turn() {
 /// failure we expect.
 #[tokio::test(flavor = "multi_thread")]
 async fn send_to_agent_as_tolerates_unregistered_parent_uuid() {
-    use kernel_handle::KernelHandle;
+    use kernel_handle::AgentControl;
 
     let kernel = cascade_test_kernel();
 
@@ -2477,7 +2477,7 @@ async fn send_to_agent_as_tolerates_unregistered_parent_uuid() {
     // (no cascade), and the call proceeds to fail at the target agent.
     let child_id = AgentId::new();
     let parent_id = AgentId::new();
-    let err = KernelHandle::send_to_agent_as(
+    let err = AgentControl::send_to_agent_as(
         kernel.as_ref(),
         &child_id.to_string(),
         "ping",
@@ -2500,11 +2500,11 @@ async fn send_to_agent_as_tolerates_unregistered_parent_uuid() {
 /// rather than silently passed through.
 #[tokio::test(flavor = "multi_thread")]
 async fn send_to_agent_as_rejects_unparseable_parent_id() {
-    use kernel_handle::KernelHandle;
+    use kernel_handle::AgentControl;
 
     let kernel = cascade_test_kernel();
     let child_id = AgentId::new();
-    let err = KernelHandle::send_to_agent_as(
+    let err = AgentControl::send_to_agent_as(
         kernel.as_ref(),
         &child_id.to_string(),
         "ping",
@@ -4673,7 +4673,6 @@ async fn test_push_notification_omits_session_suffix_for_agent_level_alerts() {
 /// alongside the existing `"cron"` carve-out.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_resolve_user_tool_decision_autonomous_bypasses_rbac() {
-    use kernel_handle::KernelHandle;
     use librefang_types::config::UserConfig;
     use librefang_types::user_policy::UserToolGate;
 
@@ -4702,7 +4701,7 @@ async fn test_resolve_user_tool_decision_autonomous_bypasses_rbac() {
 
     // Cron channel — the existing carve-out (must remain Allow).
     assert_eq!(
-        KernelHandle::resolve_user_tool_decision(
+        kernel_handle::ApprovalGate::resolve_user_tool_decision(
             kernel.as_ref(),
             "shell_exec",
             None,
@@ -4714,7 +4713,7 @@ async fn test_resolve_user_tool_decision_autonomous_bypasses_rbac() {
 
     // Autonomous channel — the new carve-out (issue #3243).
     assert_eq!(
-        KernelHandle::resolve_user_tool_decision(
+        kernel_handle::ApprovalGate::resolve_user_tool_decision(
             kernel.as_ref(),
             "shell_exec",
             None,
@@ -4728,7 +4727,7 @@ async fn test_resolve_user_tool_decision_autonomous_bypasses_rbac() {
     // A real inbound channel WITHOUT a registered sender must still
     // hit the guest gate — proves the carve-out is targeted, not a
     // blanket fail-open.
-    let guest_decision = KernelHandle::resolve_user_tool_decision(
+    let guest_decision = kernel_handle::ApprovalGate::resolve_user_tool_decision(
         kernel.as_ref(),
         "shell_exec",
         Some("999999"),

@@ -412,13 +412,15 @@ impl SessionStore {
         )
         .map_err(|e| LibreFangError::Memory(format!("FTS delete failed: {e}")))?;
 
-        if !content.is_empty() {
-            tx.execute(
-                "INSERT INTO sessions_fts (session_id, agent_id, content) VALUES (?1, ?2, ?3)",
-                rusqlite::params![session_id_str, agent_id_str, content],
-            )
-            .map_err(|e| LibreFangError::Memory(format!("FTS insert failed: {e}")))?;
-        }
+        // Always insert a FTS row, even when content is empty. The v33 migration
+        // backfills a placeholder row for every session so it remains visible to
+        // the index; skipping the INSERT here for empty-content sessions would
+        // silently remove that placeholder and break the "at least visible" invariant.
+        tx.execute(
+            "INSERT INTO sessions_fts (session_id, agent_id, content) VALUES (?1, ?2, ?3)",
+            rusqlite::params![session_id_str, agent_id_str, content],
+        )
+        .map_err(|e| LibreFangError::Memory(format!("FTS insert failed: {e}")))?;
 
         tx.commit()
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -436,23 +438,36 @@ impl SessionStore {
     }
 
     /// Delete a session from the database and its FTS5 index entry.
+    ///
+    /// Both DELETEs share one transaction (#3548). Pre-fix the FTS DELETE
+    /// ran outside any transaction with a `let _ =`-style warn-and-swallow,
+    /// so a failure on the FTS side left the `sessions` row gone but its
+    /// content still searchable through `snippet(sessions_fts, ...)` —
+    /// `search_sessions` does not JOIN `sessions`. That is a privacy
+    /// regression, not a recoverable hygiene issue, so we now propagate
+    /// the FTS error and roll the parent DELETE back. A subsequent retry
+    /// re-attempts the whole pair atomically.
     pub fn delete_session(&self, session_id: SessionId) -> LibreFangResult<()> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let id_str = session_id.0.to_string();
-        conn.execute(
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        tx.execute(
             "DELETE FROM sessions WHERE id = ?1",
             rusqlite::params![id_str],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        if let Err(e) = conn.execute(
+        tx.execute(
             "DELETE FROM sessions_fts WHERE session_id = ?1",
             rusqlite::params![id_str],
-        ) {
-            warn!(session_id = %id_str, error = %e, "Failed to delete FTS entry; orphan row left in sessions_fts");
-        }
+        )
+        .map_err(|e| LibreFangError::Memory(format!("FTS delete failed: {e}")))?;
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
@@ -1280,6 +1295,21 @@ impl SessionStore {
         // Sanitize FTS5 query: escape special characters to prevent injection.
         // FTS5 treats `*`, `"`, `NEAR`, `OR`, `AND`, `NOT` as operators.
         // Wrap each word in double quotes to treat as literal phrase tokens.
+        //
+        // Tokenizer alignment (#3548): the `sessions_fts` virtual table is
+        // declared with `tokenize='unicode61'` (migration v33). FTS5 runs
+        // the same tokenizer over the MATCH expression that produced the
+        // index, so quoted-phrase queries like `"agent-id-123"` are split
+        // into the same tokens (`agent`, `id`, `123`) that the insert path
+        // emits — `-` is a token separator, ASCII letters are
+        // case-folded, and diacritics are stripped, on both sides. We
+        // therefore do NOT pre-lowercase or pre-NFKC-normalize in Rust:
+        // doing so would diverge from SQLite's Unicode case-folding rules
+        // for non-ASCII letters, since `str::to_lowercase` follows the
+        // full Unicode tables but `unicode61` only folds the Basic
+        // Latin / Latin-1 Supplement / Latin Extended-A blocks. The
+        // explicit tokenizer in v33 is what makes this argument
+        // contractual instead of incidental.
         let sanitized: String = query
             .split_whitespace()
             .map(|word| {
@@ -2345,6 +2375,245 @@ mod tests {
 
         let results = store.search_sessions("searchable", None).unwrap();
         assert!(results.is_empty());
+    }
+
+    /// #3548 — `unicode61` treats `-` as a token separator on BOTH the
+    /// insert path and the MATCH-expression tokenization path. After v33
+    /// declares the tokenizer explicitly, a quoted-phrase query for a
+    /// hyphenated identifier like `agent-id-123` must therefore match
+    /// the same identifier indexed through `save_session`. Without the
+    /// explicit tokenizer this depended on whatever default the
+    /// build-time SQLite happened to use.
+    #[test]
+    fn test_fts_hyphenated_identifier_matches() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let mut session = store.create_session(agent_id).unwrap();
+        session
+            .messages
+            .push(Message::user("status update for agent-id-123 hello world"));
+        store.save_session(&session).unwrap();
+
+        let results = store
+            .search_sessions("agent-id-123", Some(&agent_id))
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "hyphenated identifier must match through unicode61 tokenizer"
+        );
+
+        // Case-fold check: ASCII case must not affect the match.
+        let upper = store
+            .search_sessions("Agent-ID-123", Some(&agent_id))
+            .unwrap();
+        assert_eq!(upper.len(), 1, "ASCII case-folding must round-trip");
+    }
+
+    /// #3548 — soft-delete + recreate with the same session id must not
+    /// double-index. With the v33 schema and the transactional
+    /// `save_session` upsert + DELETE/INSERT FTS pair, a sequence of
+    /// (save, delete, save) leaves exactly one FTS row for the id.
+    /// Pre-fix the FTS DELETE in `delete_session` ran outside any
+    /// transaction with warn-and-swallow, so a partial failure could
+    /// orphan the row and the subsequent INSERT in `save_session`
+    /// would silently produce a second row keyed on the same id —
+    /// `snippet(...)` would then surface stale content.
+    #[test]
+    fn test_fts_soft_delete_recreate_no_double_index() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        // First save: one FTS row.
+        let mut session = store.create_session(agent_id).unwrap();
+        session
+            .messages
+            .push(Message::user("first incarnation phrase"));
+        store.save_session(&session).unwrap();
+
+        let id = session.id;
+        let count_after_first: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                rusqlite::params![id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count_after_first, 1);
+
+        // Delete the session — FTS row goes too.
+        store.delete_session(id).unwrap();
+        let count_after_delete: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                rusqlite::params![id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count_after_delete, 0, "delete_session must clear FTS row");
+
+        // Recreate with the SAME id (the `Session` carries id + messages
+        // and `save_session` upserts on id) and different content.
+        let recreated = Session {
+            id,
+            agent_id,
+            messages: vec![Message::user("second incarnation phrase")],
+            context_window_tokens: 0,
+            label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+        };
+        store.save_session(&recreated).unwrap();
+
+        // Exactly ONE FTS row, not two.
+        let count_after_recreate: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                rusqlite::params![id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            count_after_recreate, 1,
+            "recreating a deleted session must not double-index FTS"
+        );
+
+        // The new content matches; the old does not.
+        let stale = store
+            .search_sessions("incarnation", Some(&agent_id))
+            .unwrap();
+        assert_eq!(stale.len(), 1, "exactly one search hit, not two");
+        let snippet = &stale[0].snippet;
+        assert!(
+            snippet.contains("second"),
+            "snippet must reflect the recreated content, got: {snippet}"
+        );
+        assert!(
+            !snippet.contains("first"),
+            "snippet must not leak the deleted content, got: {snippet}"
+        );
+    }
+
+    /// #3548 — backfill correctness. Simulates the v32-state DB: sessions
+    /// rows present, no matching FTS rows. Running migrate_v33 must
+    /// surface every session as an FTS row (with empty content; the
+    /// next save_session reflows the real text). Hits the application
+    /// path (SessionStore::search_sessions) via a fresh save afterwards
+    /// to confirm the rebuilt FTS table accepts inserts and matches.
+    #[test]
+    fn test_fts_v33_backfill_then_save_reflows_content() {
+        use crate::migration::run_migrations;
+
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        // Wipe FTS rows to mimic a pre-v12 / pre-fix DB. Sessions row
+        // is inserted manually so we control the agent_id and the
+        // messages blob shape.
+        let agent_id = AgentId::new();
+        let session_id = SessionId::new();
+        let messages_blob =
+            rmp_serde::to_vec_named(&vec![Message::user("backfill needle alphawombat42")]).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+            rusqlite::params![
+                session_id.0.to_string(),
+                agent_id.0.to_string(),
+                messages_blob,
+            ],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM sessions_fts", []).unwrap();
+
+        // Run v33 explicitly (run_migrations is a no-op since
+        // user_version is already current).
+        crate::migration::__test_only_run_v33(&conn);
+
+        // FTS row is present with empty content.
+        let (count, content): (i64, String) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(MAX(content), '') FROM sessions_fts WHERE session_id = ?1",
+                rusqlite::params![session_id.0.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "backfill must produce exactly one FTS row");
+        assert_eq!(
+            content, "",
+            "backfilled FTS rows have empty content until next save"
+        );
+
+        // Now drive save_session to reflow the real text into FTS, then
+        // search to confirm the index works end-to-end.
+        let store = SessionStore::new(Arc::new(Mutex::new(conn)));
+        let session = store.get_session(session_id).unwrap().unwrap();
+        store.save_session(&session).unwrap();
+
+        let hits = store
+            .search_sessions("alphawombat42", Some(&agent_id))
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "post-backfill save_session must populate searchable content"
+        );
+    }
+
+    /// Regression for the HIGH issue identified in code review (#4515):
+    /// save_session previously skipped the FTS INSERT when content was empty,
+    /// which silently removed the v33 backfill placeholder for sessions whose
+    /// messages have no extractable text (e.g. pure tool-call flows).
+    #[test]
+    fn test_fts_v33_backfill_placeholder_survives_empty_content_save() {
+        let agent_id = AgentId::new();
+        let session_id = SessionId::new();
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        {
+            let c = conn.lock().unwrap();
+            run_migrations(&c).unwrap();
+            // Empty messages vec → extract_text_content returns "".
+            let messages_blob = rmp_serde::to_vec_named(&Vec::<Message>::new()).unwrap();
+            c.execute(
+                "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                rusqlite::params![session_id.0.to_string(), agent_id.0.to_string(), messages_blob],
+            )
+            .unwrap();
+            c.execute("DELETE FROM sessions_fts", []).unwrap();
+            crate::migration::__test_only_run_v33(&c);
+            let count: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                    rusqlite::params![session_id.0.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "v33 backfill must produce a placeholder FTS row");
+        }
+
+        let store = SessionStore::new(Arc::clone(&conn));
+        let session = store.get_session(session_id).unwrap().unwrap();
+        store.save_session(&session).unwrap();
+
+        let count_after: i64 = conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                rusqlite::params![session_id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count_after, 1,
+            "save_session with empty content must preserve the FTS placeholder row"
+        );
     }
 
     /// list_sessions surfaces per-session aggregates (cost_usd, total_tokens,

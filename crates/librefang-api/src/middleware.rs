@@ -544,6 +544,28 @@ pub const PUBLIC_ROUTES_GET_ONLY: &[PublicRoute] = &[
     PublicRoute::exact_get("/api/config/schema"),
     // Dashboard assets (JS/CSS/fonts) — always public, SPA needs them for login page
     PublicRoute::prefix_get("/dashboard/assets/"),
+    // PWA siblings of the dashboard shell — static bytes baked into the binary
+    // via `include_dir!` (see `webchat.rs::resolve_dashboard_file`), identical
+    // for every user and leaking nothing sensitive. They MUST be reachable
+    // unauthenticated because:
+    //   * the W3C App Manifest spec mandates `credentials="omit"` for
+    //     `<link rel="manifest">` fetches absent `crossorigin="use-credentials"`,
+    //     so the session cookie is intentionally not sent;
+    //   * the service-worker register fetch and PWA icons are likewise issued
+    //     before/around the login flow.
+    // Without the exemption every authenticated dashboard load would log a
+    // stream of WARN 401s for these paths.
+    //
+    // Source of truth for the asset set is `dashboard/public/` (bundled by
+    // Vite into `dist/`). Adding a new PWA asset there means: (1) reference
+    // it from `dashboard/index.html` (or `manifest.json`) and (2) add an
+    // exact-match entry here. The rate limiter exempts the whole `/dashboard/`
+    // tree via prefix in `rate_limiter.rs::is_rate_limit_exempt`, so no
+    // change is needed there.
+    PublicRoute::exact_get("/dashboard/icon-192.png"),
+    PublicRoute::exact_get("/dashboard/icon-512.png"),
+    PublicRoute::exact_get("/dashboard/manifest.json"),
+    PublicRoute::exact_get("/dashboard/sw.js"),
     // i18n locale bundles — static, fetched before auth flow
     PublicRoute::prefix_get("/locales/"),
     // UAR discovery endpoints — unauthenticated so external clients can enumerate

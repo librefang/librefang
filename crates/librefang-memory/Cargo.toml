@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Memory substrate for the LibreFang Agent OS"
+readme = "README.md"
 
 [features]
 # Default: SurrealDB-backed memory via the surreal-memory library.

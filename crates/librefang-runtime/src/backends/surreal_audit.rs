@@ -370,6 +370,12 @@ impl AuditStore for SurrealAuditStore {
         entries[start..].to_vec()
     }
 
+    fn since_seq(&self, cursor: u64) -> Vec<AuditEntry> {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = entries.partition_point(|e| e.seq <= cursor);
+        entries[idx..].to_vec()
+    }
+
     fn prune(&self, retention_days: u32) -> usize {
         if retention_days == 0 {
             return 0;

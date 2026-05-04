@@ -21,7 +21,7 @@ use dashmap::DashMap;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
 use librefang_channels::types::SenderContext;
-use librefang_runtime::kernel_handle::KernelHandle;
+use librefang_runtime::kernel_handle::prelude::*;
 use librefang_runtime::llm_driver::{StreamEvent, PHASE_RESPONSE_COMPLETE};
 use librefang_runtime::llm_errors;
 use librefang_types::agent::{AgentId, SessionId};
@@ -447,8 +447,25 @@ pub async fn agent_ws(
         }
     }
 
-    // SECURITY: Enforce per-IP WebSocket connection limit
-    let ip = addr.ip();
+    // SECURITY: Enforce per-IP WebSocket connection limit.
+    //
+    // When the daemon sits behind a trusted reverse proxy, the TCP peer
+    // is the proxy and every browser collapses onto the same per-IP
+    // bucket. Use the configured allowlist to swap the peer for the
+    // real client IP from forwarding headers — gated on
+    // `trust_forwarded_for` AND a peer match in `trusted_proxies`, so
+    // an unproxied direct hit can never spoof. See `client_ip` module.
+    //
+    // The compiled allowlist + master switch live on `AppState` (built
+    // once at boot in `server.rs`) so this upgrade path never re-parses
+    // the raw config strings — and never re-emits the malformed-entry
+    // warning per upgrade.
+    let ip = crate::client_ip::resolve_real_client_ip(
+        addr.ip(),
+        &headers,
+        &state.trusted_proxies,
+        state.trust_forwarded_for,
+    );
     let max_ws_per_ip = state.kernel.config_ref().rate_limit.max_ws_per_ip;
 
     let guard = match try_acquire_ws_slot(ip, max_ws_per_ip) {
@@ -783,6 +800,16 @@ async fn handle_agent_ws(
                 }
                 msg_times.push(now);
 
+                // Behaviour change (`trusted_proxies` + `trust_forwarded_for`):
+                // when both flags are configured AND the TCP peer matches the
+                // allowlist, `client_ip` is the resolved real client IP from
+                // forwarding headers, not `addr.ip()`. That value is forwarded
+                // into `SenderContext.user_id` below — meaning per-`user_id`
+                // kernel state (channel-sender keying, audit attribution,
+                // session continuity for code paths that key on it) re-keys
+                // from "proxy IP" to "real client IP" on the very first
+                // request after operators flip the flags on. No-op when the
+                // flags are off (defaults).
                 handle_text_message(
                     &sender,
                     &state,
@@ -1008,6 +1035,13 @@ async fn handle_text_message(
                 state.kernel.clone() as Arc<dyn KernelHandle>;
             let sender_ctx = SenderContext {
                 channel: "webui".to_string(),
+                // Behaviour change (`trusted_proxies` + `trust_forwarded_for`):
+                // when both flags are configured AND the TCP peer matches the
+                // allowlist, this is the resolved real client IP, not the proxy
+                // peer. Any kernel-side per-`user_id` state — audit attribution,
+                // channel-sender keying, session continuity that keys on it —
+                // re-keys from proxy IP to real client IP the moment the flags
+                // flip on. No-op when the flags are off (defaults).
                 user_id: client_ip.to_string(),
                 display_name: "Web UI".to_string(),
                 is_group: false,

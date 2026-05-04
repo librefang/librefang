@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 32;
+const SCHEMA_VERSION: u32 = 33;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -70,7 +70,12 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(29, migrate_v29);
     run_step!(30, migrate_v30);
     run_step!(31, migrate_v31);
+    // v32 (#4496, merged): denormalized `sessions.message_count` for
+    // `list_sessions` performance.
     run_step!(32, migrate_v32);
+    // v33 (this branch, #3548): rebuild sessions_fts with explicit
+    // unicode61 tokenizer + backfill any sessions missing FTS rows.
+    run_step!(33, migrate_v33);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1124,6 +1129,111 @@ fn migrate_v31(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// Version 33: Harden `sessions_fts` (issue #3548).
+///
+/// Recreates the FTS5 virtual table with an explicit
+/// `tokenize='unicode61'` so the at-insert tokenization path is
+/// documented, stable, and matches what query-side normalization
+/// (`SessionStore::search_sessions_paginated`) assumes. The previous
+/// schema (migration v12) relied on the implicit default tokenizer,
+/// which is `unicode61` today but is a deployment-environment
+/// implicit and must not be left implicit in the schema definition.
+///
+/// **Content preservation.** SQLite has no ALTER for FTS tokenize
+/// options, so a DROP+CREATE is the only path to make the tokenizer
+/// explicit. Naively dropping wipes every existing FTS row, which
+/// silently kills full-text search for any session that isn't saved
+/// again post-upgrade (inactive / archived sessions are the worst
+/// case — users would just observe "search no longer finds my old
+/// chats"). To avoid that we snapshot the existing rows into a temp
+/// table, recreate `sessions_fts` with the explicit tokenizer, and
+/// re-insert the snapshot. FTS5 re-tokenizes on insert, so the
+/// rebuilt index is byte-identical when the old default already was
+/// `unicode61` (true for current SQLite builds) and self-heals
+/// otherwise.
+///
+/// **Backfill.** After the snapshot is restored, any row in `sessions`
+/// that *still* has no matching FTS row (pre-v12 sessions, drift from
+/// #3451-era partial writes) gets an empty placeholder inserted so it
+/// is at least visible to the index. The placeholder is overwritten
+/// with the real text on the next `save_session` for that session;
+/// reflowing it during the migration would require decoding the
+/// rmp_serde-encoded `messages` blob and running
+/// `SessionStore::extract_text_content` here, which we judged not
+/// worth the migration-time cost when the placeholder + lazy reflow
+/// already covers any session a user actually interacts with.
+///
+/// We keep the `(session_id, agent_id, content)` column shape from v12
+/// — `search_sessions` filters on `agent_id`, `delete_session` /
+/// `execute_session_agent_deletes` look it up by `session_id`, and the
+/// boot reconcile reads `session_id` directly. Switching to a
+/// content-linked (`content='sessions'`) layout would require
+/// rewriting all four call sites and the SQL above; the explicit
+/// tokenizer + transactional sync covered by `save_session` and
+/// `delete_session` already address the failure modes called out in
+/// #3548 (double-index after soft-delete-then-recreate, swallowed
+/// errors, pre-v12 invisibility). Schema choice is documented here so
+/// a later PR can revisit if the cost of app-level sync becomes a
+/// hotspot.
+fn migrate_v33(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // Atomicity comes from the outer `run_step!` transaction (or, in
+    // tests, the caller); SQLite forbids nested transactions, so this
+    // body uses bare statements and relies on that wrapper to roll
+    // back the whole rebuild on failure.
+    //
+    // Snapshot existing FTS rows so the DROP+CREATE doesn't silently
+    // wipe searchable history. The temp table is a regular SQL table
+    // (not FTS5) — we only need the raw column values to re-insert
+    // them under the new tokenizer.
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS _sessions_fts_pre_v33;
+         CREATE TEMP TABLE _sessions_fts_pre_v33 (
+             session_id TEXT,
+             agent_id   TEXT,
+             content    TEXT
+         );
+         INSERT INTO _sessions_fts_pre_v33 (session_id, agent_id, content)
+             SELECT session_id, agent_id, content FROM sessions_fts;
+         DROP TABLE sessions_fts;
+         CREATE VIRTUAL TABLE sessions_fts USING fts5(
+             session_id UNINDEXED,
+             agent_id   UNINDEXED,
+             content,
+             tokenize = 'unicode61'
+         );
+         INSERT INTO sessions_fts (session_id, agent_id, content)
+             SELECT session_id, agent_id, content FROM _sessions_fts_pre_v33;
+         DROP TABLE _sessions_fts_pre_v33;",
+    )?;
+
+    // Backfill: surface every session that still has no FTS row (pre-v12
+    // entries, partial-write drift) as an empty placeholder so it stays
+    // visible to the index. The next `save_session` call for that session
+    // overwrites `content` with the freshly extracted text inside the
+    // same transaction as the parent INSERT.
+    conn.execute(
+        "INSERT INTO sessions_fts (session_id, agent_id, content) \
+         SELECT id, agent_id, '' FROM sessions \
+         WHERE id NOT IN (SELECT session_id FROM sessions_fts)",
+        [],
+    )?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (33, datetime('now'), 'Rebuild sessions_fts with explicit unicode61 tokenizer + content-preserving backfill (#3548)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Test-only re-export so `librefang_memory::session::tests` can drive
+/// `migrate_v33` directly when simulating pre-v33 / pre-v12 drift.
+/// Production callers go through `run_migrations`.
+#[cfg(test)]
+pub(crate) fn __test_only_run_v33(conn: &Connection) {
+    migrate_v33(conn).expect("migrate_v33 in test harness must succeed");
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
@@ -1598,6 +1708,197 @@ mod tests {
             )
             .unwrap();
         assert_eq!(after_second, 2);
+    }
+
+    /// Issue #3548: v33 must rebuild `sessions_fts` with an explicit
+    /// `unicode61` tokenizer. The pragma `table_info` does not expose
+    /// FTS5 options, so we instead read `sql` from `sqlite_master` and
+    /// assert the literal `tokenize` clause survived. Without it, the
+    /// schema continues to depend on the SQLite default, which is
+    /// `unicode61` today but is not a contract.
+    #[test]
+    fn test_migrate_v33_sets_unicode61_tokenizer() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            sql.contains("unicode61"),
+            "sessions_fts schema must declare unicode61 explicitly; got: {sql}"
+        );
+        // Sanity: the column shape is preserved so existing call sites
+        // that filter on session_id / agent_id keep working.
+        assert!(sql.contains("session_id"));
+        assert!(sql.contains("agent_id"));
+        assert!(sql.contains("content"));
+    }
+
+    /// Issue #3548: v33 must backfill an FTS row for every session that
+    /// was missing one — pre-v12 sessions, sessions whose write crashed
+    /// between the parent INSERT and the FTS sync, etc. Simulates a
+    /// pre-v33 state by manually clearing `sessions_fts` after seeding
+    /// `sessions`, then re-runs `migrate_v33` and asserts every session
+    /// id now has its FTS row.
+    #[test]
+    fn test_migrate_v33_backfills_missing_fts_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Seed three sessions so the backfill has something to find.
+        let agent = uuid::Uuid::new_v4().to_string();
+        let ids: Vec<String> = (0..3).map(|_| uuid::Uuid::new_v4().to_string()).collect();
+        for id in &ids {
+            conn.execute(
+                "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at) \
+                 VALUES (?1, ?2, x'90', 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                rusqlite::params![id, agent],
+            )
+            .unwrap();
+        }
+
+        // Simulate the pre-v33 / pre-v12 drift by emptying sessions_fts
+        // entirely, then re-running migrate_v33 directly. The migration
+        // body is idempotent: DROP IF EXISTS, CREATE, INSERT...SELECT
+        // WHERE NOT IN.
+        conn.execute("DELETE FROM sessions_fts", []).unwrap();
+        let count_before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count_before, 0);
+
+        migrate_v33(&conn).expect("v33 must succeed on a drifted sessions_fts");
+
+        let count_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            count_after, 3,
+            "every session must have a backfilled FTS row"
+        );
+        for id in &ids {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "session {id} must have exactly one FTS row");
+        }
+    }
+
+    /// Issue #3548: v33 must NOT lose pre-existing FTS content. The
+    /// previous version of this migration did a naive DROP+CREATE that
+    /// silently wiped the searchable index for every session that
+    /// wasn't re-saved post-upgrade. Test seeds two FTS rows whose
+    /// content contains a distinctive needle, runs `migrate_v33`, and
+    /// asserts the needle is still findable through the rebuilt
+    /// virtual table.
+    #[test]
+    fn test_migrate_v33_preserves_existing_fts_content() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        // Drop user_version back to 32 so we can re-run v33 against a
+        // pre-populated table (first run_migrations already executed it
+        // against an empty sessions_fts, so we need a clean re-entry).
+        set_schema_version(&conn, 32).unwrap();
+
+        let agent = uuid::Uuid::new_v4().to_string();
+        let session_kept = uuid::Uuid::new_v4().to_string();
+        let session_emptied = uuid::Uuid::new_v4().to_string();
+
+        // Seed sessions table so the WHERE NOT IN backfill clause can
+        // also be exercised in the same pass.
+        for id in [&session_kept, &session_emptied] {
+            conn.execute(
+                "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at) \
+                 VALUES (?1, ?2, x'90', 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                rusqlite::params![id, agent],
+            )
+            .unwrap();
+        }
+
+        // Pre-populate sessions_fts with real content for one session
+        // (snapshot path) and leave the other un-indexed so the
+        // backfill path also runs in the same migration.
+        conn.execute(
+            "INSERT INTO sessions_fts (session_id, agent_id, content) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                session_kept,
+                agent,
+                "preserved needle distinctivewordbeta42",
+            ],
+        )
+        .unwrap();
+
+        // Re-run v33 directly — exercises snapshot+restore + backfill.
+        migrate_v33(&conn).expect("v33 rerun must succeed");
+
+        // The pre-existing content survived the rebuild.
+        let hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions_fts \
+                 WHERE sessions_fts MATCH ?1",
+                ["distinctivewordbeta42"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            hits, 1,
+            "v33 must preserve pre-existing FTS content for inactive sessions"
+        );
+
+        // The previously un-indexed session got an empty placeholder.
+        let backfilled: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                [&session_emptied],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            backfilled, 1,
+            "sessions without an FTS row must still get a backfilled placeholder"
+        );
+
+        // Tokenizer is still explicit after the rerun.
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("unicode61"));
+
+        // Temp table from the rebuild is cleaned up.
+        let temp_left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_temp_master WHERE name = '_sessions_fts_pre_v33'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(temp_left, 0, "v33 must drop its rebuild temp table");
+    }
+
+    /// v33 is idempotent: re-running it must not duplicate rows or
+    /// fail on the existing virtual table.
+    #[test]
+    fn test_migrate_v33_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        // Run a second time — both DROP IF EXISTS and INSERT WHERE NOT IN
+        // are guarded.
+        migrate_v33(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+        assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
     }
 
     #[test]

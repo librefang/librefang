@@ -460,12 +460,16 @@ pub async fn agent_budget_status(
 /// Uses a single `GROUP BY agent_id` query instead of one `SUM` per agent to
 /// eliminate the N+1 SQLite pattern that caused ~1200 queries/min under normal
 /// dashboard polling at 100 agents. See #3684.
+///
+/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}` per
+/// #3842; the underlying GROUP BY returns the full ranking in a single shot, so
+/// `offset=0`, `limit=None`.
 #[utoipa::path(
     get,
     path = "/api/budget/agents",
     tag = "budget",
     responses(
-        (status = 200, description = "Per-agent cost ranking", body = Vec<serde_json::Value>)
+        (status = 200, description = "Per-agent cost ranking", body = crate::types::JsonObject)
     )
 )]
 pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -481,7 +485,7 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
         .collect();
 
     let registry_entries = state.kernel.agent_registry().list();
-    let agents: Vec<serde_json::Value> = registry_entries
+    let items: Vec<serde_json::Value> = registry_entries
         .iter()
         .filter_map(|entry| {
             let daily = *daily_costs.get(&entry.id).unwrap_or(&0.0);
@@ -501,7 +505,13 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
         })
         .collect();
 
-    Json(serde_json::json!({"agents": agents, "total": agents.len()}))
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// PUT /api/budget/agents/{id} — Update per-agent budget limits at runtime.

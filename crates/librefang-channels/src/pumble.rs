@@ -21,6 +21,12 @@ use zeroize::Zeroizing;
 /// Pumble REST API base URL.
 const PUMBLE_API_BASE: &str = "https://api.pumble.com/v1";
 
+/// Returns the default Pumble REST API base URL. Used to initialise `PumbleAdapter::api_base`.
+#[inline]
+fn default_pumble_api_base() -> String {
+    PUMBLE_API_BASE.to_string()
+}
+
 /// Maximum message length for Pumble messages.
 const MAX_MESSAGE_LEN: usize = 4000;
 
@@ -36,6 +42,9 @@ pub struct PumbleAdapter {
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
+    /// Base URL for the Pumble REST API. Defaults to `https://api.pumble.com/v1`.
+    /// Overridable in tests via `with_api_base()` to point at a wiremock server.
+    api_base: String,
 }
 
 impl PumbleAdapter {
@@ -49,6 +58,7 @@ impl PumbleAdapter {
             bot_token: Zeroizing::new(bot_token),
             client: crate::http_client::new_client(),
             account_id: None,
+            api_base: default_pumble_api_base(),
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -57,9 +67,17 @@ impl PumbleAdapter {
         self
     }
 
+    /// Override the Pumble REST API base URL. Intended for tests that point the
+    /// adapter at a wiremock server instead of `https://api.pumble.com/v1`.
+    #[cfg(test)]
+    pub fn with_api_base(mut self, base: String) -> Self {
+        self.api_base = base;
+        self
+    }
+
     /// Validate credentials by fetching bot info from the Pumble API.
     async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/auth.test", PUMBLE_API_BASE);
+        let url = format!("{}/auth.test", self.api_base);
         let resp = self
             .client
             .get(&url)
@@ -86,7 +104,7 @@ impl PumbleAdapter {
         channel_id: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/messages", PUMBLE_API_BASE);
+        let url = format!("{}/messages", self.api_base);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
         for chunk in chunks {
@@ -320,7 +338,7 @@ impl ChannelAdapter for PumbleAdapter {
             _ => "(Unsupported content type)".to_string(),
         };
 
-        let url = format!("{}/messages", PUMBLE_API_BASE);
+        let url = format!("{}/messages", self.api_base);
         let chunks = split_message(&text, MAX_MESSAGE_LEN);
 
         for chunk in chunks {
@@ -364,6 +382,86 @@ impl ChannelAdapter for PumbleAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Uses `wiremock` to stand up a local HTTP server and points `PumbleAdapter`
+    // at it via `with_api_base()`. This exercises the `POST /messages` call made
+    // by `ChannelAdapter::send`.
+
+    use wiremock::matchers::{bearer_token, body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(api_base: String) -> PumbleAdapter {
+        PumbleAdapter::new("test-pumble-token".to_string(), 8080).with_api_base(api_base)
+    }
+
+    fn dummy_user(channel_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: channel_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn pumble_send_posts_messages_with_bearer_auth_and_channel() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .and(bearer_token("test-pumble-token"))
+            .and(body_json(serde_json::json!({
+                "channel": "C-channel-abc",
+                "text": "hello from librefang"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ts": "1700000000.000001"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("C-channel-abc"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn pumble_send_non_text_content_falls_back_to_placeholder() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .and(bearer_token("test-pumble-token"))
+            .and(body_json(serde_json::json!({
+                "channel": "C-channel-xyz",
+                "text": "(Unsupported content type)"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ts": "1700000000.000002"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("C-channel-xyz"),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send must succeed with unsupported content");
+    }
 
     #[test]
     fn test_pumble_adapter_creation() {

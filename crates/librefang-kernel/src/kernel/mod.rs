@@ -24,7 +24,7 @@ use librefang_runtime::agent_loop::{
 #[cfg(not(feature = "surreal-backend"))]
 use librefang_runtime::audit::AuditLog;
 use librefang_runtime::drivers;
-use librefang_runtime::kernel_handle::{self, KernelHandle};
+use librefang_runtime::kernel_handle::{self, prelude::*};
 use librefang_runtime::llm_driver::{
     CompletionRequest, CompletionResponse, DriverConfig, LlmDriver, LlmError, StreamEvent,
 };
@@ -8614,7 +8614,7 @@ system_prompt = "You are a helpful assistant."
                     // Other registry updates (update_skills, update_mcp_servers, etc.)
                     // follow the same pattern: update + save_agent.
                     if let Some(updated) = self.registry.get(agent_id) {
-                        if let Err(e) = self.agent_store.save_agent(&updated) {
+                        if let Err(e) = self.memory.save_agent_async(&updated).await {
                             tracing::warn!(
                                 agent_id = %agent_id,
                                 error = %e,
@@ -9257,12 +9257,16 @@ system_prompt = "You are a helpful assistant."
             let start = result.new_messages_start.min(session.messages.len());
             if start < session.messages.len() {
                 let new_messages = session.messages[start..].to_vec();
-                if let Err(e) = self.session_store.append_canonical(
-                    agent_id,
-                    &new_messages,
-                    None,
-                    Some(effective_session_id),
-                ) {
+                if let Err(e) = self
+                    .memory
+                    .append_canonical_async(
+                        agent_id,
+                        &new_messages,
+                        None,
+                        Some(effective_session_id),
+                    )
+                    .await
+                {
                     warn!("Failed to update canonical session: {e}");
                 }
             }
@@ -13553,7 +13557,7 @@ system_prompt = "You are a helpful assistant."
                 .iter()
                 .flat_map(|inst| inst.agent_ids.values().copied().collect::<Vec<_>>())
                 .collect();
-            match self.memory.load_all_agents() {
+            match self.memory.load_all_agents_async().await {
                 Ok(all) => {
                     let mut removed = 0usize;
                     for entry in all {
@@ -13563,7 +13567,7 @@ system_prompt = "You are a helpful assistant."
                         if live_hand_agents.contains(&entry.id) {
                             continue;
                         }
-                        match self.memory.remove_agent(entry.id) {
+                        match self.memory.remove_agent_async(entry.id).await {
                             Ok(()) => {
                                 removed += 1;
                                 info!(
@@ -14034,8 +14038,9 @@ system_prompt = "You are a helpful assistant."
                     }
                 }
                 if let Err(e) = self
-                    .proactive_backend
-                    .vacuum_if_shrank(pruned_total as usize)
+                    .memory
+                    .vacuum_if_shrank_async(pruned_total as usize)
+                    .await
                 {
                     warn!("Startup VACUUM after session prune failed: {e}");
                 }
@@ -18105,12 +18110,10 @@ impl LibreFangKernel {
     }
 }
 
-#[async_trait]
-impl KernelHandle for LibreFangKernel {
-    fn effective_upload_dir(&self) -> std::path::PathBuf {
-        self.config_ref().channels.effective_file_download_dir()
-    }
+// ---- BEGIN role-trait impls (split from former `impl KernelHandle for LibreFangKernel`, #3746) ----
 
+#[async_trait::async_trait]
+impl kernel_handle::AgentControl for LibreFangKernel {
     async fn spawn_agent(
         &self,
         manifest_toml: &str,
@@ -18233,6 +18236,78 @@ impl KernelHandle for LibreFangKernel {
         LibreFangKernel::kill_agent(self, id).map_err(|e| format!("Kill failed: {e}"))
     }
 
+    fn find_agents(&self, query: &str) -> Vec<kernel_handle::AgentInfo> {
+        let q = query.to_lowercase();
+        self.registry
+            .list()
+            .into_iter()
+            .filter(|e| {
+                let name_match = e.name.to_lowercase().contains(&q);
+                let tag_match = e.tags.iter().any(|t| t.to_lowercase().contains(&q));
+                let tool_match = e
+                    .manifest
+                    .capabilities
+                    .tools
+                    .iter()
+                    .any(|t| t.to_lowercase().contains(&q));
+                let desc_match = e.manifest.description.to_lowercase().contains(&q);
+                name_match || tag_match || tool_match || desc_match
+            })
+            .map(|e| kernel_handle::AgentInfo {
+                id: e.id.to_string(),
+                name: e.name.clone(),
+                state: format!("{:?}", e.state),
+                model_provider: e.manifest.model.provider.clone(),
+                model_name: e.manifest.model.model.clone(),
+                description: e.manifest.description.clone(),
+                tags: e.tags.clone(),
+                tools: e.manifest.capabilities.tools.clone(),
+            })
+            .collect()
+    }
+
+    async fn spawn_agent_checked(
+        &self,
+        manifest_toml: &str,
+        parent_id: Option<&str>,
+        parent_caps: &[librefang_types::capability::Capability],
+    ) -> Result<(String, String), String> {
+        // Parse the child manifest to extract its capabilities
+        let child_manifest: AgentManifest =
+            toml::from_str(manifest_toml).map_err(|e| format!("Invalid manifest: {e}"))?;
+        let child_caps = manifest_to_capabilities(&child_manifest);
+
+        // Enforce: child capabilities must be a subset of parent capabilities
+        librefang_types::capability::validate_capability_inheritance(parent_caps, &child_caps)?;
+
+        tracing::info!(
+            parent = parent_id.unwrap_or("kernel"),
+            child = %child_manifest.name,
+            child_caps = child_caps.len(),
+            "Capability inheritance validated — spawning child agent"
+        );
+
+        // Delegate to the normal spawn path via the AgentControl role trait.
+        kernel_handle::AgentControl::spawn_agent(self, manifest_toml, parent_id).await
+    }
+
+    fn max_agent_call_depth(&self) -> u32 {
+        let cfg = self.config.load();
+        cfg.max_agent_call_depth
+    }
+
+    fn fire_agent_step(&self, agent_id: &str, step: u32) {
+        self.external_hooks.fire(
+            crate::hooks::ExternalHookEvent::AgentStep,
+            serde_json::json!({
+                "agent_id": agent_id.to_string(),
+                "step": step,
+            }),
+        );
+    }
+}
+
+impl kernel_handle::MemoryAccess for LibreFangKernel {
     fn memory_store(
         &self,
         key: &str,
@@ -18322,36 +18397,21 @@ impl KernelHandle for LibreFangKernel {
         }
     }
 
-    fn find_agents(&self, query: &str) -> Vec<kernel_handle::AgentInfo> {
-        let q = query.to_lowercase();
-        self.registry
-            .list()
-            .into_iter()
-            .filter(|e| {
-                let name_match = e.name.to_lowercase().contains(&q);
-                let tag_match = e.tags.iter().any(|t| t.to_lowercase().contains(&q));
-                let tool_match = e
-                    .manifest
-                    .capabilities
-                    .tools
-                    .iter()
-                    .any(|t| t.to_lowercase().contains(&q));
-                let desc_match = e.manifest.description.to_lowercase().contains(&q);
-                name_match || tag_match || tool_match || desc_match
-            })
-            .map(|e| kernel_handle::AgentInfo {
-                id: e.id.to_string(),
-                name: e.name.clone(),
-                state: format!("{:?}", e.state),
-                model_provider: e.manifest.model.provider.clone(),
-                model_name: e.manifest.model.model.clone(),
-                description: e.manifest.description.clone(),
-                tags: e.tags.clone(),
-                tools: e.manifest.capabilities.tools.clone(),
-            })
-            .collect()
+    fn memory_acl_for_sender(
+        &self,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> Option<librefang_types::user_policy::UserMemoryAccess> {
+        if !self.auth.is_enabled() {
+            return None;
+        }
+        let user_id = self.auth.resolve_user(sender_id, channel)?;
+        self.auth.memory_acl_for(user_id)
     }
+}
 
+#[async_trait::async_trait]
+impl kernel_handle::TaskQueue for LibreFangKernel {
     async fn task_post(
         &self,
         title: &str,
@@ -18498,7 +18558,10 @@ impl KernelHandle for LibreFangKernel {
             .await
             .map_err(|e| format!("Task update status failed: {e}"))
     }
+}
 
+#[async_trait::async_trait]
+impl kernel_handle::EventBus for LibreFangKernel {
     async fn publish_event(
         &self,
         event_type: &str,
@@ -18516,7 +18579,10 @@ impl KernelHandle for LibreFangKernel {
         LibreFangKernel::publish_event(self, event).await;
         Ok(())
     }
+}
 
+#[async_trait::async_trait]
+impl kernel_handle::KnowledgeGraph for LibreFangKernel {
     async fn knowledge_add_entity(
         &self,
         entity: &librefang_types::memory::Entity,
@@ -18544,10 +18610,10 @@ impl KernelHandle for LibreFangKernel {
             .await
             .map_err(|e| format!("Knowledge query failed: {e}"))
     }
+}
 
-    /// Spawn with capability inheritance enforcement.
-    /// Parses the child manifest, extracts its capabilities, and verifies
-    /// every child capability is covered by the parent's grants.
+#[async_trait::async_trait]
+impl kernel_handle::CronControl for LibreFangKernel {
     async fn cron_create(
         &self,
         agent_id: &str,
@@ -18664,7 +18730,10 @@ impl KernelHandle for LibreFangKernel {
 
         Ok(())
     }
+}
 
+#[async_trait::async_trait]
+impl kernel_handle::HandsControl for LibreFangKernel {
     async fn hand_list(&self) -> Result<Vec<serde_json::Value>, String> {
         let defs = self.hand_registry.list_definitions();
         let instances = self.hand_registry.list_instances();
@@ -18768,7 +18837,10 @@ impl KernelHandle for LibreFangKernel {
             uuid::Uuid::parse_str(instance_id).map_err(|e| format!("Invalid instance ID: {e}"))?;
         self.deactivate_hand(uuid).map_err(|e| format!("{e}"))
     }
+}
 
+#[async_trait::async_trait]
+impl kernel_handle::ApprovalGate for LibreFangKernel {
     fn requires_approval(&self, tool_name: &str) -> bool {
         self.approval_manager.requires_approval(tool_name)
     }
@@ -18791,18 +18863,6 @@ impl KernelHandle for LibreFangKernel {
     ) -> bool {
         self.approval_manager
             .is_tool_denied_with_context(tool_name, sender_id, channel)
-    }
-
-    fn memory_acl_for_sender(
-        &self,
-        sender_id: Option<&str>,
-        channel: Option<&str>,
-    ) -> Option<librefang_types::user_policy::UserMemoryAccess> {
-        if !self.auth.is_enabled() {
-            return None;
-        }
-        let user_id = self.auth.resolve_user(sender_id, channel)?;
-        self.auth.memory_acl_for(user_id)
     }
 
     fn resolve_user_tool_decision(
@@ -19171,7 +19231,9 @@ impl KernelHandle for LibreFangKernel {
         }
         Ok(None)
     }
+}
 
+impl kernel_handle::A2ARegistry for LibreFangKernel {
     fn list_a2a_agents(&self) -> Vec<(String, String)> {
         let agents = self
             .a2a_external_agents
@@ -19202,7 +19264,10 @@ impl KernelHandle for LibreFangKernel {
             .find(|(_, card)| card.name.to_lowercase() == name_lower)
             .map(|(key, _)| key.clone())
     }
+}
 
+#[async_trait::async_trait]
+impl kernel_handle::ChannelSender for LibreFangKernel {
     async fn send_channel_message(
         &self,
         channel: &str,
@@ -19474,31 +19539,52 @@ impl KernelHandle for LibreFangKernel {
         Ok(())
     }
 
-    async fn spawn_agent_checked(
+    fn roster_upsert(
         &self,
-        manifest_toml: &str,
-        parent_id: Option<&str>,
-        parent_caps: &[librefang_types::capability::Capability],
-    ) -> Result<(String, String), String> {
-        // Parse the child manifest to extract its capabilities
-        let child_manifest: AgentManifest =
-            toml::from_str(manifest_toml).map_err(|e| format!("Invalid manifest: {e}"))?;
-        let child_caps = manifest_to_capabilities(&child_manifest);
-
-        // Enforce: child capabilities must be a subset of parent capabilities
-        librefang_types::capability::validate_capability_inheritance(parent_caps, &child_caps)?;
-
-        tracing::info!(
-            parent = parent_id.unwrap_or("kernel"),
-            child = %child_manifest.name,
-            child_caps = child_caps.len(),
-            "Capability inheritance validated — spawning child agent"
-        );
-
-        // Delegate to the normal spawn path (use trait method via KernelHandle::)
-        KernelHandle::spawn_agent(self, manifest_toml, parent_id).await
+        channel: &str,
+        chat_id: &str,
+        user_id: &str,
+        display_name: &str,
+        username: Option<&str>,
+    ) -> Result<(), String> {
+        self.memory
+            .roster()
+            .upsert(channel, chat_id, user_id, display_name, username);
+        Ok(())
     }
 
+    fn roster_members(
+        &self,
+        channel: &str,
+        chat_id: &str,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let members = self.memory.roster().members(channel, chat_id);
+        Ok(members
+            .into_iter()
+            .map(|(user_id, display_name, username)| {
+                serde_json::json!({
+                    "user_id": user_id,
+                    "display_name": display_name,
+                    "username": username,
+                })
+            })
+            .collect())
+    }
+
+    fn roster_remove_member(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        user_id: &str,
+    ) -> Result<(), String> {
+        self.memory
+            .roster()
+            .remove_member(channel, chat_id, user_id);
+        Ok(())
+    }
+}
+
+impl kernel_handle::PromptStore for LibreFangKernel {
     fn get_running_experiment(
         &self,
         agent_id: &str,
@@ -19701,99 +19787,10 @@ impl KernelHandle for LibreFangKernel {
             Err(e) => Err(format!("Failed to auto-track prompt version: {e}")),
         }
     }
+}
 
-    fn tool_timeout_secs(&self) -> u64 {
-        let cfg = self.config.load();
-        cfg.tool_timeout_secs
-    }
-
-    fn tool_timeout_secs_for(&self, tool_name: &str) -> u64 {
-        let cfg = self.config.load();
-        // 1. Exact match
-        if let Some(&t) = cfg.tool_timeouts.get(tool_name) {
-            return t;
-        }
-        // 2. Best glob match — longest pattern wins (most specific first).
-        // HashMap iteration is unordered; picking the longest matching pattern
-        // gives deterministic resolution when multiple globs match.
-        let best = cfg
-            .tool_timeouts
-            .iter()
-            .filter(|(pattern, _)| librefang_types::capability::glob_matches(pattern, tool_name))
-            .max_by_key(|(pattern, _)| pattern.len());
-        if let Some((_, &timeout)) = best {
-            return timeout;
-        }
-        // 3. Global fallback
-        cfg.tool_timeout_secs
-    }
-
-    fn max_agent_call_depth(&self) -> u32 {
-        let cfg = self.config.load();
-        cfg.max_agent_call_depth
-    }
-
-    fn skill_env_passthrough_policy(
-        &self,
-    ) -> Option<librefang_types::config::EnvPassthroughPolicy> {
-        let cfg = self.config.load();
-        librefang_types::config::EnvPassthroughPolicy::from_skills_config(&cfg.skills)
-    }
-
-    fn roster_upsert(
-        &self,
-        channel: &str,
-        chat_id: &str,
-        user_id: &str,
-        display_name: &str,
-        username: Option<&str>,
-    ) -> Result<(), String> {
-        self.memory
-            .roster()
-            .upsert(channel, chat_id, user_id, display_name, username);
-        Ok(())
-    }
-
-    fn roster_members(
-        &self,
-        channel: &str,
-        chat_id: &str,
-    ) -> Result<Vec<serde_json::Value>, String> {
-        let members = self.memory.roster().members(channel, chat_id);
-        Ok(members
-            .into_iter()
-            .map(|(user_id, display_name, username)| {
-                serde_json::json!({
-                    "user_id": user_id,
-                    "display_name": display_name,
-                    "username": username,
-                })
-            })
-            .collect())
-    }
-
-    fn roster_remove_member(
-        &self,
-        channel: &str,
-        chat_id: &str,
-        user_id: &str,
-    ) -> Result<(), String> {
-        self.memory
-            .roster()
-            .remove_member(channel, chat_id, user_id);
-        Ok(())
-    }
-
-    fn fire_agent_step(&self, agent_id: &str, step: u32) {
-        self.external_hooks.fire(
-            crate::hooks::ExternalHookEvent::AgentStep,
-            serde_json::json!({
-                "agent_id": agent_id.to_string(),
-                "step": step,
-            }),
-        );
-    }
-
+#[async_trait::async_trait]
+impl kernel_handle::WorkflowRunner for LibreFangKernel {
     async fn run_workflow(
         &self,
         workflow_id: &str,
@@ -19825,7 +19822,9 @@ impl KernelHandle for LibreFangKernel {
 
         Ok((run_id.to_string(), output))
     }
+}
 
+impl kernel_handle::GoalControl for LibreFangKernel {
     fn goal_list_active(
         &self,
         agent_id_filter: Option<&str>,
@@ -19895,9 +19894,48 @@ impl KernelHandle for LibreFangKernel {
 
         Ok(result)
     }
+}
+
+impl kernel_handle::ToolPolicy for LibreFangKernel {
+    fn tool_timeout_secs(&self) -> u64 {
+        let cfg = self.config.load();
+        cfg.tool_timeout_secs
+    }
+
+    fn tool_timeout_secs_for(&self, tool_name: &str) -> u64 {
+        let cfg = self.config.load();
+        // 1. Exact match
+        if let Some(&t) = cfg.tool_timeouts.get(tool_name) {
+            return t;
+        }
+        // 2. Best glob match — longest pattern wins (most specific first).
+        // HashMap iteration is unordered; picking the longest matching pattern
+        // gives deterministic resolution when multiple globs match.
+        let best = cfg
+            .tool_timeouts
+            .iter()
+            .filter(|(pattern, _)| librefang_types::capability::glob_matches(pattern, tool_name))
+            .max_by_key(|(pattern, _)| pattern.len());
+        if let Some((_, &timeout)) = best {
+            return timeout;
+        }
+        // 3. Global fallback
+        cfg.tool_timeout_secs
+    }
+
+    fn skill_env_passthrough_policy(
+        &self,
+    ) -> Option<librefang_types::config::EnvPassthroughPolicy> {
+        let cfg = self.config.load();
+        librefang_types::config::EnvPassthroughPolicy::from_skills_config(&cfg.skills)
+    }
 
     fn channel_file_download_dir(&self) -> Option<std::path::PathBuf> {
         Some(self.config.load().channels.effective_file_download_dir())
+    }
+
+    fn effective_upload_dir(&self) -> std::path::PathBuf {
+        self.config_ref().channels.effective_file_download_dir()
     }
 
     fn readonly_workspace_prefixes(&self, agent_id: &str) -> Vec<std::path::PathBuf> {
@@ -19937,6 +19975,8 @@ impl KernelHandle for LibreFangKernel {
             .collect()
     }
 }
+
+// ---- END role-trait impls (#3746) ----
 
 // ---------------------------------------------------------------------------
 // Approval resolution helpers (Step 5)
@@ -20193,7 +20233,7 @@ impl LibreFangKernel {
             }
         };
 
-        let mut session = match self.session_store.get_session(session_id) {
+        let mut session = match self.memory.get_session_async(session_id).await {
             Ok(Some(s)) => s,
             Ok(None) => {
                 warn!(
@@ -20303,7 +20343,7 @@ impl LibreFangKernel {
             return;
         }
 
-        let persisted_session = match self.session_store.get_session(session_id) {
+        let persisted_session = match self.memory.get_session_async(session_id).await {
             Ok(Some(s)) => s,
             Ok(None) => {
                 warn!(

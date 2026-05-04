@@ -799,6 +799,30 @@ impl AuditLog {
         entries[start..].to_vec()
     }
 
+    /// Returns every entry with `seq > cursor`, in insertion order.
+    ///
+    /// Intended for cursor-based streaming consumers — e.g. the
+    /// `/api/logs/stream` SSE endpoint — that need to deliver every
+    /// entry produced since the last poll without dropping any when the
+    /// production rate exceeds [`Self::recent`]'s sliding window.
+    ///
+    /// **Strictly greater than:** the cursor is the highest seq the
+    /// consumer has already received, so `since_seq(N)` returns seq > N
+    /// (never seq >= N). This means `since_seq(0)` skips an entry with
+    /// seq=0 — that initial backfill must be handled separately via
+    /// [`Self::recent`] before the cursor loop kicks in. The SSE
+    /// handler does exactly that on its first poll.
+    ///
+    /// O(log n) seek + O(k) clone, where `k` is the number of returned
+    /// entries. Relies on the invariant that entries are appended in
+    /// strictly increasing `seq` order; `record_with_context` is the
+    /// only mutator and it monotonically allocates `seq` before push.
+    pub fn since_seq(&self, cursor: u64) -> Vec<AuditEntry> {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = entries.partition_point(|e| e.seq <= cursor);
+        entries[idx..].to_vec()
+    }
+
     /// Apply the per-action retention `policy` against the in-memory
     /// audit window, dropping a prefix and updating the chain anchor so
     /// the surviving entries still verify.
@@ -2213,5 +2237,82 @@ mod tests {
             log2.verify_integrity().is_ok(),
             "reloaded chain must verify since no broken entry ever reached disk"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // since_seq — cursor-based delivery for the SSE log stream.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn since_seq_is_strictly_greater_than_cursor() {
+        // The cursor's semantic is "the highest seq the consumer has
+        // already received" — the SSE poll loop sets it from
+        // `entries.last().seq` after delivering. since_seq(N) therefore
+        // returns entries with seq > N, NOT seq >= N. since_seq(0) on a
+        // log starting at seq=0 deliberately omits seq=0; that initial
+        // backfill is handled separately by `recent(...)` in the
+        // /api/logs/stream handler so the consumer's first batch isn't
+        // missed.
+        let log = AuditLog::new();
+        for i in 0..5 {
+            log.record("a", AuditAction::AgentSpawn, format!("entry-{i}"), "ok");
+        }
+        // Entries hold seq 0..4. cursor=0 returns 1..4 (4 items).
+        let after_zero = log.since_seq(0);
+        assert_eq!(
+            after_zero.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn since_seq_returns_only_strictly_newer() {
+        let log = AuditLog::new();
+        for i in 0..5 {
+            log.record("a", AuditAction::AgentSpawn, format!("entry-{i}"), "ok");
+        }
+        // Cursor at seq=2 must skip 0, 1, 2 and return 3, 4.
+        let after_2 = log.since_seq(2);
+        assert_eq!(
+            after_2.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+    }
+
+    #[test]
+    fn since_seq_cursor_at_or_past_tail_is_empty() {
+        let log = AuditLog::new();
+        for i in 0..3 {
+            log.record("a", AuditAction::AgentSpawn, format!("entry-{i}"), "ok");
+        }
+        // Last seq is 2; both equal-and-past cursors must return nothing
+        // so the SSE poll loop doesn't re-emit the tail entry.
+        assert!(log.since_seq(2).is_empty());
+        assert!(log.since_seq(99).is_empty());
+    }
+
+    #[test]
+    fn since_seq_empty_log_is_empty() {
+        let log = AuditLog::new();
+        assert!(log.since_seq(0).is_empty());
+        assert!(log.since_seq(42).is_empty());
+    }
+
+    #[test]
+    fn since_seq_does_not_drop_entries_when_window_outpaces_recent() {
+        // Regression: the SSE handler used to call `recent(200)` and
+        // skip via `entry.seq <= last_seq`, which silently dropped any
+        // burst > 200 within one poll interval. `since_seq` must
+        // deliver every entry produced after the cursor regardless of
+        // burst size.
+        let log = AuditLog::new();
+        for i in 0..500 {
+            log.record("a", AuditAction::AgentSpawn, format!("entry-{i}"), "ok");
+        }
+        // Simulate "client got up to seq=199 last poll".
+        let delivered = log.since_seq(199);
+        assert_eq!(delivered.len(), 300);
+        assert_eq!(delivered.first().map(|e| e.seq), Some(200));
+        assert_eq!(delivered.last().map(|e| e.seq), Some(499));
     }
 }
