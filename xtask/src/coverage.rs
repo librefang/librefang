@@ -1,4 +1,5 @@
 use crate::common::repo_root;
+use crate::local_check_mode;
 use clap::Parser;
 use std::fs;
 use std::path::PathBuf;
@@ -30,6 +31,8 @@ fn has_cargo_llvm_cov() -> bool {
 }
 
 pub fn run(args: CoverageArgs) -> Result<(), Box<dyn std::error::Error>> {
+    local_check_mode::apply_for_subcommand("coverage");
+
     let root = repo_root();
 
     if !has_cargo_llvm_cov() {

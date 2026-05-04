@@ -1572,27 +1572,27 @@ pub async fn remove_channel(
 /// (for Telegram). When provided, sends a real test message to verify the bot can
 /// post to that channel.
 ///
-/// Status code semantics (#3507):
-/// - `200 OK` — credentials present (and, when a target was given, message sent)
-/// - `404 Not Found` — unknown channel name
-/// - `412 Precondition Failed` — required env vars / credentials are missing
-/// - `502 Bad Gateway` — credentials valid but downstream send failed
+/// Status code semantics (#3507, #3505):
+/// - `200 OK` — credentials present (and, when a target was given, message sent);
+///   body uses the legacy `{"status": "ok", "message": …}` shape.
+/// - `404 Not Found` — unknown channel name; body uses `ApiErrorResponse`
+///   (`{"error": "Unknown channel"}`).
+/// - `412 Precondition Failed` — required env vars / credentials are missing;
+///   body uses `ApiErrorResponse` (`{"error": "Missing required env vars: …"}`).
+/// - `502 Bad Gateway` — credentials valid but downstream send failed;
+///   body uses `ApiErrorResponse`.
 ///
-/// The JSON body shape (`{"status": "ok"|"error", "message": …}`) is preserved so
-/// callers that branch on the body still work, but the HTTP status now matches the
-/// real outcome — `fetch().ok` is the source of truth.
+/// `fetch().ok` is the source of truth. Error bodies were migrated from the
+/// ad-hoc `{"status": "error", "message": …}` shape to the canonical
+/// `ApiErrorResponse` envelope as part of #3505 so clients have a single
+/// parsing strategy across the API surface.
 pub async fn test_channel(
     Path(name): Path<String>,
     raw_body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let meta = match find_channel_meta(&name) {
         Some(m) => m,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"status": "error", "message": "Unknown channel"})),
-            )
-        }
+        None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
     };
 
     // Check all required env vars are set
@@ -1608,13 +1608,12 @@ pub async fn test_channel(
     }
 
     if !missing.is_empty() {
-        return (
-            StatusCode::PRECONDITION_FAILED,
-            Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Missing required env vars: {}", missing.join(", "))
-            })),
-        );
+        return ApiErrorResponse::bad_request(format!(
+            "Missing required env vars: {}",
+            missing.join(", ")
+        ))
+        .with_status(StatusCode::PRECONDITION_FAILED)
+        .into_json_tuple();
     }
 
     // If a target channel/chat ID is provided, send a real test message
@@ -1641,13 +1640,11 @@ pub async fn test_channel(
                 );
             }
             Err(e) => {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({
-                        "status": "error",
-                        "message": format!("Credentials valid but failed to send test message: {e}")
-                    })),
-                );
+                return ApiErrorResponse::internal(format!(
+                    "Credentials valid but failed to send test message: {e}"
+                ))
+                .with_status(StatusCode::BAD_GATEWAY)
+                .into_json_tuple();
             }
         }
     }
@@ -1741,13 +1738,7 @@ pub async fn reload_channels(State(state): State<Arc<AppState>>) -> impl IntoRes
                 "started": started,
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "status": "error",
-                "error": e,
-            })),
-        ),
+        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
     }
 }
 

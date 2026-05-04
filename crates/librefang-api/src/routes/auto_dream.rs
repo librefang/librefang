@@ -66,7 +66,9 @@ pub async fn auto_dream_trigger(
     let outcome = Arc::clone(&state.kernel)
         .auto_dream_trigger_manual(agent_id)
         .await;
-    Json(outcome).into_response()
+    // #3511: tag response so request_logging middleware can emit
+    // `agent_id` as a structured field on the access-log line.
+    crate::extensions::with_agent_id(agent_id, Json(outcome))
 }
 
 #[utoipa::path(
@@ -84,7 +86,8 @@ pub async fn auto_dream_abort(
     AgentIdPath(agent_id): AgentIdPath,
 ) -> impl IntoResponse {
     let outcome = state.kernel.auto_dream_abort(agent_id).await;
-    Json(outcome).into_response()
+    // #3511: tag response with agent_id for the access-log middleware.
+    crate::extensions::with_agent_id(agent_id, Json(outcome))
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -108,7 +111,7 @@ pub async fn auto_dream_set_enabled(
     AgentIdPath(agent_id): AgentIdPath,
     Json(req): Json<SetEnabledRequest>,
 ) -> impl IntoResponse {
-    match state.kernel.auto_dream_set_enabled(agent_id, req.enabled) {
+    let body = match state.kernel.auto_dream_set_enabled(agent_id, req.enabled) {
         Ok(()) => Json(serde_json::json!({
             "agent_id": agent_id.to_string(),
             "enabled": req.enabled,
@@ -119,5 +122,7 @@ pub async fn auto_dream_set_enabled(
             Json(serde_json::json!({"error": e.to_string()})),
         )
             .into_response(),
-    }
+    };
+    // #3511: tag response with agent_id for the access-log middleware.
+    crate::extensions::with_agent_id(agent_id, body)
 }

@@ -1189,6 +1189,115 @@ mod tests {
             .expect("send must succeed with unsupported content");
     }
 
+    // ----- transport-layer tests for #3406 -----
+    //
+    // The Slack send path (`api_send_message_opts`) currently has *no* 429
+    // retry and *no* idempotency token: a 429 from `chat.postMessage` is
+    // logged via `warn!` and the call returns `Ok(())` (fail-open). These
+    // tests pin that behaviour so a future refactor that adds retry /
+    // idempotency necessarily updates them. Promotion of the send path to
+    // a real backoff loop with an idempotency key is tracked as follow-up
+    // on issue #3406.
+
+    /// 429 + Retry-After is observed by exactly one POST — the adapter
+    /// does NOT retry, and `send()` still returns Ok (fail-open warn).
+    /// When real retry lands, flip `expect(1)` to `expect(2)` and assert
+    /// the second call body matches.
+    #[tokio::test]
+    async fn slack_send_does_not_retry_on_429_today() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat.postMessage"))
+            .and(header("Authorization", "Bearer xoxb-test-bot-token"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "1")
+                    .set_body_json(serde_json::json!({
+                        "ok": false,
+                        "error": "ratelimited",
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        // Current production behaviour: 429 is warned, send returns Ok.
+        adapter
+            .send(
+                &dummy_user("C42"),
+                ChannelContent::Text("rate-limited write".into()),
+            )
+            .await
+            .expect("slack send is fail-open on 429 today");
+    }
+
+    /// `chat.postMessage` payload omits the optional `unfurl_links` key
+    /// when the adapter wasn't told to set it — important so we don't
+    /// silently override a workspace-level Slack default.
+    #[tokio::test]
+    async fn slack_send_omits_unfurl_links_when_unset() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat.postMessage"))
+            .and(body_json(serde_json::json!({
+                "channel": "C7",
+                "text": "no unfurl flag",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("C7"),
+                ChannelContent::Text("no unfurl flag".into()),
+            )
+            .await
+            .expect("send must succeed");
+    }
+
+    /// When `with_unfurl_links(Some(false))` is set, the boolean appears
+    /// verbatim in the JSON body — pins the request shape so a refactor
+    /// that drops the field won't silently regress link previews.
+    #[tokio::test]
+    async fn slack_send_serialises_unfurl_links_false() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat.postMessage"))
+            .and(body_json(serde_json::json!({
+                "channel": "C8",
+                "text": "no preview please",
+                "unfurl_links": false,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = SlackAdapter::new(
+            "xapp-test-token".to_string(),
+            "xoxb-test-bot-token".to_string(),
+            vec![],
+        )
+        .with_api_base(server.uri())
+        .with_unfurl_links(Some(false));
+
+        adapter
+            .send(
+                &dummy_user("C8"),
+                ChannelContent::Text("no preview please".into()),
+            )
+            .await
+            .expect("send must succeed");
+    }
+
     #[test]
     fn role_resolution_owner_wins() {
         // owner > admin > guest > member, regardless of which other flags

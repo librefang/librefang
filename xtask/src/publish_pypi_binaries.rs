@@ -154,9 +154,17 @@ fn sha256_hex(data: &[u8]) -> String {
     format!("{:x}", Sha256::digest(data))
 }
 
-/// Convert version for PEP 440: -beta1 → b1, -rc1 → rc1
+/// Convert version for PEP 440: `-beta.1` → `b1`, `-rc.1` → `rc1`.
+/// Also handles the legacy `-beta1` (no dot) form for tags that predate
+/// the SemVer unification in #3310. The `-beta.` replacement runs first
+/// so the dot-form gets the right output (`...b1`, not `...b.1` which
+/// would be invalid PEP 440).
 fn pypi_version(version: &str) -> String {
-    version.replace("-beta", "b").replace("-rc", "rc")
+    version
+        .replace("-beta.", "b")
+        .replace("-rc.", "rc")
+        .replace("-beta", "b")
+        .replace("-rc", "rc")
 }
 
 fn build_wheel(

@@ -15,6 +15,7 @@ This guide covers everything you need to get started, from setting up your devel
 - [Development Environment](#development-environment)
 - [Building and Testing](#building-and-testing)
 - [Code Style](#code-style)
+- [Dependency Policy](#dependency-policy)
 - [Architecture Overview](#architecture-overview)
 - [How to Add a New Agent Template](#how-to-add-a-new-agent-template)
 - [How to Add a New Skill](#how-to-add-a-new-skill)
@@ -22,6 +23,7 @@ This guide covers everything you need to get started, from setting up your devel
 - [How to Add a New LLM Provider](#how-to-add-a-new-llm-provider)
 - [How to Add a New Tool](#how-to-add-a-new-tool)
 - [How to Write Integration Tests](#how-to-write-integration-tests)
+- [Release Articles](#release-articles)
 - [Pull Request Process](#pull-request-process)
 - [Code of Conduct](#code-of-conduct)
 
@@ -174,7 +176,7 @@ gate (clippy, openapi/SDK drift, security audit, full test matrix).
 
 | Hook        | Runs                                                                  | Target time |
 |-------------|-----------------------------------------------------------------------|-------------|
-| `pre-commit`| `cargo fmt --check` on staged `*.rs` only, CHANGELOG guard, `detect-secrets` (if installed) | < 2s |
+| `pre-commit`| `cargo fmt --check` on staged `*.rs` only, CHANGELOG guard + `(@user)` attribution check, `detect-secrets` (if installed) | < 2s |
 | `pre-push`  | Refuses direct push to `main` / `master`. Nothing else.                | < 100ms |
 | `commit-msg`| Reject Claude / Anthropic attribution                                  | < 50ms |
 
@@ -311,6 +313,52 @@ After that, weekly snapshots are uploaded as workflow artifacts (90-day
 retention) for trend tracking — they are not auto-committed back into the
 repo.
 
+### Local Check Mode (low-spec hosts)
+
+`cargo xtask ci`, `cargo xtask pre-commit`, and `cargo xtask coverage`
+probe the host on startup and may auto-throttle cargo concurrency to avoid
+OOM-ing low-spec laptops (refs #3301).
+
+`cargo xtask bench` detects the mode and prints a loud warning when throttled
+(benchmark numbers are unreliable at `CARGO_BUILD_JOBS=1`) but does **not**
+apply the throttle — set `LIBREFANG_LOCAL_CHECK_MODE=full` before running
+benchmarks to ensure comparable results.
+
+`cargo xtask dev`, `cargo xtask api-docs`, and `cargo xtask codegen` do
+**not** apply throttling: `dev` runs interactive hot-reload (not a
+compile-heavy batch job), and `api-docs`/`codegen` generate artifacts from
+already-compiled outputs rather than triggering expensive full builds.
+
+Three modes, controlled by the `LIBREFANG_LOCAL_CHECK_MODE` environment
+variable:
+
+| Mode        | When                                                    | Effect                                                            |
+|-------------|---------------------------------------------------------|-------------------------------------------------------------------|
+| `full`      | `CI=true` env, or auto-detect on capable hosts          | No env tweaks (matches historical behaviour)                      |
+| `throttled` | Auto-detect on `mem < 16 GB` **or** `cpus < 4`          | `CARGO_BUILD_JOBS=1`, appends `-C codegen-units=1` to `RUSTFLAGS`, sets `RUST_MIN_STACK=8388608` |
+| `off`       | User explicit opt-out                                   | No env tweaks (you know your machine; we won't touch anything)    |
+
+The mode is printed at the top of each affected subcommand:
+
+```
+xtask ci: local-check-mode = throttled (cpus=4, mem=8 GB)
+```
+
+**Auto-detect heuristic:**
+- If `CI` env is set (GitHub Actions, GitLab CI, CircleCI, etc.), mode is forced to `full`.
+- Else if total RAM < 16 GB or available CPU count < 4, mode is `throttled`.
+- Otherwise, mode is `full`.
+
+**Manual override:**
+```bash
+LIBREFANG_LOCAL_CHECK_MODE=full cargo xtask ci        # force full concurrency
+LIBREFANG_LOCAL_CHECK_MODE=throttled cargo xtask ci   # force throttled
+LIBREFANG_LOCAL_CHECK_MODE=off cargo xtask ci         # disable env tweaks entirely
+```
+
+Existing values for `CARGO_BUILD_JOBS` / `RUST_MIN_STACK` are preserved
+(only set when unset); `RUSTFLAGS` is appended to, never replaced.
+
 ---
 
 ## Code Style
@@ -327,6 +375,47 @@ repo.
 - **Dependencies**: Workspace dependencies are declared in the root `Cargo.toml`. Prefer reusing workspace deps over adding new ones. If you need a new dependency, justify it in the PR.
 - **Testing**: Every new feature must include tests. Use `tempfile::TempDir` for filesystem isolation and random port binding for network tests.
 - **Serde**: All config structs use `#[serde(default)]` for forward compatibility with partial TOML.
+
+---
+
+## Dependency Policy
+
+LibreFang ships as a single binary that runs other people's agents on your hardware, so every crate we pull in is part of the trust boundary. The rules below codify how we add, audit, and remove third-party code.
+
+### Adding a new crate
+
+1. **Justify it in the PR description.** Explain what it does, why a workspace crate or the standard library is not sufficient, and link to the upstream repo and license.
+2. **License must be on the allow-list** in [`deny.toml`](deny.toml). Anything outside `Apache-2.0`, `Apache-2.0 WITH LLVM-exception`, `MIT`, `BSD-2-Clause`, `BSD-3-Clause`, `0BSD`, `ISC`, `MPL-2.0`, `Unicode-DFS-2016`, `Unicode-3.0`, `Zlib`, `CC0-1.0`, `CDLA-Permissive-2.0` requires a maintainer-level decision and an explicit `[[licenses.clarify]]` or `exceptions` entry with rationale.
+3. **No git dependencies by default.** `unknown-git = "deny"` is set in `deny.toml`. If you absolutely need an unreleased upstream change, add the repo URL to `allow-git` with an inline comment linking to the upstream PR / issue and a target version where it can be removed.
+4. **Reuse the workspace dependency table** in the root `Cargo.toml` (`[workspace.dependencies]`) so version bumps stay coordinated across crates.
+
+### Patching upstream crates
+
+Every entry under `[patch.crates-io]` (in the root `Cargo.toml`) MUST carry a comment block recording:
+
+- **Why** the patch exists — CVE ID, bug report, or unmerged feature.
+- **Upstream link** — the issue or PR we are waiting on.
+- **Pinned version** — the exact upstream tag / SHA we are tracking, so reviewers can diff against it.
+- **Removal trigger** — the upstream version that will let us drop the patch (e.g. "remove once foo ≥ 1.4 is published").
+
+A patch without an audit comment is rejected at review.
+
+### Advisories and CI enforcement
+
+The [`cargo-deny`](.github/workflows/cargo-deny.yml) workflow runs on every PR and main push that touches `Cargo.toml`, `Cargo.lock`, `crates/**/Cargo.toml`, `xtask/Cargo.toml`, or `deny.toml`. It executes two independent checks:
+
+- `cargo deny check advisories` — RustSec database, yanked crates, vulnerability hits.
+- `cargo deny check bans licenses sources` — duplicate / wildcard / banned crates, license allow-list, registry / git source allow-list.
+
+A `RUSTSEC-*` advisory that we cannot immediately fix may be temporarily ignored by adding it to `[advisories].ignore` in `deny.toml`, but **only with**:
+
+- A comment naming the upstream issue / PR being tracked.
+- An explicit reviewer sign-off in the PR that adds the ignore.
+- A scheduled re-evaluation (typically removed within one release cycle).
+
+### Daily catch-all
+
+`cargo-deny.yml` also runs on a `schedule:` cron so freshly published RustSec advisories against pinned dependencies are surfaced even when no `Cargo.toml` has changed. Treat a red scheduled run as a security ticket — open an issue and either bump the dep or document the ignore as above.
 
 ---
 
@@ -772,6 +861,38 @@ mod tests {
 
 ---
 
+## Release Articles
+
+Each dated release in `CHANGELOG.md` (e.g. `## [2026.4.27]`) should land with a
+companion file in `articles/release-<YYYY.M.D>.md`. Two GitHub workflows
+consume these files on push to `main`:
+
+- `.github/workflows/devto-publish.yml` — creates / updates the matching
+  dev.to post (title-keyed, idempotent).
+- `.github/workflows/release-notify.yml` — posts a GitHub Discussion under the
+  release tag using the article body.
+
+If the article is missing on a release tag, the dev.to post and the GitHub
+Discussion are silently skipped — public release comms quietly stop. The
+`articles/` directory drifted out of sync with `CHANGELOG.md` after
+2026-03-22 (#3397) for exactly this reason.
+
+To scaffold an article from a CHANGELOG entry:
+
+```bash
+bash scripts/changelog-to-article.sh <YYYY.M.D> [<git-tag>]
+```
+
+The script slices the matching `## [YYYY.M.D]` section out of `CHANGELOG.md`
+and writes `articles/release-<YYYY.M.D>.md` with the front matter shape
+expected by `devto-publish.yml`. The optional second argument overrides the
+default `v<YYYY.M.D>` placeholder for `canonical_url` — pass the real CalVer
+tag (e.g. `v2026.4.27-beta6`) when you have it. Review the file, hand-edit
+the lead paragraph if the release deserves a narrative beyond the bullet
+list, then commit alongside the CHANGELOG bump.
+
+---
+
 ## Pull Request Process
 
 1. **Fork and branch**: Create a feature branch from `main`. Use descriptive names like `feat/add-matrix-adapter` or `fix/session-restore-crash`.
@@ -800,6 +921,28 @@ Add Matrix channel adapter with E2EE support
 Fix session restore crash on kernel reboot
 Refactor capability manager to use DashMap
 ```
+
+### CHANGELOG Attribution
+
+When you add a bullet to the `## [Unreleased]` section of `CHANGELOG.md`,
+end the line with your GitHub login in parentheses, e.g.
+
+```
+- Add Matrix channel adapter with E2EE support (#1234) (@your-login)
+```
+
+This is enforced by `scripts/check-changelog-attribution.py` (wired into the
+`pre-commit` hook and the `CHANGELOG Attribution` CI job). The check runs
+**only against the lines your PR adds** — historical entries that predate
+this convention are not retroactively flagged, and you should not backfill
+them. To audit the current `[Unreleased]` block before cutting a release:
+
+```
+python3 scripts/check-changelog-attribution.py --all-unreleased
+```
+
+The accepted format is `(@username)` matching `\(@[A-Za-z0-9_][A-Za-z0-9_-]*\)`.
+See issue #3400 for the rationale.
 
 ---
 

@@ -220,14 +220,22 @@ pub async fn list_plugins(
     let items: Vec<serde_json::Value> = plugins
         .iter()
         .map(|p| {
-            let (name, description) = resolve_plugin_i18n(
+            // `name` MUST stay canonical — it's the path-segment identifier
+            // for /plugins/{name}/* (uninstall, enable, disable, reload,
+            // install-deps). `display_name` carries the localized override
+            // for UI rendering. Substituting the localized string into
+            // `name` (the previous behavior) caused install/uninstall to
+            // hit `/plugins/上下文衰减` and 404 against the ASCII directory
+            // names actually present in the registry.
+            let (display_name, description) = resolve_plugin_i18n(
                 lang,
                 &p.manifest.name,
                 &p.manifest.description,
                 &p.manifest.i18n,
             );
             serde_json::json!({
-                "name": name,
+                "name": p.manifest.name,
+                "display_name": display_name,
                 "version": p.manifest.version,
                 "description": description,
                 "author": p.manifest.author,
@@ -276,7 +284,10 @@ pub async fn get_plugin(
     let lang = resolve_lang(lang.as_ref());
     match librefang_runtime::plugin_manager::get_plugin_info(&name) {
         Ok(info) => {
-            let (loc_name, description) = resolve_plugin_i18n(
+            // Same canonical-vs-display split as `list_plugins` — `name`
+            // is the route identifier, `display_name` is the localized UI
+            // label.
+            let (display_name, description) = resolve_plugin_i18n(
                 lang,
                 &info.manifest.name,
                 &info.manifest.description,
@@ -285,7 +296,8 @@ pub async fn get_plugin(
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
-                    "name": loc_name,
+                    "name": info.manifest.name,
+                    "display_name": display_name,
                     "version": info.manifest.version,
                     "description": description,
                     "author": info.manifest.author,
@@ -708,10 +720,17 @@ pub async fn list_plugin_registries(
             Ok(entries) => entries
                 .into_iter()
                 .map(|e| {
-                    let (name, description) =
+                    // `name` is the registry directory name on GitHub —
+                    // it's the install identifier the dashboard sends back
+                    // to POST /api/plugins/install. Localized labels go on
+                    // `display_name`; substituting them into `name` would
+                    // make the install URL fetch a non-existent directory
+                    // (the original report: 上下文衰减 → 404).
+                    let (display_name, description) =
                         resolve_plugin_i18n(lang, &e.name, &e.description, &e.i18n);
                     serde_json::json!({
-                        "name": name,
+                        "name": e.name,
+                        "display_name": display_name,
                         "installed": installed_names.contains(&e.name),
                         "version": e.version,
                         "description": description,

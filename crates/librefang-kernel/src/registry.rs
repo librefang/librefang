@@ -17,7 +17,17 @@ const CHANGE_CHANNEL_CAPACITY: usize = 16;
 /// Registry of all agents in the kernel.
 pub struct AgentRegistry {
     /// Primary index: agent ID → entry.
-    agents: DashMap<AgentId, AgentEntry>,
+    ///
+    /// Values are stored as `Arc<AgentEntry>` so reads (`list_arcs`,
+    /// `is_auto_dream_enabled`, etc.) can hand out cheap pointer clones
+    /// instead of deep-cloning the embedded `AgentManifest` (12+ Vecs /
+    /// HashMaps). Mutators take the DashMap shard lock and use
+    /// `Arc::make_mut` to get a `&mut AgentEntry`: when no readers hold
+    /// the Arc this is in-place; when readers do hold it (e.g. a
+    /// dashboard handler is mid-iteration over a `list_arcs` snapshot)
+    /// `make_mut` clones the entry once and replaces the slot, leaving
+    /// the readers' snapshot intact. See #3569.
+    agents: DashMap<AgentId, Arc<AgentEntry>>,
     /// Name index: human-readable name → agent ID.
     name_index: DashMap<String, AgentId>,
     /// Tag index: tag → list of agent IDs.
@@ -64,6 +74,29 @@ impl AgentRegistry {
         let _ = self.changed_tx.send(());
     }
 
+    /// Mutate an existing entry in place under the DashMap shard lock.
+    ///
+    /// Internally values are `Arc<AgentEntry>`; mutators need `&mut AgentEntry`.
+    /// This helper applies `Arc::make_mut` so:
+    /// - if no readers hold the Arc, the mutation is in place;
+    /// - if readers do (a dashboard handler is mid-iteration over
+    ///   `list_arcs`), the entry is cloned once and the slot is replaced,
+    ///   leaving the snapshot the readers hold untouched.
+    ///
+    /// Returns `AgentNotFound` if the agent isn't registered. The closure's
+    /// return value is propagated to the caller.
+    fn with_entry_mut<R, F>(&self, id: AgentId, f: F) -> LibreFangResult<R>
+    where
+        F: FnOnce(&mut AgentEntry) -> R,
+    {
+        let mut slot = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        let inner = Arc::make_mut(slot.value_mut());
+        Ok(f(inner))
+    }
+
     /// Register a new agent.
     ///
     /// Publication ordering is load-bearing for concurrent lookups (#3338):
@@ -89,7 +122,7 @@ impl AgentRegistry {
                 // resolves the name once `vacant.insert(id)` returns is
                 // guaranteed to find the entry under `id`.
                 let tags = entry.tags.clone();
-                self.agents.insert(id, entry);
+                self.agents.insert(id, Arc::new(entry));
                 for tag in &tags {
                     self.tag_index.entry(tag.clone()).or_default().push(id);
                 }
@@ -101,22 +134,29 @@ impl AgentRegistry {
     }
 
     /// Get an agent entry by ID.
+    ///
+    /// Returns an owned `AgentEntry` for backward compatibility — callers that
+    /// hold the value across awaits or move-out continue to work. The clone
+    /// happens once at the boundary; internal storage stays `Arc<AgentEntry>`
+    /// so a follow-up `list_arcs()` from the same handler costs only a pointer
+    /// copy. Hot paths that only need a read view should prefer building on
+    /// `list_arcs()` instead.
     pub fn get(&self, id: AgentId) -> Option<AgentEntry> {
-        self.agents.get(&id).map(|e| e.value().clone())
+        self.agents.get(&id).map(|e| (**e.value()).clone())
     }
 
     /// Find an agent by name.
     pub fn find_by_name(&self, name: &str) -> Option<AgentEntry> {
         self.name_index
             .get(name)
-            .and_then(|id| self.agents.get(id.value()).map(|e| e.value().clone()))
+            .and_then(|id| self.agents.get(id.value()).map(|e| (**e.value()).clone()))
     }
 
     /// Touch the agent's `last_active` timestamp without changing any other field.
     /// Used to prevent heartbeat false-positives during long-running operations.
     pub fn touch(&self, id: AgentId) {
         if let Some(mut entry) = self.agents.get_mut(&id) {
-            entry.last_active = chrono::Utc::now();
+            Arc::make_mut(entry.value_mut()).last_active = chrono::Utc::now();
         }
     }
 
@@ -129,35 +169,28 @@ impl AgentRegistry {
     /// Idempotent: once `true`, repeated calls only refresh `last_active`.
     pub fn mark_processed_message(&self, id: AgentId) {
         if let Some(mut entry) = self.agents.get_mut(&id) {
-            entry.has_processed_message = true;
-            entry.last_active = chrono::Utc::now();
+            let inner = Arc::make_mut(entry.value_mut());
+            inner.has_processed_message = true;
+            inner.last_active = chrono::Utc::now();
         }
     }
 
     /// Update agent state.
     pub fn set_state(&self, id: AgentId, state: AgentState) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.state = state;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
 
     /// Update agent operational mode.
     pub fn set_mode(&self, id: AgentId, mode: AgentMode) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.mode = mode;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -187,7 +220,7 @@ impl AgentRegistry {
             .remove_if(&name, |_, mapped_id| *mapped_id == id);
         // Now retract the entry. If a racing remove already took it,
         // surface AgentNotFound rather than silently succeeding.
-        let (_, entry) = self
+        let (_, entry_arc) = self
             .agents
             .remove(&id)
             .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
@@ -197,29 +230,37 @@ impl AgentRegistry {
             }
         }
         self.notify_changed();
-        Ok(entry)
+        // Try to unwrap the Arc to avoid a final clone when nobody else holds
+        // a reference. If outstanding `list_arcs()` snapshots still hold the
+        // Arc (a dashboard mid-render), fall back to cloning.
+        Ok(Arc::try_unwrap(entry_arc).unwrap_or_else(|arc| (*arc).clone()))
     }
 
     /// List all agents, sorted by name for deterministic ordering.
+    ///
+    /// Returns owned `AgentEntry` values for backward compatibility — every
+    /// entry is deep-cloned out of the registry's internal `Arc<AgentEntry>`.
+    /// Hot paths that only need read access should call [`Self::list_arcs`]
+    /// instead, which returns `Arc<AgentEntry>` clones (pointer-only).
     pub fn list(&self) -> Vec<AgentEntry> {
-        let mut entries: Vec<AgentEntry> = self.agents.iter().map(|e| e.value().clone()).collect();
+        let mut entries: Vec<AgentEntry> =
+            self.agents.iter().map(|e| (**e.value()).clone()).collect();
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         entries
     }
 
     /// List all agents as `Arc<AgentEntry>`, sorted by name.
     ///
-    /// Prefer this over `list()` in hot paths (e.g. per-LLM-turn prompt
-    /// construction) where the returned entries are read-only. Callers share
-    /// ownership of the `Arc` without deep-cloning the underlying struct; only
-    /// one `AgentEntry::clone()` per entry happens here to create the `Arc`.
-    /// See #3685.
+    /// Cheap: each element is a pointer clone of the registry's internally
+    /// stored `Arc<AgentEntry>` — no `AgentEntry::clone` happens (#3569).
+    /// Prefer this over `list()` for read-only views (dashboard refreshes,
+    /// per-LLM-turn prompt construction, metrics scrapes). Callers must
+    /// treat the entries as immutable snapshots; subsequent registry
+    /// mutations create copy-on-write replacements via `Arc::make_mut` and
+    /// will not be visible through previously returned Arcs.
     pub fn list_arcs(&self) -> Vec<Arc<AgentEntry>> {
-        let mut entries: Vec<Arc<AgentEntry>> = self
-            .agents
-            .iter()
-            .map(|e| Arc::new(e.value().clone()))
-            .collect();
+        let mut entries: Vec<Arc<AgentEntry>> =
+            self.agents.iter().map(|e| Arc::clone(e.value())).collect();
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         entries
     }
@@ -244,14 +285,9 @@ impl AgentRegistry {
 
     /// Add a child agent ID to a parent's children list.
     pub fn add_child(&self, parent_id: AgentId, child_id: AgentId) {
-        let mutated = {
-            if let Some(mut entry) = self.agents.get_mut(&parent_id) {
-                entry.children.push(child_id);
-                true
-            } else {
-                false
-            }
-        };
+        let mutated = self
+            .with_entry_mut(parent_id, |entry| entry.children.push(child_id))
+            .is_ok();
         if mutated {
             self.notify_changed();
         }
@@ -268,14 +304,10 @@ impl AgentRegistry {
         id: AgentId,
         new_session_id: librefang_types::agent::SessionId,
     ) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.session_id = new_session_id;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -286,14 +318,10 @@ impl AgentRegistry {
         id: AgentId,
         workspace: Option<std::path::PathBuf>,
     ) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.manifest.workspace = workspace;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -304,14 +332,10 @@ impl AgentRegistry {
         id: AgentId,
         source_toml_path: Option<std::path::PathBuf>,
     ) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.source_toml_path = source_toml_path;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -324,14 +348,10 @@ impl AgentRegistry {
         id: AgentId,
         manifest: librefang_types::agent::AgentManifest,
     ) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.manifest = manifest;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -342,28 +362,20 @@ impl AgentRegistry {
         id: AgentId,
         identity: librefang_types::agent::AgentIdentity,
     ) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.identity = identity;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
 
     /// Update an agent's model configuration.
     pub fn update_model(&self, id: AgentId, new_model: String) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.manifest.model.model = new_model;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -375,15 +387,11 @@ impl AgentRegistry {
         new_model: String,
         new_provider: String,
     ) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.manifest.model.model = new_model;
             entry.manifest.model.provider = new_provider;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -397,45 +405,33 @@ impl AgentRegistry {
         api_key_env: Option<String>,
         base_url: Option<String>,
     ) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.manifest.model.model = new_model;
             entry.manifest.model.provider = new_provider;
             entry.manifest.model.api_key_env = api_key_env;
             entry.manifest.model.base_url = base_url;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
 
     /// Update an agent's max_tokens (response length limit).
     pub fn update_max_tokens(&self, id: AgentId, max_tokens: u32) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.manifest.model.max_tokens = max_tokens;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
 
     /// Update an agent's sampling temperature.
     pub fn update_temperature(&self, id: AgentId, temperature: f32) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.manifest.model.temperature = temperature;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -446,14 +442,10 @@ impl AgentRegistry {
         id: AgentId,
         mode: librefang_types::agent::WebSearchAugmentationMode,
     ) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.manifest.web_search_augmentation = mode;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -464,43 +456,31 @@ impl AgentRegistry {
         id: AgentId,
         fallback_models: Vec<librefang_types::agent::FallbackModel>,
     ) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.manifest.fallback_models = fallback_models;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
 
     /// Update an agent's skill allowlist.
     pub fn update_skills(&self, id: AgentId, skills: Vec<String>) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.manifest.skills = skills;
             entry.manifest.skills_disabled = false;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
 
     /// Update an agent's MCP server allowlist.
     pub fn update_mcp_servers(&self, id: AgentId, servers: Vec<String>) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.manifest.mcp_servers = servers;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -514,11 +494,7 @@ impl AgentRegistry {
         allowlist: Option<Vec<String>>,
         blocklist: Option<Vec<String>>,
     ) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             if let Some(ct) = capabilities_tools {
                 entry.manifest.capabilities.tools = ct;
             }
@@ -530,7 +506,7 @@ impl AgentRegistry {
             }
             entry.manifest.tools_disabled = false;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -546,15 +522,11 @@ impl AgentRegistry {
         skills: Vec<String>,
         skills_disabled: bool,
     ) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.manifest.skills = skills;
             entry.manifest.skills_disabled = skills_disabled;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -571,31 +543,23 @@ impl AgentRegistry {
         blocklist: Vec<String>,
         tools_disabled: bool,
     ) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.manifest.capabilities.tools = capabilities_tools;
             entry.manifest.tool_allowlist = allowlist;
             entry.manifest.tool_blocklist = blocklist;
             entry.manifest.tools_disabled = tools_disabled;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
 
     /// Update an agent's system prompt (hot-swap, takes effect on next message).
     pub fn update_system_prompt(&self, id: AgentId, new_prompt: String) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.manifest.model.system_prompt = new_prompt;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -611,16 +575,20 @@ impl AgentRegistry {
                 vacant.insert(id);
             }
         }
-        let mut entry = self.agents.get_mut(&id).ok_or_else(|| {
-            // Roll back the name index insertion if agent not found.
-            self.name_index.remove(&new_name);
-            LibreFangError::AgentNotFound(id.to_string())
-        })?;
-        let old_name = entry.name.clone();
-        entry.name = new_name.clone();
-        entry.manifest.name = new_name;
-        entry.last_active = chrono::Utc::now();
-        drop(entry);
+        let old_name = match self.with_entry_mut(id, |entry| {
+            let prev = entry.name.clone();
+            entry.name = new_name.clone();
+            entry.manifest.name = new_name.clone();
+            entry.last_active = chrono::Utc::now();
+            prev
+        }) {
+            Ok(prev) => prev,
+            Err(e) => {
+                // Roll back the name index insertion if agent not found.
+                self.name_index.remove(&new_name);
+                return Err(e);
+            }
+        };
         self.name_index.remove(&old_name);
         self.notify_changed();
         Ok(())
@@ -628,14 +596,10 @@ impl AgentRegistry {
 
     /// Update an agent's description.
     pub fn update_description(&self, id: AgentId, new_desc: String) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.manifest.description = new_desc;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -645,14 +609,10 @@ impl AgentRegistry {
     /// In-memory only — persisting to the agent manifest file is a separate
     /// concern (matches the pattern of `update_system_prompt`).
     pub fn update_auto_dream_enabled(&self, id: AgentId, enabled: bool) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.manifest.auto_dream_enabled = enabled;
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -666,7 +626,7 @@ impl AgentRegistry {
     pub fn is_auto_dream_enabled(&self, id: AgentId) -> bool {
         self.agents
             .get(&id)
-            .map(|e| e.manifest.auto_dream_enabled)
+            .map(|e| e.value().manifest.auto_dream_enabled)
             .unwrap_or(false)
     }
 
@@ -679,11 +639,7 @@ impl AgentRegistry {
         monthly: Option<f64>,
         tokens_per_hour: Option<u64>,
     ) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             if let Some(v) = hourly {
                 entry.manifest.resources.max_cost_per_hour_usd = v;
             }
@@ -697,22 +653,18 @@ impl AgentRegistry {
                 entry.manifest.resources.max_llm_tokens_per_hour = Some(v);
             }
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
 
     /// Mark an agent's onboarding as complete.
     pub fn mark_onboarding_complete(&self, id: AgentId) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.onboarding_completed = true;
             entry.onboarding_completed_at = Some(chrono::Utc::now());
             entry.last_active = chrono::Utc::now();
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -730,15 +682,11 @@ impl AgentRegistry {
         id: AgentId,
         reason: librefang_types::config::SessionResetReason,
     ) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.force_session_wipe = false;
             entry.resume_pending = false;
             entry.reset_reason = Some(reason);
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -750,13 +698,9 @@ impl AgentRegistry {
     /// Named `schedule_session_wipe` to avoid confusion with
     /// `suspend_agent()` / `AgentState::Suspended`.
     pub fn schedule_session_wipe(&self, id: AgentId) -> LibreFangResult<()> {
-        {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        self.with_entry_mut(id, |entry| {
             entry.force_session_wipe = true;
-        }
+        })?;
         self.notify_changed();
         Ok(())
     }
@@ -764,18 +708,14 @@ impl AgentRegistry {
     /// Mark an agent's session as `resume_pending` after an interrupted
     /// restart.  Ignored when `force_session_wipe` is already set (hard-wipe wins).
     pub fn mark_resume_pending(&self, id: AgentId) -> LibreFangResult<()> {
-        let mutated = {
-            let mut entry = self
-                .agents
-                .get_mut(&id)
-                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        let mutated = self.with_entry_mut(id, |entry| {
             if !entry.force_session_wipe {
                 entry.resume_pending = true;
                 true
             } else {
                 false
             }
-        };
+        })?;
         if mutated {
             self.notify_changed();
         }
@@ -910,6 +850,76 @@ mod tests {
 
         let names: Vec<String> = registry.list().iter().map(|e| e.name.clone()).collect();
         assert_eq!(names, vec!["alpha", "mu", "zeta"]);
+    }
+
+    /// #3569: `list_arcs()` must hand out cheap pointer clones — every Arc
+    /// returned must alias the same allocation as the registry's internal
+    /// slot, so `Arc::ptr_eq` against a re-fetched snapshot confirms no
+    /// `AgentEntry::clone` happened on the read path.
+    #[test]
+    fn test_list_arcs_does_not_deep_clone() {
+        let registry = AgentRegistry::new();
+        registry.register(test_entry("alpha")).unwrap();
+        registry.register(test_entry("beta")).unwrap();
+
+        let snap1 = registry.list_arcs();
+        let snap2 = registry.list_arcs();
+        assert_eq!(snap1.len(), 2);
+        assert_eq!(snap2.len(), 2);
+        // Two consecutive snapshots must alias the same Arc allocations —
+        // proves the registry stored an Arc and `list_arcs` only pointer-cloned.
+        for (a, b) in snap1.iter().zip(snap2.iter()) {
+            assert!(
+                Arc::ptr_eq(a, b),
+                "list_arcs deep-cloned `{}`; expected pointer-clone only",
+                a.name
+            );
+        }
+        // Strong count = 1 internal slot + 2 in snap1 + 2 in snap2 = 5 per agent.
+        // The exact count is incidental; what matters is it's >1, which is only
+        // possible if `list_arcs` shared the Arc instead of allocating a new one.
+        for arc in &snap1 {
+            assert!(
+                Arc::strong_count(arc) >= 3,
+                "expected Arc shared with registry + sibling snapshot, got strong_count={}",
+                Arc::strong_count(arc)
+            );
+        }
+    }
+
+    /// #3569: mutations under `Arc::make_mut` must give snapshot semantics —
+    /// a `list_arcs()` taken before a mutation must continue to observe the
+    /// pre-mutation values, while a fresh `list_arcs()` after the mutation
+    /// observes the new ones. This is the contract that lets dashboard
+    /// handlers iterate a snapshot without locks while the kernel keeps
+    /// updating agents underneath them.
+    #[test]
+    fn test_list_arcs_snapshot_isolation_under_mutation() {
+        let registry = AgentRegistry::new();
+        registry.register(test_entry("frozen")).unwrap();
+        let id = registry.list_arcs()[0].id;
+
+        // Take a pre-mutation snapshot.
+        let before = registry.list_arcs();
+        let before_model = before[0].manifest.model.model.clone();
+
+        // Mutate — Arc::make_mut should fork the entry because `before`
+        // still holds the old Arc.
+        registry
+            .update_model(id, "claude-sonnet-4-7".to_string())
+            .unwrap();
+
+        // Old snapshot is untouched.
+        assert_eq!(before[0].manifest.model.model, before_model);
+        assert_ne!(before_model, "claude-sonnet-4-7");
+        // New snapshot reflects the mutation.
+        let after = registry.list_arcs();
+        assert_eq!(after[0].manifest.model.model, "claude-sonnet-4-7");
+        // The two snapshots are distinct allocations now.
+        assert!(
+            !Arc::ptr_eq(&before[0], &after[0]),
+            "make_mut should have forked the entry; snapshots aliased the same Arc"
+        );
     }
 
     #[test]

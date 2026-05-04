@@ -23,6 +23,7 @@ mod fmt;
 mod integration_test;
 mod license_check;
 mod loc;
+mod local_check_mode;
 mod migrate;
 mod pre_commit;
 mod publish_npm_binaries;

@@ -222,6 +222,12 @@ jobs:
             patchelf
       - name: Check formatting
         run: cargo xtask fmt
+      - name: Check API error response shape (issue #3505)
+        # Pure text scan, ~milliseconds. Rejects new `{"detail": …}` or
+        # `{"status": "error", …}` constructions in `routes/`. Files
+        # that still carry legacy shapes are listed in the script's
+        # LEGACY_FILES allowlist with their cleanup follow-ups.
+        run: bash scripts/check-error-shape.sh
       - name: Ensure dashboard build dir exists
         run: mkdir -p crates/librefang-api/static/react
       - name: Build + clippy
@@ -245,6 +251,34 @@ jobs:
             echo "Selective clippy for: $CRATES"
             cargo clippy $PFLAGS --all-targets --all-features -- -D warnings
           fi
+      # Informational lint for empty-string / "<unknown>" sentinel patterns
+      # in API response code (refs #3302). Runs in warn mode — never fails
+      # the build until the existing inventory is cleared and the script is
+      # flipped to --strict. See docs/architecture/api-conventions.md.
+      - name: Sentinel-pattern lint (warn-only)
+        run: scripts/check-no-empty-string-sentinels.sh
+
+  # ── CHANGELOG attribution check ────────────────────────────────────────────────
+  # Enforces the `(@username)` suffix on bullets *added* to the [Unreleased]
+  # section in this PR. Historical entries (1,800+ bullets, many predating
+  # any attribution convention) are NOT retroactively flagged — the validator
+  # only looks at lines this diff introduces. See #3400.
+  changelog-attribution:
+    name: CHANGELOG Attribution
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+      - name: Validate (@user) attribution on new [Unreleased] bullets
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/check-changelog-attribution.py
 
   # ── OpenAPI / SDK drift check ──────────────────────────────────────────────────
   # Regenerates openapi.json and the four SDKs and fails if anything differs

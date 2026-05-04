@@ -1,7 +1,16 @@
-//! ASCII table renderer with Unicode box-drawing borders for CLI output.
+//! Table renderer for CLI output.
 //!
-//! Supports column alignment, auto-width, header styling, and optional colored
-//! output via the `colored` crate.
+//! Two rendering modes:
+//! - [`Table::render`] — unicode box-drawing borders, bold headers via
+//!   `colored`. Suitable for interactive TTY output.
+//! - [`Table::render_ascii`] — pure ASCII (`+ - |`), no ANSI escapes,
+//!   safe for log pipes, CI capture, and terminals that mis-render
+//!   `LANG=C` unicode boxes.
+//!
+//! Most call sites should use [`Table::print`], which auto-selects unicode
+//! when stdout is a TTY and ASCII otherwise.
+
+use std::io::IsTerminal;
 
 use colored::Colorize;
 
@@ -139,9 +148,72 @@ impl Table {
         lines.join("\n")
     }
 
+    /// Render the table using ASCII glyphs only (`+ - |`), with no ANSI
+    /// escapes. Use for pipe / CI / dumb-terminal output where unicode
+    /// box-drawing or bold escape sequences would be noise.
+    ///
+    /// ```text
+    /// +------+-------+
+    /// | Name | Value |
+    /// +------+-------+
+    /// | foo  | bar   |
+    /// +------+-------+
+    /// ```
+    pub fn render_ascii(&self) -> String {
+        let widths = self.column_widths();
+
+        let border: String = {
+            let segs: Vec<String> = widths.iter().map(|w| "-".repeat(w + 2)).collect();
+            format!("+{}+", segs.join("+"))
+        };
+
+        let mut lines = Vec::with_capacity(self.rows.len() + 4);
+        lines.push(border.clone());
+
+        // Header row — no bold/ANSI in ASCII mode.
+        let header_cells: Vec<String> = self
+            .headers
+            .iter()
+            .enumerate()
+            .map(|(i, h)| format!(" {} ", Self::pad(h, widths[i], self.alignments[i])))
+            .collect();
+        lines.push(format!("|{}|", header_cells.join("|")));
+
+        lines.push(border.clone());
+
+        for row in &self.rows {
+            let cells: Vec<String> = row
+                .iter()
+                .enumerate()
+                .map(|(i, cell)| format!(" {} ", Self::pad(cell, widths[i], self.alignments[i])))
+                .collect();
+            lines.push(format!("|{}|", cells.join("|")));
+        }
+
+        lines.push(border);
+
+        lines.join("\n")
+    }
+
+    /// Render using unicode borders on a TTY, ASCII otherwise.
+    ///
+    /// Detection looks at stdout — that's where the rendered string is most
+    /// commonly written. Callers writing to stderr should pick `render` or
+    /// `render_ascii` explicitly.
+    pub fn render_auto(&self) -> String {
+        if std::io::stdout().is_terminal() {
+            self.render()
+        } else {
+            self.render_ascii()
+        }
+    }
+
     /// Render the table and print it to stdout.
+    ///
+    /// Auto-selects unicode vs. ASCII based on whether stdout is a TTY so
+    /// piped output (`librefang agents | grep …`) stays clean.
     pub fn print(&self) {
-        println!("{}", self.render());
+        println!("{}", self.render_auto());
     }
 }
 
@@ -244,5 +316,61 @@ mod tests {
         let top = rendered.lines().next().unwrap();
         // At minimum: 2 padding + description length for second column
         assert!(top.len() > 30);
+    }
+
+    #[test]
+    fn ascii_render_uses_only_ascii_glyphs() {
+        // The ASCII path must be safe for any encoding / dumb terminal:
+        // no unicode box-drawing chars, no ANSI escapes from `colored`.
+        let mut t = Table::new(&["Name", "Value"]);
+        t.add_row(&["foo", "bar"]);
+        let rendered = t.render_ascii();
+
+        for ch in rendered.chars() {
+            assert!(
+                ch.is_ascii(),
+                "non-ASCII glyph {:?} leaked into render_ascii output",
+                ch
+            );
+        }
+        // No ESC byte (start of an ANSI escape sequence).
+        assert!(!rendered.contains('\u{1b}'), "ANSI escape leaked");
+
+        // Borders use `+` corners and `-` edges.
+        let top = rendered.lines().next().unwrap();
+        assert!(top.starts_with('+') && top.ends_with('+'));
+        assert!(top.chars().all(|c| c == '+' || c == '-'));
+    }
+
+    #[test]
+    fn ascii_render_aligns_columns() {
+        // Right-align a numeric column and confirm the digit lands at the
+        // right edge of its cell (one space padding after the digit before
+        // the closing `|`).
+        let mut t = Table::new(&["Item", "Count"]);
+        t = t.align(1, Align::Right);
+        t.add_row(&["apples", "5"]);
+        t.add_row(&["oranges", "123"]);
+
+        let rendered = t.render_ascii();
+        let line = rendered.lines().find(|l| l.contains("apples")).unwrap();
+        // "Count" header is 5 chars wide; "5" right-aligned ⇒ "    5".
+        assert!(
+            line.contains("|     5 |"),
+            "expected right-aligned 5 in {line}",
+        );
+    }
+
+    #[test]
+    fn ascii_and_unicode_render_have_same_row_count() {
+        // The two renderers should agree on layout (top, header, sep, rows,
+        // bottom) — only the glyphs differ.
+        let mut t = Table::new(&["A", "B", "C"]);
+        t.add_row(&["1", "2", "3"]);
+        t.add_row(&["4", "5", "6"]);
+
+        let u = t.render();
+        let a = t.render_ascii();
+        assert_eq!(u.lines().count(), a.lines().count());
     }
 }

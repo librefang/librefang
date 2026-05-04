@@ -21,7 +21,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{DateTime, Utc};
-use librefang_runtime::audit::AuditEntry;
+use librefang_kernel::audit::AuditEntry;
 use librefang_types::agent::UserId;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -581,7 +581,7 @@ pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoRespon
 #[cfg(test)]
 mod tests {
     use super::*;
-    use librefang_runtime::audit::{AuditAction, AuditEntry};
+    use librefang_kernel::audit::{AuditAction, AuditEntry};
 
     fn entry(
         seq: u64,
