@@ -2526,6 +2526,33 @@ pub struct KernelConfig {
     /// hostnames without port, e.g. `"dash.example.com"`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_hosts: Vec<String>,
+    /// CIDR ranges (or single IPs) of reverse proxies that are trusted to
+    /// set forwarding headers (`X-Forwarded-For`, `X-Real-IP`,
+    /// `CF-Connecting-IP`, `Forwarded`). Used together with
+    /// `trust_forwarded_for`: header trust is **only** applied when the
+    /// TCP peer matches one of these entries.
+    ///
+    /// Without this allowlist, trusting forwarding headers lets any
+    /// internet client forge a per-request source IP and bypass per-IP
+    /// rate limits and connection caps. The allowlist closes that hole
+    /// by gating header trust on a verified upstream proxy.
+    ///
+    /// Entries are CIDRs (`"172.19.0.0/16"`, `"10.0.0.0/8"`,
+    /// `"2001:db8::/32"`) or bare IPs (`"127.0.0.1"`, `"::1"`). An empty
+    /// list (default) disables header trust regardless of
+    /// `trust_forwarded_for`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_proxies: Vec<String>,
+    /// Master switch for forwarding-header trust. Defaults to `false`.
+    /// When `true` AND the TCP peer matches `trusted_proxies`, the
+    /// daemon resolves the real client IP from forwarding headers
+    /// (preference: `CF-Connecting-IP` → `X-Real-IP` → `Forwarded`
+    /// (RFC 7239) → rightmost-untrusted hop in `X-Forwarded-For`).
+    /// Without both flags set, header trust stays off and the TCP peer
+    /// is used everywhere — the safe default for any non-proxied
+    /// deployment.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trust_forwarded_for: bool,
     /// Host directories under which `agent.toml: [workspaces].<name>.mount`
     /// declarations may resolve. Each declared mount is canonicalized at
     /// boot and must be a path prefix of one of these (also canonicalized)
@@ -4831,6 +4858,8 @@ impl Default for KernelConfig {
             registry: RegistryConfig::default(),
             cors_origin: Vec::new(),
             trusted_hosts: Vec::new(),
+            trusted_proxies: Vec::new(),
+            trust_forwarded_for: false,
             allowed_mount_roots: Vec::new(),
             privacy: PrivacyConfig::default(),
             strict_config: false,
