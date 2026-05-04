@@ -28,7 +28,7 @@ use axum::http::{HeaderMap, Request, Response, StatusCode};
 use axum::middleware::Next;
 use dashmap::DashMap;
 use governor::{clock::DefaultClock, state::keyed::DashMapStateStore, Quota, RateLimiter};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -120,6 +120,13 @@ pub type KeyedRateLimiter = RateLimiter<IpAddr, DashMapStateStore<IpAddr>, Defau
 pub struct GcraState {
     pub limiter: Arc<KeyedRateLimiter>,
     pub retry_after_secs: u64,
+    /// Compiled `trusted_proxies` allowlist. Empty (default) disables
+    /// header-based client-IP resolution and the limiter falls back to
+    /// the TCP peer for keying.
+    pub trusted_proxies: Arc<crate::client_ip::TrustedProxies>,
+    /// Operator opt-in for forwarding-header trust. Without this AND
+    /// a non-empty `trusted_proxies`, header trust is off.
+    pub trust_forwarded_for: bool,
 }
 
 /// Create a GCRA rate limiter with the given token budget per minute per IP.
@@ -147,17 +154,19 @@ pub async fn gcra_rate_limit(
         return next.run(request).await;
     }
 
-    // Fall back to the unspecified address (`0.0.0.0`) when ConnectInfo
-    // is missing rather than to loopback. With the loopback bypass below,
-    // a missing extension would otherwise silently disable rate limiting
-    // for every request; an unspecified address still enters the limiter
-    // and just shares one bucket across mis-wired callers — annoying,
-    // but visible.
-    let ip = request
-        .extensions()
-        .get::<axum::extract::ConnectInfo<SocketAddr>>()
-        .map(|ci| ci.0.ip())
-        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    // Resolve the real client IP. When the daemon sits behind a trusted
+    // reverse proxy (config: `trusted_proxies` + `trust_forwarded_for`)
+    // and the TCP peer matches the allowlist, this returns the IP from
+    // the forwarding headers. Otherwise it returns the TCP peer — the
+    // same conservative behavior as before, including the
+    // `0.0.0.0`-on-missing-ConnectInfo fallback documented previously.
+    // An untrusted peer can never use forwarding headers to forge a
+    // unique source per request and bypass the limiter.
+    let ip = crate::client_ip::resolve_from_request(
+        &request,
+        &state.trusted_proxies,
+        state.trust_forwarded_for,
+    );
 
     // Loopback (127.0.0.0/8 + ::1) bypasses the limiter. The dashboard
     // SPA, the librefang CLI, and any other process on the same host
@@ -295,6 +304,18 @@ impl AuthLoginLimiter {
     }
 }
 
+/// Shared state for the auth-endpoint rate limiter middleware. Bundles
+/// the limiter, the per-IP attempt cap, and the trusted-proxy
+/// configuration that decides whether forwarding headers can override
+/// the TCP peer for keying.
+#[derive(Clone)]
+pub struct AuthRateLimitState {
+    pub limiter: Arc<AuthLoginLimiter>,
+    pub max_attempts: u32,
+    pub trusted_proxies: Arc<crate::client_ip::TrustedProxies>,
+    pub trust_forwarded_for: bool,
+}
+
 /// Axum middleware that enforces per-IP rate limiting on authentication
 /// endpoints (`/api/auth/dashboard-login`, `/api/auth/login*`,
 /// `/api/auth/introspect`, `/api/auth/refresh`).
@@ -304,16 +325,21 @@ impl AuthLoginLimiter {
 /// `max_attempts` within the 15-minute window receive HTTP 429 with a
 /// `Retry-After` header.
 ///
-/// IP resolution: TCP peer address (`ConnectInfo`) only; forwarded
-/// headers are deliberately not trusted (see `resolve_client_ip`).
+/// IP resolution: TCP peer by default. When the daemon is configured
+/// with `trusted_proxies` + `trust_forwarded_for`, peers that match
+/// the allowlist have their IP replaced with the value from the
+/// forwarding headers (`CF-Connecting-IP` → `X-Real-IP` → `Forwarded`
+/// → rightmost-untrusted `X-Forwarded-For`). Untrusted peers always
+/// key on their own TCP source, so a forged `X-Forwarded-For` from
+/// the open internet still collapses every spoof attempt onto one
+/// bucket — the limiter's safety property is preserved.
 pub async fn auth_rate_limit_layer(
-    axum::extract::State((limiter, max_attempts)): axum::extract::State<(
-        Arc<AuthLoginLimiter>,
-        u32,
-    )>,
+    axum::extract::State(state): axum::extract::State<AuthRateLimitState>,
     request: Request<Body>,
     next: Next,
 ) -> Response<Body> {
+    let limiter = state.limiter.clone();
+    let max_attempts = state.max_attempts;
     let path = request.uri().path();
 
     // Endpoints that accept credentials, recovery codes, or TOTP codes —
@@ -338,7 +364,11 @@ pub async fn auth_rate_limit_layer(
         return next.run(request).await;
     }
 
-    let ip = resolve_client_ip(&request);
+    let ip = crate::client_ip::resolve_from_request(
+        &request,
+        &state.trusted_proxies,
+        state.trust_forwarded_for,
+    );
 
     // Loopback is exempt only when there is no upstream proxy.  A loopback
     // peer carrying any forwarding header indicates a reverse proxy on the
@@ -373,35 +403,19 @@ pub async fn auth_rate_limit_layer(
     next.run(request).await
 }
 
-/// Resolve the client IP from the TCP `ConnectInfo` only.
-///
-/// **Header trust removed.**  Trusting `X-Forwarded-For` / `X-Real-IP`
-/// without a verified upstream proxy lets any internet attacker rotate
-/// the apparent source per request and bypass the limiter entirely —
-/// the counter never advances past 1 for any unique (forged) IP.  The
-/// rest of this crate already follows the same conservative stance for
-/// the GCRA limiter and only consults `peer_addr` for rate-limiting
-/// keys; the auth limiter was the outlier.
-///
-/// Reverse-proxy deployments will see all auth attempts collapsed onto
-/// the proxy's IP, which is the correct fail-closed behaviour: a
-/// compromised proxy is a different threat model than a missing one.
-/// A future config flag (`auth_rate_limit_trust_forwarded`) can opt
-/// back in to header parsing once a `trusted_proxies` allowlist
-/// exists; until then, anything else is exploitable.
-fn resolve_client_ip(request: &Request<Body>) -> IpAddr {
-    request
-        .extensions()
-        .get::<axum::extract::ConnectInfo<SocketAddr>>()
-        .map(|ci| ci.0.ip())
-        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
-}
+// IP resolution lives in `crate::client_ip`. This module used to
+// contain `resolve_client_ip` that ignored forwarding headers
+// outright; the gating now happens through the shared
+// `TrustedProxies` allowlist + `trust_forwarded_for` master switch
+// passed via `GcraState` / `AuthRateLimitState`. An empty allowlist
+// preserves the historical fail-closed behaviour exactly.
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::routing::get;
     use axum::Router;
+    use std::net::SocketAddr;
     use tower::ServiceExt;
 
     /// Regression: a small-quota limiter must actually start rejecting
@@ -514,6 +528,8 @@ mod tests {
         let state = GcraState {
             limiter: create_rate_limiter(tokens_per_minute),
             retry_after_secs: 60,
+            trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
+            trust_forwarded_for: false,
         };
         Router::new()
             .route("/dashboard/{*path}", get(|| async { "asset" }))
@@ -818,7 +834,12 @@ mod tests {
         let app = Router::new()
             .route("/api/auth/dashboard-login", post(|| async { "ok" }))
             .layer(axum::middleware::from_fn_with_state(
-                (limiter.clone(), max_attempts),
+                AuthRateLimitState {
+                    limiter: limiter.clone(),
+                    max_attempts,
+                    trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
+                    trust_forwarded_for: false,
+                },
                 auth_rate_limit_layer,
             ));
 
@@ -870,7 +891,12 @@ mod tests {
         let app = Router::new()
             .route("/api/auth/dashboard-login", post(|| async { "ok" }))
             .layer(axum::middleware::from_fn_with_state(
-                (limiter, max_attempts),
+                AuthRateLimitState {
+                    limiter,
+                    max_attempts,
+                    trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
+                    trust_forwarded_for: false,
+                },
                 auth_rate_limit_layer,
             ));
 
@@ -906,7 +932,12 @@ mod tests {
         let app = Router::new()
             .route("/api/health", get(|| async { "ok" }))
             .layer(axum::middleware::from_fn_with_state(
-                (limiter, max_attempts),
+                AuthRateLimitState {
+                    limiter,
+                    max_attempts,
+                    trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
+                    trust_forwarded_for: false,
+                },
                 auth_rate_limit_layer,
             ));
 
@@ -946,7 +977,12 @@ mod tests {
         let app = Router::new()
             .route("/api/auth/dashboard-login", post(|| async { "ok" }))
             .layer(axum::middleware::from_fn_with_state(
-                (limiter, max_attempts),
+                AuthRateLimitState {
+                    limiter,
+                    max_attempts,
+                    trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
+                    trust_forwarded_for: false,
+                },
                 auth_rate_limit_layer,
             ));
 
@@ -992,7 +1028,12 @@ mod tests {
         let app = Router::new()
             .route("/api/auth/dashboard-login", post(|| async { "ok" }))
             .layer(axum::middleware::from_fn_with_state(
-                (limiter, max_attempts),
+                AuthRateLimitState {
+                    limiter,
+                    max_attempts,
+                    trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
+                    trust_forwarded_for: false,
+                },
                 auth_rate_limit_layer,
             ));
 
@@ -1043,7 +1084,12 @@ mod tests {
             let max_attempts: u32 = 1;
             let app = Router::new().route(path, post(|| async { "ok" })).layer(
                 axum::middleware::from_fn_with_state(
-                    (limiter, max_attempts),
+                    AuthRateLimitState {
+                        limiter,
+                        max_attempts,
+                        trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
+                        trust_forwarded_for: false,
+                    },
                     auth_rate_limit_layer,
                 ),
             );
@@ -1067,5 +1113,191 @@ mod tests {
             }
             assert!(saw_429, "endpoint {path} must be rate-limited but was not");
         }
+    }
+
+    /// When the daemon is configured to trust a reverse proxy
+    /// (`trusted_proxies` non-empty + `trust_forwarded_for=true`), a
+    /// request arriving from the trusted peer with `X-Forwarded-For`
+    /// must key on the forwarded IP, not the proxy's address. This is
+    /// the change PR'd in for trusted-proxies support: previously every
+    /// browser behind cloudflared collapsed onto one shared bucket.
+    #[tokio::test]
+    async fn auth_rate_limit_keys_on_forwarded_ip_when_proxy_trusted() {
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let limiter = Arc::new(AuthLoginLimiter::new());
+        let max_attempts: u32 = 2;
+        let trusted = Arc::new(crate::client_ip::TrustedProxies::compile(&[
+            "172.19.0.0/16".to_string(),
+        ]));
+        let app = Router::new()
+            .route("/api/auth/dashboard-login", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                AuthRateLimitState {
+                    limiter: limiter.clone(),
+                    max_attempts,
+                    trusted_proxies: trusted,
+                    trust_forwarded_for: true,
+                },
+                auth_rate_limit_layer,
+            ));
+
+        let proxy_peer: IpAddr = "172.19.0.1".parse().unwrap();
+        let browser_a: &str = "203.0.113.10";
+        let browser_b: &str = "203.0.113.20";
+
+        let make_req = |xff: &str| {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/api/auth/dashboard-login")
+                .header("x-forwarded-for", xff)
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                    proxy_peer, 55000,
+                ))));
+            req
+        };
+
+        // Browser A burns its budget.
+        for _ in 0..2 {
+            let r = app.clone().oneshot(make_req(browser_a)).await.unwrap();
+            assert_eq!(r.status(), StatusCode::OK);
+        }
+        let r = app.clone().oneshot(make_req(browser_a)).await.unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "browser A is over the limit on its own bucket"
+        );
+
+        // Browser B (same proxy peer, different XFF) gets a fresh bucket.
+        let r = app.clone().oneshot(make_req(browser_b)).await.unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::OK,
+            "browser B must NOT inherit browser A's exhausted bucket"
+        );
+    }
+
+    /// Spoof regression: an internet client (peer NOT in
+    /// `trusted_proxies`) that rotates `X-Forwarded-For` to a fresh
+    /// fake IP per request must NOT bypass the limiter. Forwarding
+    /// headers from untrusted peers are ignored entirely; the limiter
+    /// keys on the actual TCP source.
+    #[tokio::test]
+    async fn auth_rate_limit_ignores_xff_from_untrusted_peer() {
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let limiter = Arc::new(AuthLoginLimiter::new());
+        let max_attempts: u32 = 2;
+        let trusted = Arc::new(crate::client_ip::TrustedProxies::compile(&[
+            // Only the internal proxy subnet is trusted. The attacker's
+            // real source (198.51.100.7 below) does not match.
+            "172.19.0.0/16".to_string(),
+        ]));
+        let app = Router::new()
+            .route("/api/auth/dashboard-login", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                AuthRateLimitState {
+                    limiter,
+                    max_attempts,
+                    trusted_proxies: trusted,
+                    trust_forwarded_for: true,
+                },
+                auth_rate_limit_layer,
+            ));
+
+        let attacker_peer: IpAddr = "198.51.100.7".parse().unwrap();
+
+        let make_req = |fake_xff: &str| {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/api/auth/dashboard-login")
+                .header("x-forwarded-for", fake_xff)
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                    attacker_peer,
+                    44444,
+                ))));
+            req
+        };
+
+        // First two attempts pass (counting against attacker_peer).
+        for _ in 0..2 {
+            let r = app.clone().oneshot(make_req("10.0.0.1")).await.unwrap();
+            assert_eq!(r.status(), StatusCode::OK);
+        }
+        // Third attempt with a fresh forged XFF must STILL 429 — the
+        // forged header is ignored because the peer is not trusted.
+        let r = app.clone().oneshot(make_req("10.0.0.99")).await.unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "rotating X-Forwarded-For from an untrusted peer must not bypass the limiter"
+        );
+    }
+
+    /// When `trust_forwarded_for` is false (default), even a peer that
+    /// matches `trusted_proxies` is not allowed to set the client IP
+    /// via headers. The master switch is the kill-switch.
+    #[tokio::test]
+    async fn auth_rate_limit_ignores_xff_when_master_flag_off() {
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let limiter = Arc::new(AuthLoginLimiter::new());
+        let max_attempts: u32 = 2;
+        let trusted = Arc::new(crate::client_ip::TrustedProxies::compile(&[
+            "172.19.0.0/16".to_string(),
+        ]));
+        let app = Router::new()
+            .route("/api/auth/dashboard-login", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                AuthRateLimitState {
+                    limiter,
+                    max_attempts,
+                    trusted_proxies: trusted,
+                    trust_forwarded_for: false, // master switch off
+                },
+                auth_rate_limit_layer,
+            ));
+
+        let proxy_peer: IpAddr = "172.19.0.1".parse().unwrap();
+
+        let make_req = |xff: &str| {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/api/auth/dashboard-login")
+                .header("x-forwarded-for", xff)
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                    proxy_peer, 55000,
+                ))));
+            req
+        };
+
+        // Two unique XFFs burn the SAME bucket (proxy_peer's), because
+        // the master switch is off and headers are ignored.
+        for _ in 0..2 {
+            let r = app.clone().oneshot(make_req("203.0.113.10")).await.unwrap();
+            assert_eq!(r.status(), StatusCode::OK);
+        }
+        let r = app.oneshot(make_req("203.0.113.99")).await.unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "master switch off → XFF must be ignored, all requests share peer's bucket"
+        );
     }
 }
