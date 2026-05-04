@@ -11,3 +11,12 @@ database_id = "91df0bc6-e658-4463-9eba-22d5476d420a"
 # Daily registry refresh at UTC 02:00
 [triggers]
 crons = ["0 2 * * *"]
+
+# Plugin signing — see web/workers/SIGNING.md for keygen + deploy.
+# REGISTRY_PUBLIC_KEY is non-secret (raw 32-byte Ed25519 pubkey, base64).
+# REGISTRY_PRIVATE_KEY is a secret; deploy with:
+#   wrangler secret put REGISTRY_PRIVATE_KEY
+# Until both are set, the signing endpoints return 503 and the cron refresh
+# skips signing — the existing /api/registry path remains fully functional.
+[vars]
+REGISTRY_PUBLIC_KEY = "ClGa0Ucap8NdrKAy1rw9Tt6A9I8eg4zJ53+xIuKMuq0="

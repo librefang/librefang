@@ -35,10 +35,14 @@ CREATE TABLE IF NOT EXISTS package_versions (
   changelog   TEXT NOT NULL DEFAULT '',
   bundle_url  TEXT NOT NULL,
   bundle_sha256 TEXT NOT NULL,
+  bundle_sig  TEXT,                      -- Ed25519 signature over `id|bundle_url|bundle_sha256`, base64; NULL when REGISTRY_PRIVATE_KEY unset
   downloads   INTEGER NOT NULL DEFAULT 0,
   created_at  INTEGER NOT NULL,
   UNIQUE(package_id, version)
 );
+
+-- Migration for existing databases (D1 ignores duplicate ALTER):
+-- ALTER TABLE package_versions ADD COLUMN bundle_sig TEXT;
 
 CREATE TABLE IF NOT EXISTS stars (
   user_id    TEXT NOT NULL REFERENCES users(id),

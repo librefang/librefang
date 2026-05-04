@@ -1,6 +1,36 @@
 // Registry Worker
 // Proxies librefang-registry (GitHub) with Cache API for HTTP responses.
 // Storage: D1 (registry_clicks, kv_store, ui_errors). No KV dependency.
+//
+// Plugin signing (#3805 + PR #4600 hardening):
+//
+// The Ed25519 private key lives ONLY in the librefang-registry GitHub
+// Actions secret, never in this worker. The CI workflow there
+// (.github/workflows/refresh-cache.yml) builds plugins-index.json,
+// signs it locally, and commits both `plugins-index.json` and
+// `plugins-index.json.sig` to the repo root before poking the worker.
+// This handler is now a pure transport: it fetches the committed
+// bytes (3 raw subrequests — plugins json + sig + registry json) and
+// stores them in D1 verbatim. No bytes get re-signed by anything
+// holding registry-controlled key material.
+//
+// Daemon contract (unchanged):
+//   GET /api/registry/index.json     — canonical bytes that were signed
+//                                      (flat JSON array of plugin entries)
+//   GET /api/registry/index.json.sig — base64 Ed25519 signature
+//   GET /.well-known/registry-pubkey — base64 raw 32-byte Ed25519 pubkey
+//
+// The dashboard's /api/registry endpoint continues to return the
+// dict-shaped payload (hands/channels/plugins/skills/...) for the
+// marketplace UI. The two formats are stored separately in D1
+// (registry_data vs plugins_index). See web/workers/SIGNING.md.
+//
+// Why moved out of the worker (PR review CRITICAL #1): the previous
+// design treated the worker as a sign-anything oracle reachable via
+// REGISTRY_REFRESH_TOKEN — anyone with that token could push arbitrary
+// bytes to `main` and have them signed. The new flow ties signing to
+// the registry repo's CI identity, so the trust root is the repo's
+// branch protection + Actions secret rather than the worker.
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -49,11 +79,43 @@ export default {
     if (path === '/api/errors' && request.method === 'GET')
       return handleErrorList(env)
 
+    // Signing endpoints (Ed25519). The daemon contract is:
+    //   index.json     — canonical bytes that were signed
+    //   index.json.sig — base64 Ed25519 signature over those bytes
+    //   .well-known/registry-pubkey — raw 32-byte base64 public key
+    if (path === '/api/registry/index.json' && request.method === 'GET')
+      return handleSignedIndex(env)
+
+    if (path === '/api/registry/index.json.sig' && request.method === 'GET')
+      return handleSignedIndexSig(env)
+
+    // Both paths return the same bytes. The custom domain (stats.librefang.ai)
+    // routes only /api/* to the worker, so the daemon's HTTP-rotation
+    // probe needs an /api/* alias when the embedded constant is absent
+    // (self-hosted forks). The /.well-known/ form stays for direct
+    // workers.dev clients.
+    if ((path === '/.well-known/registry-pubkey' || path === '/api/registry/pubkey')
+        && request.method === 'GET')
+      return handlePubkey(env)
+
+    // Operator-only path used by the librefang-registry GitHub Action to
+    // rebuild the D1 cache + signed index right after a push to main, so
+    // dashboard / daemon don't have to wait for the next 02:00 UTC cron
+    // tick. Auth is a shared bearer token deployed as a worker secret;
+    // until it is set, the route returns 503 and stays inert. See
+    // `web/workers/SIGNING.md` § "Forced refresh from the registry repo".
+    if (path === '/api/registry/refresh' && request.method === 'POST')
+      return handleForcedRefresh(request, env)
+
     return new Response('Not Found', { status: 404 })
   },
 
+  // Cron is now a backstop for the GH Action — the registry repo's CI
+  // is the primary path, this just guards against CI outages by
+  // re-pulling the same in-repo files daily. Auth-free because the
+  // worker invokes itself.
   async scheduled(_event, env) {
-    await refreshRegistryCache(env)
+    await doSyncFromRepo(env, { requireAuth: false })
   },
 }
 
@@ -73,6 +135,11 @@ async function handleRegistry(request, env, ctx, forceRefresh) {
     `SELECT value, updated_at FROM kv_store WHERE key = 'registry_data'`,
   ).first()
 
+  // The fresh-fetch path makes ~30+ GitHub subrequests, which exceeds the
+  // Workers Free 50-subrequest-per-request budget. Cron runs (02:00 UTC)
+  // get the higher quota, so we keep the staleness window honored even
+  // when `?refresh=1` is set — operators wanting an immediate rebuild
+  // should let the cron fire.
   if (row && (Date.now() / 1000 - row.updated_at) < REGISTRY_STALE_TTL) {
     const response = jsonResponse(row.value, REGISTRY_CACHE_TTL)
     ctx.waitUntil(caches.default.put(cacheKey, response.clone()))
@@ -259,122 +326,212 @@ async function handleErrorList(env) {
   })
 }
 
+
 // ---------------------------------------------------------------------------
-// Registry cache refresh (cron + inline)
+// Signed-index endpoints (Ed25519)
 // ---------------------------------------------------------------------------
 
-async function refreshRegistryCache(env) {
-  const headers = ghHeaders(env)
 
-  async function fetchDir(path) {
-    const res = await fetch(`${REGISTRY_API}/${path}`, { headers })
-    if (!res.ok) return []
-    const items = await res.json()
-    return items.filter(f => f.type === 'dir' || (f.name.endsWith('.toml') && f.name !== 'README.md'))
-  }
-
-  async function fetchToml(path) {
-    const res = await fetch(`${REGISTRY_RAW}/${path}`)
-    if (!res.ok) return null
-    const text = await res.text()
-    const get = key => { const m = text.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, 'm')); return m ? m[1] : '' }
-
-    const i18n = {}
-    const i18nRe = /\[i18n\.([a-zA-Z-]+)\]\s*\n(?:([^[]*?)(?=\n\[|\n*$))/g
-    let m
-    while ((m = i18nRe.exec(text)) !== null) {
-      const descM = (m[2] || '').match(/description\s*=\s*"([^"]*)"/)
-      if (descM) i18n[m[1]] = { description: descM[1] }
-    }
-
-    const tagsM = text.match(/^tags\s*=\s*\[([^\]]*)\]/m)
-    const tags = tagsM ? tagsM[1].match(/"([^"]*)"/g)?.map(s => s.replace(/"/g, '')) : undefined
-
-    const result = { id: get('id'), name: get('name'), description: get('description'), category: get('category'), icon: get('icon') }
-    if (tags?.length) result.tags = tags
-    if (Object.keys(i18n).length) result.i18n = i18n
-    return result
-  }
-
-  async function fetchSkillMd(path, fallbackId) {
-    const res = await fetch(`${REGISTRY_RAW}/${path}`)
-    if (!res.ok) return null
-    const text = await res.text()
-    const fm = text.match(/^---\s*\n([\s\S]*?)\n---/)
-    if (!fm) return null
-    const get = key => { const m = fm[1].match(new RegExp(`^${key}\\s*:\\s*"?([^"\\n]*?)"?\\s*$`, 'm')); return m ? m[1].trim() : '' }
-    return { id: get('id') || fallbackId, name: get('name') || fallbackId, description: get('description'), category: 'skills', icon: '' }
-  }
-
-  async function fetchBatch(items, pathFn, fetcher = p => fetchToml(p)) {
-    const results = []
-    for (let i = 0; i < items.length; i += 10) {
-      const batch = await Promise.all(items.slice(i, i + 10).map(item => fetcher(pathFn(item), item.name)))
-      results.push(...batch)
-    }
-    return results.filter(Boolean)
-  }
-
-  try {
-    const dirs = await Promise.all(
-      ['hands', 'channels', 'providers', 'workflows', 'agents', 'plugins', 'skills', 'mcp'].map(fetchDir),
-    )
-    const [hands, channels, providers, workflows, agents, plugins, skills, mcp] =
-      dirs.map(items => items.filter(f => f.name !== 'README.md'))
-
-    const sigOf = items => items.map(i => `${i.name}@${i.sha || ''}`).sort().join(',')
-    const signature = ['hands', 'channels', 'providers', 'workflows', 'agents', 'plugins', 'skills', 'mcp']
-      .map((cat, i) => `${cat}=${sigOf(dirs[i].filter(f => f.name !== 'README.md'))}`)
-      .join('|')
-
-    const existing = await env.DB.prepare(
-      `SELECT value FROM kv_store WHERE key = 'registry_data'`,
-    ).first()
-    if (existing) {
-      try {
-        if (JSON.parse(existing.value).signature === signature) {
-          await env.DB.prepare(
-            `UPDATE kv_store SET updated_at = ? WHERE key = 'registry_data'`,
-          ).bind(Math.floor(Date.now() / 1000)).run()
-          console.log('Registry unchanged, skipping manifest fetch')
-          return
-        }
-      } catch (_) { /* refetch */ }
-    }
-
-    const [handDetails, agentDetails, skillDetails, channelDetails, providerDetails, workflowDetails, pluginDetails, mcpDetails] = await Promise.all([
-      fetchBatch(hands,     h => `hands/${h.name}/HAND.toml`),
-      fetchBatch(agents,    a => `agents/${a.name}/agent.toml`),
-      fetchBatch(skills,    s => `skills/${s.name}/SKILL.md`, fetchSkillMd),
-      fetchBatch(channels,  c => `channels/${c.name}`),
-      fetchBatch(providers, p => `providers/${p.name}`),
-      fetchBatch(workflows, w => `workflows/${w.name}`),
-      fetchBatch(plugins,   p => `plugins/${p.name}/plugin.toml`),
-      fetchBatch(mcp,       m => m.name.endsWith('.toml') ? `mcp/${m.name}` : `mcp/${m.name}/MCP.toml`),
-    ])
-
-    const result = {
-      hands: handDetails, channels: channelDetails, providers: providerDetails,
-      workflows: workflowDetails, agents: agentDetails, plugins: pluginDetails,
-      skills: skillDetails, mcp: mcpDetails,
-      handsCount: hands.length, channelsCount: channels.length, providersCount: providers.length,
-      workflowsCount: workflows.length, agentsCount: agents.length, pluginsCount: plugins.length,
-      skillsCount: skills.length, mcpCount: mcp.length,
-      fetchedAt: new Date().toISOString(),
-      signature,
-    }
-
-    await env.DB.prepare(
-      `INSERT INTO kv_store (key, value, updated_at) VALUES ('registry_data', ?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-    ).bind(JSON.stringify(result), Math.floor(Date.now() / 1000)).run()
-
-    console.log('Registry refreshed:', hands.length, 'hands,', channels.length, 'channels,',
-      agents.length, 'agents,', skills.length, 'skills,', mcp.length, 'mcp')
-  } catch (e) {
-    console.error('Registry refresh failed:', e.message)
-  }
+async function handleSignedIndex(env) {
+  const row = await env.DB.prepare(
+    `SELECT value FROM kv_store WHERE key = 'plugins_index'`,
+  ).first()
+  if (!row) return errorResponse('index not yet built — try again after the next cron tick', 503)
+  return new Response(row.value, {
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': `public, max-age=${REGISTRY_CACHE_TTL}`,
+      ...CORS,
+    },
+  })
 }
+
+async function handleSignedIndexSig(env) {
+  const row = await env.DB.prepare(
+    `SELECT value FROM kv_store WHERE key = 'plugins_index_sig'`,
+  ).first()
+  if (!row) return errorResponse('signature not available — REGISTRY_PRIVATE_KEY may be unset', 503)
+  return new Response(row.value, {
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': `public, max-age=${REGISTRY_CACHE_TTL}`,
+      ...CORS,
+    },
+  })
+}
+
+// Forced refresh — invoked by the librefang-registry GitHub Action after a
+// push that touched any registry content. Constant-time bearer-token auth
+// against `REGISTRY_REFRESH_TOKEN`; 503 until set so the endpoint can't
+// be probed.
+//
+// PURE TRANSPORT: this handler does NOT sign anything. It fetches three
+// files from raw.githubusercontent.com (committed by the registry repo's
+// CI, which holds the Ed25519 private key) and writes them to D1
+// verbatim. The bytes the daemon eventually verifies are byte-identical
+// to the bytes the CI signed. Any byte-mutation between sign and serve
+// would be detectable.
+async function handleForcedRefresh(request, env) {
+  return doSyncFromRepo(env, { requireAuth: true, request })
+}
+
+async function doSyncFromRepo(env, { requireAuth, request }) {
+  if (requireAuth) {
+    const expected = (env.REGISTRY_REFRESH_TOKEN || '').trim()
+    if (!expected) return errorResponse('refresh endpoint not configured', 503)
+    const auth = request.headers.get('authorization') || ''
+    const m = auth.match(/^Bearer\s+(.+)$/i)
+    const provided = m ? m[1].trim() : ''
+    if (!constantTimeEqual(provided, expected)) {
+      return errorResponse('unauthorized', 401)
+    }
+  }
+
+  const RAW_BASE =
+    'https://raw.githubusercontent.com/librefang/librefang-registry/main'
+  const pluginsUrl = `${RAW_BASE}/plugins-index.json`
+  const pluginsSigUrl = `${RAW_BASE}/plugins-index.json.sig`
+  const registryUrl = `${RAW_BASE}/registry-index.json`
+
+  // Fetch all three in parallel — 3 subrequests, constant in registry size.
+  const [pluginsResp, pluginsSigResp, registryResp] = await Promise.all([
+    fetch(pluginsUrl, { cf: { cacheTtl: 0 } }),
+    fetch(pluginsSigUrl, { cf: { cacheTtl: 0 } }),
+    fetch(registryUrl, { cf: { cacheTtl: 0 } }),
+  ])
+  if (!pluginsResp.ok) {
+    return errorResponse(
+      `failed to fetch plugins-index.json: HTTP ${pluginsResp.status}`,
+      502,
+    )
+  }
+  if (!pluginsSigResp.ok) {
+    return errorResponse(
+      `failed to fetch plugins-index.json.sig: HTTP ${pluginsSigResp.status} ` +
+      `— registry CI must commit the signature alongside the index`,
+      502,
+    )
+  }
+  if (!registryResp.ok) {
+    return errorResponse(
+      `failed to fetch registry-index.json: HTTP ${registryResp.status}`,
+      502,
+    )
+  }
+  const pluginsText = await pluginsResp.text()
+  const pluginsSigText = (await pluginsSigResp.text()).trim()
+  const registryText = await registryResp.text()
+
+  // Validate shapes / sig length. We refuse to ingest unparseable bytes
+  // or a sig that's the wrong length, since the daemon would just
+  // hard-fail on those anyway and we'd rather catch it here.
+  try {
+    const parsed = JSON.parse(pluginsText)
+    if (!Array.isArray(parsed)) throw new Error('plugins-index.json is not an array')
+  } catch (e) {
+    return errorResponse(`plugins-index.json invalid: ${e.message}`, 502)
+  }
+  try {
+    const parsed = JSON.parse(registryText)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+      throw new Error('registry-index.json is not an object')
+  } catch (e) {
+    return errorResponse(`registry-index.json invalid: ${e.message}`, 502)
+  }
+  // Ed25519 sig is exactly 64 bytes → 88 base64 chars (with `==` padding)
+  // or 86 chars unpadded. Anything else is wrong-shape garbage that the
+  // daemon would reject; better to bounce here than poison D1 with it
+  // (PR re-review MEDIUM-NEW-F).
+  if (
+    (pluginsSigText.length !== 88 && pluginsSigText.length !== 86) ||
+    !/^[A-Za-z0-9+/]+(?:==)?$/.test(pluginsSigText)
+  ) {
+    return errorResponse(
+      `plugins-index.json.sig is not a valid Ed25519 signature ` +
+      `(expected 86 or 88 base64 chars; got ${pluginsSigText.length})`,
+      502,
+    )
+  }
+
+  const now = Math.floor(Date.now() / 1000)
+  await env.DB.batch([
+    env.DB
+      .prepare(
+        `INSERT INTO kv_store (key, value, updated_at) VALUES ('plugins_index', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .bind(pluginsText, now),
+    env.DB
+      .prepare(
+        `INSERT INTO kv_store (key, value, updated_at) VALUES ('plugins_index_sig', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .bind(pluginsSigText, now),
+    env.DB
+      .prepare(
+        `INSERT INTO kv_store (key, value, updated_at) VALUES ('registry_data', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .bind(registryText, now),
+  ])
+
+  // Purge the Cache-API entry the dashboard hits — without this,
+  // /api/registry serves the previous cached payload for up to 1h. PR
+  // re-review MEDIUM-NEW-G: surface the outcome so the GH Action can
+  // see partial-success runs (D1 stored, cache stale) instead of
+  // assuming fresh-everywhere on a 200.
+  let cachePurged = false
+  let cachePurgeError = null
+  try {
+    cachePurged = await caches.default.delete(new Request('https://internal/registry_data'))
+  } catch (e) {
+    cachePurgeError = e?.message || String(e)
+    console.error('Cache purge failed:', cachePurgeError)
+  }
+
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      refreshed_at: now,
+      plugins_bytes: pluginsText.length,
+      sig_bytes: pluginsSigText.length,
+      registry_bytes: registryText.length,
+      cache_purged: cachePurged,
+      ...(cachePurgeError ? { cache_purge_error: cachePurgeError } : {}),
+    }),
+    { headers: { 'Content-Type': 'application/json', ...CORS } },
+  )
+}
+
+// Constant-time string comparison hardened against length leak via early
+// return (PR review MEDIUM #11). Iterates up to max(a.length, b.length)
+// and folds the length delta into the mismatch accumulator so timing
+// reveals at most "they're not the same" — not "yours is shorter than
+// mine". Multi-byte chars are handled via charCodeAt (no throw on
+// surrogate halves; XOR semantics are still well-defined).
+function constantTimeEqual(a, b) {
+  const len = Math.max(a.length, b.length)
+  let mismatch = a.length ^ b.length
+  for (let i = 0; i < len; i++) {
+    const ca = i < a.length ? a.charCodeAt(i) : 0
+    const cb = i < b.length ? b.charCodeAt(i) : 0
+    mismatch |= ca ^ cb
+  }
+  return mismatch === 0
+}
+
+function handlePubkey(env) {
+  const pub = (env.REGISTRY_PUBLIC_KEY || '').trim()
+  if (!pub) return errorResponse('public key not configured', 503)
+  return new Response(pub, {
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'public, max-age=86400',
+      ...CORS,
+    },
+  })
+}
+
 
 // ---------------------------------------------------------------------------
 // Helpers
