@@ -3395,7 +3395,8 @@ fn tool_memory_store(
     let kh = require_kernel(kernel)?;
     let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
     let value = input.get("value").ok_or("Missing 'value' parameter")?;
-    kh.memory_store(key, value.clone(), peer_id)?;
+    kh.memory_store(key, value.clone(), peer_id)
+        .map_err(|e| e.to_string())?;
     Ok(format!("Stored value under key '{key}'."))
 }
 
@@ -3406,7 +3407,7 @@ fn tool_memory_recall(
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
-    match kh.memory_recall(key, peer_id)? {
+    match kh.memory_recall(key, peer_id).map_err(|e| e.to_string())? {
         Some(val) => Ok(serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string())),
         None => Ok(format!("No value found for key '{key}'.")),
     }
@@ -3417,7 +3418,7 @@ fn tool_memory_list(
     peer_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
-    let keys = kh.memory_list(peer_id)?;
+    let keys = kh.memory_list(peer_id).map_err(|e| e.to_string())?;
     if keys.is_empty() {
         return Ok("No entries found in shared memory.".to_string());
     }
@@ -6578,7 +6579,7 @@ mod tests {
             _key: &str,
             _value: serde_json::Value,
             _peer_id: Option<&str>,
-        ) -> Result<(), String> {
+        ) -> Result<(), librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
@@ -6586,11 +6587,11 @@ mod tests {
             &self,
             _key: &str,
             _peer_id: Option<&str>,
-        ) -> Result<Option<serde_json::Value>, String> {
+        ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
-        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
+        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
     }
@@ -6770,7 +6771,7 @@ mod tests {
             _key: &str,
             _value: serde_json::Value,
             _peer_id: Option<&str>,
-        ) -> Result<(), String> {
+        ) -> Result<(), librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
@@ -6778,11 +6779,11 @@ mod tests {
             &self,
             _key: &str,
             _peer_id: Option<&str>,
-        ) -> Result<Option<serde_json::Value>, String> {
+        ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
-        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
+        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
     }
@@ -7330,7 +7331,7 @@ mod tests {
             _key: &str,
             _value: serde_json::Value,
             _peer_id: Option<&str>,
-        ) -> Result<(), String> {
+        ) -> Result<(), librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
@@ -7338,11 +7339,11 @@ mod tests {
             &self,
             _key: &str,
             _peer_id: Option<&str>,
-        ) -> Result<Option<serde_json::Value>, String> {
+        ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
-        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
+        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
     }
@@ -9994,7 +9995,7 @@ mod tests {
             _key: &str,
             _value: serde_json::Value,
             _peer_id: Option<&str>,
-        ) -> Result<(), String> {
+        ) -> Result<(), librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
@@ -10002,11 +10003,11 @@ mod tests {
             &self,
             _key: &str,
             _peer_id: Option<&str>,
-        ) -> Result<Option<serde_json::Value>, String> {
+        ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
-        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
+        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
     }

@@ -802,7 +802,7 @@ fn host_kv_get(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
             json!({"ok": val})
         }
         Ok(None) => json!({"ok": null}),
-        Err(e) => json!({"error": e}),
+        Err(e) => json!({"error": e.to_string()}),
     }
 }
 
@@ -866,7 +866,7 @@ fn host_kv_set(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
     let namespaced_key = format!("{}:{key}", state.agent_id);
     match kernel.memory_store(&namespaced_key, value, None) {
         Ok(()) => json!({"ok": true}),
-        Err(e) => json!({"error": e}),
+        Err(e) => json!({"error": e.to_string()}),
     }
 }
 
@@ -1255,7 +1255,7 @@ mod tests {
             key: &str,
             value: serde_json::Value,
             _peer_id: Option<&str>,
-        ) -> Result<(), String> {
+        ) -> Result<(), librefang_kernel_handle::KernelOpError> {
             self.stored.lock().unwrap().push((key.to_string(), value));
             Ok(())
         }
@@ -1263,11 +1263,11 @@ mod tests {
             &self,
             key: &str,
             _peer_id: Option<&str>,
-        ) -> Result<Option<serde_json::Value>, String> {
+        ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
             self.recalled.lock().unwrap().push(key.to_string());
             Ok(None)
         }
-        fn memory_list(&self, _: Option<&str>) -> Result<Vec<String>, String> {
+        fn memory_list(&self, _: Option<&str>) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
             Ok(vec![])
         }
     }
