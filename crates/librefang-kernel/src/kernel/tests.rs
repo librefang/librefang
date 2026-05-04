@@ -6533,3 +6533,65 @@ async fn budget_config_arcswap_concurrent_reads_consistent_with_writer() {
 
     kernel.shutdown();
 }
+
+/// Two concurrent writers mutating *different* fields of `BudgetConfig`
+/// must both land — neither edit may be silently lost. With a
+/// load-clone-store implementation, the late writer would clobber the
+/// early writer's field with the pre-update snapshot. The `rcu()`-based
+/// implementation must retry on CAS failure so both fields converge to
+/// their writer's value (regardless of arrival order).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn budget_config_concurrent_writers_no_lost_update() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-budget-rcu-writers-test");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.budget.max_hourly_usd = 1.0;
+    config.budget.max_daily_usd = 2.0;
+
+    let kernel =
+        std::sync::Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+
+    // Spawn many pairs of writers racing on disjoint fields.
+    let mut writers = Vec::with_capacity(64);
+    for i in 0..32 {
+        let hourly_target = 100.0 + i as f64;
+        let daily_target = 200.0 + i as f64;
+        let k1 = kernel.clone();
+        let k2 = kernel.clone();
+        writers.push(tokio::spawn(async move {
+            k1.update_budget_config(move |b| b.max_hourly_usd = hourly_target);
+        }));
+        writers.push(tokio::spawn(async move {
+            k2.update_budget_config(move |b| b.max_daily_usd = daily_target);
+        }));
+    }
+
+    for h in writers {
+        h.await.expect("writer task panicked");
+    }
+
+    let final_cfg = kernel.budget_config();
+    // Final values must each be from *some* writer (in their respective
+    // hourly_target / daily_target ranges) — proves the rcu retry kept
+    // each field converging to a writer-supplied value rather than
+    // collapsing back to the original 1.0 / 2.0 baseline (which would
+    // happen on lost-update).
+    assert!(
+        final_cfg.max_hourly_usd >= 100.0 && final_cfg.max_hourly_usd < 132.0,
+        "max_hourly_usd lost-update: got {}",
+        final_cfg.max_hourly_usd
+    );
+    assert!(
+        final_cfg.max_daily_usd >= 200.0 && final_cfg.max_daily_usd < 232.0,
+        "max_daily_usd lost-update: got {}",
+        final_cfg.max_daily_usd
+    );
+
+    kernel.shutdown();
+}

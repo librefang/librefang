@@ -1059,15 +1059,20 @@ impl LibreFangKernel {
     /// Safely mutate the runtime budget configuration.
     ///
     /// The caller supplies a closure that receives `&mut BudgetConfig`.
-    /// Implementation: load the current snapshot, clone it, apply the
-    /// closure, then atomically `store` the result. Concurrent writers
-    /// race to be the last writer, but `BudgetConfig` updates always
-    /// arrive as a complete new state from the admin UI — no accumulation
-    /// semantics — so a lost-update on simultaneous writes is acceptable.
-    pub fn update_budget_config(&self, f: impl FnOnce(&mut librefang_types::config::BudgetConfig)) {
-        let mut next = (*self.budget_config.load_full()).clone();
-        f(&mut next);
-        self.budget_config.store(std::sync::Arc::new(next));
+    /// Implementation: `rcu()` provides a CAS retry loop — if another
+    /// writer wins the race between load and store, we re-clone the new
+    /// snapshot and re-apply the closure. This is critical when the
+    /// closure does field-level mutation (e.g. `cfg.daily_cap_usd = x`)
+    /// because a plain load-clone-store would silently drop the other
+    /// writer's edits to unrelated fields. The closure must therefore be
+    /// idempotent and side-effect free; `Fn` rather than `FnOnce` enforces
+    /// that at the type level.
+    pub fn update_budget_config(&self, f: impl Fn(&mut librefang_types::config::BudgetConfig)) {
+        self.budget_config.rcu(|current| {
+            let mut next = (**current).clone();
+            f(&mut next);
+            std::sync::Arc::new(next)
+        });
     }
 
     /// LibreFang home directory path (boot-time immutable).
