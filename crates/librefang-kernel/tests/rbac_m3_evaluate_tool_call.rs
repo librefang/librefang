@@ -19,7 +19,7 @@
 //!       NeedsApproval
 
 use librefang_kernel::LibreFangKernel;
-use librefang_runtime::kernel_handle::KernelHandle;
+use librefang_runtime::kernel_handle::prelude::*;
 use librefang_types::config::{DefaultModelConfig, KernelConfig, UserConfig};
 use librefang_types::tool_policy::{ToolGroup, ToolPolicy};
 use librefang_types::user_policy::{UserToolCategories, UserToolGate, UserToolPolicy};
