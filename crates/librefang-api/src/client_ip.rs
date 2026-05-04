@@ -26,6 +26,14 @@
 //!    **right-to-left**, dropping hops that match `trusted_proxies`;
 //!    the first non-matching value is the real client. Walking right-
 //!    to-left prevents a malicious leftmost hop from being trusted.
+//!
+//! For the single-value headers (`CF-Connecting-IP`, `X-Real-IP`), the
+//! trusted proxy is fully authoritative — we don't second-guess what
+//! it set there. We only sanity-check that the value is a parseable
+//! IP and reject unspecified addresses (`0.0.0.0`, `::`), which can't
+//! be a real client. Loopback and RFC1918/ULA addresses are accepted
+//! as-is; the proxy may legitimately pass an internal-network client
+//! to us.
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Request};
@@ -206,10 +214,25 @@ pub fn resolve_from_request(
 }
 
 fn single_ip_header(headers: &HeaderMap, name: &str) -> Option<IpAddr> {
-    headers
+    // Asymmetry vs the XFF path: `HeaderMap::get` returns only the
+    // first instance; if a misconfigured proxy emitted multiple
+    // `cf-connecting-ip` / `x-real-ip` headers the later ones are
+    // ignored. By design — these headers are single-value per RFC and
+    // per Cloudflare's docs, and the trusted proxy is authoritative
+    // for what it set there.
+    let parsed: IpAddr = headers
         .get(name)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.trim().parse().ok())
+        .and_then(|v| v.trim().parse().ok())?;
+    // Reject the unspecified address — `0.0.0.0` / `::` can't be a
+    // real client and almost certainly indicates a misconfigured
+    // proxy or a bogus header. Loopback and private/ULA addresses
+    // are accepted: the trusted proxy may legitimately pass an
+    // internal-network client to us.
+    if parsed.is_unspecified() {
+        return None;
+    }
+    Some(parsed)
 }
 
 fn parse_xff_rightmost_untrusted(
@@ -227,18 +250,38 @@ fn parse_xff_rightmost_untrusted(
                 continue;
             }
             // XFF values are usually bare IPs but some proxies append
-            // `:port`; strip an IPv4 port suffix. IPv6 in XFF is rare
-            // and unbracketed in this header, so we only handle the
-            // v4:port case to avoid mis-parsing v6.
+            // `:port` (v4) or use the bracketed `[v6]:port` form. Try
+            // bare-parse first, then on failure strip an optional
+            // surrounding `[...]` (which `IpAddr::from_str` rejects)
+            // and an optional `:port` suffix. We only attempt the port
+            // strip when a `:` is present; for unbracketed v6 like
+            // `2001:db8::1` the bare parse already succeeds.
             let candidate = match trimmed.parse::<IpAddr>() {
                 Ok(ip) => ip,
-                Err(_) => match trimmed.rsplit_once(':') {
-                    Some((host, _port)) => match host.parse::<IpAddr>() {
+                Err(_) => {
+                    // Strip surrounding brackets if any: `[v6]` or `[v6]:port`.
+                    let inner = if let Some(rest) = trimmed.strip_prefix('[') {
+                        match rest.split_once(']') {
+                            Some((host, _suffix)) => host,
+                            None => continue,
+                        }
+                    } else {
+                        // Bare-parse already failed; only thing left to try
+                        // is `host:port`. Use rsplit so we strip just the
+                        // trailing port — but bail if there are multiple
+                        // colons (unbracketed v6) since `host:port` parsing
+                        // is undefined for that case and we'd silently
+                        // truncate.
+                        match trimmed.rsplit_once(':') {
+                            Some((host, _port)) if !host.contains(':') => host,
+                            _ => continue,
+                        }
+                    };
+                    match inner.parse::<IpAddr>() {
                         Ok(ip) => ip,
                         Err(_) => continue,
-                    },
-                    None => continue,
-                },
+                    }
+                }
             };
             chain.push(candidate);
         }
@@ -259,16 +302,24 @@ fn parse_forwarded_for_param(headers: &HeaderMap) -> Option<IpAddr> {
     let first = header.split(',').next()?;
     for param in first.split(';') {
         let param = param.trim();
-        let Some(value) = param
-            .strip_prefix("for=")
-            .or_else(|| param.strip_prefix("For="))
-        else {
+        // RFC 7230 §3.2.4 — parameter names are case-insensitive
+        // (so `for=`, `For=`, `FOR=`, `fOr=` all match).
+        let Some((key, value)) = param.split_once('=') else {
             continue;
         };
+        if !key.eq_ignore_ascii_case("for") {
+            continue;
+        }
         // Value may be quoted, may include a port, may be `[v6]:port`,
         // and may be the obfuscated `_token` form (which we ignore).
         let unquoted = value.trim_matches('"');
-        if unquoted.starts_with('_') || unquoted == "unknown" {
+        // NOTE: an obfuscated identifier (`for=_hidden`) or `unknown`
+        // here short-circuits the entire `Forwarded` walk — we don't
+        // try the next list element. By design: the RFC allows the
+        // proxy to redact the client identity and we honor that
+        // intent rather than peeking past it. Callers that want a
+        // real IP fall through to the `X-Forwarded-For` header next.
+        if unquoted.starts_with('_') || unquoted.eq_ignore_ascii_case("unknown") {
             return None;
         }
         // Strip optional surrounding brackets (`[v6]`) and any `:port`.
@@ -510,6 +561,155 @@ mod tests {
             resolve_real_client_ip(ip("10.0.0.1"), &h, &t, true),
             ip("10.0.0.1"),
             "all-garbage headers must fall back to peer, not panic"
+        );
+    }
+
+    #[test]
+    fn xff_bracketed_v6_with_port_parses() {
+        // Some proxies write IPv6 in XFF as `[v6]:port`. Bare-parse fails
+        // on the bracket form; strip the brackets and try again.
+        let t = tp(&["10.0.0.0/8"]);
+        let h = hdr(&[("x-forwarded-for", "[2001:db8::1]:1234")]);
+        assert_eq!(
+            resolve_real_client_ip(ip("10.0.0.1"), &h, &t, true),
+            ip("2001:db8::1")
+        );
+    }
+
+    #[test]
+    fn xff_bracketed_v6_no_port_parses() {
+        let t = tp(&["10.0.0.0/8"]);
+        let h = hdr(&[("x-forwarded-for", "[2001:db8::1]")]);
+        assert_eq!(
+            resolve_real_client_ip(ip("10.0.0.1"), &h, &t, true),
+            ip("2001:db8::1")
+        );
+    }
+
+    #[test]
+    fn forwarded_rfc7239_for_param_case_insensitive() {
+        // RFC 7230 §3.2.4: parameter names are case-insensitive.
+        let t = tp(&["10.0.0.0/8"]);
+        for header in [
+            "FOR=192.0.2.60",
+            "fOr=192.0.2.60",
+            "FoR=192.0.2.60;proto=http",
+            "by=203.0.113.43;FOR=192.0.2.60",
+        ] {
+            let h = hdr(&[("forwarded", header)]);
+            assert_eq!(
+                resolve_real_client_ip(ip("10.0.0.1"), &h, &t, true),
+                ip("192.0.2.60"),
+                "case-insensitive `for=` failed on header {header:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn forwarded_rfc7239_unknown_token_case_insensitive() {
+        // `unknown` and any case variant of it short-circuits the
+        // Forwarded walk just like the obfuscated `_token` form.
+        let t = tp(&["10.0.0.0/8"]);
+        for variant in ["unknown", "Unknown", "UNKNOWN"] {
+            let header = format!("for={variant}");
+            let h = hdr(&[
+                ("forwarded", header.as_str()),
+                ("x-forwarded-for", "1.2.3.4"),
+            ]);
+            assert_eq!(
+                resolve_real_client_ip(ip("10.0.0.1"), &h, &t, true),
+                ip("1.2.3.4"),
+                "`for={variant}` should fall through to XFF"
+            );
+        }
+    }
+
+    #[test]
+    fn single_value_header_rejects_unspecified() {
+        // A misconfigured proxy that injects `0.0.0.0` / `::` into
+        // these single-value headers must not be allowed to claim
+        // them as the real client. Fall through to the next header
+        // / peer rather than key on the unspecified address.
+        let t = tp(&["10.0.0.0/8"]);
+        for (hdr_name, value) in [
+            ("cf-connecting-ip", "0.0.0.0"),
+            ("x-real-ip", "0.0.0.0"),
+            ("cf-connecting-ip", "::"),
+            ("x-real-ip", "::"),
+        ] {
+            let h = hdr(&[(hdr_name, value), ("x-forwarded-for", "1.2.3.4")]);
+            assert_eq!(
+                resolve_real_client_ip(ip("10.0.0.1"), &h, &t, true),
+                ip("1.2.3.4"),
+                "{hdr_name}={value} should be rejected and fall through to XFF"
+            );
+        }
+    }
+
+    #[test]
+    fn single_value_header_accepts_loopback_and_private() {
+        // Loopback / RFC1918 / ULA addresses are NOT bogus — the
+        // proxy may legitimately pass an internal client to us.
+        let t = tp(&["10.0.0.0/8"]);
+        for value in ["127.0.0.1", "10.0.0.5", "192.168.1.1", "::1", "fc00::1"] {
+            let h = hdr(&[("cf-connecting-ip", value)]);
+            assert_eq!(
+                resolve_real_client_ip(ip("10.0.0.1"), &h, &t, true),
+                ip(value),
+                "private/loopback {value} must NOT be filtered out"
+            );
+        }
+    }
+
+    /// Regression for the WS per-IP slot key (both `agent_ws` and
+    /// `terminal_ws` go through this path). An attacker on the open
+    /// internet that rotates `X-Forwarded-For` per upgrade must NOT
+    /// be able to inflate the per-IP WS slot count under fake
+    /// identities — the slot key must collapse back onto the real
+    /// TCP peer because the peer is not in `trusted_proxies`.
+    #[test]
+    fn ws_slot_key_resists_spoof_from_untrusted_peer() {
+        let trusted = tp(&["172.19.0.0/16"]);
+        let attacker_peer = ip("198.51.100.7");
+        let mut keys = std::collections::HashSet::new();
+        for fake in [
+            "10.0.0.1",
+            "10.0.0.2",
+            "10.0.0.3",
+            "203.0.113.7, 162.158.1.1",
+        ] {
+            let h = hdr(&[("x-forwarded-for", fake)]);
+            let resolved = resolve_real_client_ip(attacker_peer, &h, &trusted, true);
+            keys.insert(resolved);
+        }
+        assert_eq!(
+            keys.len(),
+            1,
+            "rotating X-Forwarded-For from an untrusted peer must collapse \
+             to a single per-IP WS slot key (the real TCP peer)"
+        );
+        assert!(
+            keys.contains(&attacker_peer),
+            "the single resolved key must be the attacker's real TCP peer"
+        );
+    }
+
+    /// Companion to the spoof test: when the peer IS trusted, two
+    /// different forwarded clients produce two different WS slot
+    /// keys (so two real browsers behind the same cloudflared edge
+    /// don't share one slot — which is the original bug both
+    /// `agent_ws` and `terminal_ws` are fixing).
+    #[test]
+    fn ws_slot_key_separates_real_clients_behind_trusted_proxy() {
+        let trusted = tp(&["172.19.0.0/16"]);
+        let proxy_peer = ip("172.19.0.1");
+
+        let h_a = hdr(&[("x-forwarded-for", "203.0.113.10")]);
+        let h_b = hdr(&[("x-forwarded-for", "203.0.113.20")]);
+        assert_ne!(
+            resolve_real_client_ip(proxy_peer, &h_a, &trusted, true),
+            resolve_real_client_ip(proxy_peer, &h_b, &trusted, true),
+            "two browsers behind the same trusted proxy must get distinct WS slot keys"
         );
     }
 
