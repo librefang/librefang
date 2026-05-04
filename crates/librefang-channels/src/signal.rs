@@ -816,4 +816,124 @@ mod tests {
             8, 8, 8, 8
         ))));
     }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Signal's adapter is a thin client over the signal-cli REST daemon, so
+    // a `wiremock::MockServer` stands in for that daemon. The mock listens
+    // on 127.0.0.1, which the SSRF guard rejects by default — so all of
+    // these tests use `with_options(..., allow_local = true)`. Asserts the
+    // `POST {api_url}/v2/send` call shape made by `ChannelAdapter::send`,
+    // including the JSON body schema and (when configured) the bearer
+    // header.
+
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn signal_user(recipient: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: recipient.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn signal_send_posts_v2_send_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/send"))
+            .and(body_json(serde_json::json!({
+                "message": "hello signal",
+                "number": "+15555550100",
+                "recipients": ["+15555550199"],
+            })))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "timestamp": 0,
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = SignalAdapter::with_options(
+            server.uri(),
+            "+15555550100".to_string(),
+            vec![],
+            None,
+            true, // allow_local — wiremock binds to 127.0.0.1
+        )
+        .expect("signal adapter ctor with allow_local must succeed");
+        adapter
+            .send(
+                &signal_user("+15555550199"),
+                ChannelContent::Text("hello signal".into()),
+            )
+            .await
+            .expect("signal send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn signal_send_attaches_bearer_when_api_key_set() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/send"))
+            .and(header("authorization", "Bearer api-key-xyz"))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "timestamp": 0,
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = SignalAdapter::with_options(
+            server.uri(),
+            "+15555550100".to_string(),
+            vec![],
+            Some("api-key-xyz".to_string()),
+            true,
+        )
+        .expect("signal adapter ctor must succeed");
+        adapter
+            .send(
+                &signal_user("+15555550199"),
+                ChannelContent::Text("ping".into()),
+            )
+            .await
+            .expect("signal send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn signal_send_returns_err_on_non_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/send"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = SignalAdapter::with_options(
+            server.uri(),
+            "+15555550100".to_string(),
+            vec![],
+            None,
+            true,
+        )
+        .expect("signal adapter ctor must succeed");
+        let err = adapter
+            .send(
+                &signal_user("+15555550199"),
+                ChannelContent::Text("x".into()),
+            )
+            .await
+            .expect_err("signal send must propagate non-2xx as Err");
+        assert!(
+            err.to_string().contains("500"),
+            "error should mention status code, got: {err}"
+        );
+    }
 }
