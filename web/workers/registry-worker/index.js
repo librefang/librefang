@@ -554,12 +554,22 @@ async function handleSignedIndexSig(env) {
   })
 }
 
-// Forced refresh — invoked by the librefang-registry GitHub Action after a
-// push to main. Constant-time auth against `REGISTRY_REFRESH_TOKEN` (worker
-// secret); 503 until the secret is set so the endpoint can't be probed.
-// On success: rebuild D1 caches (`registry_data` + `plugins_index`),
-// re-sign, and purge the Cache-API row so the next dashboard hit reads
-// fresh bytes instead of the 1h-cached previous payload.
+// Forced refresh — invoked by the librefang-registry GitHub Action after
+// a push that touched plugins/. Constant-time auth against
+// `REGISTRY_REFRESH_TOKEN` (worker secret); 503 until set so the endpoint
+// can't be probed.
+//
+// Architecture: the daemon-shaped flat plugins index is built **inside
+// the registry repo** by `scripts/build-plugins-index.mjs` and committed
+// to `plugins-index.json` at the repo root. This handler fetches that
+// single file (1 subrequest, regardless of registry size — important on
+// Workers Free where refreshRegistryCache's ~40+ Contents API calls
+// blow the per-invocation budget), re-signs it with the worker's
+// Ed25519 private key, and persists both bytes + signature in D1.
+//
+// The dict-shaped `registry_data` cache used by the dashboard is
+// **untouched** here — it stays on the daily cron path. This handler
+// only owns the daemon's signed-install lane.
 async function handleForcedRefresh(request, env) {
   const expected = (env.REGISTRY_REFRESH_TOKEN || '').trim()
   if (!expected) return errorResponse('refresh endpoint not configured', 503)
@@ -571,31 +581,46 @@ async function handleForcedRefresh(request, env) {
     return errorResponse('unauthorized', 401)
   }
 
-  // Force a full rebuild by pre-emptively dropping the rows the
-  // signature-equality short-circuit relies on. Without this, a no-op
-  // commit (e.g. README typo) would short-circuit and never refresh
-  // plugins_index — but legitimate plugin pushes also might not flip
-  // the directory `sha`. Dropping the rows guarantees a real fetch.
-  await env.DB.batch([
-    env.DB.prepare(`DELETE FROM kv_store WHERE key = 'registry_data'`),
-    env.DB.prepare(`DELETE FROM kv_store WHERE key = 'plugins_index'`),
-    env.DB.prepare(`DELETE FROM kv_store WHERE key = 'plugins_index_sig'`),
-  ])
-
-  await refreshRegistryCache(env)
-
-  // Purge the Cache-API entry that backs `/api/registry`. A new request
-  // would otherwise see the previous (now-superseded) cached payload for
-  // up to REGISTRY_CACHE_TTL.
+  const indexUrl =
+    'https://raw.githubusercontent.com/librefang/librefang-registry/main/plugins-index.json'
+  const resp = await fetch(indexUrl, { cf: { cacheTtl: 0 } })
+  if (!resp.ok) {
+    return errorResponse(
+      `failed to fetch plugins-index.json: HTTP ${resp.status}`,
+      502,
+    )
+  }
+  const indexText = await resp.text()
+  // Validate JSON shape — refuse to sign unparseable bytes.
   try {
-    await caches.default.delete(new Request('https://internal/registry_data'))
-  } catch (_) { /* best-effort */ }
+    const parsed = JSON.parse(indexText)
+    if (!Array.isArray(parsed)) throw new Error('plugins-index.json is not an array')
+  } catch (e) {
+    return errorResponse(`plugins-index.json invalid: ${e.message}`, 502)
+  }
 
-  const fresh = await env.DB.prepare(
-    `SELECT updated_at FROM kv_store WHERE key = 'registry_data'`,
-  ).first()
+  const now = Math.floor(Date.now() / 1000)
+  await env.DB.prepare(
+    `INSERT INTO kv_store (key, value, updated_at) VALUES ('plugins_index', ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+  ).bind(indexText, now).run()
+
+  let signed = false
+  try {
+    const sig = await signWithRegistryKey(env, new TextEncoder().encode(indexText))
+    if (sig) {
+      await env.DB.prepare(
+        `INSERT INTO kv_store (key, value, updated_at) VALUES ('plugins_index_sig', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      ).bind(sig, now).run()
+      signed = true
+    }
+  } catch (e) {
+    console.error('plugins_index signing failed:', e.message)
+  }
+
   return new Response(
-    JSON.stringify({ ok: true, refreshed_at: fresh?.updated_at ?? null }),
+    JSON.stringify({ ok: true, refreshed_at: now, signed, bytes: indexText.length }),
     { headers: { 'Content-Type': 'application/json', ...CORS } },
   )
 }
