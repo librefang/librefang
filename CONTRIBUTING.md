@@ -277,10 +277,19 @@ cargo run -- doctor
 
 ### Local Check Mode (low-spec hosts)
 
-`cargo xtask ci`, `cargo xtask pre-commit`, `cargo xtask coverage`,
-`cargo xtask bench`, `cargo xtask codegen`, `cargo xtask dev`, and
-`cargo xtask api-docs` probe the host on startup and may auto-throttle
-cargo concurrency to avoid OOM-ing low-spec laptops (refs #3301).
+`cargo xtask ci`, `cargo xtask pre-commit`, and `cargo xtask coverage`
+probe the host on startup and may auto-throttle cargo concurrency to avoid
+OOM-ing low-spec laptops (refs #3301).
+
+`cargo xtask bench` detects the mode and prints a loud warning when throttled
+(benchmark numbers are unreliable at `CARGO_BUILD_JOBS=1`) but does **not**
+apply the throttle — set `LIBREFANG_LOCAL_CHECK_MODE=full` before running
+benchmarks to ensure comparable results.
+
+`cargo xtask dev`, `cargo xtask api-docs`, and `cargo xtask codegen` do
+**not** apply throttling: `dev` runs interactive hot-reload (not a
+compile-heavy batch job), and `api-docs`/`codegen` generate artifacts from
+already-compiled outputs rather than triggering expensive full builds.
 
 Three modes, controlled by the `LIBREFANG_LOCAL_CHECK_MODE` environment
 variable:

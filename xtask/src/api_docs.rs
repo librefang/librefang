@@ -1,5 +1,4 @@
 use crate::common::repo_root;
-use crate::local_check_mode;
 use clap::Parser;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,8 +29,6 @@ fn find_openapi_spec(root: &Path) -> Option<PathBuf> {
 }
 
 pub fn run(args: ApiDocsArgs) -> Result<(), Box<dyn std::error::Error>> {
-    local_check_mode::apply_for_subcommand("api-docs");
-
     let root = repo_root();
     let output_dir = root.join(&args.output);
 

@@ -148,6 +148,9 @@ fn set_env_if_unset(key: &str, val: &str) {
 }
 
 fn append_rustflags(extra: &str) {
+    if extra.trim().is_empty() {
+        return;
+    }
     let cur = env::var("RUSTFLAGS").unwrap_or_default();
     let new = if cur.is_empty() {
         extra.to_string()
@@ -346,5 +349,18 @@ mod tests {
         append_rustflags("-C codegen-units=1");
         // No duplication.
         assert_eq!(env::var("RUSTFLAGS").unwrap(), "-C codegen-units=1");
+    }
+
+    #[test]
+    fn append_rustflags_no_op_on_empty() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::new(&["RUSTFLAGS"]);
+        env::remove_var("RUSTFLAGS");
+        // Empty string: RUSTFLAGS must remain unset (no trailing space).
+        append_rustflags("");
+        assert!(env::var_os("RUSTFLAGS").is_none());
+        // Whitespace-only: same expectation.
+        append_rustflags("   ");
+        assert!(env::var_os("RUSTFLAGS").is_none());
     }
 }

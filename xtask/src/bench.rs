@@ -23,7 +23,20 @@ pub struct BenchArgs {
 }
 
 pub fn run(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
-    local_check_mode::apply_for_subcommand("bench");
+    // Detect mode but do NOT apply throttle — throttled cargo settings
+    // (jobs=1, codegen-units=1) produce meaningless benchmark numbers.
+    let (mode, probe) = local_check_mode::detect();
+    println!(
+        "xtask bench: local-check-mode = {mode} (cpus={}, mem={} GB)",
+        probe.cpus, probe.mem_gb
+    );
+    if mode == local_check_mode::LocalCheckMode::Throttled {
+        eprintln!(
+            "WARNING: benchmark results are unreliable in throttled mode \
+             (low-spec host detected). Set LIBREFANG_LOCAL_CHECK_MODE=full \
+             to compare numbers against a baseline."
+        );
+    }
 
     let root = repo_root();
 
