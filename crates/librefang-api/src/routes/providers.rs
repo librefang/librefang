@@ -83,8 +83,7 @@ pub async fn list_models(
     let catalog = state
         .kernel
         .model_catalog_ref()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+        .load();
     let provider_filter = params.get("provider").map(|s| s.to_lowercase());
     let tier_filter = params.get("tier").map(|s| s.to_lowercase());
     let available_only = params
@@ -213,8 +212,7 @@ pub async fn list_aliases(State(state): State<Arc<AppState>>) -> impl IntoRespon
     let aliases = state
         .kernel
         .model_catalog_ref()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
+        .load()
         .list_aliases()
         .clone();
     let entries: Vec<serde_json::Value> = aliases
@@ -311,8 +309,7 @@ pub async fn get_model(
     let catalog = state
         .kernel
         .model_catalog_ref()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+        .load();
     match catalog.find_model(&id) {
         Some(m) => {
             let available = catalog
@@ -358,8 +355,7 @@ pub async fn get_model_overrides(
     let catalog = state
         .kernel
         .model_catalog_ref()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+        .load();
     match catalog.get_overrides(&id) {
         Some(o) => (StatusCode::OK, Json(serde_json::to_value(o).unwrap())),
         None => (StatusCode::OK, Json(serde_json::json!({}))),
@@ -493,8 +489,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
         let catalog = state
             .kernel
             .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .load();
         catalog.list_providers().to_vec()
     };
 
@@ -630,8 +625,7 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
         let catalog = state
             .kernel
             .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .load();
         catalog.list_providers().to_vec()
     };
 
@@ -723,8 +717,7 @@ pub async fn get_provider(
         let catalog = state
             .kernel
             .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .load();
         match catalog.get_provider(&name) {
             Some(p) => {
                 let models: Vec<serde_json::Value> = catalog
@@ -997,8 +990,7 @@ pub async fn set_provider_key(
         let catalog = state
             .kernel
             .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .load();
         catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
@@ -1063,8 +1055,7 @@ pub async fn set_provider_key(
         let guard = state
             .kernel
             .default_model_override_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .load();
         match guard.as_ref() {
             Some(dm) => (dm.provider.clone(), dm.api_key_env.clone()),
             None => {
@@ -1087,8 +1078,7 @@ pub async fn set_provider_key(
             let catalog = state
                 .kernel
                 .model_catalog_ref()
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
+                .load();
             catalog.default_model_for_provider(&name)
         };
         if let Some(model_id) = default_model {
@@ -1127,8 +1117,7 @@ pub async fn set_provider_key(
             let guard = state
                 .kernel
                 .default_model_override_ref()
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
+                .load();
             match guard.as_ref() {
                 Some(dm) => dm.api_key_env != env_var,
                 None => state.kernel.config_ref().default_model.api_key_env != env_var,
@@ -1169,8 +1158,7 @@ pub async fn set_provider_key(
             let guard = state
                 .kernel
                 .default_model_override_ref()
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
+                .load();
             guard
                 .clone()
                 .unwrap_or_else(|| state.kernel.config_ref().default_model.clone())
@@ -1202,8 +1190,7 @@ pub async fn delete_provider_key(
         let catalog = state
             .kernel
             .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .load();
         catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
@@ -1260,8 +1247,7 @@ pub async fn test_provider(
         let catalog = state
             .kernel
             .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .load();
         match catalog.get_provider(&name) {
             Some(p) => (p.api_key_env.clone(), p.base_url.clone(), p.key_required),
             None => {
@@ -1586,8 +1572,7 @@ pub async fn set_provider_url(
         let catalog = state
             .kernel
             .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .load();
         catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
@@ -1606,8 +1591,9 @@ pub async fn set_provider_url(
 
     // Merge discovered models into catalog
     if !probe.discovered_models.is_empty() {
-        if let Ok(mut catalog) = state.kernel.model_catalog_ref().write() {
-            let info: Vec<_> = if probe.discovered_model_info.is_empty() {
+        // Pre-compute info outside the RCU closure (closure may retry on CAS).
+        let info: Vec<librefang_runtime::provider_health::DiscoveredModelInfo> =
+            if probe.discovered_model_info.is_empty() {
                 probe
                     .discovered_models
                     .iter()
@@ -1626,8 +1612,9 @@ pub async fn set_provider_url(
             } else {
                 probe.discovered_model_info.clone()
             };
+        state.kernel.model_catalog_update(|catalog| {
             catalog.merge_discovered_models(&name, &info);
-        }
+        });
     }
 
     let mut resp = serde_json::json!({
@@ -1683,8 +1670,7 @@ pub async fn set_default_provider(
         let catalog = state
             .kernel
             .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .load();
         let provider = match catalog.get_provider(&name) {
             Some(p) => p.clone(),
             None => {
@@ -1722,8 +1708,7 @@ pub async fn set_default_provider(
         let guard = state
             .kernel
             .default_model_override_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .load();
         match guard.as_ref() {
             Some(dm) => dm.provider.clone(),
             None => state.kernel.config_ref().default_model.provider.clone(),

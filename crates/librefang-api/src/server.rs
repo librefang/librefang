@@ -1703,21 +1703,27 @@ pub async fn run_daemon(
                             "Model catalog synced: {} files downloaded",
                             result.files_downloaded
                         );
-                        if let Ok(mut catalog) = kernel.model_catalog_ref().write() {
-                            let cfg = kernel.config_ref();
-                            catalog.load_cached_catalog_for(&cfg.home_dir);
-                            if !cfg.provider_regions.is_empty() {
+                        // Pre-read cfg fields once: the RCU closure may
+                        // re-run on CAS retry, and cloning the relevant
+                        // bits up-front keeps the closure cheap and pure.
+                        let cfg = kernel.config_ref();
+                        let home_dir = cfg.home_dir.clone();
+                        let provider_regions = cfg.provider_regions.clone();
+                        let provider_urls = cfg.provider_urls.clone();
+                        kernel.model_catalog_update(|catalog| {
+                            catalog.load_cached_catalog_for(&home_dir);
+                            if !provider_regions.is_empty() {
                                 let region_urls =
-                                    catalog.resolve_region_urls(&cfg.provider_regions);
+                                    catalog.resolve_region_urls(&provider_regions);
                                 if !region_urls.is_empty() {
                                     catalog.apply_url_overrides(&region_urls);
                                 }
                             }
-                            if !cfg.provider_urls.is_empty() {
-                                catalog.apply_url_overrides(&cfg.provider_urls);
+                            if !provider_urls.is_empty() {
+                                catalog.apply_url_overrides(&provider_urls);
                             }
                             catalog.detect_auth();
-                        }
+                        });
                     }
                     Err(e) => {
                         tracing::warn!(

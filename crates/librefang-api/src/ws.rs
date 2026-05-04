@@ -930,8 +930,7 @@ async fn handle_text_message(
                         let dm_override = state
                             .kernel
                             .default_model_override_ref()
-                            .read()
-                            .unwrap_or_else(|e| e.into_inner());
+                            .load();
                         crate::routes::agents::effective_default_model(
                             &state.kernel.config_ref().default_model,
                             dm_override.as_ref(),
@@ -947,12 +946,9 @@ async fn handle_text_message(
                     let is_missing = state
                         .kernel
                         .model_catalog_ref()
-                        .read()
-                        .ok()
-                        .and_then(|cat| {
-                            cat.get_provider(provider)
-                                .map(|p| !p.auth_status.is_available())
-                        })
+                        .load()
+                        .get_provider(provider)
+                        .map(|p| !p.auth_status.is_available())
                         .unwrap_or(false);
                     if is_missing {
                         let _ = send_json(
@@ -999,9 +995,9 @@ async fn handle_text_message(
                 let supports_vision = state
                     .kernel
                     .model_catalog_ref()
-                    .read()
-                    .ok()
-                    .and_then(|cat| cat.find_model(&model_name).map(|m| m.supports_vision))
+                    .load()
+                    .find_model(&model_name)
+                    .map(|m| m.supports_vision)
                     .unwrap_or(false);
                 if !supports_vision {
                     let _ = send_json(

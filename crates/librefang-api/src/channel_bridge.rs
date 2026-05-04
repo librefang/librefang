@@ -947,8 +947,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let catalog = self
             .kernel
             .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .load();
         let available = catalog.available_models();
         if available.is_empty() {
             return "No models available. Configure API keys to enable providers.".to_string();
@@ -989,8 +988,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let catalog = self
             .kernel
             .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .load();
         catalog
             .list_providers()
             .iter()
@@ -1003,8 +1001,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let catalog = self
             .kernel
             .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .load();
         catalog
             .models_by_provider(provider_id)
             .into_iter()
@@ -1016,8 +1013,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let catalog = self
             .kernel
             .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .load();
         let mut msg = "Providers:\n".to_string();
         for p in catalog.list_providers() {
             let status = match p.auth_status {
@@ -1044,8 +1040,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let skills = self
             .kernel
             .skill_registry_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .load();
         let skills = skills.list();
         if skills.is_empty() {
             return "No skills installed. Place skills in ~/.librefang/skills/ or install from the marketplace.".to_string();

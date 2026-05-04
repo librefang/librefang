@@ -1798,8 +1798,7 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
     let catalog = state
         .kernel
         .model_catalog_ref()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+        .load();
     let provider_options: Vec<String> = catalog
         .list_providers()
         .iter()
@@ -2512,13 +2511,14 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
     // Agents list — fully enriched (same fields as /api/agents) so AgentsPage
     // can use this snapshot directly instead of polling /api/agents separately.
     let agents: Vec<serde_json::Value> = {
-        let catalog = state.kernel.model_catalog_ref().read().ok();
+        let catalog_guard = state.kernel.model_catalog_ref().load();
+        let catalog: Option<&librefang_runtime::model_catalog::ModelCatalog> =
+            Some(&catalog_guard);
         let dm = {
             let dm_override = state
                 .kernel
                 .default_model_override_ref()
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
+                .load();
             super::agents::effective_default_model(&cfg.default_model, dm_override.as_ref())
         };
         let mut agent_entries_visible: Vec<&std::sync::Arc<librefang_types::agent::AgentEntry>> =
@@ -2529,7 +2529,7 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
             .iter()
             // `e` here is &&Arc<AgentEntry>; deref through the ref + Arc to
             // hand `enrich_agent_json` the `&AgentEntry` it expects.
-            .map(|e| super::agents::enrich_agent_json(e.as_ref(), &dm, &catalog, None))
+            .map(|e| super::agents::enrich_agent_json(e.as_ref(), &dm, catalog, None))
             .collect()
     };
 

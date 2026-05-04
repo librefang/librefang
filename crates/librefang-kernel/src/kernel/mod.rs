@@ -622,8 +622,11 @@ pub struct LibreFangKernel {
     wasm_sandbox: WasmSandbox,
     /// RBAC authentication manager.
     pub(crate) auth: AuthManager,
-    /// Model catalog registry (RwLock for auth status refresh from API).
-    pub(crate) model_catalog: std::sync::RwLock<librefang_runtime::model_catalog::ModelCatalog>,
+    /// Model catalog registry. `ArcSwap` (#3384) so the hot `send_message_full`
+    /// path can read the snapshot atomically — was previously `std::sync::RwLock`,
+    /// which forced 5+ lock acquisitions per request. Writes use the RCU pattern
+    /// (`model_catalog_update`).
+    pub(crate) model_catalog: arc_swap::ArcSwap<librefang_runtime::model_catalog::ModelCatalog>,
     /// Skill registry for plugin skills (RwLock for hot-reload on install/uninstall).
     pub(crate) skill_registry: std::sync::RwLock<librefang_skills::registry::SkillRegistry>,
     /// Tracks running agent loops for cancellation + observability. Keyed by
@@ -1470,12 +1473,38 @@ impl LibreFangKernel {
         &self.scheduler
     }
 
-    /// Model catalog (RwLock — auth status refresh from API).
+    /// Model catalog (`ArcSwap` since #3384 — auth status refresh from API).
     #[inline]
     pub fn model_catalog_ref(
         &self,
-    ) -> &std::sync::RwLock<librefang_runtime::model_catalog::ModelCatalog> {
+    ) -> &arc_swap::ArcSwap<librefang_runtime::model_catalog::ModelCatalog> {
         &self.model_catalog
+    }
+
+    /// Snapshot the current model catalog. Cheap (atomic load + Arc clone of
+    /// the guard's inner pointer) — call this in the hot path instead of
+    /// `model_catalog_ref().load()` for readability.
+    #[inline]
+    pub fn model_catalog_load(
+        &self,
+    ) -> arc_swap::Guard<Arc<librefang_runtime::model_catalog::ModelCatalog>> {
+        self.model_catalog.load()
+    }
+
+    /// Atomically mutate the model catalog using the RCU pattern: clone the
+    /// current snapshot, hand the closure a `&mut` to the clone, and store
+    /// the result. Used by API/probe paths that previously held a write
+    /// lock. Concurrent updates serialize correctly via the underlying CAS
+    /// loop in `arc_swap::ArcSwap::rcu`.
+    pub fn model_catalog_update<F>(&self, mut f: F)
+    where
+        F: FnMut(&mut librefang_runtime::model_catalog::ModelCatalog),
+    {
+        self.model_catalog.rcu(|cat| {
+            let mut next = (**cat).clone();
+            f(&mut next);
+            Arc::new(next)
+        });
     }
 
     /// Spawn background tasks to validate API keys for every `Configured` provider.
@@ -1486,9 +1515,7 @@ impl LibreFangKernel {
         use librefang_types::model_catalog::AuthStatus;
 
         let to_validate = self
-            .model_catalog
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .model_catalog.load()
             .providers_needing_validation();
 
         if to_validate.is_empty() {
@@ -1525,16 +1552,18 @@ impl LibreFangKernel {
                                 AuthStatus::InvalidKey
                             };
                             tracing::info!(provider = %id, valid, "provider key validation result");
-                            let mut catalog = kernel
-                                .model_catalog
-                                .write()
-                                .unwrap_or_else(|e| e.into_inner());
-                            catalog.set_provider_auth_status(&id, status);
-                            // Store available models so downstream can check
-                            // whether a configured model actually exists.
-                            if !result.available_models.is_empty() {
-                                catalog.set_provider_available_models(&id, result.available_models);
-                            }
+                            let available_models = result.available_models.clone();
+                            kernel.model_catalog_update(|catalog| {
+                                catalog.set_provider_auth_status(&id, status);
+                                // Store available models so downstream can check
+                                // whether a configured model actually exists.
+                                if !available_models.is_empty() {
+                                    catalog.set_provider_available_models(
+                                        &id,
+                                        available_models.clone(),
+                                    );
+                                }
+                            });
                         }
                     })
                 })
@@ -3666,7 +3695,7 @@ impl LibreFangKernel {
             default_driver: driver,
             wasm_sandbox,
             auth,
-            model_catalog: std::sync::RwLock::new(model_catalog),
+            model_catalog: arc_swap::ArcSwap::from_pointee(model_catalog),
             skill_registry: std::sync::RwLock::new(skill_registry),
             running_tasks: dashmap::DashMap::new(),
             session_interrupts: dashmap::DashMap::new(),
@@ -4453,9 +4482,7 @@ system_prompt = "You are a helpful assistant."
                 let router = ModelRouter::new(routing_config.clone());
                 for warning in router.validate_models(
                     &kernel
-                        .model_catalog
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner()),
+                        .model_catalog.load(),
                 ) {
                     warn!(agent = %entry.name, "{warning}");
                 }
@@ -4469,9 +4496,7 @@ system_prompt = "You are a helpful assistant."
             let router = ModelRouter::new(routing_config.clone());
             for warning in router.validate_models(
                 &kernel
-                    .model_catalog
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner()),
+                    .model_catalog.load(),
             ) {
                 warn!(target: "librefang_kernel::default_routing", "{warning}");
             }
@@ -5306,14 +5331,14 @@ system_prompt = "You are a helpful assistant."
 
         let driver = self.resolve_driver(&manifest)?;
 
-        let ctx_window = self.model_catalog.read().ok().and_then(|cat| {
+        let ctx_window = Some(self.model_catalog.load()).and_then(|cat| {
             cat.find_model(&manifest.model.model)
                 .map(|m| m.context_window as usize)
                 .filter(|w| *w > 0)
         });
 
         // Inject model_supports_tools for auto web search augmentation
-        if let Some(supports) = self.model_catalog.read().ok().and_then(|cat| {
+        if let Some(supports) = Some(self.model_catalog.load()).and_then(|cat| {
             cat.find_model(&manifest.model.model)
                 .map(|m| m.supports_tools)
         }) {
@@ -5393,7 +5418,7 @@ system_prompt = "You are a helpful assistant."
         // accurate (prevents TOCTOU race on concurrent ephemeral requests)
         let model = &manifest.model.model;
         let cost = MeteringEngine::estimate_cost_with_catalog(
-            &self.model_catalog.read().unwrap_or_else(|e| e.into_inner()),
+            &self.model_catalog.load(),
             model,
             result.total_usage.input_tokens,
             result.total_usage.output_tokens,
@@ -5550,22 +5575,16 @@ system_prompt = "You are a helpful assistant."
             // `check_all_and_record`; this only sizes the in-memory hold.
             let max_out = entry.manifest.model.max_tokens as u64;
             let est_in = max_out;
-            match self.model_catalog.read() {
-                Ok(catalog) => MeteringEngine::estimate_cost_with_catalog(
+            {
+                let catalog = self.model_catalog.load();
+                MeteringEngine::estimate_cost_with_catalog(
                     &catalog,
                     &entry.manifest.model.model,
                     est_in,
                     max_out,
                     0,
                     0,
-                ),
-                Err(_) => MeteringEngine::estimate_cost(
-                    &entry.manifest.model.model,
-                    est_in,
-                    max_out,
-                    0,
-                    0,
-                ),
+                )
             }
         };
         let usd_reservation = self
@@ -6584,7 +6603,7 @@ system_prompt = "You are a helpful assistant."
         // Look up model's actual context window from the catalog. Filter out
         // 0 so image/audio entries (no context window) fall through to the
         // caller's default rather than poisoning compaction math.
-        let ctx_window = self.model_catalog.read().ok().and_then(|cat| {
+        let ctx_window = Some(self.model_catalog.load()).and_then(|cat| {
             cat.find_model(&entry.manifest.model.model)
                 .map(|m| m.context_window as usize)
                 .filter(|w| *w > 0)
@@ -6597,7 +6616,7 @@ system_prompt = "You are a helpful assistant."
         let mut manifest = entry.manifest.clone();
 
         // Inject model_supports_tools for auto web search augmentation
-        if let Some(supports) = self.model_catalog.read().ok().and_then(|cat| {
+        if let Some(supports) = Some(self.model_catalog.load()).and_then(|cat| {
             cat.find_model(&manifest.model.model)
                 .map(|m| m.supports_tools)
         }) {
@@ -7139,9 +7158,7 @@ system_prompt = "You are a helpful assistant."
                     let model = &manifest.model.model;
                     let cost = MeteringEngine::estimate_cost_with_catalog(
                         &kernel_clone
-                            .model_catalog
-                            .read()
-                            .unwrap_or_else(|e| e.into_inner()),
+                            .model_catalog.load(),
                         model,
                         result.total_usage.input_tokens,
                         result.total_usage.output_tokens,
@@ -8490,7 +8507,7 @@ system_prompt = "You are a helpful assistant."
         {
             let mut router = ModelRouter::new(routing_config.clone());
             // Resolve aliases (e.g. "sonnet" -> "claude-sonnet-4-20250514") before scoring
-            router.resolve_aliases(&self.model_catalog.read().unwrap_or_else(|e| e.into_inner()));
+            router.resolve_aliases(&self.model_catalog.load());
             // Build a probe request to score complexity
             let probe = CompletionRequest {
                 model: strip_provider_prefix(&manifest.model.model, &manifest.model.provider),
@@ -8514,7 +8531,7 @@ system_prompt = "You are a helpful assistant."
             // If not, keep the current (default) provider instead of switching
             // to one the user hasn't configured.
             let mut use_routed = true;
-            if let Ok(cat) = self.model_catalog.read() {
+            let cat = self.model_catalog.load(); {
                 if let Some(entry) = cat.find_model(&routed_model) {
                     if entry.provider != manifest.model.provider {
                         let key_env = cfg.resolve_api_key_env(&entry.provider);
@@ -8538,7 +8555,7 @@ system_prompt = "You are a helpful assistant."
                     "Model routing applied"
                 );
                 manifest.model.model = routed_model.clone();
-                if let Ok(cat) = self.model_catalog.read() {
+                let cat = self.model_catalog.load(); {
                     if let Some(entry) = cat.find_model(&routed_model) {
                         if entry.provider != manifest.model.provider {
                             manifest.model.provider = entry.provider.clone();
@@ -8554,7 +8571,7 @@ system_prompt = "You are a helpful assistant."
         // Priority: model overrides > agent manifest > system defaults.
         {
             let override_key = format!("{}:{}", manifest.model.provider, manifest.model.model);
-            let catalog = self.model_catalog.read().unwrap_or_else(|e| e.into_inner());
+            let catalog = self.model_catalog.load();
             if let Some(mo) = catalog.get_overrides(&override_key) {
                 if let Some(t) = mo.temperature {
                     manifest.model.temperature = t;
@@ -8592,14 +8609,14 @@ system_prompt = "You are a helpful assistant."
         // Look up model's actual context window from the catalog. Filter out
         // 0 so image/audio entries (no context window) fall through to the
         // caller's default rather than poisoning compaction math.
-        let ctx_window = self.model_catalog.read().ok().and_then(|cat| {
+        let ctx_window = Some(self.model_catalog.load()).and_then(|cat| {
             cat.find_model(&manifest.model.model)
                 .map(|m| m.context_window as usize)
                 .filter(|w| *w > 0)
         });
 
         // Inject model_supports_tools for auto web search augmentation
-        if let Some(supports) = self.model_catalog.read().ok().and_then(|cat| {
+        if let Some(supports) = Some(self.model_catalog.load()).and_then(|cat| {
             cat.find_model(&manifest.model.model)
                 .map(|m| m.supports_tools)
         }) {
@@ -8907,7 +8924,7 @@ system_prompt = "You are a helpful assistant."
         // both pass the pre-check before either records its spend.
         let model = &manifest.model.model;
         let cost = MeteringEngine::estimate_cost_with_catalog(
-            &self.model_catalog.read().unwrap_or_else(|e| e.into_inner()),
+            &self.model_catalog.load(),
             model,
             result.total_usage.input_tokens,
             result.total_usage.output_tokens,
@@ -9896,11 +9913,11 @@ system_prompt = "You are a helpful assistant."
                 None
             } else {
                 // No custom base_url: safe to auto-detect from catalog / model name
-                let resolved_provider = self.model_catalog.read().ok().and_then(|catalog| {
-                    catalog
-                        .find_model(model)
-                        .map(|entry| entry.provider.clone())
-                });
+                let resolved_provider = self
+                    .model_catalog
+                    .load()
+                    .find_model(model)
+                    .map(|entry| entry.provider.clone());
                 resolved_provider.or_else(|| infer_provider_from_model(model))
             }
         };
@@ -10355,7 +10372,7 @@ system_prompt = "You are a helpful assistant."
 
         let model = &entry.manifest.model.model;
         let cost = MeteringEngine::estimate_cost_with_catalog(
-            &self.model_catalog.read().unwrap_or_else(|e| e.into_inner()),
+            &self.model_catalog.load(),
             model,
             input_tokens,
             output_tokens,
@@ -14790,7 +14807,7 @@ system_prompt = "You are a helpful assistant."
             return Some(url.clone());
         }
         // 2. Model catalog (updated at runtime by set_provider_url / apply_url_overrides)
-        if let Ok(catalog) = self.model_catalog.read() {
+        let catalog = self.model_catalog.load(); {
             if let Some(p) = catalog.get_provider(provider) {
                 if !p.base_url.is_empty() {
                     return Some(p.base_url.clone());
@@ -16229,9 +16246,7 @@ system_prompt = "You are a helpful assistant."
         if let Some(kernel) = kernel_weak.as_ref().and_then(|w| w.upgrade()) {
             let cost = MeteringEngine::estimate_cost_with_catalog(
                 &kernel
-                    .model_catalog
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner()),
+                    .model_catalog.load(),
                 &default_model.model,
                 response.usage.input_tokens,
                 response.usage.output_tokens,
@@ -20240,9 +20255,7 @@ pub async fn probe_and_update_local_provider(
     // when the underlying ollama is healthy.
     let api_key = {
         let catalog = kernel
-            .model_catalog
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .model_catalog.load();
         let env_var = catalog
             .get_provider(provider_id)
             .map(|p| p.api_key_env.clone())
@@ -20263,15 +20276,14 @@ pub async fn probe_and_update_local_provider(
             latency_ms = result.latency_ms,
             "Local provider online"
         );
-        if let Ok(mut catalog) = kernel.model_catalog.write() {
-            catalog.set_provider_auth_status(
-                provider_id,
-                librefang_types::model_catalog::AuthStatus::NotRequired,
-            );
-            if !result.discovered_models.is_empty() {
-                // Use enriched metadata when available (Ollama populates
-                // discovered_model_info; other providers leave it empty).
-                let info: Vec<_> = if result.discovered_model_info.is_empty() {
+        // Pre-compute the merged info outside the RCU closure so it's not
+        // recomputed on retry (the closure may run multiple times if a
+        // concurrent updater wins the CAS).
+        let merged_info: Option<Vec<librefang_runtime::provider_health::DiscoveredModelInfo>> =
+            if result.discovered_models.is_empty() {
+                None
+            } else if result.discovered_model_info.is_empty() {
+                Some(
                     result
                         .discovered_models
                         .iter()
@@ -20286,13 +20298,20 @@ pub async fn probe_and_update_local_provider(
                                 capabilities: vec![],
                             },
                         )
-                        .collect()
-                } else {
-                    result.discovered_model_info.clone()
-                };
-                catalog.merge_discovered_models(provider_id, &info);
+                        .collect(),
+                )
+            } else {
+                Some(result.discovered_model_info.clone())
+            };
+        kernel.model_catalog_update(|catalog| {
+            catalog.set_provider_auth_status(
+                provider_id,
+                librefang_types::model_catalog::AuthStatus::NotRequired,
+            );
+            if let Some(ref info) = merged_info {
+                catalog.merge_discovered_models(provider_id, info);
             }
-        }
+        });
     } else {
         let err = result.error.as_deref().unwrap_or("unknown");
         if log_offline_as_warn {
@@ -20312,12 +20331,12 @@ pub async fn probe_and_update_local_provider(
         // Using Missing would cause detect_auth() to reset the status back
         // to NotRequired on the next unrelated auth check, making offline
         // providers reappear in the model switcher.
-        if let Ok(mut catalog) = kernel.model_catalog.write() {
+        kernel.model_catalog_update(|catalog| {
             catalog.set_provider_auth_status(
                 provider_id,
                 librefang_types::model_catalog::AuthStatus::LocalOffline,
             );
-        }
+        });
     }
     result
 }
@@ -20336,9 +20355,7 @@ async fn probe_all_local_providers_once(
 ) {
     let local_providers: Vec<(String, String)> = {
         let catalog = kernel
-            .model_catalog
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .model_catalog.load();
         catalog
             .list_providers()
             .iter()
