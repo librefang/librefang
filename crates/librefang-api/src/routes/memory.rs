@@ -1544,6 +1544,44 @@ pub async fn memory_config_patch(
 // Agent KV store endpoints (#3749 11/N: moved from system.rs).
 // ---------------------------------------------------------------------------
 
+/// Owner-or-admin scoping for the per-agent KV store.
+///
+/// Returns `Err((status, body))` when the caller is authenticated but is
+/// neither an admin nor the agent's author — caller propagates that pair
+/// through `into_json_tuple`-style returns. Anonymous (no extension) and
+/// admin callers always succeed.
+///
+/// The list endpoint already enforced this; the single-key get / set /
+/// delete and the export / import handlers were missed in the original
+/// `system.rs` implementation, which let any authenticated user read or
+/// mutate `user.preferences`, `oncall.contact`, `api.tokens`, etc. on
+/// any agent as long as they knew the key name.
+fn assert_kv_owner_or_admin(
+    state: &AppState,
+    agent_id: librefang_types::agent::AgentId,
+    api_user: Option<&axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    t: &ErrorTranslator,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let Some(user) = api_user else {
+        return Ok(());
+    };
+    use crate::middleware::UserRole;
+    if user.0.role >= UserRole::Admin {
+        return Ok(());
+    }
+    let owned = state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .map(|e| e.manifest.author.eq_ignore_ascii_case(&user.0.name))
+        .unwrap_or(false);
+    if owned {
+        Ok(())
+    } else {
+        Err(ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple())
+    }
+}
+
 /// GET /api/memory/agents/:id/kv — List KV pairs for an agent.
 #[utoipa::path(get, path = "/api/memory/agents/{id}/kv", tag = "memory", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Agent KV store", body = crate::types::JsonObject)))]
 pub async fn get_agent_kv(
@@ -1553,22 +1591,8 @@ pub async fn get_agent_kv(
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    // Owner-scoping: non-admins can only read the KV store of agents
-    // they authored. Without this, anyone authenticated could pull
-    // user.preferences / oncall.contact / api.tokens out of any agent.
-    if let Some(ref user) = api_user {
-        use crate::middleware::UserRole;
-        if user.0.role < UserRole::Admin {
-            let entry = state.kernel.agent_registry().get(agent_id);
-            let owned = entry
-                .as_ref()
-                .map(|e| e.manifest.author.eq_ignore_ascii_case(&user.0.name))
-                .unwrap_or(false);
-            if !owned {
-                return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
-                    .into_json_tuple();
-            }
-        }
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        return resp;
     }
     match state.kernel.memory_substrate().list_kv(agent_id) {
         Ok(pairs) => {
@@ -1591,6 +1615,7 @@ pub async fn get_agent_kv_key(
     State(state): State<Arc<AppState>>,
     Path((id, key)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
@@ -1600,6 +1625,9 @@ pub async fn get_agent_kv_key(
                 .into_json_tuple();
         }
     };
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        return resp;
+    }
     match state
         .kernel
         .memory_substrate()
@@ -1625,6 +1653,7 @@ pub async fn set_agent_kv_key(
     State(state): State<Arc<AppState>>,
     Path((id, key)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -1635,6 +1664,9 @@ pub async fn set_agent_kv_key(
                 .into_json_tuple();
         }
     };
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        return resp;
+    }
     let value = body.get("value").cloned().unwrap_or(body);
 
     match state
@@ -1659,6 +1691,7 @@ pub async fn delete_agent_kv_key(
     State(state): State<Arc<AppState>>,
     Path((id, key)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> axum::response::Response {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
@@ -1669,6 +1702,9 @@ pub async fn delete_agent_kv_key(
                 .into_response();
         }
     };
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        return resp.into_response();
+    }
     match state
         .kernel
         .memory_substrate()
@@ -1690,12 +1726,20 @@ pub async fn export_agent_memory(
     State(state): State<Arc<AppState>>,
     AgentIdPath(agent_id): AgentIdPath,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
 
-    // Verify agent exists
+    // Verify agent exists. The owner-or-admin check below would already
+    // hide unknown agents from non-admins via 404, but admins skip the
+    // scope check entirely, so we still need this branch to give them a
+    // clean 404 instead of falling through to a `list_kv` against a
+    // non-existent id.
     if state.kernel.agent_registry().get(agent_id).is_none() {
         return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
+    }
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        return resp;
     }
 
     match state.kernel.memory_substrate().list_kv(agent_id) {
@@ -1726,13 +1770,18 @@ pub async fn import_agent_memory(
     State(state): State<Arc<AppState>>,
     AgentIdPath(agent_id): AgentIdPath,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
 
-    // Verify agent exists
+    // Verify agent exists (admins skip the owner check below, so we still
+    // need this branch for them — see `export_agent_memory`).
     if state.kernel.agent_registry().get(agent_id).is_none() {
         return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
+    }
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        return resp;
     }
 
     let kv = match body.get("kv").and_then(|v| v.as_object()) {

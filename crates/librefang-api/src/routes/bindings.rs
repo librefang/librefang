@@ -29,15 +29,32 @@ pub async fn list_bindings(State(state): State<Arc<AppState>>) -> impl IntoRespo
 }
 
 /// POST /api/bindings — Add a new agent binding.
-#[utoipa::path(post, path = "/api/bindings", tag = "system", request_body = crate::types::JsonObject, responses((status = 200, description = "Binding added", body = crate::types::JsonObject)))]
+///
+/// Validation is **advisory**: a binding referencing an unknown agent is
+/// still accepted (kernel-side `add_binding` is infallible and binding
+/// state may be primed before the target agent spawns), but a `WARN` is
+/// logged so misconfiguration is visible. Both name lookup and UUID
+/// resolution check the registry — the previous form passed any
+/// well-formed UUID even if no such agent existed, so the warn would
+/// never fire on a UUID typo.
+#[utoipa::path(
+    post,
+    path = "/api/bindings",
+    tag = "system",
+    request_body = crate::types::JsonObject,
+    responses((status = 201, description = "Binding added", body = crate::types::JsonObject))
+)]
 pub async fn add_binding(
     State(state): State<Arc<AppState>>,
     Json(binding): Json<librefang_types::config::AgentBinding>,
 ) -> impl IntoResponse {
-    // Validate agent exists
-    let agents = state.kernel.agent_registry().list();
-    let agent_exists = agents.iter().any(|e| e.name == binding.agent)
-        || binding.agent.parse::<uuid::Uuid>().is_ok();
+    let registry = state.kernel.agent_registry();
+    let agent_exists = registry.list().iter().any(|e| e.name == binding.agent)
+        || binding
+            .agent
+            .parse::<librefang_types::agent::AgentId>()
+            .ok()
+            .is_some_and(|id| registry.get(id).is_some());
     if !agent_exists {
         tracing::warn!(agent = %binding.agent, "Binding references unknown agent");
     }
