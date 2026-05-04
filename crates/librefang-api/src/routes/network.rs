@@ -331,15 +331,12 @@ pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoRes
 
     // #3842: canonical `PaginatedResponse{items,total,offset,limit}` envelope.
     let total = items.len();
-    (
-        StatusCode::OK,
-        Json(crate::types::PaginatedResponse {
-            items,
-            total,
-            offset: 0,
-            limit: None,
-        }),
-    )
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// POST /a2a/tasks/send — Submit a task to an agent via A2A.
