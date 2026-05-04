@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_runtime::kernel_handle::KernelHandle;
+use librefang_runtime::kernel_handle::prelude::*;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role, StopReason};

@@ -21,7 +21,7 @@ use dashmap::DashMap;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
 use librefang_channels::types::SenderContext;
-use librefang_runtime::kernel_handle::KernelHandle;
+use librefang_runtime::kernel_handle::prelude::*;
 use librefang_runtime::llm_driver::{StreamEvent, PHASE_RESPONSE_COMPLETE};
 use librefang_runtime::llm_errors;
 use librefang_types::agent::{AgentId, SessionId};
