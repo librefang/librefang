@@ -35,11 +35,33 @@ vi.mock("react-i18next", async () => {
   return {
     ...actual,
     useTranslation: () => ({
-      // Echo the i18n key so assertions can grep on it directly. Fall back
-      // to the second positional argument (the inline default) so we can
-      // also assert on the literal English copy.
-      t: (key: string, fallback?: string) =>
-        typeof fallback === "string" ? fallback : key,
+      // Echo the inline English default when present so assertions can
+      // match on the literal copy. When the second arg is an interpolation
+      // options object (no inline default), fall back to the i18n key
+      // suffixed with the first interpolation value (count / ago /
+      // action / message / n) — same shape as ApprovalsPage.test.tsx so
+      // future branches that exercise rotate-result, wizard, or import
+      // count don't silently match the raw `{{count}}` placeholder.
+      t: (
+        key: string,
+        fallbackOrOpts?: string | Record<string, unknown>,
+        opts?: Record<string, unknown>,
+      ) => {
+        if (typeof fallbackOrOpts === "string") {
+          if (opts && typeof opts === "object") {
+            for (const k of ["count", "ago", "action", "message", "n"]) {
+              if (k in opts) return `${fallbackOrOpts}:${String(opts[k])}`;
+            }
+          }
+          return fallbackOrOpts;
+        }
+        if (fallbackOrOpts && typeof fallbackOrOpts === "object") {
+          for (const k of ["count", "ago", "action", "message", "n"]) {
+            if (k in fallbackOrOpts) return `${key}:${String(fallbackOrOpts[k])}`;
+          }
+        }
+        return key;
+      },
     }),
   };
 });
@@ -81,14 +103,24 @@ function makeUser(overrides: Partial<UserItem> = {}): UserItem {
 
 function setUsers(
   items: UserItem[] | undefined,
-  opts: { isPending?: boolean; isError?: boolean } = {},
+  opts: {
+    isPending?: boolean;
+    isLoading?: boolean;
+    isError?: boolean;
+    isFetching?: boolean;
+  } = {},
 ) {
+  // UsersPage gates on `isPending` (UsersPage.tsx:238). `isLoading` is kept
+  // independently settable so a future branch that differentiates pending
+  // vs background-refetch can drive each knob without surprising the
+  // existing tests. Defaults to mirroring `isPending` for the common case.
+  const isPending = opts.isPending ?? false;
   useUsersMock.mockReturnValue({
     data: items,
-    isPending: opts.isPending ?? false,
-    isLoading: opts.isPending ?? false,
+    isPending,
+    isLoading: opts.isLoading ?? isPending,
     isError: opts.isError ?? false,
-    isFetching: false,
+    isFetching: opts.isFetching ?? false,
     refetch: vi.fn(),
   });
 }
@@ -141,6 +173,12 @@ describe("UsersPage", () => {
     // Page header is rendered alongside the skeleton — assert on the
     // page title to confirm the route mounted.
     expect(screen.getByText("Users & RBAC")).toBeInTheDocument();
+    // Positive signal: UsersPage renders two <CardSkeleton/>s while
+    // pending (UsersPage.tsx:240-242), each exposing role="status".
+    // Asserting on this catches a future refactor that drops the
+    // skeleton entirely or replaces it with a non-status placeholder —
+    // the absence-only checks below would silently pass in that case.
+    expect(screen.getAllByRole("status").length).toBeGreaterThanOrEqual(2);
     // While isPending, neither the empty-state title nor a real user row
     // should be present — a CardSkeleton replaces the list area.
     expect(screen.queryByText("No users yet")).not.toBeInTheDocument();
