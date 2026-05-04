@@ -251,6 +251,12 @@ jobs:
             echo "Selective clippy for: $CRATES"
             cargo clippy $PFLAGS --all-targets --all-features -- -D warnings
           fi
+      # Informational lint for empty-string / "<unknown>" sentinel patterns
+      # in API response code (refs #3302). Runs in warn mode — never fails
+      # the build until the existing inventory is cleared and the script is
+      # flipped to --strict. See docs/architecture/api-conventions.md.
+      - name: Sentinel-pattern lint (warn-only)
+        run: scripts/check-no-empty-string-sentinels.sh
 
   # ── OpenAPI / SDK drift check ──────────────────────────────────────────────────
   # Regenerates openapi.json and the four SDKs and fails if anything differs
