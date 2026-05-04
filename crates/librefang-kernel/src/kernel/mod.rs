@@ -18112,12 +18112,13 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
         description: &str,
         assigned_to: Option<&str>,
         created_by: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
         let task_id = self
             .memory
             .task_post(title, description, assigned_to, created_by)
             .await
-            .map_err(|e| format!("Task post failed: {e}"))?;
+            .map_err(|e| KernelOpError::Other(format!("Task post failed: {e}")))?;
 
         let event = librefang_types::event::Event::new(
             AgentId::new(), // system-originated
@@ -18136,7 +18137,11 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
         Ok(task_id)
     }
 
-    async fn task_claim(&self, agent_id: &str) -> Result<Option<serde_json::Value>, String> {
+    async fn task_claim(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<serde_json::Value>, kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
         // Resolve `agent_id` to a canonical UUID and also capture the name.
         // Both are forwarded to `memory.task_claim` so that tasks whose
         // `assigned_to` field was stored as either a UUID *or* a name string
@@ -18150,9 +18155,10 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
             Err(_) => match self.registry.find_by_name(agent_id) {
                 Some(entry) => (entry.id.to_string(), Some(agent_id.to_string())),
                 None => {
-                    return Err(format!(
-                        "Task claim failed: agent {agent_id:?} not found by UUID or name"
-                    ));
+                    return Err(KernelOpError::NotFound {
+                        kind: "agent",
+                        id: agent_id.to_string(),
+                    });
                 }
             },
         };
@@ -18160,7 +18166,7 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
             .memory
             .task_claim(&resolved, resolved_name.as_deref())
             .await
-            .map_err(|e| format!("Task claim failed: {e}"))?;
+            .map_err(|e| KernelOpError::Other(format!("Task claim failed: {e}")))?;
 
         if let Some(ref task) = result {
             let task_id = task["id"].as_str().unwrap_or("").to_string();
@@ -18185,22 +18191,24 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
         agent_id: &str,
         task_id: &str,
         result: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
         let resolved = match librefang_types::agent::AgentId::from_str(agent_id) {
             Ok(_) => agent_id.to_string(),
             Err(_) => match self.registry.find_by_name(agent_id) {
                 Some(entry) => entry.id.to_string(),
                 None => {
-                    return Err(format!(
-                        "Task complete failed: agent {agent_id:?} not found by UUID or name"
-                    ));
+                    return Err(KernelOpError::NotFound {
+                        kind: "agent",
+                        id: agent_id.to_string(),
+                    });
                 }
             },
         };
         self.memory
             .task_complete(task_id, result)
             .await
-            .map_err(|e| format!("Task complete failed: {e}"))?;
+            .map_err(|e| KernelOpError::Other(format!("Task complete failed: {e}")))?;
 
         let event = librefang_types::event::Event::new(
             AgentId::new(), // system-originated
@@ -18218,39 +18226,47 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
         Ok(())
     }
 
-    async fn task_list(&self, status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
-        self.memory
-            .task_list(status)
-            .await
-            .map_err(|e| format!("Task list failed: {e}"))
+    async fn task_list(
+        &self,
+        status: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, kernel_handle::KernelOpError> {
+        self.memory.task_list(status).await.map_err(|e| {
+            kernel_handle::KernelOpError::Other(format!("Task list failed: {e}"))
+        })
     }
 
-    async fn task_delete(&self, task_id: &str) -> Result<bool, String> {
-        self.memory
-            .task_delete(task_id)
-            .await
-            .map_err(|e| format!("Task delete failed: {e}"))
+    async fn task_delete(&self, task_id: &str) -> Result<bool, kernel_handle::KernelOpError> {
+        self.memory.task_delete(task_id).await.map_err(|e| {
+            kernel_handle::KernelOpError::Other(format!("Task delete failed: {e}"))
+        })
     }
 
-    async fn task_retry(&self, task_id: &str) -> Result<bool, String> {
-        self.memory
-            .task_retry(task_id)
-            .await
-            .map_err(|e| format!("Task retry failed: {e}"))
+    async fn task_retry(&self, task_id: &str) -> Result<bool, kernel_handle::KernelOpError> {
+        self.memory.task_retry(task_id).await.map_err(|e| {
+            kernel_handle::KernelOpError::Other(format!("Task retry failed: {e}"))
+        })
     }
 
-    async fn task_get(&self, task_id: &str) -> Result<Option<serde_json::Value>, String> {
-        self.memory
-            .task_get(task_id)
-            .await
-            .map_err(|e| format!("Task get failed: {e}"))
+    async fn task_get(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<serde_json::Value>, kernel_handle::KernelOpError> {
+        self.memory.task_get(task_id).await.map_err(|e| {
+            kernel_handle::KernelOpError::Other(format!("Task get failed: {e}"))
+        })
     }
 
-    async fn task_update_status(&self, task_id: &str, new_status: &str) -> Result<bool, String> {
+    async fn task_update_status(
+        &self,
+        task_id: &str,
+        new_status: &str,
+    ) -> Result<bool, kernel_handle::KernelOpError> {
         self.memory
             .task_update_status(task_id, new_status)
             .await
-            .map_err(|e| format!("Task update status failed: {e}"))
+            .map_err(|e| {
+                kernel_handle::KernelOpError::Other(format!("Task update status failed: {e}"))
+            })
     }
 }
 

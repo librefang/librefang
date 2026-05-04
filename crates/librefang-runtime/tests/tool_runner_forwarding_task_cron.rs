@@ -87,36 +87,36 @@ impl TaskQueue for CapturingKernel {
         _: &str,
         _: Option<&str>,
         created_by: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         self.task_post_calls
             .lock()
             .unwrap()
             .push(created_by.map(|s| s.to_string()));
         Ok("task-id-1".to_string())
     }
-    async fn task_claim(&self, _: &str) -> Result<Option<serde_json::Value>, String> {
+    async fn task_claim(&self, _: &str) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_complete(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+    async fn task_complete(&self, _: &str, _: &str, _: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_list(&self, _: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    async fn task_list(&self, _: Option<&str>) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_delete(&self, _: &str) -> Result<bool, String> {
+    async fn task_delete(&self, _: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_retry(&self, _: &str) -> Result<bool, String> {
+    async fn task_retry(&self, _: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_get(&self, task_id: &str) -> Result<Option<serde_json::Value>, String> {
+    async fn task_get(&self, task_id: &str) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         self.task_get_calls
             .lock()
             .unwrap()
             .push(task_id.to_string());
         Ok(self.task_get_response.lock().unwrap().clone())
     }
-    async fn task_update_status(&self, _: &str, _: &str) -> Result<bool, String> {
+    async fn task_update_status(&self, _: &str, _: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 }
