@@ -39,9 +39,8 @@ See `CLAUDE.md` for the full agent contract (worktree rules, hooks, integration 
 ## Build
 
 ```bash
-cargo build --workspace                                # full build
-cargo build --workspace --lib                          # libs only (CLI binary may be locked)
-cargo test --workspace                                 # all tests
+cargo check --workspace --lib                          # compile-check only — full build runs in CI
+cargo test -p <crate>                                  # scoped tests; workspace-wide form is forbidden (target/ contention)
 cargo clippy --workspace --all-targets -- -D warnings  # zero warnings
 ```
 
