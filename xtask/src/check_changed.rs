@@ -20,6 +20,7 @@
 use clap::Parser;
 use std::collections::BTreeSet;
 use std::process::Command;
+use std::sync::OnceLock;
 
 use crate::common::repo_root;
 
@@ -68,11 +69,12 @@ struct Plan {
 }
 
 fn changed_files(from: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    // `<from>...HEAD` is the merge-base diff (only commits unique to HEAD),
-    // matching what GitHub reports for a PR.
-    let range = format!("{from}...HEAD");
+    // Two-dot diff to match ci.yml's `git diff --name-only "$BASE_SHA" "$HEAD_SHA"`.
+    // Three-dot (`{from}...HEAD`) silently drops files that main moved past
+    // since the branch forked, which would make the local plan disagree with
+    // what CI actually runs.
     let output = Command::new("git")
-        .args(["diff", "--name-only", &range])
+        .args(["diff", "--name-only", from, "HEAD"])
         .current_dir(repo_root())
         .output()?;
     if !output.status.success() {
@@ -89,28 +91,44 @@ fn changed_files(from: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> 
         .collect())
 }
 
-fn detect_lanes(changed: &[String]) -> Lanes {
+struct LaneRegexes {
+    rust: regex::Regex,
+    docs: regex::Regex,
+    ci: regex::Regex,
+    install: regex::Regex,
+    workspace_cargo: regex::Regex,
+    xtask_src: regex::Regex,
+}
+
+fn lane_regexes() -> &'static LaneRegexes {
     // Same regexes as ci.yml's `Compute diff and route` step. Keep these
     // identical to the shell version — drift would silently make the local
     // command lie about CI behaviour.
-    let rust = regex::Regex::new(r"^(crates/|Cargo\.(toml|lock)$|xtask/|openapi\.json$|sdk/)")
-        .expect("static regex");
-    let docs = regex::Regex::new(r"^(docs/|.*\.md$)").expect("static regex");
-    let ci = regex::Regex::new(r"^\.github/workflows/").expect("static regex");
-    let install = regex::Regex::new(
-        r"^web/public/install\.(sh|ps1)$|^scripts/tests/install_sh_test\.sh$",
-    )
-    .expect("static regex");
-    let workspace_cargo = regex::Regex::new(r"^Cargo\.(toml|lock)$").expect("static regex");
-    let xtask_src = regex::Regex::new(r"^xtask/").expect("static regex");
+    static REGEXES: OnceLock<LaneRegexes> = OnceLock::new();
+    REGEXES.get_or_init(|| LaneRegexes {
+        rust: regex::Regex::new(r"^(crates/|Cargo\.(toml|lock)$|xtask/|openapi\.json$|sdk/)")
+            .expect("static regex"),
+        docs: regex::Regex::new(r"^(docs/|.*\.md$)").expect("static regex"),
+        ci: regex::Regex::new(r"^\.github/workflows/").expect("static regex"),
+        install: regex::Regex::new(
+            r"^web/public/install\.(sh|ps1)$|^scripts/tests/install_sh_test\.sh$",
+        )
+        .expect("static regex"),
+        workspace_cargo: regex::Regex::new(r"^Cargo\.(toml|lock)$").expect("static regex"),
+        xtask_src: regex::Regex::new(r"^xtask/").expect("static regex"),
+    })
+}
+
+fn detect_lanes(changed: &[String]) -> Lanes {
+    let r = lane_regexes();
     let any = |re: &regex::Regex| changed.iter().any(|p| re.is_match(p));
     Lanes {
-        rust: any(&rust),
-        docs: any(&docs),
-        ci: any(&ci),
-        install: any(&install),
-        workspace_cargo: any(&workspace_cargo),
-        xtask_src: any(&xtask_src),
+        rust: any(&r.rust),
+        docs: any(&r.docs),
+        ci: any(&r.ci),
+        install: any(&r.install),
+        workspace_cargo: any(&r.workspace_cargo),
+        xtask_src: any(&r.xtask_src),
     }
 }
 
@@ -119,13 +137,25 @@ fn detect_lanes(changed: &[String]) -> Lanes {
 /// it here because the local workflow is always PR-equivalent.
 fn decide_full_run(lanes: &Lanes) -> Decision {
     if lanes.ci {
-        Decision { value: true, reason: "CI workflow changed" }
+        Decision {
+            value: true,
+            reason: "CI workflow changed",
+        }
     } else if lanes.workspace_cargo {
-        Decision { value: true, reason: "workspace Cargo.toml/Cargo.lock changed" }
+        Decision {
+            value: true,
+            reason: "workspace Cargo.toml/Cargo.lock changed",
+        }
     } else if lanes.xtask_src {
-        Decision { value: true, reason: "xtask source changed" }
+        Decision {
+            value: true,
+            reason: "xtask source changed",
+        }
     } else {
-        Decision { value: false, reason: "selective" }
+        Decision {
+            value: false,
+            reason: "selective",
+        }
     }
 }
 
@@ -134,9 +164,15 @@ fn decide_full_run(lanes: &Lanes) -> Decision {
 /// trigger for re-running the full nextest matrix.
 fn decide_full_test(lanes: &Lanes) -> Decision {
     if lanes.workspace_cargo {
-        Decision { value: true, reason: "workspace Cargo.toml/Cargo.lock changed" }
+        Decision {
+            value: true,
+            reason: "workspace Cargo.toml/Cargo.lock changed",
+        }
     } else {
-        Decision { value: false, reason: "selective" }
+        Decision {
+            value: false,
+            reason: "selective",
+        }
     }
 }
 
@@ -167,13 +203,19 @@ fn build_plan(from: &str) -> Result<Plan, Box<dyn std::error::Error>> {
     let full_run = decide_full_run(&lanes);
     let full_test = decide_full_test(&lanes);
     let crates = affected_crates(&files, &lanes);
-    Ok(Plan { lanes, full_run, full_test, crates, files })
+    Ok(Plan {
+        lanes,
+        full_run,
+        full_test,
+        crates,
+        files,
+    })
 }
 
 fn print_human(plan: &Plan) {
     println!("Changed files: {}", plan.files.len());
     if plan.files.is_empty() {
-        println!("  (none — branch already merged or `--from` is HEAD)");
+        println!("  (none -- branch already merged or `--from` is HEAD)");
     } else {
         for f in &plan.files {
             println!("  {f}");
@@ -224,101 +266,106 @@ fn print_json(plan: &Plan) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_cargo_check(plan: &Plan) -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = Command::new("cargo");
-    cmd.current_dir(repo_root());
+/// Build args for `cargo check`. `None` = nothing to do (selective with no
+/// affected crates). Selective mode does NOT pass `--lib` because `-p X --lib`
+/// errors with "no library targets found in package X" for binary-only crates
+/// (librefang-cli, librefang-desktop); the same gotcha CI's selective `cargo
+/// build` step explicitly works around. `--workspace --lib` is fine because
+/// there `--lib` is a workspace-wide filter, not a per-package selector.
+fn build_check_args(plan: &Plan) -> Option<Vec<String>> {
     if plan.full_run.value {
-        cmd.args(["check", "--workspace", "--lib"]);
-        println!("→ cargo check --workspace --lib");
-    } else if plan.crates.is_empty() {
-        println!("→ cargo check skipped (no affected crates)");
-        return Ok(());
-    } else {
-        cmd.arg("check");
-        for c in &plan.crates {
-            cmd.args(["-p", c]);
-        }
-        cmd.arg("--lib");
-        println!(
-            "→ cargo check {} --lib",
-            plan.crates
+        Some(
+            ["check", "--workspace", "--lib"]
                 .iter()
-                .map(|c| format!("-p {c}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
+                .map(|s| s.to_string())
+                .collect(),
+        )
+    } else if plan.crates.is_empty() {
+        None
+    } else {
+        let mut v = vec!["check".to_string()];
+        for c in &plan.crates {
+            v.push("-p".into());
+            v.push(c.clone());
+        }
+        Some(v)
     }
-    let status = cmd.status()?;
-    if !status.success() {
-        return Err("cargo check failed".into());
-    }
-    Ok(())
 }
 
-fn run_cargo_clippy(plan: &Plan) -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = Command::new("cargo");
-    cmd.current_dir(repo_root());
+/// Build args for `cargo clippy`. Selective mode passes `--all-features`
+/// to match ci.yml's selective clippy step (`cargo clippy $PFLAGS
+/// --all-targets --all-features -- -D warnings`); without it a feature-gated
+/// lint failure passes locally but trips CI. `--workspace` mode mirrors the
+/// `cargo xtask ci` invocation, which doesn't pass `--all-features`.
+fn build_clippy_args(plan: &Plan) -> Option<Vec<String>> {
     if plan.full_run.value {
-        cmd.args([
-            "clippy",
-            "--workspace",
-            "--all-targets",
-            "--",
-            "-D",
-            "warnings",
-        ]);
-        println!("→ cargo clippy --workspace --all-targets -- -D warnings");
+        Some(
+            [
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        )
     } else if plan.crates.is_empty() {
-        println!("→ cargo clippy skipped (no affected crates)");
-        return Ok(());
+        None
     } else {
-        cmd.arg("clippy");
+        let mut v = vec!["clippy".to_string()];
         for c in &plan.crates {
-            cmd.args(["-p", c]);
+            v.push("-p".into());
+            v.push(c.clone());
         }
-        cmd.args(["--all-targets", "--", "-D", "warnings"]);
-        println!(
-            "→ cargo clippy {} --all-targets -- -D warnings",
-            plan.crates
+        v.extend(
+            ["--all-targets", "--all-features", "--", "-D", "warnings"]
                 .iter()
-                .map(|c| format!("-p {c}"))
-                .collect::<Vec<_>>()
-                .join(" ")
+                .map(|s| s.to_string()),
         );
+        Some(v)
     }
-    let status = cmd.status()?;
-    if !status.success() {
-        return Err("cargo clippy failed".into());
-    }
-    Ok(())
 }
 
-fn run_cargo_test(plan: &Plan) -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd = Command::new("cargo");
-    cmd.current_dir(repo_root());
+/// Build args for `cargo test`. `full_test=true` → workspace; otherwise
+/// per-crate. The repo-wide guidance forbids unscoped `cargo test` because of
+/// shared `target/` contention with the daemon, so the workspace branch is
+/// only reached when CI itself would do the same (workspace Cargo manifest
+/// changed); see ci.yml `full_test` decision.
+fn build_test_args(plan: &Plan) -> Option<Vec<String>> {
     if plan.full_test.value {
-        cmd.args(["test", "--workspace"]);
-        println!("→ cargo test --workspace");
-    } else if plan.crates.is_empty() {
-        println!("→ cargo test skipped (no affected crates)");
-        return Ok(());
-    } else {
-        cmd.arg("test");
-        for c in &plan.crates {
-            cmd.args(["-p", c]);
-        }
-        println!(
-            "→ cargo test {}",
-            plan.crates
+        Some(
+            ["test", "--workspace"]
                 .iter()
-                .map(|c| format!("-p {c}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
+                .map(|s| s.to_string())
+                .collect(),
+        )
+    } else if plan.crates.is_empty() {
+        None
+    } else {
+        let mut v = vec!["test".to_string()];
+        for c in &plan.crates {
+            v.push("-p".into());
+            v.push(c.clone());
+        }
+        Some(v)
     }
-    let status = cmd.status()?;
+}
+
+fn run_cargo(label: &str, args: Option<Vec<String>>) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(args) = args else {
+        println!("-> cargo {label} skipped (no affected crates)");
+        return Ok(());
+    };
+    println!("-> cargo {}", args.join(" "));
+    let status = Command::new("cargo")
+        .args(&args)
+        .current_dir(repo_root())
+        .status()?;
     if !status.success() {
-        return Err("cargo test failed".into());
+        return Err(format!("cargo {label} failed").into());
     }
     Ok(())
 }
@@ -335,9 +382,9 @@ pub fn run(args: CheckChangedArgs) -> Result<(), Box<dyn std::error::Error>> {
     for kind in &args.run {
         match kind.trim() {
             "" => continue,
-            "check" => run_cargo_check(&plan)?,
-            "clippy" => run_cargo_clippy(&plan)?,
-            "test" => run_cargo_test(&plan)?,
+            "check" => run_cargo("check", build_check_args(&plan))?,
+            "clippy" => run_cargo("clippy", build_clippy_args(&plan))?,
+            "test" => run_cargo("test", build_test_args(&plan))?,
             other => return Err(format!("unknown --run kind: {other}").into()),
         }
     }
@@ -352,6 +399,21 @@ mod tests {
     fn lanes_from(paths: &[&str]) -> Lanes {
         let v: Vec<String> = paths.iter().map(|s| s.to_string()).collect();
         detect_lanes(&v)
+    }
+
+    fn plan_from(paths: &[&str]) -> Plan {
+        let files: Vec<String> = paths.iter().map(|s| s.to_string()).collect();
+        let lanes = detect_lanes(&files);
+        let full_run = decide_full_run(&lanes);
+        let full_test = decide_full_test(&lanes);
+        let crates = affected_crates(&files, &lanes);
+        Plan {
+            lanes,
+            full_run,
+            full_test,
+            crates,
+            files,
+        }
     }
 
     #[test]
@@ -390,10 +452,7 @@ mod tests {
 
     #[test]
     fn install_paths_flag_install_lane() {
-        let l = lanes_from(&[
-            "web/public/install.sh",
-            "scripts/tests/install_sh_test.sh",
-        ]);
+        let l = lanes_from(&["web/public/install.sh", "scripts/tests/install_sh_test.sh"]);
         assert!(l.install);
         assert!(!l.rust);
     }
@@ -420,7 +479,10 @@ mod tests {
         ] {
             let v: Vec<String> = paths.iter().map(|s| s.to_string()).collect();
             let lanes = detect_lanes(&v);
-            assert!(decide_full_run(&lanes).value, "expected full_run for {paths:?}");
+            assert!(
+                decide_full_run(&lanes).value,
+                "expected full_run for {paths:?}"
+            );
         }
     }
 
@@ -483,5 +545,86 @@ mod tests {
             crates.contains("librefang-api"),
             "schema-mirror rule should pull api in for a types-only change"
         );
+    }
+
+    // ── command-line shape tests ─────────────────────────────────────────
+    // These pin the exact argv we hand to `cargo` so a future edit can't
+    // silently reintroduce `-p X --lib` (errors on bin-only crates) or drop
+    // `--all-features` from selective clippy (lets feature-gated lints pass
+    // locally but fail CI).
+
+    #[test]
+    fn selective_check_does_not_pass_lib() {
+        // Bin-only crate should NOT get `-p librefang-cli --lib` (cargo
+        // errors with "no library targets found in package librefang-cli").
+        let plan = plan_from(&["crates/librefang-cli/src/main.rs"]);
+        let args = build_check_args(&plan).expect("should produce args");
+        assert!(
+            !args.iter().any(|a| a == "--lib"),
+            "selective check must not pass --lib: {args:?}"
+        );
+        assert!(args.contains(&"-p".to_string()));
+        assert!(args.contains(&"librefang-cli".to_string()));
+    }
+
+    #[test]
+    fn full_run_check_uses_workspace_lib() {
+        let plan = plan_from(&[".github/workflows/ci.yml"]);
+        let args = build_check_args(&plan).expect("should produce args");
+        assert_eq!(args, vec!["check", "--workspace", "--lib"]);
+    }
+
+    #[test]
+    fn selective_clippy_passes_all_features() {
+        // ci.yml's selective lane runs `cargo clippy $PFLAGS --all-targets
+        // --all-features -- -D warnings`. Drift here means a feature-gated
+        // lint can pass locally but fail CI.
+        let plan = plan_from(&["crates/librefang-runtime/src/foo.rs"]);
+        let args = build_clippy_args(&plan).expect("should produce args");
+        assert!(
+            args.iter().any(|a| a == "--all-features"),
+            "selective clippy must pass --all-features: {args:?}"
+        );
+        assert!(args.iter().any(|a| a == "--all-targets"));
+        assert!(args.windows(2).any(|w| w == ["--", "-D"]));
+    }
+
+    #[test]
+    fn full_run_clippy_workspace_shape() {
+        let plan = plan_from(&[".github/workflows/ci.yml"]);
+        let args = build_clippy_args(&plan).expect("should produce args");
+        assert_eq!(
+            args,
+            vec![
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings"
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_plan_yields_no_cargo_args() {
+        let plan = plan_from(&[]);
+        assert!(build_check_args(&plan).is_none());
+        assert!(build_clippy_args(&plan).is_none());
+        assert!(build_test_args(&plan).is_none());
+    }
+
+    #[test]
+    fn selective_test_per_crate() {
+        let plan = plan_from(&["crates/librefang-kernel/src/mod.rs"]);
+        let args = build_test_args(&plan).expect("should produce args");
+        assert_eq!(args, vec!["test", "-p", "librefang-kernel"]);
+    }
+
+    #[test]
+    fn workspace_cargo_change_runs_full_test() {
+        let plan = plan_from(&["Cargo.lock"]);
+        let args = build_test_args(&plan).expect("should produce args");
+        assert_eq!(args, vec!["test", "--workspace"]);
     }
 }
