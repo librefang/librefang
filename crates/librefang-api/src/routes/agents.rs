@@ -2413,21 +2413,10 @@ pub async fn kill_agent(
         }
     };
 
-    // Refs #4614: destructive delete requires explicit confirmation via
-    // `?confirm=true`. Without it the request is rejected with 409
-    // Conflict + the data-loss warning text so a typo / replay /
-    // click-bug can't silently destroy history.
-    if !q.confirm {
-        return ApiErrorResponse::conflict(DELETE_AGENT_WARNING)
-            .with_code("delete_confirmation_required")
-            .into_response();
-    }
-
-    // Hand-spawned runtime agents are owned by their hand instance. Killing
-    // one directly leaves the hand registry pointing at a dangling id that
-    // can respawn or produce stale instance state — require callers to
-    // deactivate or uninstall the owning hand instead. The dashboard hides
-    // Delete for hand agents already; this closes the direct-API loophole.
+    // Idempotent-no-op short-circuit: a DELETE for an already-absent agent is
+    // a no-op per RFC 9110 §9.2.2, so we don't gate it on `?confirm=true` —
+    // there's nothing to confirm destroying. Hand-owned and confirmation
+    // checks only apply when the agent actually exists.
     match state.kernel.agent_registry().get(agent_id) {
         Some(entry) if entry.is_hand => {
             return ApiErrorResponse::conflict(
@@ -2436,7 +2425,18 @@ pub async fn kill_agent(
             .with_code("hand_agent_delete_denied")
             .into_response();
         }
-        Some(_) => {}
+        Some(_) => {
+            // Refs #4614: destructive delete of an existing agent requires
+            // explicit confirmation via `?confirm=true`. Without it the
+            // request is rejected with 409 Conflict + the data-loss warning
+            // text so a typo / replay / click-bug can't silently destroy
+            // history.
+            if !q.confirm {
+                return ApiErrorResponse::conflict(DELETE_AGENT_WARNING)
+                    .with_code("delete_confirmation_required")
+                    .into_response();
+            }
+        }
         None => {
             // Idempotent DELETE: the agent is already gone (replayed request,
             // double-click, race with another deleter). Treat as success per

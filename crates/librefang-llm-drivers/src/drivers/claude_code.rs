@@ -69,6 +69,10 @@ pub struct ClaudeCodeDriver {
     config_dir: Option<std::path::PathBuf>,
     /// Optional MCP bridge config (see [`McpBridgeConfig`]).
     mcp_bridge: Option<McpBridgeConfig>,
+    /// When `true` (the default), set `LIBREFANG_AGENT_ID`, `LIBREFANG_SESSION_ID`,
+    /// and `LIBREFANG_STEP_ID` env vars on the spawned subprocess so operators can
+    /// correlate process-tree entries with LibreFang agent sessions.
+    emit_caller_trace_headers: bool,
 }
 
 impl ClaudeCodeDriver {
@@ -95,6 +99,7 @@ impl ClaudeCodeDriver {
             message_timeout_secs: DEFAULT_MESSAGE_TIMEOUT_SECS,
             config_dir: None,
             mcp_bridge: None,
+            emit_caller_trace_headers: true,
         }
     }
 
@@ -109,6 +114,39 @@ impl ClaudeCodeDriver {
     pub fn with_mcp_bridge(mut self, bridge: McpBridgeConfig) -> Self {
         self.mcp_bridge = Some(bridge);
         self
+    }
+
+    /// Control whether caller-trace env vars are injected into the spawned
+    /// subprocess. When `true` (the default), `LIBREFANG_AGENT_ID`,
+    /// `LIBREFANG_SESSION_ID`, and `LIBREFANG_STEP_ID` are set from the
+    /// `CompletionRequest` fields so operators can correlate OS process-tree
+    /// entries with LibreFang agent sessions.
+    pub fn with_emit_caller_trace_headers(mut self, emit: bool) -> Self {
+        self.emit_caller_trace_headers = emit;
+        self
+    }
+
+    /// Inject caller-trace env vars into a subprocess command when the flag is on.
+    ///
+    /// Sets `LIBREFANG_AGENT_ID`, `LIBREFANG_SESSION_ID`, and
+    /// `LIBREFANG_STEP_ID` from the `CompletionRequest`. Empty / `None` values
+    /// are skipped so the subprocess environment stays clean.
+    fn apply_caller_trace_envs(cmd: &mut tokio::process::Command, request: &CompletionRequest) {
+        if let Some(ref id) = request.agent_id {
+            if !id.is_empty() {
+                cmd.env("LIBREFANG_AGENT_ID", id);
+            }
+        }
+        if let Some(ref sid) = request.session_id {
+            if !sid.is_empty() {
+                cmd.env("LIBREFANG_SESSION_ID", sid);
+            }
+        }
+        if let Some(ref step) = request.step_id {
+            if !step.is_empty() {
+                cmd.env("LIBREFANG_STEP_ID", step);
+            }
+        }
     }
 
     /// Create a new Claude Code driver with a custom timeout.
@@ -598,6 +636,9 @@ impl LlmDriver for ClaudeCodeDriver {
         if let Some(ref dir) = self.config_dir {
             cmd.env("CLAUDE_CONFIG_DIR", dir);
         }
+        if self.emit_caller_trace_headers {
+            Self::apply_caller_trace_envs(&mut cmd, &request);
+        }
 
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
@@ -850,6 +891,9 @@ impl LlmDriver for ClaudeCodeDriver {
         Self::apply_env_filter(&mut cmd);
         if let Some(ref dir) = self.config_dir {
             cmd.env("CLAUDE_CONFIG_DIR", dir);
+        }
+        if self.emit_caller_trace_headers {
+            Self::apply_caller_trace_envs(&mut cmd, &request);
         }
 
         cmd.stdout(std::process::Stdio::piped());
@@ -1662,6 +1706,101 @@ mod tests {
         let dir = make_claude_tmp_dir("empty");
         assert!(!claude_credentials_in_dir(&dir));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_caller_trace_envs_set_when_flag_on() {
+        // apply_caller_trace_envs must set all three vars when all IDs are present.
+        let mut cmd = tokio::process::Command::new("echo");
+        let request = CompletionRequest {
+            model: "claude-code/sonnet".to_string(),
+            messages: std::sync::Arc::new(vec![]),
+            tools: std::sync::Arc::new(vec![]),
+            max_tokens: 1,
+            temperature: 0.0,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: Some("agent-abc".to_string()),
+            session_id: Some("sess-xyz".to_string()),
+            step_id: Some("step-001".to_string()),
+        };
+        ClaudeCodeDriver::apply_caller_trace_envs(&mut cmd, &request);
+        let envs: std::collections::HashMap<_, _> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| {
+                v.map(|v| {
+                    (
+                        k.to_string_lossy().to_string(),
+                        v.to_string_lossy().to_string(),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            envs.get("LIBREFANG_AGENT_ID").map(|s| s.as_str()),
+            Some("agent-abc")
+        );
+        assert_eq!(
+            envs.get("LIBREFANG_SESSION_ID").map(|s| s.as_str()),
+            Some("sess-xyz")
+        );
+        assert_eq!(
+            envs.get("LIBREFANG_STEP_ID").map(|s| s.as_str()),
+            Some("step-001")
+        );
+    }
+
+    #[test]
+    fn test_caller_trace_envs_absent_when_flag_off() {
+        // When emit_caller_trace_headers is false the driver must not inject any
+        // LIBREFANG_* env vars onto the subprocess command.
+        let driver = ClaudeCodeDriver::new(None, false).with_emit_caller_trace_headers(false);
+        assert!(!driver.emit_caller_trace_headers);
+    }
+
+    #[test]
+    fn test_caller_trace_envs_skips_empty_values() {
+        // None / empty IDs must not produce empty env var entries.
+        let mut cmd = tokio::process::Command::new("echo");
+        let request = CompletionRequest {
+            model: "claude-code/sonnet".to_string(),
+            messages: std::sync::Arc::new(vec![]),
+            tools: std::sync::Arc::new(vec![]),
+            max_tokens: 1,
+            temperature: 0.0,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+            session_id: Some(String::new()),
+            step_id: None,
+        };
+        ClaudeCodeDriver::apply_caller_trace_envs(&mut cmd, &request);
+        let envs: std::collections::HashMap<_, _> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| {
+                v.map(|v| {
+                    (
+                        k.to_string_lossy().to_string(),
+                        v.to_string_lossy().to_string(),
+                    )
+                })
+            })
+            .collect();
+        assert!(!envs.contains_key("LIBREFANG_AGENT_ID"));
+        assert!(!envs.contains_key("LIBREFANG_SESSION_ID"));
+        assert!(!envs.contains_key("LIBREFANG_STEP_ID"));
     }
 
     #[test]
