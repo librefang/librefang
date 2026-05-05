@@ -432,6 +432,10 @@ _338 PRs from 7 contributors since v2026.4.28-beta7._
 - **Outbound `[channels.webhook] callback_url` is SSRF-guarded.** Adapters refuse to start if the URL resolves to a private (`10/8`, `172.16/12`, `192.168/16`), CGN (`100.64/10`), loopback (`127/8`, `::1`), link-local, multicast, or cloud-metadata range. Catches IPv6 short forms like `[::]`, IPv4-mapped (`[::ffff:127.0.0.1]`), NAT64, and trailing-dot FQDNs. **Action required**: local dev setups using `callback_url = "http://127.0.0.1/..."` must switch to a public tunnel (ngrok, cloudflared) or omit `callback_url`. (#3942)
 - **BREAKING**: `require_auth_for_reads` now defaults to *enabled* whenever any form of authentication is configured (`api_key`, `user_api_keys`, or dashboard credentials). Previously the flag had to be set explicitly, leaving read endpoints open even on instances with an `api_key`. Operators who deliberately want open reads on an authenticated instance (e.g. behind a trusted reverse proxy) must now set `require_auth_for_reads = false` in `config.toml`. A boot-time INFO log records when the flag is auto-enabled. (#2448)
 
+### Quality
+
+- CI Test job split into **Unit** (`lib+bin`, ~2 min, single Ubuntu runner) and **Integration** (`--tests`, sharded across 4 Ubuntu shards + macOS + Windows). Unit failures now surface in ~2 min without waiting for the full integration matrix. Local fast iteration: `cargo nextest run --workspace --lib --bins`. Full validation: `cargo nextest run --workspace --no-fail-fast`. Closes #3696. (@houko)
+
 ### Maintenance
 
 - Wire `cargo xtask integration-test` into CI as a `live-integration-smoke` job — spawns a real `target/debug/librefang start` daemon on every PR touching Rust or CI files, hits `/api/health`, `/api/agents`, `/api/budget`, `/api/network/status`, and SIGTERMs. Catches the failure modes the in-process integration tests miss (route not registered in `server.rs`, daemon failing to bind, config fields not deserializing). Runs with `--skip-llm` to keep the gate hermetic; the live-LLM branch is reserved for the release/nightly workflow that has provider keys. (#3405) (@houko)

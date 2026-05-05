@@ -91,6 +91,24 @@ cargo clippy --workspace --all-targets -- -D warnings  # Zero warnings
 cargo test -p <crate>                                  # Only when verifying behavior in one crate
 ```
 
+### CI test lanes (refs #3696)
+
+CI splits tests into two separate jobs so a unit failure surfaces quickly:
+
+- **Unit-fast** (`Test / Unit (lib+bin)`, ~2 min): `cargo nextest run --workspace --lib --bins --no-fail-fast`
+  — lib and binary unit tests only; no integration test binaries. Run this locally for quick iteration.
+- **Integration** (`Test / Ubuntu (shard N/4)`, ~10-20 min): sharded across 4 Ubuntu runners via
+  `--partition hash:N/4`; also single jobs on macOS and Windows. Runs all `--tests` targets.
+
+Local equivalents:
+```bash
+# Fast lane — unit tests only:
+cargo nextest run --workspace --lib --bins --no-fail-fast
+
+# Full validation — integration tests (mirrors the Ubuntu shard lane):
+cargo nextest run --workspace --no-fail-fast
+```
+
 ## MANDATORY: Integration Testing (refs #3721)
 
 **Primary verification is automated.** The repo has comprehensive
