@@ -78,6 +78,20 @@ async fn boot(api_key: &str) -> Harness {
     }
 }
 
+/// Agents the test suite explicitly spawned, excluding the default
+/// `assistant` that `LibreFangKernel::boot_with_config` auto-creates on
+/// a fresh registry. This lets per-test assertions count side-effects
+/// without being perturbed by the bootstrap agent.
+fn test_spawned_agents(h: &Harness) -> Vec<librefang_types::agent::AgentEntry> {
+    h.state
+        .kernel
+        .agent_registry()
+        .list()
+        .into_iter()
+        .filter(|a| a.name != "assistant")
+        .collect()
+}
+
 fn manifest_body(name: &str) -> serde_json::Value {
     let manifest_toml = format!(
         r#"
@@ -140,7 +154,11 @@ async fn spawn_without_idempotency_key_is_unchanged() {
     // fire on the duplicate name. Either way the spawn count is > 1
     // attempts; the point is that the legacy behaviour is preserved
     // when the header is absent.
-    let agents_after = h.state.kernel.agent_registry().list();
+    //
+    // `boot()` auto-spawns a default `assistant` agent on a fresh kernel
+    // (kernel/mod.rs `if registry.list().is_empty() { spawn assistant }`),
+    // so we filter to count only the agents this test explicitly created.
+    let agents_after = test_spawned_agents(&h);
     assert_eq!(agents_after.len(), 1);
 }
 
@@ -161,7 +179,7 @@ async fn spawn_with_idempotency_key_replays_response() {
 
     assert_eq!(id1, id2, "replay must echo original agent_id");
 
-    let agents = h.state.kernel.agent_registry().list();
+    let agents = test_spawned_agents(&h);
     assert_eq!(
         agents.len(),
         1,
@@ -199,7 +217,7 @@ async fn spawn_with_reused_key_different_body_is_409() {
 
     // Side-effect check: the second request must NOT have spawned an
     // agent. Only the original agent exists.
-    let agents = h.state.kernel.agent_registry().list();
+    let agents = test_spawned_agents(&h);
     assert_eq!(agents.len(), 1);
 }
 

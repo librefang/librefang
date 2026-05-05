@@ -2158,6 +2158,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         self.kernel
             .send_channel_message(channel_type, recipient, message, thread_id, None)
             .await
+            .map_err(|e| e.to_string())
     }
 
     fn channels_download_dir(&self) -> Option<std::path::PathBuf> {

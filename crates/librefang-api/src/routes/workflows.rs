@@ -1956,7 +1956,12 @@ pub async fn create_cron_job(
                 serde_json::from_str(&result).unwrap_or(serde_json::json!({"id": result}));
             (StatusCode::CREATED, Json(parsed))
         }
-        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple(),
+        // #3541: route structured KernelOpError through the centralized
+        // From impl so the status-code contract is consistent across all
+        // routes. The earlier inline match mapped `Unavailable` to 500
+        // (should be 503) and `Other` to 400 (should be 500), both fixed
+        // here because the From impl is the single source of truth.
+        Err(e) => ApiErrorResponse::from(e).into_json_tuple(),
     }
 }
 

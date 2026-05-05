@@ -3073,7 +3073,14 @@ mod tests {
         ///      providers reject pending tool calls).
         ///   2. Every ToolResult retained references a ToolUse id that is
         ///      also present in the output (no orphan ToolResult).
-        ///   3. No duplicate ToolResult tool_use_ids in the output.
+        ///   3. No duplicate ToolResult tool_use_ids **for ids that occur in
+        ///      a single assistant turn**. Ids that span multiple assistant
+        ///      turns (Moonshot/Kimi reuse per-completion counters like
+        ///      `memory_store:6`, see `deduplicate_tool_results` and the
+        ///      `reorder_preserves_per_turn_synthetic_when_tool_id_collides_across_turns`
+        ///      regression test) are explicitly preserved by the repair
+        ///      pipeline so each turn keeps its own ToolResult; the
+        ///      duplicate ids in that case are by design, not a bug.
         ///
         /// Input is a random `Vec<Message>` (length 0..=30) drawn from a
         /// strategy that deliberately mixes orphan ToolUses, orphan
@@ -3115,9 +3122,34 @@ mod tests {
                 );
             }
 
-            // Invariant 3: no duplicate ToolResult tool_use_ids.
+            // Invariant 3: no duplicate ToolResult tool_use_ids — except
+            // for ids that occur in more than one assistant turn (the
+            // Moonshot/Kimi per-completion-counter reuse case the
+            // `deduplicate_tool_results` collision_ids escape preserves).
+            // Mirror the production logic: count assistant turns per id;
+            // ids seen in >1 turn are positional duplicates by design and
+            // each turn legitimately carries its own ToolResult.
+            let mut tool_use_turn_count: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for m in &output {
+                if m.role != Role::Assistant {
+                    continue;
+                }
+                if let MessageContent::Blocks(blocks) = &m.content {
+                    for b in blocks {
+                        if let ContentBlock::ToolUse { id, .. } = b {
+                            *tool_use_turn_count.entry(id.clone()).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
             let mut seen = std::collections::HashSet::new();
             for rid in &result_ids {
+                if tool_use_turn_count.get(rid).copied().unwrap_or(0) > 1 {
+                    // Cross-turn collision is intentional (Moonshot reuse) —
+                    // skip the uniqueness check for these ids.
+                    continue;
+                }
                 prop_assert!(
                     seen.insert(rid.clone()),
                     "duplicate ToolResult id={rid:?} in output={output:?}"

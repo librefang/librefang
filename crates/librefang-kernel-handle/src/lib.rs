@@ -28,6 +28,88 @@
 //! atomically.
 
 use async_trait::async_trait;
+use thiserror::Error;
+
+// ============================================================================
+// Typed kernel-op errors (#3541 1/N)
+// ============================================================================
+//
+// Historically every method on the role traits returned `Result<_, String>`.
+// That destroyed structured error information at the most-trafficked seam
+// between runtime and kernel — callers resorted to substring-matching on the
+// formatted message (`.contains("not found")`) to map back to user-visible
+// categories. This enum is the typed replacement; new methods adopt it, and
+// existing ones migrate one role trait at a time.
+//
+// Variants are deliberately *categories*, not "one variant per call site":
+// callers should be able to do `match err { Unavailable { .. } => 503,
+// NotFound { .. } => 404, .. }` without having to enumerate every kernel
+// internal. `Other(String)` is the temporary catch-all for un-classified
+// failures from the kernel implementation; reduce its use as PRs migrate
+// individual paths.
+//
+// Display strings stay close to the original `format!` outputs so
+// log lines and translated UI messages don't drift on first migration.
+#[derive(Debug, Error)]
+pub enum KernelOpError {
+    /// The capability is wired off in this build / configuration. Maps to
+    /// HTTP 503 Service Unavailable. Replaces the historical
+    /// `Err("X not available".into())` pattern that role-trait default impls
+    /// emit.
+    #[error("{capability} not available")]
+    Unavailable { capability: &'static str },
+
+    /// The targeted entity (agent, task, job, …) does not exist. Maps to
+    /// HTTP 404. Includes the entity *kind* and *id* so callers can surface
+    /// both without parsing the error message.
+    #[error("{kind} `{id}` not found")]
+    NotFound { kind: &'static str, id: String },
+
+    /// Caller-supplied input failed validation before the operation was
+    /// attempted. Maps to HTTP 400. The `field` is the *machine* name of
+    /// the field; `reason` is the human-readable cause.
+    #[error("invalid {field}: {reason}")]
+    Invalid { field: &'static str, reason: String },
+
+    /// JSON / TOML serialization failed. Distinct from `Invalid` because
+    /// these failures originate inside the kernel (re-encoding internal
+    /// state for the wire), not from caller input.
+    #[error("serialize failed: {0}")]
+    Serialize(#[from] serde_json::Error),
+
+    /// Catch-all for kernel-side failures that haven't been classified into
+    /// a typed variant yet. Each migration PR should reduce the population
+    /// of this variant by adding a more specific one above. **Not for
+    /// caller-input errors** — use `Invalid` for those.
+    #[error("{0}")]
+    Other(String),
+}
+
+impl KernelOpError {
+    /// Build the historical `"X not available"` payload as a typed
+    /// `Unavailable` variant. Used by role-trait default impls to keep the
+    /// "missing capability returns Err at first call" contract while
+    /// upgrading the error type. Callers can match on `Unavailable` instead
+    /// of substring-matching on `.to_string()`.
+    pub const fn unavailable(capability: &'static str) -> Self {
+        KernelOpError::Unavailable { capability }
+    }
+}
+
+// String → KernelOpError::Other for ergonomics during the migration window.
+// Kernel impls that still produce `String` errors can `.map_err(Into::into)`
+// without spelling out a variant. New code SHOULD prefer a typed variant.
+impl From<String> for KernelOpError {
+    fn from(s: String) -> Self {
+        KernelOpError::Other(s)
+    }
+}
+
+impl From<&str> for KernelOpError {
+    fn from(s: &str) -> Self {
+        KernelOpError::Other(s.to_string())
+    }
+}
 
 /// Agent info returned by list and discovery operations.
 #[derive(Debug, Clone)]
@@ -57,7 +139,7 @@ pub trait AgentControl: Send + Sync {
         &self,
         manifest_toml: &str,
         parent_id: Option<&str>,
-    ) -> Result<(String, String), String>;
+    ) -> Result<(String, String), KernelOpError>;
 
     /// Spawn an agent with capability inheritance enforcement.
     /// `parent_caps` are the parent's granted capabilities. The kernel MUST verify
@@ -67,7 +149,7 @@ pub trait AgentControl: Send + Sync {
         manifest_toml: &str,
         parent_id: Option<&str>,
         parent_caps: &[librefang_types::capability::Capability],
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String), KernelOpError> {
         // Default: delegate to spawn_agent (no enforcement)
         // The kernel MUST override this with real enforcement
         let _ = parent_caps;
@@ -75,7 +157,7 @@ pub trait AgentControl: Send + Sync {
     }
 
     /// Send a message to another agent and get the response.
-    async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, String>;
+    async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, KernelOpError>;
 
     /// Like [`send_to_agent`](Self::send_to_agent), but records that the
     /// call was made on behalf of `parent_agent_id`, so a `/stop` issued to
@@ -88,7 +170,7 @@ pub trait AgentControl: Send + Sync {
         agent_id: &str,
         message: &str,
         parent_agent_id: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, KernelOpError> {
         tracing::trace!(
             agent = %agent_id,
             parent = %parent_agent_id,
@@ -101,7 +183,7 @@ pub trait AgentControl: Send + Sync {
     fn list_agents(&self) -> Vec<AgentInfo>;
 
     /// Kill an agent by ID.
-    fn kill_agent(&self, agent_id: &str) -> Result<(), String>;
+    fn kill_agent(&self, agent_id: &str) -> Result<(), KernelOpError>;
 
     /// Find agents by query (matches on name substring, tag, or tool name; case-insensitive).
     fn find_agents(&self, query: &str) -> Vec<AgentInfo>;
@@ -142,8 +224,8 @@ pub trait AgentControl: Send + Sync {
         _agent_id: &str,
         _prompt: &str,
         _allowed_tools: Option<Vec<String>>,
-    ) -> Result<String, String> {
-        Err("run_forked_agent_oneshot not available in this handle".to_string())
+    ) -> Result<String, KernelOpError> {
+        Err(KernelOpError::unavailable("run_forked_agent_oneshot"))
     }
 
     /// Maximum inter-agent call depth (from config). Default: 5.
@@ -165,7 +247,7 @@ pub trait MemoryAccess: Send + Sync {
         key: &str,
         value: serde_json::Value,
         peer_id: Option<&str>,
-    ) -> Result<(), String>;
+    ) -> Result<(), KernelOpError>;
 
     /// Recall a value from shared memory.
     /// When `peer_id` is `Some`, only returns values stored under that peer's namespace.
@@ -173,11 +255,11 @@ pub trait MemoryAccess: Send + Sync {
         &self,
         key: &str,
         peer_id: Option<&str>,
-    ) -> Result<Option<serde_json::Value>, String>;
+    ) -> Result<Option<serde_json::Value>, KernelOpError>;
 
     /// List all keys in shared memory.
     /// When `peer_id` is `Some`, only returns keys within that peer's namespace.
-    fn memory_list(&self, peer_id: Option<&str>) -> Result<Vec<String>, String>;
+    fn memory_list(&self, peer_id: Option<&str>) -> Result<Vec<String>, KernelOpError>;
 
     /// Resolve the per-user memory ACL for the given sender + channel
     /// pair (RBAC M3, #3054 Phase 2). Returns the resolved
@@ -214,10 +296,10 @@ pub trait TaskQueue: Send + Sync {
         description: &str,
         assigned_to: Option<&str>,
         created_by: Option<&str>,
-    ) -> Result<String, String>;
+    ) -> Result<String, KernelOpError>;
 
     /// Claim the next available task (optionally filtered by assignee). Returns task JSON or None.
-    async fn task_claim(&self, agent_id: &str) -> Result<Option<serde_json::Value>, String>;
+    async fn task_claim(&self, agent_id: &str) -> Result<Option<serde_json::Value>, KernelOpError>;
 
     /// Mark a task as completed with a result string. `agent_id` identifies the completer.
     async fn task_complete(
@@ -225,23 +307,30 @@ pub trait TaskQueue: Send + Sync {
         agent_id: &str,
         task_id: &str,
         result: &str,
-    ) -> Result<(), String>;
+    ) -> Result<(), KernelOpError>;
 
     /// List tasks, optionally filtered by status.
-    async fn task_list(&self, status: Option<&str>) -> Result<Vec<serde_json::Value>, String>;
+    async fn task_list(
+        &self,
+        status: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, KernelOpError>;
 
     /// Delete a task by ID. Returns true if deleted.
-    async fn task_delete(&self, task_id: &str) -> Result<bool, String>;
+    async fn task_delete(&self, task_id: &str) -> Result<bool, KernelOpError>;
 
     /// Retry a task by resetting it to pending. Returns true if reset.
-    async fn task_retry(&self, task_id: &str) -> Result<bool, String>;
+    async fn task_retry(&self, task_id: &str) -> Result<bool, KernelOpError>;
 
     /// Get a single task by ID including its result and retry_count.
-    async fn task_get(&self, task_id: &str) -> Result<Option<serde_json::Value>, String>;
+    async fn task_get(&self, task_id: &str) -> Result<Option<serde_json::Value>, KernelOpError>;
 
     /// Update a task's status to `pending` (reset) or `cancelled`.
     /// Returns true if the task was found and updated.
-    async fn task_update_status(&self, task_id: &str, new_status: &str) -> Result<bool, String>;
+    async fn task_update_status(
+        &self,
+        task_id: &str,
+        new_status: &str,
+    ) -> Result<bool, KernelOpError>;
 }
 
 // ============================================================================
@@ -255,7 +344,7 @@ pub trait EventBus: Send + Sync {
         &self,
         event_type: &str,
         payload: serde_json::Value,
-    ) -> Result<(), String>;
+    ) -> Result<(), KernelOpError>;
 }
 
 // ============================================================================
@@ -275,7 +364,7 @@ pub trait KnowledgeGraph: Send + Sync {
     async fn knowledge_add_entity(
         &self,
         entity: &librefang_types::memory::Entity,
-    ) -> Result<String, String>;
+    ) -> Result<String, KernelOpError>;
 
     /// Add a relation to the knowledge graph.
     ///
@@ -284,13 +373,13 @@ pub trait KnowledgeGraph: Send + Sync {
     async fn knowledge_add_relation(
         &self,
         relation: &librefang_types::memory::Relation,
-    ) -> Result<String, String>;
+    ) -> Result<String, KernelOpError>;
 
     /// Query the knowledge graph with a pattern.
     async fn knowledge_query(
         &self,
         pattern: librefang_types::memory::GraphPattern,
-    ) -> Result<Vec<librefang_types::memory::GraphMatch>, String>;
+    ) -> Result<Vec<librefang_types::memory::GraphMatch>, KernelOpError>;
 }
 
 // ============================================================================
@@ -304,21 +393,21 @@ pub trait CronControl: Send + Sync {
         &self,
         agent_id: &str,
         job_json: serde_json::Value,
-    ) -> Result<String, String> {
+    ) -> Result<String, KernelOpError> {
         let _ = (agent_id, job_json);
-        Err("Cron scheduler not available".to_string())
+        Err(KernelOpError::unavailable("Cron scheduler"))
     }
 
     /// List cron jobs for the calling agent.
-    async fn cron_list(&self, agent_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    async fn cron_list(&self, agent_id: &str) -> Result<Vec<serde_json::Value>, KernelOpError> {
         let _ = agent_id;
-        Err("Cron scheduler not available".to_string())
+        Err(KernelOpError::unavailable("Cron scheduler"))
     }
 
     /// Cancel a cron job by ID.
-    async fn cron_cancel(&self, job_id: &str) -> Result<(), String> {
+    async fn cron_cancel(&self, job_id: &str) -> Result<(), KernelOpError> {
         let _ = job_id;
-        Err("Cron scheduler not available".to_string())
+        Err(KernelOpError::unavailable("Cron scheduler"))
     }
 }
 
@@ -394,7 +483,7 @@ pub trait ApprovalGate: Send + Sync {
         tool_name: &str,
         action_summary: &str,
         session_id: Option<&str>,
-    ) -> Result<librefang_types::approval::ApprovalDecision, String> {
+    ) -> Result<librefang_types::approval::ApprovalDecision, KernelOpError> {
         let _ = (agent_id, tool_name, action_summary, session_id);
         Ok(librefang_types::approval::ApprovalDecision::Approved)
     }
@@ -407,9 +496,9 @@ pub trait ApprovalGate: Send + Sync {
         action_summary: &str,
         deferred: librefang_types::tool::DeferredToolExecution,
         session_id: Option<&str>,
-    ) -> Result<librefang_types::tool::ToolApprovalSubmission, String> {
+    ) -> Result<librefang_types::tool::ToolApprovalSubmission, KernelOpError> {
         let _ = (agent_id, tool_name, action_summary, deferred, session_id);
-        Err("Approval system not available".to_string())
+        Err(KernelOpError::unavailable("Approval system"))
     }
 
     /// Resolve an approval request and get the deferred payload.
@@ -425,17 +514,17 @@ pub trait ApprovalGate: Send + Sync {
             librefang_types::approval::ApprovalResponse,
             Option<librefang_types::tool::DeferredToolExecution>,
         ),
-        String,
+        KernelOpError,
     > {
         let _ = (request_id, decision, decided_by, totp_verified, user_id);
-        Err("Approval system not available".to_string())
+        Err(KernelOpError::unavailable("Approval system"))
     }
 
     /// Check current status of an approval request.
     fn get_approval_status(
         &self,
         request_id: uuid::Uuid,
-    ) -> Result<Option<librefang_types::approval::ApprovalDecision>, String> {
+    ) -> Result<Option<librefang_types::approval::ApprovalDecision>, KernelOpError> {
         let _ = request_id;
         Ok(None)
     }
@@ -448,8 +537,8 @@ pub trait ApprovalGate: Send + Sync {
 #[async_trait]
 pub trait HandsControl: Send + Sync {
     /// List available Hands and their activation status.
-    async fn hand_list(&self) -> Result<Vec<serde_json::Value>, String> {
-        Err("Hands system not available".to_string())
+    async fn hand_list(&self) -> Result<Vec<serde_json::Value>, KernelOpError> {
+        Err(KernelOpError::unavailable("Hands system"))
     }
 
     /// Install a Hand from TOML content.
@@ -457,9 +546,9 @@ pub trait HandsControl: Send + Sync {
         &self,
         toml_content: &str,
         skill_content: &str,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, KernelOpError> {
         let _ = (toml_content, skill_content);
-        Err("Hands system not available".to_string())
+        Err(KernelOpError::unavailable("Hands system"))
     }
 
     /// Activate a Hand — spawns a specialized autonomous agent.
@@ -467,21 +556,21 @@ pub trait HandsControl: Send + Sync {
         &self,
         hand_id: &str,
         config: std::collections::HashMap<String, serde_json::Value>,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, KernelOpError> {
         let _ = (hand_id, config);
-        Err("Hands system not available".to_string())
+        Err(KernelOpError::unavailable("Hands system"))
     }
 
     /// Check the status and dashboard metrics of an active Hand.
-    async fn hand_status(&self, hand_id: &str) -> Result<serde_json::Value, String> {
+    async fn hand_status(&self, hand_id: &str) -> Result<serde_json::Value, KernelOpError> {
         let _ = hand_id;
-        Err("Hands system not available".to_string())
+        Err(KernelOpError::unavailable("Hands system"))
     }
 
     /// Deactivate a running Hand and stop its agent.
-    async fn hand_deactivate(&self, instance_id: &str) -> Result<(), String> {
+    async fn hand_deactivate(&self, instance_id: &str) -> Result<(), KernelOpError> {
         let _ = instance_id;
-        Err("Hands system not available".to_string())
+        Err(KernelOpError::unavailable("Hands system"))
     }
 }
 
@@ -519,9 +608,9 @@ pub trait ChannelSender: Send + Sync {
         message: &str,
         thread_id: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, KernelOpError> {
         let _ = (channel, recipient, message, thread_id, account_id);
-        Err("Channel send not available".to_string())
+        Err(KernelOpError::unavailable("Channel send"))
     }
 
     /// Send media content (image/file) to a user on a named channel adapter.
@@ -539,11 +628,11 @@ pub trait ChannelSender: Send + Sync {
         filename: Option<&str>,
         thread_id: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, KernelOpError> {
         let _ = (
             channel, recipient, media_type, media_url, caption, filename, thread_id, account_id,
         );
-        Err("Channel media send not available".to_string())
+        Err(KernelOpError::unavailable("Channel media send"))
     }
 
     /// Send a local file (raw bytes) to a user on a named channel adapter.
@@ -566,11 +655,11 @@ pub trait ChannelSender: Send + Sync {
         mime_type: &str,
         thread_id: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, KernelOpError> {
         let _ = (
             channel, recipient, data, filename, mime_type, thread_id, account_id,
         );
-        Err("Channel file data send not available".to_string())
+        Err(KernelOpError::unavailable("Channel file data send"))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -584,7 +673,7 @@ pub trait ChannelSender: Send + Sync {
         correct_option_id: Option<u8>,
         explanation: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), KernelOpError> {
         let _ = (
             channel,
             recipient,
@@ -595,7 +684,7 @@ pub trait ChannelSender: Send + Sync {
             explanation,
             account_id,
         );
-        Err("Channel poll send not available".to_string())
+        Err(KernelOpError::unavailable("Channel poll send"))
     }
 
     /// Upsert a group roster member (channel bridge → persistent storage).
@@ -606,7 +695,7 @@ pub trait ChannelSender: Send + Sync {
         _user_id: &str,
         _display_name: &str,
         _username: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), KernelOpError> {
         Ok(())
     }
 
@@ -615,7 +704,7 @@ pub trait ChannelSender: Send + Sync {
         &self,
         _channel: &str,
         _chat_id: &str,
-    ) -> Result<Vec<serde_json::Value>, String> {
+    ) -> Result<Vec<serde_json::Value>, KernelOpError> {
         Ok(Vec::new())
     }
 
@@ -625,7 +714,7 @@ pub trait ChannelSender: Send + Sync {
         _channel: &str,
         _chat_id: &str,
         _user_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), KernelOpError> {
         Ok(())
     }
 }
@@ -639,7 +728,7 @@ pub trait PromptStore: Send + Sync {
     fn get_running_experiment(
         &self,
         _agent_id: &str,
-    ) -> Result<Option<librefang_types::agent::PromptExperiment>, String> {
+    ) -> Result<Option<librefang_types::agent::PromptExperiment>, KernelOpError> {
         Ok(None)
     }
 
@@ -651,7 +740,7 @@ pub trait PromptStore: Send + Sync {
         _latency_ms: u64,
         _cost_usd: f64,
         _success: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), KernelOpError> {
         Ok(())
     }
 
@@ -659,7 +748,7 @@ pub trait PromptStore: Send + Sync {
     fn get_prompt_version(
         &self,
         _version_id: &str,
-    ) -> Result<Option<librefang_types::agent::PromptVersion>, String> {
+    ) -> Result<Option<librefang_types::agent::PromptVersion>, KernelOpError> {
         Ok(None)
     }
 
@@ -667,7 +756,7 @@ pub trait PromptStore: Send + Sync {
     fn list_prompt_versions(
         &self,
         _agent_id: librefang_types::agent::AgentId,
-    ) -> Result<Vec<librefang_types::agent::PromptVersion>, String> {
+    ) -> Result<Vec<librefang_types::agent::PromptVersion>, KernelOpError> {
         Ok(Vec::new())
     }
 
@@ -679,25 +768,29 @@ pub trait PromptStore: Send + Sync {
     fn create_prompt_version(
         &self,
         _version: &librefang_types::agent::PromptVersion,
-    ) -> Result<(), String> {
-        Err("Prompt store not available".to_string())
+    ) -> Result<(), KernelOpError> {
+        Err(KernelOpError::unavailable("Prompt store"))
     }
 
     /// Delete a prompt version. Default: error.
-    fn delete_prompt_version(&self, _version_id: &str) -> Result<(), String> {
-        Err("Prompt store not available".to_string())
+    fn delete_prompt_version(&self, _version_id: &str) -> Result<(), KernelOpError> {
+        Err(KernelOpError::unavailable("Prompt store"))
     }
 
     /// Set a prompt version as active. Default: error.
-    fn set_active_prompt_version(&self, _version_id: &str, _agent_id: &str) -> Result<(), String> {
-        Err("Prompt store not available".to_string())
+    fn set_active_prompt_version(
+        &self,
+        _version_id: &str,
+        _agent_id: &str,
+    ) -> Result<(), KernelOpError> {
+        Err(KernelOpError::unavailable("Prompt store"))
     }
 
     /// List all experiments for an agent. Default: empty vec.
     fn list_experiments(
         &self,
         _agent_id: librefang_types::agent::AgentId,
-    ) -> Result<Vec<librefang_types::agent::PromptExperiment>, String> {
+    ) -> Result<Vec<librefang_types::agent::PromptExperiment>, KernelOpError> {
         Ok(Vec::new())
     }
 
@@ -708,15 +801,15 @@ pub trait PromptStore: Send + Sync {
     fn create_experiment(
         &self,
         _experiment: &librefang_types::agent::PromptExperiment,
-    ) -> Result<(), String> {
-        Err("Prompt store not available".to_string())
+    ) -> Result<(), KernelOpError> {
+        Err(KernelOpError::unavailable("Prompt store"))
     }
 
     /// Get an experiment by ID. Default: None.
     fn get_experiment(
         &self,
         _experiment_id: &str,
-    ) -> Result<Option<librefang_types::agent::PromptExperiment>, String> {
+    ) -> Result<Option<librefang_types::agent::PromptExperiment>, KernelOpError> {
         Ok(None)
     }
 
@@ -725,15 +818,15 @@ pub trait PromptStore: Send + Sync {
         &self,
         _experiment_id: &str,
         _status: librefang_types::agent::ExperimentStatus,
-    ) -> Result<(), String> {
-        Err("Prompt store not available".to_string())
+    ) -> Result<(), KernelOpError> {
+        Err(KernelOpError::unavailable("Prompt store"))
     }
 
     /// Get experiment metrics. Default: empty vec.
     fn get_experiment_metrics(
         &self,
         _experiment_id: &str,
-    ) -> Result<Vec<librefang_types::agent::ExperimentVariantMetrics>, String> {
+    ) -> Result<Vec<librefang_types::agent::ExperimentVariantMetrics>, KernelOpError> {
         Ok(Vec::new())
     }
 
@@ -742,7 +835,7 @@ pub trait PromptStore: Send + Sync {
         &self,
         _agent_id: librefang_types::agent::AgentId,
         _system_prompt: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), KernelOpError> {
         Ok(())
     }
 }
@@ -760,9 +853,9 @@ pub trait WorkflowRunner: Send + Sync {
         &self,
         workflow_id: &str,
         input: &str,
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String), KernelOpError> {
         let _ = (workflow_id, input);
-        Err("Workflow engine not available".to_string())
+        Err(KernelOpError::unavailable("Workflow engine"))
     }
 }
 
@@ -773,7 +866,10 @@ pub trait WorkflowRunner: Send + Sync {
 pub trait GoalControl: Send + Sync {
     /// List active goals (pending or in_progress), optionally filtered by agent ID.
     /// Returns a JSON array of goal objects.
-    fn goal_list_active(&self, _agent_id: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    fn goal_list_active(
+        &self,
+        _agent_id: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, KernelOpError> {
         Ok(Vec::new())
     }
 
@@ -783,8 +879,8 @@ pub trait GoalControl: Send + Sync {
         _goal_id: &str,
         _status: Option<&str>,
         _progress: Option<u8>,
-    ) -> Result<serde_json::Value, String> {
-        Err("Goal system not available".to_string())
+    ) -> Result<serde_json::Value, KernelOpError> {
+        Err(KernelOpError::unavailable("Goal system"))
     }
 }
 
@@ -944,17 +1040,21 @@ mod tests {
             &self,
             _manifest_toml: &str,
             _parent_id: Option<&str>,
-        ) -> Result<(String, String), String> {
-            Err("stub".to_string())
+        ) -> Result<(String, String), super::KernelOpError> {
+            Err("stub".into())
         }
-        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
-            Err("stub".to_string())
+        async fn send_to_agent(
+            &self,
+            _agent_id: &str,
+            _message: &str,
+        ) -> Result<String, super::KernelOpError> {
+            Err("stub".into())
         }
         fn list_agents(&self) -> Vec<AgentInfo> {
             vec![]
         }
-        fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
-            Err("stub".to_string())
+        fn kill_agent(&self, _agent_id: &str) -> Result<(), super::KernelOpError> {
+            Err("stub".into())
         }
         fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
             vec![]
@@ -967,17 +1067,17 @@ mod tests {
             _key: &str,
             _value: serde_json::Value,
             _peer_id: Option<&str>,
-        ) -> Result<(), String> {
-            Err("stub".to_string())
+        ) -> Result<(), super::KernelOpError> {
+            Err("stub".into())
         }
         fn memory_recall(
             &self,
             _key: &str,
             _peer_id: Option<&str>,
-        ) -> Result<Option<serde_json::Value>, String> {
+        ) -> Result<Option<serde_json::Value>, super::KernelOpError> {
             Ok(None)
         }
-        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
+        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, super::KernelOpError> {
             Ok(vec![])
         }
     }
@@ -990,10 +1090,13 @@ mod tests {
             _description: &str,
             _assigned_to: Option<&str>,
             _created_by: Option<&str>,
-        ) -> Result<String, String> {
-            Err("stub".to_string())
+        ) -> Result<String, super::KernelOpError> {
+            Err("stub".into())
         }
-        async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
+        async fn task_claim(
+            &self,
+            _agent_id: &str,
+        ) -> Result<Option<serde_json::Value>, super::KernelOpError> {
             Ok(None)
         }
         async fn task_complete(
@@ -1001,26 +1104,32 @@ mod tests {
             _agent_id: &str,
             _task_id: &str,
             _result: &str,
-        ) -> Result<(), String> {
-            Err("stub".to_string())
+        ) -> Result<(), super::KernelOpError> {
+            Err("stub".into())
         }
-        async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+        async fn task_list(
+            &self,
+            _status: Option<&str>,
+        ) -> Result<Vec<serde_json::Value>, super::KernelOpError> {
             Ok(vec![])
         }
-        async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
+        async fn task_delete(&self, _task_id: &str) -> Result<bool, super::KernelOpError> {
             Ok(false)
         }
-        async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
+        async fn task_retry(&self, _task_id: &str) -> Result<bool, super::KernelOpError> {
             Ok(false)
         }
-        async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
+        async fn task_get(
+            &self,
+            _task_id: &str,
+        ) -> Result<Option<serde_json::Value>, super::KernelOpError> {
             Ok(None)
         }
         async fn task_update_status(
             &self,
             _task_id: &str,
             _new_status: &str,
-        ) -> Result<bool, String> {
+        ) -> Result<bool, super::KernelOpError> {
             Ok(false)
         }
     }
@@ -1031,7 +1140,7 @@ mod tests {
             &self,
             _event_type: &str,
             _payload: serde_json::Value,
-        ) -> Result<(), String> {
+        ) -> Result<(), super::KernelOpError> {
             Ok(())
         }
     }
@@ -1041,19 +1150,19 @@ mod tests {
         async fn knowledge_add_entity(
             &self,
             _entity: &librefang_types::memory::Entity,
-        ) -> Result<String, String> {
-            Err("stub".to_string())
+        ) -> Result<String, super::KernelOpError> {
+            Err("stub".into())
         }
         async fn knowledge_add_relation(
             &self,
             _relation: &librefang_types::memory::Relation,
-        ) -> Result<String, String> {
-            Err("stub".to_string())
+        ) -> Result<String, super::KernelOpError> {
+            Err("stub".into())
         }
         async fn knowledge_query(
             &self,
             _pattern: librefang_types::memory::GraphPattern,
-        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, super::KernelOpError> {
             Ok(vec![])
         }
     }

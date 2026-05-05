@@ -7,6 +7,7 @@ mod bench;
 mod build_timings;
 mod build_web;
 mod changelog;
+mod check_changed;
 mod check_links;
 mod ci;
 mod clean_all;
@@ -89,6 +90,12 @@ enum Command {
     /// Check for broken links in documentation
     CheckLinks(check_links::CheckLinksArgs),
 
+    /// Show which CI lanes a branch's diff would trigger; optionally
+    /// run `cargo check`/`clippy`/`test` against the affected crate set
+    /// (#3296). Mirrors the `changes` job in `.github/workflows/ci.yml`
+    /// so a developer can preview the CI plan locally.
+    CheckChanged(check_changed::CheckChangedArgs),
+
     /// Run criterion benchmarks
     Bench(bench::BenchArgs),
 
@@ -164,6 +171,7 @@ fn main() {
         Command::Deps(args) => deps::run(args),
         Command::Codegen(args) => codegen::run(args),
         Command::CheckLinks(args) => check_links::run(args),
+        Command::CheckChanged(args) => check_changed::run(args),
         Command::Bench(args) => bench::run(args),
         Command::BuildTimings(args) => build_timings::run_collect(args),
         Command::CompareBuildTimings(args) => build_timings::run_compare(args),

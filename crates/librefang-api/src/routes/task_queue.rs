@@ -11,10 +11,23 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_kernel::kernel_handle::prelude::*;
+use librefang_kernel::kernel_handle::{prelude::*, KernelOpError};
 use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Map a `KernelOpError` from the TaskQueue role-trait to an HTTP-ready
+/// `ApiErrorResponse` (#3541 2/N).
+///
+/// Delegates to the central `From<KernelOpError>` mapping in
+/// `crate::error` so the status-code contract stays in one place:
+/// `NotFound → 404, Invalid → 400, Unavailable → 503, Serialize/Other → 500`.
+/// The earlier inline body mapped `Unavailable` to 500, which contradicted
+/// the documented contract on `KernelOpError::Unavailable` and stripped
+/// retryability semantics from clients.
+fn map_kernel_op_err(err: KernelOpError) -> ApiErrorResponse {
+    ApiErrorResponse::from(err)
+}
 
 /// Build routes for the task-queue domain.
 pub fn router() -> axum::Router<Arc<AppState>> {
@@ -101,7 +114,7 @@ pub async fn task_queue_status(
                 })),
             )
         }
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+        Err(e) => map_kernel_op_err(e).into_json_tuple(),
     }
 }
 
@@ -120,7 +133,7 @@ pub async fn task_queue_list(
                 Json(serde_json::json!({"tasks": tasks, "total": total})),
             )
         }
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+        Err(e) => map_kernel_op_err(e).into_json_tuple(),
     }
 }
 
@@ -137,7 +150,7 @@ pub async fn task_queue_delete(
     match state.kernel.task_delete(&id).await {
         Ok(true) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
         Ok(false) => ApiErrorResponse::not_found(err_task_not_found).into_json_tuple(),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+        Err(e) => map_kernel_op_err(e).into_json_tuple(),
     }
 }
 
@@ -164,7 +177,7 @@ pub async fn task_queue_retry(
                 "error": err_task_not_retryable
             })),
         ),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+        Err(e) => map_kernel_op_err(e).into_json_tuple(),
     }
 }
 
@@ -196,7 +209,7 @@ pub async fn task_queue_list_root(
                 Json(serde_json::json!({"tasks": tasks, "total": total})),
             )
         }
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+        Err(e) => map_kernel_op_err(e).into_json_tuple(),
     }
 }
 
@@ -243,7 +256,7 @@ pub async fn task_queue_post_root(
             StatusCode::CREATED,
             Json(serde_json::json!({"id": task_id, "status": "pending"})),
         ),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+        Err(e) => map_kernel_op_err(e).into_json_tuple(),
     }
 }
 
@@ -260,7 +273,7 @@ pub async fn task_queue_get(
     match state.kernel.task_get(&id).await {
         Ok(Some(task)) => (StatusCode::OK, Json(task)),
         Ok(None) => ApiErrorResponse::not_found(err_not_found).into_json_tuple(),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+        Err(e) => map_kernel_op_err(e).into_json_tuple(),
     }
 }
 
@@ -302,6 +315,6 @@ pub async fn task_queue_patch(
             Json(serde_json::json!({"id": id, "status": new_status})),
         ),
         Ok(false) => ApiErrorResponse::not_found(err_not_found).into_json_tuple(),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+        Err(e) => map_kernel_op_err(e).into_json_tuple(),
     }
 }
