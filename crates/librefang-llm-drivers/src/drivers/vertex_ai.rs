@@ -979,6 +979,7 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         };
         let region = resolve_region(&config);
         assert_eq!(region, "us-central1");
@@ -1000,6 +1001,7 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         };
         let region = resolve_region(&config);
         assert_eq!(region, "europe-west4");

@@ -1682,6 +1682,26 @@ pub struct TelemetryConfig {
     ///
     /// Issue #3136.
     pub auto_start_observability_stack: bool,
+    /// Emit `x-librefang-{agent,session,step}-id` HTTP headers on outbound
+    /// OpenAI-compatible LLM requests so observability sidecars (logging
+    /// gateways, audit proxies, OTel collectors that shape spans from request
+    /// metadata) can correlate request log records to the originating agent /
+    /// session / agent-loop iteration without parsing the JSON body.
+    /// Default: `true`.
+    ///
+    /// Set to `false` to suppress all three headers wire-side regardless of
+    /// whether the kernel populated `CompletionRequest`'s caller-id fields.
+    /// Useful for operators with strict zero-egress policies (regulated
+    /// tenants, EU healthcare) who want no LibreFang-internal identifiers
+    /// crossing the upstream-provider boundary, even though the IDs are
+    /// opaque UUIDs / integers and carry no PII.
+    ///
+    /// Currently consulted only by the OpenAI-compatible driver. Other
+    /// drivers (Anthropic, Gemini, Bedrock, Vertex, ChatGPT, Copilot,
+    /// Claude Code, Codex, Gemini CLI, Qwen Code) do not emit these headers
+    /// today; when they grow per-driver header-emission support, they will
+    /// honour the same flag.
+    pub emit_caller_trace_headers: bool,
 }
 
 impl TelemetryConfig {
@@ -1719,6 +1739,7 @@ impl Default for TelemetryConfig {
             sample_rate: 1.0,
             prometheus_enabled: true,
             auto_start_observability_stack: false,
+            emit_caller_trace_headers: true,
         }
     }
 }

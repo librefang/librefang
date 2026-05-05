@@ -361,3 +361,83 @@ async fn stream_emits_trace_headers_when_set() {
         Some("3"),
     );
 }
+
+/// Operator opt-out (PR #4548 third-round review): when
+/// `KernelConfig.telemetry.emit_caller_trace_headers = false` is plumbed
+/// through `DriverConfig` to `OpenAIDriver::with_emit_caller_trace_headers(false)`,
+/// the three `x-librefang-*` headers must NOT appear on the wire even when the
+/// per-request caller-id fields ARE populated. Other (non-trace) request
+/// behaviour stays unchanged — this is a wire-side suppression only.
+#[tokio::test]
+#[serial_test::serial]
+async fn complete_suppresses_trace_headers_when_emit_flag_disabled() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    let driver = mock_openai_driver(&server).with_emit_caller_trace_headers(false);
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_200_body("ok")))
+        .mount(&server)
+        .await;
+
+    // Caller-id fields are populated; the driver-level opt-out must still suppress.
+    let req = request_with_trace_ids(Some("agent-abc"), Some("sess-xyz"), Some("7"));
+    let result = driver.complete(req).await;
+    assert!(result.is_ok(), "complete should succeed: {result:?}");
+
+    let received = server.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    let headers = &received[0].headers;
+    assert!(
+        headers.get("x-librefang-agent-id").is_none(),
+        "agent-id header must not appear when emit flag is false",
+    );
+    assert!(
+        headers.get("x-librefang-session-id").is_none(),
+        "session-id header must not appear when emit flag is false",
+    );
+    assert!(
+        headers.get("x-librefang-step-id").is_none(),
+        "step-id header must not appear when emit flag is false",
+    );
+}
+
+/// Companion to the suppression test: `extra_headers` set on the driver must
+/// continue to ride out even when the trace-emit flag is off. The opt-out
+/// gates the trace-id namespace, not the operator's own custom headers — an
+/// operator who legitimately put `Authorization` or any other header into
+/// `extra_headers` for, say, a downstream auth shim still expects it on the
+/// wire regardless of how the trace-id flag is configured.
+#[tokio::test]
+#[serial_test::serial]
+async fn complete_emit_flag_off_preserves_extra_headers() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    let driver = mock_openai_driver(&server)
+        .with_emit_caller_trace_headers(false)
+        .with_extra_headers(vec![("x-vendor-trace".to_string(), "keep-me".to_string())]);
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_200_body("ok")))
+        .mount(&server)
+        .await;
+
+    let req = request_with_trace_ids(Some("agent-abc"), Some("sess-xyz"), Some("7"));
+    let result = driver.complete(req).await;
+    assert!(result.is_ok(), "complete should succeed: {result:?}");
+
+    let received = server.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    let headers = &received[0].headers;
+    // Trace headers stay suppressed.
+    assert!(headers.get("x-librefang-agent-id").is_none());
+    assert!(headers.get("x-librefang-session-id").is_none());
+    assert!(headers.get("x-librefang-step-id").is_none());
+    // Operator's own extras still ride out — opt-out gates namespace, not extras.
+    assert_eq!(
+        headers.get("x-vendor-trace").map(|v| v.to_str().unwrap()),
+        Some("keep-me"),
+    );
+}

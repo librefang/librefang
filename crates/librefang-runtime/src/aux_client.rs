@@ -224,6 +224,7 @@ impl AuxClient {
                 .provider_request_timeout_secs
                 .get(provider)
                 .copied(),
+            emit_caller_trace_headers: self.kernel_config.telemetry.emit_caller_trace_headers,
         };
 
         create_driver(&driver_cfg).map_err(|e| e.to_string())

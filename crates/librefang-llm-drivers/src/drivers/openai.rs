@@ -34,6 +34,12 @@ pub struct OpenAIDriver {
     /// Per-provider HTTP request timeout in seconds.
     /// Overrides the HTTP client's default read timeout when set.
     request_timeout_secs: Option<u64>,
+    /// Whether to emit the three `x-librefang-{agent,session,step}-id` trace
+    /// headers on outbound requests. Mirrors
+    /// `KernelConfig.telemetry.emit_caller_trace_headers`; when `false`, no
+    /// trace headers are emitted regardless of whether `CompletionRequest`'s
+    /// caller-id fields are populated.
+    emit_caller_trace_headers: bool,
 }
 
 impl OpenAIDriver {
@@ -74,6 +80,7 @@ impl OpenAIDriver {
             url_query: None,
             moonshot_file_cache: Default::default(),
             request_timeout_secs,
+            emit_caller_trace_headers: true,
         }
     }
 
@@ -118,6 +125,7 @@ impl OpenAIDriver {
             url_query: Some(format!("api-version={}", api_version)),
             moonshot_file_cache: Default::default(),
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         }
     }
 
@@ -332,6 +340,20 @@ impl OpenAIDriver {
         self.extra_headers = headers;
         self
     }
+
+    /// Override the trace-header emission flag (mirrors
+    /// `KernelConfig.telemetry.emit_caller_trace_headers`). Default is `true`,
+    /// which preserves the OpenAI driver's behaviour from PR #4548 onward;
+    /// operators with strict zero-egress policies can flip the toml-side flag
+    /// to `false` and the kernel passes that through here at driver-creation
+    /// time. When `false`, the three `x-librefang-{agent,session,step}-id`
+    /// headers are skipped wire-side regardless of whether the per-request
+    /// caller-id fields on `CompletionRequest` are populated. Other
+    /// (non-trace) `extra_headers` are unaffected by this flag.
+    pub fn with_emit_caller_trace_headers(mut self, emit: bool) -> Self {
+        self.emit_caller_trace_headers = emit;
+        self
+    }
 }
 
 /// Build the merged custom-header map for an outbound LLM request. Combines
@@ -340,6 +362,32 @@ impl OpenAIDriver {
 /// auth shims) with the per-request `x-librefang-{agent,session,step}-id`
 /// trace headers sourced from [`CompletionRequest`].
 ///
+/// Naming convention — `x-` prefix: deliberately retained despite RFC 6648
+/// (June 2012) deprecating the `x-` "experimental" convention for new
+/// protocols. Three reasons we are knowingly not following the RFC's
+/// recommendation here:
+///
+/// 1. **Industry de-facto practice.** Every LLM-adjacent provider and
+///    proxy LibreFang interoperates with continues to use `x-` for
+///    application-namespaced headers — OpenAI's own `x-request-id` /
+///    `x-ratelimit-*`, Cloudflare's `x-amz-cf-id`, AWS SigV4's `x-amz-*`,
+///    GitHub's `x-github-*`, Stripe's `x-stripe-*`. Picking
+///    unprefixed `librefang-*` would make us the odd one out and mean
+///    operators run a *non-prefixed* allowlist on their proxies for
+///    LibreFang only, which is exactly the integration-tax RFC 6648 was
+///    trying to avoid.
+/// 2. **Internal precedent.** The MCP-bridge config in `claude_code.rs`
+///    has shipped with `X-LibreFang-Agent-Id` since well before this PR.
+///    A second namespace would force two allowlist entries (one with `x-`,
+///    one without) on every operator who wants to forward both, defeating
+///    the "single allowlist string" ergonomic the prefix was chosen for.
+/// 3. **RFC 6648 is non-normative.** The RFC is BCP 178 ("Best Current
+///    Practice") guidance for *new protocol designers*, not a wire-format
+///    requirement; it explicitly allows existing deployments to keep
+///    `x-` headers and Section 3 calls out the cost of churning
+///    namespaces. The cost-benefit on a feature-gated observability hint
+///    is not worth a third-party-allowlist breakage.
+///
 /// Casing convention: trace headers are emitted as **lowercase-with-dashes**
 /// (`x-librefang-agent-id`). HTTP header names are case-insensitive on the
 /// wire, but log-grep tooling and JSON-dump callers benefit from a single
@@ -347,6 +395,32 @@ impl OpenAIDriver {
 /// TitleCase (`X-LibreFang-Agent-Id`) — that path goes through axum's
 /// case-insensitive `HeaderMap` so it remains interoperable, but new code
 /// should follow the lowercase convention used here.
+///
+/// Known proxy behaviour: most OpenAI-compatible upstreams pass `x-*`
+/// headers through unchanged. Three configurations are worth flagging to
+/// operators before relying on these headers reaching their final sidecar:
+///
+/// - **Cloudflare AI Gateway** (`gateway.ai.cloudflare.com/...`) currently
+///   forwards arbitrary `x-*` request headers to the upstream; verify in
+///   your gateway analytics or by inspecting the upstream-side log if you
+///   route through Cloudflare-AI specifically.
+/// - **Azure API Management** in front of Azure OpenAI strips unknown
+///   request headers by default unless explicitly listed in the inbound
+///   policy's `set-header`/`<rewrite-uri>` allowlist. Operators running
+///   APIM have to add `x-librefang-*` to the allowlist explicitly.
+/// - **OpenRouter** forwards arbitrary `x-*` request headers to the
+///   selected upstream provider as of testing in 2026-04, but this is
+///   not contractually documented; treat reachability past OpenRouter as
+///   best-effort.
+///
+/// LiteLLM proxy, vLLM, Ollama, Fireworks, Together, Groq, and Cerebras
+/// all pass arbitrary request headers through to their HTTP layer, so
+/// the trace headers reach any sidecar between LibreFang and the proxy
+/// without further configuration. None of this is contractually
+/// guaranteed; this is the empirical state of the integrations as of
+/// PR #4548 — the `telemetry.emit_caller_trace_headers = false` opt-out
+/// is the supported escape hatch when a proxy you control mishandles the
+/// namespace.
 ///
 /// Precedence: trace headers always **replace** any same-named entries from
 /// `extra_headers`. An operator who sets `x-librefang-agent-id` via the
@@ -378,6 +452,7 @@ impl OpenAIDriver {
 fn build_custom_header_map(
     extra_headers: &[(String, String)],
     request: &CompletionRequest,
+    emit_caller_trace_headers: bool,
 ) -> reqwest::header::HeaderMap {
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
@@ -404,6 +479,18 @@ fn build_custom_header_map(
                 );
             }
         }
+    }
+
+    // Operator opt-out: when `telemetry.emit_caller_trace_headers = false`
+    // in `config.toml`, skip the three `x-librefang-*` insertions wire-side
+    // regardless of whether `CompletionRequest`'s caller-id fields are
+    // populated. Returning early here (rather than gating per-header) means
+    // an operator who legitimately put `x-librefang-agent-id` into their
+    // own `extra_headers` for a diagnostic experiment still sees their
+    // value go out — the trace-header path is what's gated, not the
+    // namespace.
+    if !emit_caller_trace_headers {
+        return map;
     }
 
     // Then layer trace headers on top with `insert` (overwrite semantics):
@@ -1140,8 +1227,11 @@ impl LlmDriver for OpenAIDriver {
             // trace headers `insert` precedence so they replace any
             // same-named entries from `extra_headers` instead of duplicating
             // on the wire. See `build_custom_header_map` doc-comment.
-            req_builder =
-                req_builder.headers(build_custom_header_map(&self.extra_headers, &request));
+            req_builder = req_builder.headers(build_custom_header_map(
+                &self.extra_headers,
+                &request,
+                self.emit_caller_trace_headers,
+            ));
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.
             let timeout_secs = request
@@ -1558,8 +1648,11 @@ impl LlmDriver for OpenAIDriver {
             // (`x-librefang-*`) trace headers into a single HeaderMap. Mirror
             // of the non-streaming path; see `build_custom_header_map` for
             // validation and precedence semantics.
-            req_builder =
-                req_builder.headers(build_custom_header_map(&self.extra_headers, &request));
+            req_builder = req_builder.headers(build_custom_header_map(
+                &self.extra_headers,
+                &request,
+                self.emit_caller_trace_headers,
+            ));
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.
             let timeout_secs = request

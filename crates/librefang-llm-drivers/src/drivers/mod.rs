@@ -702,12 +702,15 @@ fn create_driver_from_entry(
     let request_timeout_secs = config.request_timeout_secs;
 
     match entry.api_format {
-        ApiFormat::OpenAI => Ok(Arc::new(openai::OpenAIDriver::with_proxy_and_timeout(
-            api_key,
-            base_url,
-            proxy_url,
-            request_timeout_secs,
-        ))),
+        ApiFormat::OpenAI => Ok(Arc::new(
+            openai::OpenAIDriver::with_proxy_and_timeout(
+                api_key,
+                base_url,
+                proxy_url,
+                request_timeout_secs,
+            )
+            .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+        )),
         ApiFormat::Anthropic => Ok(Arc::new(
             anthropic::AnthropicDriver::with_proxy_and_timeout(
                 api_key,
@@ -774,13 +777,16 @@ fn create_driver_from_entry(
                 .clone()
                 .or_else(|| std::env::var("AZURE_OPENAI_API_VERSION").ok())
                 .unwrap_or_else(|| "2024-02-01".to_string());
-            Ok(Arc::new(openai::OpenAIDriver::new_azure_with_proxy(
-                api_key,
-                endpoint,
-                deployment,
-                api_version,
-                proxy_url,
-            )))
+            Ok(Arc::new(
+                openai::OpenAIDriver::new_azure_with_proxy(
+                    api_key,
+                    endpoint,
+                    deployment,
+                    api_version,
+                    proxy_url,
+                )
+                .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+            ))
         }
         ApiFormat::Bedrock => {
             // Region falls back to AWS_REGION → AWS_DEFAULT_REGION → us-east-1
@@ -818,12 +824,15 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             let env_var = format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"));
             std::env::var(&env_var).unwrap_or_default()
         });
-        return Ok(Arc::new(openai::OpenAIDriver::with_proxy_and_timeout(
-            api_key,
-            base_url.clone(),
-            config.proxy_url.as_deref(),
-            config.request_timeout_secs,
-        )));
+        return Ok(Arc::new(
+            openai::OpenAIDriver::with_proxy_and_timeout(
+                api_key,
+                base_url.clone(),
+                config.proxy_url.as_deref(),
+                config.request_timeout_secs,
+            )
+            .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+        ));
     }
 
     // No base_url either — last resort: check if the user set an API key env var
@@ -1106,6 +1115,7 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
@@ -1124,6 +1134,7 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         };
         let driver = create_driver(&config);
         assert!(driver.is_err());
@@ -1311,6 +1322,7 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1337,6 +1349,7 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1363,6 +1376,7 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         };
         let driver = create_driver(&config);
         assert!(driver.is_err());
@@ -1389,6 +1403,7 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         };
         let result = create_driver(&config);
         assert!(result.is_err());
@@ -1424,6 +1439,7 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
@@ -1452,6 +1468,7 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         };
 
         let driver = create_driver(&config);
@@ -1492,6 +1509,7 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         };
         let driver = create_driver(&config);
         assert!(
@@ -1513,6 +1531,7 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         };
         // Clear any env var that might interfere
         std::env::remove_var("AZURE_OPENAI_ENDPOINT");
@@ -1543,6 +1562,7 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         };
         let d1 = cache.get_or_create(&config).unwrap();
         let d2 = cache.get_or_create(&config).unwrap();
@@ -1564,6 +1584,7 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         };
         let config_b = DriverConfig {
             provider: "ollama".to_string(),
@@ -1576,6 +1597,7 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         };
         let d_a = cache.get_or_create(&config_a).unwrap();
         let d_b = cache.get_or_create(&config_b).unwrap();
@@ -1600,6 +1622,7 @@ mod tests {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         };
         cache.get_or_create(&config).unwrap();
         assert_eq!(cache.len(), 1);

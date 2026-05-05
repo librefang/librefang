@@ -493,6 +493,18 @@ pub struct DriverConfig {
     /// instead; this field only applies to HTTP API drivers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<u64>,
+    /// Emit `x-librefang-{agent,session,step}-id` trace headers on outbound
+    /// LLM requests. Mirrors `KernelConfig.telemetry.emit_caller_trace_headers`;
+    /// the kernel populates this field per-driver. Default `true`.
+    ///
+    /// Operators with strict zero-egress policies (regulated tenants, EU
+    /// healthcare) can flip the toml-side flag to `false` to suppress all
+    /// three headers wire-side regardless of whether `CompletionRequest`'s
+    /// caller-id fields are populated. Currently only honoured by the
+    /// OpenAI-compatible driver; other drivers do not emit these headers
+    /// today and so are unaffected by this flag.
+    #[serde(default = "default_emit_caller_trace_headers")]
+    pub emit_caller_trace_headers: bool,
 }
 
 /// Configuration for bridging LibreFang tools into a CLI-based driver via MCP.
@@ -523,6 +535,7 @@ impl Default for DriverConfig {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: default_emit_caller_trace_headers(),
         }
     }
 }
@@ -533,6 +546,10 @@ fn default_skip_permissions() -> bool {
 
 fn default_message_timeout_secs() -> u64 {
     300
+}
+
+fn default_emit_caller_trace_headers() -> bool {
+    true
 }
 
 /// SECURITY: Custom Debug impl redacts the API key.
@@ -560,6 +577,7 @@ impl std::fmt::Debug for DriverConfig {
             .field("mcp_bridge", &self.mcp_bridge.as_ref().map(|b| &b.base_url))
             .field("proxy_url", &self.proxy_url.as_ref().map(|_| "<redacted>"))
             .field("request_timeout_secs", &self.request_timeout_secs)
+            .field("emit_caller_trace_headers", &self.emit_caller_trace_headers)
             .finish()
     }
 }
