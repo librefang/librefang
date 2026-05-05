@@ -3792,11 +3792,7 @@ pub async fn add_mcp_server(
             })
             .unwrap_or_default();
 
-        let catalog = state
-            .kernel
-            .mcp_catalog()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = state.kernel.mcp_catalog_load();
         let entry = match catalog.get(&tid) {
             Some(e) => e.clone(),
             None => {
@@ -5348,11 +5344,7 @@ pub async fn list_mcp_catalog(
     let lang = super::resolve_lang(lang.as_ref());
     let installed_ids = collect_installed_catalog_ids(&state);
 
-    let catalog = state
-        .kernel
-        .mcp_catalog()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let catalog = state.kernel.mcp_catalog_load();
     let entries: Vec<serde_json::Value> = catalog
         .list()
         .iter()
@@ -5383,11 +5375,7 @@ pub async fn get_mcp_catalog_entry(
     let lang = super::resolve_lang(lang.as_ref());
     let installed_ids = collect_installed_catalog_ids(&state);
 
-    let catalog = state
-        .kernel
-        .mcp_catalog()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let catalog = state.kernel.mcp_catalog_load();
     match catalog.get(&id) {
         Some(entry) => (
             StatusCode::OK,
@@ -5559,11 +5547,7 @@ pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoRes
     let installed_map = installed_servers_by_template(&cfg.mcp_servers);
     let health = state.kernel.mcp_health();
 
-    let catalog = state
-        .kernel
-        .mcp_catalog()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let catalog = state.kernel.mcp_catalog_load();
 
     let mut extensions = Vec::new();
     for entry in catalog.list() {
@@ -5611,11 +5595,7 @@ pub async fn get_extension(
 ) -> impl IntoResponse {
     let cfg = state.kernel.config_snapshot();
     let installed_map = installed_servers_by_template(&cfg.mcp_servers);
-    let catalog = state
-        .kernel
-        .mcp_catalog()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let catalog = state.kernel.mcp_catalog_load();
 
     let entry = match catalog.get(&name) {
         Some(t) => t.clone(),

@@ -687,8 +687,9 @@ pub struct LibreFangKernel {
     pub(crate) hand_registry: librefang_hands::registry::HandRegistry,
     /// MCP catalog — read-only set of server templates shipped by the
     /// registry. Refreshed by `registry_sync` and re-read on
-    /// `POST /api/mcp/reload`.
-    pub(crate) mcp_catalog: std::sync::RwLock<librefang_extensions::catalog::McpCatalog>,
+    /// `POST /api/mcp/reload`. Lock-free reads via `ArcSwap`; writes use
+    /// `rcu()` so readers are never blocked (matches `model_catalog` pattern).
+    pub(crate) mcp_catalog: arc_swap::ArcSwap<librefang_extensions::catalog::McpCatalog>,
     /// MCP server health monitor.
     pub(crate) mcp_health: librefang_extensions::health::HealthMonitor,
     /// Effective MCP server list — mirrors `config.mcp_servers`.
@@ -1782,10 +1783,34 @@ impl LibreFangKernel {
         &self.hand_registry
     }
 
-    /// MCP catalog (RwLock — hot-reload from `mcp/catalog/` on disk).
+    /// MCP catalog — returns the `ArcSwap` for lock-free reads.
+    ///
+    /// Prefer [`mcp_catalog_load`] for simple single-snapshot reads;
+    /// use this accessor when you need the `ArcSwap` handle directly.
     #[inline]
-    pub fn mcp_catalog(&self) -> &std::sync::RwLock<librefang_extensions::catalog::McpCatalog> {
+    pub fn mcp_catalog(&self) -> &arc_swap::ArcSwap<librefang_extensions::catalog::McpCatalog> {
         &self.mcp_catalog
+    }
+
+    /// Load a snapshot of the MCP catalog — lock-free, no blocking.
+    ///
+    /// The returned `Guard` holds a reference-counted snapshot; the catalog
+    /// can be swapped concurrently without invalidating it.
+    #[inline]
+    pub fn mcp_catalog_load(
+        &self,
+    ) -> arc_swap::Guard<std::sync::Arc<librefang_extensions::catalog::McpCatalog>> {
+        self.mcp_catalog.load()
+    }
+
+    /// Reload the MCP catalog from disk, replacing the current snapshot
+    /// atomically via RCU. Readers in flight keep the old snapshot until
+    /// they drop their `Guard`.
+    pub fn mcp_catalog_reload(&self, home_dir: &std::path::Path) -> usize {
+        let mut fresh = librefang_extensions::catalog::McpCatalog::new(home_dir);
+        let count = fresh.load(home_dir);
+        self.mcp_catalog.store(std::sync::Arc::new(fresh));
+        count
     }
 
     /// MCP server health monitor.
@@ -3759,7 +3784,7 @@ impl LibreFangKernel {
             pairing,
             embedding_driver,
             hand_registry,
-            mcp_catalog: std::sync::RwLock::new(mcp_catalog),
+            mcp_catalog: arc_swap::ArcSwap::from_pointee(mcp_catalog),
             mcp_health,
             effective_mcp_servers: std::sync::RwLock::new(all_mcp_servers),
             delivery_tracker: DeliveryTracker::new(),
@@ -10110,12 +10135,15 @@ system_prompt = "You are a helpful assistant."
             ))));
         }
 
-        let toml_str = std::fs::read_to_string(&toml_path).map_err(|e| {
-            KernelError::LibreFang(LibreFangError::Internal(format!(
-                "Failed to read {}: {e}",
-                toml_path.display()
-            )))
-        })?;
+        // `block_in_place` so this sync read does not park a tokio worker
+        // thread for I/O while holding no locks.
+        let toml_str = tokio::task::block_in_place(|| std::fs::read_to_string(&toml_path))
+            .map_err(|e| {
+                KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "Failed to read {}: {e}",
+                    toml_path.display()
+                )))
+            })?;
 
         // Try the hand-extraction path FIRST, then fall back to flat AgentManifest.
         // See the boot loop for the rationale — AgentManifest::deserialize is lenient
@@ -12272,11 +12300,9 @@ system_prompt = "You are a helpful assistant."
                 }
                 HotAction::ReloadExtensions => {
                     info!("Hot-reload: reloading MCP catalog");
-                    let mut cat = self.mcp_catalog.write().unwrap_or_else(|e| e.into_inner());
-                    // Re-read template files from `mcp/catalog/` on disk.
-                    let count = cat.load(&new_config.home_dir);
+                    // Atomic swap — readers in flight keep the old snapshot.
+                    let count = self.mcp_catalog_reload(&new_config.home_dir);
                     info!("Hot-reload: reloaded {count} MCP catalog entry/entries");
-                    drop(cat);
                     // Effective MCP server list now == config.mcp_servers directly.
                     let new_mcp = new_config.mcp_servers.clone();
                     let mut effective = self
@@ -15446,11 +15472,8 @@ system_prompt = "You are a helpful assistant."
         use librefang_types::config::McpTransportEntry;
 
         // 1. Reload the MCP catalog from disk (new templates may have landed
-        //    after `registry_sync`).
-        let catalog_count = {
-            let mut cat = self.mcp_catalog.write().unwrap_or_else(|e| e.into_inner());
-            cat.load(&cfg.home_dir)
-        };
+        //    after `registry_sync`). Atomic swap — readers never blocked.
+        let catalog_count = self.mcp_catalog_reload(&cfg.home_dir);
 
         // 2. Effective server list == config.mcp_servers (no merge needed).
         let new_configs = cfg.mcp_servers.clone();
