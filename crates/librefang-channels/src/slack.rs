@@ -21,6 +21,12 @@ use zeroize::Zeroizing;
 const SLACK_API_BASE: &str = "https://slack.com/api";
 const SLACK_MSG_LIMIT: usize = 3000;
 
+/// Returns the default Slack API base URL. Used to initialise `SlackAdapter::api_base`.
+#[inline]
+fn default_slack_api_base() -> String {
+    SLACK_API_BASE.to_string()
+}
+
 /// Key for pending reaction tracking: (channel_id, message_ts).
 type ReactionKey = (String, String);
 
@@ -29,6 +35,9 @@ pub struct SlackAdapter {
     /// SECURITY: Tokens are zeroized on drop to prevent memory disclosure.
     app_token: Zeroizing<String>,
     bot_token: Zeroizing<String>,
+    /// Base URL for the Slack Web API. Defaults to `https://slack.com/api`.
+    /// Overridable in tests via `with_api_base()` to point at a wiremock server.
+    api_base: String,
     client: reqwest::Client,
     allowed_channels: Vec<String>,
     /// Optional account identifier for multi-bot routing.
@@ -66,6 +75,7 @@ impl SlackAdapter {
         Self {
             app_token: Zeroizing::new(app_token),
             bot_token: Zeroizing::new(bot_token),
+            api_base: default_slack_api_base(),
             client: crate::http_client::new_client(),
             allowed_channels,
             account_id: None,
@@ -79,6 +89,14 @@ impl SlackAdapter {
             reactions_enabled,
             pending_reactions: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Override the Slack Web API base URL. Intended for tests that point the
+    /// adapter at a wiremock server instead of `https://slack.com/api`.
+    #[cfg(test)]
+    pub fn with_api_base(mut self, base: String) -> Self {
+        self.api_base = base;
+        self
     }
 
     /// Override the reactions_enabled setting (e.g., from a config struct field).
@@ -120,7 +138,7 @@ impl SlackAdapter {
     async fn validate_bot_token(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let resp: serde_json::Value = self
             .client
-            .post(format!("{SLACK_API_BASE}/auth.test"))
+            .post(format!("{}/auth.test", self.api_base))
             .header(
                 "Authorization",
                 format!("Bearer {}", self.bot_token.as_str()),
@@ -219,7 +237,7 @@ impl SlackAdapter {
 
         let resp: serde_json::Value = self
             .client
-            .post(format!("{SLACK_API_BASE}/chat.postMessage"))
+            .post(format!("{}/chat.postMessage", self.api_base))
             .header(
                 "Authorization",
                 format!("Bearer {}", self.bot_token.as_str()),
@@ -266,7 +284,7 @@ impl SlackAdapter {
 
             let resp: serde_json::Value = self
                 .client
-                .post(format!("{SLACK_API_BASE}/chat.postMessage"))
+                .post(format!("{}/chat.postMessage", self.api_base))
                 .header(
                     "Authorization",
                     format!("Bearer {}", self.bot_token.as_str()),
@@ -297,7 +315,7 @@ impl SlackAdapter {
         });
         match self
             .client
-            .post(format!("{SLACK_API_BASE}/reactions.add"))
+            .post(format!("{}/reactions.add", self.api_base))
             .header(
                 "Authorization",
                 format!("Bearer {}", self.bot_token.as_str()),
@@ -333,7 +351,7 @@ impl SlackAdapter {
         });
         match self
             .client
-            .post(format!("{SLACK_API_BASE}/reactions.remove"))
+            .post(format!("{}/reactions.remove", self.api_base))
             .header(
                 "Authorization",
                 format!("Bearer {}", self.bot_token.as_str()),
@@ -381,7 +399,7 @@ impl SlackAdapter {
         &self,
         user_id: &str,
     ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{SLACK_API_BASE}/users.info?user={user_id}");
+        let url = format!("{}/users.info?user={user_id}", self.api_base);
         let resp: serde_json::Value = self
             .client
             .get(&url)
@@ -472,6 +490,7 @@ impl ChannelAdapter for SlackAdapter {
 
         let app_token = self.app_token.clone();
         let bot_token = self.bot_token.clone();
+        let api_base = self.api_base.clone();
         let bot_user_id = self.bot_user_id.clone();
         let allowed_channels = self.allowed_channels.clone();
         let account_id = self.account_id.clone();
@@ -491,7 +510,7 @@ impl ChannelAdapter for SlackAdapter {
                 }
 
                 // Get a fresh WebSocket URL
-                let ws_url_result = get_socket_mode_url(&client, &app_token)
+                let ws_url_result = get_socket_mode_url(&client, &app_token, &api_base)
                     .await
                     .map_err(|e| e.to_string());
                 let ws_url = match ws_url_result {
@@ -604,6 +623,7 @@ impl ChannelAdapter for SlackAdapter {
                                 if reactions_enabled {
                                     let rx_client = client.clone();
                                     let rx_token = bot_token.clone();
+                                    let rx_api_base = api_base.clone();
                                     let rx_channel = msg.sender.platform_id.clone();
                                     let rx_ts = msg.platform_message_id.clone();
                                     let rx_pending = pending_reactions.clone();
@@ -616,7 +636,7 @@ impl ChannelAdapter for SlackAdapter {
                                             "name": "eyes",
                                         });
                                         match rx_client
-                                            .post(format!("{SLACK_API_BASE}/reactions.add"))
+                                            .post(format!("{rx_api_base}/reactions.add"))
                                             .header(
                                                 "Authorization",
                                                 format!("Bearer {}", rx_token.as_str()),
@@ -802,9 +822,10 @@ impl ChannelAdapter for SlackAdapter {
 async fn get_socket_mode_url(
     client: &reqwest::Client,
     app_token: &str,
+    api_base: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let resp: serde_json::Value = client
-        .post(format!("{SLACK_API_BASE}/apps.connections.open"))
+        .post(format!("{api_base}/apps.connections.open"))
         .header("Authorization", format!("Bearer {app_token}"))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
@@ -1053,6 +1074,229 @@ async fn parse_slack_block_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Uses `wiremock` to stand up a local HTTP server and points `SlackAdapter`
+    // at it via `with_api_base()`. This mirrors the pattern used for the gotify
+    // slice (PR #4447) and exercises the `chat.postMessage` call made by
+    // `ChannelAdapter::send`.
+
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(api_base: String) -> SlackAdapter {
+        SlackAdapter::new(
+            "xapp-test-token".to_string(),
+            "xoxb-test-bot-token".to_string(),
+            vec![],
+        )
+        .with_api_base(api_base)
+    }
+
+    fn dummy_user(channel_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: channel_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn slack_send_posts_chat_message_to_channel() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat.postMessage"))
+            .and(header("Authorization", "Bearer xoxb-test-bot-token"))
+            .and(body_json(serde_json::json!({
+                "channel": "C12345",
+                "text": "hello from librefang",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ts": "1700000000.000100",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("C12345"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn slack_send_in_thread_includes_thread_ts() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat.postMessage"))
+            .and(header("Authorization", "Bearer xoxb-test-bot-token"))
+            .and(body_json(serde_json::json!({
+                "channel": "C12345",
+                "text": "threaded reply",
+                "thread_ts": "1700000000.000100",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "ts": "1700000001.000200",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send_in_thread(
+                &dummy_user("C12345"),
+                ChannelContent::Text("threaded reply".into()),
+                "1700000000.000100",
+            )
+            .await
+            .expect("send_in_thread must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn slack_send_non_text_content_uses_placeholder() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat.postMessage"))
+            .and(body_json(serde_json::json!({
+                "channel": "C99999",
+                "text": "(Unsupported content type)",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("C99999"),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send must succeed with unsupported content");
+    }
+
+    // ----- transport-layer tests for #3406 -----
+    //
+    // The Slack send path (`api_send_message_opts`) currently has *no* 429
+    // retry and *no* idempotency token: a 429 from `chat.postMessage` is
+    // logged via `warn!` and the call returns `Ok(())` (fail-open). These
+    // tests pin that behaviour so a future refactor that adds retry /
+    // idempotency necessarily updates them. Promotion of the send path to
+    // a real backoff loop with an idempotency key is tracked as follow-up
+    // on issue #3406.
+
+    /// 429 + Retry-After is observed by exactly one POST — the adapter
+    /// does NOT retry, and `send()` still returns Ok (fail-open warn).
+    /// When real retry lands, flip `expect(1)` to `expect(2)` and assert
+    /// the second call body matches.
+    #[tokio::test]
+    async fn slack_send_does_not_retry_on_429_today() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat.postMessage"))
+            .and(header("Authorization", "Bearer xoxb-test-bot-token"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "1")
+                    .set_body_json(serde_json::json!({
+                        "ok": false,
+                        "error": "ratelimited",
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        // Current production behaviour: 429 is warned, send returns Ok.
+        adapter
+            .send(
+                &dummy_user("C42"),
+                ChannelContent::Text("rate-limited write".into()),
+            )
+            .await
+            .expect("slack send is fail-open on 429 today");
+    }
+
+    /// `chat.postMessage` payload omits the optional `unfurl_links` key
+    /// when the adapter wasn't told to set it — important so we don't
+    /// silently override a workspace-level Slack default.
+    #[tokio::test]
+    async fn slack_send_omits_unfurl_links_when_unset() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat.postMessage"))
+            .and(body_json(serde_json::json!({
+                "channel": "C7",
+                "text": "no unfurl flag",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("C7"),
+                ChannelContent::Text("no unfurl flag".into()),
+            )
+            .await
+            .expect("send must succeed");
+    }
+
+    /// When `with_unfurl_links(Some(false))` is set, the boolean appears
+    /// verbatim in the JSON body — pins the request shape so a refactor
+    /// that drops the field won't silently regress link previews.
+    #[tokio::test]
+    async fn slack_send_serialises_unfurl_links_false() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat.postMessage"))
+            .and(body_json(serde_json::json!({
+                "channel": "C8",
+                "text": "no preview please",
+                "unfurl_links": false,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = SlackAdapter::new(
+            "xapp-test-token".to_string(),
+            "xoxb-test-bot-token".to_string(),
+            vec![],
+        )
+        .with_api_base(server.uri())
+        .with_unfurl_links(Some(false));
+
+        adapter
+            .send(
+                &dummy_user("C8"),
+                ChannelContent::Text("no preview please".into()),
+            )
+            .await
+            .expect("send must succeed");
+    }
 
     #[test]
     fn role_resolution_owner_wins() {

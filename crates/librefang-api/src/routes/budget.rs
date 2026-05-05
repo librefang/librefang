@@ -335,6 +335,7 @@ pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
     put,
     path = "/api/budget",
     tag = "budget",
+    request_body(content = crate::types::JsonObject, description = "Partial budget config (max_hourly_usd / max_daily_usd / max_monthly_usd / alert_threshold / default_max_llm_tokens_per_hour)"),
     responses((status = 200, description = "Updated global budget status", body = crate::types::JsonObject))
 )]
 pub async fn update_budget(
@@ -381,7 +382,7 @@ pub async fn update_budget(
     let new_budget = state.kernel.budget_config();
     state.kernel.audit().record_with_context(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
+        librefang_kernel::audit::AuditAction::ConfigChange,
         format!(
             "global_budget updated: {}",
             fmt_global_budget_diff(&old_budget, &new_budget)
@@ -410,7 +411,11 @@ pub async fn agent_budget_status(
     let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
-            return ApiErrorResponse::not_found("Agent not found").into_response();
+            // #3511: even on 404 we know agent_id was well-formed, so emit it.
+            return crate::extensions::with_agent_id(
+                agent_id,
+                ApiErrorResponse::not_found("Agent not found"),
+            );
         }
     };
 
@@ -425,7 +430,7 @@ pub async fn agent_budget_status(
     let token_usage = state.kernel.scheduler_ref().get_usage(agent_id);
     let tokens_used = token_usage.map(|s| s.total_tokens).unwrap_or(0);
 
-    (
+    let body = (
         StatusCode::OK,
         Json(serde_json::json!({
             "agent_id": agent_id.to_string(),
@@ -451,8 +456,9 @@ pub async fn agent_budget_status(
                 "pct": if quota.effective_token_limit() > 0 { tokens_used as f64 / quota.effective_token_limit() as f64 } else { 0.0 },
             },
         })),
-    )
-        .into_response()
+    );
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 /// GET /api/budget/agents — Per-agent cost ranking (top spenders).
@@ -520,6 +526,7 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
     path = "/api/budget/agents/{id}",
     tag = "budget",
     params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = crate::types::JsonObject, description = "Partial ResourceQuota (max_cost_per_hour_usd / max_cost_per_day_usd / max_cost_per_month_usd / max_llm_tokens_per_hour)"),
     responses((status = 200, description = "Updated agent ResourceQuota (max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour, …)", body = crate::types::JsonObject))
 )]
 pub async fn update_agent_budget(
@@ -536,10 +543,13 @@ pub async fn update_agent_budget(
     let tokens = body["max_llm_tokens_per_hour"].as_u64();
 
     if hourly.is_none() && daily.is_none() && monthly.is_none() && tokens.is_none() {
-        return ApiErrorResponse::bad_request(
-            "Provide at least one of: max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour",
-        )
-        .into_response();
+        // #3511: tag even validation failures with agent_id (path was well-formed).
+        return crate::extensions::with_agent_id(
+            agent_id,
+            ApiErrorResponse::bad_request(
+                "Provide at least one of: max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour",
+            ),
+        );
     }
 
     // Capture OLD per-agent caps BEFORE the in-memory mutation so the
@@ -552,7 +562,7 @@ pub async fn update_agent_budget(
         .get(agent_id)
         .map(|e| e.manifest.resources.clone());
 
-    match state
+    let body = match state
         .kernel
         .agent_registry()
         .update_resources(agent_id, hourly, daily, monthly, tokens)
@@ -574,7 +584,7 @@ pub async fn update_agent_budget(
             // is conveyed via `user_id` (None for anonymous loopback).
             state.kernel.audit().record_with_context(
                 agent_id.to_string(),
-                librefang_runtime::audit::AuditAction::ConfigChange,
+                librefang_kernel::audit::AuditAction::ConfigChange,
                 format!(
                     "agent_budget updated for {agent_id}: {}",
                     fmt_agent_resources_diff(old_resources.as_ref(), new_resources.as_ref())
@@ -601,7 +611,9 @@ pub async fn update_agent_budget(
             }
         }
         Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_response(),
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 // ---------------------------------------------------------------------------
@@ -624,7 +636,7 @@ fn require_admin_for_user_budget(
         Some(u) => {
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::PermissionDenied,
+                librefang_kernel::audit::AuditAction::PermissionDenied,
                 format!("user budget endpoint denied for role {}", u.role),
                 "denied",
                 Some(u.user_id),
@@ -638,7 +650,7 @@ fn require_admin_for_user_budget(
         None => {
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::PermissionDenied,
+                librefang_kernel::audit::AuditAction::PermissionDenied,
                 "user budget endpoint denied for anonymous caller",
                 "denied",
                 None,
@@ -865,7 +877,7 @@ pub async fn user_budget_detail(
     tag = "budget",
     params(("user_id" = String, Path, description = "User UUID or configured name")),
     responses(
-        (status = 200, description = "Budget written and reloaded", body = crate::types::JsonObject),
+        (status = 200, description = "Budget written and reloaded — body is the canonical UserBudgetConfig (max_hourly_usd, max_daily_usd, max_monthly_usd, alert_threshold)", body = crate::types::JsonObject),
         (status = 400, description = "Invalid or partial budget payload"),
         (status = 403, description = "Caller is not an admin"),
         (status = 404, description = "No user matches the given id/name"),
@@ -983,7 +995,7 @@ pub async fn update_user_budget(
         Ok(()) => {
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::ConfigChange,
+                librefang_kernel::audit::AuditAction::ConfigChange,
                 format!(
                     "user_budget updated for {user_id_param}: {}",
                     fmt_user_budget_diff(old_budget.as_ref(), Some(&new_budget))
@@ -992,14 +1004,11 @@ pub async fn update_user_budget(
                 api_user_ref.map(|u| u.user_id),
                 Some("api".to_string()),
             );
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "ok",
-                    "budget": new_budget,
-                })),
-            )
-                .into_response()
+            // Issue #3832: return the canonical UserBudgetConfig entity so
+            // dashboard mutations can `setQueryData` without a follow-up GET.
+            // The previous `{"status":"ok","budget":...}` ack envelope forced
+            // every successful PUT into a refetch.
+            (StatusCode::OK, Json(new_budget)).into_response()
         }
         Err(super::users::PersistError::NotFound(m)) => {
             ApiErrorResponse::not_found(m).into_response()
@@ -1078,7 +1087,7 @@ pub async fn delete_user_budget(
         Ok(()) => {
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::ConfigChange,
+                librefang_kernel::audit::AuditAction::ConfigChange,
                 format!(
                     "user_budget cleared for {user_id_param}: {}",
                     fmt_user_budget_diff(old_budget.as_ref(), None)

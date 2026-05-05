@@ -56,6 +56,9 @@ pub struct QqAdapter {
     last_error: Arc<RwLock<Option<String>>>,
     /// Current access token (refreshed periodically).
     access_token: Arc<RwLock<Option<String>>>,
+    /// REST base URL. Defaults to `QQ_API_BASE`; tests override via
+    /// `with_base_url` so the adapter talks to a local wiremock instead.
+    api_base: String,
 }
 
 impl QqAdapter {
@@ -78,11 +81,20 @@ impl QqAdapter {
             started_at: Arc::new(RwLock::new(None)),
             last_error: Arc::new(RwLock::new(None)),
             access_token: Arc::new(RwLock::new(None)),
+            api_base: QQ_API_BASE.to_string(),
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the REST base URL. `#[cfg(test)]`-only — used by wiremock-driven
+    /// tests to point the adapter at a local mock server.
+    #[cfg(test)]
+    pub fn with_base_url(mut self, url: String) -> Self {
+        self.api_base = url;
         self
     }
 
@@ -101,7 +113,7 @@ impl QqAdapter {
         });
         let resp = self
             .client
-            .post(format!("{}{}", QQ_API_BASE, endpoint))
+            .post(format!("{}{}", self.api_base, endpoint))
             .header("Authorization", format!("Bearer {}", token))
             .json(&body)
             .send()
@@ -629,5 +641,94 @@ mod tests {
     fn test_parse_dispatch_unknown_event() {
         let data = serde_json::json!({"id": "123", "content": "test"});
         assert!(parse_dispatch_event("UNKNOWN_EVENT", &data).is_none());
+    }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // The `QQ_API_BASE` const is now backed by an `api_base` field
+    // (see struct definition); a `#[cfg(test)] with_base_url` setter
+    // points the adapter at a local `wiremock::MockServer`.
+    //
+    // The QQ adapter encodes `platform_id` as `"<endpoint>|<msg_id>"`
+    // (split by `|`) — `send()` silently no-ops if that delimiter is
+    // missing, so the happy-path test must use a `|`-encoded id. The
+    // adapter normally fetches its `access_token` from QQ's OAuth
+    // endpoint inside `start()`; tests skip `start()` and seed the
+    // token directly via the private `RwLock` field (legal because
+    // `mod tests` is a child of the same module and can see private
+    // items).
+
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn qq_user(endpoint_and_msg: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: endpoint_and_msg.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    async fn seed_token(adapter: &QqAdapter, token: &str) {
+        *adapter.access_token.write().await = Some(token.to_string());
+    }
+
+    #[tokio::test]
+    async fn qq_send_posts_to_endpoint_with_bearer() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/groups/G1/messages"))
+            .and(header("authorization", "Bearer access-token-xyz"))
+            .and(body_json(serde_json::json!({
+                "content": "hi qq",
+                "msg_id": "MSG-1",
+                "msg_type": 0,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "ok"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = QqAdapter::new("app-1".to_string(), "secret-1".to_string(), vec![])
+            .with_base_url(server.uri());
+        seed_token(&adapter, "access-token-xyz").await;
+
+        adapter
+            .send(
+                &qq_user("/v2/groups/G1/messages|MSG-1"),
+                ChannelContent::Text("hi qq".into()),
+            )
+            .await
+            .expect("qq send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn qq_send_no_op_when_platform_id_missing_pipe() {
+        let server = MockServer::start().await;
+        // No mounted Mock — if send fires any HTTP request, wiremock
+        // returns 404 and the test would still pass because send()
+        // swallows errors. So instead we assert that no request is
+        // observed by checking `received_requests` is empty.
+        let adapter = QqAdapter::new("app-1".to_string(), "secret-1".to_string(), vec![])
+            .with_base_url(server.uri());
+        seed_token(&adapter, "access-token").await;
+
+        adapter
+            .send(
+                &qq_user("not-encoded-as-endpoint-pipe-msgid"),
+                ChannelContent::Text("hi".into()),
+            )
+            .await
+            .expect("qq send must not error on malformed platform_id");
+
+        let received = server
+            .received_requests()
+            .await
+            .expect("MockServer should expose received_requests");
+        assert!(
+            received.is_empty(),
+            "qq send must not hit the network when platform_id has no pipe; got {} request(s)",
+            received.len()
+        );
     }
 }

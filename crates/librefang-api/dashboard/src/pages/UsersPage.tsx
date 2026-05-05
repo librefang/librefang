@@ -304,14 +304,14 @@ export function UsersPage() {
                     ) : null}
                   </div>
                   <p className="mt-2 text-[11px] text-text-dim">
-                    {Object.keys(u.channel_bindings).length} {t(
+                    {Object.keys(u.channel_bindings ?? {}).length} {t(
                       "users.bindings_suffix",
                       "channel binding(s)",
                     )}
                   </p>
-                  {Object.entries(u.channel_bindings).length > 0 ? (
+                  {Object.entries(u.channel_bindings ?? {}).length > 0 ? (
                     <ul className="mt-1 flex flex-wrap gap-1">
-                      {Object.entries(u.channel_bindings).map(([k, v]) => (
+                      {Object.entries(u.channel_bindings ?? {}).map(([k, v]) => (
                         <li
                           key={k}
                           className="font-mono text-[10px] rounded bg-main/40 px-1.5 py-0.5"
@@ -1037,7 +1037,7 @@ function IdentityWizardModal({
                 {t(`users.roles.${user.role}`, user.role)}
               </Badge>
               <span className="text-[11px] text-text-dim">
-                {Object.keys(user.channel_bindings).length}{" "}
+                {Object.keys(user.channel_bindings ?? {}).length}{" "}
                 {t("users.bindings_suffix", "channel binding(s)")}
               </span>
             </div>

@@ -37,6 +37,9 @@ pub struct ThreemaAdapter {
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
+    /// REST base URL. Defaults to `THREEMA_API_URL`; tests override via
+    /// `with_base_url` so the adapter talks to a local wiremock instead.
+    api_base: String,
 }
 
 impl ThreemaAdapter {
@@ -52,11 +55,20 @@ impl ThreemaAdapter {
             secret: Zeroizing::new(secret),
             client: crate::http_client::new_client(),
             account_id: None,
+            api_base: THREEMA_API_URL.to_string(),
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the REST base URL. `#[cfg(test)]`-only — used by wiremock-driven
+    /// tests to point the adapter at a local mock server.
+    #[cfg(test)]
+    pub fn with_base_url(mut self, url: String) -> Self {
+        self.api_base = url;
         self
     }
 
@@ -84,7 +96,7 @@ impl ThreemaAdapter {
         to: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/send_simple", THREEMA_API_URL);
+        let url = format!("{}/send_simple", self.api_base);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
         for chunk in chunks {
@@ -389,5 +401,77 @@ mod tests {
         let msg = parse_threema_webhook(&payload, "*MYGATEW").unwrap();
         assert!(msg.metadata.contains_key("nonce"));
         assert!(msg.metadata.contains_key("mac"));
+    }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // The `THREEMA_API_URL` const is now backed by an `api_base` field
+    // (see struct definition); a `#[cfg(test)] with_base_url` setter
+    // points the adapter at a local `wiremock::MockServer`. Asserts the
+    // `POST /send_simple` request — form-urlencoded body containing
+    // `from`, `to`, `secret`, `text` (matched with `body_string_contains`
+    // because reqwest serialises form params, not JSON).
+
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn threema_user(threema_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: threema_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn threema_send_posts_send_simple_form() {
+        let server = MockServer::start().await;
+        // Use ASCII-only `from`/`to`/`text` so we do not have to bake in
+        // assumptions about which characters reqwest's form serialiser
+        // percent-encodes (`*` and ` ` differ in practice across crate
+        // versions). Tests only need to verify the four field names land
+        // verbatim with the expected values.
+        Mock::given(method("POST"))
+            .and(path("/send_simple"))
+            .and(body_string_contains("from=GATEWAY1"))
+            .and(body_string_contains("to=ABCDEFGH"))
+            .and(body_string_contains("secret=top-sec"))
+            .and(body_string_contains("text=hi-threema"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("MSGID-1"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = ThreemaAdapter::new("GATEWAY1".to_string(), "top-sec".to_string(), 0)
+            .with_base_url(server.uri());
+        adapter
+            .send(
+                &threema_user("ABCDEFGH"),
+                ChannelContent::Text("hi-threema".into()),
+            )
+            .await
+            .expect("threema send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn threema_send_returns_err_on_non_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/send_simple"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = ThreemaAdapter::new("*MYGATEW".to_string(), "bad-sec".to_string(), 0)
+            .with_base_url(server.uri());
+        let err = adapter
+            .send(&threema_user("OTHERID0"), ChannelContent::Text("x".into()))
+            .await
+            .expect_err("threema send must propagate non-2xx as Err");
+        assert!(
+            err.to_string().contains("401"),
+            "error should mention status code, got: {err}"
+        );
     }
 }

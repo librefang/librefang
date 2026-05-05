@@ -14,7 +14,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_runtime::kernel_handle::prelude::*;
+use librefang_kernel::kernel_handle::prelude::*;
 use librefang_types::i18n::ErrorTranslator;
 use std::sync::Arc;
 
@@ -437,7 +437,7 @@ pub async fn approve_request(
                         .into_json_tuple()
                         .into_response();
                     }
-                    match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                    match crate::approval::ApprovalManager::verify_totp_code_with_issuer(
                         &secret,
                         code,
                         &totp_issuer,
@@ -472,7 +472,7 @@ pub async fn approve_request(
                             // tables.
                             state.kernel.audit().record_with_context(
                                 "system",
-                                librefang_runtime::audit::AuditAction::AuthAttempt,
+                                librefang_kernel::audit::AuditAction::AuthAttempt,
                                 format!("totp_used_for_approval:{uuid}"),
                                 "totp_verified",
                                 None,
@@ -539,7 +539,7 @@ pub async fn approve_request(
             ),
         )
             .into_response(),
-        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple().into_response(),
+        Err(e) => ApiErrorResponse::bad_request(e.to_string()).into_json_tuple().into_response(),
     }
 }
 
@@ -578,7 +578,12 @@ pub async fn reject_request(
             ),
         )
             .into_response(),
-        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
+        // #3541: route the typed `KernelOpError` through the central
+        // status-code map. The previous `not_found(_)` was wrong — a
+        // `KernelOpError::Unavailable` (approval gate disabled) was
+        // surfacing as 404 instead of 503, and an internal `Other`
+        // failure surfaced as 404 instead of 500.
+        Err(e) => ApiErrorResponse::from(e).into_response(),
     }
 }
 
@@ -635,7 +640,10 @@ pub async fn modify_request(
             ),
         )
             .into_response(),
-        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
+        // #3541: see `reject_request` above — route through the typed
+        // `KernelOpError` mapping so non-NotFound variants get the
+        // status code their semantics demand.
+        Err(e) => ApiErrorResponse::from(e).into_response(),
     }
 }
 
@@ -728,9 +736,8 @@ pub async fn batch_resolve(
                 "decision": resp.decision.as_str(),
                 "decided_at": resp.decided_at.to_rfc3339(),
             })),
-            Err(e) => {
-                result_json.push(serde_json::json!({"id": id, "status": "error", "message": e}))
-            }
+            Err(e) => result_json
+                .push(serde_json::json!({"id": id, "status": "error", "message": e.to_string()})),
         }
     }
 
@@ -1144,12 +1151,13 @@ pub async fn totp_setup(
                     }
                     match state.kernel.vault_get("totp_secret") {
                         Some(secret) => {
-                            let ok = librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
-                                &secret,
-                                code,
-                                &totp_issuer,
-                            )
-                            .unwrap_or(false);
+                            let ok =
+                                crate::approval::ApprovalManager::verify_totp_code_with_issuer(
+                                    &secret,
+                                    code,
+                                    &totp_issuer,
+                                )
+                                .unwrap_or(false);
                             if ok {
                                 state.kernel.approvals().record_totp_code_used(code);
                             }
@@ -1293,7 +1301,7 @@ pub async fn totp_confirm(
         )
         .into_json_tuple();
     }
-    match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+    match crate::approval::ApprovalManager::verify_totp_code_with_issuer(
         &secret,
         &body.code,
         &totp_issuer,
@@ -1424,7 +1432,7 @@ pub async fn totp_revoke(
         }
         match state.kernel.vault_get("totp_secret") {
             Some(secret) => {
-                let ok = librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                let ok = crate::approval::ApprovalManager::verify_totp_code_with_issuer(
                     &secret,
                     &body.code,
                     &totp_issuer,

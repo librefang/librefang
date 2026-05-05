@@ -69,9 +69,9 @@ async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     // Populate the registry cache so the kernel boots without network access.
-    librefang_runtime::registry_sync::sync_registry(
+    librefang_kernel::registry_sync::sync_registry(
         tmp.path(),
-        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
     );
 

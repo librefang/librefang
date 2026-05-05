@@ -42,7 +42,7 @@ impl ConsolidationEngine {
                  WHERE deleted = 0 AND accessed_at < ?2 AND confidence > 0.1",
                 rusqlite::params![decay_factor, cutoff],
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         // Phase 2: merge highly similar memories (>90% text similarity).
         // Load active memories per-agent to prevent cross-tenant merges: memories
@@ -58,10 +58,10 @@ impl ConsolidationEngine {
         let agent_ids: Vec<String> = {
             let mut stmt = conn
                 .prepare("SELECT DISTINCT agent_id FROM memories WHERE deleted = 0")
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             let rows = stmt
                 .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             rows.filter_map(|r| r.ok()).collect()
         };
 
@@ -78,7 +78,7 @@ impl ConsolidationEngine {
         // all-or-nothing safe here.
         let outer_tx = conn
             .unchecked_transaction()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         'agents: for agent_id in &agent_ids {
             // Pull every column needed to merge state correctly. Pre-fix
@@ -93,7 +93,7 @@ impl ConsolidationEngine {
                      WHERE deleted = 0 AND agent_id = ?1 \
                      ORDER BY confidence DESC",
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
 
             #[allow(clippy::type_complexity)]
             let mut rows: Vec<(String, String, f64, String, i64, Option<Vec<u8>>)> = stmt
@@ -107,7 +107,7 @@ impl ConsolidationEngine {
                         row.get::<_, Option<Vec<u8>>>(5)?,
                     ))
                 })
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?
+                .map_err(LibreFangError::memory)?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -166,7 +166,7 @@ impl ConsolidationEngine {
                                 "UPDATE memories SET deleted = 1 WHERE id = ?1",
                                 rusqlite::params![&rows[j].0],
                             )
-                            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                            .map_err(LibreFangError::memory)?;
 
                         match merged_embedding.as_ref() {
                             Some(bytes) => {
@@ -183,7 +183,7 @@ impl ConsolidationEngine {
                                             &rows[i].0,
                                         ],
                                     )
-                                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                                    .map_err(LibreFangError::memory)?;
                             }
                             None => {
                                 outer_tx
@@ -198,7 +198,7 @@ impl ConsolidationEngine {
                                             &rows[i].0,
                                         ],
                                     )
-                                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                                    .map_err(LibreFangError::memory)?;
                             }
                         }
 
@@ -234,9 +234,7 @@ impl ConsolidationEngine {
         // MAX_MERGES_PER_RUN fsyncs into one. If no merges happened the
         // outer tx is still committed (a no-op write), which is cheaper
         // than guarding the commit on `memories_merged > 0`.
-        outer_tx
-            .commit()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        outer_tx.commit().map_err(LibreFangError::memory)?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
 

@@ -21,7 +21,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{DateTime, Utc};
-use librefang_runtime::audit::AuditEntry;
+use librefang_kernel::audit::AuditEntry;
 use librefang_types::agent::UserId;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -105,7 +105,7 @@ fn require_admin(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> O
             // Authenticated but under-privileged — record with attribution.
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::PermissionDenied,
+                librefang_kernel::audit::AuditAction::PermissionDenied,
                 format!("audit endpoint denied for role {}", u.role),
                 "denied",
                 Some(u.user_id),
@@ -119,7 +119,7 @@ fn require_admin(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> O
             // Anonymous (loopback / no-auth mode) — record without attribution.
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::PermissionDenied,
+                librefang_kernel::audit::AuditAction::PermissionDenied,
                 "audit endpoint denied for anonymous caller",
                 "denied",
                 None,
@@ -581,7 +581,7 @@ pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoRespon
 #[cfg(test)]
 mod tests {
     use super::*;
-    use librefang_runtime::audit::{AuditAction, AuditEntry};
+    use librefang_kernel::audit::{AuditAction, AuditEntry};
 
     fn entry(
         seq: u64,

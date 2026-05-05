@@ -18,11 +18,18 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
-/// LINE push message API endpoint.
-const LINE_PUSH_URL: &str = "https://api.line.me/v2/bot/message/push";
-
-/// LINE reply message API endpoint.
+/// LINE reply message API endpoint. Used by `api_reply_message` (dead_code allowed
+/// because reply is not yet wired into `ChannelAdapter::send`).
+#[allow(dead_code)]
 const LINE_REPLY_URL: &str = "https://api.line.me/v2/bot/message/reply";
+
+/// Returns the default LINE Messaging API base URL. Used to initialise
+/// `LineAdapter::push_api_base`. Scheme + host only — the message-type
+/// path (`/v2/bot/message/push`) is appended at each call site.
+#[inline]
+fn default_line_push_api_base() -> String {
+    "https://api.line.me".to_string()
+}
 
 /// LINE profile API endpoint.
 #[allow(dead_code)]
@@ -47,6 +54,10 @@ pub struct LineAdapter {
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
+    /// Base URL for the LINE Messaging API (scheme + host only, no trailing slash).
+    /// Defaults to `https://api.line.me`. Overridable in tests via `with_push_api_base()`
+    /// to point at a wiremock server.
+    push_api_base: String,
 }
 
 impl LineAdapter {
@@ -62,11 +73,21 @@ impl LineAdapter {
             access_token: Zeroizing::new(access_token),
             client: crate::http_client::new_client(),
             account_id: None,
+            push_api_base: default_line_push_api_base(),
         }
     }
+
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the LINE Messaging API base URL (scheme + host). Intended for tests
+    /// that point the adapter at a wiremock server instead of `https://api.line.me`.
+    #[cfg(test)]
+    pub fn with_push_api_base(mut self, base: String) -> Self {
+        self.push_api_base = base;
         self
     }
 
@@ -143,9 +164,10 @@ impl LineAdapter {
                 ]
             });
 
+            let push_url = format!("{}/v2/bot/message/push", self.push_api_base);
             let resp = self
                 .client
-                .post(LINE_PUSH_URL)
+                .post(&push_url)
                 .bearer_auth(self.access_token.as_str())
                 .json(&body)
                 .send()
@@ -452,9 +474,10 @@ impl ChannelAdapter for LineAdapter {
                     ]
                 });
 
+                let push_url = format!("{}/v2/bot/message/push", self.push_api_base);
                 let resp = self
                     .client
-                    .post(LINE_PUSH_URL)
+                    .post(&push_url)
                     .bearer_auth(self.access_token.as_str())
                     .json(&body)
                     .send()
@@ -497,6 +520,124 @@ impl ChannelAdapter for LineAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Uses `wiremock` to stand up a local HTTP server and points `LineAdapter`
+    // at it via `with_push_api_base()`. This mirrors the pattern used for the
+    // discord slice (PR #4551) and exercises the `POST /v2/bot/message/push`
+    // call made by `ChannelAdapter::send`.
+
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(push_api_base: String) -> LineAdapter {
+        LineAdapter::new(
+            "channel-secret-test".to_string(),
+            "test-access-token".to_string(),
+            0,
+        )
+        .with_push_api_base(push_api_base)
+    }
+
+    fn dummy_user(platform_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: platform_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn line_send_text_posts_push_message_with_bearer_auth_and_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/bot/message/push"))
+            .and(header("Authorization", "Bearer test-access-token"))
+            .and(body_json(serde_json::json!({
+                "to": "U1234567890",
+                "messages": [{"type": "text", "text": "hello from librefang"}]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("U1234567890"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn line_send_image_posts_image_message_with_push_api_base() {
+        // Locks the second `push_api_base` call site — the image branch in
+        // `send()` directly (not via `api_push_message`). Without this test
+        // a regression that reverts `self.client.post(&push_url)` back to
+        // `LINE_PUSH_URL` in the image branch would slip through CI even
+        // though the PR explicitly claims to refactor that branch.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/bot/message/push"))
+            .and(header("Authorization", "Bearer test-access-token"))
+            .and(body_json(serde_json::json!({
+                "to": "Uimage1234",
+                "messages": [{
+                    "type": "image",
+                    "originalContentUrl": "https://example.com/photo.jpg",
+                    "previewImageUrl": "https://example.com/photo.jpg",
+                }]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("Uimage1234"),
+                ChannelContent::Image {
+                    url: "https://example.com/photo.jpg".into(),
+                    caption: None,
+                    mime_type: None,
+                },
+            )
+            .await
+            .expect("image send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn line_send_unsupported_content_falls_back_to_placeholder_text() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/bot/message/push"))
+            .and(header("Authorization", "Bearer test-access-token"))
+            .and(body_json(serde_json::json!({
+                "to": "U9999999999",
+                "messages": [{"type": "text", "text": "(Unsupported content type)"}]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("U9999999999"),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send must succeed with unsupported content");
+    }
 
     #[test]
     fn test_line_adapter_creation() {

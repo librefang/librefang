@@ -1,6 +1,17 @@
 // FangHub Marketplace Worker
 // Storage: Cloudflare D1 (SQLite)
 // Auth: GitHub OAuth (stateless JWT in cookie)
+//
+// Plugin signing (#3805): when REGISTRY_PRIVATE_KEY (PKCS#8 base64) is set
+// as a Worker secret and REGISTRY_PUBLIC_KEY (raw 32-byte base64) is set as
+// a var, each published version is signed at publish time over the canonical
+// string `<slug>@<version>|<bundle_url>|<bundle_sha256>` and the signature
+// is stored in package_versions.bundle_sig. The daemon
+// (librefang-runtime/plugin_manager.rs) fetches:
+//   GET /v1/pubkey                                   — base64 raw 32-byte pubkey
+//   GET /v1/download/<slug>/<version>/signature     — { signed: "...", sig: "..." }
+// The `signed` field is the exact canonical string the daemon must reconstruct
+// and verify with the pubkey. See web/workers/SIGNING.md.
 
 const CORS = {
   'Access-Control-Allow-Origin': 'https://librefang.ai',
@@ -56,6 +67,15 @@ export default {
       const starMatch = path.match(/^\/v1\/packages\/([^/]+)\/star$/)
       if (starMatch) {
         return handleStar(starMatch[1], request, env)
+      }
+
+      // Signing endpoints
+      if (path === '/v1/pubkey' && request.method === 'GET') {
+        return handlePubkey(env)
+      }
+      const sigMatch = path.match(/^\/v1\/download\/([^/]+)\/([^/]+)\/signature$/)
+      if (sigMatch && request.method === 'GET') {
+        return handleVersionSignature(sigMatch[1], sigMatch[2], env)
       }
 
       return json({ error: 'Not Found' }, 404)
@@ -311,14 +331,46 @@ async function handlePublishVersion(slug, request, env) {
   const { version, bundle_url, bundle_sha256, changelog } = body
   if (!version || !bundle_url || !bundle_sha256) return json({ error: 'version, bundle_url, bundle_sha256 required' }, 400)
 
+  // PR review CRITICAL #2 — without an allowlist, an author can publish
+  // `bundle_url=https://attacker.example/payload.tgz` with any sha256
+  // and get a registry-signed signature back. The daemon's verification
+  // then reduces to "the registry confirmed this author claimed this
+  // URL". Restrict to known hosts that hold immutable, content-addressed
+  // artefacts so the signature actually attests to what users install.
+  if (!isAllowedBundleHost(bundle_url)) {
+    return json({
+      error:
+        'bundle_url must be hosted on an approved CDN: GitHub Releases ' +
+        '(github.com/.../releases/download/), or the marketplace R2 bucket ' +
+        '(marketplace.librefang.ai/bundles/). Self-hosted URLs are not ' +
+        'eligible for registry signing — the signature would attest to ' +
+        'host control rather than artefact identity.',
+    }, 400)
+  }
+  // Stronger sanity check on the sha256 too — 64 lower-hex chars,
+  // matches what `sha256sum` emits.
+  if (!/^[0-9a-f]{64}$/.test(bundle_sha256)) {
+    return json({ error: 'bundle_sha256 must be 64 lower-hex chars' }, 400)
+  }
+
   const versionId = `${slug}@${version}`
   const now = Math.floor(Date.now() / 1000)
 
+  // Compute the canonical signed payload — the daemon reconstructs this exact
+  // string and verifies it with the registry pubkey before installing.
+  const signedPayload = `${versionId}|${bundle_url}|${bundle_sha256}`
+  let bundleSig = null
+  try {
+    bundleSig = await signWithRegistryKey(env, new TextEncoder().encode(signedPayload))
+  } catch (e) {
+    console.error('Bundle signing failed:', e.message)
+  }
+
   try {
     await env.DB.prepare(
-      `INSERT INTO package_versions (id, package_id, version, changelog, bundle_url, bundle_sha256, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).bind(versionId, slug, version, changelog || '', bundle_url, bundle_sha256, now).run()
+      `INSERT INTO package_versions (id, package_id, version, changelog, bundle_url, bundle_sha256, bundle_sig, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(versionId, slug, version, changelog || '', bundle_url, bundle_sha256, bundleSig, now).run()
   } catch (e) {
     if (e.message?.includes('UNIQUE')) return json({ error: 'Version already exists' }, 409)
     throw e
@@ -472,8 +524,115 @@ async function authenticate(request, env) {
 }
 
 // ---------------------------------------------------------------------------
+// Plugin signing (Ed25519)
+// ---------------------------------------------------------------------------
+
+function handlePubkey(env) {
+  const pub = (env.REGISTRY_PUBLIC_KEY || '').trim()
+  if (!pub) return json({ error: 'public key not configured' }, 503)
+  return new Response(pub, {
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'public, max-age=86400',
+      ...CORS,
+    },
+  })
+}
+
+async function handleVersionSignature(slug, version, env) {
+  const versionId = version === 'latest'
+    ? await resolveLatestVersionId(slug, env)
+    : `${slug}@${version}`
+  if (!versionId) return json({ error: 'Not Found' }, 404)
+
+  const row = await env.DB.prepare(
+    `SELECT bundle_url, bundle_sha256, bundle_sig FROM package_versions WHERE id = ?`,
+  ).bind(versionId).first()
+  if (!row) return json({ error: 'Not Found' }, 404)
+  if (!row.bundle_sig) return json({ error: 'version not signed' }, 503)
+
+  return json({
+    signed: `${versionId}|${row.bundle_url}|${row.bundle_sha256}`,
+    sig: row.bundle_sig,
+  })
+}
+
+async function resolveLatestVersionId(slug, env) {
+  const pkg = await env.DB.prepare(
+    `SELECT latest_version FROM packages WHERE id = ?`,
+  ).bind(slug).first()
+  if (!pkg?.latest_version) return null
+  return `${slug}@${pkg.latest_version}`
+}
+
+// Sign `bytes` with the configured PKCS#8 private key. Returns base64
+// signature, or null when no key is configured. Throws on malformed key.
+async function signWithRegistryKey(env, bytes) {
+  const pkcs8B64 = (env.REGISTRY_PRIVATE_KEY || '').trim()
+  if (!pkcs8B64) return null
+  const pkcs8 = bytesFromB64(pkcs8B64)
+  const key = await crypto.subtle.importKey(
+    'pkcs8', pkcs8, { name: 'Ed25519' }, false, ['sign'],
+  )
+  const sig = await crypto.subtle.sign({ name: 'Ed25519' }, key, bytes)
+  return b64FromBytes(new Uint8Array(sig))
+}
+
+function bytesFromB64(b64) {
+  const bin = atob(b64.replace(/\s+/g, ''))
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
+}
+
+function b64FromBytes(bytes) {
+  let s = ''
+  for (const b of bytes) s += String.fromCharCode(b)
+  return btoa(s)
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// Hosts that publish immutable, content-addressed artefacts and are
+// reasonable trust roots for marketplace bundles. PR re-review HIGH-NEW-D
+// closed two leaks here:
+//   1. raw-string startsWith() check was bypassable via WHATWG URL
+//      normalization (`https://github.com/../../attacker/x.tgz` parses
+//      to `https://attacker/x.tgz` but startsWith('https://github.com/')
+//      returns true on the unparsed input). Now matched on parsed
+//      (host, pathPrefix) tuples.
+//   2. `https://github.com/<owner>/<repo>/raw/main/x.tgz` matched the
+//      old `https://github.com/` prefix but is mutable (branch HEAD).
+//      Restrict to `/releases/download/` (release assets are immutable
+//      once tag-pinned) and the GitHub asset CDN, which is what
+//      `gh release download` redirects to.
+const ALLOWED_BUNDLE_LOCATIONS = [
+  // (host, pathPrefix) — both must match after URL parsing.
+  { host: 'github.com',                    pathRegex: /^\/[^/]+\/[^/]+\/releases\/download\// },
+  { host: 'objects.githubusercontent.com', pathRegex: /^\// },
+  { host: 'marketplace.librefang.ai',      pathRegex: /^\/bundles\// },
+]
+
+function isAllowedBundleHost(url) {
+  if (typeof url !== 'string' || url.length === 0 || url.length > 2048) return false
+  let parsed
+  try {
+    parsed = new URL(url)
+  } catch (_) {
+    return false
+  }
+  if (parsed.protocol !== 'https:') return false
+  if (parsed.username || parsed.password) return false
+  // Reject hash + query — bundle URLs should be plain immutable paths.
+  // (CDN-side cache busters via ?v= are an acceptable loss; signers can
+  //  drop them before publishing.)
+  if (parsed.hash) return false
+  return ALLOWED_BUNDLE_LOCATIONS.some(loc =>
+    parsed.host === loc.host && loc.pathRegex.test(parsed.pathname),
+  )
+}
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS })

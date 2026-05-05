@@ -51,7 +51,12 @@ impl TestAppState {
     }
 
     /// Builds from an existing kernel (caller is responsible for holding TempDir).
+    ///
+    /// Wraps the kernel in `Arc` and wires `set_self_handle` so internal
+    /// `kernel_handle()` lookups (used by `send_message_*`) succeed (#3652).
     pub fn from_kernel(kernel: LibreFangKernel, tmp: TempDir) -> Self {
+        let kernel = Arc::new(kernel);
+        kernel.set_self_handle();
         let state = Self::build_state(kernel, &tmp);
         Self {
             state,
@@ -184,9 +189,17 @@ impl TestAppState {
     }
 
     /// Internal: builds AppState from a kernel.
-    fn build_state(kernel: LibreFangKernel, tmp: &TempDir) -> Arc<AppState> {
-        let kernel = Arc::new(kernel);
+    fn build_state(kernel: Arc<LibreFangKernel>, tmp: &TempDir) -> Arc<AppState> {
         let channels_config = kernel.config_ref().channels.clone();
+
+        // Idempotency-Key replay store (#3637) — wired against the
+        // substrate's shared SQLite connection so tests exercise the
+        // same persistence path as production.
+        let idempotency_store: Arc<
+            dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync,
+        > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
+            kernel.memory_substrate().usage_conn(),
+        ));
 
         Arc::new(AppState {
             kernel,
@@ -216,6 +229,7 @@ impl TestAppState {
             // per-IP rate-limiter / WS slot keying always uses the TCP peer.
             trusted_proxies: Arc::new(librefang_api::client_ip::TrustedProxies::default()),
             trust_forwarded_for: false,
+            idempotency_store,
         })
     }
 }

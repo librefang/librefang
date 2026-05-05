@@ -6,7 +6,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_runtime::media::{MediaDriverCache, MediaError};
+use librefang_kernel::media::{MediaDriverCache, MediaError};
 use librefang_types::media::{
     MediaCapability, MediaImageRequest, MediaMusicRequest, MediaTtsRequest, MediaVideoRequest,
 };
@@ -30,7 +30,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 // ── Known media providers (mirrors MEDIA_PROVIDER_ORDER in runtime) ─────
 
 /// Known media provider names, in preference order.
-/// Keep in sync with `librefang_runtime::media::MEDIA_PROVIDER_ORDER`.
+/// Keep in sync with `librefang_kernel::media::MEDIA_PROVIDER_ORDER`.
 const KNOWN_MEDIA_PROVIDERS: &[&str] = &["openai", "gemini", "elevenlabs", "minimax", "google_tts"];
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -65,7 +65,7 @@ fn resolve_driver(
     cache: &MediaDriverCache,
     provider: &Option<String>,
     capability: MediaCapability,
-) -> Result<Arc<dyn librefang_runtime::media::MediaDriver>, MediaError> {
+) -> Result<Arc<dyn librefang_kernel::media::MediaDriver>, MediaError> {
     if let Some(ref name) = provider {
         cache.get_or_create(name, None)
     } else {

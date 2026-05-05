@@ -273,4 +273,38 @@ mod tests {
         assert_eq!(adapter.port, 5223);
         assert_eq!(adapter.endpoint(), "xmpp.example.com:5223");
     }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // The XMPP adapter is intentionally a stub today (`send()` returns
+    // a contract-pinning Err naming the missing tokio-xmpp dependency).
+    // The existing `test_send_returns_error` already asserts `is_err()`;
+    // this extra case pins the **error message**, which callers and
+    // dashboards may surface verbatim — so a future implementation
+    // cannot silently change the wording while still being a no-op.
+
+    #[tokio::test]
+    async fn xmpp_send_error_message_pins_tokio_xmpp_pending_marker() {
+        let adapter = XmppAdapter::new(
+            "bot@example.com".to_string(),
+            "pass".to_string(),
+            "xmpp.example.com".to_string(),
+            5222,
+            vec![],
+        );
+        let user = ChannelUser {
+            platform_id: "alice@example.com".to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        };
+        let err = adapter
+            .send(&user, ChannelContent::Text("ignored — stub".into()))
+            .await
+            .expect_err("xmpp send must remain a stub Err until tokio-xmpp lands");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("not started") && msg.contains("tokio-xmpp"),
+            "stub error must mention not-started + tokio-xmpp, got: {err}"
+        );
+    }
 }

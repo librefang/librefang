@@ -377,6 +377,203 @@ pub fn calculate_backoff(current: Duration, max: Duration) -> Duration {
 mod tests {
     use super::*;
 
+    // ----- transport-layer tests for #3406 -----
+    //
+    // Stand up a local `wiremock::MockServer` and point `MatrixAdapter`
+    // at it via the `homeserver_url` argument to `new()`. Exercises the
+    // PUT `/_matrix/client/v3/rooms/{}/send/m.room.message/{txn_id}`
+    // call made by `ChannelAdapter::send`.
+    //
+    // Matrix is the only one of the three #3406 top adapters where
+    // idempotency is on the wire by design: the txn_id (last URL
+    // segment) is the protocol-level dedup key. Today
+    // `api_send_message` mints a fresh `Uuid::new_v4()` per call and
+    // does not retry — so the dedup property exists but is unused.
+    // Tests assert (a) the txn_id IS a UUID and (b) 429 / 5xx surface
+    // as `Err` (fail-loud, unlike Slack/Discord); a follow-up that
+    // adds retry must reuse the same txn_id and is tracked on #3406.
+
+    use wiremock::matchers::{body_json, header, method, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(homeserver_url: String) -> MatrixAdapter {
+        MatrixAdapter::new(
+            homeserver_url,
+            "@bot:matrix.org".to_string(),
+            "secret-access-token".to_string(),
+            vec![],
+            false,
+        )
+    }
+
+    fn dummy_user(room_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: room_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    /// Request shape: PUT to the documented Matrix CS-API path,
+    /// `Bearer` auth, `m.text` body. Path matcher accepts any UUID
+    /// txn_id segment (the txn_id assertion is in a separate test).
+    #[tokio::test]
+    async fn matrix_send_puts_room_message_event() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/!room:example\.org/send/m\.room\.message/[0-9a-fA-F-]{36}$",
+            ))
+            .and(header("Authorization", "Bearer secret-access-token"))
+            .and(body_json(serde_json::json!({
+                "msgtype": "m.text",
+                "body": "hello matrix",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$evt:example.org",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("!room:example.org"),
+                ChannelContent::Text("hello matrix".into()),
+            )
+            .await
+            .expect("matrix send must succeed against mock");
+    }
+
+    /// The txn_id MUST be a v4-shaped UUID. Capture the recorded request
+    /// URL and assert the last path segment parses as a UUID. This pins
+    /// the protocol-level idempotency key to a real opaque token (not,
+    /// say, a monotonic counter) so dedup is preserved across daemon
+    /// restarts.
+    #[tokio::test]
+    async fn matrix_send_uses_uuid_txn_id_for_idempotency() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/!r:example\.org/send/m\.room\.message/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$evt",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("!r:example.org"),
+                ChannelContent::Text("idempotent".into()),
+            )
+            .await
+            .expect("matrix send must succeed");
+
+        // Two independent send() calls produce different txn_ids
+        // (today's behaviour — retry would need to *reuse* one txn_id,
+        // tracked as follow-up on #3406). Use `received_requests()`
+        // after-the-fact instead of a `respond_with` closure so we
+        // capture txn_ids without juggling `Sync` closure state.
+        let server2 = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/!r:example\.org/send/m\.room\.message/.+$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$e",
+            })))
+            .expect(2)
+            .mount(&server2)
+            .await;
+
+        let adapter2 = make_adapter(server2.uri());
+        adapter2
+            .send(
+                &dummy_user("!r:example.org"),
+                ChannelContent::Text("first".into()),
+            )
+            .await
+            .unwrap();
+        adapter2
+            .send(
+                &dummy_user("!r:example.org"),
+                ChannelContent::Text("second".into()),
+            )
+            .await
+            .unwrap();
+
+        let recorded = server2
+            .received_requests()
+            .await
+            .expect("wiremock should have recorded requests");
+        assert_eq!(recorded.len(), 2, "expected exactly two PUT calls");
+        let observed: Vec<String> = recorded
+            .iter()
+            .map(|r| {
+                r.url
+                    .path()
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        assert_ne!(
+            observed[0], observed[1],
+            "today the adapter mints a fresh uuid per call; a future retry refactor MUST reuse one"
+        );
+        for txn in &observed {
+            assert!(
+                uuid::Uuid::parse_str(txn).is_ok(),
+                "txn_id {txn} must be a valid UUID"
+            );
+        }
+    }
+
+    /// Matrix differs from Slack/Discord: `api_send_message` is
+    /// fail-loud — non-2xx becomes `Err`, not a warn'd Ok. Pin that
+    /// here so a future fail-open refactor doesn't silently swallow
+    /// 429s. Single observation, no retry today.
+    #[tokio::test]
+    async fn matrix_send_returns_err_on_429_no_retry_today() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/!r:example\.org/send/m\.room\.message/.+$",
+            ))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "1")
+                    .set_body_json(serde_json::json!({
+                        "errcode": "M_LIMIT_EXCEEDED",
+                        "error": "Too many requests",
+                        "retry_after_ms": 1000,
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        let err = adapter
+            .send(
+                &dummy_user("!r:example.org"),
+                ChannelContent::Text("rate-limited".into()),
+            )
+            .await
+            .expect_err("matrix send is fail-loud on 429 today");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("429") || msg.to_ascii_lowercase().contains("too many"),
+            "error must surface the 429: {msg}"
+        );
+    }
+
     #[test]
     fn test_matrix_adapter_creation() {
         let adapter = MatrixAdapter::new(

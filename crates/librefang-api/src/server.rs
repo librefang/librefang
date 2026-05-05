@@ -63,7 +63,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .merge(routes::goals::router())
         .merge(routes::inbox::router())
         .merge(routes::media::router())
-        .merge(routes::prompts::routes())
+        .merge(routes::prompts::router())
         .merge(routes::terminal::router())
         .merge(routes::users::router())
         .merge(routes::webhooks::router())
@@ -375,9 +375,9 @@ fn session_cookie_attrs(headers: &axum::http::HeaderMap) -> &'static str {
     post,
     path = "/api/auth/dashboard-login",
     tag = "auth",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Login outcome — returns session token on success or `requires_totp` when 2FA is needed", body = serde_json::Value),
+        (status = 200, description = "Login outcome — returns session token on success or `requires_totp` when 2FA is needed", body = crate::types::JsonObject),
         (status = 401, description = "Invalid username, password, or TOTP code")
     )
 )]
@@ -559,7 +559,7 @@ pub(crate) async fn dashboard_login(
     path = "/api/auth/dashboard-check",
     tag = "auth",
     responses(
-        (status = 200, description = "Auth mode for the dashboard SPA — one of `none`, `api_key`, `credentials`, or `hybrid`", body = serde_json::Value)
+        (status = 200, description = "Auth mode for the dashboard SPA — one of `none`, `api_key`, `credentials`, or `hybrid`", body = crate::types::JsonObject)
     )
 )]
 pub(crate) async fn dashboard_auth_check(
@@ -616,7 +616,7 @@ pub(crate) async fn dashboard_auth_check(
     path = "/api/auth/logout",
     tag = "auth",
     responses(
-        (status = 200, description = "Session invalidated and cookie cleared", body = serde_json::Value)
+        (status = 200, description = "Session invalidated and cookie cleared", body = crate::types::JsonObject)
     )
 )]
 pub(crate) async fn dashboard_logout(
@@ -695,7 +695,7 @@ pub(crate) struct ChangePasswordRequest {
     tag = "auth",
     request_body = ChangePasswordRequest,
     responses(
-        (status = 200, description = "Credentials updated and existing sessions invalidated", body = serde_json::Value),
+        (status = 200, description = "Credentials updated and existing sessions invalidated", body = crate::types::JsonObject),
         (status = 400, description = "Missing required fields or password too short"),
         (status = 401, description = "Current password is incorrect")
     )
@@ -1072,6 +1072,14 @@ pub async fn build_router(
     };
     let trust_forwarded_for_cached = kernel.config_ref().trust_forwarded_for;
 
+    // Build the Idempotency-Key replay store (#3637) on top of the
+    // substrate's shared SQLite connection. Reuses the WAL pool so
+    // there's no separate file and no second open call.
+    let idempotency_store: Arc<dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync> =
+        Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
+            kernel.memory_substrate().usage_conn(),
+        ));
+
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
@@ -1080,7 +1088,7 @@ pub async fn build_router(
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
         skillhub_cache: dashmap::DashMap::new(),
-        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        provider_probe_cache: librefang_kernel::provider_health::ProbeCache::new(),
         provider_test_cache: dashmap::DashMap::new(),
         webhook_store: crate::webhook_store::WebhookStore::load(
             kernel.home_dir().join("data").join("webhooks.json"),
@@ -1088,7 +1096,7 @@ pub async fn build_router(
         active_sessions: active_sessions.clone(),
         api_key_lock: api_key_lock.clone(),
         user_api_keys: user_api_keys_lock.clone(),
-        media_drivers: librefang_runtime::media::MediaDriverCache::new_with_urls(
+        media_drivers: librefang_kernel::media::MediaDriverCache::new_with_urls(
             kernel.config_ref().provider_urls.clone(),
         ),
         webhook_router,
@@ -1098,6 +1106,7 @@ pub async fn build_router(
         gcra_limiter: gcra_limiter_arc.clone(),
         trusted_proxies: trusted_proxies_arc.clone(),
         trust_forwarded_for: trust_forwarded_for_cached,
+        idempotency_store,
     });
 
     // CORS: allow localhost origins by default, plus any configured in cors_origin.
@@ -1683,7 +1692,7 @@ pub async fn run_daemon(
         bg_tasks.push(tokio::spawn(async move {
             loop {
                 let cfg = kernel.config_snapshot();
-                match librefang_runtime::catalog_sync::sync_catalog_to(
+                match librefang_kernel::catalog_sync::sync_catalog_to(
                     kernel.home_dir(),
                     &cfg.registry.registry_mirror,
                 )
@@ -1694,21 +1703,26 @@ pub async fn run_daemon(
                             "Model catalog synced: {} files downloaded",
                             result.files_downloaded
                         );
-                        if let Ok(mut catalog) = kernel.model_catalog_ref().write() {
-                            let cfg = kernel.config_ref();
-                            catalog.load_cached_catalog_for(&cfg.home_dir);
-                            if !cfg.provider_regions.is_empty() {
-                                let region_urls =
-                                    catalog.resolve_region_urls(&cfg.provider_regions);
+                        // Pre-read cfg fields once: the RCU closure may
+                        // re-run on CAS retry, and cloning the relevant
+                        // bits up-front keeps the closure cheap and pure.
+                        let cfg = kernel.config_ref();
+                        let home_dir = cfg.home_dir.clone();
+                        let provider_regions = cfg.provider_regions.clone();
+                        let provider_urls = cfg.provider_urls.clone();
+                        kernel.model_catalog_update(|catalog| {
+                            catalog.load_cached_catalog_for(&home_dir);
+                            if !provider_regions.is_empty() {
+                                let region_urls = catalog.resolve_region_urls(&provider_regions);
                                 if !region_urls.is_empty() {
                                     catalog.apply_url_overrides(&region_urls);
                                 }
                             }
-                            if !cfg.provider_urls.is_empty() {
-                                catalog.apply_url_overrides(&cfg.provider_urls);
+                            if !provider_urls.is_empty() {
+                                catalog.apply_url_overrides(&provider_urls);
                             }
                             catalog.detect_auth();
-                        }
+                        });
                     }
                     Err(e) => {
                         tracing::warn!(

@@ -2976,4 +2976,231 @@ mod tests {
             other => panic!("expected block user message, got {other:?}"),
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Property-based: trim/repair invariants (#3409)
+    // -----------------------------------------------------------------------
+
+    /// Atom used by the strategy to build random message histories. Each atom
+    /// produces exactly one `Message`. `tool_use_id` values are drawn from a
+    /// small finite pool so orphaned / duplicated / mispaired ToolUse and
+    /// ToolResult blocks are deliberately frequent, which is the interesting
+    /// adversarial input space for `validate_and_repair`.
+    #[derive(Debug, Clone)]
+    enum MsgAtom {
+        UserText(String),
+        AssistantText(String),
+        AssistantToolUse(u8, String),
+        UserToolResult(u8),
+    }
+
+    fn msg_atom_to_message(atom: &MsgAtom) -> Message {
+        match atom {
+            MsgAtom::UserText(t) => Message::user(t),
+            MsgAtom::AssistantText(t) => Message::assistant(t),
+            MsgAtom::AssistantToolUse(id, name) => Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: format!("tu-{id}"),
+                    name: name.clone(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                }]),
+                pinned: false,
+                timestamp: None,
+            },
+            MsgAtom::UserToolResult(id) => Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: format!("tu-{id}"),
+                    tool_name: "any_tool".to_string(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                    status: ToolExecutionStatus::Completed,
+                    approval_request_id: None,
+                }]),
+                pinned: false,
+                timestamp: None,
+            },
+        }
+    }
+
+    /// Collect tool_use_ids from assistant ToolUse blocks in a slice.
+    fn collect_use_ids(messages: &[Message]) -> Vec<String> {
+        let mut out = Vec::new();
+        for m in messages {
+            if let MessageContent::Blocks(blocks) = &m.content {
+                for b in blocks {
+                    if let ContentBlock::ToolUse { id, .. } = b {
+                        out.push(id.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Collect tool_use_ids referenced by ToolResult blocks in a slice.
+    fn collect_result_ids(messages: &[Message]) -> Vec<String> {
+        let mut out = Vec::new();
+        for m in messages {
+            if let MessageContent::Blocks(blocks) = &m.content {
+                for b in blocks {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = b {
+                        out.push(tool_use_id.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    mod prop {
+        use super::{
+            collect_result_ids, collect_use_ids, find_safe_trim_point, msg_atom_to_message,
+            validate_and_repair, MsgAtom,
+        };
+        use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+        use proptest::prelude::*;
+
+        proptest! {
+        #![proptest_config(ProptestConfig { cases: 256, ..Default::default() })]
+
+        /// Three invariants on the canonical repair pipeline:
+        ///
+        ///   1. Every ToolUse id retained in the output is paired with at
+        ///      least one ToolResult referencing it (no orphan ToolUse —
+        ///      providers reject pending tool calls).
+        ///   2. Every ToolResult retained references a ToolUse id that is
+        ///      also present in the output (no orphan ToolResult).
+        ///   3. No duplicate ToolResult tool_use_ids **for ids that occur in
+        ///      a single assistant turn**. Ids that span multiple assistant
+        ///      turns (Moonshot/Kimi reuse per-completion counters like
+        ///      `memory_store:6`, see `deduplicate_tool_results` and the
+        ///      `reorder_preserves_per_turn_synthetic_when_tool_id_collides_across_turns`
+        ///      regression test) are explicitly preserved by the repair
+        ///      pipeline so each turn keeps its own ToolResult; the
+        ///      duplicate ids in that case are by design, not a bug.
+        ///
+        /// Input is a random `Vec<Message>` (length 0..=30) drawn from a
+        /// strategy that deliberately mixes orphan ToolUses, orphan
+        /// ToolResults, duplicate ids, and mis-roled blocks (since
+        /// AssistantToolUse / UserToolResult are emitted independently).
+        #[test]
+        fn validate_and_repair_no_orphans_no_dup_results(
+            atoms in proptest::collection::vec(
+                prop_oneof![
+                    "[a-z]{1,5}".prop_map(MsgAtom::UserText),
+                    "[a-z]{1,5}".prop_map(MsgAtom::AssistantText),
+                    (0u8..4u8, "[a-z_]{1,6}")
+                        .prop_map(|(id, name)| MsgAtom::AssistantToolUse(id, name)),
+                    (0u8..4u8).prop_map(MsgAtom::UserToolResult),
+                ],
+                0..=30,
+            ),
+        ) {
+            let input: Vec<Message> = atoms.iter().map(msg_atom_to_message).collect();
+            let output = validate_and_repair(&input);
+
+            let use_ids = collect_use_ids(&output);
+            let result_ids = collect_result_ids(&output);
+
+            // Invariant 1: every retained ToolUse has a matching ToolResult.
+            for id in &use_ids {
+                prop_assert!(
+                    result_ids.iter().any(|rid| rid == id),
+                    "orphan ToolUse id={id:?} in output={output:?}"
+                );
+            }
+
+            // Invariant 2: every retained ToolResult points at a present
+            // ToolUse id.
+            for rid in &result_ids {
+                prop_assert!(
+                    use_ids.iter().any(|uid| uid == rid),
+                    "orphan ToolResult id={rid:?} in output={output:?}"
+                );
+            }
+
+            // Invariant 3: no duplicate ToolResult tool_use_ids — except
+            // for ids that occur in more than one assistant turn (the
+            // Moonshot/Kimi per-completion-counter reuse case the
+            // `deduplicate_tool_results` collision_ids escape preserves).
+            // Mirror the production logic: count assistant turns per id;
+            // ids seen in >1 turn are positional duplicates by design and
+            // each turn legitimately carries its own ToolResult.
+            let mut tool_use_turn_count: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for m in &output {
+                if m.role != Role::Assistant {
+                    continue;
+                }
+                if let MessageContent::Blocks(blocks) = &m.content {
+                    for b in blocks {
+                        if let ContentBlock::ToolUse { id, .. } = b {
+                            *tool_use_turn_count.entry(id.clone()).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            let mut seen = std::collections::HashSet::new();
+            for rid in &result_ids {
+                if tool_use_turn_count.get(rid).copied().unwrap_or(0) > 1 {
+                    // Cross-turn collision is intentional (Moonshot reuse) —
+                    // skip the uniqueness check for these ids.
+                    continue;
+                }
+                prop_assert!(
+                    seen.insert(rid.clone()),
+                    "duplicate ToolResult id={rid:?} in output={output:?}"
+                );
+            }
+        }
+
+        /// `find_safe_trim_point` must never return an index that splits a
+        /// ToolUse from its trailing ToolResult turn. Concretely: when it
+        /// returns `Some(p)` with `p > 0`, `messages[p - 1]` must not be an
+        /// Assistant message that still carries a ToolUse block — otherwise
+        /// the drain would orphan that ToolUse on the kept side of the
+        /// history, exactly the bug the trim-cap invariant is meant to
+        /// prevent.
+        #[test]
+        fn find_safe_trim_point_never_splits_tool_pair(
+            atoms in proptest::collection::vec(
+                prop_oneof![
+                    "[a-z]{1,5}".prop_map(MsgAtom::UserText),
+                    "[a-z]{1,5}".prop_map(MsgAtom::AssistantText),
+                    (0u8..4u8, "[a-z_]{1,6}")
+                        .prop_map(|(id, name)| MsgAtom::AssistantToolUse(id, name)),
+                    (0u8..4u8).prop_map(MsgAtom::UserToolResult),
+                ],
+                2..=30,
+            ),
+            min_trim_pct in 0u32..=100u32,
+        ) {
+            let messages: Vec<Message> = atoms.iter().map(msg_atom_to_message).collect();
+            let len = messages.len();
+            // Map percentage to a min_trim in [0, len-1]; len>=2 from strategy.
+            let min_trim = ((min_trim_pct as usize) * (len - 1)) / 100;
+
+            if let Some(p) = find_safe_trim_point(&messages, min_trim) {
+                prop_assert!(p < len, "trim point {p} out of range len={len}");
+                if p > 0 {
+                    let prev = &messages[p - 1];
+                    let prev_has_tool_use = matches!(
+                        &prev.content,
+                        MessageContent::Blocks(blocks)
+                            if blocks.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                    );
+                    prop_assert!(
+                        !(prev.role == Role::Assistant && prev_has_tool_use),
+                        "trim_point={p} would orphan ToolUse at index {} in {:?}",
+                        p - 1,
+                        messages
+                    );
+                }
+            }
+        }
+        }
+    }
 }

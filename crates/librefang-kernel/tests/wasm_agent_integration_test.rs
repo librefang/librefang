@@ -7,7 +7,6 @@
 
 use librefang_testing::MockKernelBuilder;
 use librefang_types::agent::AgentManifest;
-use std::sync::Arc;
 
 /// Minimal echo module: returns input JSON wrapped as `{"response": "..."}`.
 ///
@@ -264,7 +263,6 @@ memory_write = ["self.*"]
 async fn test_wasm_agent_streaming_fallback() {
     let (kernel, _tmp) = MockKernelBuilder::new().build();
     std::fs::write(_tmp.path().join("hello.wat"), HELLO_WAT).unwrap();
-    let kernel = Arc::new(kernel);
 
     let manifest = wasm_manifest("wasm-stream", "hello.wat");
     let agent_id = kernel.spawn_agent(manifest).unwrap();

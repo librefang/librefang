@@ -12,7 +12,7 @@ use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
-use librefang_runtime::mcp_oauth::{self, McpAuthState, OAuthTokens};
+use librefang_kernel::mcp_oauth::{self, McpAuthState, OAuthTokens};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
@@ -398,7 +398,7 @@ pub async fn auth_start(
     let flow_vault_key =
         |field: &str| KernelOAuthProvider::vault_key(&format!("{server_url}:{flow_id}"), field);
     let store =
-        |field: &str, value: &str| -> Result<(), librefang_runtime::mcp_oauth::McpOAuthError> {
+        |field: &str, value: &str| -> Result<(), librefang_kernel::mcp_oauth::McpOAuthError> {
             provider.vault_set(&flow_vault_key(field), value)
         };
     if let Err(e) = store("pkce_verifier", &pkce_verifier) {
@@ -710,7 +710,7 @@ pub async fn auth_callback(
     // Exchange authorization code for tokens.
     // Use the proxy-aware client so token endpoint requests respect proxy config
     // and inherit default connect/read timeouts (prevents hung token exchanges).
-    let http_client = librefang_runtime::http_client::proxied_client();
+    let http_client = librefang_kernel::http_client::proxied_client();
     let mut form_params = vec![
         ("grant_type", "authorization_code".to_string()),
         ("code", code),
@@ -824,6 +824,40 @@ pub async fn auth_callback(
         tracing::warn!(error = %e, "Failed to store OAuth tokens");
     }
 
+    // Promote `token_endpoint` (and `client_id` if registered via DCR) from
+    // the per-flow staging namespace into the durable per-server namespace
+    // BEFORE the PKCE cleanup loop deletes them. The kernel's `try_refresh`
+    // path reads these from `{server_url}/...`, not the per-flow keys; if
+    // we skip this step the refresh fails on the first access-token expiry
+    // with `No token_endpoint stored for refresh` and the user is bounced
+    // back through a fresh OAuth flow each session.
+    //
+    // NOTE: concurrent OAuth flows for the same `server_url` race here on
+    // the bare per-server namespace — last write wins. This matches the
+    // existing race in DCR persistence at L345-346 and is acceptable: two
+    // simultaneous sign-ins for one server are an unusual operator action
+    // and both arrive at the same metadata under normal use. No locking.
+    //
+    // Fail-open on `store_oauth_metadata` error (parity with the
+    // `store_tokens` warn-and-continue at L823-825): the user has just
+    // completed an interactive OAuth flow and we already have the access
+    // token in hand. Returning a 5xx here would force them through another
+    // browser round-trip — much worse UX than silently breaking refresh
+    // until the next interactive sign-in, which is the *existing* failure
+    // mode pre-#4547 anyway. The recovery path is: when refresh fails
+    // (`McpOAuthError::MissingTokenEndpoint`), the daemon flips back to
+    // `NeedsAuth` and the next message kicks off a fresh OAuth flow,
+    // which re-runs this block. Operators see the failure in the
+    // `Failed to persist OAuth metadata for refresh` log line above the
+    // expected `No token_endpoint stored for refresh` later — that
+    // pairing is the diagnostic signal.
+    if let Err(e) = trait_provider
+        .store_oauth_metadata(&server_url, &token_endpoint, client_id.as_deref())
+        .await
+    {
+        tracing::warn!(error = %e, "Failed to persist OAuth metadata for refresh");
+    }
+
     // Clean up one-time PKCE values from vault (per-flow key — #3727).
     //
     // #3651: replaced `let _ = vault_remove(...)` so vault crypto failures
@@ -914,7 +948,7 @@ pub async fn auth_revoke(
         // #3750: surface VaultLocked / KeyNotFound / Io / Crypto distinctly so
         // the dashboard can render the right recovery prompt instead of a
         // generic 500.
-        use librefang_runtime::mcp_oauth::McpOAuthError;
+        use librefang_kernel::mcp_oauth::McpOAuthError;
         let resp = match e {
             McpOAuthError::VaultLocked => ApiErrorResponse::bad_request(
                 "Vault is locked — set LIBREFANG_VAULT_KEY before retrying sign-out.",

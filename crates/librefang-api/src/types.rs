@@ -505,6 +505,52 @@ pub struct PaginatedResponse<T: Serialize> {
     pub limit: Option<usize>,
 }
 
+/// Hard server-side cap on page size (#3639). A client requesting `?limit=N`
+/// with N greater than this is silently clamped — protects the wire from
+/// pathological "fetch everything" calls on growing catalogs.
+pub const PAGINATION_MAX_LIMIT: usize = 100;
+
+/// Generic pagination query parameters: `?offset=&limit=`.
+///
+/// Used by list endpoints that previously returned the full collection
+/// regardless of query params (#3639). When neither `offset` nor `limit`
+/// is supplied, the handler returns the full collection — preserves
+/// backward compatibility for callers that depended on the unbounded
+/// shape. When *either* is supplied, both default to sane values
+/// (`offset=0`, `limit=PAGINATION_MAX_LIMIT`) and `limit` is server-capped.
+#[derive(Debug, Default, Deserialize)]
+pub struct PaginationQuery {
+    /// Number of items to skip from the start of the result set.
+    pub offset: Option<usize>,
+    /// Maximum number of items to return; server-capped at `PAGINATION_MAX_LIMIT`.
+    pub limit: Option<usize>,
+}
+
+impl PaginationQuery {
+    /// Slice a collection according to the query, returning
+    /// `(items, total, effective_offset, effective_limit)`.
+    ///
+    /// `effective_limit` is `None` when the query left both fields blank
+    /// (full collection returned); otherwise it's the clamped value the
+    /// server actually applied, so clients can tell from the response
+    /// envelope whether the cap kicked in.
+    pub fn paginate<T>(&self, items: Vec<T>) -> (Vec<T>, usize, usize, Option<usize>) {
+        let total = items.len();
+        // Both unset → full collection, preserve old behaviour.
+        if self.offset.is_none() && self.limit.is_none() {
+            return (items, total, 0, None);
+        }
+        let offset = self.offset.unwrap_or(0).min(total);
+        let limit = self
+            .limit
+            .unwrap_or(PAGINATION_MAX_LIMIT)
+            .min(PAGINATION_MAX_LIMIT);
+        let end = (offset + limit).min(total);
+        let page: Vec<T> = items.into_iter().skip(offset).take(end - offset).collect();
+        (page, total, offset, Some(limit))
+    }
+}
+
 /// Request to push a proactive outbound message from an agent to a channel.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct PushMessageRequest {
@@ -711,6 +757,67 @@ mod tests {
         assert_eq!(q.offset, Some(5));
         assert_eq!(q.sort.as_deref(), Some("name"));
         assert_eq!(q.order.as_deref(), Some("desc"));
+    }
+
+    #[test]
+    fn pagination_unspecified_returns_full_collection() {
+        let q = PaginationQuery::default();
+        let (items, total, offset, limit) = q.paginate((0..10).collect::<Vec<_>>());
+        assert_eq!(items.len(), 10);
+        assert_eq!(total, 10);
+        assert_eq!(offset, 0);
+        assert_eq!(limit, None, "no params → no server cap reported");
+    }
+
+    #[test]
+    fn pagination_explicit_offset_only_uses_default_limit() {
+        let q = PaginationQuery {
+            offset: Some(5),
+            limit: None,
+        };
+        let (items, total, offset, limit) = q.paginate((0..1000).collect::<Vec<_>>());
+        assert_eq!(total, 1000);
+        assert_eq!(offset, 5);
+        assert_eq!(limit, Some(PAGINATION_MAX_LIMIT));
+        assert_eq!(items.len(), PAGINATION_MAX_LIMIT);
+        assert_eq!(items.first(), Some(&5));
+    }
+
+    #[test]
+    fn pagination_clamps_oversized_limit_to_max() {
+        let q = PaginationQuery {
+            offset: Some(0),
+            limit: Some(9999),
+        };
+        let (items, _, _, limit) = q.paginate((0..200).collect::<Vec<_>>());
+        assert_eq!(items.len(), PAGINATION_MAX_LIMIT);
+        assert_eq!(limit, Some(PAGINATION_MAX_LIMIT));
+    }
+
+    #[test]
+    fn pagination_offset_past_total_yields_empty_page() {
+        let q = PaginationQuery {
+            offset: Some(50),
+            limit: Some(10),
+        };
+        let (items, total, offset, limit) = q.paginate((0..30).collect::<Vec<_>>());
+        assert_eq!(items.len(), 0);
+        assert_eq!(total, 30);
+        assert_eq!(offset, 30, "clamped to total");
+        assert_eq!(limit, Some(10));
+    }
+
+    #[test]
+    fn pagination_returns_partial_last_page() {
+        let q = PaginationQuery {
+            offset: Some(95),
+            limit: Some(10),
+        };
+        let (items, total, offset, limit) = q.paginate((0..100).collect::<Vec<_>>());
+        assert_eq!(items.len(), 5);
+        assert_eq!(total, 100);
+        assert_eq!(offset, 95);
+        assert_eq!(limit, Some(10));
     }
 
     #[test]

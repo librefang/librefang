@@ -14,7 +14,6 @@ import {
   Menu,
   Home,
   Layers,
-  Layout,
   Image as ImageIcon,
   History,
   MessageCircle,
@@ -882,7 +881,10 @@ export function App() {
       { to: "/audit", label: t("nav.audit", "Audit"), icon: FileText },
       { to: "/logs", label: t("nav.logs"), icon: FileText },
       ...(terminalEnabled ? [{ to: "/terminal" as const, label: t("nav.terminal"), icon: Terminal }] : []),
-      { to: "/canvas", label: t("nav.canvas", { defaultValue: "Canvas" }), icon: Layout },
+      // Canvas page is intentionally not in the nav — `/canvas` route is
+      // still mounted in router.tsx for direct-URL access from the
+      // workflow editor, but the standalone Observability entry was
+      // noise (per ops feedback).
       { to: "/comms", label: t("nav.comms"), icon: Activity },
       { to: "/media", label: t("nav.media"), icon: ImageIcon },
     ];

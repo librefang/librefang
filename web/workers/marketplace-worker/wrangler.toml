@@ -10,6 +10,14 @@ database_id = "91df0bc6-e658-4463-9eba-22d5476d420a"
 
 [vars]
 GITHUB_CLIENT_ID = "Iv1.3683b4ad4a41e982"
+# Plugin signing — see web/workers/SIGNING.md.
+# REGISTRY_PUBLIC_KEY is non-secret (raw 32-byte Ed25519 pubkey, base64).
+# REGISTRY_PRIVATE_KEY is a secret; deploy with:
+#   wrangler secret put REGISTRY_PRIVATE_KEY
+# Until both are set, /v1/pubkey and /v1/download/.../signature return 503,
+# new versions are stored without bundle_sig (NULL), and existing endpoints
+# remain fully functional.
+REGISTRY_PUBLIC_KEY = "ClGa0Ucap8NdrKAy1rw9Tt6A9I8eg4zJ53+xIuKMuq0="
 
 # Weekly stats aggregation
 [triggers]

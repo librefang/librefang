@@ -3592,4 +3592,103 @@ mod tests {
         assert!(static_err.is_err());
         assert_eq!(static_err, instance_err);
     }
+
+    // -----------------------------------------------------------------------
+    // Property-based: requires_approval matches a brute-force oracle (#3409)
+    // -----------------------------------------------------------------------
+
+    /// Brute-force oracle for `ApprovalManager::requires_approval` against the
+    /// shapes of pattern that production glob_matches handles for a tool name
+    /// (no `/` and no `.`):
+    ///
+    /// - `"*"`             -> matches anything
+    /// - `"prefix*"`       -> `value.starts_with(prefix)`
+    /// - `"*suffix"`       -> `value.ends_with(suffix)`
+    /// - `"prefix*suffix"` -> starts_with(prefix) && ends_with(suffix)
+    ///   && len >= prefix.len() + suffix.len()
+    /// - exact (no `*`)    -> equality
+    ///
+    /// Multi-`*` patterns are skipped by the strategy below to keep the oracle
+    /// trivial and the comparison unambiguous.
+    fn oracle_pattern_matches(pattern: &str, value: &str) -> bool {
+        if pattern == "*" {
+            return true;
+        }
+        if pattern == value {
+            return true;
+        }
+        let star_count = pattern.matches('*').count();
+        match star_count {
+            0 => pattern == value,
+            1 => {
+                if let Some(prefix) = pattern.strip_suffix('*') {
+                    value.starts_with(prefix)
+                } else if let Some(suffix) = pattern.strip_prefix('*') {
+                    value.ends_with(suffix)
+                } else {
+                    // middle wildcard: "prefix*suffix"
+                    let star = pattern.find('*').unwrap();
+                    let prefix = &pattern[..star];
+                    let suffix = &pattern[star + 1..];
+                    value.starts_with(prefix)
+                        && value.ends_with(suffix)
+                        && value.len() >= prefix.len() + suffix.len()
+                }
+            }
+            _ => unreachable!("strategy filters multi-star patterns"),
+        }
+    }
+
+    fn oracle_requires_approval(patterns: &[String], tool_name: &str) -> bool {
+        patterns
+            .iter()
+            .any(|p| oracle_pattern_matches(p, tool_name))
+    }
+
+    mod prop {
+        use super::{oracle_requires_approval, ApprovalManager};
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 256, ..Default::default() })]
+
+            /// For randomly generated `(rules, tool_name)` pairs, the production
+            /// matcher must agree with a brute-force oracle. Single-wildcard
+            /// patterns only — multi-wildcard glob semantics are out of scope
+            /// for the oracle (and the docs guarantee tool patterns stay
+            /// simple).
+            #[test]
+            fn approval_requires_approval_matches_oracle(
+                patterns in proptest::collection::vec(
+                    prop_oneof![
+                        "[a-z_]{1,8}".prop_map(|s| s),
+                        "[a-z_]{1,6}".prop_map(|s| format!("{s}*")),
+                        "[a-z_]{1,6}".prop_map(|s| format!("*{s}")),
+                        ("[a-z_]{1,4}", "[a-z_]{1,4}")
+                            .prop_map(|(a, b)| format!("{a}*{b}")),
+                        Just("*".to_string()),
+                    ],
+                    1..=5,
+                ),
+                tool_name in "[a-z_]{1,12}",
+            ) {
+                let policy = librefang_types::approval::ApprovalPolicy {
+                    require_approval: patterns.clone(),
+                    ..Default::default()
+                };
+                let mgr = ApprovalManager::new(policy);
+
+                let production = mgr.requires_approval(&tool_name);
+                let oracle = oracle_requires_approval(&patterns, &tool_name);
+
+                prop_assert_eq!(
+                    production,
+                    oracle,
+                    "patterns={:?} tool_name={:?}",
+                    patterns,
+                    tool_name
+                );
+            }
+        }
+    }
 }

@@ -724,4 +724,77 @@ mod tests {
         assert!(msg.metadata.contains_key("replies"));
         assert!(msg.metadata.contains_key("attachments"));
     }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Stand up a `wiremock::MockServer` and route the adapter at it via the
+    // existing public `with_urls` helper. Asserts the
+    // `POST {api_url}/channels/{channel}/messages` call made by
+    // `ChannelAdapter::send` for a text message — path, `x-bot-token`
+    // header, and JSON body schema.
+
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn revolt_user(channel_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: channel_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    fn revolt_with_uri(token: &str, uri: String) -> RevoltAdapter {
+        RevoltAdapter::with_urls(token.to_string(), uri, "wss://revolt.invalid".to_string())
+    }
+
+    #[tokio::test]
+    async fn revolt_send_posts_to_channel_messages() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/channels/CHAN1/messages"))
+            .and(header("x-bot-token", "bot-tok"))
+            .and(body_json(serde_json::json!({"content": "hello librefang"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "_id": "MSG1",
+                "channel": "CHAN1",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = revolt_with_uri("bot-tok", server.uri());
+        adapter
+            .send(
+                &revolt_user("CHAN1"),
+                ChannelContent::Text("hello librefang".into()),
+            )
+            .await
+            .expect("revolt send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn revolt_send_returns_err_on_non_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/channels/CHAN_BAD/messages"))
+            .respond_with(ResponseTemplate::new(403))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = revolt_with_uri("bot-tok", server.uri());
+        let err = adapter
+            .send(
+                &revolt_user("CHAN_BAD"),
+                ChannelContent::Text("nope".into()),
+            )
+            .await
+            .expect_err("revolt send must propagate non-2xx as Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("403"),
+            "error should mention status code, got: {msg}"
+        );
+    }
 }

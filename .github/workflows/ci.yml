@@ -222,6 +222,12 @@ jobs:
             patchelf
       - name: Check formatting
         run: cargo xtask fmt
+      - name: Check API error response shape (issue #3505)
+        # Pure text scan, ~milliseconds. Rejects new `{"detail": …}` or
+        # `{"status": "error", …}` constructions in `routes/`. Files
+        # that still carry legacy shapes are listed in the script's
+        # LEGACY_FILES allowlist with their cleanup follow-ups.
+        run: bash scripts/check-error-shape.sh
       - name: Ensure dashboard build dir exists
         run: mkdir -p crates/librefang-api/static/react
       - name: Build + clippy
@@ -245,6 +251,34 @@ jobs:
             echo "Selective clippy for: $CRATES"
             cargo clippy $PFLAGS --all-targets --all-features -- -D warnings
           fi
+      # Informational lint for empty-string / "<unknown>" sentinel patterns
+      # in API response code (refs #3302). Runs in warn mode — never fails
+      # the build until the existing inventory is cleared and the script is
+      # flipped to --strict. See docs/architecture/api-conventions.md.
+      - name: Sentinel-pattern lint (warn-only)
+        run: scripts/check-no-empty-string-sentinels.sh
+
+  # ── CHANGELOG attribution check ────────────────────────────────────────────────
+  # Enforces the `(@username)` suffix on bullets *added* to the [Unreleased]
+  # section in this PR. Historical entries (1,800+ bullets, many predating
+  # any attribution convention) are NOT retroactively flagged — the validator
+  # only looks at lines this diff introduces. See #3400.
+  changelog-attribution:
+    name: CHANGELOG Attribution
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+      - name: Validate (@user) attribution on new [Unreleased] bullets
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/check-changelog-attribution.py
 
   # ── OpenAPI / SDK drift check ──────────────────────────────────────────────────
   # Regenerates openapi.json and the four SDKs and fails if anything differs
@@ -428,24 +462,117 @@ jobs:
       - name: Parse PowerShell installer
         run: pwsh -NoProfile -Command '$tokens=$null; $errors=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("web/public/install.ps1",[ref]$tokens,[ref]$errors); if ($errors) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }'
 
+  # ── Live-integration smoke (#3405) ────────────────────────────────────────────
+  # Spawn a real `target/debug/librefang start` daemon on port 4545, hit
+  # `/api/health`, `/api/agents`, `/api/budget`, `/api/network/status`, then
+  # SIGTERM. Catches the failure modes the in-process integration tests miss:
+  # missing route registration in `server.rs`, config fields not deserializing,
+  # daemon refusing to bind, etc.
+  #
+  # `--skip-llm` is set: the per-PR smoke does not call a real provider (no
+  # API keys exposed to PR runners). The provider-call branch of
+  # `xtask integration-test` is exercised separately by the release / nightly
+  # workflow when a real `GROQ_API_KEY` secret is available.
+  live-integration-smoke:
+    name: Live Integration Smoke
+    needs: changes
+    # PR-only: push to main already runs the full test matrix; the smoke
+    # adds spawn-a-real-daemon coverage that the in-process tests miss.
+    if: github.event_name == 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # Default `Swatinem/rust-cache` key (job-name + Cargo.lock hash) so this
+      # job shares its target/ with the rest of the Rust jobs. A per-job
+      # `live-smoke-${hashFiles}` key forced a cold compile (~15-20 min debug)
+      # on every first run, eating most of the 25-min timeout.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Ensure dashboard build dir exists
+        run: mkdir -p crates/librefang-api/static/react
+      - name: Build daemon (debug)
+        run: cargo build -p librefang-cli --bin librefang
+      - name: Run live-integration smoke (skip LLM)
+        run: |
+          cargo run -p xtask -- integration-test \
+            --binary target/debug/librefang \
+            --skip-llm \
+            --daemon-log /tmp/librefang-daemon.log \
+            --health-timeout-secs 60
+      - name: Show daemon log on failure
+        if: failure()
+        run: |
+          if [ -f /tmp/librefang-daemon.log ]; then
+            echo "::group::daemon log"
+            cat /tmp/librefang-daemon.log
+            echo "::endgroup::"
+          else
+            echo "(no daemon log captured)"
+          fi
+      - name: Stop any leftover daemon (best-effort)
+        if: always()
+        run: |
+          if command -v lsof >/dev/null 2>&1; then
+            lsof -ti :4545 | xargs -r kill -9 || true
+          fi
+
+  # ── AGENTS.md / CLAUDE.md sibling-symlink check (#3297) ────────────────────────
+  # Every per-crate / per-subdir AGENTS.md must have a sibling CLAUDE.md
+  # symlink pointing at it, so AI tooling that doesn't recognise AGENTS.md
+  # (older Claude Code builds, Codex CLI variants) finds the rules under
+  # the conventional name. The repo-root pair is exempt — the two files
+  # there are intentionally distinct.
+  agents-claude-pair:
+    name: AGENTS.md ↔ CLAUDE.md pair
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Verify sibling CLAUDE.md symlink
+        run: sh scripts/check-agents-claude-pair.sh
+
   # ── Ubuntu tests: selective on PR, full on main ────────────────────────────────
+  # Full-run lane (push to main, workspace Cargo.toml change) runs the full
+  # workspace test matrix sharded 4 ways via `cargo nextest run --partition
+  # hash:N/4`. `fail-fast: false` prevents one failing shard from masking
+  # failures in the others. The selective lane (PR touching only a few crates)
+  # stays on a single runner — the affected crate set is small, and shard
+  # startup cost dominates wallclock for short test sets. (#3311)
   test-ubuntu:
-    name: Test / Ubuntu
+    name: Test / Ubuntu (shard ${{ matrix.shard }}/4)
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Skip non-1 shards in selective lane
+        id: gate
+        run: |
+          if [ "${{ needs.changes.outputs.full_test }}" != "true" ] && [ "${{ matrix.shard }}" != "1" ]; then
+            echo "Selective lane: only shard 1 runs (no benefit to fan-out for a small affected set)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: steps.gate.outputs.skip != 'true'
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: steps.gate.outputs.skip != 'true'
         with:
           key: test-ubuntu-${{ hashFiles('**/Cargo.lock') }}
       - name: Install nextest
+        if: steps.gate.outputs.skip != 'true'
         uses: taiki-e/install-action@4616abf838e456930a67014fba647f87c185cc6c # nextest
       - name: Ensure dashboard build dir exists
+        if: steps.gate.outputs.skip != 'true'
         run: mkdir -p crates/librefang-api/static/react
       - name: Install Tauri system deps
+        if: steps.gate.outputs.skip != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -455,9 +582,10 @@ jobs:
             librsvg2-dev \
             patchelf
       - name: Build tests
+        if: steps.gate.outputs.skip != 'true'
         run: |
           if [ "${{ needs.changes.outputs.full_test }}" = "true" ]; then
-            echo "Building workspace tests (full run)…"
+            echo "Building workspace tests (full run, shard ${{ matrix.shard }}/4)…"
             cargo test --workspace --no-run -j 2
           else
             CRATES="${{ needs.changes.outputs.crates }}"
@@ -471,12 +599,18 @@ jobs:
             cargo test $PFLAGS --no-run -j 2
           fi
       - name: Run tests
+        if: steps.gate.outputs.skip != 'true'
         env:
           RUST_TEST_THREADS: "1"
         run: |
           if [ "${{ needs.changes.outputs.full_test }}" = "true" ]; then
-            echo "Running workspace tests (full run)…"
-            cargo nextest run --workspace --no-fail-fast
+            echo "Running workspace tests (shard ${{ matrix.shard }}/4)…"
+            # `--partition hash:N/M` deterministically buckets each test into
+            # one of M shards by the hash of its name. Adding tests doesn't
+            # reshuffle the others; deleting tests doesn't either. Stable
+            # buckets are critical for cache hit rates across runs.
+            cargo nextest run --workspace --no-fail-fast \
+              --partition hash:${{ matrix.shard }}/4
           else
             CRATES="${{ needs.changes.outputs.crates }}"
             if [ -z "$CRATES" ]; then

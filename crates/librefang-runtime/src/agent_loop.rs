@@ -546,6 +546,29 @@ fn tool_use_blocks_from_calls(tool_calls: &[ToolCall]) -> Vec<ContentBlock> {
         .collect()
 }
 
+/// Sanitize a tool name into a bounded, low-cardinality metric label.
+///
+/// Strips control chars and caps the length so an LLM that hallucinates
+/// a wild tool name can't blow up the metric registry. The set of real
+/// tool names is bounded (builtins + skill tools + MCP tools), so this
+/// label dimension stays tractable in steady state.
+fn sanitize_tool_label(name: &str) -> String {
+    name.chars().filter(|c| !c.is_control()).take(64).collect()
+}
+
+/// Record a tool-call outcome for observability (#3495). `outcome` is
+/// one of `"success"` / `"failure"`; we never push raw error text into
+/// metric labels.
+fn record_tool_call_metric(tool_name: &str, is_error: bool) {
+    let outcome = if is_error { "failure" } else { "success" };
+    metrics::counter!(
+        "librefang_tool_call_total",
+        "tool" => sanitize_tool_label(tool_name),
+        "outcome" => outcome,
+    )
+    .increment(1);
+}
+
 fn append_tool_result_guidance_blocks(tool_result_blocks: &mut Vec<ContentBlock>) {
     let denial_count = tool_result_blocks
         .iter()
@@ -911,7 +934,22 @@ struct ToolExecutionContext<'a> {
         tool.id = %tool_call.id,
     ),
 )]
+/// Thin wrapper around `execute_single_tool_call_inner` that guarantees
+/// `record_tool_call_metric` is called on **every** return path — both `Ok`
+/// (success or is_error tool result) and `Err` (e.g. circuit-break).
 async fn execute_single_tool_call(
+    ctx: &mut ToolExecutionContext<'_>,
+    tool_call: &ToolCall,
+) -> Result<ExecutedToolCall, LibreFangError> {
+    let result = execute_single_tool_call_inner(ctx, tool_call).await;
+    match &result {
+        Ok(executed) => record_tool_call_metric(&tool_call.name, executed.result.is_error),
+        Err(_) => record_tool_call_metric(&tool_call.name, true),
+    }
+    result
+}
+
+async fn execute_single_tool_call_inner(
     ctx: &mut ToolExecutionContext<'_>,
     tool_call: &ToolCall,
 ) -> Result<ExecutedToolCall, LibreFangError> {
@@ -2964,7 +3002,7 @@ async fn finalize_successful_end_turn(
         ctx.memory
             .save_session_async(ctx.session)
             .await
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
     }
 
     // Post-turn memory writes and context-engine updates are skipped for
@@ -3743,7 +3781,7 @@ pub async fn run_agent_loop(
                         memory
                             .save_session_async(session)
                             .await
-                            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                            .map_err(LibreFangError::memory)?;
                     }
                     return Ok(build_silent_agent_loop_result(
                         total_usage,
@@ -3777,7 +3815,7 @@ pub async fn run_agent_loop(
                     memory
                         .save_session_async(session)
                         .await
-                        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                        .map_err(LibreFangError::memory)?;
                     return Ok(build_silent_agent_loop_result(
                         total_usage,
                         iteration + 1,
@@ -4244,7 +4282,7 @@ fn check_retry_cooldown(
                 reason,
                 retry_after_secs,
             } => {
-                return Err(LibreFangError::LlmDriver(format!(
+                return Err(LibreFangError::llm_driver_msg(format!(
                     "Provider '{provider}' is in cooldown ({reason}). Retry in {retry_after_secs}s."
                 )));
             }
@@ -4285,7 +4323,7 @@ async fn handle_retryable_llm_error(
 ) -> Result<String, LibreFangError> {
     if attempt == MAX_RETRIES {
         record_retry_failure(provider, cooldown, false);
-        return Err(LibreFangError::LlmDriver(exhausted_message));
+        return Err(LibreFangError::llm_driver_msg(exhausted_message));
     }
 
     let delay = std::cmp::max(retry_after_ms, BASE_RETRY_DELAY_MS * 2u64.pow(attempt));
@@ -4318,7 +4356,10 @@ fn build_user_facing_llm_error(
         classified.sanitized_message
     };
 
-    (classified.is_billing, LibreFangError::LlmDriver(user_msg))
+    (
+        classified.is_billing,
+        LibreFangError::llm_driver_msg(user_msg),
+    )
 }
 
 #[instrument(
@@ -4394,7 +4435,7 @@ async fn call_with_retry(
         }
     }
 
-    Err(LibreFangError::LlmDriver(
+    Err(LibreFangError::llm_driver_msg(
         last_error.unwrap_or_else(|| "Unknown error".to_string()),
     ))
 }
@@ -4482,7 +4523,7 @@ async fn stream_with_retry(
                             .await;
                     }
                 }
-                return Err(LibreFangError::LlmDriver(format!(
+                return Err(LibreFangError::llm_driver_msg(format!(
                     "Task timed out after {inactivity_secs}s of inactivity \
                      (last: {last_activity}). \
                      {partial_text_len} chars of partial output were delivered. \
@@ -4512,7 +4553,7 @@ async fn stream_with_retry(
         }
     }
 
-    Err(LibreFangError::LlmDriver(
+    Err(LibreFangError::llm_driver_msg(
         last_error.unwrap_or_else(|| "Unknown error".to_string()),
     ))
 }
@@ -5193,7 +5234,7 @@ pub async fn run_agent_loop_streaming(
                         memory
                             .save_session_async(session)
                             .await
-                            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                            .map_err(LibreFangError::memory)?;
                     }
                     return Ok(build_silent_agent_loop_result(
                         total_usage,
@@ -5224,7 +5265,7 @@ pub async fn run_agent_loop_streaming(
                     memory
                         .save_session_async(session)
                         .await
-                        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                        .map_err(LibreFangError::memory)?;
                     return Ok(build_silent_agent_loop_result(
                         total_usage,
                         iteration + 1,
@@ -11278,6 +11319,79 @@ mod tests {
             messages.first().map(|m| m.role),
             Some(Role::User),
             "history must start with a user turn after trim+repair"
+        );
+    }
+
+    // ── record_tool_call_metric covers failure paths ───────────────────────
+
+    /// Regression for #4560 — `record_tool_call_metric` must fire with
+    /// `outcome="failure"` even when `execute_single_tool_call` returns
+    /// `Err(...)` (e.g. circuit-break), not only on the `Ok` path.
+    ///
+    /// We test `record_tool_call_metric` directly: call it with `is_error =
+    /// true` inside a `with_local_recorder` scope and assert the counter has
+    /// a "failure" label — mirroring the `DebuggingRecorder` pattern used in
+    /// `command_lane.rs::test_submit_records_queue_wait_histogram`.
+    #[test]
+    fn test_record_tool_call_metric_failure_outcome() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            // Simulate what the wrapper does when execute_single_tool_call_inner
+            // returns Err (circuit-break or any hard error).
+            record_tool_call_metric("my_tool", true);
+        });
+
+        let snap = snapshotter.snapshot().into_vec();
+        let failure_counter = snap.iter().find(|(ckey, _, _, val)| {
+            ckey.key().name() == "librefang_tool_call_total"
+                && ckey
+                    .key()
+                    .labels()
+                    .any(|l| l.key() == "tool" && l.value() == "my_tool")
+                && ckey
+                    .key()
+                    .labels()
+                    .any(|l| l.key() == "outcome" && l.value() == "failure")
+                && matches!(val, DebugValue::Counter(_))
+        });
+        assert!(
+            failure_counter.is_some(),
+            "outcome=failure counter must be recorded for error paths"
+        );
+        if let Some((_, _, _, DebugValue::Counter(count))) = failure_counter {
+            assert_eq!(*count, 1, "counter must be incremented exactly once");
+        }
+    }
+
+    /// Success path: `record_tool_call_metric` with `is_error = false` must
+    /// produce `outcome="success"`.
+    #[test]
+    fn test_record_tool_call_metric_success_outcome() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_tool_call_metric("other_tool", false);
+        });
+
+        let snap = snapshotter.snapshot().into_vec();
+        let success_counter = snap.iter().find(|(ckey, _, _, val)| {
+            ckey.key().name() == "librefang_tool_call_total"
+                && ckey
+                    .key()
+                    .labels()
+                    .any(|l| l.key() == "outcome" && l.value() == "success")
+                && matches!(val, DebugValue::Counter(_))
+        });
+        assert!(
+            success_counter.is_some(),
+            "outcome=success counter must be recorded for successful tool calls"
         );
     }
 }

@@ -457,6 +457,84 @@ impl ChannelAdapter for NextcloudAdapter {
 mod tests {
     use super::*;
 
+    // ----- send() path tests (issue #3820) -----
+    //
+    // `NextcloudAdapter::server_url` is the injectable base URL (passed via
+    // `new()`), so no extra field is needed. Tests stand up a wiremock server,
+    // pass its URI as the server URL, then assert that `send()` issues
+    // `POST /ocs/v2.php/apps/spreed/api/v1/chat/{room_token}` with the correct
+    // JSON body and OCS/Bearer headers.
+
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(server_url: String) -> NextcloudAdapter {
+        NextcloudAdapter::new(server_url, "test-nc-token".to_string(), vec![])
+    }
+
+    fn dummy_user(room_token: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: room_token.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn nextcloud_send_posts_chat_message_with_ocs_and_bearer_headers() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ocs/v2.php/apps/spreed/api/v1/chat/room-abc"))
+            .and(header("Authorization", "Bearer test-nc-token"))
+            .and(header("OCS-APIRequest", "true"))
+            .and(body_json(
+                serde_json::json!({ "message": "hello from librefang" }),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "ocs": { "meta": { "status": "ok", "statuscode": 201 }, "data": {} }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("room-abc"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn nextcloud_send_non_text_content_falls_back_to_placeholder() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ocs/v2.php/apps/spreed/api/v1/chat/room-xyz"))
+            .and(body_json(
+                serde_json::json!({ "message": "(Unsupported content type)" }),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "ocs": { "meta": { "status": "ok", "statuscode": 201 }, "data": {} }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("room-xyz"),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send must succeed with unsupported content");
+    }
+
     #[test]
     fn test_nextcloud_adapter_creation() {
         let adapter = NextcloudAdapter::new(

@@ -14,8 +14,8 @@ use librefang_api::middleware;
 use librefang_api::routes::{self, AppState};
 use librefang_api::server;
 use librefang_api::ws;
+use librefang_kernel::audit::AuditAction;
 use librefang_kernel::LibreFangKernel;
-use librefang_runtime::audit::AuditAction;
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use librefang_types::agent::WebSearchAugmentationMode;
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
@@ -175,9 +175,9 @@ async fn start_full_router(api_key: &str) -> FullRouterHarness {
 
     // Sync registry content into the temp home_dir so the kernel boots
     // with a populated model catalog.
-    librefang_runtime::registry_sync::sync_registry(
+    librefang_kernel::registry_sync::sync_registry(
         tmp.path(),
-        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
     );
 
@@ -2352,7 +2352,7 @@ async fn test_attach_session_stream_404_for_unknown_agent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_attach_session_stream_fans_out_to_multiple_clients() {
     use futures::StreamExt as _;
-    use librefang_runtime::llm_driver::StreamEvent;
+    use librefang_kernel::llm_driver::StreamEvent;
     use std::time::Duration;
 
     let server = start_test_server().await;
@@ -2463,9 +2463,9 @@ async fn test_attach_session_stream_fans_out_to_multiple_clients() {
 async fn start_full_router_with_proactive(enabled: bool) -> FullRouterHarness {
     let tmp = tempfile::tempdir().expect("Failed to create temp dir");
 
-    librefang_runtime::registry_sync::sync_registry(
+    librefang_kernel::registry_sync::sync_registry(
         tmp.path(),
-        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
     );
 
@@ -3592,6 +3592,23 @@ async fn test_user_budget_put_get_delete_round_trip() {
         .await
         .unwrap();
     assert_eq!(put_resp.status(), 200, "PUT should accept the upsert");
+
+    // Issue #3832: the success body is the canonical UserBudgetConfig — no
+    // `{"status":"ok","budget":...}` ack envelope. Dashboard mutations rely on
+    // this to `setQueryData` without a follow-up GET.
+    let put_body: serde_json::Value = put_resp.json().await.unwrap();
+    assert!(
+        put_body.get("status").is_none(),
+        "PUT body must not carry the legacy ack envelope: {put_body:?}"
+    );
+    assert!(
+        put_body.get("budget").is_none(),
+        "PUT body must be the bare UserBudgetConfig, not nested under `budget`: {put_body:?}"
+    );
+    assert_eq!(put_body["max_hourly_usd"], serde_json::json!(1.5));
+    assert_eq!(put_body["max_daily_usd"], serde_json::json!(12.0));
+    assert_eq!(put_body["max_monthly_usd"], serde_json::json!(100.0));
+    assert_eq!(put_body["alert_threshold"], serde_json::json!(0.75));
 
     // GET should reflect the new caps.
     let after_put: serde_json::Value = client

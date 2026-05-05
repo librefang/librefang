@@ -29,8 +29,14 @@ use zeroize::Zeroizing;
 
 const MAX_MESSAGE_LEN: usize = 20000;
 
-/// Robot Send API for webhook mode outbound messages.
-const DINGTALK_SEND_URL: &str = "https://oapi.dingtalk.com/robot/send";
+/// Default Robot Send API base URL for webhook mode outbound messages.
+const DINGTALK_API_BASE: &str = "https://oapi.dingtalk.com";
+
+/// Returns the default DingTalk API base URL. Used to initialise `DingTalkAdapter::api_base`.
+#[inline]
+fn default_dingtalk_api_base() -> String {
+    DINGTALK_API_BASE.to_string()
+}
 
 /// Stream gateway registration endpoint.
 const DINGTALK_GATEWAY_URL: &str = "https://api.dingtalk.com/v1.0/gateway/connections/open";
@@ -80,6 +86,9 @@ pub struct DingTalkAdapter {
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
+    /// Base URL for the DingTalk Robot Send API. Defaults to `https://oapi.dingtalk.com`.
+    /// Overridable in tests via `with_api_base()` to point at a wiremock server.
+    api_base: String,
 }
 
 impl DingTalkAdapter {
@@ -101,6 +110,7 @@ impl DingTalkAdapter {
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
+            api_base: default_dingtalk_api_base(),
         }
     }
 
@@ -121,12 +131,21 @@ impl DingTalkAdapter {
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
+            api_base: default_dingtalk_api_base(),
         }
     }
 
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the DingTalk API base URL. Intended for tests that point the
+    /// adapter at a wiremock server instead of `https://oapi.dingtalk.com`.
+    #[cfg(test)]
+    pub fn with_api_base(mut self, base: String) -> Self {
+        self.api_base = base;
         self
     }
 
@@ -181,8 +200,8 @@ impl DingTalkAdapter {
             .append_pair("sign", &sign)
             .finish();
         format!(
-            "{}?access_token={}&timestamp={}&{}",
-            DINGTALK_SEND_URL,
+            "{}/robot/send?access_token={}&timestamp={}&{}",
+            self.api_base,
             self.access_token.as_str(),
             timestamp,
             encoded_sign
@@ -833,6 +852,89 @@ impl ChannelAdapter for DingTalkAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Uses `wiremock` to stand up a local HTTP server and points `DingTalkAdapter`
+    // at it via `with_api_base()`. This exercises the `POST /robot/send` call made
+    // by `ChannelAdapter::send` in webhook mode.
+
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_webhook_adapter(api_base: String) -> DingTalkAdapter {
+        DingTalkAdapter::new(
+            "test-access-token".to_string(),
+            "test-secret".to_string(),
+            8080,
+        )
+        .with_api_base(api_base)
+    }
+
+    fn dummy_user(channel_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: channel_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn dingtalk_send_posts_robot_send_with_text_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/robot/send"))
+            .and(body_json(serde_json::json!({
+                "msgtype": "text",
+                "text": { "content": "hello from librefang" }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errcode": 0,
+                "errmsg": "ok"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_webhook_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("channel-abc"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn dingtalk_send_non_text_content_falls_back_to_placeholder() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/robot/send"))
+            .and(body_json(serde_json::json!({
+                "msgtype": "text",
+                "text": { "content": "(Unsupported content type)" }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errcode": 0,
+                "errmsg": "ok"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_webhook_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("channel-xyz"),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send must succeed with unsupported content");
+    }
 
     #[test]
     fn test_dingtalk_adapter_creation_webhook() {

@@ -637,4 +637,179 @@ mod tests {
         let adapter = MqttAdapter::new(config);
         assert_eq!(adapter.port, 8883);
     }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // MQTT outbound goes through `rumqttc::AsyncClient::publish`. Faking
+    // that boundary requires either a trait abstraction over `AsyncClient`
+    // or an in-process MQTT broker (e.g. `rumqttd`); both are larger
+    // architectural changes than this PR's wiremock-coverage scope.
+    //
+    // What we *can* pin without that work is the fail-loud contract: if
+    // `send()` is called before `start()` has populated `self.client`,
+    // it must return an Err naming the missing connection — and it must
+    // not panic on the `RwLock<Option<AsyncClient>>` `.as_ref()` path.
+
+    fn mqtt_user(topic: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: topic.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mqtt_send_returns_err_when_not_started() {
+        let adapter = MqttAdapter::new(test_config());
+        // No `start()` ⇒ `self.client` stays None.
+        let err = adapter
+            .send(
+                &mqtt_user("librefang/out"),
+                ChannelContent::Text("x".into()),
+            )
+            .await
+            .expect_err("mqtt send must error when client is unset");
+        assert!(
+            err.to_string().to_lowercase().contains("not connected"),
+            "error should mention disconnected client, got: {err}"
+        );
+    }
+
+    // -- happy-path against a minimal MQTT v3.1.1 broker fixture --
+    //
+    // No public Rust crate ships a "tap-the-publish" mock for `rumqttc`,
+    // so the fixture is a hand-written TCP listener that speaks just
+    // enough of the MQTT 3.1.1 wire format to satisfy `rumqttc`:
+    // CONNECT → CONNACK, SUBSCRIBE → SUBACK, PUBLISH → PUBACK. The
+    // captured PUBLISH topic + payload are forwarded through a oneshot
+    // and asserted against what `MqttAdapter::send()` was asked to
+    // emit. Every wire-format byte is laid out inline in the fixture
+    // below; there is no extra dev-dependency.
+
+    /// Read a variable-length MQTT v3.1.1 "remaining length" header
+    /// from `r`. MQTT encodes it as 1-4 bytes; the high bit signals
+    /// continuation. See MQTT-3.1.1 §2.2.3.
+    async fn mqtt_read_remaining_length<R: tokio::io::AsyncRead + Unpin>(
+        r: &mut R,
+    ) -> std::io::Result<usize> {
+        use tokio::io::AsyncReadExt as _;
+        let mut multiplier: usize = 1;
+        let mut value: usize = 0;
+        for _ in 0..4 {
+            let mut byte = [0u8; 1];
+            r.read_exact(&mut byte).await?;
+            value += (byte[0] & 0x7f) as usize * multiplier;
+            if byte[0] & 0x80 == 0 {
+                return Ok(value);
+            }
+            multiplier *= 128;
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "MQTT remaining-length exceeds 4 bytes",
+        ))
+    }
+
+    #[tokio::test]
+    async fn mqtt_send_publishes_payload_to_response_topic_via_min_broker() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let host = addr.ip().to_string();
+        let port = addr.port();
+
+        let (tx, rx) = oneshot::channel::<(String, Vec<u8>)>();
+        let broker = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut r, mut w) = stream.into_split();
+            let mut tx_opt = Some(tx);
+            loop {
+                let mut byte0 = [0u8; 1];
+                if r.read_exact(&mut byte0).await.is_err() {
+                    return;
+                }
+                let packet_type = byte0[0] >> 4;
+                let qos = (byte0[0] >> 1) & 0x03;
+                let remaining_len = match mqtt_read_remaining_length(&mut r).await {
+                    Ok(n) => n,
+                    Err(_) => return,
+                };
+                let mut body = vec![0u8; remaining_len];
+                if r.read_exact(&mut body).await.is_err() {
+                    return;
+                }
+                match packet_type {
+                    1 => {
+                        // CONNECT — accept any client and reply with CONNACK
+                        let _ = w.write_all(&[0x20, 0x02, 0x00, 0x00]).await;
+                    }
+                    8 => {
+                        // SUBSCRIBE — first 2 bytes are the packet ID
+                        let pkt_id = [body[0], body[1]];
+                        let _ = w.write_all(&[0x90, 0x03, pkt_id[0], pkt_id[1], 0x00]).await;
+                    }
+                    3 => {
+                        // PUBLISH — variable header: topic_len (BE u16) +
+                        // topic + (packet_id if qos > 0). Payload fills
+                        // the rest of the body.
+                        let topic_len = u16::from_be_bytes([body[0], body[1]]) as usize;
+                        let topic = String::from_utf8_lossy(&body[2..2 + topic_len]).to_string();
+                        let payload_start = if qos > 0 {
+                            let pkt_id = [body[2 + topic_len], body[3 + topic_len]];
+                            let _ = w.write_all(&[0x40, 0x02, pkt_id[0], pkt_id[1]]).await;
+                            4 + topic_len
+                        } else {
+                            2 + topic_len
+                        };
+                        let payload = body[payload_start..].to_vec();
+                        if let Some(tx) = tx_opt.take() {
+                            let _ = tx.send((topic, payload));
+                        }
+                    }
+                    _ => {
+                        // PINGREQ / DISCONNECT / etc. — ignore
+                    }
+                }
+            }
+        });
+
+        let mut config = test_config();
+        config.host = host;
+        config.port = port;
+        config.response_topic = "librefang/out".to_string();
+        let adapter = MqttAdapter::new(config);
+
+        // `start()` populates `self.client` *before* spawning the
+        // eventloop, so `send()` can publish as soon as we return.
+        // The eventloop will pump the bytes onto the wire once it has
+        // observed CONNACK from the fixture.
+        let _stream = adapter
+            .start()
+            .await
+            .expect("mqtt start must succeed against fixture broker");
+
+        adapter
+            .send(
+                &mqtt_user("ignored-by-mqtt-adapter"),
+                ChannelContent::Text("hi mqtt".into()),
+            )
+            .await
+            .expect("mqtt send must succeed against fixture broker");
+
+        let (topic, payload) = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("fixture must observe PUBLISH within 5s")
+            .expect("oneshot must not be dropped");
+        assert_eq!(topic, "librefang/out");
+        assert_eq!(
+            payload, b"hi mqtt",
+            "PUBLISH payload must round-trip the text body"
+        );
+
+        // Tidy up; we have what we needed.
+        broker.abort();
+    }
 }

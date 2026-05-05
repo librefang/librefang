@@ -2799,6 +2799,34 @@ pub struct KernelConfig {
     /// `None` (default) disables message-count pruning.
     #[serde(default)]
     pub cron_session_max_messages: Option<usize>,
+    /// Fraction of the effective token budget (post-prune) at which the
+    /// kernel emits a `tracing::warn!` for a Persistent cron session
+    /// approaching the provider context window. Closes the operator-
+    /// visibility gap from #3693: pruning prevents the hard 400 from
+    /// the provider, but without this warn the trend is invisible until
+    /// a fire actually fails.
+    ///
+    /// Applied against the effective limit:
+    ///   1. `cron_session_max_tokens` if set, else
+    ///   2. [`Self::cron_session_warn_total_tokens`] as a fallback ceiling.
+    ///
+    /// Skipped entirely when both are `None`, or when this value is
+    /// `None` / `<= 0.0` / `> 1.0`.
+    ///
+    /// Default: `Some(0.8)` — warn at 80% of the budget.
+    #[serde(default = "default_cron_session_warn_fraction")]
+    pub cron_session_warn_fraction: Option<f64>,
+    /// Fallback context-window ceiling used by
+    /// [`Self::cron_session_warn_fraction`] when
+    /// `cron_session_max_tokens` is unset. Lets operators get growth
+    /// warnings even on agents that have not opted into pruning.
+    ///
+    /// Default: `Some(200_000)` — matches the typical Claude / GPT-4
+    /// long-context window. Set to `None` to disable the fallback
+    /// (warn only fires when `cron_session_max_tokens` is explicitly
+    /// configured).
+    #[serde(default = "default_cron_session_warn_total_tokens")]
+    pub cron_session_warn_total_tokens: Option<u64>,
     /// Config include files — loaded and deep-merged before the root config.
     /// Paths are relative to the root config file's directory.
     /// Security: absolute paths and `..` components are rejected.
@@ -4011,6 +4039,19 @@ fn default_max_cron_jobs() -> usize {
     500
 }
 
+/// Default warn fraction for cron session size (#3693): 80% of the
+/// effective token budget.
+fn default_cron_session_warn_fraction() -> Option<f64> {
+    Some(0.8)
+}
+
+/// Default fallback ceiling for cron session warn (#3693): 200k tokens
+/// — matches typical long-context provider windows so operators get a
+/// signal even without an explicit `cron_session_max_tokens` cap.
+fn default_cron_session_warn_total_tokens() -> Option<u64> {
+    Some(200_000)
+}
+
 /// Default stale workflow run timeout in minutes (60 minutes = 1 hour).
 fn default_workflow_stale_timeout_minutes() -> u64 {
     60
@@ -4839,6 +4880,8 @@ impl Default for KernelConfig {
             max_cron_jobs: default_max_cron_jobs(),
             cron_session_max_tokens: None,
             cron_session_max_messages: None,
+            cron_session_warn_fraction: default_cron_session_warn_fraction(),
+            cron_session_warn_total_tokens: default_cron_session_warn_total_tokens(),
             include: Vec::new(),
             exec_policy: ExecPolicy::default(),
             bindings: Vec::new(),
