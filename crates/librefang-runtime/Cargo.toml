@@ -77,6 +77,7 @@ metrics-util = { version = "0.20", features = ["debugging"] }
 # `librefang-runtime-mcp` already pin in this workspace, so no new
 # transitive deps land in `Cargo.lock`.
 wiremock = "0.6"
+tracing-subscriber = { workspace = true }
 
 [features]
 landlock-sandbox = ["dep:landlock"]
