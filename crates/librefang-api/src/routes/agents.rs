@@ -1865,11 +1865,22 @@ pub async fn send_message(
 
     match result {
         Ok(result) => {
+            // #3511: read the post-turn registry entry to get the resolved
+            // session_id. The kernel may have created a new session during the
+            // turn (e.g. session_mode = "new"), so we re-read rather than
+            // reusing the pre-call guard check above. Falls back to None if the
+            // agent was deleted mid-turn (exceedingly rare).
+            let resolved_session_id = state
+                .kernel
+                .agent_registry()
+                .get(agent_id)
+                .map(|e| e.session_id);
+
             // When the agent intentionally chose not to reply (NO_REPLY / [[silent]]),
             // return an empty response with the silent flag so callers can distinguish
             // intentional silence from a bug.
             if result.silent {
-                return (
+                let body = (
                     StatusCode::OK,
                     Json(serde_json::json!({
                         "response": "",
@@ -1879,8 +1890,14 @@ pub async fn send_message(
                         "iterations": result.iterations,
                         "cost_usd": result.cost_usd,
                     })),
-                )
-                    .into_response();
+                );
+                return match resolved_session_id {
+                    Some(sid) => crate::extensions::with_session_id(
+                        sid,
+                        crate::extensions::with_agent_id(agent_id, body),
+                    ),
+                    None => crate::extensions::with_agent_id(agent_id, body),
+                };
             }
 
             // Extract reasoning trace (optional) and strip <think>...</think>
@@ -1903,7 +1920,7 @@ pub async fn send_message(
             } else {
                 cleaned
             };
-            (
+            let body = (
                 StatusCode::OK,
                 Json(serde_json::json!(MessageResponse {
                     response,
@@ -1918,8 +1935,14 @@ pub async fn send_message(
                     thinking: thinking_trace,
                     owner_notice: result.owner_notice,
                 })),
-            )
-                .into_response()
+            );
+            match resolved_session_id {
+                Some(sid) => crate::extensions::with_session_id(
+                    sid,
+                    crate::extensions::with_agent_id(agent_id, body),
+                ),
+                None => crate::extensions::with_agent_id(agent_id, body),
+            }
         }
         Err(e) => {
             tracing::warn!("send_message failed for agent {id}: {e}");
@@ -2248,18 +2271,25 @@ pub async fn get_agent_session(
             }
 
             let messages = built_messages;
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "session_id": session.id.0.to_string(),
-                    "agent_id": session.agent_id.0.to_string(),
-                    "message_count": session.messages.len(),
-                    "context_window_tokens": session.context_window_tokens,
-                    "label": session.label,
-                    "messages": messages,
-                })),
+            // #3511: tag session_id (and agent_id) so the access-log
+            // middleware can emit them as structured fields.
+            crate::extensions::with_session_id(
+                session.id,
+                crate::extensions::with_agent_id(
+                    agent_id,
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "session_id": session.id.0.to_string(),
+                            "agent_id": session.agent_id.0.to_string(),
+                            "message_count": session.messages.len(),
+                            "context_window_tokens": session.context_window_tokens,
+                            "label": session.label,
+                            "messages": messages,
+                        })),
+                    ),
+                ),
             )
-                .into_response()
         }
         Ok(None) => {
             // The session row is not materialized in the memory substrate
@@ -2277,17 +2307,23 @@ pub async fn get_agent_session(
                         .into_response();
                 }
             }
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "session_id": entry.session_id.0.to_string(),
-                    "agent_id": agent_id.to_string(),
-                    "message_count": 0,
-                    "context_window_tokens": 0,
-                    "messages": [],
-                })),
+            // #3511: tag both identifiers even for the empty-session case.
+            crate::extensions::with_session_id(
+                entry.session_id,
+                crate::extensions::with_agent_id(
+                    agent_id,
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "session_id": entry.session_id.0.to_string(),
+                            "agent_id": agent_id.to_string(),
+                            "message_count": 0,
+                            "context_window_tokens": 0,
+                            "messages": [],
+                        })),
+                    ),
+                ),
             )
-                .into_response()
         }
         Err(e) => {
             tracing::warn!("Session load failed for agent {id}: {e}");
@@ -2950,13 +2986,19 @@ pub async fn attach_session_stream(
         },
     );
 
-    Sse::new(sse_stream)
-        .keep_alive(
-            axum::response::sse::KeepAlive::new()
-                .interval(std::time::Duration::from_secs(15))
-                .text("keep-alive"),
-        )
-        .into_response()
+    // #3511: tag both agent_id and session_id so the access-log middleware
+    // can emit them as structured fields on this SSE endpoint's log line.
+    crate::extensions::with_session_id(
+        session_id,
+        crate::extensions::with_agent_id(
+            agent_id,
+            Sse::new(sse_stream).keep_alive(
+                axum::response::sse::KeepAlive::new()
+                    .interval(std::time::Duration::from_secs(15))
+                    .text("keep-alive"),
+            ),
+        ),
+    )
 }
 
 #[utoipa::path(
