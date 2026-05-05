@@ -11,8 +11,12 @@
 //! mapping. Centralising it here lets every route handler delegate via
 //! `?` / `.map_err(Into::into)` instead of building its own ad-hoc
 //! match. Without this, each handler invents its own status-code
-//! mapping and the `KernelOpError::NotFound` / `Invalid` / `Unavailable`
-//! categories silently collapse to 500.
+//! mapping and the `KernelOpError` categories silently collapse to 500.
+//!
+//! After #3541 8/N, `KernelOpError` is a type alias for
+//! `librefang_types::error::LibreFangError`, so matches must use
+//! `LibreFangError` variants instead of the old struct-style variants
+//! (`Unavailable { .. }`, `NotFound { .. }`, `Invalid { .. }`, …).
 
 pub use librefang_kernel::error::KernelError;
 
@@ -21,35 +25,43 @@ use librefang_kernel_handle::KernelOpError;
 use crate::types::ApiErrorResponse;
 use axum::http::StatusCode;
 
-/// Map a typed `KernelOpError` to the canonical HTTP status code.
+/// Map a typed `KernelOpError` (`LibreFangError` alias) to the canonical
+/// HTTP status code.
 ///
-/// The mapping is the contract advertised on `KernelOpError`'s variant
-/// docs in `librefang-kernel-handle/src/lib.rs`:
-///
-/// | Variant       | Status                          |
-/// |---------------|---------------------------------|
-/// | `Unavailable` | 503 Service Unavailable         |
-/// | `NotFound`    | 404 Not Found                   |
-/// | `Invalid`     | 400 Bad Request                 |
-/// | `Serialize`   | 500 Internal Server Error       |
-/// | `Other`       | 500 Internal Server Error       |
+/// | Variant(s)                                      | Status |
+/// |-------------------------------------------------|--------|
+/// | `AgentNotFound` / `SessionNotFound`             | 404    |
+/// | `InvalidInput` / `InvalidState` / `ManifestParse` | 400  |
+/// | `AuthDenied` / `CapabilityDenied`               | 403    |
+/// | `Unavailable` / `ShuttingDown`                  | 503    |
+/// | everything else                                 | 500    |
 pub fn kernel_op_status(err: &KernelOpError) -> StatusCode {
     match err {
-        KernelOpError::Unavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
-        KernelOpError::NotFound { .. } => StatusCode::NOT_FOUND,
-        KernelOpError::Invalid { .. } => StatusCode::BAD_REQUEST,
-        KernelOpError::Serialize(_) | KernelOpError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        KernelOpError::AgentNotFound(_) | KernelOpError::SessionNotFound(_) => {
+            StatusCode::NOT_FOUND
+        }
+        KernelOpError::InvalidInput(_)
+        | KernelOpError::InvalidState { .. }
+        | KernelOpError::ManifestParse(_) => StatusCode::BAD_REQUEST,
+        KernelOpError::AuthDenied(_) | KernelOpError::CapabilityDenied(_) => StatusCode::FORBIDDEN,
+        KernelOpError::Unavailable(_) | KernelOpError::ShuttingDown => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
 /// Stable machine-readable code for client-side switch logic.
 pub fn kernel_op_code(err: &KernelOpError) -> &'static str {
     match err {
-        KernelOpError::Unavailable { .. } => "service_unavailable",
-        KernelOpError::NotFound { .. } => "not_found",
-        KernelOpError::Invalid { .. } => "invalid_input",
-        KernelOpError::Serialize(_) => "serialize_failed",
-        KernelOpError::Other(_) => "internal_error",
+        KernelOpError::AgentNotFound(_) | KernelOpError::SessionNotFound(_) => "not_found",
+        KernelOpError::InvalidInput(_)
+        | KernelOpError::InvalidState { .. }
+        | KernelOpError::ManifestParse(_) => "invalid_input",
+        KernelOpError::AuthDenied(_) | KernelOpError::CapabilityDenied(_) => "auth_denied",
+        KernelOpError::Unavailable(_) | KernelOpError::ShuttingDown => "service_unavailable",
+        KernelOpError::Serialization { .. } => "serialize_failed",
+        _ => "internal_error",
     }
 }
 

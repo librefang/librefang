@@ -158,6 +158,17 @@ pub enum LibreFangError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 
+    /// The capability is not wired in this build / configuration. Used by
+    /// kernel-handle role-trait default impls to signal that an optional
+    /// subsystem (cron scheduler, hands system, approval queue, channel
+    /// adapter, …) is unavailable. The string carries the capability name
+    /// so callers can surface it without parsing the formatted message.
+    /// Maps cleanly to HTTP 503 Service Unavailable on the api boundary.
+    /// Replaces the historical `Result<_, "X not available">` String shape
+    /// (#3541).
+    #[error("{0} not available")]
+    Unavailable(String),
+
     /// The agent loop exited because tools failed in N consecutive iterations.
     #[error(
         "Repeated tool failures: {iterations} consecutive iterations with {error_count} errors"
@@ -202,6 +213,14 @@ pub type LibreFangResult<T> = Result<T, LibreFangError>;
 // ---------------------------------------------------------------------------
 
 impl LibreFangError {
+    /// Build an [`Self::Unavailable`] for a missing optional subsystem
+    /// (cron scheduler, hands system, approval queue, channel adapter, …).
+    /// Used by `KernelHandle` role-trait default impls to signal that the
+    /// capability is wired off in this build / configuration. (#3541)
+    pub fn unavailable(capability: impl Into<String>) -> Self {
+        Self::Unavailable(capability.into())
+    }
+
     /// Build a [`Self::Memory`] from a typed error, preserving it on the
     /// `source()` chain.
     pub fn memory<E>(source: E) -> Self
@@ -291,6 +310,22 @@ impl LibreFangError {
 impl From<serde_json::Error> for LibreFangError {
     fn from(e: serde_json::Error) -> Self {
         Self::serialization(e)
+    }
+}
+
+/// String → `Internal(_)`. Lets callers that produced a `String` error
+/// (during the migration window away from `Result<_, String>`) flow it
+/// through `?` into a function returning `LibreFangError`. New code SHOULD
+/// pick a more specific variant where one fits.
+impl From<String> for LibreFangError {
+    fn from(s: String) -> Self {
+        Self::Internal(s)
+    }
+}
+
+impl From<&str> for LibreFangError {
+    fn from(s: &str) -> Self {
+        Self::Internal(s.to_string())
     }
 }
 

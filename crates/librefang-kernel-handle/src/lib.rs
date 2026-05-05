@@ -28,88 +28,34 @@
 //! atomically.
 
 use async_trait::async_trait;
-use thiserror::Error;
 
 // ============================================================================
-// Typed kernel-op errors (#3541 1/N)
+// Typed kernel-op errors (#3541)
 // ============================================================================
 //
-// Historically every method on the role traits returned `Result<_, String>`.
-// That destroyed structured error information at the most-trafficked seam
-// between runtime and kernel — callers resorted to substring-matching on the
-// formatted message (`.contains("not found")`) to map back to user-visible
-// categories. This enum is the typed replacement; new methods adopt it, and
-// existing ones migrate one role trait at a time.
+// `KernelOpError` is a re-export of `librefang_types::error::LibreFangError`
+// — the canonical structured business-error enum that already existed in
+// the workspace before this migration. The trait surface uses the alias
+// for two reasons:
 //
-// Variants are deliberately *categories*, not "one variant per call site":
-// callers should be able to do `match err { Unavailable { .. } => 503,
-// NotFound { .. } => 404, .. }` without having to enumerate every kernel
-// internal. `Other(String)` is the temporary catch-all for un-classified
-// failures from the kernel implementation; reduce its use as PRs migrate
-// individual paths.
+//   1. Callers that crossed the runtime↔kernel seam used to get
+//      `Result<_, String>`, throwing away the variant info and forcing
+//      substring-matching back to a category. The alias resolves that
+//      directly: `match err { LibreFangError::AgentNotFound(_) => 404,
+//      CapabilityDenied(_) => 403, Unavailable(_) => 503, … }`.
+//   2. Reusing the existing enum (rather than introducing a parallel
+//      "kernel handle error") keeps every layer (runtime, kernel, api)
+//      working with the same vocabulary, so converting between layers is
+//      a no-op rather than a `match`-and-rewrap dance.
 //
-// Display strings stay close to the original `format!` outputs so
-// log lines and translated UI messages don't drift on first migration.
-#[derive(Debug, Error)]
-pub enum KernelOpError {
-    /// The capability is wired off in this build / configuration. Maps to
-    /// HTTP 503 Service Unavailable. Replaces the historical
-    /// `Err("X not available".into())` pattern that role-trait default impls
-    /// emit.
-    #[error("{capability} not available")]
-    Unavailable { capability: &'static str },
+// Use [`KernelResult<T>`] in new role-trait method signatures so the
+// shape `Result<T, LibreFangError>` is consistent and self-documenting.
+pub use librefang_types::error::LibreFangError as KernelOpError;
 
-    /// The targeted entity (agent, task, job, …) does not exist. Maps to
-    /// HTTP 404. Includes the entity *kind* and *id* so callers can surface
-    /// both without parsing the error message.
-    #[error("{kind} `{id}` not found")]
-    NotFound { kind: &'static str, id: String },
-
-    /// Caller-supplied input failed validation before the operation was
-    /// attempted. Maps to HTTP 400. The `field` is the *machine* name of
-    /// the field; `reason` is the human-readable cause.
-    #[error("invalid {field}: {reason}")]
-    Invalid { field: &'static str, reason: String },
-
-    /// JSON / TOML serialization failed. Distinct from `Invalid` because
-    /// these failures originate inside the kernel (re-encoding internal
-    /// state for the wire), not from caller input.
-    #[error("serialize failed: {0}")]
-    Serialize(#[from] serde_json::Error),
-
-    /// Catch-all for kernel-side failures that haven't been classified into
-    /// a typed variant yet. Each migration PR should reduce the population
-    /// of this variant by adding a more specific one above. **Not for
-    /// caller-input errors** — use `Invalid` for those.
-    #[error("{0}")]
-    Other(String),
-}
-
-impl KernelOpError {
-    /// Build the historical `"X not available"` payload as a typed
-    /// `Unavailable` variant. Used by role-trait default impls to keep the
-    /// "missing capability returns Err at first call" contract while
-    /// upgrading the error type. Callers can match on `Unavailable` instead
-    /// of substring-matching on `.to_string()`.
-    pub const fn unavailable(capability: &'static str) -> Self {
-        KernelOpError::Unavailable { capability }
-    }
-}
-
-// String → KernelOpError::Other for ergonomics during the migration window.
-// Kernel impls that still produce `String` errors can `.map_err(Into::into)`
-// without spelling out a variant. New code SHOULD prefer a typed variant.
-impl From<String> for KernelOpError {
-    fn from(s: String) -> Self {
-        KernelOpError::Other(s)
-    }
-}
-
-impl From<&str> for KernelOpError {
-    fn from(s: &str) -> Self {
-        KernelOpError::Other(s.to_string())
-    }
-}
+/// Canonical result type for `KernelHandle` role-trait methods (#3541).
+/// Use this in new method signatures rather than respelling
+/// `Result<T, KernelOpError>` each time.
+pub type KernelResult<T> = Result<T, KernelOpError>;
 
 /// Agent info returned by list and discovery operations.
 #[derive(Debug, Clone)]

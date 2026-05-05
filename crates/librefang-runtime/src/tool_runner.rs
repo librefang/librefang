@@ -10078,8 +10078,13 @@ mod tests {
         ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
             if self.should_fail_escalation {
                 // Parse child manifest to extract capabilities, mimicking real kernel behavior
-                let manifest: librefang_types::agent::AgentManifest =
-                    toml::from_str(manifest_toml).map_err(|e| format!("Invalid manifest: {e}"))?;
+                let manifest: librefang_types::agent::AgentManifest = toml::from_str(manifest_toml)
+                    .map_err(|e| {
+                        librefang_kernel_handle::KernelOpError::InvalidInput(format!(
+                            "manifest: {}",
+                            e.to_string()
+                        ))
+                    })?;
                 let child_caps: Vec<librefang_types::capability::Capability> = manifest
                     .capabilities
                     .tools
@@ -10089,7 +10094,8 @@ mod tests {
                 librefang_types::capability::validate_capability_inheritance(
                     parent_caps,
                     &child_caps,
-                )?;
+                )
+                .map_err(librefang_kernel_handle::KernelOpError::Internal)?;
             }
             Ok(("test-id-456".to_string(), "good-child".to_string()))
         }

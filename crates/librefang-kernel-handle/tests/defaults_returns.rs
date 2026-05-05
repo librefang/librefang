@@ -198,25 +198,19 @@ async fn test_cron_defaults_return_errors() {
     // "Cron scheduler not available" for log-output continuity.
     let result = handle.cron_create("agent", serde_json::json!({})).await;
     match result {
-        Err(KernelOpError::Unavailable {
-            capability: "Cron scheduler",
-        }) => {}
+        Err(KernelOpError::Unavailable(c)) if c == "Cron scheduler" => {}
         other => panic!("cron_create: expected Unavailable, got {other:?}"),
     }
 
     let result = handle.cron_list("agent").await;
     match result {
-        Err(KernelOpError::Unavailable {
-            capability: "Cron scheduler",
-        }) => {}
+        Err(KernelOpError::Unavailable(c)) if c == "Cron scheduler" => {}
         other => panic!("cron_list: expected Unavailable, got {other:?}"),
     }
 
     let result = handle.cron_cancel("job1").await;
     match result {
-        Err(KernelOpError::Unavailable {
-            capability: "Cron scheduler",
-        }) => {}
+        Err(KernelOpError::Unavailable(c)) if c == "Cron scheduler" => {}
         other => panic!("cron_cancel: expected Unavailable, got {other:?}"),
     }
 }

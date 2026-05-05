@@ -18068,9 +18068,11 @@ impl kernel_handle::AgentControl for LibreFangKernel {
     }
 
     fn kill_agent(&self, agent_id: &str) -> Result<(), kernel_handle::KernelOpError> {
-        let id = self.resolve_agent_identifier(agent_id)?;
+        let id = self
+            .resolve_agent_identifier(agent_id)
+            .map_err(kernel_handle::KernelOpError::Internal)?;
         LibreFangKernel::kill_agent(self, id)
-            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Kill failed: {e}")))
+            .map_err(|e| kernel_handle::KernelOpError::Internal(format!("Kill failed: {e}")))
     }
 
     fn find_agents(&self, query: &str) -> Vec<kernel_handle::AgentInfo> {
@@ -18110,15 +18112,14 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         parent_caps: &[librefang_types::capability::Capability],
     ) -> Result<(String, String), kernel_handle::KernelOpError> {
         // Parse the child manifest to extract its capabilities
-        let child_manifest: AgentManifest =
-            toml::from_str(manifest_toml).map_err(|e| kernel_handle::KernelOpError::Invalid {
-                field: "manifest",
-                reason: e.to_string(),
-            })?;
+        let child_manifest: AgentManifest = toml::from_str(manifest_toml).map_err(|e| {
+            kernel_handle::KernelOpError::InvalidInput(format!("manifest: {}", e.to_string()))
+        })?;
         let child_caps = manifest_to_capabilities(&child_manifest);
 
         // Enforce: child capabilities must be a subset of parent capabilities
-        librefang_types::capability::validate_capability_inheritance(parent_caps, &child_caps)?;
+        librefang_types::capability::validate_capability_inheritance(parent_caps, &child_caps)
+            .map_err(|e| kernel_handle::KernelOpError::Internal(e))?;
 
         tracing::info!(
             parent = parent_id.unwrap_or("kernel"),
@@ -18166,7 +18167,7 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
             .is_some();
         self.memory
             .structured_set(agent_id, &scoped, value)
-            .map_err(|e| KernelOpError::Other(format!("Memory store failed: {e}")))?;
+            .map_err(|e| KernelOpError::Internal(format!("Memory store failed: {e}")))?;
 
         // Publish MemoryUpdate event so triggers can react
         let operation = if had_old {
@@ -18212,7 +18213,7 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         let scoped = peer_scoped_key(key, peer_id);
         self.memory
             .structured_get(agent_id, &scoped)
-            .map_err(|e| KernelOpError::Other(format!("Memory recall failed: {e}")))
+            .map_err(|e| KernelOpError::Internal(format!("Memory recall failed: {e}")))
     }
 
     fn memory_list(
@@ -18224,7 +18225,7 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         let all_keys = self
             .memory
             .list_keys(agent_id)
-            .map_err(|e| KernelOpError::Other(format!("Memory list failed: {e}")))?;
+            .map_err(|e| KernelOpError::Internal(format!("Memory list failed: {e}")))?;
         match peer_id {
             Some(pid) => {
                 let prefix = format!("peer:{pid}:");
@@ -18270,7 +18271,7 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
             .memory
             .task_post(title, description, assigned_to, created_by)
             .await
-            .map_err(|e| KernelOpError::Other(format!("Task post failed: {e}")))?;
+            .map_err(|e| KernelOpError::Internal(format!("Task post failed: {e}")))?;
 
         let event = librefang_types::event::Event::new(
             AgentId::new(), // system-originated
@@ -18307,10 +18308,7 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
             Err(_) => match self.registry.find_by_name(agent_id) {
                 Some(entry) => (entry.id.to_string(), Some(agent_id.to_string())),
                 None => {
-                    return Err(KernelOpError::NotFound {
-                        kind: "agent",
-                        id: agent_id.to_string(),
-                    });
+                    return Err(KernelOpError::AgentNotFound(agent_id.to_string()));
                 }
             },
         };
@@ -18318,7 +18316,7 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
             .memory
             .task_claim(&resolved, resolved_name.as_deref())
             .await
-            .map_err(|e| KernelOpError::Other(format!("Task claim failed: {e}")))?;
+            .map_err(|e| KernelOpError::Internal(format!("Task claim failed: {e}")))?;
 
         if let Some(ref task) = result {
             let task_id = task["id"].as_str().unwrap_or("").to_string();
@@ -18350,17 +18348,14 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
             Err(_) => match self.registry.find_by_name(agent_id) {
                 Some(entry) => entry.id.to_string(),
                 None => {
-                    return Err(KernelOpError::NotFound {
-                        kind: "agent",
-                        id: agent_id.to_string(),
-                    });
+                    return Err(KernelOpError::AgentNotFound(agent_id.to_string()));
                 }
             },
         };
         self.memory
             .task_complete(task_id, result)
             .await
-            .map_err(|e| KernelOpError::Other(format!("Task complete failed: {e}")))?;
+            .map_err(|e| KernelOpError::Internal(format!("Task complete failed: {e}")))?;
 
         let event = librefang_types::event::Event::new(
             AgentId::new(), // system-originated
@@ -18385,21 +18380,21 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
         self.memory
             .task_list(status)
             .await
-            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Task list failed: {e}")))
+            .map_err(|e| kernel_handle::KernelOpError::Internal(format!("Task list failed: {e}")))
     }
 
     async fn task_delete(&self, task_id: &str) -> Result<bool, kernel_handle::KernelOpError> {
         self.memory
             .task_delete(task_id)
             .await
-            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Task delete failed: {e}")))
+            .map_err(|e| kernel_handle::KernelOpError::Internal(format!("Task delete failed: {e}")))
     }
 
     async fn task_retry(&self, task_id: &str) -> Result<bool, kernel_handle::KernelOpError> {
         self.memory
             .task_retry(task_id)
             .await
-            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Task retry failed: {e}")))
+            .map_err(|e| kernel_handle::KernelOpError::Internal(format!("Task retry failed: {e}")))
     }
 
     async fn task_get(
@@ -18409,7 +18404,7 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
         self.memory
             .task_get(task_id)
             .await
-            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Task get failed: {e}")))
+            .map_err(|e| kernel_handle::KernelOpError::Internal(format!("Task get failed: {e}")))
     }
 
     async fn task_update_status(
@@ -18421,7 +18416,7 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
             .task_update_status(task_id, new_status)
             .await
             .map_err(|e| {
-                kernel_handle::KernelOpError::Other(format!("Task update status failed: {e}"))
+                kernel_handle::KernelOpError::Internal(format!("Task update status failed: {e}"))
             })
     }
 }
@@ -18457,7 +18452,7 @@ impl kernel_handle::KnowledgeGraph for LibreFangKernel {
         // Clone here so the trait can take `&Entity` and avoid forcing
         // every caller to give up ownership. See #3553.
         self.memory.add_entity(entity.clone()).await.map_err(|e| {
-            kernel_handle::KernelOpError::Other(format!("Knowledge add entity failed: {e}"))
+            kernel_handle::KernelOpError::Internal(format!("Knowledge add entity failed: {e}"))
         })
     }
 
@@ -18469,7 +18464,9 @@ impl kernel_handle::KnowledgeGraph for LibreFangKernel {
             .add_relation(relation.clone())
             .await
             .map_err(|e| {
-                kernel_handle::KernelOpError::Other(format!("Knowledge add relation failed: {e}"))
+                kernel_handle::KernelOpError::Internal(format!(
+                    "Knowledge add relation failed: {e}"
+                ))
             })
     }
 
@@ -18478,7 +18475,7 @@ impl kernel_handle::KnowledgeGraph for LibreFangKernel {
         pattern: librefang_types::memory::GraphPattern,
     ) -> Result<Vec<librefang_types::memory::GraphMatch>, kernel_handle::KernelOpError> {
         self.memory.query_graph(pattern).await.map_err(|e| {
-            kernel_handle::KernelOpError::Other(format!("Knowledge query failed: {e}"))
+            kernel_handle::KernelOpError::Internal(format!("Knowledge query failed: {e}"))
         })
     }
 }
@@ -18497,32 +18494,17 @@ impl kernel_handle::CronControl for LibreFangKernel {
 
         let name = job_json["name"]
             .as_str()
-            .ok_or_else(|| KernelOpError::Invalid {
-                field: "name",
-                reason: "missing or not a string".into(),
+            .ok_or_else(|| {
+                KernelOpError::InvalidInput("name: missing or not a string".to_string())
             })?
             .to_string();
-        let schedule: CronSchedule =
-            serde_json::from_value(job_json["schedule"].clone()).map_err(|e| {
-                KernelOpError::Invalid {
-                    field: "schedule",
-                    reason: e.to_string(),
-                }
-            })?;
-        let action: CronAction =
-            serde_json::from_value(job_json["action"].clone()).map_err(|e| {
-                KernelOpError::Invalid {
-                    field: "action",
-                    reason: e.to_string(),
-                }
-            })?;
+        let schedule: CronSchedule = serde_json::from_value(job_json["schedule"].clone())
+            .map_err(|e| KernelOpError::InvalidInput(format!("schedule: {}", e.to_string())))?;
+        let action: CronAction = serde_json::from_value(job_json["action"].clone())
+            .map_err(|e| KernelOpError::InvalidInput(format!("action: {}", e.to_string())))?;
         let delivery: CronDelivery = if job_json["delivery"].is_object() {
-            serde_json::from_value(job_json["delivery"].clone()).map_err(|e| {
-                KernelOpError::Invalid {
-                    field: "delivery",
-                    reason: e.to_string(),
-                }
-            })?
+            serde_json::from_value(job_json["delivery"].clone())
+                .map_err(|e| KernelOpError::InvalidInput(format!("delivery: {}", e.to_string())))?
         } else {
             // Default to LastChannel so cron jobs created by an agent in
             // a channel context actually deliver their output back to
@@ -18539,19 +18521,13 @@ impl kernel_handle::CronControl for LibreFangKernel {
 
         let aid =
             librefang_types::agent::AgentId(uuid::Uuid::parse_str(agent_id).map_err(|e| {
-                KernelOpError::Invalid {
-                    field: "agent_id",
-                    reason: e.to_string(),
-                }
+                KernelOpError::InvalidInput(format!("agent_id: {}", e.to_string()))
             })?);
 
         let session_mode: Option<librefang_types::agent::SessionMode> =
             if job_json["session_mode"].is_string() {
                 serde_json::from_value(job_json["session_mode"].clone()).map_err(|e| {
-                    KernelOpError::Invalid {
-                        field: "session_mode",
-                        reason: e.to_string(),
-                    }
+                    KernelOpError::InvalidInput(format!("session_mode: {}", e.to_string()))
                 })?
             } else {
                 None
@@ -18562,10 +18538,7 @@ impl kernel_handle::CronControl for LibreFangKernel {
         // before the job is added (rather than failing silently at fire time).
         let delivery_targets: Vec<CronDeliveryTarget> = if job_json["delivery_targets"].is_array() {
             serde_json::from_value(job_json["delivery_targets"].clone()).map_err(|e| {
-                KernelOpError::Invalid {
-                    field: "delivery_targets",
-                    reason: e.to_string(),
-                }
+                KernelOpError::InvalidInput(format!("delivery_targets: {}", e.to_string()))
             })?
         } else {
             Vec::new()
@@ -18590,7 +18563,7 @@ impl kernel_handle::CronControl for LibreFangKernel {
         let id = self
             .cron_scheduler
             .add_job(job, one_shot)
-            .map_err(|e| KernelOpError::Other(e.to_string()))?;
+            .map_err(|e| KernelOpError::Internal(e.to_string()))?;
 
         // Persist after adding
         if let Err(e) = self.cron_scheduler.persist() {
@@ -18611,10 +18584,7 @@ impl kernel_handle::CronControl for LibreFangKernel {
         use kernel_handle::KernelOpError;
         let aid =
             librefang_types::agent::AgentId(uuid::Uuid::parse_str(agent_id).map_err(|e| {
-                KernelOpError::Invalid {
-                    field: "agent_id",
-                    reason: e.to_string(),
-                }
+                KernelOpError::InvalidInput(format!("agent_id: {}", e.to_string()))
             })?);
         let jobs = self.cron_scheduler.list_jobs(aid);
         let json_jobs: Vec<serde_json::Value> = jobs
@@ -18626,16 +18596,13 @@ impl kernel_handle::CronControl for LibreFangKernel {
 
     async fn cron_cancel(&self, job_id: &str) -> Result<(), kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
-        let id =
-            librefang_types::scheduler::CronJobId(uuid::Uuid::parse_str(job_id).map_err(|e| {
-                KernelOpError::Invalid {
-                    field: "job_id",
-                    reason: e.to_string(),
-                }
-            })?);
+        let id = librefang_types::scheduler::CronJobId(
+            uuid::Uuid::parse_str(job_id)
+                .map_err(|e| KernelOpError::InvalidInput(format!("job_id: {}", e.to_string())))?,
+        );
         self.cron_scheduler
             .remove_job(id)
-            .map_err(|e| KernelOpError::Other(e.to_string()))?;
+            .map_err(|e| KernelOpError::Internal(e.to_string()))?;
 
         // Persist after removal
         if let Err(e) = self.cron_scheduler.persist() {
@@ -18751,12 +18718,10 @@ impl kernel_handle::HandsControl for LibreFangKernel {
 
     async fn hand_deactivate(&self, instance_id: &str) -> Result<(), kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
-        let uuid = uuid::Uuid::parse_str(instance_id).map_err(|e| KernelOpError::Invalid {
-            field: "instance_id",
-            reason: e.to_string(),
-        })?;
+        let uuid = uuid::Uuid::parse_str(instance_id)
+            .map_err(|e| KernelOpError::InvalidInput(format!("instance_id: {}", e.to_string())))?;
         self.deactivate_hand(uuid)
-            .map_err(|e| KernelOpError::Other(e.to_string()))
+            .map_err(|e| KernelOpError::Internal(e.to_string()))
     }
 }
 
@@ -19106,23 +19071,20 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         kernel_handle::KernelOpError,
     > {
         // #3541 follow-up: classify the missing-id case as
-        // `KernelOpError::NotFound { kind: "approval", id }` so the API
+        // `KernelOpError::AgentNotFound` / `Internal` so the API
         // boundary surfaces 404 via the typed mapping. The underlying
         // `ApprovalManager::resolve` still returns `String` (typing it
         // is left to a separate ApprovalManager refactor); the substring
         // check is scoped to the manager's exact "not found or expired"
-        // wording. All other error wordings flow through `Other`.
+        // wording. All other error wordings flow through `Internal`.
         let (response, deferred) = self
             .approval_manager
             .resolve(request_id, decision, decided_by, totp_verified, user_id)
             .map_err(|msg| {
                 if msg.contains("not found") {
-                    kernel_handle::KernelOpError::NotFound {
-                        kind: "approval",
-                        id: request_id.to_string(),
-                    }
+                    kernel_handle::KernelOpError::AgentNotFound(request_id.to_string())
                 } else {
-                    kernel_handle::KernelOpError::Other(msg)
+                    kernel_handle::KernelOpError::Internal(msg)
                 }
             })?;
 
@@ -19329,12 +19291,9 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
                 filename: filename.unwrap_or("file").to_string(),
             },
             _ => {
-                return Err(kernel_handle::KernelOpError::Invalid {
-                    field: "media_type",
-                    reason: format!(
-                        "Unsupported media type: '{media_type}'. Use 'image' or 'file'."
-                    ),
-                });
+                return Err(kernel_handle::KernelOpError::InvalidInput(format!(
+                    "media_type: Unsupported media type: '{media_type}'. Use 'image' or 'file'."
+                )));
             }
         };
 
@@ -19532,18 +19491,15 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         if !cfg.prompt_intelligence.enabled {
             return Ok(None);
         }
-        let id: AgentId = agent_id
-            .parse()
-            .map_err(|e| kernel_handle::KernelOpError::Invalid {
-                field: "agent_id",
-                reason: format!("{e}"),
-            })?;
+        let id: AgentId = agent_id.parse().map_err(|e| {
+            kernel_handle::KernelOpError::Internal(format!("Invalid agent ID: {e}"))
+        })?;
         let store = self
             .prompt_store
             .get()
-            .ok_or(kernel_handle::KernelOpError::unavailable("Prompt store"))?;
+            .ok_or("Prompt store not initialized")?;
         store.get_running_experiment(id).map_err(|e| {
-            kernel_handle::KernelOpError::Other(format!("Failed to get experiment: {e}"))
+            kernel_handle::KernelOpError::Internal(format!("Failed to get experiment: {e}"))
         })
     }
 
@@ -19555,20 +19511,12 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         cost_usd: f64,
         success: bool,
     ) -> Result<(), kernel_handle::KernelOpError> {
-        let exp_id: uuid::Uuid =
-            experiment_id
-                .parse()
-                .map_err(|e| kernel_handle::KernelOpError::Invalid {
-                    field: "experiment_id",
-                    reason: format!("{e}"),
-                })?;
-        let var_id: uuid::Uuid =
-            variant_id
-                .parse()
-                .map_err(|e| kernel_handle::KernelOpError::Invalid {
-                    field: "variant_id",
-                    reason: format!("{e}"),
-                })?;
+        let exp_id: uuid::Uuid = experiment_id.parse().map_err(|e| {
+            kernel_handle::KernelOpError::Internal(format!("Invalid experiment ID: {e}"))
+        })?;
+        let var_id: uuid::Uuid = variant_id.parse().map_err(|e| {
+            kernel_handle::KernelOpError::Internal(format!("Invalid variant ID: {e}"))
+        })?;
         let store = self
             .prompt_store
             .get()
@@ -19576,7 +19524,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         store
             .record_request(exp_id, var_id, latency_ms, cost_usd, success)
             .map_err(|e| {
-                kernel_handle::KernelOpError::Other(format!("Failed to record request: {e}"))
+                kernel_handle::KernelOpError::Internal(format!("Failed to record request: {e}"))
             })
     }
 
@@ -19584,20 +19532,16 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         &self,
         version_id: &str,
     ) -> Result<Option<librefang_types::agent::PromptVersion>, kernel_handle::KernelOpError> {
-        let id: uuid::Uuid =
-            version_id
-                .parse()
-                .map_err(|e| kernel_handle::KernelOpError::Invalid {
-                    field: "version_id",
-                    reason: format!("{e}"),
-                })?;
+        let id: uuid::Uuid = version_id.parse().map_err(|e| {
+            kernel_handle::KernelOpError::Internal(format!("Invalid version ID: {e}"))
+        })?;
         let store = self
             .prompt_store
             .get()
             .ok_or(kernel_handle::KernelOpError::unavailable("Prompt store"))?;
-        store
-            .get_version(id)
-            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Failed to get version: {e}")))
+        store.get_version(id).map_err(|e| {
+            kernel_handle::KernelOpError::Internal(format!("Failed to get version: {e}"))
+        })
     }
 
     fn list_prompt_versions(
@@ -19607,9 +19551,9 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         let store = self
             .prompt_store
             .get()
-            .ok_or(kernel_handle::KernelOpError::unavailable("Prompt store"))?;
+            .ok_or("Prompt store not initialized")?;
         store.list_versions(agent_id).map_err(|e| {
-            kernel_handle::KernelOpError::Other(format!("Failed to list versions: {e}"))
+            kernel_handle::KernelOpError::Internal(format!("Failed to list versions: {e}"))
         })
     }
 
@@ -19626,7 +19570,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         // Clone here — the store owns the value. Trade-off accepted by
         // #3553: callers (API handlers) no longer have to clone first.
         store.create_version(version.clone()).map_err(|e| {
-            kernel_handle::KernelOpError::Other(format!("Failed to create version: {e}"))
+            kernel_handle::KernelOpError::Internal(format!("Failed to create version: {e}"))
         })?;
         // Prune old versions if over the configured limit
         let max = cfg.prompt_intelligence.max_versions_per_agent;
@@ -19635,19 +19579,15 @@ impl kernel_handle::PromptStore for LibreFangKernel {
     }
 
     fn delete_prompt_version(&self, version_id: &str) -> Result<(), kernel_handle::KernelOpError> {
-        let id: uuid::Uuid =
-            version_id
-                .parse()
-                .map_err(|e| kernel_handle::KernelOpError::Invalid {
-                    field: "version_id",
-                    reason: format!("{e}"),
-                })?;
+        let id: uuid::Uuid = version_id.parse().map_err(|e| {
+            kernel_handle::KernelOpError::Internal(format!("Invalid version ID: {e}"))
+        })?;
         let store = self
             .prompt_store
             .get()
-            .ok_or(kernel_handle::KernelOpError::unavailable("Prompt store"))?;
+            .ok_or("Prompt store not initialized")?;
         store.delete_version(id).map_err(|e| {
-            kernel_handle::KernelOpError::Other(format!("Failed to delete version: {e}"))
+            kernel_handle::KernelOpError::Internal(format!("Failed to delete version: {e}"))
         })
     }
 
@@ -19656,26 +19596,18 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         version_id: &str,
         agent_id: &str,
     ) -> Result<(), kernel_handle::KernelOpError> {
-        let id: uuid::Uuid =
-            version_id
-                .parse()
-                .map_err(|e| kernel_handle::KernelOpError::Invalid {
-                    field: "version_id",
-                    reason: format!("{e}"),
-                })?;
-        let agent: librefang_types::agent::AgentId =
-            agent_id
-                .parse()
-                .map_err(|e| kernel_handle::KernelOpError::Invalid {
-                    field: "agent_id",
-                    reason: format!("{e}"),
-                })?;
+        let id: uuid::Uuid = version_id.parse().map_err(|e| {
+            kernel_handle::KernelOpError::Internal(format!("Invalid version ID: {e}"))
+        })?;
+        let agent: librefang_types::agent::AgentId = agent_id.parse().map_err(|e| {
+            kernel_handle::KernelOpError::Internal(format!("Invalid agent ID: {e}"))
+        })?;
         let store = self
             .prompt_store
             .get()
-            .ok_or(kernel_handle::KernelOpError::unavailable("Prompt store"))?;
+            .ok_or("Prompt store not initialized")?;
         store.set_active_version(id, agent).map_err(|e| {
-            kernel_handle::KernelOpError::Other(format!("Failed to set active version: {e}"))
+            kernel_handle::KernelOpError::Internal(format!("Failed to set active version: {e}"))
         })
     }
 
@@ -19686,9 +19618,9 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         let store = self
             .prompt_store
             .get()
-            .ok_or(kernel_handle::KernelOpError::unavailable("Prompt store"))?;
+            .ok_or("Prompt store not initialized")?;
         store.list_experiments(agent_id).map_err(|e| {
-            kernel_handle::KernelOpError::Other(format!("Failed to list experiments: {e}"))
+            kernel_handle::KernelOpError::Internal(format!("Failed to list experiments: {e}"))
         })
     }
 
@@ -19702,7 +19634,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
             .ok_or(kernel_handle::KernelOpError::unavailable("Prompt store"))?;
         // Clone here — the store owns the value. See #3553.
         store.create_experiment(experiment.clone()).map_err(|e| {
-            kernel_handle::KernelOpError::Other(format!("Failed to create experiment: {e}"))
+            kernel_handle::KernelOpError::Internal(format!("Failed to create experiment: {e}"))
         })
     }
 
@@ -19711,19 +19643,15 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         experiment_id: &str,
     ) -> Result<Option<librefang_types::agent::PromptExperiment>, kernel_handle::KernelOpError>
     {
-        let id: uuid::Uuid =
-            experiment_id
-                .parse()
-                .map_err(|e| kernel_handle::KernelOpError::Invalid {
-                    field: "experiment_id",
-                    reason: format!("{e}"),
-                })?;
+        let id: uuid::Uuid = experiment_id.parse().map_err(|e| {
+            kernel_handle::KernelOpError::Internal(format!("Invalid experiment ID: {e}"))
+        })?;
         let store = self
             .prompt_store
             .get()
-            .ok_or(kernel_handle::KernelOpError::unavailable("Prompt store"))?;
+            .ok_or("Prompt store not initialized")?;
         store.get_experiment(id).map_err(|e| {
-            kernel_handle::KernelOpError::Other(format!("Failed to get experiment: {e}"))
+            kernel_handle::KernelOpError::Internal(format!("Failed to get experiment: {e}"))
         })
     }
 
@@ -19732,25 +19660,23 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         experiment_id: &str,
         status: librefang_types::agent::ExperimentStatus,
     ) -> Result<(), kernel_handle::KernelOpError> {
-        let id: uuid::Uuid =
-            experiment_id
-                .parse()
-                .map_err(|e| kernel_handle::KernelOpError::Invalid {
-                    field: "experiment_id",
-                    reason: format!("{e}"),
-                })?;
+        let id: uuid::Uuid = experiment_id.parse().map_err(|e| {
+            kernel_handle::KernelOpError::Internal(format!("Invalid experiment ID: {e}"))
+        })?;
         let store = self
             .prompt_store
             .get()
-            .ok_or(kernel_handle::KernelOpError::unavailable("Prompt store"))?;
+            .ok_or("Prompt store not initialized")?;
         store.update_experiment_status(id, status).map_err(|e| {
-            kernel_handle::KernelOpError::Other(format!("Failed to update experiment status: {e}"))
+            kernel_handle::KernelOpError::Internal(format!(
+                "Failed to update experiment status: {e}"
+            ))
         })?;
 
         // When completing an experiment, auto-activate the winning variant's prompt version
         if status == librefang_types::agent::ExperimentStatus::Completed {
             let metrics = store.get_experiment_metrics(id).map_err(|e| {
-                kernel_handle::KernelOpError::Other(format!(
+                kernel_handle::KernelOpError::Internal(format!(
                     "Failed to get experiment metrics: {e}"
                 ))
             })?;
@@ -19760,7 +19686,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
                     .unwrap_or(std::cmp::Ordering::Equal)
             }) {
                 if let Some(exp) = store.get_experiment(id).map_err(|e| {
-                    kernel_handle::KernelOpError::Other(format!("Failed to get experiment: {e}"))
+                    kernel_handle::KernelOpError::Internal(format!("Failed to get experiment: {e}"))
                 })? {
                     if let Some(variant) = exp.variants.iter().find(|v| v.id == winner.variant_id) {
                         let _ = store.set_active_version(variant.prompt_version_id, exp.agent_id);
@@ -19783,19 +19709,15 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         experiment_id: &str,
     ) -> Result<Vec<librefang_types::agent::ExperimentVariantMetrics>, kernel_handle::KernelOpError>
     {
-        let id: uuid::Uuid =
-            experiment_id
-                .parse()
-                .map_err(|e| kernel_handle::KernelOpError::Invalid {
-                    field: "experiment_id",
-                    reason: format!("{e}"),
-                })?;
+        let id: uuid::Uuid = experiment_id.parse().map_err(|e| {
+            kernel_handle::KernelOpError::Internal(format!("Invalid experiment ID: {e}"))
+        })?;
         let store = self
             .prompt_store
             .get()
-            .ok_or(kernel_handle::KernelOpError::unavailable("Prompt store"))?;
+            .ok_or("Prompt store not initialized")?;
         store.get_experiment_metrics(id).map_err(|e| {
-            kernel_handle::KernelOpError::Other(format!("Failed to get experiment metrics: {e}"))
+            kernel_handle::KernelOpError::Internal(format!("Failed to get experiment metrics: {e}"))
         })
     }
 
@@ -19821,7 +19743,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
                 Ok(())
             }
             Ok(false) => Ok(()),
-            Err(e) => Err(kernel_handle::KernelOpError::Other(format!(
+            Err(e) => Err(kernel_handle::KernelOpError::Internal(format!(
                 "Failed to auto-track prompt version: {e}"
             ))),
         }
@@ -19849,15 +19771,14 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
                 .iter()
                 .find(|w| w.name.to_lowercase() == name_lower)
                 .map(|w| w.id)
-                .ok_or_else(|| KernelOpError::NotFound {
-                    kind: "workflow",
-                    id: workflow_id.to_string(),
+                .ok_or_else(|| {
+                    KernelOpError::Internal(format!("workflow `{}` not found", workflow_id))
                 })?
         };
 
         let (run_id, output) = LibreFangKernel::run_workflow(self, wf_id, input.to_string())
             .await
-            .map_err(|e| KernelOpError::Other(format!("Workflow execution failed: {e}")))?;
+            .map_err(|e| KernelOpError::Internal(format!("Workflow execution failed: {e}")))?;
 
         Ok((run_id.to_string(), output))
     }
@@ -19874,7 +19795,7 @@ impl kernel_handle::GoalControl for LibreFangKernel {
                 Ok(Some(serde_json::Value::Array(arr))) => arr,
                 Ok(_) => return Ok(Vec::new()),
                 Err(e) => {
-                    return Err(kernel_handle::KernelOpError::Other(format!(
+                    return Err(kernel_handle::KernelOpError::Internal(format!(
                         "Failed to load goals: {e}"
                     )))
                 }
@@ -19907,13 +19828,13 @@ impl kernel_handle::GoalControl for LibreFangKernel {
             match self.memory.structured_get(shared_id, "__librefang_goals") {
                 Ok(Some(serde_json::Value::Array(arr))) => arr,
                 Ok(_) => {
-                    return Err(kernel_handle::KernelOpError::NotFound {
-                        kind: "goal",
-                        id: goal_id.to_string(),
-                    })
+                    return Err(kernel_handle::KernelOpError::Internal(format!(
+                        "goal `{}` not found",
+                        goal_id.to_string()
+                    )))
                 }
                 Err(e) => {
-                    return Err(kernel_handle::KernelOpError::Other(format!(
+                    return Err(kernel_handle::KernelOpError::Internal(format!(
                         "Failed to load goals: {e}"
                     )))
                 }
@@ -19934,9 +19855,11 @@ impl kernel_handle::GoalControl for LibreFangKernel {
             }
         }
 
-        let result = updated_goal.ok_or_else(|| kernel_handle::KernelOpError::NotFound {
-            kind: "goal",
-            id: goal_id.to_string(),
+        let result = updated_goal.ok_or_else(|| {
+            kernel_handle::KernelOpError::Internal(format!(
+                "goal `{}` not found",
+                goal_id.to_string()
+            ))
         })?;
 
         self.memory
@@ -19946,7 +19869,7 @@ impl kernel_handle::GoalControl for LibreFangKernel {
                 serde_json::Value::Array(goals),
             )
             .map_err(|e| {
-                kernel_handle::KernelOpError::Other(format!("Failed to save goals: {e}"))
+                kernel_handle::KernelOpError::Internal(format!("Failed to save goals: {e}"))
             })?;
 
         Ok(result)
