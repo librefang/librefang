@@ -28,7 +28,8 @@ pub struct IntegrationTestArgs {
     /// Capture daemon stdout+stderr to this file. Without this flag the
     /// daemon's output is dropped, which means a startup failure surfaces
     /// as nothing more than "Health check timed out". CI callers should set
-    /// this and `cat` the file in an `if: failure()` step.
+    /// this and `cat` the file in an `if: failure()` step. The file is
+    /// truncated on each run; rotate yourself if you need historical logs.
     #[arg(long)]
     pub daemon_log: Option<PathBuf>,
 
@@ -83,6 +84,22 @@ fn cleanup_daemon(daemon: &mut Child, port: u16) {
     let _ = daemon.kill();
     let _ = daemon.wait();
     kill_process_on_port(port);
+}
+
+/// Dump captured daemon log to stderr when present. No-op if `--daemon-log`
+/// wasn't passed (we never captured anything in that case). Called from every
+/// failure path so a CI step / local user always gets the root cause without
+/// having to know the file location.
+fn dump_daemon_log(args: &IntegrationTestArgs) {
+    let Some(path) = &args.daemon_log else {
+        return;
+    };
+    eprintln!("--- daemon log ({}) ---", path.display());
+    match std::fs::read_to_string(path) {
+        Ok(contents) => eprintln!("{contents}"),
+        Err(read_err) => eprintln!("(failed to read daemon log: {read_err})"),
+    }
+    eprintln!("--- end daemon log ---");
 }
 
 fn wait_for_health(port: u16, timeout: Duration) -> Result<(), Box<dyn std::error::Error>> {
@@ -238,14 +255,7 @@ pub fn run(args: IntegrationTestArgs) -> Result<(), Box<dyn std::error::Error>> 
     );
     if let Err(e) = wait_for_health(port, Duration::from_secs(args.health_timeout_secs)) {
         cleanup_daemon(&mut daemon, port);
-        if let Some(path) = &args.daemon_log {
-            eprintln!("--- daemon log ({}) ---", path.display());
-            match std::fs::read_to_string(path) {
-                Ok(contents) => eprintln!("{contents}"),
-                Err(read_err) => eprintln!("(failed to read daemon log: {read_err})"),
-            }
-            eprintln!("--- end daemon log ---");
-        }
+        dump_daemon_log(&args);
         return Err(format!("Daemon failed to start: {}", e).into());
     }
     println!("  Daemon is healthy");
@@ -375,6 +385,10 @@ pub fn run(args: IntegrationTestArgs) -> Result<(), Box<dyn std::error::Error>> 
         for err in &results.errors {
             println!("  - {}", err);
         }
+        // Endpoint test failures usually mean the daemon hit an error path
+        // (5xx, panic, deserialize error, etc.) — daemon log is the root
+        // cause source. Symmetric with the wait_for_health failure path.
+        dump_daemon_log(&args);
         Err(format!("{} test(s) failed", results.failed).into())
     } else {
         println!("All integration tests passed!");
