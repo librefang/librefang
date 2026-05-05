@@ -1713,8 +1713,7 @@ pub async fn run_daemon(
                         kernel.model_catalog_update(|catalog| {
                             catalog.load_cached_catalog_for(&home_dir);
                             if !provider_regions.is_empty() {
-                                let region_urls =
-                                    catalog.resolve_region_urls(&provider_regions);
+                                let region_urls = catalog.resolve_region_urls(&provider_regions);
                                 if !region_urls.is_empty() {
                                     catalog.apply_url_overrides(&region_urls);
                                 }

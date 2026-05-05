@@ -199,7 +199,9 @@ async fn dead_route_audit_every_openapi_path_is_registered_in_router() {
                 Body::from("{}")
             };
 
-            let mut builder = Request::builder().method(method.as_str()).uri(&request_path);
+            let mut builder = Request::builder()
+                .method(method.as_str())
+                .uri(&request_path);
             if method != "GET" && method != "HEAD" && method != "DELETE" {
                 builder = builder.header("content-type", "application/json");
             }
