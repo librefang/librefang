@@ -784,9 +784,7 @@ pub async fn bulk_stop_agents(
 pub(crate) fn enrich_agent_json(
     e: &librefang_types::agent::AgentEntry,
     dm: &librefang_types::config::DefaultModelConfig,
-    catalog: &Option<
-        std::sync::RwLockReadGuard<'_, librefang_runtime::model_catalog::ModelCatalog>,
-    >,
+    catalog: Option<&librefang_runtime::model_catalog::ModelCatalog>,
     bulk_stats: Option<&std::collections::HashMap<String, (u64, f64)>>,
 ) -> serde_json::Value {
     let provider = if e.manifest.model.provider.is_empty() || e.manifest.model.provider == "default"
@@ -802,7 +800,6 @@ pub(crate) fn enrich_agent_json(
     };
 
     let (tier, auth_status, supports_thinking) = catalog
-        .as_ref()
         .map(|cat| {
             let model_entry = cat.find_model(model);
             let tier = model_entry
@@ -912,7 +909,8 @@ pub async fn list_agents(
             }
         }
     }
-    let catalog = state.kernel.model_catalog_ref().read().ok();
+    let catalog_guard = state.kernel.model_catalog_ref().load();
+    let catalog: Option<&librefang_runtime::model_catalog::ModelCatalog> = Some(&catalog_guard);
     let dm = {
         let dm_override = state
             .kernel
@@ -1018,7 +1016,7 @@ pub async fn list_agents(
     // helper expects without forcing a manifest deep-clone (#3569).
     let items: Vec<serde_json::Value> = agents
         .iter()
-        .map(|e| enrich_agent_json(e.as_ref(), &dm, &catalog, bulk_stats.as_ref()))
+        .map(|e| enrich_agent_json(e.as_ref(), &dm, catalog, bulk_stats.as_ref()))
         .collect();
 
     Json(PaginatedResponse {
@@ -1759,7 +1757,8 @@ pub async fn send_message(
             } else {
                 &entry.manifest.model.provider
             };
-            if let Some(catalog) = state.kernel.model_catalog_ref().read().ok().as_ref() {
+            {
+                let catalog = state.kernel.model_catalog_ref().load();
                 if let Some(p) = catalog.get_provider(provider) {
                     if !p.auth_status.is_available() {
                         return crate::extensions::with_agent_id(
