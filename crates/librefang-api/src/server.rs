@@ -8,6 +8,7 @@ use crate::webchat;
 use axum::response::IntoResponse;
 use axum::Router;
 use librefang_kernel::config_reload::HotAction;
+use librefang_kernel::kernel_handle::{ApiAuth, DashboardRawConfig};
 use librefang_kernel::LibreFangKernel;
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -148,72 +149,63 @@ fn resolve_dashboard_credential(
 }
 
 #[allow(deprecated)]
-pub(crate) fn dashboard_session_token(kernel: &LibreFangKernel) -> Option<String> {
-    let cfg = kernel.config_ref();
-    let username = resolve_dashboard_credential(
-        &cfg.dashboard_user,
-        "LIBREFANG_DASHBOARD_USER",
-        kernel.home_dir(),
-    );
-    let password = resolve_dashboard_credential(
-        &cfg.dashboard_pass,
-        "LIBREFANG_DASHBOARD_PASS",
-        kernel.home_dir(),
-    );
+pub(crate) fn dashboard_session_token(kernel: &dyn ApiAuth) -> Option<String> {
+    let DashboardRawConfig {
+        user,
+        pass,
+        pass_hash,
+    } = kernel.dashboard_raw_config();
+    let home = kernel.auth_home_dir();
+    let username = resolve_dashboard_credential(&user, "LIBREFANG_DASHBOARD_USER", home);
+    let password = resolve_dashboard_credential(&pass, "LIBREFANG_DASHBOARD_PASS", home);
 
     crate::password_hash::derive_dashboard_session_token(
         username.trim(),
         password.trim(),
-        cfg.dashboard_pass_hash.trim(),
+        pass_hash.trim(),
     )
 }
 
-pub(crate) fn valid_api_tokens(kernel: &LibreFangKernel) -> Vec<String> {
+pub(crate) fn valid_api_tokens(kernel: &dyn ApiAuth) -> Vec<String> {
     let mut tokens = Vec::new();
-    let cfg = kernel.config_ref();
-    let explicit_api_key = cfg.api_key.trim();
-    if explicit_api_key.is_empty() {
+    let explicit_api_key = kernel.auth_api_key();
+    if explicit_api_key.trim().is_empty() {
         // No api_key configured — API is open, no auth required.
         // Dashboard login is handled separately by session cookie checks.
         return tokens;
     }
-    tokens.push(explicit_api_key.to_string());
+    tokens.push(explicit_api_key.trim().to_string());
     if let Some(token) = dashboard_session_token(kernel) {
         tokens.push(token);
     }
     tokens
 }
 
-pub(crate) fn has_dashboard_credentials(kernel: &LibreFangKernel) -> bool {
-    let cfg = kernel.config_ref();
-    let username = resolve_dashboard_credential(
-        &cfg.dashboard_user,
-        "LIBREFANG_DASHBOARD_USER",
-        kernel.home_dir(),
-    );
-    let password = resolve_dashboard_credential(
-        &cfg.dashboard_pass,
-        "LIBREFANG_DASHBOARD_PASS",
-        kernel.home_dir(),
-    );
-    !username.trim().is_empty()
-        && (!cfg.dashboard_pass_hash.trim().is_empty() || !password.trim().is_empty())
+pub(crate) fn has_dashboard_credentials(kernel: &dyn ApiAuth) -> bool {
+    let DashboardRawConfig {
+        user,
+        pass,
+        pass_hash,
+    } = kernel.dashboard_raw_config();
+    let home = kernel.auth_home_dir();
+    let username = resolve_dashboard_credential(&user, "LIBREFANG_DASHBOARD_USER", home);
+    let password = resolve_dashboard_credential(&pass, "LIBREFANG_DASHBOARD_PASS", home);
+    !username.trim().is_empty() && (!pass_hash.trim().is_empty() || !password.trim().is_empty())
 }
 
-pub(crate) fn configured_user_api_keys(kernel: &LibreFangKernel) -> Vec<middleware::ApiUserAuth> {
+pub(crate) fn configured_user_api_keys(kernel: &dyn ApiAuth) -> Vec<middleware::ApiUserAuth> {
     kernel
-        .config_ref()
-        .users
-        .iter()
+        .auth_config_users()
+        .into_iter()
         .filter_map(|user| {
-            let api_key_hash = user.api_key_hash.as_deref()?.trim();
+            let api_key_hash = user.api_key_hash?.trim().to_string();
             if api_key_hash.is_empty() {
                 return None;
             }
             Some(middleware::ApiUserAuth {
                 name: user.name.clone(),
                 role: middleware::UserRole::from_str_role(&user.role),
-                api_key_hash: api_key_hash.to_string(),
+                api_key_hash,
                 user_id: librefang_types::agent::UserId::from_name(&user.name),
             })
         })
@@ -225,10 +217,9 @@ pub(crate) fn configured_user_api_keys(kernel: &LibreFangKernel) -> Vec<middlewa
 /// table it uses for config-defined users. `device:{id}` namespacing keeps
 /// device entries distinguishable from regular users — `pairing_remove_device`
 /// also keys on this prefix when revoking access.
-pub(crate) fn paired_device_user_keys(kernel: &LibreFangKernel) -> Vec<middleware::ApiUserAuth> {
+pub(crate) fn paired_device_user_keys(kernel: &dyn ApiAuth) -> Vec<middleware::ApiUserAuth> {
     kernel
-        .pairing_ref()
-        .device_api_keys()
+        .auth_device_api_keys()
         .into_iter()
         .map(|(device_id, api_key_hash)| {
             let name = format!("device:{device_id}");
@@ -246,15 +237,15 @@ pub(crate) fn paired_device_user_keys(kernel: &LibreFangKernel) -> Vec<middlewar
 /// the daemon: an explicit `api_key`, any `[[users]]` entry with an
 /// `api_key_hash`, any paired device, or dashboard credentials. Used at boot
 /// (#3572) to decide whether a non-loopback bind is safe.
-fn any_auth_configured(kernel: &LibreFangKernel) -> bool {
-    let api_key_set = !kernel.config_ref().api_key.trim().is_empty();
-    let users_have_keys = kernel.config_ref().users.iter().any(|u| {
+fn any_auth_configured(kernel: &dyn ApiAuth) -> bool {
+    let api_key_set = !kernel.auth_api_key().trim().is_empty();
+    let users_have_keys = kernel.auth_config_users().iter().any(|u| {
         u.api_key_hash
             .as_deref()
             .map(|h| !h.trim().is_empty())
             .unwrap_or(false)
     });
-    let paired_devices = !kernel.pairing_ref().device_api_keys().is_empty();
+    let paired_devices = !kernel.auth_device_api_keys().is_empty();
     let dashboard = has_dashboard_credentials(kernel);
     api_key_set || users_have_keys || paired_devices || dashboard
 }
@@ -320,7 +311,7 @@ pub(crate) fn evaluate_bind_auth_safety(
 /// CLI prints it and exits non-zero rather than running open and dropping
 /// every request at the middleware layer.
 pub(crate) fn check_bind_auth_safety(
-    kernel: &LibreFangKernel,
+    kernel: &dyn ApiAuth,
     addr: &SocketAddr,
 ) -> Result<(), String> {
     match evaluate_bind_auth_safety(addr, any_auth_configured(kernel), allow_no_auth_env()) {

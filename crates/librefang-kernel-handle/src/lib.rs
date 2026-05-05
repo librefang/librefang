@@ -909,7 +909,70 @@ pub trait ToolPolicy: Send + Sync {
 }
 
 // ============================================================================
-// KernelHandle — supertrait alias of all 14 role traits.
+// 15. ApiAuth — raw auth-config values needed by the HTTP server layer to
+//     build middleware token tables and bind-safety checks at startup.
+//
+//     Deliberately returns *raw* (unresolved) config strings so the API
+//     server can apply its own credential-resolution logic (env-var override,
+//     vault: prefix, literal) without pulling KernelConfig into that layer.
+// ============================================================================
+
+/// A snapshot of the user-config values needed for API-key table construction.
+#[derive(Debug, Clone)]
+pub struct ApiUserConfigSnapshot {
+    pub name: String,
+    pub role: String,
+    pub api_key_hash: Option<String>,
+}
+
+/// Raw dashboard credential strings from config (before env-var / vault
+/// resolution). The HTTP server resolves them with `LIBREFANG_DASHBOARD_USER`,
+/// `LIBREFANG_DASHBOARD_PASS`, and the `vault:KEY` prefix logic.
+#[derive(Debug, Clone)]
+pub struct DashboardRawConfig {
+    pub user: String,
+    pub pass: String,
+    pub pass_hash: String,
+}
+
+pub trait ApiAuth: Send + Sync {
+    /// Raw `api_key` value from config (may be empty when auth is open).
+    fn auth_api_key(&self) -> String;
+
+    /// Raw dashboard credential strings from config (before resolution).
+    fn dashboard_raw_config(&self) -> DashboardRawConfig;
+
+    /// Absolute path to the daemon home directory.
+    fn auth_home_dir(&self) -> &std::path::Path;
+
+    /// Paired-device (mobile) API key hashes: `(device_id, api_key_hash)`.
+    fn auth_device_api_keys(&self) -> Vec<(String, String)>;
+
+    /// Per-user config entries used to build the user API-key table.
+    fn auth_config_users(&self) -> Vec<ApiUserConfigSnapshot>;
+}
+
+// ============================================================================
+// 16. SessionWriter — pre-inject content blocks into an agent session before
+//     an LLM turn, used by the HTTP attachment upload path (#3744).
+//
+//     Abstracts over `agent_registry()` + `memory_substrate()` so callers
+//     in librefang-api do not need to import the concrete kernel type.
+// ============================================================================
+
+pub trait SessionWriter: Send + Sync {
+    /// Pre-insert `blocks` as a User-role message into the agent's current
+    /// session so the LLM sees the content in the next turn.  No-op (with a
+    /// `warn!`) when the agent is not found; best-effort on save failure.
+    fn inject_attachment_blocks(
+        &self,
+        agent_id: librefang_types::agent::AgentId,
+        blocks: Vec<librefang_types::message::ContentBlock>,
+    );
+}
+
+// ============================================================================
+// KernelHandle — supertrait alias of all 16 role traits.
 //
 // Existing call sites take `Arc<dyn KernelHandle>`; that keeps working because
 // any type that impls every role trait automatically gets `KernelHandle` via
@@ -932,6 +995,8 @@ pub trait KernelHandle:
     + WorkflowRunner
     + GoalControl
     + ToolPolicy
+    + ApiAuth
+    + SessionWriter
     + Send
     + Sync
 {
@@ -952,6 +1017,8 @@ impl<T> KernelHandle for T where
         + WorkflowRunner
         + GoalControl
         + ToolPolicy
+        + ApiAuth
+        + SessionWriter
         + Send
         + Sync
         + ?Sized
@@ -963,9 +1030,10 @@ impl<T> KernelHandle for T where
 /// resolve. Replaces the pre-#3746 single-trait import pattern.
 pub mod prelude {
     pub use super::{
-        A2ARegistry, AgentControl, AgentInfo, ApprovalGate, ChannelSender, CronControl, EventBus,
-        GoalControl, HandsControl, KernelHandle, KnowledgeGraph, MemoryAccess, PromptStore,
-        TaskQueue, ToolPolicy, WorkflowRunner,
+        A2ARegistry, AgentControl, AgentInfo, ApiAuth, ApiUserConfigSnapshot, ApprovalGate,
+        ChannelSender, CronControl, DashboardRawConfig, EventBus, GoalControl, HandsControl,
+        KernelHandle, KnowledgeGraph, MemoryAccess, PromptStore, SessionWriter, TaskQueue,
+        ToolPolicy, WorkflowRunner,
     };
 }
 
@@ -1122,6 +1190,35 @@ mod tests {
     impl WorkflowRunner for StubKernel {}
     impl GoalControl for StubKernel {}
     impl ToolPolicy for StubKernel {}
+    impl ApiAuth for StubKernel {
+        fn auth_api_key(&self) -> String {
+            String::new()
+        }
+        fn dashboard_raw_config(&self) -> DashboardRawConfig {
+            DashboardRawConfig {
+                user: String::new(),
+                pass: String::new(),
+                pass_hash: String::new(),
+            }
+        }
+        fn auth_home_dir(&self) -> &std::path::Path {
+            std::path::Path::new("/tmp")
+        }
+        fn auth_device_api_keys(&self) -> Vec<(String, String)> {
+            vec![]
+        }
+        fn auth_config_users(&self) -> Vec<ApiUserConfigSnapshot> {
+            vec![]
+        }
+    }
+    impl SessionWriter for StubKernel {
+        fn inject_attachment_blocks(
+            &self,
+            _agent_id: librefang_types::agent::AgentId,
+            _blocks: Vec<librefang_types::message::ContentBlock>,
+        ) {
+        }
+    }
 
     #[test]
     fn stub_satisfies_kernel_handle_via_blanket_impl() {
@@ -1153,5 +1250,7 @@ mod tests {
         let _wf: Arc<dyn WorkflowRunner> = Arc::new(StubKernel);
         let _goal: Arc<dyn GoalControl> = Arc::new(StubKernel);
         let _tp: Arc<dyn ToolPolicy> = Arc::new(StubKernel);
+        let _auth: Arc<dyn ApiAuth> = Arc::new(StubKernel);
+        let _sw: Arc<dyn SessionWriter> = Arc::new(StubKernel);
     }
 }
