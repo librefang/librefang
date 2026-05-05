@@ -595,7 +595,7 @@ jobs:
         run: |
           if [ "${{ needs.changes.outputs.full_test }}" = "true" ]; then
             echo "Running workspace unit tests (lib+bin, full run)…"
-            cargo nextest run --workspace --lib --bins --no-fail-fast
+            cargo nextest run --workspace --lib --bins --no-fail-fast --no-tests=pass
           else
             CRATES="${{ needs.changes.outputs.crates }}"
             if [ -z "$CRATES" ]; then

@@ -7622,9 +7622,10 @@ impl Default for ParallelToolsConfig {
 ///
 /// ```toml
 /// [tool_results]
-/// spill_threshold_bytes   = 16384   # 16 KB — spill to artifact store above this
-/// max_bytes_per_turn      = 50000   # deferred: cumulative budget (unused)
-/// history_fold_after_turns = 8      # deferred: fold old results (unused)
+/// spill_threshold_bytes   = 16384         # 16 KB — spill to artifact store above this
+/// max_artifact_bytes      = 67108864      # 64 MiB — per-artifact write cap
+/// max_bytes_per_turn      = 50000         # deferred: cumulative budget (unused)
+/// history_fold_after_turns = 8            # deferred: fold old results (unused)
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(default)]
@@ -7634,6 +7635,12 @@ pub struct ToolResultsConfig {
     /// handle instead of the raw payload.  Default: 16 384 bytes (16 KB).
     #[serde(default = "default_spill_threshold_bytes")]
     pub spill_threshold_bytes: u64,
+    /// Maximum bytes for a single artifact write.  Spill is skipped (falling
+    /// back to truncation) when a tool result exceeds this cap, preventing a
+    /// single oversized response from filling the artifact store.
+    /// Default: 67 108 864 bytes (64 MiB).
+    #[serde(default = "default_max_artifact_bytes")]
+    pub max_artifact_bytes: u64,
     /// **Deferred (#3347 2/N)** — cumulative byte cap across all tool results
     /// in a single LLM turn.  Not yet enforced.  Default: 50 000 bytes.
     #[serde(default = "default_max_bytes_per_turn")]
@@ -7648,6 +7655,10 @@ fn default_spill_threshold_bytes() -> u64 {
     16_384
 }
 
+fn default_max_artifact_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+
 fn default_max_bytes_per_turn() -> u64 {
     50_000
 }
@@ -7660,6 +7671,7 @@ impl Default for ToolResultsConfig {
     fn default() -> Self {
         Self {
             spill_threshold_bytes: default_spill_threshold_bytes(),
+            max_artifact_bytes: default_max_artifact_bytes(),
             max_bytes_per_turn: default_max_bytes_per_turn(),
             history_fold_after_turns: default_history_fold_after_turns(),
         }

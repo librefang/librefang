@@ -18135,14 +18135,13 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         parent_caps: &[librefang_types::capability::Capability],
     ) -> Result<(String, String), kernel_handle::KernelOpError> {
         // Parse the child manifest to extract its capabilities
-        let child_manifest: AgentManifest = toml::from_str(manifest_toml).map_err(|e| {
-            kernel_handle::KernelOpError::InvalidInput(format!("manifest: {}", e.to_string()))
-        })?;
+        let child_manifest: AgentManifest = toml::from_str(manifest_toml)
+            .map_err(|e| kernel_handle::KernelOpError::InvalidInput(format!("manifest: {e}")))?;
         let child_caps = manifest_to_capabilities(&child_manifest);
 
         // Enforce: child capabilities must be a subset of parent capabilities
         librefang_types::capability::validate_capability_inheritance(parent_caps, &child_caps)
-            .map_err(|e| kernel_handle::KernelOpError::Internal(e))?;
+            .map_err(kernel_handle::KernelOpError::Internal)?;
 
         tracing::info!(
             parent = parent_id.unwrap_or("kernel"),
@@ -18522,12 +18521,12 @@ impl kernel_handle::CronControl for LibreFangKernel {
             })?
             .to_string();
         let schedule: CronSchedule = serde_json::from_value(job_json["schedule"].clone())
-            .map_err(|e| KernelOpError::InvalidInput(format!("schedule: {}", e.to_string())))?;
+            .map_err(|e| KernelOpError::InvalidInput(format!("schedule: {e}")))?;
         let action: CronAction = serde_json::from_value(job_json["action"].clone())
-            .map_err(|e| KernelOpError::InvalidInput(format!("action: {}", e.to_string())))?;
+            .map_err(|e| KernelOpError::InvalidInput(format!("action: {e}")))?;
         let delivery: CronDelivery = if job_json["delivery"].is_object() {
             serde_json::from_value(job_json["delivery"].clone())
-                .map_err(|e| KernelOpError::InvalidInput(format!("delivery: {}", e.to_string())))?
+                .map_err(|e| KernelOpError::InvalidInput(format!("delivery: {e}")))?
         } else {
             // Default to LastChannel so cron jobs created by an agent in
             // a channel context actually deliver their output back to
@@ -18542,16 +18541,15 @@ impl kernel_handle::CronControl for LibreFangKernel {
         let is_at_schedule = matches!(schedule, CronSchedule::At { .. });
         let one_shot = job_json["one_shot"].as_bool().unwrap_or(is_at_schedule);
 
-        let aid =
-            librefang_types::agent::AgentId(uuid::Uuid::parse_str(agent_id).map_err(|e| {
-                KernelOpError::InvalidInput(format!("agent_id: {}", e.to_string()))
-            })?);
+        let aid = librefang_types::agent::AgentId(
+            uuid::Uuid::parse_str(agent_id)
+                .map_err(|e| KernelOpError::InvalidInput(format!("agent_id: {e}")))?,
+        );
 
         let session_mode: Option<librefang_types::agent::SessionMode> =
             if job_json["session_mode"].is_string() {
-                serde_json::from_value(job_json["session_mode"].clone()).map_err(|e| {
-                    KernelOpError::InvalidInput(format!("session_mode: {}", e.to_string()))
-                })?
+                serde_json::from_value(job_json["session_mode"].clone())
+                    .map_err(|e| KernelOpError::InvalidInput(format!("session_mode: {e}")))?
             } else {
                 None
             };
@@ -18560,9 +18558,8 @@ impl kernel_handle::CronControl for LibreFangKernel {
         // Validate each entry up front so a bad shape produces a clear error
         // before the job is added (rather than failing silently at fire time).
         let delivery_targets: Vec<CronDeliveryTarget> = if job_json["delivery_targets"].is_array() {
-            serde_json::from_value(job_json["delivery_targets"].clone()).map_err(|e| {
-                KernelOpError::InvalidInput(format!("delivery_targets: {}", e.to_string()))
-            })?
+            serde_json::from_value(job_json["delivery_targets"].clone())
+                .map_err(|e| KernelOpError::InvalidInput(format!("delivery_targets: {e}")))?
         } else {
             Vec::new()
         };
@@ -18605,10 +18602,10 @@ impl kernel_handle::CronControl for LibreFangKernel {
         agent_id: &str,
     ) -> Result<Vec<serde_json::Value>, kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
-        let aid =
-            librefang_types::agent::AgentId(uuid::Uuid::parse_str(agent_id).map_err(|e| {
-                KernelOpError::InvalidInput(format!("agent_id: {}", e.to_string()))
-            })?);
+        let aid = librefang_types::agent::AgentId(
+            uuid::Uuid::parse_str(agent_id)
+                .map_err(|e| KernelOpError::InvalidInput(format!("agent_id: {e}")))?,
+        );
         let jobs = self.cron_scheduler.list_jobs(aid);
         let json_jobs: Vec<serde_json::Value> = jobs
             .into_iter()
@@ -18621,7 +18618,7 @@ impl kernel_handle::CronControl for LibreFangKernel {
         use kernel_handle::KernelOpError;
         let id = librefang_types::scheduler::CronJobId(
             uuid::Uuid::parse_str(job_id)
-                .map_err(|e| KernelOpError::InvalidInput(format!("job_id: {}", e.to_string())))?,
+                .map_err(|e| KernelOpError::InvalidInput(format!("job_id: {e}")))?,
         );
         self.cron_scheduler
             .remove_job(id)
@@ -18742,7 +18739,7 @@ impl kernel_handle::HandsControl for LibreFangKernel {
     async fn hand_deactivate(&self, instance_id: &str) -> Result<(), kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
         let uuid = uuid::Uuid::parse_str(instance_id)
-            .map_err(|e| KernelOpError::InvalidInput(format!("instance_id: {}", e.to_string())))?;
+            .map_err(|e| KernelOpError::InvalidInput(format!("instance_id: {e}")))?;
         self.deactivate_hand(uuid)
             .map_err(|e| KernelOpError::Internal(e.to_string()))
     }
@@ -19852,8 +19849,7 @@ impl kernel_handle::GoalControl for LibreFangKernel {
                 Ok(Some(serde_json::Value::Array(arr))) => arr,
                 Ok(_) => {
                     return Err(kernel_handle::KernelOpError::Internal(format!(
-                        "goal `{}` not found",
-                        goal_id.to_string()
+                        "goal `{goal_id}` not found"
                     )))
                 }
                 Err(e) => {
@@ -19879,10 +19875,7 @@ impl kernel_handle::GoalControl for LibreFangKernel {
         }
 
         let result = updated_goal.ok_or_else(|| {
-            kernel_handle::KernelOpError::Internal(format!(
-                "goal `{}` not found",
-                goal_id.to_string()
-            ))
+            kernel_handle::KernelOpError::Internal(format!("goal `{goal_id}` not found"))
         })?;
 
         self.memory
@@ -20138,6 +20131,7 @@ impl LibreFangKernel {
         skill_snapshot: &'a librefang_skills::registry::SkillRegistry,
         deferred: &'a librefang_types::tool::DeferredToolExecution,
     ) -> librefang_runtime::tool_runner::ToolExecContext<'a> {
+        let cfg = self.config.load();
         librefang_runtime::tool_runner::ToolExecContext {
             kernel: Some(kernel_handle),
             allowed_tools: deferred.allowed_tools.as_deref(),
@@ -20162,6 +20156,8 @@ impl LibreFangKernel {
             process_manager: Some(&self.process_manager),
             sender_id: deferred.sender_id.as_deref(),
             channel: deferred.channel.as_deref(),
+            spill_threshold_bytes: cfg.tool_results.spill_threshold_bytes,
+            max_artifact_bytes: cfg.tool_results.max_artifact_bytes,
             checkpoint_manager: self.checkpoint_manager.as_ref(),
             process_registry: Some(&self.process_registry),
             // Deferred tool executions run after the originating session's turn

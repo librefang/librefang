@@ -329,6 +329,14 @@ pub struct ToolExecContext<'a> {
     pub process_registry: Option<&'a crate::process_registry::ProcessRegistry>,
     pub sender_id: Option<&'a str>,
     pub channel: Option<&'a str>,
+    /// Artifact spill threshold from `[tool_results] spill_threshold_bytes`.
+    /// Tool results larger than this are written to the artifact store.
+    /// `0` means use the compiled default (16 KiB).
+    pub spill_threshold_bytes: u64,
+    /// Per-artifact write cap from `[tool_results] max_artifact_bytes`.
+    /// Spill is skipped when the result exceeds this, falling back to
+    /// truncation.  `0` means use the compiled default (64 MiB).
+    pub max_artifact_bytes: u64,
     /// Optional checkpoint manager.  When `Some`, a snapshot is taken
     /// automatically before every `file_write` and `apply_patch` call.
     /// Snapshot failures are non-fatal (logged as warnings only).
@@ -404,6 +412,8 @@ pub async fn execute_tool_raw(
         process_registry: _,
         sender_id,
         channel: _,
+        spill_threshold_bytes,
+        max_artifact_bytes,
         checkpoint_manager,
         interrupt,
         dangerous_command_checker,
@@ -583,7 +593,19 @@ pub async fn execute_tool_raw(
                         .fetch_with_options(url, method, headers, body)
                         .await
                 } else {
-                    tool_web_fetch_legacy(input).await
+                    // Resolve config values; 0 means "use compiled default"
+                    // (test call sites that don't populate the ctx fields).
+                    let threshold = if *spill_threshold_bytes == 0 {
+                        16_384 // ToolResultsConfig::default().spill_threshold_bytes
+                    } else {
+                        *spill_threshold_bytes
+                    };
+                    let max_artifact = if *max_artifact_bytes == 0 {
+                        crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES
+                    } else {
+                        *max_artifact_bytes
+                    };
+                    tool_web_fetch_legacy(input, threshold, max_artifact).await
                 }
             }
         },
@@ -1392,6 +1414,8 @@ pub async fn execute_tool(
         process_registry,
         sender_id,
         channel,
+        spill_threshold_bytes: 0,
+        max_artifact_bytes: 0,
         checkpoint_manager,
         interrupt,
         dangerous_command_checker,
@@ -2705,7 +2729,11 @@ async fn tool_apply_patch(
 // ---------------------------------------------------------------------------
 
 /// Legacy web fetch (no SSRF protection, no readability). Used when WebToolsContext is unavailable.
-async fn tool_web_fetch_legacy(input: &serde_json::Value) -> Result<String, String> {
+async fn tool_web_fetch_legacy(
+    input: &serde_json::Value,
+    spill_threshold: u64,
+    max_artifact_bytes: u64,
+) -> Result<String, String> {
     let url = input["url"].as_str().ok_or("Missing 'url' parameter")?;
     let client = crate::http_client::proxied_client_builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -2729,14 +2757,15 @@ async fn tool_web_fetch_legacy(input: &serde_json::Value) -> Result<String, Stri
         .map_err(|e| format!("Failed to read response body: {e}"))?;
     // Artifact spill: if the body exceeds the configured threshold, write it
     // to the artifact store and return a compact stub with a handle.  On write
-    // failure, fall through to the existing byte-cap truncation so callers
-    // always get a usable (if partial) response.
-    let spill_threshold: u64 = 16_384; // matches ToolResultsConfig default
+    // failure (including per-artifact size cap exceeded), fall through to the
+    // existing byte-cap truncation so callers always get a usable (if partial)
+    // response.
     let body_bytes = body.as_bytes();
     if let Some(stub) = crate::artifact_store::maybe_spill(
         "web_fetch",
         body_bytes,
         spill_threshold,
+        max_artifact_bytes,
         &librefang_data_dir().join("artifacts"),
     ) {
         return Ok(format!("HTTP {status}\n\n{stub}"));
@@ -10839,7 +10868,12 @@ async fn test_evolve_tools_rejected_when_registry_frozen() {
 async fn read_artifact_round_trip() {
     let dir = tempfile::TempDir::new().unwrap();
     let content = b"artifact payload";
-    let handle = crate::artifact_store::write(content, dir.path()).unwrap();
+    let handle = crate::artifact_store::write(
+        content,
+        dir.path(),
+        crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
+    )
+    .unwrap();
 
     let input = serde_json::json!({ "handle": handle.as_str() });
     let result = tool_read_artifact(&input, dir.path()).await.unwrap();
@@ -10851,7 +10885,12 @@ async fn read_artifact_round_trip() {
 async fn read_artifact_with_offset_and_length() {
     let dir = tempfile::TempDir::new().unwrap();
     let content = b"0123456789abcdef";
-    let handle = crate::artifact_store::write(content, dir.path()).unwrap();
+    let handle = crate::artifact_store::write(
+        content,
+        dir.path(),
+        crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
+    )
+    .unwrap();
 
     let input = serde_json::json!({ "handle": handle.as_str(), "offset": 4, "length": 6 });
     let result = tool_read_artifact(&input, dir.path()).await.unwrap();
@@ -10881,7 +10920,12 @@ async fn read_artifact_missing_handle_returns_error() {
 async fn read_artifact_past_end_returns_no_more_content_message() {
     let dir = tempfile::TempDir::new().unwrap();
     let content = b"short";
-    let handle = crate::artifact_store::write(content, dir.path()).unwrap();
+    let handle = crate::artifact_store::write(
+        content,
+        dir.path(),
+        crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
+    )
+    .unwrap();
 
     let input = serde_json::json!({ "handle": handle.as_str(), "offset": 9999 });
     let result = tool_read_artifact(&input, dir.path()).await.unwrap();

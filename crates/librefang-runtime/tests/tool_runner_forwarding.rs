@@ -223,6 +223,8 @@ fn make_ctx<'a>(
         process_registry: None,
         sender_id,
         channel: None,
+        spill_threshold_bytes: 0,
+        max_artifact_bytes: 0,
         checkpoint_manager: None,
         interrupt: None,
         dangerous_command_checker: None,
