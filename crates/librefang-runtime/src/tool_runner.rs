@@ -1058,6 +1058,13 @@ pub async fn execute_tool_raw(
             }
         },
 
+        // Artifact retrieval tool — recovers content spilled to disk by the
+        // artifact store when a tool result exceeded `spill_threshold_bytes`.
+        "read_artifact" => {
+            let artifact_dir = librefang_data_dir().join("artifacts");
+            tool_read_artifact(input, &artifact_dir).await
+        }
+
         // Canvas / A2UI tool
         "canvas_present" => tool_canvas_present(input, *workspace_root).await,
 
@@ -1429,6 +1436,9 @@ pub const ALWAYS_NATIVE_TOOLS: &[&str] = &[
     // Private channel to the owner — intentionally cheap so agents never
     // skip using it because of declaration cost.
     "notify_owner",
+    // Artifact retrieval — must be always available so agents can recover
+    // spilled content even in lazy-tool mode.
+    "read_artifact",
     // Skill evolution helpers stay native because they're also in the
     // always-available set enforced by the kernel.
     "skill_read_file",
@@ -2326,6 +2336,29 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["html"]
             }),
         },
+        // --- Artifact retrieval tool ---
+        ToolDefinition {
+            name: "read_artifact".to_string(),
+            description: "Retrieve content from the artifact store. Use this when a previous tool result was truncated with a message like '[tool_result: … | sha256:… | … bytes | preview:]'. Pass the handle exactly as shown (e.g. \"sha256:abc…\"), an optional byte offset (default 0), and an optional length (default 4096, max 65536).".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "handle": {
+                        "type": "string",
+                        "description": "Artifact handle from the spill stub, e.g. \"sha256:abc123…\" (64 hex chars after the prefix)."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Byte offset to start reading from (default 0)."
+                    },
+                    "length": {
+                        "type": "integer",
+                        "description": "Number of bytes to read (default 4096, max 65536)."
+                    }
+                },
+                "required": ["handle"]
+            }),
+        },
         // --- Skill evolution tools ---
         ToolDefinition {
             name: "skill_evolve_create".to_string(),
@@ -2694,6 +2727,21 @@ async fn tool_web_fetch_legacy(input: &serde_json::Value) -> Result<String, Stri
         .text()
         .await
         .map_err(|e| format!("Failed to read response body: {e}"))?;
+    // Artifact spill: if the body exceeds the configured threshold, write it
+    // to the artifact store and return a compact stub with a handle.  On write
+    // failure, fall through to the existing byte-cap truncation so callers
+    // always get a usable (if partial) response.
+    let spill_threshold: u64 = 16_384; // matches ToolResultsConfig default
+    let body_bytes = body.as_bytes();
+    if let Some(stub) = crate::artifact_store::maybe_spill(
+        "web_fetch",
+        body_bytes,
+        spill_threshold,
+        &librefang_data_dir().join("artifacts"),
+    ) {
+        return Ok(format!("HTTP {status}\n\n{stub}"));
+    }
+
     let max_len = 50_000;
     let truncated = if body.len() > max_len {
         format!(
@@ -6265,6 +6313,59 @@ async fn tool_canvas_present(
     });
 
     serde_json::to_string_pretty(&response).map_err(|e| format!("Serialize error: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Artifact retrieval tool (#3347)
+// ---------------------------------------------------------------------------
+
+/// Derive the LibreFang data directory (used by `read_artifact`).
+///
+/// Priority: `LIBREFANG_HOME` env var > `~/.librefang`, then `data/`.
+/// Mirrors the logic in `librefang_types::config::types::librefang_home_dir`.
+fn librefang_data_dir() -> std::path::PathBuf {
+    let home = if let Ok(h) = std::env::var("LIBREFANG_HOME") {
+        std::path::PathBuf::from(h)
+    } else {
+        dirs::home_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join(".librefang")
+    };
+    home.join("data")
+}
+
+/// Implementation of the `read_artifact` tool.
+///
+/// Reads up to `length` bytes from the artifact identified by `handle`,
+/// starting at `offset`.  Both parameters are optional (defaults: 0 and 4096).
+/// The result is UTF-8 text: binary blobs are lossily decoded.
+async fn tool_read_artifact(
+    input: &serde_json::Value,
+    artifact_dir: &std::path::Path,
+) -> Result<String, String> {
+    let handle = input["handle"]
+        .as_str()
+        .ok_or("Missing required parameter 'handle'")?;
+
+    let offset = input["offset"].as_u64().unwrap_or(0) as usize;
+    let length = input["length"]
+        .as_u64()
+        .unwrap_or(4096)
+        .min(crate::artifact_store::MAX_READ_LENGTH as u64) as usize;
+
+    let bytes = crate::artifact_store::read(handle, offset, length, artifact_dir)?;
+
+    if bytes.is_empty() {
+        return Ok(format!(
+            "[read_artifact: {handle} | offset={offset}] — no more content (past end of artifact)"
+        ));
+    }
+
+    let text = String::from_utf8_lossy(&bytes);
+    Ok(format!(
+        "[read_artifact: {handle} | offset={offset} | {} bytes read]\n{text}",
+        bytes.len()
+    ))
 }
 
 #[cfg(test)]
@@ -10081,8 +10182,7 @@ mod tests {
                 let manifest: librefang_types::agent::AgentManifest = toml::from_str(manifest_toml)
                     .map_err(|e| {
                         librefang_kernel_handle::KernelOpError::InvalidInput(format!(
-                            "manifest: {}",
-                            e.to_string()
+                            "manifest: {e}"
                         ))
                     })?;
                 let child_caps: Vec<librefang_types::capability::Capability> = manifest
@@ -10731,4 +10831,80 @@ async fn test_evolve_tools_rejected_when_registry_frozen() {
     .await
     .expect_err("write_file must reject under freeze");
     assert!(err.contains("frozen") || err.contains("Stable"));
+}
+
+// ── read_artifact tool (#3347) ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn read_artifact_round_trip() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let content = b"artifact payload";
+    let handle = crate::artifact_store::write(content, dir.path()).unwrap();
+
+    let input = serde_json::json!({ "handle": handle.as_str() });
+    let result = tool_read_artifact(&input, dir.path()).await.unwrap();
+    assert!(result.contains("artifact payload"), "got: {result}");
+    assert!(result.contains("sha256:"), "got: {result}");
+}
+
+#[tokio::test]
+async fn read_artifact_with_offset_and_length() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let content = b"0123456789abcdef";
+    let handle = crate::artifact_store::write(content, dir.path()).unwrap();
+
+    let input = serde_json::json!({ "handle": handle.as_str(), "offset": 4, "length": 6 });
+    let result = tool_read_artifact(&input, dir.path()).await.unwrap();
+    assert!(result.contains("456789"), "got: {result}");
+}
+
+#[tokio::test]
+async fn read_artifact_nonexistent_returns_error() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let fake = "sha256:".to_string() + &"b".repeat(64);
+    let input = serde_json::json!({ "handle": fake });
+    let result = tool_read_artifact(&input, dir.path()).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("not found"));
+}
+
+#[tokio::test]
+async fn read_artifact_missing_handle_returns_error() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let input = serde_json::json!({});
+    let result = tool_read_artifact(&input, dir.path()).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("handle"));
+}
+
+#[tokio::test]
+async fn read_artifact_past_end_returns_no_more_content_message() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let content = b"short";
+    let handle = crate::artifact_store::write(content, dir.path()).unwrap();
+
+    let input = serde_json::json!({ "handle": handle.as_str(), "offset": 9999 });
+    let result = tool_read_artifact(&input, dir.path()).await.unwrap();
+    assert!(result.contains("past end"), "got: {result}");
+}
+
+#[test]
+fn read_artifact_registered_in_builtins() {
+    let defs = builtin_tool_definitions();
+    let def = defs.iter().find(|d| d.name == "read_artifact");
+    assert!(
+        def.is_some(),
+        "read_artifact must appear in builtin_tool_definitions"
+    );
+    let schema = &def.unwrap().input_schema;
+    let required = schema["required"].as_array().expect("required array");
+    assert!(required.iter().any(|v| v.as_str() == Some("handle")));
+}
+
+#[test]
+fn read_artifact_in_always_native_tools() {
+    assert!(
+        ALWAYS_NATIVE_TOOLS.contains(&"read_artifact"),
+        "read_artifact must be in ALWAYS_NATIVE_TOOLS"
+    );
 }

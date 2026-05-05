@@ -3066,6 +3066,14 @@ pub struct KernelConfig {
     /// integration lands in PR-4. See [`ParallelToolsConfig`].
     #[serde(default)]
     pub parallel_tools: ParallelToolsConfig,
+    /// Tool-result context budget and artifact spill configuration.
+    /// See [`ToolResultsConfig`] for knob descriptions.  The primary active
+    /// mechanism is artifact spill (responses > `spill_threshold_bytes` are
+    /// written to disk and replaced with a stub + `read_artifact` handle).
+    /// The cumulative budget and history fold knobs are wired but deferred
+    /// — see #3347 2/N and 3/N.
+    #[serde(default)]
+    pub tool_results: ToolResultsConfig,
     /// How long (in minutes) a workflow run may remain in the `Running` or
     /// `Pending` state before it is considered stale after a daemon restart.
     ///
@@ -4943,6 +4951,7 @@ impl Default for KernelConfig {
             terminal: TerminalConfig::default(),
             tool_invoke: ToolInvokeConfig::default(),
             parallel_tools: ParallelToolsConfig::default(),
+            tool_results: ToolResultsConfig::default(),
             workflow_stale_timeout_minutes: default_workflow_stale_timeout_minutes(),
         }
     }
@@ -7594,6 +7603,65 @@ impl Default for ParallelToolsConfig {
             max_concurrent: 4,
             mcp_default_safety: "write_shared".to_string(),
             mcp_readonly_allowlist: Vec::new(),
+        }
+    }
+}
+
+/// Tool-result context budget and artifact spill configuration.
+///
+/// Controls what happens when a tool returns a very large payload.  The primary
+/// mechanism shipped in #3347 1/N is **artifact spill**: responses larger than
+/// `spill_threshold_bytes` are written to `~/.librefang/data/artifacts/` and
+/// the agent receives a compact stub with a handle it can pass to
+/// `read_artifact` to retrieve the content in chunks.
+///
+/// `max_bytes_per_turn` and `history_fold_after_turns` are wired into the
+/// config schema for forward-compatibility but are **not yet active** — their
+/// enforcement mechanisms depend on the aux-LLM channel (#3314) and are
+/// tracked as follow-up work in #3347 2/N and 3/N.
+///
+/// ```toml
+/// [tool_results]
+/// spill_threshold_bytes   = 16384   # 16 KB — spill to artifact store above this
+/// max_bytes_per_turn      = 50000   # deferred: cumulative budget (unused)
+/// history_fold_after_turns = 8      # deferred: fold old results (unused)
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ToolResultsConfig {
+    /// Spill threshold in bytes.  Tool results larger than this are written to
+    /// the artifact store; the agent receives a stub with a `read_artifact`
+    /// handle instead of the raw payload.  Default: 16 384 bytes (16 KB).
+    #[serde(default = "default_spill_threshold_bytes")]
+    pub spill_threshold_bytes: u64,
+    /// **Deferred (#3347 2/N)** — cumulative byte cap across all tool results
+    /// in a single LLM turn.  Not yet enforced.  Default: 50 000 bytes.
+    #[serde(default = "default_max_bytes_per_turn")]
+    pub max_bytes_per_turn: u64,
+    /// **Deferred (#3347 3/N)** — fold (summarise via aux-LLM) tool-result
+    /// history after this many turns.  Not yet enforced.  Default: 8 turns.
+    #[serde(default = "default_history_fold_after_turns")]
+    pub history_fold_after_turns: u32,
+}
+
+fn default_spill_threshold_bytes() -> u64 {
+    16_384
+}
+
+fn default_max_bytes_per_turn() -> u64 {
+    50_000
+}
+
+fn default_history_fold_after_turns() -> u32 {
+    8
+}
+
+impl Default for ToolResultsConfig {
+    fn default() -> Self {
+        Self {
+            spill_threshold_bytes: default_spill_threshold_bytes(),
+            max_bytes_per_turn: default_max_bytes_per_turn(),
+            history_fold_after_turns: default_history_fold_after_turns(),
         }
     }
 }
