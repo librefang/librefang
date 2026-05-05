@@ -345,6 +345,16 @@ fn delete(path: &str, bearer: Option<&str>) -> Request<Body> {
     b.body(Body::empty()).unwrap()
 }
 
+/// Refs #4614 — DELETE /api/agents/{id} requires `?confirm=true` (or a
+/// `{"confirm": true}` body) to gate the destructive canonical-UUID
+/// purge. This helper appends the query param so tests don't have to
+/// open-code the URL in every call site.
+fn delete_confirmed(path: &str, bearer: Option<&str>) -> Request<Body> {
+    let glue = if path.contains('?') { '&' } else { '?' };
+    let with_confirm = format!("{path}{glue}confirm=true");
+    delete(&with_confirm, bearer)
+}
+
 /// Refs #3509: DELETE is idempotent (RFC 9110 §9.2.2). Killing the same
 /// agent twice MUST succeed both times — the second call returns
 /// `200 OK` with `status: already-deleted` instead of `404 Not Found`,
@@ -356,10 +366,11 @@ async fn test_delete_agent_twice_both_succeed_idempotent() {
     let h = boot(TEST_TOKEN).await;
     let id = spawn_named(&h.state, "kill-target");
 
-    // First call — agent exists, normal kill path.
+    // First call — agent exists, normal kill path. Refs #4614: confirm
+    // required to gate canonical-UUID purge.
     let (status1, body1) = send(
         h.app.clone(),
-        delete(&format!("/api/agents/{}", id), Some(TEST_TOKEN)),
+        delete_confirmed(&format!("/api/agents/{}", id), Some(TEST_TOKEN)),
     )
     .await;
     assert_eq!(
@@ -372,7 +383,7 @@ async fn test_delete_agent_twice_both_succeed_idempotent() {
     // Second call — agent already gone. MUST still be 200, not 404.
     let (status2, body2) = send(
         h.app.clone(),
-        delete(&format!("/api/agents/{}", id), Some(TEST_TOKEN)),
+        delete_confirmed(&format!("/api/agents/{}", id), Some(TEST_TOKEN)),
     )
     .await;
     assert_eq!(
@@ -392,6 +403,9 @@ async fn test_delete_agent_twice_both_succeed_idempotent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_delete_agent_invalid_id_still_returns_400() {
     let h = boot(TEST_TOKEN).await;
+    // Bare DELETE — malformed UUID short-circuits with 400 before the
+    // confirmation check fires, so the response stays the same shape
+    // post-#4614.
     let (status, body) = send(
         h.app.clone(),
         delete("/api/agents/not-a-uuid", Some(TEST_TOKEN)),
@@ -409,9 +423,11 @@ async fn test_delete_agent_invalid_id_still_returns_400() {
 async fn test_delete_agent_unknown_uuid_is_idempotent_200() {
     let h = boot(TEST_TOKEN).await;
     let unknown = AgentId::new();
+    // Refs #4614: confirm required even on the idempotent-already-gone
+    // path so the contract is consistent across all DELETEs.
     let (status, body) = send(
         h.app.clone(),
-        delete(&format!("/api/agents/{}", unknown), Some(TEST_TOKEN)),
+        delete_confirmed(&format!("/api/agents/{}", unknown), Some(TEST_TOKEN)),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body={body:?}");

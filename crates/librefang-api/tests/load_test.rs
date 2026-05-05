@@ -575,10 +575,13 @@ async fn load_spawn_kill_cycle() {
         }
     }
 
-    // Kill
+    // Kill (refs #4614: confirm required)
     for id in &ids {
         client
-            .delete(format!("{}/api/agents/{}", server.base_url, id))
+            .delete(format!(
+                "{}/api/agents/{}?confirm=true",
+                server.base_url, id
+            ))
             .send()
             .await
             .unwrap();

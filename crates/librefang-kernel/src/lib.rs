@@ -3,6 +3,7 @@
 //! The kernel manages agent lifecycles, memory, permissions, scheduling,
 //! and inter-agent communication.
 
+pub mod agent_identity_registry;
 pub mod approval;
 pub mod auth;
 pub mod auto_dream;

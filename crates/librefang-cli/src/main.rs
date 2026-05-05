@@ -1122,11 +1122,44 @@ enum AgentCommands {
     },
     /// Kill an agent.
     #[command(
-        long_about = "Terminate a running agent by its UUID.\n\nExamples:\n  librefang agent kill 550e8400-e29b-41d4-a716-446655440000"
+        long_about = "Terminate a running agent by its UUID.\n\nThis is a destructive operation: the agent's canonical UUID binding is\npurged, orphaning any prior sessions / memories under the old UUID. The\nnext spawn under the same name lands on a fresh UUID. Use\n`librefang agent delete <name> --yes` for the explicit-by-name variant\n(refs #4614).\n\nExamples:\n  librefang agent kill 550e8400-e29b-41d4-a716-446655440000"
     )]
     Kill {
         /// Agent ID (UUID).
         agent_id: String,
+    },
+    /// Delete an agent by name with a confirmation prompt (refs #4614).
+    #[command(
+        long_about = "Permanently delete an agent and purge its canonical UUID binding.\n\nResolves <name> to its canonical UUID via the agent_identities registry,\nprompts for confirmation (or `--yes` to bypass), and issues\n`DELETE /api/agents/{id}?confirm=true`. The next spawn under the same\nname will land on a fresh UUID; prior sessions / memories are orphaned.\n\nExamples:\n  librefang agent delete coder\n  librefang agent delete coder --yes"
+    )]
+    Delete {
+        /// Agent name (looked up in agent_identities.toml).
+        name: String,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Reset an agent's canonical UUID without killing it (refs #4614).
+    #[command(
+        long_about = "Drop the canonical UUID binding for <name> from the\nagent_identities registry without killing the agent. The next spawn\nwill re-derive a fresh UUID. Prior sessions / memories tied to the\nold UUID are orphaned. Prompts for confirmation; pass `--yes` to skip.\n\nExamples:\n  librefang agent reset-uuid coder\n  librefang agent reset-uuid coder --yes"
+    )]
+    ResetUuid {
+        /// Agent name.
+        name: String,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Reassign sessions / memories from an old UUID to the canonical one (refs #4614, deferred).
+    #[command(
+        long_about = "Migrate orphaned data from <old-uuid> to the canonical UUID for <name>.\n\nNOT YET IMPLEMENTED — this command is reserved by issue #4614 but the\nactual cross-table reassignment requires deep memory-substrate surgery\n(sessions, events, kv_store, memories, entities, relations,\nusage_events, canonical_sessions, prompt_experiments, audit_entries,\napproval_audit, plus the proactive memory store) under a single\ntransaction with rollback semantics. Tracked as a follow-up.\n\nFor now this command prints a friendly message pointing to the issue.\n\nExamples:\n  librefang agent merge-history coder --from 0123abcd-...-..."
+    )]
+    MergeHistory {
+        /// Agent name (canonical UUID destination).
+        name: String,
+        /// Old UUID whose sessions / memories should be reassigned.
+        #[arg(long)]
+        from: String,
     },
     /// Set an agent property (e.g., model).
     #[command(
@@ -2066,6 +2099,9 @@ fn main() {
             AgentCommands::List { json } => cmd_agent_list(cli.config, json),
             AgentCommands::Chat { agent_id } => cmd_agent_chat(cli.config, &agent_id),
             AgentCommands::Kill { agent_id } => cmd_agent_kill(cli.config, &agent_id),
+            AgentCommands::Delete { name, yes } => cmd_agent_delete(cli.config, &name, yes),
+            AgentCommands::ResetUuid { name, yes } => cmd_agent_reset_uuid(cli.config, &name, yes),
+            AgentCommands::MergeHistory { name, from } => cmd_agent_merge_history(&name, &from),
             AgentCommands::Set {
                 agent_id,
                 field,
@@ -4082,9 +4118,14 @@ fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
     if let Some(base) = find_daemon() {
         let agent_id = resolve_agent_id(&base, agent_id_str);
         let client = daemon_client();
+        // Refs #4614: explicit `librefang agent kill <id>` IS the user's
+        // confirmation. The API requires `?confirm=true` on DELETE so the
+        // canonical UUID is purged on the kill (matching the issue's
+        // "explicit delete" semantics). Internal lifecycle resets call
+        // `kernel.kill_agent` directly and skip this path.
         let body = daemon_json(
             client
-                .delete(format!("{base}/api/agents/{agent_id}"))
+                .delete(format!("{base}/api/agents/{agent_id}?confirm=true"))
                 .send(),
         );
         if body.get("status").is_some() {
@@ -4108,7 +4149,9 @@ fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
             std::process::exit(1);
         });
         let kernel = boot_kernel(config);
-        match kernel.kill_agent(agent_id) {
+        // Direct-kernel path (no daemon): mirror the API's confirmed-delete
+        // semantics so behavior matches whether the daemon is running or not.
+        match kernel.kill_agent_with_purge(agent_id, true) {
             Ok(()) => println!(
                 "{}",
                 i18n::t_args("agent-killed", &[("id", &agent_id.to_string())])
@@ -4122,6 +4165,192 @@ fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
             }
         }
     }
+}
+
+/// Refs #4614 — `librefang agent delete <name>` with confirmation prompt.
+///
+/// Looks up the canonical UUID for `name` via `GET /api/agents/identities`
+/// (or directly from the kernel registry when no daemon is running),
+/// prints the destructive-action warning, and either prompts `[y/N]` or
+/// proceeds immediately when `--yes` is set. Then issues the confirmed
+/// DELETE. This is the long-form companion to `librefang agent kill <id>`
+/// — useful when the operator only knows the agent's name.
+fn cmd_agent_delete(config: Option<PathBuf>, name: &str, yes: bool) {
+    eprintln!("WARNING: Deleting agent \"{name}\" will permanently remove its canonical UUID");
+    eprintln!("    and all associated memories and sessions.");
+    eprintln!("    This action cannot be undone.");
+    if !yes && !prompt_yes_no("Confirm?", false) {
+        eprintln!("Aborted.");
+        std::process::exit(1);
+    }
+
+    if let Some(base) = find_daemon() {
+        let client = daemon_client();
+        // Resolve name → UUID via the identity registry endpoint.
+        let canonical_uuid = match lookup_canonical_uuid(&base, name) {
+            Some(id) => id,
+            None => {
+                eprintln!(
+                    "No canonical UUID recorded for agent name '{name}' — nothing to delete."
+                );
+                std::process::exit(1);
+            }
+        };
+        let body = daemon_json(
+            client
+                .delete(format!("{base}/api/agents/{canonical_uuid}?confirm=true"))
+                .send(),
+        );
+        if body.get("status").is_some() {
+            println!("Agent \"{name}\" deleted (canonical UUID purged).");
+        } else {
+            eprintln!(
+                "Failed to delete agent: {}",
+                body["error"].as_str().unwrap_or("Unknown error")
+            );
+            std::process::exit(1);
+        }
+    } else {
+        let kernel = boot_kernel(config);
+        let canonical_uuid = match kernel.agent_identities().get(name) {
+            Some(id) => id,
+            None => {
+                eprintln!(
+                    "No canonical UUID recorded for agent name '{name}' — nothing to delete."
+                );
+                std::process::exit(1);
+            }
+        };
+        match kernel.kill_agent_with_purge(canonical_uuid, true) {
+            Ok(()) => println!("Agent \"{name}\" deleted (canonical UUID purged)."),
+            Err(e) => {
+                eprintln!("Failed to delete agent: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+/// Refs #4614 — `librefang agent reset-uuid <name>` with confirmation.
+///
+/// Drops the canonical UUID binding without killing a running agent. The
+/// next spawn under `name` re-derives a fresh UUID and registers it as
+/// the new canonical binding; prior sessions / memories tied to the old
+/// UUID are orphaned. `--yes` skips the prompt.
+fn cmd_agent_reset_uuid(config: Option<PathBuf>, name: &str, yes: bool) {
+    eprintln!("WARNING: Resetting the canonical UUID for \"{name}\" will orphan all sessions");
+    eprintln!("    and memories tied to its current UUID. The next spawn under this");
+    eprintln!("    name will start with a fresh UUID. This action cannot be undone.");
+    if !yes && !prompt_yes_no("Confirm?", false) {
+        eprintln!("Aborted.");
+        std::process::exit(1);
+    }
+
+    if let Some(base) = find_daemon() {
+        let client = daemon_client();
+        let body = daemon_json(
+            client
+                .post(format!(
+                    "{base}/api/agents/identities/{}/reset",
+                    percent_encode_path_segment(name)
+                ))
+                .query(&[("confirm", "true")])
+                .send(),
+        );
+        if body.get("status").is_some() {
+            println!(
+                "Canonical UUID for \"{name}\" reset (was {}).",
+                body["previous_canonical_uuid"]
+                    .as_str()
+                    .unwrap_or("<unknown>")
+            );
+        } else {
+            eprintln!(
+                "Failed to reset canonical UUID: {}",
+                body["error"].as_str().unwrap_or("Unknown error")
+            );
+            std::process::exit(1);
+        }
+    } else {
+        let kernel = boot_kernel(config);
+        match kernel.agent_identities().purge(name) {
+            Some(prev) => println!("Canonical UUID for \"{name}\" reset (was {prev})."),
+            None => {
+                eprintln!("No canonical UUID recorded for agent name '{name}'.");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+/// Refs #4614 — `librefang agent merge-history` placeholder.
+///
+/// The cross-table reassignment is not yet implemented — see the
+/// long_about on `AgentCommands::MergeHistory` for the rationale (deep
+/// memory-substrate surgery across 10+ tables under one transaction).
+fn cmd_agent_merge_history(name: &str, from: &str) {
+    eprintln!("merge-history is not yet implemented (refs #4614 follow-up).");
+    eprintln!("Reassignment of sessions / memories from {from} to the canonical UUID");
+    eprintln!("for agent \"{name}\" requires cross-table SQL surgery in the memory");
+    eprintln!("substrate that is being tracked separately.");
+    std::process::exit(2);
+}
+
+/// Look up the canonical UUID for `name` via the identity-registry
+/// endpoint. Returns `None` if no entry exists (or on any HTTP error —
+/// the caller surfaces a friendly message).
+fn lookup_canonical_uuid(base: &str, name: &str) -> Option<String> {
+    let client = daemon_client();
+    let resp = client
+        .get(format!("{base}/api/agents/identities"))
+        .send()
+        .ok()?;
+    let entries: serde_json::Value = resp.json().ok()?;
+    let arr = entries.as_array()?;
+    for entry in arr {
+        if entry["name"].as_str() == Some(name) {
+            return entry["canonical_uuid"].as_str().map(String::from);
+        }
+    }
+    None
+}
+
+/// Minimal percent-encoder for a single URL path segment. Encodes
+/// everything outside the `unreserved` set (RFC 3986 §2.3) plus `/` so
+/// the segment can't escape into a parent path. Avoids pulling a new
+/// dependency for the one-off use here.
+fn percent_encode_path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.as_bytes() {
+        let b = *byte;
+        let unreserved =
+            b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~';
+        if unreserved {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Minimal `[y/N]` prompt for destructive operations. Reads a single
+/// line from stdin; treats anything other than `y` / `Y` / `yes` /
+/// `YES` as "no" (per the issue's `[y/N]` default).
+fn prompt_yes_no(prompt: &str, default_yes: bool) -> bool {
+    use std::io::Write as _;
+    let suffix = if default_yes { "[Y/n]" } else { "[y/N]" };
+    eprint!("{prompt} {suffix} ");
+    let _ = std::io::stderr().flush();
+    let mut buf = String::new();
+    if std::io::stdin().read_line(&mut buf).is_err() {
+        return false;
+    }
+    let trimmed = buf.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return default_yes;
+    }
+    matches!(trimmed.as_str(), "y" | "yes")
 }
 
 fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {

@@ -1432,7 +1432,13 @@ export async function getAgentTemplateToml(name: string): Promise<string> {
 }
 
 export async function deleteAgent(agentId: string): Promise<ApiActionResponse> {
-  return del<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`);
+  // Refs #4614 — DELETE requires explicit confirmation. The dashboard
+  // already wraps this call in a confirmation modal, so we send the
+  // confirm flag here. Without it the API returns 409 with the
+  // canonical-UUID data-loss warning.
+  return del<ApiActionResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}?confirm=true`,
+  );
 }
 
 export async function cloneAgent(agentId: string): Promise<ApiActionResponse> {

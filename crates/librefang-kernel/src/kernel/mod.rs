@@ -572,6 +572,12 @@ pub struct LibreFangKernel {
     pub(crate) raw_config_toml: ArcSwap<toml::Value>,
     /// Agent registry.
     pub(crate) registry: AgentRegistry,
+    /// Canonical agent UUID registry (refs #4614). Persists `agent_name →
+    /// canonical_uuid` independently of the agent registry / SQLite agent
+    /// rows so that respawn after kill / panic / manifest reload reuses the
+    /// same `AgentId` and surviving sessions remain reachable. See
+    /// `crate::agent_identity_registry` for layout and rationale.
+    pub(crate) agent_identities: Arc<crate::agent_identity_registry::AgentIdentityRegistry>,
     /// Capability manager.
     pub(crate) capabilities: CapabilityManager,
     /// Event bus.
@@ -1441,6 +1447,16 @@ impl LibreFangKernel {
     #[inline]
     pub fn agent_registry(&self) -> &AgentRegistry {
         &self.registry
+    }
+
+    /// Canonical agent UUID registry (refs #4614). Persists
+    /// `agent_name → canonical_uuid` independently of agent lifecycle so
+    /// that respawns reuse the same `AgentId` instead of orphaning
+    /// history. Read-only handle exposed for tests, diagnostics, and
+    /// API surfaces.
+    #[inline]
+    pub fn agent_identities(&self) -> &Arc<crate::agent_identity_registry::AgentIdentityRegistry> {
+        &self.agent_identities
     }
 
     /// Memory substrate (structured storage, vector search).
@@ -3671,12 +3687,27 @@ impl LibreFangKernel {
         // empty table, which is the same semantics as the previous on-miss
         // path.
         let initial_raw_config_toml = load_raw_config_toml(&config.home_dir.join("config.toml"));
+
+        // Canonical agent UUID registry (refs #4614). Loaded from
+        // `<home_dir>/agent_identities.toml`; missing or malformed files
+        // start the registry empty (the load helper logs the cause).
+        let agent_identities = Arc::new(
+            crate::agent_identity_registry::AgentIdentityRegistry::load(&config.home_dir),
+        );
+        if !agent_identities.is_empty() {
+            info!(
+                count = agent_identities.len(),
+                "Loaded canonical agent UUID registry"
+            );
+        }
+
         let kernel = Self {
             home_dir_boot: config.home_dir.clone(),
             data_dir_boot: config.data_dir.clone(),
             config: ArcSwap::new(std::sync::Arc::new(config)),
             raw_config_toml: ArcSwap::new(std::sync::Arc::new(initial_raw_config_toml)),
             registry: AgentRegistry::new(),
+            agent_identities,
             capabilities: CapabilityManager::new(),
             event_bus: EventBus::new(),
             session_lifecycle_bus: Arc::new(crate::session_lifecycle::SessionLifecycleBus::new(
@@ -4563,9 +4594,38 @@ system_prompt = "You are a helpful assistant."
         // same agent gets the same UUID across daemon restarts. This preserves
         // session history associations in SQLite. Child agents spawned at
         // runtime still use random IDs (via predetermined_id = None + parent).
+        //
+        // Refs #4614 — canonical UUID registry: for top-level agents
+        // (`parent.is_none()`), consult `agent_identities` first. If a prior
+        // spawn already registered a UUID for this name, reuse it verbatim
+        // — even if the v5 derivation later changes (namespace bump, name
+        // normalisation tweak), the agent's history stays reachable. If no
+        // entry exists yet, fall back to the historical
+        // `AgentId::from_name(&name)` derivation and atomically register
+        // it as the canonical UUID for this name (first-spawn wins).
         let agent_id = predetermined_id.unwrap_or_else(|| {
             if parent.is_none() {
-                AgentId::from_name(&name)
+                if let Some(existing) = self.agent_identities.get(&name) {
+                    debug!(
+                        agent = %name,
+                        id = %existing,
+                        "Reusing canonical UUID from agent_identities registry (#4614)"
+                    );
+                    existing
+                } else {
+                    let derived = AgentId::from_name(&name);
+                    let recorded = self.agent_identities.register_if_absent(&name, derived);
+                    if recorded != derived {
+                        // Someone else won the race; honor their UUID.
+                        debug!(
+                            agent = %name,
+                            chosen = %recorded,
+                            derived = %derived,
+                            "agent_identities: lost register race, honoring existing entry"
+                        );
+                    }
+                    recorded
+                }
             } else {
                 AgentId::new()
             }
@@ -10806,8 +10866,32 @@ system_prompt = "You are a helpful assistant."
         }
     }
 
-    /// Kill an agent.
+    /// Kill an agent. By default the canonical UUID registry entry
+    /// (refs #4614) is **kept** so a later respawn of the same name lands
+    /// on the same `AgentId`. Use [`Self::kill_agent_with_purge`] to also
+    /// drop the canonical-UUID binding (i.e. fully orphan history).
     pub fn kill_agent(&self, agent_id: AgentId) -> KernelResult<()> {
+        self.kill_agent_with_purge(agent_id, false)
+    }
+
+    /// Kill an agent and optionally purge its canonical UUID binding from
+    /// the identity registry (refs #4614).
+    ///
+    /// `purge_identity = false` (the default for `kill_agent`) is the
+    /// safe choice — sessions and memories tied to this UUID stay
+    /// reachable on respawn.
+    ///
+    /// `purge_identity = true` permanently removes the `name → uuid`
+    /// mapping. The next spawn under the same name will derive a fresh
+    /// UUID via `AgentId::from_name`, and any prior history is orphaned.
+    /// This is the destructive path the issue describes ("explicit
+    /// delete + confirmation"); confirmation is enforced at the API/CLI
+    /// layer.
+    pub fn kill_agent_with_purge(
+        &self,
+        agent_id: AgentId,
+        purge_identity: bool,
+    ) -> KernelResult<()> {
         let entry = self
             .registry
             .remove(agent_id)
@@ -10844,11 +10928,26 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Refs #4614: canonical UUID registry. Default `kill_agent` keeps
+        // the binding so a respawn under the same name reuses this UUID.
+        // `kill_agent_with_purge(agent, true)` (gated behind explicit
+        // confirmation at the API/CLI surface) also drops the entry,
+        // which is the destructive path the issue describes.
+        if purge_identity {
+            if let Some(dropped) = self.agent_identities.purge(&entry.name) {
+                info!(
+                    agent = %entry.name,
+                    id = %dropped,
+                    "Purged canonical UUID from agent_identities registry (#4614)"
+                );
+            }
+        }
+
         // SECURITY: Record agent kill in audit trail
         self.audit_log.record(
             agent_id.to_string(),
             librefang_runtime::audit::AuditAction::AgentKill,
-            format!("name={}", entry.name),
+            format!("name={}, purge_identity={}", entry.name, purge_identity),
             "ok",
         );
 

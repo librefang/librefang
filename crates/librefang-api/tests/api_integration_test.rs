@@ -631,8 +631,13 @@ async fn test_spawn_list_kill_agent() {
     assert_eq!(test_agent["model_provider"], "ollama");
 
     // --- Kill ---
+    // Refs #4614: DELETE requires `?confirm=true` so canonical UUID
+    // purge is gated behind explicit operator intent.
     let resp = client
-        .delete(format!("{}/api/agents/{}", server.base_url, agent_id))
+        .delete(format!(
+            "{}/api/agents/{}?confirm=true",
+            server.base_url, agent_id
+        ))
         .send()
         .await
         .unwrap();
@@ -1223,8 +1228,13 @@ async fn test_kill_nonexistent_agent_is_idempotent() {
     let client = reqwest::Client::new();
 
     let fake_id = uuid::Uuid::new_v4();
+    // Refs #4614: confirm required, but the idempotent-already-gone
+    // shortcut still applies and yields 200 OK.
     let resp = client
-        .delete(format!("{}/api/agents/{}", server.base_url, fake_id))
+        .delete(format!(
+            "{}/api/agents/{}?confirm=true",
+            server.base_url, fake_id
+        ))
         .send()
         .await
         .unwrap();
@@ -1329,9 +1339,12 @@ memory_write = ["self.*"]
     let status: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(status["agent_count"], 4);
 
-    // Kill one
+    // Kill one (refs #4614: confirm required)
     let resp = client
-        .delete(format!("{}/api/agents/{}", server.base_url, ids[1]))
+        .delete(format!(
+            "{}/api/agents/{}?confirm=true",
+            server.base_url, ids[1]
+        ))
         .send()
         .await
         .unwrap();
@@ -1347,10 +1360,13 @@ memory_write = ["self.*"]
     let agents = body["items"].as_array().unwrap();
     assert_eq!(agents.len(), 3);
 
-    // Kill the rest
+    // Kill the rest (refs #4614: confirm required)
     for id in [&ids[0], &ids[2]] {
         client
-            .delete(format!("{}/api/agents/{}", server.base_url, id))
+            .delete(format!(
+                "{}/api/agents/{}?confirm=true",
+                server.base_url, id
+            ))
             .send()
             .await
             .unwrap();

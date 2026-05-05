@@ -69,6 +69,9 @@ use crate::types;
         routes::clear_agent_history,
         routes::compact_session,
         routes::stop_agent,
+        // Canonical agent UUID registry (refs #4614)
+        routes::list_agent_identities,
+        routes::reset_agent_identity,
         routes::list_agent_runtime,
         routes::stop_session,
         routes::set_model,

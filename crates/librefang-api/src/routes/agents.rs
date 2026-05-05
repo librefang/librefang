@@ -9,6 +9,16 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/agents",
             axum::routing::get(list_agents).post(spawn_agent),
         )
+        // Canonical agent UUID registry (refs #4614). Routed before
+        // /agents/{id} so the literal segment doesn't get parsed as a UUID.
+        .route(
+            "/agents/identities",
+            axum::routing::get(list_agent_identities),
+        )
+        .route(
+            "/agents/identities/{name}/reset",
+            axum::routing::post(reset_agent_identity),
+        )
         // Bulk agent operations (placed before /agents/{id} to avoid path conflicts)
         .route(
             "/agents/bulk",
@@ -2298,27 +2308,61 @@ pub async fn get_agent_session(
     }
 }
 
-/// DELETE /api/agents/:id — Kill an agent.
+/// Query parameters for `DELETE /api/agents/{id}` (refs #4614).
+///
+/// `confirm = true` is required by the canonical-UUID registry design — a
+/// bare DELETE is rejected with `409 Conflict` so a typo, replayed
+/// request, or dashboard click-bug can't silently destroy history. When
+/// `confirm=true` the agent is killed AND its `name → canonical_uuid`
+/// binding is purged from `agent_identities.toml` (i.e. the next spawn
+/// under the same name lands on a fresh UUID; prior sessions / memories
+/// are orphaned).
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct DeleteAgentQuery {
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+/// Warning text shown when a DELETE arrives without confirmation. Mirrors
+/// the prompt copy in the issue body so CLI / API / dashboard surface the
+/// same wording.
+const DELETE_AGENT_WARNING: &str = "Deleting this agent will permanently remove its canonical UUID and all associated memories and sessions. This action cannot be undone. Re-issue with confirm=true to proceed.";
+
+/// DELETE /api/agents/:id — Kill an agent (refs #4614).
 ///
 /// Idempotent (RFC 9110 §9.2.2 / §9.3.5): deleting an agent that is already
 /// gone returns `200 OK` with `{"status": "already-deleted"}` instead of
 /// `404`. `404` is reserved for the malformed-UUID case alone, so retried
 /// or replayed DELETEs by clients (network blips, dashboard double-clicks)
 /// no longer surface a phantom error. Refs #3509.
+///
+/// Refs #4614 — canonical agent UUID registry. Explicit deletes via this
+/// endpoint require `confirm=true` (as a query param or JSON body field).
+/// Without it the request is rejected with `409 Conflict` and the
+/// data-loss warning text. With confirmation, the kernel kills the agent
+/// AND purges its canonical UUID binding so the next spawn under the
+/// same name lands on a fresh UUID. Internal lifecycle resets (hot
+/// reload, panic restart) call `kill_agent` directly and preserve the
+/// binding — the destructive purge only happens when an operator
+/// explicitly asks for it.
 #[utoipa::path(
     delete,
     path = "/api/agents/{id}",
     tag = "agents",
-    params(("id" = String, Path, description = "Agent ID")),
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("confirm" = Option<bool>, Query, description = "Required: confirms canonical UUID purge. Refs #4614.")
+    ),
     responses(
-        (status = 200, description = "Agent killed (or was already absent — idempotent)"),
+        (status = 200, description = "Agent killed and canonical UUID purged"),
         (status = 400, description = "Malformed agent ID"),
-        (status = 409, description = "Agent is hand-owned and cannot be deleted directly")
+        (status = 409, description = "Confirmation required, or agent is hand-owned")
     )
 )]
 pub async fn kill_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(q): Query<DeleteAgentQuery>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -2330,6 +2374,16 @@ pub async fn kill_agent(
                 .into_response();
         }
     };
+
+    // Refs #4614: destructive delete requires explicit confirmation via
+    // `?confirm=true`. Without it the request is rejected with 409
+    // Conflict + the data-loss warning text so a typo / replay /
+    // click-bug can't silently destroy history.
+    if !q.confirm {
+        return ApiErrorResponse::conflict(DELETE_AGENT_WARNING)
+            .with_code("delete_confirmation_required")
+            .into_response();
+    }
 
     // Hand-spawned runtime agents are owned by their hand instance. Killing
     // one directly leaves the hand registry pointing at a dangling id that
@@ -2359,10 +2413,15 @@ pub async fn kill_agent(
         }
     }
 
-    let body = match state.kernel.kill_agent(agent_id) {
+    // Confirmed delete: kill + purge canonical UUID binding (refs #4614).
+    let body = match state.kernel.kill_agent_with_purge(agent_id, true) {
         Ok(()) => (
             StatusCode::OK,
-            Json(serde_json::json!({"status": "killed", "agent_id": id})),
+            Json(serde_json::json!({
+                "status": "killed",
+                "agent_id": id,
+                "identity_purged": true,
+            })),
         )
             .into_response(),
         Err(e) => {
@@ -6263,6 +6322,111 @@ pub async fn push_message(
                 "agent_id": agent_id.to_string(),
             })),
         ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Canonical agent UUID registry endpoints (refs #4614)
+// ---------------------------------------------------------------------------
+
+/// One row in the response of `GET /api/agents/identities`.
+///
+/// `created_at` is RFC 3339 UTC (string form rather than
+/// `chrono::DateTime<Utc>` so the type implements `utoipa::ToSchema`
+/// without pulling in chrono's optional `schemars` feature).
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct AgentIdentityRow {
+    pub name: String,
+    pub canonical_uuid: String,
+    pub created_at: String,
+}
+
+/// GET /api/agents/identities — List the canonical UUID registry (refs #4614).
+///
+/// Returns all `name → canonical_uuid` mappings persisted at
+/// `<home_dir>/agent_identities.toml`. Order is stable (sorted by name) so
+/// callers can rely on the result for diagnostics / golden tests.
+#[utoipa::path(
+    get,
+    path = "/api/agents/identities",
+    tag = "agents",
+    responses(
+        (status = 200, description = "Canonical UUID registry contents", body = Vec<AgentIdentityRow>)
+    )
+)]
+pub async fn list_agent_identities(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let entries = state.kernel.agent_identities().list();
+    let rows: Vec<AgentIdentityRow> = entries
+        .into_iter()
+        .map(|(name, identity)| AgentIdentityRow {
+            name,
+            canonical_uuid: identity.canonical_uuid.to_string(),
+            created_at: identity.created_at.to_rfc3339(),
+        })
+        .collect();
+    (StatusCode::OK, Json(serde_json::json!(rows)))
+}
+
+/// Query parameters for `POST /api/agents/identities/{name}/reset`.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ResetIdentityQuery {
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+const RESET_IDENTITY_WARNING: &str = "Resetting this agent's canonical UUID will orphan all sessions, memories, and audit history tied to the prior UUID. The next spawn under this name will start with a fresh UUID. This action cannot be undone. Re-issue with confirm=true to proceed.";
+
+/// POST /api/agents/identities/{name}/reset — Drop the canonical UUID
+/// binding for `name` (refs #4614).
+///
+/// Requires `confirm=true` (query string or JSON body) — without it the
+/// request is rejected with `409 Conflict` and the data-loss warning. The
+/// next spawn under the same name re-derives a fresh UUID via
+/// `AgentId::from_name` and registers it as the new canonical binding.
+/// The agent is **not** killed — operators can call `DELETE /api/agents/{id}`
+/// (or `kill_agent`) separately if a runtime restart is also desired.
+///
+/// Returns `404` if no entry exists for `name`.
+#[utoipa::path(
+    post,
+    path = "/api/agents/identities/{name}/reset",
+    tag = "agents",
+    params(
+        ("name" = String, Path, description = "Agent name"),
+        ("confirm" = Option<bool>, Query, description = "Required: confirms canonical UUID reset.")
+    ),
+    responses(
+        (status = 200, description = "Canonical UUID purged"),
+        (status = 404, description = "No canonical UUID recorded for this name"),
+        (status = 409, description = "Confirmation required")
+    )
+)]
+pub async fn reset_agent_identity(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(q): Query<ResetIdentityQuery>,
+) -> impl IntoResponse {
+    if !q.confirm {
+        return ApiErrorResponse::conflict(RESET_IDENTITY_WARNING)
+            .with_code("reset_identity_unconfirmed")
+            .into_response();
+    }
+
+    match state.kernel.agent_identities().purge(&name) {
+        Some(dropped) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "reset",
+                "name": name,
+                "previous_canonical_uuid": dropped.to_string(),
+            })),
+        )
+            .into_response(),
+        None => ApiErrorResponse::not_found(format!(
+            "no canonical UUID recorded for agent name '{name}'"
+        ))
+        .with_code("identity_not_found")
+        .into_response(),
     }
 }
 
