@@ -5423,6 +5423,7 @@
           "hands"
         ],
         "summary": "POST /api/hands/{hand_id}/activate — Activate a hand (spawns agent).",
+        "description": "Honours `Idempotency-Key` (#3637): when set, a duplicate request\nwith the same key + same body replays the cached response instead\nof activating a second hand instance. A different body under the\nsame key is rejected with 409 Conflict.",
         "operationId": "activate_hand",
         "parameters": [
           {
@@ -5455,6 +5456,9 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Idempotency-Key was reused with a different request body"
           }
         }
       }
