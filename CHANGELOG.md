@@ -429,6 +429,8 @@ _338 PRs from 7 contributors since v2026.4.28-beta7._
 
 ### Security
 
+- **CI + runtime supply-chain audit for marketplace skills/hands/templates** — `.pth` import-hijack files, `base64`+`exec`/`eval` payloads, jailbreak/exfil prompt phrases, and `sys.path`/`importlib` abuse are now caught at two layers: (1) the `supply-chain-audit` CI workflow (`.github/workflows/supply-chain-audit.yml`) gates every PR touching skill/hand/extension trees; (2) `librefang_skills::supply_chain::scan()` runs at marketplace install time and refuses the install (`SkillError::SecurityBlocked`) if any critical finding is detected, cleaning up the partially-extracted directory. Set `LIBREFANG_SKIP_SUPPLY_CHAIN_AUDIT=1` to bypass for dev/testing (emits a WARN). Closes #3333. (@houko)
+
 - **Channel webhook HMAC verification is now mandatory** for Messenger, LINE, Teams, Viber, and DingTalk. Previously, missing signature headers were silently bypassed; they now return `400 Bad Request`, and signature mismatches return `401 Unauthorized`. **Action required if you operate any of these channels:** # pragma: no-attribution
   - **Messenger** — set `MESSENGER_APP_SECRET` to your Facebook App Secret (the new `app_secret_env` field in `[channels.messenger]` defaults to this). If unset, signatures are skipped with a startup warning and the endpoint stays unauthenticated — production should always set it. # pragma: no-attribution
   - **Teams** — set `TEAMS_SECURITY_TOKEN` to the base64 outgoing-webhook security token from the Teams portal (the new `security_token_env` field in `[channels.teams]`). Same fallback semantics as Messenger. # pragma: no-attribution
