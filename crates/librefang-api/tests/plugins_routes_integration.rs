@@ -279,7 +279,7 @@ async fn context_engine_get_trace_by_id_rejects_malformed_id() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .contains("16 lowercase hex"),
@@ -313,7 +313,7 @@ async fn get_plugin_unknown_returns_404() {
     let (status, body) = json_request(&h, Method::GET, &path, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
     assert!(
-        body["error"].as_str().is_some(),
+        body["error"]["message"].as_str().is_some(),
         "missing error string: {body:?}"
     );
 }
@@ -354,7 +354,7 @@ async fn plugin_status_unknown_returns_400() {
     let path = format!("/api/plugins/{ABSENT_PLUGIN}/status");
     let (status, body) = json_request(&h, Method::GET, &path, None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
-    assert!(body["error"].as_str().is_some(), "{body:?}");
+    assert!(body["error"]["message"].as_str().is_some(), "{body:?}");
 }
 
 /// `/api/plugins/{name}/state` validates the name first; an invalid name
@@ -368,7 +368,7 @@ async fn get_plugin_state_rejects_invalid_name() {
     let (status, body) = json_request(&h, Method::GET, "/api/plugins/has..dots/state", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .to_lowercase()
@@ -393,7 +393,7 @@ async fn install_plugin_rejects_missing_source() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
-    assert!(body["error"].as_str().is_some(), "{body:?}");
+    assert!(body["error"]["message"].as_str().is_some(), "{body:?}");
 }
 
 /// `source = registry` requires `name`.
@@ -409,7 +409,7 @@ async fn install_plugin_registry_source_requires_name() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .to_lowercase()
@@ -431,7 +431,7 @@ async fn uninstall_plugin_requires_name() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .to_lowercase()
@@ -497,7 +497,7 @@ async fn install_with_deps_rejects_invalid_name() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .to_lowercase()
@@ -520,7 +520,7 @@ async fn batch_plugin_operation_requires_operation() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .to_lowercase()
@@ -542,7 +542,7 @@ async fn batch_plugin_operation_requires_plugins_array() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .to_lowercase()
@@ -564,7 +564,7 @@ async fn batch_plugin_operation_rejects_empty_plugins_array() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .to_lowercase()
@@ -670,7 +670,10 @@ async fn upgrade_plugin_rejects_invalid_registry_format() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("owner/repo"),
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("owner/repo"),
         "{body:?}"
     );
 }
@@ -688,7 +691,7 @@ async fn test_plugin_hook_requires_hook_field() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .to_lowercase()
@@ -781,7 +784,10 @@ async fn plugin_registry_search_rejects_invalid_registry_param() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("owner/repo"),
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("owner/repo"),
         "{body:?}"
     );
 }

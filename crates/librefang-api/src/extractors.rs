@@ -191,7 +191,7 @@ mod tests {
         // for the well-known key. The test asserts on that exact text so a
         // translation typo would surface here.
         let expected = ErrorTranslator::new("en").t(INVALID_AGENT_ID_KEY);
-        assert_eq!(body["error"].as_str(), Some(expected.as_str()));
+        assert_eq!(body["error"]["message"].as_str(), Some(expected.as_str()));
     }
 
     #[tokio::test]

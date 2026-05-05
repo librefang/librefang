@@ -178,7 +178,7 @@ async fn test_list_agents_rejects_invalid_sort_field() {
     let h = boot(TEST_TOKEN).await;
     let (status, body) = send(h.app.clone(), get("/api/agents?sort=not_a_field")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"].is_string());
+    assert!(body["error"].is_object());
 }
 
 // ---------------------------------------------------------------------------
@@ -261,7 +261,7 @@ async fn test_patch_agent_invalid_mcp_servers_payload_returns_400() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"].is_string());
+    assert!(body["error"].is_object());
 }
 
 #[tokio::test(flavor = "multi_thread")]

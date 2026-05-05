@@ -142,7 +142,7 @@ async fn hooks_wake_returns_404_when_webhook_triggers_not_enabled() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
-    assert!(body["error"].is_string(), "{body:?}");
+    assert!(body["error"].is_object(), "{body:?}");
 }
 
 /// `webhook_triggers.enabled = false` is the default-flagged case — also a 404.
@@ -527,5 +527,5 @@ async fn commands_lookup_unknown_returns_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
-    assert!(body["error"].is_string(), "{body:?}");
+    assert!(body["error"].is_object(), "{body:?}");
 }

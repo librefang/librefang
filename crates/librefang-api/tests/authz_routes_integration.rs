@@ -121,7 +121,7 @@ async fn authz_effective_anonymous_caller_is_forbidden() {
     let (status, body) = run(&h, req(Method::GET, "/api/authz/effective/Alice", None)).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body:?}");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .to_lowercase()
@@ -203,7 +203,7 @@ async fn authz_effective_unknown_user_returns_404() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .to_lowercase()
