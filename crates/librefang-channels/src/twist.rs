@@ -48,6 +48,9 @@ pub struct TwistAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Last seen comment ID per channel for incremental polling.
     last_comment_ids: Arc<RwLock<HashMap<String, i64>>>,
+    /// REST base URL. Defaults to `TWIST_API_BASE`; tests override via
+    /// `with_base_url` so the adapter talks to a local wiremock instead.
+    api_base: String,
 }
 
 impl TwistAdapter {
@@ -68,11 +71,20 @@ impl TwistAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             last_comment_ids: Arc::new(RwLock::new(HashMap::new())),
+            api_base: TWIST_API_BASE.to_string(),
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the REST base URL. `#[cfg(test)]`-only — used by wiremock-driven
+    /// tests to point the adapter at a local mock server.
+    #[cfg(test)]
+    pub fn with_base_url(mut self, url: String) -> Self {
+        self.api_base = url;
         self
     }
 
@@ -192,7 +204,7 @@ impl TwistAdapter {
         thread_id: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/comments/add", TWIST_API_BASE);
+        let url = format!("{}/comments/add", self.api_base);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
         for chunk in chunks {
@@ -621,5 +633,83 @@ mod tests {
     #[test]
     fn test_twist_poll_interval() {
         assert_eq!(POLL_INTERVAL_SECS, 5);
+    }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // The `TWIST_API_BASE` const is now backed by an `api_base` field
+    // (see struct definition); a `#[cfg(test)] with_base_url` setter
+    // points the adapter at a local `wiremock::MockServer`. Asserts the
+    // `POST /comments/add` request shape — bearer auth + the
+    // `{ thread_id (numeric), content }` JSON schema. `platform_id` is
+    // parsed as `i64` into `thread_id`; non-numeric IDs are coerced to 0.
+
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn twist_user(thread_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: thread_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn twist_send_posts_comments_add() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/comments/add"))
+            .and(header("authorization", "Bearer twist-tok"))
+            .and(body_json(serde_json::json!({
+                "thread_id": 4242,
+                "content": "hello twist",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 99})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = TwistAdapter::new(
+            "twist-tok".to_string(),
+            "ws-1".to_string(),
+            vec![],
+        )
+        .with_base_url(server.uri());
+        adapter
+            .send(
+                &twist_user("4242"),
+                ChannelContent::Text("hello twist".into()),
+            )
+            .await
+            .expect("twist send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn twist_send_returns_err_on_non_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/comments/add"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = TwistAdapter::new(
+            "bad-tok".to_string(),
+            "ws-1".to_string(),
+            vec![],
+        )
+        .with_base_url(server.uri());
+        let err = adapter
+            .send(&twist_user("123"), ChannelContent::Text("x".into()))
+            .await
+            .expect_err("twist send must propagate non-2xx as Err");
+        assert!(
+            err.to_string().contains("500"),
+            "error should mention status code, got: {err}"
+        );
     }
 }

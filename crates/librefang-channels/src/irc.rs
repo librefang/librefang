@@ -679,4 +679,80 @@ mod tests {
         let msg = parse_privmsg(&line, "librefang-bot");
         assert!(msg.is_none());
     }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // IRC send() does not open a socket — it writes IRC frames to an
+    // internal `mpsc::Sender<String>` (`write_tx`) which the start()
+    // loop drains onto a `TcpStream`. That mpsc boundary is the natural
+    // tap point: we seed `write_tx` with a test channel and then assert
+    // the exact IRC `PRIVMSG` lines that send() emits. No socket, no
+    // wiremock — and no production code change.
+
+    fn irc_user(target: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: target.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn irc_send_writes_privmsg_frame_to_internal_mpsc() {
+        let adapter = IrcAdapter::new(
+            "irc.example".to_string(),
+            6667,
+            "librefang-bot".to_string(),
+            None,
+            vec!["#librefang".to_string()],
+            false,
+        );
+
+        // Tap the internal write channel before calling send().
+        let (tx, mut rx) = mpsc::channel::<String>(8);
+        *adapter.write_tx.write().await = Some(tx);
+
+        adapter
+            .send(
+                &irc_user("#librefang"),
+                ChannelContent::Text("hello irc".into()),
+            )
+            .await
+            .expect("irc send must succeed when write_tx is wired up");
+
+        let frame = rx
+            .recv()
+            .await
+            .expect("send() must push exactly one PRIVMSG frame");
+        assert_eq!(
+            frame, "PRIVMSG #librefang :hello irc\r\n",
+            "frame must match the IRC PRIVMSG wire format"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no extra frames expected for a single short message"
+        );
+    }
+
+    #[tokio::test]
+    async fn irc_send_returns_err_when_not_started() {
+        // write_tx is None ⇒ adapter has not been start()ed; send() must
+        // bubble that up instead of silently dropping the message.
+        let adapter = IrcAdapter::new(
+            "irc.example".to_string(),
+            6667,
+            "librefang-bot".to_string(),
+            None,
+            vec![],
+            false,
+        );
+        let err = adapter
+            .send(&irc_user("alice"), ChannelContent::Text("x".into()))
+            .await
+            .expect_err("irc send must error when start() has not run");
+        assert!(
+            err.to_string().to_lowercase().contains("not started"),
+            "error should mention not-started state, got: {err}"
+        );
+    }
 }

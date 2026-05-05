@@ -22,6 +22,12 @@ use zeroize::Zeroizing;
 /// Guilded REST API base URL.
 const GUILDED_API_BASE: &str = "https://www.guilded.gg/api/v1";
 
+/// Returns the default Guilded API base URL. Used to initialise `GuildedAdapter::api_base`.
+#[inline]
+fn default_guilded_api_base() -> String {
+    GUILDED_API_BASE.to_string()
+}
+
 /// Guilded WebSocket gateway URL.
 const GUILDED_WS_URL: &str = "wss://www.guilded.gg/websocket/v1";
 
@@ -37,6 +43,9 @@ pub struct GuildedAdapter {
     bot_token: Zeroizing<String>,
     /// Server (guild) IDs to listen on (empty = all servers the bot is in).
     server_ids: Vec<String>,
+    /// Base URL for the Guilded REST API. Defaults to `https://www.guilded.gg/api/v1`.
+    /// Overridable in tests via `with_api_base()` to point at a wiremock server.
+    api_base: String,
     /// HTTP client for REST API calls.
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
@@ -57,6 +66,7 @@ impl GuildedAdapter {
         Self {
             bot_token: Zeroizing::new(bot_token),
             server_ids,
+            api_base: default_guilded_api_base(),
             client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
@@ -69,9 +79,17 @@ impl GuildedAdapter {
         self
     }
 
+    /// Override the Guilded REST API base URL. Intended for tests that point the adapter at
+    /// a wiremock server instead of `https://www.guilded.gg/api/v1`.
+    #[cfg(test)]
+    pub fn with_api_base(mut self, base: String) -> Self {
+        self.api_base = base;
+        self
+    }
+
     /// Validate credentials by fetching the bot's own user info.
     async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/users/@me", GUILDED_API_BASE);
+        let url = format!("{}/users/@me", self.api_base);
         let resp = self
             .client
             .get(&url)
@@ -94,7 +112,7 @@ impl GuildedAdapter {
         channel_id: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/channels/{}/messages", GUILDED_API_BASE, channel_id);
+        let url = format!("{}/channels/{}/messages", self.api_base, channel_id);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
         for chunk in chunks {
@@ -370,6 +388,81 @@ impl ChannelAdapter for GuildedAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Uses `wiremock` to stand up a local HTTP server and points `GuildedAdapter`
+    // at it via `with_api_base()`. Exercises the `POST /channels/{id}/messages`
+    // call made by `ChannelAdapter::send`.
+
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(api_base: String) -> GuildedAdapter {
+        GuildedAdapter::new("test-guilded-token".to_string(), vec![]).with_api_base(api_base)
+    }
+
+    fn dummy_user(channel_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: channel_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn guilded_send_posts_channel_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/channels/ch-abc123/messages"))
+            .and(header("Authorization", "Bearer test-guilded-token"))
+            .and(body_json(serde_json::json!({
+                "content": "hello from librefang",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": { "id": "msg-001" },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("ch-abc123"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn guilded_send_unsupported_content_uses_placeholder() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/channels/ch-xyz/messages"))
+            .and(body_json(serde_json::json!({
+                "content": "(Unsupported content type)",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": { "id": "msg-002" },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("ch-xyz"),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send with unsupported content must succeed");
+    }
 
     #[test]
     fn test_guilded_adapter_creation() {

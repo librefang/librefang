@@ -392,6 +392,10 @@ pub struct WeComAdapter {
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
     mode: Mode,
+    /// Override the WeCom webhook base URL. `None` = production default
+    /// (`https://qyapi.weixin.qq.com/cgi-bin/webhook/send`); tests set
+    /// this via `with_webhook_base` to point at a local wiremock.
+    webhook_base: Option<String>,
 }
 
 impl WeComAdapter {
@@ -408,6 +412,7 @@ impl WeComAdapter {
                 ws_tx: Arc::new(RwLock::new(None)),
                 pending_req_ids: Arc::new(RwLock::new(HashMap::new())),
             },
+            webhook_base: None,
         }
     }
 
@@ -432,11 +437,20 @@ impl WeComAdapter {
                 encoding_aes_key,
                 webhook_key: Arc::new(RwLock::new(None)),
             },
+            webhook_base: None,
         }
     }
 
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the WeCom webhook base URL. `#[cfg(test)]`-only — used by
+    /// wiremock-driven tests to point the adapter at a local mock server.
+    #[cfg(test)]
+    pub fn with_webhook_base(mut self, url: String) -> Self {
+        self.webhook_base = Some(url);
         self
     }
 
@@ -1458,10 +1472,11 @@ impl ChannelAdapter for WeComAdapter {
                     };
                     drop(key_guard);
 
-                    let url = format!(
-                        "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={}",
-                        key
-                    );
+                    let base = self
+                        .webhook_base
+                        .as_deref()
+                        .unwrap_or("https://qyapi.weixin.qq.com/cgi-bin/webhook/send");
+                    let url = format!("{}?key={}", base, key);
                     info!(url = %url, "WeCom bot replying via webhook key");
                     for chunk in split_message(&text, MAX_MESSAGE_LEN) {
                         let payload = serde_json::json!({
@@ -1737,5 +1752,139 @@ mod tests {
         let encrypted_b64 = base64::engine::general_purpose::STANDARD.encode(&encrypted);
         let decrypted = decrypt_aes_cbc(&key, &encrypted_b64).unwrap();
         assert_eq!(&decrypted[..plaintext.len()], plaintext);
+    }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // WeCom is the most operationally complex adapter in the crate (two
+    // modes — Websocket and Callback — plus AES-encrypted callbacks).
+    // For send-path coverage we only exercise Callback mode's webhook
+    // fallback: it is the only outbound path that goes over plain HTTP
+    // (Websocket mode just queues a frame onto an internal mpsc; that's
+    // already covered by `test_build_reply_frame` / `test_build_send_frame`).
+    //
+    // The hard-coded `https://qyapi.weixin.qq.com/cgi-bin/webhook/send`
+    // URL is now overridable via `with_webhook_base` (test-only).
+    // `webhook_key` lives inside `Mode::Callback` and is normally
+    // populated by the callback receiver after the bot's first inbound
+    // message; tests seed it directly because `mod tests` is a child
+    // module and can pattern-match the variant.
+
+    use wiremock::matchers::{body_json, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn wecom_user(user_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: user_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    async fn seed_webhook_key(adapter: &WeComAdapter, key: &str) {
+        if let Mode::Callback { webhook_key, .. } = &adapter.mode {
+            *webhook_key.write().await = Some(key.to_string());
+        } else {
+            panic!("seed_webhook_key requires Callback mode");
+        }
+    }
+
+    #[tokio::test]
+    async fn wecom_callback_send_posts_webhook_with_key_query_and_text_payload() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(query_param("key", "WEBHOOK-KEY-1"))
+            .and(body_json(serde_json::json!({
+                "msgtype": "text",
+                "text": { "content": "hi wecom" },
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"errcode": 0})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = WeComAdapter::new_callback(
+            "bot-id".to_string(),
+            "secret".to_string(),
+            8454,
+            Some("token".to_string()),
+            None,
+        )
+        .with_webhook_base(server.uri());
+        seed_webhook_key(&adapter, "WEBHOOK-KEY-1").await;
+
+        adapter
+            .send(
+                &wecom_user("user-42"),
+                ChannelContent::Text("hi wecom".into()),
+            )
+            .await
+            .expect("wecom callback send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn wecom_callback_send_returns_err_when_no_webhook_key() {
+        // No `seed_webhook_key` call ⇒ webhook_key stays None ⇒ send()
+        // must error before any HTTP attempt.
+        let server = MockServer::start().await;
+        let adapter = WeComAdapter::new_callback(
+            "bot-id".to_string(),
+            "secret".to_string(),
+            8454,
+            None,
+            None,
+        )
+        .with_webhook_base(server.uri());
+
+        let err = adapter
+            .send(&wecom_user("user-42"), ChannelContent::Text("x".into()))
+            .await
+            .expect_err("wecom callback send must error when webhook_key is unset");
+        assert!(
+            err.to_string().to_lowercase().contains("no webhook key"),
+            "error should mention missing webhook_key, got: {err}"
+        );
+        let received = server
+            .received_requests()
+            .await
+            .expect("MockServer should expose received_requests");
+        assert!(
+            received.is_empty(),
+            "wecom must not hit the network when webhook_key is unset; got {} request(s)",
+            received.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn wecom_callback_send_returns_err_on_non_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = WeComAdapter::new_callback(
+            "bot-id".to_string(),
+            "secret".to_string(),
+            8454,
+            None,
+            None,
+        )
+        .with_webhook_base(server.uri());
+        seed_webhook_key(&adapter, "WEBHOOK-KEY-1").await;
+
+        let err = adapter
+            .send(&wecom_user("user-42"), ChannelContent::Text("x".into()))
+            .await
+            .expect_err("wecom callback send must propagate non-2xx as Err");
+        assert!(
+            err.to_string().contains("500"),
+            "error should mention status code, got: {err}"
+        );
     }
 }
