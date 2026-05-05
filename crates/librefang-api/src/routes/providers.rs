@@ -2276,7 +2276,10 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"].as_str().unwrap().contains("not found"));
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not found"));
     }
 
     #[test]
