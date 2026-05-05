@@ -126,8 +126,10 @@ pub(crate) fn resolve_lang(lang: Option<&axum::Extension<RequestLanguage>>) -> &
 pub struct AppState {
     pub kernel: Arc<LibreFangKernel>,
     pub started_at: Instant,
-    /// Channel bridge manager — held behind a Mutex so it can be swapped on hot-reload.
-    pub bridge_manager: tokio::sync::Mutex<Option<librefang_channels::bridge::BridgeManager>>,
+    /// Channel bridge manager — held in an `ArcSwap` for lock-free reads and atomic
+    /// swap on hot-reload. Write sites use `store(Arc::new(new_value))`; the stop
+    /// path uses `swap` + `Arc::try_unwrap` to obtain ownership for `stop()`.
+    pub bridge_manager: arc_swap::ArcSwap<Option<librefang_channels::bridge::BridgeManager>>,
     /// Live channel config — updated on every hot-reload so list_channels() reflects reality.
     pub channels_config: tokio::sync::RwLock<librefang_types::config::ChannelsConfig>,
     /// Notify handle to trigger graceful HTTP server shutdown from the API.

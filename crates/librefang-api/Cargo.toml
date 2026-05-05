@@ -22,6 +22,7 @@ librefang-migrate = { path = "../librefang-migrate" }
 librefang-telemetry = { path = "../librefang-telemetry" }
 librefang-http = { path = "../librefang-http" }
 anyhow = { workspace = true }
+arc-swap = { workspace = true }
 dashmap = { workspace = true }
 portable-pty = { workspace = true }
 tokio = { workspace = true }

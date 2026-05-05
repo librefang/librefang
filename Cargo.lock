@@ -4122,6 +4122,7 @@ name = "librefang-api"
 version = "2026.5.2-beta8"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "argon2",
  "async-trait",
  "axum",
@@ -4704,6 +4705,7 @@ dependencies = [
 name = "librefang-testing"
 version = "2026.5.2-beta8"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "axum",
  "dashmap",

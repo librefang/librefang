@@ -6330,21 +6330,21 @@ pub async fn push_message(
         );
     }
 
-    // Delegate to the bridge manager if available, otherwise use kernel directly
+    // Delegate to the bridge manager if available, otherwise use kernel directly.
+    // The ArcSwap guard must not be held across an `.await`, so we load it,
+    // clone the Arc, drop the guard, then drive the async call.
     let thread_id = req.thread_id.as_deref();
-    let result = {
-        let bridge = state.bridge_manager.lock().await;
-        if let Some(ref bm) = *bridge {
-            bm.push_message(&req.channel, &req.recipient, &req.message, thread_id)
-                .await
-        } else {
-            // No bridge manager — fall back to kernel's channel adapter registry
-            state
-                .kernel
-                .send_channel_message(&req.channel, &req.recipient, &req.message, thread_id, None)
-                .await
-                .map_err(|e| e.to_string())
-        }
+    let bridge_arc = state.bridge_manager.load_full();
+    let result = if let Some(ref bm) = *bridge_arc {
+        bm.push_message(&req.channel, &req.recipient, &req.message, thread_id)
+            .await
+    } else {
+        // No bridge manager — fall back to kernel's channel adapter registry
+        state
+            .kernel
+            .send_channel_message(&req.channel, &req.recipient, &req.message, thread_id, None)
+            .await
+            .map_err(|e| e.to_string())
     };
 
     match result {
@@ -7225,7 +7225,7 @@ mod monitoring_tests {
         let state = Arc::new(AppState {
             kernel,
             started_at: std::time::Instant::now(),
-            bridge_manager: tokio::sync::Mutex::new(None),
+            bridge_manager: arc_swap::ArcSwap::new(std::sync::Arc::new(None)),
             channels_config: tokio::sync::RwLock::new(Default::default()),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             clawhub_cache: dashmap::DashMap::new(),
