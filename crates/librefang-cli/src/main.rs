@@ -2632,7 +2632,7 @@ fn cmd_init_upgrade() {
     let existing_raw = match std::fs::read_to_string(&config_path) {
         Ok(s) => s,
         Err(e) => {
-            ui::error(&format!("Failed to read config.toml: {e}"));
+            p.finish_with_failure(&format!("Upgrade aborted: failed to read config.toml: {e}"));
             std::process::exit(1);
         }
     };
@@ -2640,7 +2640,9 @@ fn cmd_init_upgrade() {
     let existing: toml::Value = match toml::from_str(&existing_raw) {
         Ok(v) => v,
         Err(e) => {
-            ui::error(&format!("Failed to parse config.toml: {e}"));
+            p.finish_with_failure(&format!(
+                "Upgrade aborted: failed to parse config.toml: {e}"
+            ));
             ui::hint(&format!(
                 "Your original config was saved to backups/{backup_name}"
             ));
@@ -2653,7 +2655,9 @@ fn cmd_init_upgrade() {
     let defaults: toml::Value = match toml::from_str(&default_config_str) {
         Ok(v) => v,
         Err(e) => {
-            ui::error(&format!("Failed to parse default config template: {e}"));
+            p.finish_with_failure(&format!(
+                "Upgrade aborted: failed to parse default config template: {e}"
+            ));
             std::process::exit(1);
         }
     };
@@ -2714,7 +2718,7 @@ fn cmd_init_upgrade() {
         }
 
         if let Err(e) = std::fs::write(&config_path, &content) {
-            ui::error(&format!("Failed to write config: {e}"));
+            p.finish_with_failure(&format!("Upgrade aborted: failed to write config: {e}"));
             ui::hint(&format!(
                 "Your original config was saved to backups/{backup_name}"
             ));
@@ -6957,7 +6961,6 @@ fn cmd_migrate(args: MigrateArgs) {
     };
 
     let mut sp = progress::auto("Running migration", None);
-    sp.tick(1);
     match librefang_migrate::run_migration(&options) {
         Ok(report) => {
             sp.finish("Migration complete");
@@ -6974,7 +6977,7 @@ fn cmd_migrate(args: MigrateArgs) {
             }
         }
         Err(e) => {
-            sp.finish(&format!("Migration failed: {e}"));
+            sp.finish_with_failure(&format!("Migration failed: {e}"));
             std::process::exit(1);
         }
     }
@@ -7087,7 +7090,7 @@ fn cmd_skill_install(source: &str, hand: Option<&str>) {
                 }
             }
             Err(e) => {
-                sp.finish(&format!("Failed to install skill: {e}"));
+                sp.finish_with_failure(&format!("Failed to install skill: {e}"));
                 std::process::exit(1);
             }
         }
@@ -7350,7 +7353,7 @@ fn cmd_skill_publish(
             }),
         )
         .unwrap_or_else(|e| {
-            sp.finish(&format!("Publish failed: {e}"));
+            sp.finish_with_failure(&format!("Publish failed: {e}"));
             std::process::exit(1);
         });
 
