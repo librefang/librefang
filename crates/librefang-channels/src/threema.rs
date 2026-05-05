@@ -442,12 +442,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let adapter = ThreemaAdapter::new(
-            "GATEWAY1".to_string(),
-            "top-sec".to_string(),
-            0,
-        )
-        .with_base_url(server.uri());
+        let adapter = ThreemaAdapter::new("GATEWAY1".to_string(), "top-sec".to_string(), 0)
+            .with_base_url(server.uri());
         adapter
             .send(
                 &threema_user("ABCDEFGH"),
@@ -467,12 +463,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let adapter = ThreemaAdapter::new(
-            "*MYGATEW".to_string(),
-            "bad-sec".to_string(),
-            0,
-        )
-        .with_base_url(server.uri());
+        let adapter = ThreemaAdapter::new("*MYGATEW".to_string(), "bad-sec".to_string(), 0)
+            .with_base_url(server.uri());
         let err = adapter
             .send(&threema_user("OTHERID0"), ChannelContent::Text("x".into()))
             .await

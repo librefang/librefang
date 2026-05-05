@@ -675,7 +675,7 @@ mod tests {
 
     #[tokio::test]
     async fn mumble_send_writes_framed_text_message_packet_to_socket() {
-        use tokio::io::{AsyncReadExt as _};
+        use tokio::io::AsyncReadExt as _;
         use tokio::net::{TcpListener, TcpStream};
         use tokio::sync::oneshot;
 
@@ -690,9 +690,7 @@ mod tests {
                 return;
             }
             let pkt_type = u16::from_be_bytes([header[0], header[1]]);
-            let pkt_len =
-                u32::from_be_bytes([header[2], header[3], header[4], header[5]])
-                    as usize;
+            let pkt_len = u32::from_be_bytes([header[2], header[3], header[4], header[5]]) as usize;
             let mut body = vec![0u8; pkt_len];
             if s.read_exact(&mut body).await.is_err() {
                 return;

@@ -567,8 +567,7 @@ mod tests {
 
     #[tokio::test]
     async fn nostr_send_publishes_kind4_event_envelope() {
-        let recipient_pubkey =
-            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let recipient_pubkey = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let (url, captured) = start_capture_ws_server().await;
         let adapter = NostrAdapter::new(TEST_PRIVKEY.to_string(), vec![url]);
 

@@ -98,29 +98,29 @@ pub async fn list_peers(
     // and lazily initialized when the OFP peer node starts. Read it live on every
     // request — caching at boot would return a stale (or empty) snapshot if the
     // OFP node initialized after AppState was constructed (#3644).
-    let all: Vec<serde_json::Value> =
-        if let Some(peer_registry) = state.kernel.peer_registry_ref() {
-            peer_registry
-                .all_peers()
-                .iter()
-                .map(|p| {
-                    serde_json::json!({
-                        "node_id": p.node_id,
-                        "node_name": p.node_name,
-                        "address": p.address.to_string(),
-                        "state": format!("{:?}", p.state),
-                        "agents": p.agents.iter().map(|a| serde_json::json!({
-                            "id": a.id,
-                            "name": a.name,
-                        })).collect::<Vec<_>>(),
-                        "connected_at": p.connected_at.to_rfc3339(),
-                        "protocol_version": p.protocol_version,
-                    })
+    let all: Vec<serde_json::Value> = if let Some(peer_registry) = state.kernel.peer_registry_ref()
+    {
+        peer_registry
+            .all_peers()
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "node_id": p.node_id,
+                    "node_name": p.node_name,
+                    "address": p.address.to_string(),
+                    "state": format!("{:?}", p.state),
+                    "agents": p.agents.iter().map(|a| serde_json::json!({
+                        "id": a.id,
+                        "name": a.name,
+                    })).collect::<Vec<_>>(),
+                    "connected_at": p.connected_at.to_rfc3339(),
+                    "protocol_version": p.protocol_version,
                 })
-                .collect()
-        } else {
-            Vec::new()
-        };
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     // Pagination (#3639): apply `?offset=&limit=` with a server-side cap of
     // PAGINATION_MAX_LIMIT. Backward-compatible — when both query params are
     // absent the full list is still returned.

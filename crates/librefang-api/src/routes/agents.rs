@@ -189,8 +189,8 @@ use axum::response::IntoResponse;
 use axum::Json;
 use dashmap::DashMap;
 use librefang_channels::types::SenderContext;
-use librefang_kernel::LibreFangKernel;
 use librefang_kernel::kernel_handle::prelude::*;
+use librefang_kernel::LibreFangKernel;
 use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest};
 use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
@@ -910,7 +910,7 @@ pub async fn list_agents(
         }
     }
     let catalog_guard = state.kernel.model_catalog_ref().load();
-    let catalog: Option<&librefang_runtime::model_catalog::ModelCatalog> = Some(&catalog_guard);
+    let catalog: Option<&librefang_kernel::model_catalog::ModelCatalog> = Some(&catalog_guard);
     let dm = {
         let dm_override = state
             .kernel

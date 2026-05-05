@@ -745,11 +745,7 @@ mod tests {
     }
 
     fn revolt_with_uri(token: &str, uri: String) -> RevoltAdapter {
-        RevoltAdapter::with_urls(
-            token.to_string(),
-            uri,
-            "wss://revolt.invalid".to_string(),
-        )
+        RevoltAdapter::with_urls(token.to_string(), uri, "wss://revolt.invalid".to_string())
     }
 
     #[tokio::test]
@@ -759,12 +755,10 @@ mod tests {
             .and(path("/channels/CHAN1/messages"))
             .and(header("x-bot-token", "bot-tok"))
             .and(body_json(serde_json::json!({"content": "hello librefang"})))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "_id": "MSG1",
-                    "channel": "CHAN1",
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "_id": "MSG1",
+                "channel": "CHAN1",
+            })))
             .expect(1)
             .mount(&server)
             .await;

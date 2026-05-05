@@ -712,43 +712,40 @@ pub async fn list_plugin_registries(
 
     let mut results = Vec::new();
     for reg in &registries {
-        let plugins = match librefang_kernel::plugin_manager::list_registry_plugins(
-            &reg.github_repo,
-        )
-        .await
-        {
-            Ok(entries) => entries
-                .into_iter()
-                .map(|e| {
-                    // `name` is the registry directory name on GitHub —
-                    // it's the install identifier the dashboard sends back
-                    // to POST /api/plugins/install. Localized labels go on
-                    // `display_name`; substituting them into `name` would
-                    // make the install URL fetch a non-existent directory
-                    // (the original report: 上下文衰减 → 404).
-                    let (display_name, description) =
-                        resolve_plugin_i18n(lang, &e.name, &e.description, &e.i18n);
-                    serde_json::json!({
-                        "name": e.name,
-                        "display_name": display_name,
-                        "installed": installed_names.contains(&e.name),
-                        "version": e.version,
-                        "description": description,
-                        "author": e.author,
-                        "hooks": e.hooks,
+        let plugins =
+            match librefang_kernel::plugin_manager::list_registry_plugins(&reg.github_repo).await {
+                Ok(entries) => entries
+                    .into_iter()
+                    .map(|e| {
+                        // `name` is the registry directory name on GitHub —
+                        // it's the install identifier the dashboard sends back
+                        // to POST /api/plugins/install. Localized labels go on
+                        // `display_name`; substituting them into `name` would
+                        // make the install URL fetch a non-existent directory
+                        // (the original report: 上下文衰减 → 404).
+                        let (display_name, description) =
+                            resolve_plugin_i18n(lang, &e.name, &e.description, &e.i18n);
+                        serde_json::json!({
+                            "name": e.name,
+                            "display_name": display_name,
+                            "installed": installed_names.contains(&e.name),
+                            "version": e.version,
+                            "description": description,
+                            "author": e.author,
+                            "hooks": e.hooks,
+                        })
                     })
-                })
-                .collect::<Vec<_>>(),
-            Err(e) => {
-                results.push(serde_json::json!({
-                    "name": reg.name,
-                    "github_repo": reg.github_repo,
-                    "error": e,
-                    "plugins": [],
-                }));
-                continue;
-            }
-        };
+                    .collect::<Vec<_>>(),
+                Err(e) => {
+                    results.push(serde_json::json!({
+                        "name": reg.name,
+                        "github_repo": reg.github_repo,
+                        "error": e,
+                        "plugins": [],
+                    }));
+                    continue;
+                }
+            };
         results.push(serde_json::json!({
             "name": reg.name,
             "github_repo": reg.github_repo,

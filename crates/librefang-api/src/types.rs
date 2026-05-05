@@ -541,7 +541,10 @@ impl PaginationQuery {
             return (items, total, 0, None);
         }
         let offset = self.offset.unwrap_or(0).min(total);
-        let limit = self.limit.unwrap_or(PAGINATION_MAX_LIMIT).min(PAGINATION_MAX_LIMIT);
+        let limit = self
+            .limit
+            .unwrap_or(PAGINATION_MAX_LIMIT)
+            .min(PAGINATION_MAX_LIMIT);
         let end = (offset + limit).min(total);
         let page: Vec<T> = items.into_iter().skip(offset).take(end - offset).collect();
         (page, total, offset, Some(limit))

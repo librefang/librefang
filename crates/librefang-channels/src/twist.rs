@@ -665,19 +665,13 @@ mod tests {
                 "thread_id": 4242,
                 "content": "hello twist",
             })))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 99})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 99})))
             .expect(1)
             .mount(&server)
             .await;
 
-        let adapter = TwistAdapter::new(
-            "twist-tok".to_string(),
-            "ws-1".to_string(),
-            vec![],
-        )
-        .with_base_url(server.uri());
+        let adapter = TwistAdapter::new("twist-tok".to_string(), "ws-1".to_string(), vec![])
+            .with_base_url(server.uri());
         adapter
             .send(
                 &twist_user("4242"),
@@ -697,12 +691,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let adapter = TwistAdapter::new(
-            "bad-tok".to_string(),
-            "ws-1".to_string(),
-            vec![],
-        )
-        .with_base_url(server.uri());
+        let adapter = TwistAdapter::new("bad-tok".to_string(), "ws-1".to_string(), vec![])
+            .with_base_url(server.uri());
         let err = adapter
             .send(&twist_user("123"), ChannelContent::Text("x".into()))
             .await

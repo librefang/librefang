@@ -684,19 +684,13 @@ mod tests {
                 "msg_id": "MSG-1",
                 "msg_type": 0,
             })))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "ok"})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "ok"})))
             .expect(1)
             .mount(&server)
             .await;
 
-        let adapter = QqAdapter::new(
-            "app-1".to_string(),
-            "secret-1".to_string(),
-            vec![],
-        )
-        .with_base_url(server.uri());
+        let adapter = QqAdapter::new("app-1".to_string(), "secret-1".to_string(), vec![])
+            .with_base_url(server.uri());
         seed_token(&adapter, "access-token-xyz").await;
 
         adapter
@@ -715,12 +709,8 @@ mod tests {
         // returns 404 and the test would still pass because send()
         // swallows errors. So instead we assert that no request is
         // observed by checking `received_requests` is empty.
-        let adapter = QqAdapter::new(
-            "app-1".to_string(),
-            "secret-1".to_string(),
-            vec![],
-        )
-        .with_base_url(server.uri());
+        let adapter = QqAdapter::new("app-1".to_string(), "secret-1".to_string(), vec![])
+            .with_base_url(server.uri());
         seed_token(&adapter, "access-token").await;
 
         adapter

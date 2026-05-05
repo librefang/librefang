@@ -663,7 +663,10 @@ mod tests {
         let adapter = MqttAdapter::new(test_config());
         // No `start()` ⇒ `self.client` stays None.
         let err = adapter
-            .send(&mqtt_user("librefang/out"), ChannelContent::Text("x".into()))
+            .send(
+                &mqtt_user("librefang/out"),
+                ChannelContent::Text("x".into()),
+            )
             .await
             .expect_err("mqtt send must error when client is unset");
         assert!(
@@ -746,28 +749,17 @@ mod tests {
                     8 => {
                         // SUBSCRIBE — first 2 bytes are the packet ID
                         let pkt_id = [body[0], body[1]];
-                        let _ = w
-                            .write_all(&[0x90, 0x03, pkt_id[0], pkt_id[1], 0x00])
-                            .await;
+                        let _ = w.write_all(&[0x90, 0x03, pkt_id[0], pkt_id[1], 0x00]).await;
                     }
                     3 => {
                         // PUBLISH — variable header: topic_len (BE u16) +
                         // topic + (packet_id if qos > 0). Payload fills
                         // the rest of the body.
-                        let topic_len =
-                            u16::from_be_bytes([body[0], body[1]]) as usize;
-                        let topic = String::from_utf8_lossy(
-                            &body[2..2 + topic_len],
-                        )
-                        .to_string();
+                        let topic_len = u16::from_be_bytes([body[0], body[1]]) as usize;
+                        let topic = String::from_utf8_lossy(&body[2..2 + topic_len]).to_string();
                         let payload_start = if qos > 0 {
-                            let pkt_id = [
-                                body[2 + topic_len],
-                                body[3 + topic_len],
-                            ];
-                            let _ = w
-                                .write_all(&[0x40, 0x02, pkt_id[0], pkt_id[1]])
-                                .await;
+                            let pkt_id = [body[2 + topic_len], body[3 + topic_len]];
+                            let _ = w.write_all(&[0x40, 0x02, pkt_id[0], pkt_id[1]]).await;
                             4 + topic_len
                         } else {
                             2 + topic_len
@@ -813,8 +805,7 @@ mod tests {
             .expect("oneshot must not be dropped");
         assert_eq!(topic, "librefang/out");
         assert_eq!(
-            payload,
-            b"hi mqtt",
+            payload, b"hi mqtt",
             "PUBLISH payload must round-trip the text body"
         );
 

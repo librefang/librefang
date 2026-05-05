@@ -500,11 +500,9 @@ mod tests {
                     "msg": "hi from librefang",
                 }
             })))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "success": true,
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+            })))
             .expect(1)
             .mount(&server)
             .await;

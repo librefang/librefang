@@ -169,11 +169,11 @@ impl EmailAdapter {
             // Test-only path: no TLS, no AUTH. Lets `send()` talk to a
             // hand-rolled in-process SMTP listener that doesn't speak
             // TLS. Production paths leave `smtp_use_plain == false`.
-            return Ok(AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(
-                &self.smtp_host,
-            )
-            .port(self.smtp_port)
-            .build());
+            return Ok(
+                AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&self.smtp_host)
+                    .port(self.smtp_port)
+                    .build(),
+            );
         }
 
         let creds = Credentials::new(self.username.clone(), self.password.as_str().to_string());

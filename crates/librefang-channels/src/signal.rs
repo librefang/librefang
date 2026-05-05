@@ -848,11 +848,9 @@ mod tests {
                 "number": "+15555550100",
                 "recipients": ["+15555550199"],
             })))
-            .respond_with(
-                ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                    "timestamp": 0,
-                })),
-            )
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "timestamp": 0,
+            })))
             .expect(1)
             .mount(&server)
             .await;
@@ -880,11 +878,9 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v2/send"))
             .and(header("authorization", "Bearer api-key-xyz"))
-            .respond_with(
-                ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                    "timestamp": 0,
-                })),
-            )
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "timestamp": 0,
+            })))
             .expect(1)
             .mount(&server)
             .await;

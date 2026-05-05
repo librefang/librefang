@@ -552,8 +552,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let adapter =
-            LinkedInAdapter::new("access-tok".to_string(), "42".to_string()).with_base_url(server.uri());
+        let adapter = LinkedInAdapter::new("access-tok".to_string(), "42".to_string())
+            .with_base_url(server.uri());
         adapter
             .send(
                 &linkedin_user("urn:li:person:abc"),
@@ -573,8 +573,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let adapter =
-            LinkedInAdapter::new("access-tok".to_string(), "42".to_string()).with_base_url(server.uri());
+        let adapter = LinkedInAdapter::new("access-tok".to_string(), "42".to_string())
+            .with_base_url(server.uri());
         let err = adapter
             .send(
                 &linkedin_user("urn:li:person:xyz"),

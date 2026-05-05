@@ -588,8 +588,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let adapter =
-            WebexAdapter::new("bot-tok".to_string(), vec![]).with_base_url(server.uri());
+        let adapter = WebexAdapter::new("bot-tok".to_string(), vec![]).with_base_url(server.uri());
         adapter
             .send(
                 &webex_user("ROOM1"),
@@ -609,8 +608,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let adapter =
-            WebexAdapter::new("bad-tok".to_string(), vec![]).with_base_url(server.uri());
+        let adapter = WebexAdapter::new("bad-tok".to_string(), vec![]).with_base_url(server.uri());
         let err = adapter
             .send(&webex_user("ROOM_X"), ChannelContent::Text("nope".into()))
             .await

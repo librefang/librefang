@@ -190,10 +190,7 @@ impl WhatsAppAdapter {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         use reqwest::multipart;
 
-        let url = format!(
-            "{}/{}/media",
-            self.cloud_api_base, self.phone_number_id
-        );
+        let url = format!("{}/{}/media", self.cloud_api_base, self.phone_number_id);
 
         // Build multipart form: file field + messaging_product field
         let file_part = multipart::Part::bytes(audio.to_vec())
@@ -246,10 +243,7 @@ impl WhatsAppAdapter {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let media_id = self.api_upload_media(audio, mime_type).await?;
 
-        let url = format!(
-            "{}/{}/messages",
-            self.cloud_api_base, self.phone_number_id
-        );
+        let url = format!("{}/{}/messages", self.cloud_api_base, self.phone_number_id);
         let body = serde_json::json!({
             "messaging_product": "whatsapp",
             "to": to,
@@ -356,10 +350,7 @@ impl WhatsAppAdapter {
         to: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!(
-            "{}/{}/messages",
-            self.cloud_api_base, self.phone_number_id
-        );
+        let url = format!("{}/{}/messages", self.cloud_api_base, self.phone_number_id);
 
         // Split long messages
         let chunks = crate::types::split_message(text, MAX_MESSAGE_LEN);
@@ -396,10 +387,7 @@ impl WhatsAppAdapter {
         &self,
         message_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!(
-            "{}/{}/messages",
-            self.cloud_api_base, self.phone_number_id
-        );
+        let url = format!("{}/{}/messages", self.cloud_api_base, self.phone_number_id);
 
         let body = serde_json::json!({
             "messaging_product": "whatsapp",
@@ -545,10 +533,7 @@ impl ChannelAdapter for WhatsAppAdapter {
                     "type": "audio",
                     "audio": { "link": url }
                 });
-                let api_url = format!(
-                    "{}/{}/messages",
-                    self.cloud_api_base, self.phone_number_id
-                );
+                let api_url = format!("{}/{}/messages", self.cloud_api_base, self.phone_number_id);
                 let resp = self
                     .client
                     .post(&api_url)
@@ -573,10 +558,7 @@ impl ChannelAdapter for WhatsAppAdapter {
                         "caption": caption.unwrap_or_default()
                     }
                 });
-                let api_url = format!(
-                    "{}/{}/messages",
-                    self.cloud_api_base, self.phone_number_id
-                );
+                let api_url = format!("{}/{}/messages", self.cloud_api_base, self.phone_number_id);
                 self.client
                     .post(&api_url)
                     .bearer_auth(&*self.access_token)
@@ -594,10 +576,7 @@ impl ChannelAdapter for WhatsAppAdapter {
                         "filename": filename
                     }
                 });
-                let api_url = format!(
-                    "{}/{}/messages",
-                    self.cloud_api_base, self.phone_number_id
-                );
+                let api_url = format!("{}/{}/messages", self.cloud_api_base, self.phone_number_id);
                 self.client
                     .post(&api_url)
                     .bearer_auth(&*self.access_token)
@@ -615,10 +594,7 @@ impl ChannelAdapter for WhatsAppAdapter {
                         "longitude": lon
                     }
                 });
-                let api_url = format!(
-                    "{}/{}/messages",
-                    self.cloud_api_base, self.phone_number_id
-                );
+                let api_url = format!("{}/{}/messages", self.cloud_api_base, self.phone_number_id);
                 self.client
                     .post(&api_url)
                     .bearer_auth(&*self.access_token)
@@ -814,12 +790,10 @@ mod tests {
                 "type": "text",
                 "text": { "body": "hi whatsapp" }
             })))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "messaging_product": "whatsapp",
-                    "messages": [{ "id": "wamid.123" }],
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "messaging_product": "whatsapp",
+                "messages": [{ "id": "wamid.123" }],
+            })))
             .expect(1)
             .mount(&server)
             .await;

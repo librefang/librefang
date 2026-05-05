@@ -2509,7 +2509,7 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
     // can use this snapshot directly instead of polling /api/agents separately.
     let agents: Vec<serde_json::Value> = {
         let catalog_guard = state.kernel.model_catalog_ref().load();
-        let catalog: Option<&librefang_runtime::model_catalog::ModelCatalog> = Some(&catalog_guard);
+        let catalog: Option<&librefang_kernel::model_catalog::ModelCatalog> = Some(&catalog_guard);
         let dm = {
             let dm_override = state
                 .kernel

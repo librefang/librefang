@@ -327,8 +327,8 @@ use librefang_channels::wechat::WeChatAdapter;
 use librefang_channels::wecom::WeComAdapter;
 
 use async_trait::async_trait;
-use librefang_kernel::LibreFangKernel;
 use librefang_kernel::llm_driver::StreamEvent;
+use librefang_kernel::LibreFangKernel;
 use librefang_types::agent::AgentId;
 use std::sync::Arc;
 #[cfg(feature = "channel-telegram")]
@@ -459,8 +459,7 @@ where
                             debug!("Streaming bridge: filtered tool-use-adjacent text");
                         } else if looks_like_tool_call(&iter_buf) {
                             warn!("Streaming bridge: filtered leaked tool call text at ContentComplete (len={})", iter_buf.len());
-                        } else if librefang_kernel::silent_response::is_silent_response(&iter_buf)
-                        {
+                        } else if librefang_kernel::silent_response::is_silent_response(&iter_buf) {
                             debug!(
                                 "Streaming bridge: suppressed NO_REPLY sentinel at ContentComplete"
                             );

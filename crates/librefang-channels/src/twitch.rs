@@ -322,8 +322,7 @@ impl ChannelAdapter for TwitchAdapter {
 
         // Connect briefly to send the message
         // In production, a persistent write connection would be maintained.
-        let stream =
-            TcpStream::connect((self.irc_host.as_str(), self.irc_port)).await?;
+        let stream = TcpStream::connect((self.irc_host.as_str(), self.irc_port)).await?;
         let (_reader, mut writer) = stream.into_split();
 
         writer.write_all(self.pass_string().as_bytes()).await?;
@@ -479,12 +478,12 @@ mod tests {
             .await
             .expect("listener must capture frames within 5s")
             .expect("oneshot must not be dropped");
-        let text = String::from_utf8(bytes)
-            .expect("captured bytes must be valid utf-8 (IRC is ASCII)");
+        let text =
+            String::from_utf8(bytes).expect("captured bytes must be valid utf-8 (IRC is ASCII)");
 
-        let pass_idx = text.find("PASS oauth:abc123\r\n").expect(
-            "expected PASS frame with the configured oauth token, got: \n---\n{text}\n---",
-        );
+        let pass_idx = text
+            .find("PASS oauth:abc123\r\n")
+            .expect("expected PASS frame with the configured oauth token, got: \n---\n{text}\n---");
         let nick_idx = text
             .find("NICK librefang_bot\r\n")
             .expect("expected NICK frame with the configured nick");

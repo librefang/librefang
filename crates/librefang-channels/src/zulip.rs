@@ -593,12 +593,10 @@ mod tests {
             .and(body_string_contains("to=engineering"))
             .and(body_string_contains("topic=LibreFang"))
             .and(body_string_contains("content=hello+zulip"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "result": "success",
-                    "id": 99,
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": "success",
+                "id": 99,
+            })))
             .expect(1)
             .mount(&server)
             .await;

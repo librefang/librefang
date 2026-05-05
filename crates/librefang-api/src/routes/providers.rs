@@ -438,7 +438,7 @@ fn attach_probe_result(
         entry["discovered_models"] = serde_json::json!(&probe.discovered_models);
         // Pre-compute the merged info outside the RCU closure: the closure
         // may re-run on CAS retry (#3384) so all allocation happens here once.
-        let info: Vec<librefang_runtime::provider_health::DiscoveredModelInfo> =
+        let info: Vec<librefang_kernel::provider_health::DiscoveredModelInfo> =
             if probe.discovered_model_info.is_empty() {
                 probe
                     .discovered_models
@@ -1573,22 +1573,20 @@ pub async fn set_provider_url(
     // Merge discovered models into catalog
     if !probe.discovered_models.is_empty() {
         // Pre-compute info outside the RCU closure (closure may retry on CAS).
-        let info: Vec<librefang_runtime::provider_health::DiscoveredModelInfo> =
+        let info: Vec<librefang_kernel::provider_health::DiscoveredModelInfo> =
             if probe.discovered_model_info.is_empty() {
                 probe
                     .discovered_models
                     .iter()
-                    .map(
-                        |n| librefang_kernel::provider_health::DiscoveredModelInfo {
-                            name: n.clone(),
-                            parameter_size: None,
-                            quantization_level: None,
-                            family: None,
-                            families: None,
-                            size: None,
-                            capabilities: vec![],
-                        },
-                    )
+                    .map(|n| librefang_kernel::provider_health::DiscoveredModelInfo {
+                        name: n.clone(),
+                        parameter_size: None,
+                        quantization_level: None,
+                        family: None,
+                        families: None,
+                        size: None,
+                        capabilities: vec![],
+                    })
                     .collect()
             } else {
                 probe.discovered_model_info.clone()
