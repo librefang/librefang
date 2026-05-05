@@ -15,12 +15,18 @@
 set -eu
 
 # 1. Format check, staged Rust files only.
+#
+# `cargo fmt --check -- <paths>` silently ignores the path arguments and
+# rescans the whole workspace, so the hook used to fail on pre-existing
+# fmt drift in files the committer never touched. Invoke `rustfmt`
+# directly so the path scope actually sticks. Edition is hardcoded to
+# match `workspace.package.edition` in the root Cargo.toml.
 STAGED_RS=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs' || true)
 if [ -n "$STAGED_RS" ]; then
     # shellcheck disable=SC2086 # intentional word splitting on file list
-    if ! cargo fmt --check -- $STAGED_RS >/dev/null 2>&1; then
+    if ! rustfmt --check --edition 2021 $STAGED_RS >/dev/null 2>&1; then
         echo "Error: staged Rust files are not rustfmt-clean."
-        echo "Run: cargo fmt -- $STAGED_RS"
+        echo "Run: rustfmt --edition 2021 $STAGED_RS"
         echo "Then re-stage and commit again."
         exit 1
     fi
