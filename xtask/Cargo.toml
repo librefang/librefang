@@ -17,7 +17,7 @@ sha2 = { workspace = true }
 # Kept xtask-local; not promoted to workspace.dependencies because no
 # production crate consumes it. Default features are disabled — we only need
 # the system probe, not disks/networks/processes.
-sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 librefang-migrate = { path = "../crates/librefang-migrate" }
 
 [lints]
