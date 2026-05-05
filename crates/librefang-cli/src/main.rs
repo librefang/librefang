@@ -2576,7 +2576,11 @@ fn cmd_init_upgrade() {
     ui::blank();
     ui::section("Upgrading LibreFang installation");
 
+    // Four upgrade steps: backup, registry sync, vault/git, config merge.
+    let mut p = progress::auto("Upgrading", Some(4));
+
     // 2. Backup existing config under backups/ (keep last 3)
+    p.set_message("Backing up config");
     let backups_dir = librefang_dir.join("backups");
     if let Err(e) = std::fs::create_dir_all(&backups_dir) {
         ui::error(&format!("Failed to create backups dir: {e}"));
@@ -2590,17 +2594,21 @@ fn cmd_init_upgrade() {
     }
     restrict_file_permissions(&backup_path);
     prune_old_config_backups(&backups_dir, 3);
+    p.tick(1);
     ui::success(&format!("Backed up config to backups/{backup_name}"));
 
     // 3. Sync registry (TTL=0 forces refresh regardless of last sync time)
-    ui::hint("Syncing registry...");
+    p.set_message("Syncing registry");
     if librefang_runtime::registry_sync::sync_registry(&librefang_dir, 0, "") {
+        p.tick(1);
         ui::success("Registry synced");
     } else {
+        p.tick(1);
         ui::hint("Registry sync failed (network issue?) — continuing with cached content");
     }
 
     // 4. Ensure data dir, vault, and git exist
+    p.set_message("Initialising vault/git");
     let data_dir = librefang_dir.join("data");
     if !data_dir.exists() {
         let _ = std::fs::create_dir_all(&data_dir);
@@ -2617,8 +2625,10 @@ fn cmd_init_upgrade() {
             }
         }
     }
+    p.tick(1);
 
     // 5. Merge new default config fields
+    p.set_message("Merging config fields");
     let existing_raw = match std::fs::read_to_string(&config_path) {
         Ok(s) => s,
         Err(e) => {
@@ -2716,6 +2726,8 @@ fn cmd_init_upgrade() {
             ui::kv("  +", key);
         }
     }
+    p.tick(1);
+    p.finish("Upgrade steps complete");
 
     // 6. Check for legacy ~/.openclaw installation
     if let Some(home) = dirs::home_dir() {
@@ -6944,8 +6956,11 @@ fn cmd_migrate(args: MigrateArgs) {
         dry_run: args.dry_run,
     };
 
+    let mut sp = progress::auto("Running migration", None);
+    sp.tick(1);
     match librefang_migrate::run_migration(&options) {
         Ok(report) => {
+            sp.finish("Migration complete");
             report.print_summary();
 
             // Save migration report
@@ -6959,7 +6974,7 @@ fn cmd_migrate(args: MigrateArgs) {
             }
         }
         Err(e) => {
-            eprintln!("Migration failed: {e}");
+            sp.finish(&format!("Migration failed: {e}"));
             std::process::exit(1);
         }
     }
@@ -7057,7 +7072,8 @@ fn cmd_skill_install(source: &str, hand: Option<&str>) {
         }
     } else {
         // Remote install from FangHub
-        println!("Installing {source} from FangHub...");
+        let mut sp = progress::auto(&format!("Installing {source}"), None);
+        sp.tick(1);
         let rt = tokio::runtime::Runtime::new().unwrap();
         let client = librefang_skills::marketplace::MarketplaceClient::new(
             librefang_skills::marketplace::MarketplaceConfig::default(),
@@ -7065,13 +7081,13 @@ fn cmd_skill_install(source: &str, hand: Option<&str>) {
         match rt.block_on(client.install(source, &skills_dir)) {
             Ok(version) => {
                 if let Some(h) = hand {
-                    println!("Installed {source} {version} to hand '{h}'");
+                    sp.finish(&format!("Installed {source} {version} to hand '{h}'"));
                 } else {
-                    println!("Installed {source} {version}");
+                    sp.finish(&format!("Installed {source} {version}"));
                 }
             }
             Err(e) => {
-                eprintln!("Failed to install skill: {e}");
+                sp.finish(&format!("Failed to install skill: {e}"));
                 std::process::exit(1);
             }
         }
@@ -7313,6 +7329,11 @@ fn cmd_skill_publish(
         packaged.manifest.skill.name, packaged.manifest.skill.version
     );
 
+    let mut sp = progress::auto(
+        &format!("Publishing {}@{tag}", packaged.manifest.skill.name),
+        None,
+    );
+    sp.tick(1);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let client = librefang_skills::marketplace::MarketplaceClient::new(
         librefang_skills::marketplace::MarketplaceConfig::default(),
@@ -7329,14 +7350,14 @@ fn cmd_skill_publish(
             }),
         )
         .unwrap_or_else(|e| {
-            eprintln!("Publish failed: {e}");
+            sp.finish(&format!("Publish failed: {e}"));
             std::process::exit(1);
         });
 
-    println!(
+    sp.finish(&format!(
         "Published {} to {}@{}",
         published.asset_name, published.repo, published.tag
-    );
+    ));
     if !published.html_url.is_empty() {
         println!("Release: {}", published.html_url);
     }

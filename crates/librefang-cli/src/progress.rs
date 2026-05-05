@@ -483,4 +483,33 @@ mod tests {
         assert_eq!(pb.current, 2);
         assert_eq!(pb.label, "renamed");
     }
+
+    /// In CI / pipe environments stderr is not a TTY. Verify that the
+    /// `auto()` path falls back to `LogReporter` by constructing one directly
+    /// and asserting the same observable behaviour — tick advances current,
+    /// finish emits without panic, and the None-total branch prints without
+    /// dividing by zero or overflowing.
+    #[test]
+    fn auto_non_tty_fallback_behaves_like_log_reporter() {
+        // Construct a LogReporter directly (same type auto() would pick on a
+        // non-TTY stderr) and drive it through the full ProgressReporter API.
+        let mut r = LogReporter::new("Installing skill", Some(3));
+        r.tick(1);
+        assert_eq!(r.current, 1);
+        r.set_message("Downloading");
+        assert_eq!(r.label, "Downloading");
+        r.tick(2);
+        assert_eq!(r.current, 3);
+        r.finish("Done");
+    }
+
+    #[test]
+    fn auto_non_tty_indeterminate_fallback() {
+        // None-total variant — covers the spinner-equivalent branch in LogReporter.
+        let mut r = LogReporter::new("Migrating", None);
+        r.tick(1);
+        r.tick(1);
+        assert_eq!(r.current, 2);
+        r.finish("Migration complete");
+    }
 }
