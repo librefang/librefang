@@ -489,6 +489,15 @@ jobs:
       # `live-smoke-${hashFiles}` key forced a cold compile (~15-20 min debug)
       # on every first run, eating most of the 25-min timeout.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install system deps for keyring/secret-service
+        # `librefang-cli` pulls `librefang-extensions`, which on Linux pulls
+        # `keyring` → `secret-service` → `libdbus-sys`; the latter's build
+        # script panics ("explicit panic") when `dbus-1.pc` is not on
+        # PKG_CONFIG_PATH, which fails `cargo build` opaquely. Mirrors the
+        # equivalent step in the OpenAPI Drift / Test Ubuntu jobs.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libsecret-1-dev pkg-config
       - name: Ensure dashboard build dir exists
         run: mkdir -p crates/librefang-api/static/react
       - name: Build daemon (debug)
