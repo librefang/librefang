@@ -80,10 +80,7 @@ pub async fn list_models(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let catalog = state
-        .kernel
-        .model_catalog_ref()
-        .load();
+    let catalog = state.kernel.model_catalog_ref().load();
     let provider_filter = params.get("provider").map(|s| s.to_lowercase());
     let tier_filter = params.get("tier").map(|s| s.to_lowercase());
     let available_only = params
@@ -306,10 +303,7 @@ pub async fn get_model(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let catalog = state
-        .kernel
-        .model_catalog_ref()
-        .load();
+    let catalog = state.kernel.model_catalog_ref().load();
     match catalog.find_model(&id) {
         Some(m) => {
             let available = catalog
@@ -352,10 +346,7 @@ pub async fn get_model_overrides(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let catalog = state
-        .kernel
-        .model_catalog_ref()
-        .load();
+    let catalog = state.kernel.model_catalog_ref().load();
     match catalog.get_overrides(&id) {
         Some(o) => (StatusCode::OK, Json(serde_json::to_value(o).unwrap())),
         None => (StatusCode::OK, Json(serde_json::json!({}))),
@@ -486,10 +477,7 @@ fn attach_probe_result(
 )]
 pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let provider_list: Vec<librefang_types::model_catalog::ProviderInfo> = {
-        let catalog = state
-            .kernel
-            .model_catalog_ref()
-            .load();
+        let catalog = state.kernel.model_catalog_ref().load();
         catalog.list_providers().to_vec()
     };
 
@@ -622,10 +610,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// Returns providers list for the dashboard snapshot endpoint.
 pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json::Value> {
     let provider_list: Vec<librefang_types::model_catalog::ProviderInfo> = {
-        let catalog = state
-            .kernel
-            .model_catalog_ref()
-            .load();
+        let catalog = state.kernel.model_catalog_ref().load();
         catalog.list_providers().to_vec()
     };
 
@@ -714,10 +699,7 @@ pub async fn get_provider(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     let (provider, models) = {
-        let catalog = state
-            .kernel
-            .model_catalog_ref()
-            .load();
+        let catalog = state.kernel.model_catalog_ref().load();
         match catalog.get_provider(&name) {
             Some(p) => {
                 let models: Vec<serde_json::Value> = catalog
@@ -987,10 +969,7 @@ pub async fn set_provider_key(
 
     // Look up env var from catalog; for unknown/custom providers derive one.
     let env_var = {
-        let catalog = state
-            .kernel
-            .model_catalog_ref()
-            .load();
+        let catalog = state.kernel.model_catalog_ref().load();
         catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
@@ -1055,7 +1034,8 @@ pub async fn set_provider_key(
         let guard = state
             .kernel
             .default_model_override_ref()
-            .load();
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
             Some(dm) => (dm.provider.clone(), dm.api_key_env.clone()),
             None => {
@@ -1075,10 +1055,7 @@ pub async fn set_provider_key(
     let switched = if !current_has_key && current_provider != name {
         // Find a default model for the newly-keyed provider
         let default_model = {
-            let catalog = state
-                .kernel
-                .model_catalog_ref()
-                .load();
+            let catalog = state.kernel.model_catalog_ref().load();
             catalog.default_model_for_provider(&name)
         };
         if let Some(model_id) = default_model {
@@ -1117,7 +1094,8 @@ pub async fn set_provider_key(
             let guard = state
                 .kernel
                 .default_model_override_ref()
-                .load();
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             match guard.as_ref() {
                 Some(dm) => dm.api_key_env != env_var,
                 None => state.kernel.config_ref().default_model.api_key_env != env_var,
@@ -1158,7 +1136,8 @@ pub async fn set_provider_key(
             let guard = state
                 .kernel
                 .default_model_override_ref()
-                .load();
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             guard
                 .clone()
                 .unwrap_or_else(|| state.kernel.config_ref().default_model.clone())
@@ -1187,10 +1166,7 @@ pub async fn delete_provider_key(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     let env_var = {
-        let catalog = state
-            .kernel
-            .model_catalog_ref()
-            .load();
+        let catalog = state.kernel.model_catalog_ref().load();
         catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
@@ -1244,10 +1220,7 @@ pub async fn test_provider(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     let (env_var, base_url, key_required) = {
-        let catalog = state
-            .kernel
-            .model_catalog_ref()
-            .load();
+        let catalog = state.kernel.model_catalog_ref().load();
         match catalog.get_provider(&name) {
             Some(p) => (p.api_key_env.clone(), p.base_url.clone(), p.key_required),
             None => {
@@ -1569,10 +1542,7 @@ pub async fn set_provider_url(
     // the listing request — without this, they return 401 even when the
     // backing model server is healthy.
     let probe_env_var = {
-        let catalog = state
-            .kernel
-            .model_catalog_ref()
-            .load();
+        let catalog = state.kernel.model_catalog_ref().load();
         catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
@@ -1667,10 +1637,7 @@ pub async fn set_default_provider(
 
     // Verify the provider exists in the catalog
     let (default_model, env_var) = {
-        let catalog = state
-            .kernel
-            .model_catalog_ref()
-            .load();
+        let catalog = state.kernel.model_catalog_ref().load();
         let provider = match catalog.get_provider(&name) {
             Some(p) => p.clone(),
             None => {
@@ -1705,10 +1672,7 @@ pub async fn set_default_provider(
 
     // Read old default before updating, so sync_default_model_agents knows what to migrate
     let old_provider = {
-        let guard = state
-            .kernel
-            .default_model_override_ref()
-            .load();
+        let guard = state.kernel.default_model_override_ref().load();
         match guard.as_ref() {
             Some(dm) => dm.provider.clone(),
             None => state.kernel.config_ref().default_model.provider.clone(),

@@ -930,7 +930,8 @@ async fn handle_text_message(
                         let dm_override = state
                             .kernel
                             .default_model_override_ref()
-                            .load();
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner());
                         crate::routes::agents::effective_default_model(
                             &state.kernel.config_ref().default_model,
                             dm_override.as_ref(),

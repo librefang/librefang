@@ -1795,10 +1795,7 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
     //     Carries `{ select?, number_select?, min?, max?, step?, placeholder? }`.
     //
     // Replaces a 245-line hand-authored schema (issue #3048 follow-up).
-    let catalog = state
-        .kernel
-        .model_catalog_ref()
-        .load();
+    let catalog = state.kernel.model_catalog_ref().load();
     let provider_options: Vec<String> = catalog
         .list_providers()
         .iter()
@@ -2512,13 +2509,13 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
     // can use this snapshot directly instead of polling /api/agents separately.
     let agents: Vec<serde_json::Value> = {
         let catalog_guard = state.kernel.model_catalog_ref().load();
-        let catalog: Option<&librefang_runtime::model_catalog::ModelCatalog> =
-            Some(&catalog_guard);
+        let catalog: Option<&librefang_runtime::model_catalog::ModelCatalog> = Some(&catalog_guard);
         let dm = {
             let dm_override = state
                 .kernel
                 .default_model_override_ref()
-                .load();
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             super::agents::effective_default_model(&cfg.default_model, dm_override.as_ref())
         };
         let mut agent_entries_visible: Vec<&std::sync::Arc<librefang_types::agent::AgentEntry>> =

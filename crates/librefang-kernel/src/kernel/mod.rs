@@ -1514,9 +1514,7 @@ impl LibreFangKernel {
     pub fn spawn_key_validation(self: Arc<Self>) {
         use librefang_types::model_catalog::AuthStatus;
 
-        let to_validate = self
-            .model_catalog.load()
-            .providers_needing_validation();
+        let to_validate = self.model_catalog.load().providers_needing_validation();
 
         if to_validate.is_empty() {
             return;
@@ -4480,10 +4478,7 @@ system_prompt = "You are a helpful assistant."
         for entry in kernel.registry.list() {
             if let Some(ref routing_config) = entry.manifest.routing {
                 let router = ModelRouter::new(routing_config.clone());
-                for warning in router.validate_models(
-                    &kernel
-                        .model_catalog.load(),
-                ) {
+                for warning in router.validate_models(&kernel.model_catalog.load()) {
                     warn!(agent = %entry.name, "{warning}");
                 }
             }
@@ -4494,10 +4489,7 @@ system_prompt = "You are a helpful assistant."
         // warnings at boot, not silently at first dispatch.
         if let Some(ref routing_config) = kernel.config.load().default_routing {
             let router = ModelRouter::new(routing_config.clone());
-            for warning in router.validate_models(
-                &kernel
-                    .model_catalog.load(),
-            ) {
+            for warning in router.validate_models(&kernel.model_catalog.load()) {
                 warn!(target: "librefang_kernel::default_routing", "{warning}");
             }
         }
@@ -7157,8 +7149,7 @@ system_prompt = "You are a helpful assistant."
                     // (mirrors non-streaming path — prevents TOCTOU race)
                     let model = &manifest.model.model;
                     let cost = MeteringEngine::estimate_cost_with_catalog(
-                        &kernel_clone
-                            .model_catalog.load(),
+                        &kernel_clone.model_catalog.load(),
                         model,
                         result.total_usage.input_tokens,
                         result.total_usage.output_tokens,
@@ -8531,7 +8522,8 @@ system_prompt = "You are a helpful assistant."
             // If not, keep the current (default) provider instead of switching
             // to one the user hasn't configured.
             let mut use_routed = true;
-            let cat = self.model_catalog.load(); {
+            let cat = self.model_catalog.load();
+            {
                 if let Some(entry) = cat.find_model(&routed_model) {
                     if entry.provider != manifest.model.provider {
                         let key_env = cfg.resolve_api_key_env(&entry.provider);
@@ -8555,7 +8547,8 @@ system_prompt = "You are a helpful assistant."
                     "Model routing applied"
                 );
                 manifest.model.model = routed_model.clone();
-                let cat = self.model_catalog.load(); {
+                let cat = self.model_catalog.load();
+                {
                     if let Some(entry) = cat.find_model(&routed_model) {
                         if entry.provider != manifest.model.provider {
                             manifest.model.provider = entry.provider.clone();
@@ -10639,13 +10632,10 @@ system_prompt = "You are a helpful assistant."
         // to the 200K default instead of feeding 0 into compaction math.
         let agent_ctx_window = self
             .model_catalog
-            .read()
-            .ok()
-            .and_then(|cat| {
-                cat.find_model(&entry.manifest.model.model)
-                    .map(|m| m.context_window as usize)
-                    .filter(|w| *w > 0)
-            })
+            .load()
+            .find_model(&entry.manifest.model.model)
+            .map(|m| m.context_window as usize)
+            .filter(|w| *w > 0)
             .unwrap_or(200_000);
 
         // Compaction is a side task — route through the auxiliary chain when
@@ -12047,40 +12037,50 @@ system_prompt = "You are a helpful assistant."
                     info!("Hot-reload: applying provider URL overrides");
                     // Invalidate cached LLM drivers — URLs/keys may have changed.
                     self.driver_cache.clear();
-                    let mut catalog = self
-                        .model_catalog
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner());
-                    // Apply region selections first (lower priority)
-                    if !new_config.provider_regions.is_empty() {
-                        let region_urls = catalog.resolve_region_urls(&new_config.provider_regions);
+                    // Pre-compute everything outside the RCU closure: the closure
+                    // may re-run on CAS retry, so all logging + region resolution
+                    // happens here exactly once. Region resolution reads a
+                    // snapshot — under contention the inputs are still consistent
+                    // because they only depend on `new_config` + provider list.
+                    let regions = new_config.provider_regions.clone();
+                    let provider_urls = new_config.provider_urls.clone();
+                    let proxy_urls = new_config.provider_proxy_urls.clone();
+                    let region_urls: std::collections::BTreeMap<String, String> =
+                        if regions.is_empty() {
+                            std::collections::BTreeMap::new()
+                        } else {
+                            let snapshot = self.model_catalog.load();
+                            let urls = snapshot.resolve_region_urls(&regions);
+                            if !urls.is_empty() {
+                                info!(
+                                    "Hot-reload: applied {} provider region URL override(s)",
+                                    urls.len()
+                                );
+                            }
+                            let region_api_keys = snapshot.resolve_region_api_keys(&regions);
+                            if !region_api_keys.is_empty() {
+                                info!(
+                                    "Hot-reload: {} region api_key override(s) detected \
+                                 (takes effect on next driver init)",
+                                    region_api_keys.len()
+                                );
+                            }
+                            urls
+                        };
+                    self.model_catalog_update(|catalog| {
                         if !region_urls.is_empty() {
                             catalog.apply_url_overrides(&region_urls);
-                            info!(
-                                "Hot-reload: applied {} provider region URL override(s)",
-                                region_urls.len()
-                            );
                         }
-                        let region_api_keys =
-                            catalog.resolve_region_api_keys(&new_config.provider_regions);
-                        if !region_api_keys.is_empty() {
-                            info!(
-                                "Hot-reload: {} region api_key override(s) detected \
-                                 (takes effect on next driver init)",
-                                region_api_keys.len()
-                            );
+                        // Apply explicit provider_urls (higher priority, overwrites region URLs)
+                        if !provider_urls.is_empty() {
+                            catalog.apply_url_overrides(&provider_urls);
                         }
-                    }
-                    // Apply explicit provider_urls (higher priority, overwrites region URLs)
-                    if !new_config.provider_urls.is_empty() {
-                        catalog.apply_url_overrides(&new_config.provider_urls);
-                    }
-                    if !new_config.provider_proxy_urls.is_empty() {
-                        catalog.apply_proxy_url_overrides(&new_config.provider_proxy_urls);
-                    }
+                        if !proxy_urls.is_empty() {
+                            catalog.apply_proxy_url_overrides(&proxy_urls);
+                        }
+                    });
                     // Also update media driver cache with new provider URLs
-                    self.media_drivers
-                        .update_provider_urls(new_config.provider_urls.clone());
+                    self.media_drivers.update_provider_urls(provider_urls);
                 }
                 HotAction::UpdateDefaultModel => {
                     info!(
@@ -14807,7 +14807,8 @@ system_prompt = "You are a helpful assistant."
             return Some(url.clone());
         }
         // 2. Model catalog (updated at runtime by set_provider_url / apply_url_overrides)
-        let catalog = self.model_catalog.load(); {
+        let catalog = self.model_catalog.load();
+        {
             if let Some(p) = catalog.get_provider(provider) {
                 if !p.base_url.is_empty() {
                     return Some(p.base_url.clone());
@@ -16245,8 +16246,7 @@ system_prompt = "You are a helpful assistant."
         // failures are logged but don't abort the review.
         if let Some(kernel) = kernel_weak.as_ref().and_then(|w| w.upgrade()) {
             let cost = MeteringEngine::estimate_cost_with_catalog(
-                &kernel
-                    .model_catalog.load(),
+                &kernel.model_catalog.load(),
                 &default_model.model,
                 response.usage.input_tokens,
                 response.usage.output_tokens,
@@ -20254,8 +20254,7 @@ pub async fn probe_and_update_local_provider(
     // the probe always 401s and the catalog flips to LocalOffline even
     // when the underlying ollama is healthy.
     let api_key = {
-        let catalog = kernel
-            .model_catalog.load();
+        let catalog = kernel.model_catalog.load();
         let env_var = catalog
             .get_provider(provider_id)
             .map(|p| p.api_key_env.clone())
@@ -20354,8 +20353,7 @@ async fn probe_all_local_providers_once(
     relevant_providers: &std::collections::HashSet<String>,
 ) {
     let local_providers: Vec<(String, String)> = {
-        let catalog = kernel
-            .model_catalog.load();
+        let catalog = kernel.model_catalog.load();
         catalog
             .list_providers()
             .iter()

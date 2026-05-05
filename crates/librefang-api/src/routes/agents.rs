@@ -915,7 +915,8 @@ pub async fn list_agents(
         let dm_override = state
             .kernel
             .default_model_override_ref()
-            .load();
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         effective_default_model(
             &state.kernel.config_ref().default_model,
             dm_override.as_ref(),
@@ -1742,7 +1743,8 @@ pub async fn send_message(
                 let dm_override = state
                     .kernel
                     .default_model_override_ref()
-                    .load();
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
                 effective_default_model(
                     &state.kernel.config_ref().default_model,
                     dm_override.as_ref(),
@@ -2518,7 +2520,8 @@ pub async fn get_agent(
         let dm_override = state
             .kernel
             .default_model_override_ref()
-            .load();
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         effective_default_model(
             &state.kernel.config_ref().default_model,
             dm_override.as_ref(),
@@ -3942,7 +3945,8 @@ pub async fn get_agent_skills(
     let available = state
         .kernel
         .skill_registry_ref()
-        .load()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
         .skill_names();
     (
         StatusCode::OK,
