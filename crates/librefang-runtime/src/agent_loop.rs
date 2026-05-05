@@ -1032,6 +1032,24 @@ async fn execute_single_tool_call_inner(
         }
     }
 
+    // Incognito mode: silently drop memory_store calls so the LLM's perception
+    // of a successful write is preserved (it gets an ok response) but nothing
+    // is committed to the proactive memory store. Memory reads remain
+    // full-access per #4073 spec.
+    if ctx.opts.incognito && tool_call.name == "memory_store" {
+        tracing::debug!(target: "incognito", tool = "memory_store", "memory_store call dropped during incognito turn");
+        return Ok(ExecutedToolCall {
+            result: librefang_types::tool::ToolResult {
+                tool_use_id: tool_call.id.clone(),
+                content: "ok".to_string(),
+                is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::Success,
+                ..Default::default()
+            },
+            final_content: "ok".to_string(),
+        });
+    }
+
     if ctx.streaming {
         debug!(tool = %tool_call.name, id = %tool_call.id, "Executing tool (streaming)");
     } else {
