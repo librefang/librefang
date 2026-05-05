@@ -831,8 +831,8 @@ class NetworkResource {
     return this._c._request("GET", "/api/network/status");
   }
 
-  async listPeers() {
-    return this._c._request("GET", "/api/peers");
+  async listPeers(query) {
+    return this._c._request("GET", "/api/peers", undefined, query);
   }
 
   async getPeer(id) {

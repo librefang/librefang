@@ -7291,6 +7291,28 @@
         ],
         "summary": "GET /api/peers — List known OFP peers.",
         "operationId": "list_peers",
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Skip N items",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max items to return; server-capped at 100",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "List known OFP peers",

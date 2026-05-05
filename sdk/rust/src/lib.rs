@@ -1028,8 +1028,8 @@ impl NetworkResource {
         do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/network/status".to_string(), None, &[]).await
     }
 
-    pub async fn list_peers(&self) -> Result<Value> {
-        do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/peers".to_string(), None, &[]).await
+    pub async fn list_peers(&self, offset: Option<&str>, limit: Option<&str>) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/peers".to_string(), None, &[("offset", offset), ("limit", limit)]).await
     }
 
     pub async fn get_peer(&self, id: &str) -> Result<Value> {
