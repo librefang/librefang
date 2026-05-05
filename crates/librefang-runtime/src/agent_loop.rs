@@ -1481,14 +1481,23 @@ fn finalize_tool_use_results(
     // as persistent context.  `has_delegation_result` gates on the tool name
     // "agent_send" which is an internal kernel-controlled tool, so external
     // content cannot satisfy the predicate.
-    let pin_this = has_delegation_result && existing_pinned < MAX_PINNED_DELEGATION;
-    debug_assert!(
-        !pin_this
-            || tool_result_blocks
-                .iter()
-                .any(|b| matches!(b, ContentBlock::ToolResult { tool_name, .. } if tool_name == "agent_send")),
-        "tool-result messages may only be pinned when they contain an agent_send result"
-    );
+    let mut pin_this = has_delegation_result && existing_pinned < MAX_PINNED_DELEGATION;
+    // Trust-boundary guard: only tool-result messages that actually contain an
+    // `agent_send` block may be pinned.  External / MCP tool output must never
+    // reach the pinned set regardless of how `has_delegation_result` was derived.
+    // This is a runtime check (not debug-only) so the invariant holds in release.
+    if pin_this
+        && !tool_result_blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolResult { tool_name, .. } if tool_name == "agent_send"))
+    {
+        tracing::error!(
+            target: "trust_boundary",
+            "refusing to pin tool-result message that contains no agent_send block; \
+             resetting pin_this to false to prevent external content injection"
+        );
+        pin_this = false;
+    }
 
     let tool_results_msg = Message {
         role: Role::User,
@@ -3609,7 +3618,15 @@ pub async fn run_agent_loop(
         // stubs before context assembly so the LLM never sees raw bulk payloads
         // from old turns.  Runs fold first, then the compressor, mirroring the
         // ordering rationale in the module-level doc.
-        if tr_fold_after_turns > 0 {
+        //
+        // Fast-path: skip the call entirely when the history is too short to
+        // contain any stale turns.  Minimum for staleness: fold_after_turns
+        // assistant turns plus at least one older turn means we need more than
+        // `fold_after_turns * 2` messages.  This avoids even the index-walk
+        // inside `collect_stale_indices` on every short-session iteration.
+        if tr_fold_after_turns > 0
+            && messages.len() > (tr_fold_after_turns as usize).saturating_mul(2)
+        {
             let (folded, fold_result) = crate::history_fold::fold_stale_tool_results(
                 messages,
                 tr_fold_after_turns,
@@ -5046,7 +5063,10 @@ pub async fn run_agent_loop_streaming(
 
         // History fold (#3347 3/N): replace stale tool-result messages with compact
         // stubs before context assembly — streaming path mirrors non-streaming.
-        if tr_fold_after_turns > 0 {
+        // Fast-path: same length guard as the non-streaming path above.
+        if tr_fold_after_turns > 0
+            && messages.len() > (tr_fold_after_turns as usize).saturating_mul(2)
+        {
             let (folded, fold_result) = crate::history_fold::fold_stale_tool_results(
                 messages,
                 tr_fold_after_turns,
@@ -8925,6 +8945,225 @@ mod tests {
         assert_eq!(result.directives.reply_to.as_deref(), Some("msg_999"));
         assert!(result.directives.current_thread);
         assert!(!result.directives.silent);
+    }
+
+    // ── History-fold integration test ────────────────────────────────────────
+    //
+    // Drives `run_agent_loop` through enough tool-use / tool-result cycles to
+    // push earlier turns past the `history_fold_after_turns` boundary, then
+    // asserts that the fold stub was observed in a CompletionRequest sent to
+    // the primary driver.  A mock aux driver returns deterministic summaries
+    // so the test does not require a live LLM key.
+    //
+    // The fold operates on the local `messages` slice used for LLM calls (not
+    // `session.messages` directly), so the assertion captures the request that
+    // the primary driver received: at least one message in that request must
+    // start with the "[history-fold]" prefix.
+
+    /// Driver that emits `N` tool-use rounds then finishes with EndTurn text.
+    /// Each tool-use call names "probe_tool" (unknown → hard error returned by
+    /// the loop), accumulating tool-result messages in the working history.
+    /// Also records all CompletionRequest message lists it receives so the
+    /// test can assert that fold stubs appeared in a request.
+    struct MultiToolCycleDriver {
+        call_count: AtomicU32,
+        tool_cycles: u32,
+        // Flattened snapshot of all messages seen across all complete() calls.
+        seen_messages: std::sync::Mutex<Vec<librefang_types::message::Message>>,
+    }
+
+    impl MultiToolCycleDriver {
+        fn new(tool_cycles: u32) -> Self {
+            Self {
+                call_count: AtomicU32::new(0),
+                tool_cycles,
+                seen_messages: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmDriver for MultiToolCycleDriver {
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            // Record the messages this call received.
+            {
+                let mut guard = self.seen_messages.lock().unwrap();
+                guard.extend(request.messages.iter().cloned());
+            }
+            let call = self.call_count.fetch_add(1, Ordering::Relaxed);
+            if call < self.tool_cycles {
+                Ok(CompletionResponse {
+                    content: vec![ContentBlock::ToolUse {
+                        id: format!("tid_{call}"),
+                        name: "probe_tool".to_string(),
+                        input: serde_json::json!({"n": call}),
+                        provider_metadata: None,
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    tool_calls: vec![ToolCall {
+                        id: format!("tid_{call}"),
+                        name: "probe_tool".to_string(),
+                        input: serde_json::json!({"n": call}),
+                    }],
+                    usage: TokenUsage {
+                        input_tokens: 10,
+                        output_tokens: 3,
+                        ..Default::default()
+                    },
+                })
+            } else {
+                Ok(CompletionResponse {
+                    content: vec![ContentBlock::Text {
+                        text: "All done after many tool cycles.".to_string(),
+                        provider_metadata: None,
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                    tool_calls: vec![],
+                    usage: TokenUsage {
+                        input_tokens: 10,
+                        output_tokens: 8,
+                        ..Default::default()
+                    },
+                })
+            }
+        }
+    }
+
+    /// Deterministic aux driver for fold summarisation: returns a fixed
+    /// summary string without any network call.
+    struct FoldSummaryDriver;
+
+    #[async_trait]
+    impl LlmDriver for FoldSummaryDriver {
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: "probe_tool ran and returned output.".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage {
+                    input_tokens: 5,
+                    output_tokens: 8,
+                    ..Default::default()
+                },
+            })
+        }
+    }
+
+    /// Verifies that the history-fold path is exercised end-to-end:
+    /// after enough tool-use cycles the fold path replaces stale tool-result
+    /// messages with compact `[history-fold]` stubs that are visible in the
+    /// CompletionRequest messages delivered to the primary driver.
+    #[tokio::test]
+    async fn test_history_fold_stub_appears_in_llm_request_after_enough_tool_cycles() {
+        use crate::aux_client::AuxClient;
+        use librefang_types::config::ToolResultsConfig;
+
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+        };
+        let manifest = test_manifest();
+
+        // Primary driver: 10 tool-use rounds then EndTurn; records all
+        // CompletionRequest.messages it receives.
+        let primary = Arc::new(MultiToolCycleDriver::new(10));
+        let driver: Arc<dyn LlmDriver> = Arc::clone(&primary) as Arc<dyn LlmDriver>;
+
+        // Aux driver: deterministic fold summariser (no live LLM required).
+        // Wire it as the primary driver of an AuxClient that has no chain
+        // configuration, so every AuxTask resolves directly to FoldSummaryDriver.
+        let aux_driver: Arc<dyn LlmDriver> = Arc::new(FoldSummaryDriver);
+        let aux_client = AuxClient::with_primary_only(aux_driver);
+
+        // fold_after_turns=3 so turns 0..6 are stale by the time we have 10
+        // assistant turns, guaranteeing at least one fold group before the
+        // final LLM call that returns EndTurn.
+        let tool_results_cfg = ToolResultsConfig {
+            history_fold_after_turns: 3,
+            ..ToolResultsConfig::default()
+        };
+
+        let loop_opts = LoopOptions {
+            aux_client: Some(Arc::new(aux_client)),
+            tool_results_config: Some(tool_results_cfg),
+            ..LoopOptions::default()
+        };
+
+        let result = run_agent_loop(
+            &manifest,
+            "Run many tool cycles",
+            &mut session,
+            &memory,
+            driver,
+            &[], // no tool definitions — probe_tool is unknown, gets hard error
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // on_phase
+            None, // media_engine
+            None, // media_drivers
+            None, // tts_engine
+            None, // docker_config
+            None, // hooks
+            None, // context_window_tokens
+            None, // process_manager
+            None, // checkpoint_manager
+            None, // process_registry
+            None, // user_content_blocks
+            None, // proactive_memory
+            None, // context_engine
+            None, // pending_messages
+            &loop_opts,
+        )
+        .await
+        .expect("Loop should complete without error");
+
+        // The loop must finish and produce a non-empty final response.
+        assert!(
+            !result.response.trim().is_empty(),
+            "expected non-empty final response, got: {:?}",
+            result.response
+        );
+
+        // At least one message that the primary driver received across all
+        // calls must be a [history-fold] stub — this proves fold_stale_tool_results
+        // ran and replaced stale tool-result entries before the LLM call.
+        // The prefix "[history-fold]" mirrors `history_fold::FOLD_PREFIX`.
+        const FOLD_PREFIX_STR: &str = "[history-fold]";
+        let seen = primary.seen_messages.lock().unwrap();
+        let fold_stub_found = seen.iter().any(|m| {
+            matches!(&m.content,
+                librefang_types::message::MessageContent::Text(t)
+                    if t.starts_with(FOLD_PREFIX_STR))
+        });
+        assert!(
+            fold_stub_found,
+            "expected at least one [history-fold] stub in a CompletionRequest after 10 tool \
+             cycles with fold_after_turns=3; messages seen by primary driver: {:#?}",
+            seen.iter()
+                .map(|m| format!("{:?}: {:?}", m.role, m.content))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]

@@ -7654,7 +7654,10 @@ pub struct ToolResultsConfig {
     /// Fold (summarise via aux-LLM) stale tool results after this many turns
     /// (#3347 3/N).  Tool-result messages older than this threshold are
     /// replaced with a compact summary before the next LLM call.  Falls back
-    /// to byte truncation when no aux-LLM is configured.  Default: 8 turns.
+    /// to a static-stub replacement (`[history-fold: N tool result(s)
+    /// [summarisation unavailable]]`) when no aux-LLM is configured or the
+    /// aux call fails, so stale payload is always removed from context.
+    /// Default: 8 turns.
     #[serde(default = "default_history_fold_after_turns")]
     pub history_fold_after_turns: u32,
 }

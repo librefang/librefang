@@ -5491,6 +5491,9 @@ system_prompt = "You are a helpful assistant."
                 max_history_messages: self.config.load().max_history_messages,
                 aux_client: Some(self.aux_client.load_full()),
                 parent_session_id: None,
+                // Ephemeral /btw sessions start with empty history so no stale
+                // tool results can accumulate — None uses compiled defaults which
+                // is fine; the fold guard exits early on short histories.
                 tool_results_config: None,
             },
         )
@@ -6346,7 +6349,7 @@ system_prompt = "You are a helpful assistant."
             max_history_messages: self.config.load().max_history_messages,
             aux_client: Some(self.aux_client.load_full()),
             parent_session_id: Some(parent_session_id),
-            tool_results_config: None,
+            tool_results_config: Some(self.config.load().tool_results.clone()),
         };
         // INVARIANT: forks must use the canonical session so the parent turn's
         // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
@@ -6419,7 +6422,7 @@ system_prompt = "You are a helpful assistant."
             max_history_messages: self.config.load().max_history_messages,
             aux_client: Some(self.aux_client.load_full()),
             parent_session_id: None,
-            tool_results_config: None,
+            tool_results_config: Some(self.config.load().tool_results.clone()),
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
