@@ -201,6 +201,18 @@ async fn sandbox_accepts_module_loaded_from_disk() {
 async fn sandbox_denies_fs_read_without_capability() {
     let sandbox = WasmSandbox::new().unwrap();
 
+    // Defensive: cargo runs each crate's tests with CWD = crate dir, so
+    // `Cargo.toml` resolves. If a future test runner (nextest with a custom
+    // workdir, sandboxed exec, …) changes CWD, fail loudly here instead of
+    // silently misattributing the resulting fs_read failure to capability
+    // denial — the test would still "pass" but stop exercising the deny
+    // path it claims to.
+    assert!(
+        std::path::Path::new("Cargo.toml").exists(),
+        "test assumes CWD = crate dir; Cargo.toml not found in {:?}",
+        std::env::current_dir()
+    );
+
     // Cargo.toml exists in every crate's working dir during test runs;
     // fs_read canonicalises before the capability check (#3814) so the
     // path must resolve.
