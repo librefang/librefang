@@ -3605,7 +3605,7 @@ mod tests {
     /// - `"prefix*"`       -> `value.starts_with(prefix)`
     /// - `"*suffix"`       -> `value.ends_with(suffix)`
     /// - `"prefix*suffix"` -> starts_with(prefix) && ends_with(suffix)
-    ///                        && len >= prefix.len() + suffix.len()
+    ///   && len >= prefix.len() + suffix.len()
     /// - exact (no `*`)    -> equality
     ///
     /// Multi-`*` patterns are skipped by the strategy below to keep the oracle

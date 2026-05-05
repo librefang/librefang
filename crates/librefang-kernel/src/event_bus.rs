@@ -421,9 +421,8 @@ mod tests {
         // 3 200 events into a 4 096-slot channel with a passive consumer
         // is by design noisy — we only need to confirm broadcast fired.)
         let mut got_any = false;
-        while let Ok(_ev) = rx.try_recv() {
+        if let Ok(_ev) = rx.try_recv() {
             got_any = true;
-            break;
         }
         if !got_any {
             // If the channel hasn't drained yet, do one bounded await.
