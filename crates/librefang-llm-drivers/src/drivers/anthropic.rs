@@ -27,6 +27,12 @@ pub struct AnthropicDriver {
     /// Per-provider HTTP request timeout in seconds.
     /// Overrides the HTTP client's default read timeout when set.
     request_timeout_secs: Option<u64>,
+    /// Whether to emit the three `x-librefang-{agent,session,step}-id` trace
+    /// headers on outbound requests. Mirrors
+    /// `KernelConfig.telemetry.emit_caller_trace_headers`; when `false`, no
+    /// trace headers are emitted regardless of whether `CompletionRequest`'s
+    /// caller-id fields are populated.
+    emit_caller_trace_headers: bool,
 }
 
 impl AnthropicDriver {
@@ -65,7 +71,20 @@ impl AnthropicDriver {
             base_url,
             client,
             request_timeout_secs,
+            emit_caller_trace_headers: true,
         }
+    }
+
+    /// Override the trace-header emission flag (mirrors
+    /// `KernelConfig.telemetry.emit_caller_trace_headers`). Default is `true`,
+    /// meaning the three `x-librefang-{agent,session,step}-id` headers are
+    /// emitted on every request that has those fields populated. Pass `false`
+    /// to suppress them entirely — useful when the upstream rejects unknown
+    /// headers or when an operator has opted out via config. Non-trace
+    /// `extra_headers` are unaffected by this flag.
+    pub fn with_emit_caller_trace_headers(mut self, emit: bool) -> Self {
+        self.emit_caller_trace_headers = emit;
+        self
     }
 }
 
@@ -420,6 +439,15 @@ impl LlmDriver for AnthropicDriver {
             if request_uses_1h_cache(&request) {
                 req_builder = req_builder.header("anthropic-beta", ANTHROPIC_1H_CACHE_BETA);
             }
+            // Merge per-request caller-identity (`x-librefang-*`) trace headers.
+            // Empty extra_headers slice — Anthropic driver has no operator-level
+            // extras escape-hatch today; the slice is kept for API symmetry with
+            // OpenAI and to allow future addition without changing call-site shape.
+            req_builder = req_builder.headers(super::trace_headers::build_trace_header_map(
+                &[],
+                &request,
+                self.emit_caller_trace_headers,
+            ));
             let mut req_builder = req_builder.json(&api_request);
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.
@@ -568,6 +596,13 @@ impl LlmDriver for AnthropicDriver {
             if request_uses_1h_cache(&request) {
                 req_builder = req_builder.header("anthropic-beta", ANTHROPIC_1H_CACHE_BETA);
             }
+            // Merge per-request caller-identity (`x-librefang-*`) trace headers
+            // on the streaming path — mirrors the non-streaming path above.
+            req_builder = req_builder.headers(super::trace_headers::build_trace_header_map(
+                &[],
+                &request,
+                self.emit_caller_trace_headers,
+            ));
             let mut req_builder = req_builder.json(&api_request);
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.

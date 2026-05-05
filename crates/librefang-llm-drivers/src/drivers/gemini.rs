@@ -33,6 +33,12 @@ pub struct GeminiDriver {
     /// Per-provider HTTP request timeout in seconds.
     /// Overrides the HTTP client's default read timeout when set.
     request_timeout_secs: Option<u64>,
+    /// Whether to emit the three `x-librefang-{agent,session,step}-id` trace
+    /// headers on outbound requests. Mirrors
+    /// `KernelConfig.telemetry.emit_caller_trace_headers`; when `false`, no
+    /// trace headers are emitted regardless of whether `CompletionRequest`'s
+    /// caller-id fields are populated.
+    emit_caller_trace_headers: bool,
 }
 
 impl GeminiDriver {
@@ -71,7 +77,18 @@ impl GeminiDriver {
             base_url,
             client,
             request_timeout_secs,
+            emit_caller_trace_headers: true,
         }
+    }
+
+    /// Override the trace-header emission flag (mirrors
+    /// `KernelConfig.telemetry.emit_caller_trace_headers`). Default is `true`,
+    /// meaning the three `x-librefang-{agent,session,step}-id` headers are
+    /// emitted on every request that has those fields populated. Pass `false`
+    /// to suppress them entirely. Non-trace `extra_headers` are unaffected.
+    pub fn with_emit_caller_trace_headers(mut self, emit: bool) -> Self {
+        self.emit_caller_trace_headers = emit;
+        self
     }
 }
 
@@ -880,6 +897,12 @@ impl LlmDriver for GeminiDriver {
                 .post(&url)
                 .header("x-goog-api-key", self.api_key.as_str())
                 .header("content-type", "application/json")
+                // Merge per-request caller-identity (`x-librefang-*`) trace headers.
+                .headers(super::trace_headers::build_trace_header_map(
+                    &[],
+                    &request,
+                    self.emit_caller_trace_headers,
+                ))
                 .json(&gemini_request);
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.
@@ -1011,6 +1034,13 @@ impl LlmDriver for GeminiDriver {
                 .post(&url)
                 .header("x-goog-api-key", self.api_key.as_str())
                 .header("content-type", "application/json")
+                // Merge per-request caller-identity (`x-librefang-*`) trace headers
+                // on the streaming path — mirrors the non-streaming path above.
+                .headers(super::trace_headers::build_trace_header_map(
+                    &[],
+                    &request,
+                    self.emit_caller_trace_headers,
+                ))
                 .json(&gemini_request);
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.
