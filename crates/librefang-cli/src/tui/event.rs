@@ -2593,10 +2593,7 @@ pub fn spawn_fetch_extensions(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
                 .iter()
                 .filter_map(|s| s.template_id.clone())
                 .collect();
-            let catalog = kernel
-                .mcp_catalog()
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
+            let catalog = kernel.mcp_catalog_load();
             let extensions: Vec<ExtensionInfo> = catalog
                 .list()
                 .iter()

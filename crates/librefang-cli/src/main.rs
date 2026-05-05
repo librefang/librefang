@@ -2583,13 +2583,13 @@ fn cmd_init_upgrade() {
     p.set_message("Backing up config");
     let backups_dir = librefang_dir.join("backups");
     if let Err(e) = std::fs::create_dir_all(&backups_dir) {
-        ui::error(&format!("Failed to create backups dir: {e}"));
+        p.finish_with_failure(&format!("Failed to create backups dir: {e}"));
         std::process::exit(1);
     }
     let backup_name = format!("config-{}.toml", format_local_timestamp());
     let backup_path = backups_dir.join(&backup_name);
     if let Err(e) = std::fs::copy(&config_path, &backup_path) {
-        ui::error(&format!("Failed to backup config: {e}"));
+        p.finish_with_failure(&format!("Failed to backup config: {e}"));
         std::process::exit(1);
     }
     restrict_file_permissions(&backup_path);
