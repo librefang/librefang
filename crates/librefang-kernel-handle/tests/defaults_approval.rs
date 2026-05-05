@@ -15,7 +15,11 @@ impl AgentControl for NoopKernelHandle {
         Err("not implemented".into())
     }
 
-    async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, librefang_kernel_handle::KernelOpError> {
+    async fn send_to_agent(
+        &self,
+        _agent_id: &str,
+        _message: &str,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 
@@ -50,7 +54,10 @@ impl MemoryAccess for NoopKernelHandle {
         Err("not implemented".into())
     }
 
-    fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
+    fn memory_list(
+        &self,
+        _peer_id: Option<&str>,
+    ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 }
@@ -67,7 +74,10 @@ impl TaskQueue for NoopKernelHandle {
         Err("not implemented".into())
     }
 
-    async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    async fn task_claim(
+        &self,
+        _agent_id: &str,
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 
@@ -80,23 +90,39 @@ impl TaskQueue for NoopKernelHandle {
         Err("not implemented".into())
     }
 
-    async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    async fn task_list(
+        &self,
+        _status: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 
-    async fn task_delete(&self, _task_id: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+    async fn task_delete(
+        &self,
+        _task_id: &str,
+    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 
-    async fn task_retry(&self, _task_id: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+    async fn task_retry(
+        &self,
+        _task_id: &str,
+    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 
-    async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    async fn task_get(
+        &self,
+        _task_id: &str,
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 
-    async fn task_update_status(&self, _task_id: &str, _new_status: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+    async fn task_update_status(
+        &self,
+        _task_id: &str,
+        _new_status: &str,
+    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 }
@@ -114,15 +140,24 @@ impl EventBus for NoopKernelHandle {
 
 #[async_trait]
 impl KnowledgeGraph for NoopKernelHandle {
-    async fn knowledge_add_entity(&self, _entity: &Entity) -> Result<String, librefang_kernel_handle::KernelOpError> {
+    async fn knowledge_add_entity(
+        &self,
+        _entity: &Entity,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 
-    async fn knowledge_add_relation(&self, _relation: &Relation) -> Result<String, librefang_kernel_handle::KernelOpError> {
+    async fn knowledge_add_relation(
+        &self,
+        _relation: &Relation,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 
-    async fn knowledge_query(&self, _pattern: GraphPattern) -> Result<Vec<GraphMatch>, librefang_kernel_handle::KernelOpError> {
+    async fn knowledge_query(
+        &self,
+        _pattern: GraphPattern,
+    ) -> Result<Vec<GraphMatch>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 }

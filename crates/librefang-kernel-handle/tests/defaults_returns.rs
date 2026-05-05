@@ -15,7 +15,11 @@ impl AgentControl for NoopKernelHandle {
         Err("noop".into())
     }
 
-    async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, librefang_kernel_handle::KernelOpError> {
+    async fn send_to_agent(
+        &self,
+        _agent_id: &str,
+        _message: &str,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("noop".into())
     }
 
@@ -50,7 +54,10 @@ impl MemoryAccess for NoopKernelHandle {
         Err("noop".into())
     }
 
-    fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
+    fn memory_list(
+        &self,
+        _peer_id: Option<&str>,
+    ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         Err("noop".into())
     }
 }
@@ -67,7 +74,10 @@ impl TaskQueue for NoopKernelHandle {
         Err("noop".into())
     }
 
-    async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    async fn task_claim(
+        &self,
+        _agent_id: &str,
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("noop".into())
     }
 
@@ -80,23 +90,39 @@ impl TaskQueue for NoopKernelHandle {
         Err("noop".into())
     }
 
-    async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    async fn task_list(
+        &self,
+        _status: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("noop".into())
     }
 
-    async fn task_delete(&self, _task_id: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+    async fn task_delete(
+        &self,
+        _task_id: &str,
+    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("noop".into())
     }
 
-    async fn task_retry(&self, _task_id: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+    async fn task_retry(
+        &self,
+        _task_id: &str,
+    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("noop".into())
     }
 
-    async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+    async fn task_get(
+        &self,
+        _task_id: &str,
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("noop".into())
     }
 
-    async fn task_update_status(&self, _task_id: &str, _new_status: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+    async fn task_update_status(
+        &self,
+        _task_id: &str,
+        _new_status: &str,
+    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("noop".into())
     }
 }
@@ -172,19 +198,25 @@ async fn test_cron_defaults_return_errors() {
     // "Cron scheduler not available" for log-output continuity.
     let result = handle.cron_create("agent", serde_json::json!({})).await;
     match result {
-        Err(KernelOpError::Unavailable { capability: "Cron scheduler" }) => {}
+        Err(KernelOpError::Unavailable {
+            capability: "Cron scheduler",
+        }) => {}
         other => panic!("cron_create: expected Unavailable, got {other:?}"),
     }
 
     let result = handle.cron_list("agent").await;
     match result {
-        Err(KernelOpError::Unavailable { capability: "Cron scheduler" }) => {}
+        Err(KernelOpError::Unavailable {
+            capability: "Cron scheduler",
+        }) => {}
         other => panic!("cron_list: expected Unavailable, got {other:?}"),
     }
 
     let result = handle.cron_cancel("job1").await;
     match result {
-        Err(KernelOpError::Unavailable { capability: "Cron scheduler" }) => {}
+        Err(KernelOpError::Unavailable {
+            capability: "Cron scheduler",
+        }) => {}
         other => panic!("cron_cancel: expected Unavailable, got {other:?}"),
     }
 }

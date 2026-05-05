@@ -4144,6 +4144,7 @@ dependencies = [
  "librefang-hands",
  "librefang-http",
  "librefang-kernel",
+ "librefang-kernel-handle",
  "librefang-llm-drivers",
  "librefang-memory",
  "librefang-migrate",

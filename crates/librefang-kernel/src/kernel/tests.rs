@@ -2462,7 +2462,8 @@ async fn send_to_agent_as_tolerates_unregistered_parent_uuid() {
     .expect_err("non-existent child must fail");
 
     assert!(
-        err.to_string().to_lowercase()
+        err.to_string()
+            .to_lowercase()
             .contains(&child_id.to_string().to_lowercase())
             || err.to_string().to_lowercase().contains("not found"),
         "error must reference the missing child, not the missing parent: {err}"

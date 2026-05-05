@@ -10,6 +10,7 @@ readme = "README.md"
 librefang-types = { path = "../librefang-types" }
 schemars = { version = "0.8", features = ["chrono", "uuid1"] }
 librefang-kernel = { path = "../librefang-kernel" }
+librefang-kernel-handle = { path = "../librefang-kernel-handle" }
 librefang-runtime = { path = "../librefang-runtime" }
 librefang-llm-drivers = { path = "../librefang-llm-drivers" }
 librefang-memory = { path = "../librefang-memory" }

@@ -1924,14 +1924,32 @@ pub async fn send_message(
         }
         Err(e) => {
             tracing::warn!("send_message failed for agent {id}: {e}");
-            let (status, code) = if format!("{e}").contains("Agent not found") {
-                (StatusCode::NOT_FOUND, "agent_not_found")
-            } else if format!("{e}").contains("quota") || format!("{e}").contains("Quota") {
-                (StatusCode::TOO_MANY_REQUESTS, "budget_exceeded")
-            } else if format!("{e}").contains("belongs to a different agent") {
-                (StatusCode::BAD_REQUEST, "session_agent_mismatch")
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, "message_delivery_failed")
+            // #3541: replace the legacy `format!("{e}").contains(...)`
+            // grep with a typed match on the kernel error surface. The two
+            // categories with dedicated variants (`AgentNotFound`,
+            // `QuotaExceeded`) become structural matches; the
+            // session-mismatch path still flows through
+            // `LibreFangError::Internal(_)` at the kernel side (see
+            // `crates/librefang-kernel/src/kernel/mod.rs:6446 / :8099 /
+            // :9454 / :9486`) so it remains a substring check scoped to
+            // that variant — eliminating that last grep needs a kernel
+            // emit-site refactor to a typed `SessionAgentMismatch`
+            // variant, tracked as #3541 follow-up.
+            use crate::error::KernelError;
+            use librefang_types::error::LibreFangError;
+            let (status, code) = match &e {
+                KernelError::LibreFang(LibreFangError::AgentNotFound(_)) => {
+                    (StatusCode::NOT_FOUND, "agent_not_found")
+                }
+                KernelError::LibreFang(LibreFangError::QuotaExceeded(_)) => {
+                    (StatusCode::TOO_MANY_REQUESTS, "budget_exceeded")
+                }
+                KernelError::LibreFang(LibreFangError::Internal(msg))
+                    if msg.contains("belongs to a different agent") =>
+                {
+                    (StatusCode::BAD_REQUEST, "session_agent_mismatch")
+                }
+                _ => (StatusCode::INTERNAL_SERVER_ERROR, "message_delivery_failed"),
             };
             let t = ErrorTranslator::new(l);
             ApiErrorResponse {

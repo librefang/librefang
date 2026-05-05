@@ -421,7 +421,10 @@ impl MemorySubstrate {
         if pruned_count == 0 {
             return Ok(());
         }
-        let conn = self.conn.lock().map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
         vacuum_inner(&conn, pruned_count);
         Ok(())
     }
@@ -510,7 +513,10 @@ impl MemorySubstrate {
 
     /// Load all paired devices from the database.
     pub fn load_paired_devices(&self) -> LibreFangResult<Vec<serde_json::Value>> {
-        let conn = self.conn.lock().map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
         let mut stmt = conn.prepare(
             "SELECT device_id, display_name, platform, paired_at, last_seen, push_token, api_key_hash FROM paired_devices"
         ).map_err(LibreFangError::memory)?;
@@ -546,7 +552,10 @@ impl MemorySubstrate {
         push_token: Option<&str>,
         api_key_hash: &str,
     ) -> LibreFangResult<()> {
-        let conn = self.conn.lock().map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
         conn.execute(
             "INSERT OR REPLACE INTO paired_devices (device_id, display_name, platform, paired_at, last_seen, push_token, api_key_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![device_id, display_name, platform, paired_at, last_seen, push_token, api_key_hash],
@@ -556,7 +565,10 @@ impl MemorySubstrate {
 
     /// Remove a paired device from the database.
     pub fn remove_paired_device(&self, device_id: &str) -> LibreFangResult<()> {
-        let conn = self.conn.lock().map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
         conn.execute(
             "DELETE FROM paired_devices WHERE device_id = ?1",
             rusqlite::params![device_id],
