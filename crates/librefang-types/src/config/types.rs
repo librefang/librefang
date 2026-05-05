@@ -7623,6 +7623,8 @@ impl Default for ParallelToolsConfig {
 /// `history_fold_after_turns` triggers tool-result history summarisation via
 /// the aux-LLM channel (#3347 3/N) — falls back to byte truncation when no
 /// aux-LLM is configured.
+/// `artifact_max_age_days` evicts stale spill artifacts at daemon startup
+/// (#3347 4/N).  Set to `0` to disable eviction entirely.
 ///
 /// ```toml
 /// [tool_results]
@@ -7630,6 +7632,7 @@ impl Default for ParallelToolsConfig {
 /// max_artifact_bytes       = 67108864     # 64 MiB — per-artifact write cap
 /// max_bytes_per_turn       = 50000        # cumulative byte cap across all tool results in one turn
 /// history_fold_after_turns = 8            # fold stale tool results after this many turns
+/// artifact_max_age_days    = 30           # evict spill artifacts older than this on startup; 0 disables
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(default)]
@@ -7660,6 +7663,17 @@ pub struct ToolResultsConfig {
     /// Default: 8 turns.
     #[serde(default = "default_history_fold_after_turns")]
     pub history_fold_after_turns: u32,
+    /// Evict spill artifacts older than this many days at daemon startup
+    /// (#3347 4/N).  The artifact store grows unbounded otherwise — every
+    /// large tool result writes a content-addressed file under
+    /// `~/.librefang/data/artifacts/` and the original
+    /// `read_artifact` handle in the message history is the only thing
+    /// pinning it.  After history compaction or a long agent lifetime
+    /// those handles are no longer reachable, but the bytes remain on
+    /// disk.  GC runs once per daemon boot, fire-and-forget.
+    /// Set to `0` to disable eviction entirely.  Default: 30 days.
+    #[serde(default = "default_artifact_max_age_days")]
+    pub artifact_max_age_days: u32,
 }
 
 fn default_spill_threshold_bytes() -> u64 {
@@ -7678,6 +7692,10 @@ fn default_history_fold_after_turns() -> u32 {
     8
 }
 
+fn default_artifact_max_age_days() -> u32 {
+    30
+}
+
 impl Default for ToolResultsConfig {
     fn default() -> Self {
         Self {
@@ -7685,6 +7703,7 @@ impl Default for ToolResultsConfig {
             max_artifact_bytes: default_max_artifact_bytes(),
             max_bytes_per_turn: default_max_bytes_per_turn(),
             history_fold_after_turns: default_history_fold_after_turns(),
+            artifact_max_age_days: default_artifact_max_age_days(),
         }
     }
 }

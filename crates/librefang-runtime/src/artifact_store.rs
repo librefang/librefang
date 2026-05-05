@@ -12,12 +12,15 @@
 //! Storage layout:  `<data_dir>/artifacts/<sha256hex>.bin`
 //!
 //! Writes are atomic (temp-file + rename) and idempotent (existing hash files
-//! are not overwritten).  GC / age-based eviction is a follow-up (#3347 4/N).
+//! are not overwritten).  Age-based GC ([`gc_evict_older_than`]) runs once
+//! per daemon boot via [`run_startup_gc_once`] (#3347 4/N).
 
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use tracing::{debug, warn};
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime};
+use tracing::{debug, info, warn};
 
 /// Maximum bytes that `read_artifact` will return per call (64 KiB).
 pub const MAX_READ_LENGTH: usize = 64 * 1024;
@@ -264,6 +267,160 @@ pub fn maybe_spill(
 }
 
 // ---------------------------------------------------------------------------
+// Garbage collection (#3347 4/N)
+// ---------------------------------------------------------------------------
+
+/// Outcome of a single [`gc_evict_older_than`] pass.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct GcReport {
+    /// Number of files inspected (artifacts plus orphan tmp files).
+    pub scanned: usize,
+    /// Number of files actually removed.
+    pub evicted: usize,
+    /// Total bytes freed across all removed files.
+    pub bytes_freed: u64,
+    /// Per-file errors (stat or remove failures).  Non-fatal: any file the
+    /// pass could not handle is left in place and recorded here.
+    pub errors: Vec<String>,
+}
+
+/// Evict artifacts older than `max_age` from `artifact_dir`.
+///
+/// Uses each file's modification time.  Both `<hash>.bin` artifacts and
+/// orphan `<hash>.<pid>.<nanos>.tmp` files left over from interrupted
+/// writes are subject to eviction; other files in the directory are
+/// ignored so the function is safe to point at unrelated paths.
+///
+/// Never returns `Err`: the artifact store is best-effort persistent
+/// cache, and a failed GC pass must not crash callers.  Errors are
+/// surfaced via the returned [`GcReport`] for logging.
+pub fn gc_evict_older_than(artifact_dir: &Path, max_age: Duration) -> GcReport {
+    gc_evict_older_than_with_now(artifact_dir, max_age, SystemTime::now())
+}
+
+/// Test-friendly variant of [`gc_evict_older_than`] that takes the
+/// reference "now" explicitly.  Production callers go through the public
+/// wrapper; tests use this to fast-forward time without manipulating
+/// filesystem mtimes (which would require a `filetime` dev-dep).
+pub(crate) fn gc_evict_older_than_with_now(
+    artifact_dir: &Path,
+    max_age: Duration,
+    now: SystemTime,
+) -> GcReport {
+    let mut report = GcReport::default();
+    let entries = match std::fs::read_dir(artifact_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            // Missing dir is the steady-state on a fresh install; only
+            // surface real I/O errors.
+            if e.kind() != std::io::ErrorKind::NotFound {
+                report
+                    .errors
+                    .push(format!("read_dir {}: {e}", artifact_dir.display()));
+            }
+            return report;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        // Only touch artifact-store-owned files.  Skipping non-matching
+        // names keeps the GC safe even if the dir is shared by mistake.
+        if !file_name.ends_with(".bin") && !file_name.ends_with(".tmp") {
+            continue;
+        }
+        report.scanned += 1;
+
+        let metadata = match entry.metadata() {
+            Ok(m) => m,
+            Err(e) => {
+                report.errors.push(format!("stat {file_name}: {e}"));
+                continue;
+            }
+        };
+        // Files without a readable mtime are skipped rather than evicted —
+        // we have no evidence they are stale.
+        let mtime = match metadata.modified() {
+            Ok(t) => t,
+            Err(e) => {
+                report.errors.push(format!("mtime {file_name}: {e}"));
+                continue;
+            }
+        };
+        // `duration_since` errors when mtime is in the future (clock skew);
+        // treat that as age-zero so we don't evict freshly-written files.
+        let age = now.duration_since(mtime).unwrap_or_default();
+        if age <= max_age {
+            continue;
+        }
+
+        let len = metadata.len();
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                report.evicted += 1;
+                report.bytes_freed += len;
+            }
+            Err(e) => {
+                report.errors.push(format!("remove {file_name}: {e}"));
+            }
+        }
+    }
+    report
+}
+
+/// Process-wide guard so [`run_startup_gc_once`] fires at most one async
+/// task per daemon, even if multiple subsystems try to trigger it.
+static STARTUP_GC_FIRED: OnceLock<()> = OnceLock::new();
+
+/// Spawn a one-shot artifact-store GC in the tokio runtime.
+///
+/// Idempotent across the lifetime of the process: subsequent calls return
+/// without spawning anything.  When `max_age` is zero the call is also a
+/// no-op so operators can disable eviction by setting
+/// `[tool_results] artifact_max_age_days = 0`.
+///
+/// The GC itself runs on `spawn_blocking` to keep filesystem I/O off the
+/// async reactor; the spawning task only awaits the join handle and logs.
+pub fn run_startup_gc_once(artifact_dir: &Path, max_age: Duration) {
+    if max_age.is_zero() {
+        return;
+    }
+    if STARTUP_GC_FIRED.set(()).is_err() {
+        return;
+    }
+    let dir = artifact_dir.to_path_buf();
+    tokio::spawn(async move {
+        let dir_for_log = dir.clone();
+        let report = match tokio::task::spawn_blocking(move || gc_evict_older_than(&dir, max_age))
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, dir = %dir_for_log.display(), "artifact GC: blocking task panicked");
+                return;
+            }
+        };
+        if !report.errors.is_empty() {
+            for err in &report.errors {
+                warn!(dir = %dir_for_log.display(), error = %err, "artifact GC: per-file error");
+            }
+        }
+        info!(
+            dir = %dir_for_log.display(),
+            scanned = report.scanned,
+            evicted = report.evicted,
+            bytes_freed = report.bytes_freed,
+            errors = report.errors.len(),
+            "artifact GC: startup pass complete"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -410,5 +567,114 @@ mod tests {
         let result = maybe_spill("web_fetch", &content, 100, 500, dir.path());
         // Should return None (write rejected) rather than panicking.
         assert!(result.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // GC tests (#3347 4/N)
+    // -----------------------------------------------------------------------
+
+    /// Build a "now" timestamp that pretends `extra` has elapsed since the
+    /// real wall clock — equivalent to backdating every file in the dir by
+    /// `extra` without touching filesystem mtimes.
+    fn now_plus(extra: Duration) -> SystemTime {
+        SystemTime::now() + extra
+    }
+
+    #[test]
+    fn gc_missing_dir_returns_clean_report() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        let report = gc_evict_older_than(&missing, Duration::from_secs(60));
+        assert_eq!(report.scanned, 0);
+        assert_eq!(report.evicted, 0);
+        assert_eq!(report.bytes_freed, 0);
+        assert!(report.errors.is_empty(), "missing dir is not an error");
+    }
+
+    #[test]
+    fn gc_does_not_evict_fresh_artifact() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let content = b"fresh content";
+        let handle = write(content, dir.path(), DEFAULT_MAX_ARTIFACT_BYTES).unwrap();
+        // Pass with a 1-hour max-age — the file we just wrote is < 1s old.
+        let report = gc_evict_older_than(dir.path(), Duration::from_secs(3600));
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.evicted, 0);
+        // Round-trip read still works.
+        let got = read(handle.as_str(), 0, 64, dir.path()).unwrap();
+        assert_eq!(got, content);
+    }
+
+    #[test]
+    fn gc_evicts_stale_artifact_and_frees_bytes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let content = vec![b'x'; 1234];
+        let handle = write(&content, dir.path(), DEFAULT_MAX_ARTIFACT_BYTES).unwrap();
+        // Simulate "now" at +2 days; the just-written file's age becomes 2 days.
+        let now = now_plus(Duration::from_secs(2 * 24 * 3600));
+        let report = gc_evict_older_than_with_now(dir.path(), Duration::from_secs(24 * 3600), now);
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.evicted, 1);
+        assert_eq!(report.bytes_freed, content.len() as u64);
+        assert!(report.errors.is_empty());
+        // Re-read after eviction must fail with "not found".
+        let err = read(handle.as_str(), 0, 64, dir.path()).unwrap_err();
+        assert!(err.contains("not found"), "expected not-found, got: {err}");
+    }
+
+    #[test]
+    fn gc_evicts_orphan_tmp_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Synthesize an orphan tmp file matching the writer's naming convention.
+        let orphan = dir.path().join("deadbeef.999.111.tmp");
+        std::fs::write(&orphan, b"orphan junk").unwrap();
+        let now = now_plus(Duration::from_secs(7 * 24 * 3600));
+        let report = gc_evict_older_than_with_now(dir.path(), Duration::from_secs(24 * 3600), now);
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.evicted, 1);
+        assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn gc_ignores_unrelated_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // A file that does not match the .bin / .tmp suffix must not be touched
+        // even when stale, so pointing GC at the wrong directory is safe.
+        let unrelated = dir.path().join("README.md");
+        std::fs::write(&unrelated, b"important").unwrap();
+        let now = now_plus(Duration::from_secs(365 * 24 * 3600));
+        let report = gc_evict_older_than_with_now(dir.path(), Duration::from_secs(60), now);
+        assert_eq!(report.scanned, 0);
+        assert_eq!(report.evicted, 0);
+        assert!(unrelated.exists(), "unrelated file must survive GC");
+    }
+
+    #[test]
+    fn gc_future_mtime_is_not_evicted() {
+        // Clock skew can produce an mtime in the future; the GC must treat
+        // that as age zero rather than panicking on `duration_since`.
+        let dir = tempfile::TempDir::new().unwrap();
+        let _ = write(b"future-clock-skew", dir.path(), DEFAULT_MAX_ARTIFACT_BYTES).unwrap();
+        // "Now" set far in the past — every file's mtime is "in the future"
+        // relative to it.  age must clamp to zero, so nothing is evicted.
+        let pretend_now = SystemTime::UNIX_EPOCH;
+        let report = gc_evict_older_than_with_now(dir.path(), Duration::ZERO, pretend_now);
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.evicted, 0);
+    }
+
+    #[tokio::test]
+    async fn run_startup_gc_zero_max_age_is_noop() {
+        // With max_age = 0 the function returns immediately without firing
+        // the OnceLock guard, so subsequent non-zero calls still work.
+        let dir = tempfile::TempDir::new().unwrap();
+        let content = vec![b'x'; 100];
+        let _ = write(&content, dir.path(), DEFAULT_MAX_ARTIFACT_BYTES).unwrap();
+        run_startup_gc_once(dir.path(), Duration::ZERO);
+        // Yield once — if a task were spawned it would have a chance to run.
+        tokio::task::yield_now().await;
+        // File still present.
+        let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(entries.len(), 1, "zero-max-age must not evict anything");
     }
 }

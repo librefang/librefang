@@ -13192,6 +13192,20 @@ system_prompt = "You are a helpful assistant."
         );
 
         let cfg = self.config.load_full();
+
+        // #3347 4/N: artifact-store GC at daemon startup.
+        // Spawns a background task that walks the spill directory once and
+        // deletes any `<hash>.bin` (or orphan `<hash>.<pid>.<nanos>.tmp`)
+        // file with mtime older than `[tool_results] artifact_max_age_days`.
+        // Set to `0` in config to disable.  Idempotent across the lifetime
+        // of the process — repeat calls are no-ops.
+        let max_age_days = cfg.tool_results.artifact_max_age_days;
+        if max_age_days > 0 {
+            let artifact_dir = self.data_dir_boot.join("artifacts");
+            let max_age = std::time::Duration::from_secs(max_age_days as u64 * 24 * 60 * 60);
+            librefang_runtime::artifact_store::run_startup_gc_once(&artifact_dir, max_age);
+        }
+
         // Restore previously active hands from persisted state
         let state_path = self.home_dir_boot.join("data").join("hand_state.json");
         let saved_hands = librefang_hands::registry::HandRegistry::load_state_detailed(&state_path);

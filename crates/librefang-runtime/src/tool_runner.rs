@@ -588,23 +588,31 @@ pub async fn execute_tool_raw(
                         }
                     }
                 }
+                // Resolve config values; 0 means "use compiled default"
+                // (test call sites that don't populate the ctx fields).
+                let threshold = if *spill_threshold_bytes == 0 {
+                    16_384 // ToolResultsConfig::default().spill_threshold_bytes
+                } else {
+                    *spill_threshold_bytes
+                };
+                let max_artifact = if *max_artifact_bytes == 0 {
+                    crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES
+                } else {
+                    *max_artifact_bytes
+                };
                 if let Some(ctx) = web_ctx {
+                    // #3347 5/N: also wire spill into the primary
+                    // WebToolsContext::fetch path (Tavily / Brave / Jina /
+                    // SSRF-protected GET).  #4651 only wired the legacy
+                    // plain-HTTP fallback; large readability-converted
+                    // payloads on the main path were still inlined.
                     ctx.fetch
                         .fetch_with_options(url, method, headers, body)
                         .await
+                        .map(|body| {
+                            spill_or_passthrough("web_fetch", body, threshold, max_artifact)
+                        })
                 } else {
-                    // Resolve config values; 0 means "use compiled default"
-                    // (test call sites that don't populate the ctx fields).
-                    let threshold = if *spill_threshold_bytes == 0 {
-                        16_384 // ToolResultsConfig::default().spill_threshold_bytes
-                    } else {
-                        *spill_threshold_bytes
-                    };
-                    let max_artifact = if *max_artifact_bytes == 0 {
-                        crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES
-                    } else {
-                        *max_artifact_bytes
-                    };
                     tool_web_fetch_legacy(input, threshold, max_artifact).await
                 }
             }
@@ -613,10 +621,24 @@ pub async fn execute_tool_raw(
             None => Err("Missing 'query' parameter".to_string()),
             Some(query) => {
                 let max_results = input["max_results"].as_u64().unwrap_or(5) as usize;
-                if let Some(ctx) = web_ctx {
-                    ctx.search.search(query, max_results).await
+                let threshold = if *spill_threshold_bytes == 0 {
+                    16_384
                 } else {
-                    tool_web_search_legacy(input).await
+                    *spill_threshold_bytes
+                };
+                let max_artifact = if *max_artifact_bytes == 0 {
+                    crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES
+                } else {
+                    *max_artifact_bytes
+                };
+                if let Some(ctx) = web_ctx {
+                    ctx.search.search(query, max_results).await.map(|body| {
+                        spill_or_passthrough("web_search", body, threshold, max_artifact)
+                    })
+                } else {
+                    tool_web_search_legacy(input).await.map(|body| {
+                        spill_or_passthrough("web_search", body, threshold, max_artifact)
+                    })
                 }
             }
         },
@@ -2727,6 +2749,32 @@ async fn tool_apply_patch(
 // ---------------------------------------------------------------------------
 // Web tools
 // ---------------------------------------------------------------------------
+
+/// Apply artifact spill to a tool-result string, returning a compact stub
+/// when the body exceeds `threshold` and the spill write succeeds.  Falls
+/// through to the original body when below the threshold or when the
+/// write fails (e.g. per-artifact cap exceeded, disk full).
+///
+/// Shared by `web_fetch` (primary + legacy) and `web_search` (#3347 5/N).
+fn spill_or_passthrough(
+    tool_name: &str,
+    body: String,
+    threshold: u64,
+    max_artifact: u64,
+) -> String {
+    let bytes = body.as_bytes();
+    if let Some(stub) = crate::artifact_store::maybe_spill(
+        tool_name,
+        bytes,
+        threshold,
+        max_artifact,
+        &librefang_data_dir().join("artifacts"),
+    ) {
+        stub
+    } else {
+        body
+    }
+}
 
 /// Legacy web fetch (no SSRF protection, no readability). Used when WebToolsContext is unavailable.
 async fn tool_web_fetch_legacy(
