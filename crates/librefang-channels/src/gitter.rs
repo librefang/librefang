@@ -22,6 +22,12 @@ const MAX_MESSAGE_LEN: usize = 4096;
 const GITTER_STREAM_URL: &str = "https://stream.gitter.im/v1/rooms";
 const GITTER_API_URL: &str = "https://api.gitter.im/v1/rooms";
 
+/// Returns the default Gitter REST API base URL. Used to initialise `GitterAdapter::api_base`.
+#[inline]
+fn default_gitter_api_base() -> String {
+    GITTER_API_URL.to_string()
+}
+
 /// Gitter streaming channel adapter.
 ///
 /// Receives messages via the Gitter Streaming API (newline-delimited JSON)
@@ -31,6 +37,9 @@ pub struct GitterAdapter {
     token: Zeroizing<String>,
     /// Gitter room ID to listen on.
     room_id: String,
+    /// Base URL for the Gitter REST API. Defaults to `https://api.gitter.im/v1/rooms`.
+    /// Overridable in tests via `with_api_base()` to point at a wiremock server.
+    api_base: String,
     /// HTTP client.
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
@@ -51,6 +60,7 @@ impl GitterAdapter {
         Self {
             token: Zeroizing::new(token),
             room_id,
+            api_base: default_gitter_api_base(),
             client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
@@ -60,6 +70,14 @@ impl GitterAdapter {
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the Gitter REST API base URL. Intended for tests that point the adapter at
+    /// a wiremock server instead of `https://api.gitter.im/v1/rooms`.
+    #[cfg(test)]
+    pub fn with_api_base(mut self, base: String) -> Self {
+        self.api_base = base;
         self
     }
 
@@ -90,7 +108,7 @@ impl GitterAdapter {
 
     /// Fetch room info to resolve display name.
     async fn get_room_name(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/{}", GITTER_API_URL, self.room_id);
+        let url = format!("{}/{}", self.api_base, self.room_id);
         let resp = self
             .client
             .get(&url)
@@ -112,7 +130,7 @@ impl GitterAdapter {
         &self,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/{}/chatMessages", GITTER_API_URL, self.room_id);
+        let url = format!("{}/{}/chatMessages", self.api_base, self.room_id);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
         for chunk in chunks {
@@ -374,6 +392,83 @@ impl ChannelAdapter for GitterAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Uses `wiremock` to stand up a local HTTP server and points `GitterAdapter`
+    // at it via `with_api_base()`. Exercises the `POST /{room_id}/chatMessages`
+    // call made by `ChannelAdapter::send`.
+
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(api_base: String) -> GitterAdapter {
+        GitterAdapter::new("test-gitter-token".to_string(), "abc123room".to_string())
+            .with_api_base(api_base)
+    }
+
+    fn dummy_user() -> ChannelUser {
+        ChannelUser {
+            platform_id: "abc123room".to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn gitter_send_posts_chat_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/abc123room/chatMessages"))
+            .and(header("Authorization", "Bearer test-gitter-token"))
+            .and(body_json(serde_json::json!({
+                "text": "hello from librefang",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "msg-001",
+                "text": "hello from librefang",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user(),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn gitter_send_unsupported_content_uses_placeholder() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/abc123room/chatMessages"))
+            .and(body_json(serde_json::json!({
+                "text": "(Unsupported content type)",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "msg-002",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user(),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send with unsupported content must succeed");
+    }
 
     #[test]
     fn test_gitter_adapter_creation() {

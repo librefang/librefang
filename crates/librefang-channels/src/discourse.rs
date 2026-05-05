@@ -79,6 +79,14 @@ impl DiscourseAdapter {
         self
     }
 
+    /// Override the Discourse base URL. Intended for tests that point the adapter at
+    /// a wiremock server instead of a real Discourse instance.
+    #[cfg(test)]
+    pub fn with_base_url(mut self, base_url: String) -> Self {
+        self.base_url = base_url;
+        self
+    }
+
     /// Add Discourse API auth headers to a request builder.
     fn auth_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         builder
@@ -420,6 +428,108 @@ impl ChannelAdapter for DiscourseAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Uses `wiremock` to stand up a local HTTP server and points `DiscourseAdapter`
+    // at it via `with_base_url()`. Exercises the `POST /posts.json` call made by
+    // `ChannelAdapter::send` when given a numeric topic_id as the platform_id.
+
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(base_url: String) -> DiscourseAdapter {
+        DiscourseAdapter::new(
+            base_url,
+            "test-api-key".to_string(),
+            "bot-user".to_string(),
+            vec![],
+        )
+    }
+
+    fn dummy_user(topic_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: topic_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn discourse_send_posts_reply_to_topic() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/posts.json"))
+            .and(header("Api-Key", "test-api-key"))
+            .and(header("Api-Username", "bot-user"))
+            .and(body_json(serde_json::json!({
+                "topic_id": 42,
+                "raw": "hello from librefang",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 101,
+                "topic_id": 42,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri()).with_base_url(server.uri());
+        adapter
+            .send(
+                &dummy_user("42"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn discourse_send_unsupported_content_uses_placeholder() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/posts.json"))
+            .and(body_json(serde_json::json!({
+                "topic_id": 7,
+                "raw": "(Unsupported content type)",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 102,
+                "topic_id": 7,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri()).with_base_url(server.uri());
+        adapter
+            .send(
+                &dummy_user("7"),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send with unsupported content must succeed");
+    }
+
+    #[tokio::test]
+    async fn discourse_send_zero_topic_id_returns_error() {
+        // platform_id "0" should be rejected before any HTTP call is made.
+        let server = MockServer::start().await;
+        // No Mock mounted — any request would cause a 404 and the test would still
+        // pass, but we want to confirm zero requests are issued.
+
+        let adapter = make_adapter(server.uri()).with_base_url(server.uri());
+        let result = adapter
+            .send(
+                &dummy_user("0"),
+                ChannelContent::Text("should not reach server".into()),
+            )
+            .await;
+        assert!(result.is_err(), "zero topic_id must be rejected");
+    }
 
     #[test]
     fn test_discourse_adapter_creation() {

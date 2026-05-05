@@ -69,6 +69,11 @@ pub struct EmailAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Tracks reply context per sender for email threading.
     reply_ctx: Arc<DashMap<String, ReplyCtx>>,
+    /// When `true`, `build_smtp_transport` builds a plain (no-TLS,
+    /// no-AUTH) SMTP transport via `builder_dangerous`. `#[cfg(test)]`
+    /// only path: tests set this via `with_plain_smtp` so `send()`
+    /// can talk to a hand-rolled local SMTP fixture without TLS.
+    smtp_use_plain: bool,
 }
 
 impl EmailAdapter {
@@ -104,11 +109,21 @@ impl EmailAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             reply_ctx: Arc::new(DashMap::new()),
+            smtp_use_plain: false,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Switch the SMTP transport into plain (no-TLS) mode for tests.
+    /// `#[cfg(test)]`-only — used to point the adapter at a local
+    /// hand-rolled SMTP fixture without standing up TLS.
+    #[cfg(test)]
+    pub fn with_plain_smtp(mut self) -> Self {
+        self.smtp_use_plain = true;
         self
     }
 
@@ -150,6 +165,17 @@ impl EmailAdapter {
     async fn build_smtp_transport(
         &self,
     ) -> Result<AsyncSmtpTransport<Tokio1Executor>, Box<dyn std::error::Error + Send + Sync>> {
+        if self.smtp_use_plain {
+            // Test-only path: no TLS, no AUTH. Lets `send()` talk to a
+            // hand-rolled in-process SMTP listener that doesn't speak
+            // TLS. Production paths leave `smtp_use_plain == false`.
+            return Ok(AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(
+                &self.smtp_host,
+            )
+            .port(self.smtp_port)
+            .build());
+        }
+
         let creds = Credentials::new(self.username.clone(), self.password.as_str().to_string());
 
         let transport = if self.smtp_port == 465 {
@@ -898,5 +924,213 @@ mod tests {
         let ctx = ctx_map.get("user@test.com").unwrap();
         assert_eq!(ctx.subject, "Original Subject");
         assert_eq!(ctx.message_id, "<msg-123@test.com>");
+    }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Email's outbound path goes through `lettre::AsyncSmtpTransport`
+    // and a real SMTP handshake. Faking that boundary requires either a
+    // trait abstraction over `AsyncTransport` or an in-process SMTP
+    // server (e.g. `mailhog` via `testcontainers-rs`); both are larger
+    // architectural changes than this PR's wiremock-coverage scope.
+    //
+    // What we *can* pin without standing up a real SMTP server is the
+    // input-validation path that runs before any TCP I/O: an
+    // unparseable recipient address must surface as an Err before the
+    // adapter touches the network. That is the early-return contract
+    // future SMTP-fixture tests will rely on.
+
+    fn email_user(addr: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: addr.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn email_send_returns_err_for_invalid_recipient_before_smtp_io() {
+        // Use a syntactically invalid email so `to_addr.parse::<Mailbox>()`
+        // bails inside `send()` before any SMTP handshake is attempted.
+        // The SMTP host below is purposefully unreachable; if the
+        // pre-flight parse check were ever removed, this test would
+        // start hanging on DNS and the regression would be visible.
+        let adapter = EmailAdapter::new(
+            "imap.invalid.tld".to_string(),
+            993,
+            "smtp.invalid.tld".to_string(),
+            587,
+            "bot@example.com".to_string(),
+            "password".to_string(),
+            30,
+            vec![],
+            vec![],
+        );
+
+        let err = adapter
+            .send(
+                &email_user("not-an-email-at-all"),
+                ChannelContent::Text("x".into()),
+            )
+            .await
+            .expect_err("email send must reject malformed recipient before SMTP");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("invalid recipient"),
+            "error should mention invalid recipient, got: {err}"
+        );
+    }
+
+    // -- happy-path against a hand-rolled plain-SMTP fixture --
+    //
+    // No public crate ships a "tap-the-DATA-body" mock for `lettre`.
+    // The fixture below speaks just enough SMTP to satisfy lettre's
+    // builder_dangerous transport: 220 banner → EHLO 250 (no STARTTLS,
+    // no AUTH so lettre doesn't try to upgrade) → MAIL FROM 250 →
+    // RCPT TO 250 → DATA 354 → capture body until `\r\n.\r\n` → 250 →
+    // QUIT 221 → close. The captured `(from, recipient, body)` tuple
+    // is forwarded through a oneshot and asserted against what
+    // `EmailAdapter::send()` was asked to emit.
+
+    #[tokio::test]
+    async fn email_send_writes_rfc5322_message_through_smtp_fixture() {
+        use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+
+        #[derive(Debug)]
+        struct CapturedSmtp {
+            mail_from: String,
+            rcpt_to: String,
+            data: String,
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let host = addr.ip().to_string();
+        let port = addr.port();
+
+        let (tx, rx) = oneshot::channel::<CapturedSmtp>();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, mut w) = stream.into_split();
+            let mut reader = BufReader::new(r);
+
+            // Greet.
+            w.write_all(b"220 mock.smtp ESMTP\r\n").await.unwrap();
+
+            let mut mail_from = String::new();
+            let mut rcpt_to = String::new();
+            let mut data_body = String::new();
+            let mut tx_opt = Some(tx);
+
+            loop {
+                let mut line = String::new();
+                let n = reader.read_line(&mut line).await.unwrap();
+                if n == 0 {
+                    return;
+                }
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                let upper = trimmed.to_uppercase();
+                if upper.starts_with("EHLO") || upper.starts_with("HELO") {
+                    // multi-line 250: do NOT advertise STARTTLS or AUTH.
+                    w.write_all(b"250-mock.smtp\r\n").await.unwrap();
+                    w.write_all(b"250-SIZE 65536\r\n").await.unwrap();
+                    w.write_all(b"250 8BITMIME\r\n").await.unwrap();
+                } else if upper.starts_with("MAIL FROM:") {
+                    mail_from = trimmed.to_string();
+                    w.write_all(b"250 OK\r\n").await.unwrap();
+                } else if upper.starts_with("RCPT TO:") {
+                    rcpt_to = trimmed.to_string();
+                    w.write_all(b"250 OK\r\n").await.unwrap();
+                } else if upper == "DATA" {
+                    w.write_all(b"354 End data with <CR><LF>.<CR><LF>\r\n")
+                        .await
+                        .unwrap();
+                    // Read body lines until we see "\r\n.\r\n". Each
+                    // SMTP body line is a discrete \r\n-terminated read.
+                    loop {
+                        let mut body_line = String::new();
+                        let n = reader.read_line(&mut body_line).await.unwrap();
+                        if n == 0 {
+                            return;
+                        }
+                        if body_line == ".\r\n" {
+                            break;
+                        }
+                        data_body.push_str(&body_line);
+                    }
+                    w.write_all(b"250 OK: queued as MOCK-1\r\n").await.unwrap();
+                    if let Some(tx) = tx_opt.take() {
+                        let _ = tx.send(CapturedSmtp {
+                            mail_from: mail_from.clone(),
+                            rcpt_to: rcpt_to.clone(),
+                            data: data_body.clone(),
+                        });
+                    }
+                } else if upper.starts_with("QUIT") {
+                    w.write_all(b"221 Bye\r\n").await.unwrap();
+                    // Drain the rest of the connection so the client
+                    // sees the QUIT response before EOF.
+                    let mut sink = Vec::new();
+                    let _ = reader.read_to_end(&mut sink).await;
+                    return;
+                } else if upper.starts_with("RSET") || upper.starts_with("NOOP") {
+                    w.write_all(b"250 OK\r\n").await.unwrap();
+                } else {
+                    // Unknown verb — keep talking.
+                    w.write_all(b"250 OK\r\n").await.unwrap();
+                }
+            }
+        });
+
+        let adapter = EmailAdapter::new(
+            "imap.invalid.tld".to_string(),
+            993,
+            host,
+            port,
+            "bot@example.com".to_string(),
+            "password".to_string(),
+            30,
+            vec![],
+            vec![],
+        )
+        .with_plain_smtp();
+
+        adapter
+            .send(
+                &email_user("alice@example.com"),
+                ChannelContent::Text("Subject: Test Message\n\nhello smtp".into()),
+            )
+            .await
+            .expect("email send must succeed against plain-SMTP fixture");
+
+        let captured = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("fixture must capture DATA body within 5s")
+            .expect("oneshot must not be dropped");
+
+        assert!(
+            captured.mail_from.contains("bot@example.com"),
+            "MAIL FROM must reference the configured sender, got: {}",
+            captured.mail_from
+        );
+        assert!(
+            captured.rcpt_to.contains("alice@example.com"),
+            "RCPT TO must reference the recipient, got: {}",
+            captured.rcpt_to
+        );
+        assert!(
+            captured.data.contains("Subject: Test Message"),
+            "DATA body must carry the subject, got: ---\n{}\n---",
+            captured.data
+        );
+        assert!(
+            captured.data.contains("hello smtp"),
+            "DATA body must carry the message body, got: ---\n{}\n---",
+            captured.data
+        );
+
+        server.abort();
     }
 }

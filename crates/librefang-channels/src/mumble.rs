@@ -613,4 +613,128 @@ mod tests {
         // No field 2 tag (0x12) should be present
         assert!(!payload.contains(&0x12));
     }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Mumble outbound writes a custom protobuf-framed packet through a
+    // TLS-wrapped `OwnedWriteHalf`. Standing up a Mumble server stub
+    // (TLS + protobuf TextMessage) is disproportionate to the test
+    // value here; the existing `build_text_message_packet` /
+    // `build_authenticate_packet` / `encode_packet` tests already cover
+    // the protobuf framing in isolation.
+    //
+    // What we *can* pin without that work is the fail-loud contract: if
+    // `send()` is called before `start()` has populated `self.stream`,
+    // it must return an Err naming the missing connection — and it
+    // must not panic on the `Mutex<Option<OwnedWriteHalf>>` `.as_mut()`
+    // path.
+
+    fn mumble_user(channel: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: channel.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mumble_send_returns_err_when_not_connected() {
+        let adapter = MumbleAdapter::new(
+            "mumble.example.invalid".to_string(),
+            64738,
+            String::new(),
+            "librefang-bot".to_string(),
+            "Root".to_string(),
+        );
+        let err = adapter
+            .send(&mumble_user("Root"), ChannelContent::Text("x".into()))
+            .await
+            .expect_err("mumble send must error when stream is unset");
+        assert!(
+            err.to_string().to_lowercase().contains("not connected"),
+            "error should mention disconnected stream, got: {err}"
+        );
+    }
+
+    // -- happy-path against a TCP listener fixture --
+    //
+    // Mumble's `send()` writes raw protobuf-framed bytes to the
+    // adapter's stored `OwnedWriteHalf` (no TLS in this adapter's
+    // current implementation). We bind a local `TcpListener`, dial it
+    // ourselves, hand the resulting client-side `OwnedWriteHalf` to
+    // `adapter.stream`, then call `send()` and read back the bytes
+    // from the server side. We assert the on-wire framing (type =
+    // `MSG_TYPE_TEXT_MESSAGE` = 11, big-endian u32 length) and that
+    // the protobuf payload contains the message text in the clear
+    // (the inner `TextMessage` puts `message` at field 5 / wire-type
+    // 2, so the UTF-8 bytes appear verbatim in the encoded payload).
+    //
+    // The protobuf decode itself is already covered by
+    // `test_build_text_message_packet*` in this same module — this
+    // test specifically pins that `send()` reaches the wire.
+
+    #[tokio::test]
+    async fn mumble_send_writes_framed_text_message_packet_to_socket() {
+        use tokio::io::{AsyncReadExt as _};
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio::sync::oneshot;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let (tx, rx) = oneshot::channel::<(u16, Vec<u8>)>();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut header = [0u8; 6];
+            if s.read_exact(&mut header).await.is_err() {
+                return;
+            }
+            let pkt_type = u16::from_be_bytes([header[0], header[1]]);
+            let pkt_len =
+                u32::from_be_bytes([header[2], header[3], header[4], header[5]])
+                    as usize;
+            let mut body = vec![0u8; pkt_len];
+            if s.read_exact(&mut body).await.is_err() {
+                return;
+            }
+            let _ = tx.send((pkt_type, body));
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let (_read_half, write_half) = stream.into_split();
+
+        let adapter = MumbleAdapter::new(
+            "127.0.0.1".to_string(),
+            addr.port(),
+            String::new(),
+            "librefang-bot".to_string(),
+            "Root".to_string(),
+        );
+        *adapter.stream.lock().await = Some(write_half);
+
+        adapter
+            .send(
+                &mumble_user("Root"),
+                ChannelContent::Text("hello mumble".into()),
+            )
+            .await
+            .expect("mumble send must succeed once stream is wired up");
+
+        let (pkt_type, body) = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("listener must capture a packet within 5s")
+            .expect("oneshot must not be dropped");
+
+        assert_eq!(
+            pkt_type, MSG_TYPE_TEXT_MESSAGE,
+            "packet type must be TextMessage (11)"
+        );
+        assert!(
+            body.windows(b"hello mumble".len())
+                .any(|w| w == b"hello mumble"),
+            "payload must carry the message text in the protobuf body, got bytes: {body:?}"
+        );
+
+        server.abort();
+    }
 }
