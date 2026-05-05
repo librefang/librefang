@@ -417,7 +417,7 @@ async fn batch_oversize_is_bad_request() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body}");
-    assert!(body["error"]["message"]
+    assert!(body["error"]
         .as_str()
         .unwrap_or_default()
         .contains("batch size"));
