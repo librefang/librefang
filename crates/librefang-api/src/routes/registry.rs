@@ -266,17 +266,14 @@ async fn create_registry_content(
             }
         }
 
-        let mut catalog = state
-            .kernel
-            .model_catalog_ref()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Err(e) = catalog.load_catalog_file(&target) {
-            tracing::warn!("Failed to merge provider file into catalog: {e}");
-        }
-        catalog.detect_auth();
+        let target_for_closure = target.clone();
+        state.kernel.model_catalog_update(move |catalog| {
+            if let Err(e) = catalog.load_catalog_file(&target_for_closure) {
+                tracing::warn!("Failed to merge provider file into catalog: {e}");
+            }
+            catalog.detect_auth();
+        });
         // Invalidate cached LLM drivers — URLs/keys may have changed.
-        drop(catalog);
         state.kernel.clear_driver_cache();
 
         if api_key_to_save.is_some() {

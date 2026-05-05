@@ -230,6 +230,17 @@ use std::time::Instant;
 // Skills endpoints
 // ---------------------------------------------------------------------------
 
+/// Query parameters for `GET /api/skills`. Combines the existing
+/// `?category=` filter with the canonical `?offset=&limit=` pagination
+/// from `PaginationQuery` (#3639). Server caps `limit` at
+/// `PAGINATION_MAX_LIMIT` (= 100).
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ListSkillsQuery {
+    pub category: Option<String>,
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
+}
+
 /// GET /api/skills — List installed skills.
 ///
 /// `categories` always reflects all skills regardless of the `?category=` filter.
@@ -243,7 +254,7 @@ use std::time::Instant;
 )]
 pub async fn list_skills(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    Query(params): Query<ListSkillsQuery>,
 ) -> impl IntoResponse {
     // Use the kernel's LIVE registry so `skills.disabled` and
     // `skills.extra_dirs` from config.toml take effect on this
@@ -257,7 +268,7 @@ pub async fn list_skills(
         .read()
         .unwrap_or_else(|e| e.into_inner());
 
-    let category_filter = params.get("category").map(|s| s.as_str());
+    let category_filter = params.category.as_deref();
 
     // Collect all categories first (unaffected by the filter), then apply filter.
     // Category derivation lives in `librefang_skills::registry::derive_category`
@@ -312,14 +323,23 @@ pub async fn list_skills(
         })
         .collect();
 
+    // Pagination (#3639): apply `?offset=&limit=` after the category filter
+    // and category-set computation, so `categories` always reflects the
+    // unfiltered registry while `items`/`total` reflect the filtered + paged
+    // view. Capped server-side at PAGINATION_MAX_LIMIT.
+    let pagination = crate::types::PaginationQuery {
+        offset: params.offset,
+        limit: params.limit,
+    };
+    let (items, total, offset, limit) = pagination.paginate(skills);
     let categories_vec: Vec<String> = categories.into_iter().collect();
-    let total = skills.len();
-    // Untyped JSON so `categories` can be added alongside PaginatedResponse fields without a new struct.
+    // Untyped JSON so `categories` can ride alongside the canonical
+    // PaginatedResponse fields without a new struct.
     Json(serde_json::json!({
-        "items": skills,
+        "items": items,
         "total": total,
-        "offset": 0,
-        "limit": serde_json::Value::Null,
+        "offset": offset,
+        "limit": limit,
         "categories": categories_vec,
     }))
 }
