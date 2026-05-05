@@ -326,9 +326,9 @@ async fn install_hand_missing_toml_content_returns_400() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let err = body
-        .get("error")
-        .and_then(|v| v.as_str())
+    let err = body["error"]["message"]
+        .as_str()
+        .or_else(|| body["error"].as_str())
         .unwrap_or_default();
     assert!(
         err.to_lowercase().contains("toml_content"),

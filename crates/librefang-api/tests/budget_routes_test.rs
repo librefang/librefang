@@ -330,7 +330,7 @@ async fn agent_budget_status_rejects_invalid_id_with_400() {
     let (status, body) = request(&h, Method::GET, "/api/budget/agents/not-a-uuid", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .to_lowercase()
@@ -387,7 +387,7 @@ async fn update_agent_budget_rejects_empty_body_with_400() {
     let (status, body) = request(&h, Method::PUT, &path, Some(serde_json::json!({}))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .contains("at least one"),

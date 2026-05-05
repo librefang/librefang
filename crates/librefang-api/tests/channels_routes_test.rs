@@ -181,7 +181,7 @@ async fn channels_get_unknown_returns_404_with_unified_error() {
     let h = boot().await;
     let (status, body) = json_request(&h, Method::GET, "/api/channels/nope-not-real", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
-    let err = body["error"].as_str().unwrap_or("");
+    let err = body["error"]["message"].as_str().unwrap_or("");
     assert!(
         err.contains("Unknown channel"),
         "error must mention 'Unknown channel': {body:?}"
@@ -222,7 +222,7 @@ async fn channels_configure_unknown_channel_returns_404() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .contains("Unknown channel"),
@@ -243,7 +243,10 @@ async fn channels_configure_missing_fields_object_returns_400() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("fields"),
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("fields"),
         "error must mention 'fields': {body:?}"
     );
 }
@@ -264,7 +267,7 @@ async fn channels_remove_unknown_channel_returns_404() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .contains("Unknown channel"),
@@ -290,14 +293,11 @@ async fn channels_test_unknown_channel_returns_404() {
     // Post-#3505: error responses use the canonical `ApiErrorResponse`
     // envelope (`{"error": …}`). The pre-migration `{"status": "error",
     // "message": …}` shape no longer appears.
-    assert_eq!(body["error"], "Unknown channel");
+    // Post-#3639: `error` is a nested object with a `message` field.
+    assert_eq!(body["error"]["message"], "Unknown channel");
     assert!(
         body.get("status").is_none(),
         "legacy `status` field must be gone post-#3505: {body}"
-    );
-    assert!(
-        body.get("message").is_none(),
-        "legacy `message` field must be gone post-#3505: {body}"
     );
 }
 
@@ -330,13 +330,13 @@ async fn channels_test_known_channel_with_no_creds_reports_missing_env() {
     let h = boot().await;
     let (status, body) = json_request(&h, Method::POST, "/api/channels/telegram/test", None).await;
     assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body:?}");
-    let msg = body["error"].as_str().unwrap_or("");
+    let msg = body["error"]["message"].as_str().unwrap_or("");
     assert!(
         msg.contains("Missing required env vars"),
         "error must call out missing env vars: {body}"
     );
     assert!(
-        body.get("status").is_none() && body.get("message").is_none(),
-        "legacy `status` / `message` fields must be gone post-#3505: {body}"
+        body.get("status").is_none(),
+        "legacy `status` field must be gone post-#3505: {body}"
     );
 }
