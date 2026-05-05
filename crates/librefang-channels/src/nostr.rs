@@ -518,4 +518,97 @@ mod tests {
         );
         assert_eq!(adapter.relays.len(), 3);
     }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Nostr's `send()` opens a WebSocket against each configured relay
+    // URL. Wiremock is HTTP-only, so we stand up a minimal WebSocket
+    // server with `tokio-tungstenite::accept_async` (already a dev-dep
+    // for telegram et al.) and route the adapter at it via the existing
+    // public `relays: Vec<String>` argument — no production hook is
+    // required. Asserts the NIP-01 envelope: a JSON array `["EVENT",
+    // {…}]` with `kind = 4`, the configured `content`, and a `tags`
+    // entry referencing the recipient pubkey via the `"p"` letter.
+
+    use futures::StreamExt as _;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    fn nostr_user(pubkey: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: pubkey.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    /// Start a one-shot WebSocket server on 127.0.0.1:0.
+    /// Returns `(ws://addr, receiver)` where the first text frame
+    /// received from the client is forwarded onto the receiver.
+    async fn start_capture_ws_server() -> (String, oneshot::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{addr}");
+        let (tx, rx) = oneshot::channel::<String>();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            if let Some(Ok(WsMessage::Text(text))) = ws.next().await {
+                let _ = tx.send(text.to_string());
+            }
+            // Politely close the socket so the client's `send` future
+            // resolves quickly instead of waiting on the read half.
+            let _ = ws.close(None).await;
+        });
+        (url, rx)
+    }
+
+    #[tokio::test]
+    async fn nostr_send_publishes_kind4_event_envelope() {
+        let recipient_pubkey =
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let (url, captured) = start_capture_ws_server().await;
+        let adapter = NostrAdapter::new(TEST_PRIVKEY.to_string(), vec![url]);
+
+        adapter
+            .send(
+                &nostr_user(recipient_pubkey),
+                ChannelContent::Text("hello relay".into()),
+            )
+            .await
+            .expect("nostr send must succeed against capturing ws server");
+
+        let raw = tokio::time::timeout(Duration::from_secs(5), captured)
+            .await
+            .expect("server must receive a frame within 5s")
+            .expect("capture oneshot must not be dropped");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw).expect("frame must be valid JSON");
+        assert_eq!(parsed[0].as_str(), Some("EVENT"), "envelope must be EVENT");
+        assert_eq!(parsed[1]["kind"].as_i64(), Some(4), "must be kind 4 (DM)");
+        assert_eq!(
+            parsed[1]["content"].as_str(),
+            Some("hello relay"),
+            "content must round-trip the text"
+        );
+        assert_eq!(
+            parsed[1]["tags"][0][0].as_str(),
+            Some("p"),
+            "first tag entry must be a `p` (recipient) tag"
+        );
+        assert_eq!(
+            parsed[1]["tags"][0][1].as_str(),
+            Some(recipient_pubkey),
+            "first tag entry must reference the recipient pubkey"
+        );
+        assert!(
+            parsed[1]["pubkey"]
+                .as_str()
+                .map(|s| s.len() == 64)
+                .unwrap_or(false),
+            "pubkey must be a 32-byte hex string (64 chars)"
+        );
+    }
 }

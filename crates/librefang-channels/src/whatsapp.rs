@@ -52,6 +52,10 @@ pub struct WhatsAppAdapter {
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
+    /// Cloud API base URL (without phone-number-id segment). Defaults to
+    /// `"https://graph.facebook.com/v21.0"`; tests override via
+    /// `with_base_url` so the adapter talks to a local wiremock instead.
+    cloud_api_base: String,
 }
 
 impl WhatsAppAdapter {
@@ -79,11 +83,20 @@ impl WhatsAppAdapter {
             bot_name: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
+            cloud_api_base: "https://graph.facebook.com/v21.0".to_string(),
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the Cloud API base URL. `#[cfg(test)]`-only — used by
+    /// wiremock-driven tests to point the adapter at a local mock server.
+    #[cfg(test)]
+    pub fn with_base_url(mut self, url: String) -> Self {
+        self.cloud_api_base = url;
         self
     }
 
@@ -178,8 +191,8 @@ impl WhatsAppAdapter {
         use reqwest::multipart;
 
         let url = format!(
-            "https://graph.facebook.com/v21.0/{}/media",
-            self.phone_number_id
+            "{}/{}/media",
+            self.cloud_api_base, self.phone_number_id
         );
 
         // Build multipart form: file field + messaging_product field
@@ -234,8 +247,8 @@ impl WhatsAppAdapter {
         let media_id = self.api_upload_media(audio, mime_type).await?;
 
         let url = format!(
-            "https://graph.facebook.com/v21.0/{}/messages",
-            self.phone_number_id
+            "{}/{}/messages",
+            self.cloud_api_base, self.phone_number_id
         );
         let body = serde_json::json!({
             "messaging_product": "whatsapp",
@@ -344,8 +357,8 @@ impl WhatsAppAdapter {
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
-            "https://graph.facebook.com/v21.0/{}/messages",
-            self.phone_number_id
+            "{}/{}/messages",
+            self.cloud_api_base, self.phone_number_id
         );
 
         // Split long messages
@@ -384,8 +397,8 @@ impl WhatsAppAdapter {
         message_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
-            "https://graph.facebook.com/v21.0/{}/messages",
-            self.phone_number_id
+            "{}/{}/messages",
+            self.cloud_api_base, self.phone_number_id
         );
 
         let body = serde_json::json!({
@@ -533,8 +546,8 @@ impl ChannelAdapter for WhatsAppAdapter {
                     "audio": { "link": url }
                 });
                 let api_url = format!(
-                    "https://graph.facebook.com/v21.0/{}/messages",
-                    self.phone_number_id
+                    "{}/{}/messages",
+                    self.cloud_api_base, self.phone_number_id
                 );
                 let resp = self
                     .client
@@ -561,8 +574,8 @@ impl ChannelAdapter for WhatsAppAdapter {
                     }
                 });
                 let api_url = format!(
-                    "https://graph.facebook.com/v21.0/{}/messages",
-                    self.phone_number_id
+                    "{}/{}/messages",
+                    self.cloud_api_base, self.phone_number_id
                 );
                 self.client
                     .post(&api_url)
@@ -582,8 +595,8 @@ impl ChannelAdapter for WhatsAppAdapter {
                     }
                 });
                 let api_url = format!(
-                    "https://graph.facebook.com/v21.0/{}/messages",
-                    self.phone_number_id
+                    "{}/{}/messages",
+                    self.cloud_api_base, self.phone_number_id
                 );
                 self.client
                     .post(&api_url)
@@ -603,8 +616,8 @@ impl ChannelAdapter for WhatsAppAdapter {
                     }
                 });
                 let api_url = format!(
-                    "https://graph.facebook.com/v21.0/{}/messages",
-                    self.phone_number_id
+                    "{}/{}/messages",
+                    self.cloud_api_base, self.phone_number_id
                 );
                 self.client
                     .post(&api_url)
@@ -767,5 +780,128 @@ mod tests {
         )
         .with_group_policy(GroupPolicy::Ignore);
         assert!(!adapter.should_handle_message(true, "/help", ""));
+    }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // The Cloud API URL was previously hard-coded inline; it is now backed
+    // by a `cloud_api_base` field with a `#[cfg(test)] with_base_url`
+    // setter. Asserts the `POST {base}/{phone_number_id}/messages` shape
+    // — bearer auth + the WhatsApp Cloud API JSON envelope. Web/QR
+    // gateway mode (already publicly settable via `with_gateway`) is
+    // covered separately.
+
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn whatsapp_user(phone: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: phone.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn whatsapp_cloud_api_send_posts_messages_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/PHONE_ID_42/messages"))
+            .and(header("authorization", "Bearer access-tok"))
+            .and(body_json(serde_json::json!({
+                "messaging_product": "whatsapp",
+                "to": "+15555550199",
+                "type": "text",
+                "text": { "body": "hi whatsapp" }
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "messaging_product": "whatsapp",
+                    "messages": [{ "id": "wamid.123" }],
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = WhatsAppAdapter::new(
+            "PHONE_ID_42".to_string(),
+            "access-tok".to_string(),
+            "verify".to_string(),
+            8443,
+            vec![],
+        )
+        .with_base_url(server.uri());
+        adapter
+            .send(
+                &whatsapp_user("+15555550199"),
+                ChannelContent::Text("hi whatsapp".into()),
+            )
+            .await
+            .expect("whatsapp Cloud API send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn whatsapp_cloud_api_send_returns_err_on_non_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/PHONE_ID_42/messages"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = WhatsAppAdapter::new(
+            "PHONE_ID_42".to_string(),
+            "bad-tok".to_string(),
+            "verify".to_string(),
+            8443,
+            vec![],
+        )
+        .with_base_url(server.uri());
+        let err = adapter
+            .send(
+                &whatsapp_user("+15555550199"),
+                ChannelContent::Text("x".into()),
+            )
+            .await
+            .expect_err("whatsapp Cloud API send must propagate non-2xx as Err");
+        assert!(
+            err.to_string().contains("401"),
+            "error should mention status code, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn whatsapp_gateway_mode_send_posts_to_message_send() {
+        // gateway mode is already publicly settable via `with_gateway`,
+        // so this happy-path needs no extra production hook.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/message/send"))
+            .and(body_json(serde_json::json!({
+                "to": "+15555550199",
+                "text": "via gateway",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = WhatsAppAdapter::new(
+            "PHONE_ID_42".to_string(),
+            "ignored-in-gateway-mode".to_string(),
+            "verify".to_string(),
+            8443,
+            vec![],
+        )
+        .with_gateway(Some(server.uri()));
+        adapter
+            .send(
+                &whatsapp_user("+15555550199"),
+                ChannelContent::Text("via gateway".into()),
+            )
+            .await
+            .expect("whatsapp gateway send must succeed against mock");
     }
 }

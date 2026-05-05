@@ -564,4 +564,118 @@ mod tests {
         // Verify the key is accessible (it will be zeroized on drop)
         assert_eq!(adapter.api_key.as_str(), "my-secret-api-key");
     }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Zulip's existing `new()` already takes a `server_url`, so no hook
+    // is needed — point it at a local `wiremock::MockServer` directly.
+    // Body matching uses `body_string_contains` because reqwest serialises
+    // the form params as `application/x-www-form-urlencoded`, not JSON.
+
+    use wiremock::matchers::{body_string_contains, header_exists, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn zulip_user(stream_or_email: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: stream_or_email.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn zulip_send_stream_message_posts_to_messages_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/messages"))
+            .and(header_exists("authorization"))
+            .and(body_string_contains("type=stream"))
+            .and(body_string_contains("to=engineering"))
+            .and(body_string_contains("topic=LibreFang"))
+            .and(body_string_contains("content=hello+zulip"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "result": "success",
+                    "id": 99,
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = ZulipAdapter::new(
+            server.uri(),
+            "bot@example.com".to_string(),
+            "api-key-xyz".to_string(),
+            vec![],
+        );
+        adapter
+            .send(
+                &zulip_user("engineering"),
+                ChannelContent::Text("hello zulip".into()),
+            )
+            .await
+            .expect("zulip stream send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn zulip_send_dm_uses_direct_type() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/messages"))
+            .and(header_exists("authorization"))
+            .and(body_string_contains("type=direct"))
+            // form-urlencoded turns "@" into "%40"
+            .and(body_string_contains("to=alice%40example.com"))
+            .and(body_string_contains("content=ping"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "result": "success",
+                    "id": 100,
+                })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = ZulipAdapter::new(
+            server.uri(),
+            "bot@example.com".to_string(),
+            "api-key-xyz".to_string(),
+            vec![],
+        );
+        adapter
+            .send(
+                &zulip_user("alice@example.com"),
+                ChannelContent::Text("ping".into()),
+            )
+            .await
+            .expect("zulip dm send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn zulip_send_returns_err_on_non_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/messages"))
+            .respond_with(ResponseTemplate::new(400))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = ZulipAdapter::new(
+            server.uri(),
+            "bot@example.com".to_string(),
+            "bad-key".to_string(),
+            vec![],
+        );
+        let err = adapter
+            .send(&zulip_user("any-stream"), ChannelContent::Text("x".into()))
+            .await
+            .expect_err("zulip send must propagate non-2xx as Err");
+        assert!(
+            err.to_string().contains("400"),
+            "error should mention status code, got: {err}"
+        );
+    }
 }

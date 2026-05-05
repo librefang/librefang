@@ -24,6 +24,12 @@ const FLOCK_API_BASE: &str = "https://api.flock.com/v2";
 /// Maximum message length for Flock messages.
 const MAX_MESSAGE_LEN: usize = 4096;
 
+/// Returns the default Flock API base URL. Used to initialise `FlockAdapter::api_base`.
+#[inline]
+fn default_flock_api_base() -> String {
+    FLOCK_API_BASE.to_string()
+}
+
 /// Flock Bot channel adapter using webhook for receiving and REST API for sending.
 ///
 /// Listens for inbound event callbacks via a configurable HTTP webhook server
@@ -32,6 +38,9 @@ const MAX_MESSAGE_LEN: usize = 4096;
 pub struct FlockAdapter {
     /// SECURITY: Bot token is zeroized on drop.
     bot_token: Zeroizing<String>,
+    /// Base URL for the Flock REST API. Defaults to `https://api.flock.com/v2`.
+    /// Overridable in tests via `with_api_base()` to point at a wiremock server.
+    api_base: String,
     /// HTTP client for outbound API calls.
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
@@ -47,6 +56,7 @@ impl FlockAdapter {
     pub fn new(bot_token: String, _webhook_port: u16) -> Self {
         Self {
             bot_token: Zeroizing::new(bot_token),
+            api_base: default_flock_api_base(),
             client: crate::http_client::new_client(),
             account_id: None,
         }
@@ -57,11 +67,19 @@ impl FlockAdapter {
         self
     }
 
+    /// Override the Flock API base URL. Intended for tests that point the adapter at
+    /// a wiremock server instead of `https://api.flock.com/v2`.
+    #[cfg(test)]
+    pub fn with_api_base(mut self, base: String) -> Self {
+        self.api_base = base;
+        self
+    }
+
     /// Validate credentials by fetching bot/app info.
     async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/users.getInfo?token={}",
-            FLOCK_API_BASE,
+            self.api_base,
             self.bot_token.as_str()
         );
         let resp = self.client.get(&url).send().await?;
@@ -85,7 +103,7 @@ impl FlockAdapter {
         to: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/chat.sendMessage", FLOCK_API_BASE);
+        let url = format!("{}/chat.sendMessage", self.api_base);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
         for chunk in chunks {
@@ -125,7 +143,7 @@ impl FlockAdapter {
         text: &str,
         attachment_title: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/chat.sendMessage", FLOCK_API_BASE);
+        let url = format!("{}/chat.sendMessage", self.api_base);
 
         let body = serde_json::json!({
             "token": self.bot_token.as_str(),
@@ -342,6 +360,84 @@ impl ChannelAdapter for FlockAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Uses `wiremock` to stand up a local HTTP server and points `FlockAdapter`
+    // at it via `with_api_base()`. Exercises the `chat.sendMessage` call made by
+    // `ChannelAdapter::send`.
+
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(api_base: String) -> FlockAdapter {
+        FlockAdapter::new("test-flock-token".to_string(), 8181).with_api_base(api_base)
+    }
+
+    fn dummy_user(channel_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: channel_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn flock_send_posts_chat_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat.sendMessage"))
+            .and(body_json(serde_json::json!({
+                "token": "test-flock-token",
+                "to": "g:channel123",
+                "text": "hello from librefang",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "uid": "msg-001",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("g:channel123"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn flock_send_unsupported_content_uses_placeholder() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat.sendMessage"))
+            .and(body_json(serde_json::json!({
+                "token": "test-flock-token",
+                "to": "u:user456",
+                "text": "(Unsupported content type)",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "uid": "msg-002",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("u:user456"),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send with unsupported content must succeed");
+    }
 
     #[test]
     fn test_flock_adapter_creation() {

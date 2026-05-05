@@ -82,6 +82,15 @@ fn default_token_uri() -> String {
     "https://oauth2.googleapis.com/token".to_string()
 }
 
+/// Default Google Chat REST API base URL.
+const GOOGLE_CHAT_API_BASE: &str = "https://chat.googleapis.com/v1";
+
+/// Returns the default Google Chat API base URL. Used to initialise `GoogleChatAdapter::api_base`.
+#[inline]
+fn default_google_chat_api_base() -> String {
+    GOOGLE_CHAT_API_BASE.to_string()
+}
+
 /// Google Chat channel adapter using service account authentication and REST API.
 ///
 /// Inbound messages arrive via a configurable webhook HTTP listener.
@@ -92,6 +101,9 @@ pub struct GoogleChatAdapter {
     service_account_key: Zeroizing<String>,
     /// Space IDs to listen to (e.g., "spaces/AAAA").
     space_ids: Vec<String>,
+    /// Base URL for the Google Chat REST API. Defaults to `https://chat.googleapis.com/v1`.
+    /// Overridable in tests via `with_api_base()` to point at a wiremock server.
+    api_base: String,
     /// HTTP client for outbound API calls.
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
@@ -111,6 +123,7 @@ impl GoogleChatAdapter {
         Self {
             service_account_key: Zeroizing::new(service_account_key),
             space_ids,
+            api_base: default_google_chat_api_base(),
             client: crate::http_client::new_client(),
             account_id: None,
             cached_token: Arc::new(RwLock::new(None)),
@@ -119,6 +132,14 @@ impl GoogleChatAdapter {
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the Google Chat REST API base URL. Intended for tests that point the adapter at
+    /// a wiremock server instead of `https://chat.googleapis.com/v1`.
+    #[cfg(test)]
+    pub fn with_api_base(mut self, base: String) -> Self {
+        self.api_base = base;
         self
     }
 
@@ -277,7 +298,7 @@ impl GoogleChatAdapter {
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let token = self.get_access_token().await?;
-        let url = format!("https://chat.googleapis.com/v1/{}/messages", space_id);
+        let url = format!("{}/{}/messages", self.api_base, space_id);
 
         let chunks = split_message(text, MAX_MESSAGE_LEN);
         for chunk in chunks {
@@ -550,6 +571,87 @@ mod tests {
         let adapter = GoogleChatAdapter::new("not-json".to_string(), vec![], 8092);
         // Can't call async get_access_token in sync test, but verify construction works
         assert_eq!(adapter.name(), "google_chat");
+    }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Uses `wiremock` to stand up a local HTTP server and points `GoogleChatAdapter`
+    // at it via `with_api_base()`. The service account JSON uses the `access_token`
+    // fallback field to bypass JWT exchange so no real credentials are needed.
+
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Build an adapter that uses the `access_token` field in the key JSON
+    /// so `get_access_token()` never performs a JWT exchange.
+    fn make_adapter(api_base: String) -> GoogleChatAdapter {
+        let key_json = serde_json::json!({
+            "access_token": "test-google-token",
+        })
+        .to_string();
+        GoogleChatAdapter::new(key_json, vec![], 0).with_api_base(api_base)
+    }
+
+    fn dummy_user(space_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: space_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn google_chat_send_posts_message_to_space() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/spaces/AAABBB/messages"))
+            .and(header("Authorization", "Bearer test-google-token"))
+            .and(body_json(serde_json::json!({
+                "text": "hello from librefang",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": "spaces/AAABBB/messages/msg-001",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("spaces/AAABBB"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn google_chat_send_unsupported_content_uses_placeholder() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/spaces/CCCDDD/messages"))
+            .and(body_json(serde_json::json!({
+                "text": "(Unsupported content type)",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": "spaces/CCCDDD/messages/msg-002",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("spaces/CCCDDD"),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send with unsupported content must succeed");
     }
 
     #[test]
