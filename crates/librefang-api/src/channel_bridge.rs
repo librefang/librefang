@@ -327,7 +327,10 @@ use librefang_channels::wechat::WeChatAdapter;
 use librefang_channels::wecom::WeComAdapter;
 
 use async_trait::async_trait;
+use librefang_kernel::auth::Action as KernelAction;
+use librefang_kernel::config::load_config as kernel_load_config;
 use librefang_kernel::llm_driver::StreamEvent;
+use librefang_kernel::DeliveryTracker;
 use librefang_kernel::LibreFangKernel;
 use librefang_types::agent::AgentId;
 use std::sync::Arc;
@@ -1987,11 +1990,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .ok_or_else(|| "Unrecognized user. Contact an admin to get access.".to_string())?;
 
         let auth_action = match action {
-            "chat" => librefang_kernel::auth::Action::ChatWithAgent,
-            "spawn" => librefang_kernel::auth::Action::SpawnAgent,
-            "kill" => librefang_kernel::auth::Action::KillAgent,
-            "install_skill" => librefang_kernel::auth::Action::InstallSkill,
-            _ => librefang_kernel::auth::Action::ChatWithAgent,
+            "chat" => KernelAction::ChatWithAgent,
+            "spawn" => KernelAction::SpawnAgent,
+            "kill" => KernelAction::KillAgent,
+            "install_skill" => KernelAction::InstallSkill,
+            _ => KernelAction::ChatWithAgent,
         };
 
         self.kernel
@@ -2010,13 +2013,9 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         thread_id: Option<&str>,
     ) {
         let receipt = if success {
-            librefang_kernel::DeliveryTracker::sent_receipt(channel, recipient)
+            DeliveryTracker::sent_receipt(channel, recipient)
         } else {
-            librefang_kernel::DeliveryTracker::failed_receipt(
-                channel,
-                recipient,
-                error.unwrap_or("Unknown error"),
-            )
+            DeliveryTracker::failed_receipt(channel, recipient, error.unwrap_or("Unknown error"))
         };
         self.kernel.delivery().record(agent_id, receipt);
 
@@ -3724,7 +3723,7 @@ pub async fn reload_channels_from_disk(
 
     // Re-read config from disk
     let config_path = state.kernel.home_dir().join("config.toml");
-    let fresh_config = librefang_kernel::config::load_config(Some(&config_path));
+    let fresh_config = kernel_load_config(Some(&config_path));
 
     // Update the live channels config so list_channels() reflects reality
     *state.channels_config.write().await = fresh_config.channels.clone();
@@ -3751,6 +3750,7 @@ pub async fn reload_channels_from_disk(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use librefang_kernel::event_bus::EventBus;
 
     #[test]
     fn test_looks_like_tool_call_detects_markdown_tool_call_with_preamble() {
@@ -4478,7 +4478,7 @@ mod tests {
     /// the assertion in `event_bus::tests::record_consumer_lag_increments_dropped_count`.
     #[test]
     fn test_event_bus_record_consumer_lag_increments_dropped_count() {
-        let bus = librefang_kernel::event_bus::EventBus::new();
+        let bus = EventBus::new();
         assert_eq!(bus.dropped_count(), 0);
         bus.record_consumer_lag(5, "test-context");
         assert_eq!(bus.dropped_count(), 5);

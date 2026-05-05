@@ -13,6 +13,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use base64::Engine as _;
+use librefang_kernel::pairing::PairedDevice;
 use librefang_types::i18n::ErrorTranslator;
 use std::sync::Arc;
 
@@ -206,7 +207,7 @@ pub async fn pairing_complete(
     let api_key_hash = crate::password_hash::hash_device_token(&plaintext_key);
 
     let device_id = uuid::Uuid::new_v4().to_string();
-    let device_info = librefang_kernel::pairing::PairedDevice {
+    let device_info = PairedDevice {
         device_id: device_id.clone(),
         display_name: display_name.to_string(),
         platform: platform.to_string(),
@@ -230,7 +231,7 @@ pub async fn pairing_complete(
             let device_user_name = format!("device:{}", device.device_id);
             let auth = crate::middleware::ApiUserAuth {
                 name: device_user_name.clone(),
-                role: librefang_kernel::auth::UserRole::User,
+                role: crate::middleware::UserRole::User,
                 api_key_hash,
                 user_id: librefang_types::agent::UserId::from_name(&device_user_name),
             };

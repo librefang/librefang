@@ -1,6 +1,7 @@
 //! Health, status, configuration, security, and migration handlers.
 
 use super::AppState;
+use librefang_kernel::config_reload::{validate_config_for_reload, HotAction};
 
 /// Build routes for the config/health/security/migration domain.
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
@@ -1654,10 +1655,7 @@ pub async fn config_reload(
             // If channel config changed, the kernel already cleared the adapter
             // registry — but we also need to stop the old BridgeManager and
             // restart adapters from the new config.
-            if plan
-                .hot_actions
-                .contains(&librefang_kernel::config_reload::HotAction::ReloadChannels)
-            {
+            if plan.hot_actions.contains(&HotAction::ReloadChannels) {
                 match crate::channel_bridge::reload_channels_from_disk(&state).await {
                     Ok(names) => {
                         tracing::info!(
@@ -2220,8 +2218,7 @@ pub async fn config_set(
     // out-of-range value would be flagged here even though reload
     // would silently fix it.
     parsed_config.clamp_bounds();
-    if let Err(errors) = librefang_kernel::config_reload::validate_config_for_reload(&parsed_config)
-    {
+    if let Err(errors) = validate_config_for_reload(&parsed_config) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({

@@ -7,6 +7,7 @@ use crate::routes::{self, AppState};
 use crate::webchat;
 use axum::response::IntoResponse;
 use axum::Router;
+use librefang_kernel::config_reload::HotAction;
 use librefang_kernel::LibreFangKernel;
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -1610,7 +1611,7 @@ pub async fn run_daemon(
                             }
                             // Restart channel bridge if channel config changed
                             if plan.hot_actions.contains(
-                                &librefang_kernel::config_reload::HotAction::ReloadChannels,
+                                &HotAction::ReloadChannels,
                             ) {
                                 match crate::channel_bridge::reload_channels_from_disk(&st).await {
                                     Ok(names) => {
