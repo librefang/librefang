@@ -757,8 +757,14 @@ fn create_driver_from_entry(
             chatgpt::ChatGptDriver::with_proxy(api_key, base_url, proxy_url)
                 .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
         )),
-        ApiFormat::Copilot => Ok(Arc::new(copilot::CopilotDriver::new(api_key, base_url))),
-        ApiFormat::VertexAI => Ok(Arc::new(vertex_ai::VertexAiDriver::new(config)?)),
+        ApiFormat::Copilot => Ok(Arc::new(
+            copilot::CopilotDriver::new(api_key, base_url)
+                .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+        )),
+        ApiFormat::VertexAI => Ok(Arc::new(
+            vertex_ai::VertexAiDriver::new(config)?
+                .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+        )),
         ApiFormat::AzureOpenAI => {
             let azure = &config.azure_openai;
             let endpoint = azure
@@ -800,10 +806,10 @@ fn create_driver_from_entry(
             let region = std::env::var("AWS_REGION")
                 .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
                 .ok();
-            Ok(Arc::new(bedrock::BedrockDriver::new_with_credentials(
-                Some(api_key),
-                region,
-            )?))
+            Ok(Arc::new(
+                bedrock::BedrockDriver::new_with_credentials(Some(api_key), region)?
+                    .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+            ))
         }
     }
 }

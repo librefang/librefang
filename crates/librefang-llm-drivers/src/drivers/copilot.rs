@@ -166,6 +166,13 @@ pub fn copilot_auth_available() -> bool {
 pub struct CopilotDriver {
     github_token: Zeroizing<String>,
     token_cache: CopilotTokenCache,
+    /// Whether to emit the three `x-librefang-{agent,session,step}-id` trace
+    /// headers on outbound requests. Mirrors
+    /// `KernelConfig.telemetry.emit_caller_trace_headers`; when `false`, no
+    /// trace headers are emitted regardless of whether `CompletionRequest`'s
+    /// caller-id fields are populated. The flag is forwarded to the inner
+    /// `OpenAIDriver` instance that handles the actual HTTP call.
+    emit_caller_trace_headers: bool,
 }
 
 impl CopilotDriver {
@@ -173,6 +180,39 @@ impl CopilotDriver {
         Self {
             github_token: Zeroizing::new(github_token),
             token_cache: CopilotTokenCache::new(),
+            emit_caller_trace_headers: true,
+        }
+    }
+
+    /// Override the trace-header emission flag (mirrors
+    /// `KernelConfig.telemetry.emit_caller_trace_headers`). Default is `true`,
+    /// meaning the three `x-librefang-{agent,session,step}-id` headers are
+    /// emitted on every request that has those fields populated. Pass `false`
+    /// to suppress them entirely. The flag is forwarded to the inner
+    /// `OpenAIDriver`.
+    pub fn with_emit_caller_trace_headers(mut self, emit: bool) -> Self {
+        self.emit_caller_trace_headers = emit;
+        self
+    }
+
+    /// Test-only constructor: bypasses the GitHub token-exchange step by
+    /// pre-seeding the token cache with a synthetic Copilot token whose
+    /// `base_url` points at `mock_base_url` (e.g. a `wiremock::MockServer`
+    /// URI). The completion request is then sent directly to the mock server's
+    /// `/chat/completions` path.
+    #[doc(hidden)]
+    pub fn new_for_test(github_token: String, mock_base_url: String) -> Self {
+        let cache = CopilotTokenCache::new();
+        // Pre-load a token that won't expire for 1 hour.
+        cache.set(CachedToken {
+            token: zeroize::Zeroizing::new("copilot-test-token".to_string()),
+            expires_at: Instant::now() + Duration::from_secs(3600),
+            base_url: mock_base_url,
+        });
+        Self {
+            github_token: zeroize::Zeroizing::new(github_token),
+            token_cache: cache,
+            emit_caller_trace_headers: true,
         }
     }
 
@@ -205,8 +245,8 @@ impl CopilotDriver {
         } else {
             token.base_url.clone()
         };
-        super::openai::OpenAIDriver::new(token.token.to_string(), base_url).with_extra_headers(
-            vec![
+        super::openai::OpenAIDriver::new(token.token.to_string(), base_url)
+            .with_extra_headers(vec![
                 ("Editor-Version".to_string(), "vscode/1.96.0".to_string()),
                 (
                     "Editor-Plugin-Version".to_string(),
@@ -216,8 +256,8 @@ impl CopilotDriver {
                     "Copilot-Integration-Id".to_string(),
                     "vscode-chat".to_string(),
                 ),
-            ],
-        )
+            ])
+            .with_emit_caller_trace_headers(self.emit_caller_trace_headers)
     }
 }
 
