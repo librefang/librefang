@@ -17,6 +17,7 @@ pub mod gemini_cli;
 pub mod openai;
 pub mod qwen_code;
 pub mod token_rotation;
+pub(crate) mod trace_headers;
 pub mod vertex_ai;
 
 use crate::llm_driver::{DriverConfig, LlmDriver, LlmError};
@@ -717,14 +718,18 @@ fn create_driver_from_entry(
                 base_url,
                 proxy_url,
                 request_timeout_secs,
-            ),
+            )
+            .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
         )),
-        ApiFormat::Gemini => Ok(Arc::new(gemini::GeminiDriver::with_proxy_and_timeout(
-            api_key,
-            base_url,
-            proxy_url,
-            request_timeout_secs,
-        ))),
+        ApiFormat::Gemini => Ok(Arc::new(
+            gemini::GeminiDriver::with_proxy_and_timeout(
+                api_key,
+                base_url,
+                proxy_url,
+                request_timeout_secs,
+            )
+            .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+        )),
         ApiFormat::ClaudeCode => {
             let mut d = claude_code::ClaudeCodeDriver::with_timeout(
                 config.base_url.clone(),
@@ -748,9 +753,10 @@ fn create_driver_from_entry(
             config.base_url.clone(),
             config.skip_permissions,
         ))),
-        ApiFormat::ChatGpt => Ok(Arc::new(chatgpt::ChatGptDriver::with_proxy(
-            api_key, base_url, proxy_url,
-        ))),
+        ApiFormat::ChatGpt => Ok(Arc::new(
+            chatgpt::ChatGptDriver::with_proxy(api_key, base_url, proxy_url)
+                .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+        )),
         ApiFormat::Copilot => Ok(Arc::new(copilot::CopilotDriver::new(api_key, base_url))),
         ApiFormat::VertexAI => Ok(Arc::new(vertex_ai::VertexAiDriver::new(config)?)),
         ApiFormat::AzureOpenAI => {

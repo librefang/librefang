@@ -194,6 +194,12 @@ pub struct ChatGptDriver {
     /// for the in-flight refresh and then re-check the cache — avoiding the
     /// thundering-herd that burns the refresh token.
     refresh_lock: tokio::sync::Mutex<()>,
+    /// Whether to emit the three `x-librefang-{agent,session,step}-id` trace
+    /// headers on outbound requests. Mirrors
+    /// `KernelConfig.telemetry.emit_caller_trace_headers`; when `false`, no
+    /// trace headers are emitted regardless of whether `CompletionRequest`'s
+    /// caller-id fields are populated.
+    emit_caller_trace_headers: bool,
 }
 
 impl ChatGptDriver {
@@ -219,7 +225,18 @@ impl ChatGptDriver {
             token_cache: ChatGptTokenCache::new(),
             client,
             refresh_lock: tokio::sync::Mutex::new(()),
+            emit_caller_trace_headers: true,
         }
+    }
+
+    /// Override the trace-header emission flag (mirrors
+    /// `KernelConfig.telemetry.emit_caller_trace_headers`). Default is `true`,
+    /// meaning the three `x-librefang-{agent,session,step}-id` headers are
+    /// emitted on every request that has those fields populated. Pass `false`
+    /// to suppress them entirely. Non-trace `extra_headers` are unaffected.
+    pub fn with_emit_caller_trace_headers(mut self, emit: bool) -> Self {
+        self.emit_caller_trace_headers = emit;
+        self
     }
 
     /// Get a valid session token, caching it with an estimated TTL.
@@ -310,10 +327,12 @@ impl ChatGptDriver {
         url: &str,
         api_request: &ResponsesApiRequest,
         bearer_token: &str,
+        trace_headers: reqwest::header::HeaderMap,
     ) -> Result<reqwest::Response, LlmError> {
         self.client
             .post(url)
             .bearer_auth(bearer_token)
+            .headers(trace_headers)
             .json(api_request)
             .send()
             .await
@@ -324,10 +343,13 @@ impl ChatGptDriver {
         &self,
         url: &str,
         api_request: &ResponsesApiRequest,
+        trace_headers: reqwest::header::HeaderMap,
     ) -> Result<reqwest::Response, LlmError> {
         let token = self.ensure_token()?;
+        // Clone the header map for the potential retry path below.
+        let headers_clone = trace_headers.clone();
         let http_resp = self
-            .post_responses_request(url, api_request, token.token.as_str())
+            .post_responses_request(url, api_request, token.token.as_str(), trace_headers)
             .await?;
         match http_resp.status() {
             reqwest::StatusCode::UNAUTHORIZED => {}
@@ -350,7 +372,7 @@ impl ChatGptDriver {
 
         let refreshed = self.refresh_token().await?;
         let http_resp = self
-            .post_responses_request(url, api_request, refreshed.token.as_str())
+            .post_responses_request(url, api_request, refreshed.token.as_str(), headers_clone)
             .await?;
 
         // Preserve post-refresh 403s so higher-level classification can
@@ -970,7 +992,17 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
         let url = format!("{base}/codex/responses");
 
         debug!("ChatGPT Responses API POST {url}");
-        let http_resp = self.send_with_auth_retry(&url, &api_request).await?;
+        let http_resp = self
+            .send_with_auth_retry(
+                &url,
+                &api_request,
+                super::trace_headers::build_trace_header_map(
+                    &[],
+                    &request,
+                    self.emit_caller_trace_headers,
+                ),
+            )
+            .await?;
         let status = http_resp.status();
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -1017,7 +1049,17 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
         let url = format!("{base}/codex/responses");
 
         debug!("ChatGPT Responses API SSE stream POST {url}");
-        let http_resp = self.send_with_auth_retry(&url, &api_request).await?;
+        let http_resp = self
+            .send_with_auth_retry(
+                &url,
+                &api_request,
+                super::trace_headers::build_trace_header_map(
+                    &[],
+                    &request,
+                    self.emit_caller_trace_headers,
+                ),
+            )
+            .await?;
         let status = http_resp.status();
 
         if !status.is_success() {
