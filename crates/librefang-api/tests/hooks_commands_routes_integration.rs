@@ -278,7 +278,7 @@ async fn hooks_wake_rejects_empty_text_payload() {
     }
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .to_lowercase()
@@ -381,7 +381,7 @@ async fn hooks_agent_rejects_empty_message() {
         std::env::remove_var(env_name);
     }
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
-    assert!(body["error"]
+    assert!(body["error"]["message"]
         .as_str()
         .unwrap_or("")
         .to_lowercase()
@@ -411,7 +411,7 @@ async fn hooks_agent_rejects_oversize_timeout() {
     }
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .contains("timeout_secs"),
