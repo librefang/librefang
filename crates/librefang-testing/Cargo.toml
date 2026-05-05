@@ -12,6 +12,7 @@ librefang-runtime = { path = "../librefang-runtime" }
 librefang-memory = { path = "../librefang-memory" }
 librefang-api = { path = "../librefang-api", default-features = false, features = ["telemetry"] }
 
+arc-swap = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 axum = { workspace = true }

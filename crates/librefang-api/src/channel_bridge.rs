@@ -3667,13 +3667,13 @@ pub async fn start_channel_bridge_with_config(
 pub async fn reload_channels_from_disk(
     state: &crate::routes::AppState,
 ) -> Result<Vec<String>, String> {
-    // Stop existing bridge
+    // Stop existing bridge. Swap it out atomically so concurrent readers see
+    // None immediately, then unwrap the Arc to get owned access for stop().
     {
-        let mut guard = state.bridge_manager.lock().await;
-        if let Some(ref mut bridge) = *guard {
-            bridge.stop().await;
+        let old = state.bridge_manager.swap(std::sync::Arc::new(None));
+        if let Ok(Some(ref mut b)) = std::sync::Arc::try_unwrap(old) {
+            b.stop().await;
         }
-        *guard = None;
     }
 
     // Re-read secrets.env so new API tokens are available in std::env.
@@ -3733,8 +3733,8 @@ pub async fn reload_channels_from_disk(
     let (new_bridge, started, webhook_router) =
         start_channel_bridge_with_config(state.kernel.clone(), &fresh_config.channels).await;
 
-    // Store the new bridge
-    *state.bridge_manager.lock().await = new_bridge;
+    // Store the new bridge atomically.
+    state.bridge_manager.store(std::sync::Arc::new(new_bridge));
 
     // Swap the webhook router so new routes take effect on the shared server
     *state.webhook_router.write().await = Arc::new(webhook_router);

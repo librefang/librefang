@@ -204,7 +204,7 @@ impl TestAppState {
         Arc::new(AppState {
             kernel,
             started_at: Instant::now(),
-            bridge_manager: tokio::sync::Mutex::new(None),
+            bridge_manager: arc_swap::ArcSwap::new(std::sync::Arc::new(None)),
             channels_config: tokio::sync::RwLock::new(channels_config),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             clawhub_cache: dashmap::DashMap::new(),

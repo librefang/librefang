@@ -1083,7 +1083,7 @@ pub async fn build_router(
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
-        bridge_manager: tokio::sync::Mutex::new(bridge),
+        bridge_manager: arc_swap::ArcSwap::new(std::sync::Arc::new(bridge)),
         channels_config: tokio::sync::RwLock::new(channels_config),
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
@@ -1865,9 +1865,14 @@ pub async fn run_daemon(
         }
     }
 
-    // Stop channel bridges
-    if let Some(ref mut b) = *state.bridge_manager.lock().await {
-        b.stop().await;
+    // Stop channel bridges. Swap out the bridge atomically so no new readers
+    // can acquire it, then unwrap the Arc (we just removed the only strong
+    // reference stored in AppState) and call stop().
+    {
+        let old = state.bridge_manager.swap(std::sync::Arc::new(None));
+        if let Ok(Some(ref mut b)) = std::sync::Arc::try_unwrap(old) {
+            b.stop().await;
+        }
     }
 
     // Stop observability stack — graceful path. `.take()` consumes the guard
