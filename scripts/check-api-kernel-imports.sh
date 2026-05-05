@@ -90,8 +90,11 @@ ALLOWLIST=(
 fail=0
 
 # Collect all non-comment lines referencing LibreFangKernel, skip test modules.
+# grep -v ':[0-9]*:.*//.*LibreFangKernel' strips both leading `//` and trailing
+# `// LibreFangKernel note` style comments that the older first-char-only
+# pattern missed.
 "${SCAN_LFK[@]}" \
-    | grep -v ':[0-9]*:[[:space:]]*//' \
+    | grep -v ':[0-9]*:.*//.*LibreFangKernel' \
     | grep -v '#\[cfg(test' \
     | grep -v 'boot_with_config' \
     > /tmp/api-lfk-refs.txt 2>/dev/null || true

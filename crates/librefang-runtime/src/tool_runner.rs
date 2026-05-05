@@ -6930,6 +6930,35 @@ mod tests {
     impl WorkflowRunner for ApprovalKernel {}
     impl GoalControl for ApprovalKernel {}
     impl ToolPolicy for ApprovalKernel {}
+    impl ApiAuth for ApprovalKernel {
+        fn auth_api_key(&self) -> String {
+            String::new()
+        }
+        fn dashboard_raw_config(&self) -> DashboardRawConfig {
+            DashboardRawConfig {
+                user: String::new(),
+                pass: String::new(),
+                pass_hash: String::new(),
+            }
+        }
+        fn auth_home_dir(&self) -> &std::path::Path {
+            std::path::Path::new("/tmp")
+        }
+        fn auth_device_api_keys(&self) -> Vec<(String, String)> {
+            vec![]
+        }
+        fn auth_config_users(&self) -> Vec<ApiUserConfigSnapshot> {
+            vec![]
+        }
+    }
+    impl SessionWriter for ApprovalKernel {
+        fn inject_attachment_blocks(
+            &self,
+            _agent_id: librefang_types::agent::AgentId,
+            _blocks: Vec<librefang_types::message::ContentBlock>,
+        ) {
+        }
+    }
 
     // ---- END role-trait impls (#3746) ----
 
@@ -7141,6 +7170,35 @@ mod tests {
     impl WorkflowRunner for ForceHumanCapturingKernel {}
     impl GoalControl for ForceHumanCapturingKernel {}
     impl ToolPolicy for ForceHumanCapturingKernel {}
+    impl ApiAuth for ForceHumanCapturingKernel {
+        fn auth_api_key(&self) -> String {
+            String::new()
+        }
+        fn dashboard_raw_config(&self) -> DashboardRawConfig {
+            DashboardRawConfig {
+                user: String::new(),
+                pass: String::new(),
+                pass_hash: String::new(),
+            }
+        }
+        fn auth_home_dir(&self) -> &std::path::Path {
+            std::path::Path::new("/tmp")
+        }
+        fn auth_device_api_keys(&self) -> Vec<(String, String)> {
+            vec![]
+        }
+        fn auth_config_users(&self) -> Vec<ApiUserConfigSnapshot> {
+            vec![]
+        }
+    }
+    impl SessionWriter for ForceHumanCapturingKernel {
+        fn inject_attachment_blocks(
+            &self,
+            _agent_id: librefang_types::agent::AgentId,
+            _blocks: Vec<librefang_types::message::ContentBlock>,
+        ) {
+        }
+    }
 
     // ---- END role-trait impls (#3746) ----
 
@@ -7714,6 +7772,35 @@ mod tests {
     impl PromptStore for NamedWsKernel {}
     impl WorkflowRunner for NamedWsKernel {}
     impl GoalControl for NamedWsKernel {}
+    impl ApiAuth for NamedWsKernel {
+        fn auth_api_key(&self) -> String {
+            String::new()
+        }
+        fn dashboard_raw_config(&self) -> DashboardRawConfig {
+            DashboardRawConfig {
+                user: String::new(),
+                pass: String::new(),
+                pass_hash: String::new(),
+            }
+        }
+        fn auth_home_dir(&self) -> &std::path::Path {
+            std::path::Path::new("/tmp")
+        }
+        fn auth_device_api_keys(&self) -> Vec<(String, String)> {
+            vec![]
+        }
+        fn auth_config_users(&self) -> Vec<ApiUserConfigSnapshot> {
+            vec![]
+        }
+    }
+    impl SessionWriter for NamedWsKernel {
+        fn inject_attachment_blocks(
+            &self,
+            _agent_id: librefang_types::agent::AgentId,
+            _blocks: Vec<librefang_types::message::ContentBlock>,
+        ) {
+        }
+    }
 
     // ---- END role-trait impls (#3746) ----
 
@@ -10390,6 +10477,35 @@ mod tests {
     impl WorkflowRunner for SpawnCheckKernel {}
     impl GoalControl for SpawnCheckKernel {}
     impl ToolPolicy for SpawnCheckKernel {}
+    impl ApiAuth for SpawnCheckKernel {
+        fn auth_api_key(&self) -> String {
+            String::new()
+        }
+        fn dashboard_raw_config(&self) -> DashboardRawConfig {
+            DashboardRawConfig {
+                user: String::new(),
+                pass: String::new(),
+                pass_hash: String::new(),
+            }
+        }
+        fn auth_home_dir(&self) -> &std::path::Path {
+            std::path::Path::new("/tmp")
+        }
+        fn auth_device_api_keys(&self) -> Vec<(String, String)> {
+            vec![]
+        }
+        fn auth_config_users(&self) -> Vec<ApiUserConfigSnapshot> {
+            vec![]
+        }
+    }
+    impl SessionWriter for SpawnCheckKernel {
+        fn inject_attachment_blocks(
+            &self,
+            _agent_id: librefang_types::agent::AgentId,
+            _blocks: Vec<librefang_types::message::ContentBlock>,
+        ) {
+        }
+    }
 
     // ---- END role-trait impls (#3746) ----
 

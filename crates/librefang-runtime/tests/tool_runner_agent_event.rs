@@ -217,6 +217,35 @@ impl PromptStore for CapturingKernel {}
 impl WorkflowRunner for CapturingKernel {}
 impl GoalControl for CapturingKernel {}
 impl ToolPolicy for CapturingKernel {}
+impl librefang_kernel_handle::ApiAuth for CapturingKernel {
+    fn auth_api_key(&self) -> String {
+        String::new()
+    }
+    fn dashboard_raw_config(&self) -> librefang_kernel_handle::DashboardRawConfig {
+        librefang_kernel_handle::DashboardRawConfig {
+            user: String::new(),
+            pass: String::new(),
+            pass_hash: String::new(),
+        }
+    }
+    fn auth_home_dir(&self) -> &std::path::Path {
+        std::path::Path::new("/tmp")
+    }
+    fn auth_device_api_keys(&self) -> Vec<(String, String)> {
+        vec![]
+    }
+    fn auth_config_users(&self) -> Vec<librefang_kernel_handle::ApiUserConfigSnapshot> {
+        vec![]
+    }
+}
+impl librefang_kernel_handle::SessionWriter for CapturingKernel {
+    fn inject_attachment_blocks(
+        &self,
+        _agent_id: librefang_types::agent::AgentId,
+        _blocks: Vec<librefang_types::message::ContentBlock>,
+    ) {
+    }
+}
 
 // --- Helpers ---------------------------------------------------------------
 
