@@ -229,7 +229,10 @@ async fn setup_when_already_confirmed_requires_current_code() {
     // Bare setup call must now refuse.
     let (s2, b2) = json_post(&h, "/api/approvals/totp/setup", serde_json::json!({})).await;
     assert_eq!(s2, StatusCode::BAD_REQUEST, "got body: {b2:?}");
-    let err = b2["error"].as_str().unwrap_or_default();
+    let err = b2["error"]
+        .as_str()
+        .or_else(|| b2["error"]["message"].as_str())
+        .unwrap_or_default();
     assert!(
         err.contains("current_code"),
         "error must mention current_code, got: {err}"
@@ -313,7 +316,10 @@ async fn confirm_rejects_replayed_code() {
     )
     .await;
     assert_eq!(s2, StatusCode::BAD_REQUEST, "got body: {b2:?}");
-    let err = b2["error"].as_str().unwrap_or_default();
+    let err = b2["error"]
+        .as_str()
+        .or_else(|| b2["error"]["message"].as_str())
+        .unwrap_or_default();
     assert!(
         err.contains("already been used"),
         "expected replay error, got: {err}"
