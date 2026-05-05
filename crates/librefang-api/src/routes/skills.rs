@@ -2618,6 +2618,11 @@ fn hand_instance_to_json(instance: &librefang_hands::HandInstance) -> serde_json
 }
 
 /// POST /api/hands/{hand_id}/activate — Activate a hand (spawns agent).
+///
+/// Honours `Idempotency-Key` (#3637): when set, a duplicate request
+/// with the same key + same body replays the cached response instead
+/// of activating a second hand instance. A different body under the
+/// same key is rejected with 409 Conflict.
 #[utoipa::path(
     post,
     path = "/api/hands/{hand_id}/activate",
@@ -2627,15 +2632,45 @@ fn hand_instance_to_json(instance: &librefang_hands::HandInstance) -> serde_json
     ),
     request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Activate a hand (spawns agent)", body = crate::types::JsonObject)
+        (status = 200, description = "Activate a hand (spawns agent)", body = crate::types::JsonObject),
+        (status = 409, description = "Idempotency-Key was reused with a different request body")
     )
 )]
 pub async fn activate_hand(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
-    body: Option<Json<librefang_hands::ActivateHandRequest>>,
-) -> impl IntoResponse {
-    let config = body.map(|b| b.0.config).unwrap_or_default();
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let key = crate::idempotency::extract_key(&headers);
+    let body_bytes: Vec<u8> = body.to_vec();
+    let store = Arc::clone(&state.idempotency_store);
+    let inner_body = body_bytes.clone();
+
+    crate::idempotency::run_idempotent(
+        store.as_ref(),
+        key.as_deref(),
+        &body_bytes,
+        move || async move { activate_hand_inner(state, hand_id, &inner_body).await },
+    )
+    .await
+}
+
+/// Inner handler — produces a `(StatusCode, Vec<u8>)` snapshot suitable
+/// for caching by the Idempotency-Key middleware.
+async fn activate_hand_inner(
+    state: Arc<AppState>,
+    hand_id: String,
+    body_bytes: &[u8],
+) -> (StatusCode, Vec<u8>) {
+    let config = if body_bytes.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        match serde_json::from_slice::<librefang_hands::ActivateHandRequest>(body_bytes) {
+            Ok(req) => req.config,
+            Err(_) => std::collections::HashMap::new(),
+        }
+    };
 
     match state.kernel.activate_hand(&hand_id, config) {
         Ok(instance) => {
@@ -2661,9 +2696,17 @@ pub async fn activate_hand(
                     }
                 }
             }
-            (StatusCode::OK, Json(hand_instance_to_json(&instance)))
+            let body = serde_json::to_vec(&hand_instance_to_json(&instance))
+                .unwrap_or_else(|_| b"{}".to_vec());
+            (StatusCode::OK, body)
         }
-        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Err(e) => {
+            let payload = serde_json::json!({"error": format!("{e}"), "code": "activate_hand_failed", "type": "activate_hand_failed"});
+            (
+                StatusCode::BAD_REQUEST,
+                serde_json::to_vec(&payload).unwrap_or_default(),
+            )
+        }
     }
 }
 

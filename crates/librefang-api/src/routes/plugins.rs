@@ -321,6 +321,11 @@ pub async fn get_plugin(
 
 /// POST /api/plugins/install — Install a plugin from registry, local path, or git URL.
 ///
+/// Honours `Idempotency-Key` (#3637): when set, a duplicate request
+/// with the same key + same body replays the cached response instead
+/// of re-installing. A different body under the same key is rejected
+/// with 409 Conflict.
+///
 /// Request body:
 /// ```json
 /// {"source": "registry", "name": "qdrant-recall"}
@@ -335,17 +340,52 @@ pub async fn get_plugin(
     responses(
         (status = 201, description = "Plugin installed", body = crate::types::JsonObject),
         (status = 400, description = "Invalid request"),
-        (status = 409, description = "Plugin already installed")
+        (status = 409, description = "Plugin already installed or Idempotency-Key conflict")
     )
 )]
-pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn install_plugin(
+    State(state): State<Arc<super::AppState>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let key = crate::idempotency::extract_key(&headers);
+    let body_bytes: Vec<u8> = body.to_vec();
+    let store = Arc::clone(&state.idempotency_store);
+    let inner_body = body_bytes.clone();
+
+    crate::idempotency::run_idempotent(
+        store.as_ref(),
+        key.as_deref(),
+        &body_bytes,
+        move || async move { install_plugin_inner(&inner_body).await },
+    )
+    .await
+}
+
+/// Inner handler — produces a `(StatusCode, Vec<u8>)` snapshot suitable
+/// for caching by the Idempotency-Key middleware.
+async fn install_plugin_inner(body_bytes: &[u8]) -> (StatusCode, Vec<u8>) {
+    let body: serde_json::Value = match serde_json::from_slice(body_bytes) {
+        Ok(v) => v,
+        Err(_) => {
+            let payload = serde_json::json!({"error": "Invalid JSON body", "code": "invalid_json", "type": "invalid_json"});
+            return (
+                StatusCode::BAD_REQUEST,
+                serde_json::to_vec(&payload).unwrap_or_default(),
+            );
+        }
+    };
+
     let source = match body.get("source").and_then(|s| s.as_str()) {
         Some("registry") => {
             let name = match body.get("name").and_then(|n| n.as_str()) {
                 Some(n) => n.to_string(),
                 None => {
-                    return ApiErrorResponse::bad_request("Missing 'name' for registry install")
-                        .into_json_tuple()
+                    let payload = serde_json::json!({"error": "Missing 'name' for registry install", "code": "invalid_request", "type": "invalid_request"});
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        serde_json::to_vec(&payload).unwrap_or_default(),
+                    );
                 }
             };
             let github_repo = body
@@ -358,8 +398,11 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
             let path = match body.get("path").and_then(|p| p.as_str()) {
                 Some(p) => std::path::PathBuf::from(p),
                 None => {
-                    return ApiErrorResponse::bad_request("Missing 'path' for local install")
-                        .into_json_tuple()
+                    let payload = serde_json::json!({"error": "Missing 'path' for local install", "code": "invalid_request", "type": "invalid_request"});
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        serde_json::to_vec(&payload).unwrap_or_default(),
+                    );
                 }
             };
             librefang_kernel::plugin_manager::PluginSource::Local { path }
@@ -368,8 +411,11 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
             let url = match body.get("url").and_then(|u| u.as_str()) {
                 Some(u) => u.to_string(),
                 None => {
-                    return ApiErrorResponse::bad_request("Missing 'url' for git install")
-                        .into_json_tuple()
+                    let payload = serde_json::json!({"error": "Missing 'url' for git install", "code": "invalid_request", "type": "invalid_request"});
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        serde_json::to_vec(&payload).unwrap_or_default(),
+                    );
                 }
             };
             let branch = body
@@ -379,31 +425,36 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
             librefang_kernel::plugin_manager::PluginSource::Git { url, branch }
         }
         _ => {
-            return ApiErrorResponse::bad_request(
-                "Invalid source. Use 'registry', 'local', or 'git'",
-            )
-            .into_json_tuple()
+            let payload = serde_json::json!({"error": "Invalid source. Use 'registry', 'local', or 'git'", "code": "invalid_request", "type": "invalid_request"});
+            return (
+                StatusCode::BAD_REQUEST,
+                serde_json::to_vec(&payload).unwrap_or_default(),
+            );
         }
     };
 
     match librefang_kernel::plugin_manager::install_plugin(&source).await {
-        Ok(info) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({
+        Ok(info) => {
+            let payload = serde_json::json!({
                 "installed": true,
                 "name": info.manifest.name,
                 "version": info.manifest.version,
                 "path": info.path.display().to_string(),
                 "restart_required": true,
-            })),
-        ),
+            });
+            (
+                StatusCode::CREATED,
+                serde_json::to_vec(&payload).unwrap_or_default(),
+            )
+        }
         Err(e) => {
             let status = if e.contains("already installed") {
                 StatusCode::CONFLICT
             } else {
                 StatusCode::BAD_REQUEST
             };
-            (status, Json(serde_json::json!({"error": e})))
+            let payload = serde_json::json!({"error": e});
+            (status, serde_json::to_vec(&payload).unwrap_or_default())
         }
     }
 }

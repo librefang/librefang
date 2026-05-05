@@ -552,22 +552,71 @@ pub async fn get_webhook(
 }
 
 /// POST /api/webhooks — Create a new webhook subscription.
+///
+/// Honours `Idempotency-Key` (#3637): when set, a duplicate request
+/// with the same key + same body replays the cached response instead
+/// of creating a second subscription. A different body under the same
+/// key is rejected with 409 Conflict.
 pub async fn create_webhook(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Json(req): Json<crate::webhook_store::CreateWebhookRequest>,
-) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let key = crate::idempotency::extract_key(&headers);
+    let body_bytes: Vec<u8> = body.to_vec();
+    let store = Arc::clone(&state.idempotency_store);
+    let inner_body = body_bytes.clone();
+    let l = super::resolve_lang(lang.as_ref());
+
+    crate::idempotency::run_idempotent(
+        store.as_ref(),
+        key.as_deref(),
+        &body_bytes,
+        move || async move { create_webhook_inner(state, l, &inner_body).await },
+    )
+    .await
+}
+
+/// Inner handler — produces a `(StatusCode, Vec<u8>)` snapshot suitable
+/// for caching by the Idempotency-Key middleware.
+async fn create_webhook_inner(
+    state: Arc<AppState>,
+    l: &'static str,
+    body_bytes: &[u8],
+) -> (StatusCode, Vec<u8>) {
+    let t = ErrorTranslator::new(l);
+    let req: crate::webhook_store::CreateWebhookRequest = match serde_json::from_slice(body_bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            let payload = serde_json::json!({"error": format!("Invalid JSON body: {e}"), "code": "invalid_json", "type": "invalid_json"});
+            return (
+                StatusCode::BAD_REQUEST,
+                serde_json::to_vec(&payload).unwrap_or_default(),
+            );
+        }
+    };
     match state.webhook_store.create(req) {
         Ok(webhook) => {
             let redacted = crate::webhook_store::redact_webhook_secret(&webhook);
-            match serde_json::to_value(&redacted) {
-                Ok(v) => (StatusCode::CREATED, Json(v)),
-                Err(_) => ApiErrorResponse::internal(t.t("api-error-webhook-serialize-error"))
-                    .into_json_tuple(),
+            match serde_json::to_vec(&redacted) {
+                Ok(v) => (StatusCode::CREATED, v),
+                Err(_) => {
+                    let payload = serde_json::json!({"error": t.t("api-error-webhook-serialize-error"), "code": "serialize_error", "type": "serialize_error"});
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        serde_json::to_vec(&payload).unwrap_or_default(),
+                    )
+                }
             }
         }
-        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple(),
+        Err(e) => {
+            let payload = serde_json::json!({"error": e, "code": "invalid_request", "type": "invalid_request"});
+            (
+                StatusCode::BAD_REQUEST,
+                serde_json::to_vec(&payload).unwrap_or_default(),
+            )
+        }
     }
 }
 

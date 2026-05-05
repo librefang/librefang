@@ -274,3 +274,148 @@ async fn a2a_send_rejects_reused_key_with_different_body() {
     // the second body re-runs the handler instead of producing a 409.
     assert_eq!(s2, StatusCode::BAD_REQUEST);
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/webhooks — create webhook subscription
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn create_webhook_with_idempotency_key_replays_response() {
+    let h = boot("test-secret").await;
+    let body = serde_json::json!({
+        "name": "idem-hook",
+        "url": "https://example.com/hook",
+        "events": ["message_received"],
+    });
+
+    let (s1, v1) = post_json(&h, "/api/webhooks", body.clone(), Some("wh-key-1")).await;
+    assert_eq!(s1, StatusCode::CREATED, "first create: {v1}");
+    let id1 = v1["id"].as_str().unwrap_or("").to_string();
+    assert!(!id1.is_empty(), "webhook id should be present");
+
+    // Same key, same body — replay; no second subscription created.
+    let (s2, v2) = post_json(&h, "/api/webhooks", body.clone(), Some("wh-key-1")).await;
+    assert_eq!(s2, StatusCode::CREATED, "replay: {v2}");
+    let id2 = v2["id"].as_str().unwrap_or("").to_string();
+    assert_eq!(id1, id2, "idempotent replay must echo original webhook id");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn create_webhook_reused_key_different_body_is_409() {
+    let h = boot("test-secret").await;
+    let body_a = serde_json::json!({
+        "name": "hook-a",
+        "url": "https://example.com/hook-a",
+        "events": ["message_received"],
+    });
+    let body_b = serde_json::json!({
+        "name": "hook-b",
+        "url": "https://example.com/hook-b",
+        "events": ["message_received"],
+    });
+
+    let (s1, _v1) = post_json(&h, "/api/webhooks", body_a, Some("wh-key-2")).await;
+    assert_eq!(s1, StatusCode::CREATED);
+
+    let (s2, v2) = post_json(&h, "/api/webhooks", body_b, Some("wh-key-2")).await;
+    assert_eq!(s2, StatusCode::CONFLICT, "body: {v2}");
+    assert_eq!(
+        v2["code"].as_str(),
+        Some("idempotency_key_conflict"),
+        "machine-readable error code present"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/hands/{hand_id}/activate
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn activate_hand_non_2xx_remains_retriable_under_same_key() {
+    // No hands are registered in the test kernel, so activate returns 400.
+    // Non-2xx responses must NOT be cached — a retry under the same key
+    // must re-execute the handler, not replay the failure.
+    let h = boot("test-secret").await;
+    let body = serde_json::json!({});
+
+    let (s1, _) = post_json(
+        &h,
+        "/api/hands/nonexistent-hand/activate",
+        body.clone(),
+        Some("hand-key-1"),
+    )
+    .await;
+    assert_eq!(s1, StatusCode::BAD_REQUEST);
+
+    // Retry with the same key and same body — must re-execute (no cached 4xx).
+    let (s2, _) = post_json(
+        &h,
+        "/api/hands/nonexistent-hand/activate",
+        body,
+        Some("hand-key-1"),
+    )
+    .await;
+    assert_eq!(
+        s2,
+        StatusCode::BAD_REQUEST,
+        "non-2xx must remain retriable under the same Idempotency-Key"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn activate_hand_without_idempotency_key_is_unchanged() {
+    // Verify the fast path (no header) is not affected.
+    let h = boot("test-secret").await;
+    let (s, _) = post_json(
+        &h,
+        "/api/hands/nonexistent-hand/activate",
+        serde_json::json!({}),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/plugins/install
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn install_plugin_non_2xx_remains_retriable_under_same_key() {
+    // An invalid source returns 400. Non-2xx must not be cached.
+    let h = boot("test-secret").await;
+    let body = serde_json::json!({"source": "invalid-source"});
+
+    let (s1, _) = post_json(
+        &h,
+        "/api/plugins/install",
+        body.clone(),
+        Some("plugin-key-1"),
+    )
+    .await;
+    assert_eq!(s1, StatusCode::BAD_REQUEST);
+
+    // Retry — must re-execute, not replay.
+    let (s2, _) = post_json(&h, "/api/plugins/install", body, Some("plugin-key-1")).await;
+    assert_eq!(
+        s2,
+        StatusCode::BAD_REQUEST,
+        "non-2xx plugin install must remain retriable"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn install_plugin_reused_key_different_body_does_not_conflict_after_4xx() {
+    // First call fails (non-2xx) so no cache row is written.
+    // A second call with a different body must re-execute, not 409.
+    let h = boot("test-secret").await;
+    let body_a = serde_json::json!({"source": "bad-a"});
+    let body_b = serde_json::json!({"source": "bad-b"});
+
+    let (s1, _) = post_json(&h, "/api/plugins/install", body_a, Some("plugin-key-2")).await;
+    assert_eq!(s1, StatusCode::BAD_REQUEST);
+
+    let (s2, _) = post_json(&h, "/api/plugins/install", body_b, Some("plugin-key-2")).await;
+    // No 409 because nothing was cached after the first 4xx.
+    assert_eq!(s2, StatusCode::BAD_REQUEST);
+}
