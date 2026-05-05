@@ -73,9 +73,10 @@ async fn list_prompt_versions(
             })
             .into_response()
         }
-        Err(e) => ApiErrorResponse::internal(e.to_string())
-            .into_json_tuple()
-            .into_response(),
+        // #3541: PromptStore returns typed `KernelOpError`; route through
+        // the central status-code map so a `NotFound { kind: "prompt_version" }`
+        // surfaces as 404 instead of being flattened to 500.
+        Err(e) => ApiErrorResponse::from(e).into_response(),
     };
     // #3511: tag response so request_logging middleware can emit `agent_id`.
     crate::extensions::with_agent_id(agent_id, body)
@@ -104,9 +105,10 @@ async fn create_prompt_version(
     let body = match state.kernel.create_prompt_version(&version) {
         // Issue #3832: POST /versions creates a new resource — 201 Created.
         Ok(_) => (StatusCode::CREATED, Json(version)).into_response(),
-        Err(e) => ApiErrorResponse::internal(e.to_string())
-            .into_json_tuple()
-            .into_response(),
+        // #3541: PromptStore returns typed `KernelOpError`; route through
+        // the central status-code map so a `NotFound { kind: "prompt_version" }`
+        // surfaces as 404 instead of being flattened to 500.
+        Err(e) => ApiErrorResponse::from(e).into_response(),
     };
     // #3511: tag response so request_logging middleware can emit `agent_id`.
     crate::extensions::with_agent_id(agent_id, body)
@@ -118,9 +120,10 @@ async fn get_prompt_version(
 ) -> impl IntoResponse {
     match state.kernel.get_prompt_version(&id) {
         Ok(version) => Json(version).into_response(),
-        Err(e) => ApiErrorResponse::internal(e.to_string())
-            .into_json_tuple()
-            .into_response(),
+        // #3541: PromptStore returns typed `KernelOpError`; route through
+        // the central status-code map so a `NotFound { kind: "prompt_version" }`
+        // surfaces as 404 instead of being flattened to 500.
+        Err(e) => ApiErrorResponse::from(e).into_response(),
     }
 }
 
@@ -130,9 +133,10 @@ async fn delete_prompt_version(
 ) -> impl IntoResponse {
     match state.kernel.delete_prompt_version(&id) {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => ApiErrorResponse::internal(e.to_string())
-            .into_json_tuple()
-            .into_response(),
+        // #3541: PromptStore returns typed `KernelOpError`; route through
+        // the central status-code map so a `NotFound { kind: "prompt_version" }`
+        // surfaces as 404 instead of being flattened to 500.
+        Err(e) => ApiErrorResponse::from(e).into_response(),
     }
 }
 
@@ -150,9 +154,8 @@ async fn activate_prompt_version(
         }
     };
     if let Err(e) = state.kernel.set_active_prompt_version(&id, agent_id) {
-        return ApiErrorResponse::internal(e.to_string())
-            .into_json_tuple()
-            .into_response();
+        // #3541: typed KernelOpError → status-code via From impl.
+        return ApiErrorResponse::from(e).into_response();
     }
     // Read back the activated version so the caller can patch caches in place
     // without an extra round-trip. If the version vanished between write and
@@ -189,9 +192,10 @@ async fn list_experiments(
             })
             .into_response()
         }
-        Err(e) => ApiErrorResponse::internal(e.to_string())
-            .into_json_tuple()
-            .into_response(),
+        // #3541: PromptStore returns typed `KernelOpError`; route through
+        // the central status-code map so a `NotFound { kind: "prompt_version" }`
+        // surfaces as 404 instead of being flattened to 500.
+        Err(e) => ApiErrorResponse::from(e).into_response(),
     };
     // #3511: tag response so request_logging middleware can emit `agent_id`.
     crate::extensions::with_agent_id(agent_id, body)
@@ -220,9 +224,10 @@ async fn create_experiment(
     let body = match state.kernel.create_experiment(&experiment) {
         // Issue #3832: POST /experiments creates a new resource — 201 Created.
         Ok(_) => (StatusCode::CREATED, Json(experiment)).into_response(),
-        Err(e) => ApiErrorResponse::internal(e.to_string())
-            .into_json_tuple()
-            .into_response(),
+        // #3541: PromptStore returns typed `KernelOpError`; route through
+        // the central status-code map so a `NotFound { kind: "prompt_version" }`
+        // surfaces as 404 instead of being flattened to 500.
+        Err(e) => ApiErrorResponse::from(e).into_response(),
     };
     // #3511: tag response so request_logging middleware can emit `agent_id`.
     crate::extensions::with_agent_id(agent_id, body)
@@ -234,9 +239,10 @@ async fn get_experiment(
 ) -> impl IntoResponse {
     match state.kernel.get_experiment(&id) {
         Ok(experiment) => Json(experiment).into_response(),
-        Err(e) => ApiErrorResponse::internal(e.to_string())
-            .into_json_tuple()
-            .into_response(),
+        // #3541: PromptStore returns typed `KernelOpError`; route through
+        // the central status-code map so a `NotFound { kind: "prompt_version" }`
+        // surfaces as 404 instead of being flattened to 500.
+        Err(e) => ApiErrorResponse::from(e).into_response(),
     }
 }
 
@@ -252,16 +258,16 @@ async fn transition_experiment(
     status: librefang_types::agent::ExperimentStatus,
 ) -> axum::response::Response {
     if let Err(e) = state.kernel.update_experiment_status(id, status) {
-        return ApiErrorResponse::internal(e.to_string())
-            .into_json_tuple()
-            .into_response();
+        // #3541: typed KernelOpError → status-code via From impl.
+        return ApiErrorResponse::from(e).into_response();
     }
     match state.kernel.get_experiment(id) {
         Ok(Some(experiment)) => Json(experiment).into_response(),
         Ok(None) => Json(serde_json::json!({"success": true})).into_response(),
-        Err(e) => ApiErrorResponse::internal(e.to_string())
-            .into_json_tuple()
-            .into_response(),
+        // #3541: PromptStore returns typed `KernelOpError`; route through
+        // the central status-code map so a `NotFound { kind: "prompt_version" }`
+        // surfaces as 404 instead of being flattened to 500.
+        Err(e) => ApiErrorResponse::from(e).into_response(),
     }
 }
 
@@ -307,8 +313,9 @@ async fn get_experiment_metrics(
 ) -> impl IntoResponse {
     match state.kernel.get_experiment_metrics(&id) {
         Ok(metrics) => Json(metrics).into_response(),
-        Err(e) => ApiErrorResponse::internal(e.to_string())
-            .into_json_tuple()
-            .into_response(),
+        // #3541: PromptStore returns typed `KernelOpError`; route through
+        // the central status-code map so a `NotFound { kind: "prompt_version" }`
+        // surfaces as 404 instead of being flattened to 500.
+        Err(e) => ApiErrorResponse::from(e).into_response(),
     }
 }

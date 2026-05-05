@@ -57,27 +57,19 @@ pub enum KernelOpError {
     /// `Err("X not available".into())` pattern that role-trait default impls
     /// emit.
     #[error("{capability} not available")]
-    Unavailable {
-        capability: &'static str,
-    },
+    Unavailable { capability: &'static str },
 
     /// The targeted entity (agent, task, job, …) does not exist. Maps to
     /// HTTP 404. Includes the entity *kind* and *id* so callers can surface
     /// both without parsing the error message.
     #[error("{kind} `{id}` not found")]
-    NotFound {
-        kind: &'static str,
-        id: String,
-    },
+    NotFound { kind: &'static str, id: String },
 
     /// Caller-supplied input failed validation before the operation was
     /// attempted. Maps to HTTP 400. The `field` is the *machine* name of
     /// the field; `reason` is the human-readable cause.
     #[error("invalid {field}: {reason}")]
-    Invalid {
-        field: &'static str,
-        reason: String,
-    },
+    Invalid { field: &'static str, reason: String },
 
     /// JSON / TOML serialization failed. Distinct from `Invalid` because
     /// these failures originate inside the kernel (re-encoding internal
@@ -307,10 +299,7 @@ pub trait TaskQueue: Send + Sync {
     ) -> Result<String, KernelOpError>;
 
     /// Claim the next available task (optionally filtered by assignee). Returns task JSON or None.
-    async fn task_claim(
-        &self,
-        agent_id: &str,
-    ) -> Result<Option<serde_json::Value>, KernelOpError>;
+    async fn task_claim(&self, agent_id: &str) -> Result<Option<serde_json::Value>, KernelOpError>;
 
     /// Mark a task as completed with a result string. `agent_id` identifies the completer.
     async fn task_complete(
@@ -333,10 +322,7 @@ pub trait TaskQueue: Send + Sync {
     async fn task_retry(&self, task_id: &str) -> Result<bool, KernelOpError>;
 
     /// Get a single task by ID including its result and retry_count.
-    async fn task_get(
-        &self,
-        task_id: &str,
-    ) -> Result<Option<serde_json::Value>, KernelOpError>;
+    async fn task_get(&self, task_id: &str) -> Result<Option<serde_json::Value>, KernelOpError>;
 
     /// Update a task's status to `pending` (reset) or `cancelled`.
     /// Returns true if the task was found and updated.
@@ -792,7 +778,11 @@ pub trait PromptStore: Send + Sync {
     }
 
     /// Set a prompt version as active. Default: error.
-    fn set_active_prompt_version(&self, _version_id: &str, _agent_id: &str) -> Result<(), KernelOpError> {
+    fn set_active_prompt_version(
+        &self,
+        _version_id: &str,
+        _agent_id: &str,
+    ) -> Result<(), KernelOpError> {
         Err(KernelOpError::unavailable("Prompt store"))
     }
 
@@ -1053,7 +1043,11 @@ mod tests {
         ) -> Result<(String, String), super::KernelOpError> {
             Err("stub".into())
         }
-        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, super::KernelOpError> {
+        async fn send_to_agent(
+            &self,
+            _agent_id: &str,
+            _message: &str,
+        ) -> Result<String, super::KernelOpError> {
             Err("stub".into())
         }
         fn list_agents(&self) -> Vec<AgentInfo> {
@@ -1099,7 +1093,10 @@ mod tests {
         ) -> Result<String, super::KernelOpError> {
             Err("stub".into())
         }
-        async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, super::KernelOpError> {
+        async fn task_claim(
+            &self,
+            _agent_id: &str,
+        ) -> Result<Option<serde_json::Value>, super::KernelOpError> {
             Ok(None)
         }
         async fn task_complete(
@@ -1110,7 +1107,10 @@ mod tests {
         ) -> Result<(), super::KernelOpError> {
             Err("stub".into())
         }
-        async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, super::KernelOpError> {
+        async fn task_list(
+            &self,
+            _status: Option<&str>,
+        ) -> Result<Vec<serde_json::Value>, super::KernelOpError> {
             Ok(vec![])
         }
         async fn task_delete(&self, _task_id: &str) -> Result<bool, super::KernelOpError> {
@@ -1119,7 +1119,10 @@ mod tests {
         async fn task_retry(&self, _task_id: &str) -> Result<bool, super::KernelOpError> {
             Ok(false)
         }
-        async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, super::KernelOpError> {
+        async fn task_get(
+            &self,
+            _task_id: &str,
+        ) -> Result<Option<serde_json::Value>, super::KernelOpError> {
             Ok(None)
         }
         async fn task_update_status(

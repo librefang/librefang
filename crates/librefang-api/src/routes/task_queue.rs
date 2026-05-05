@@ -17,17 +17,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Map a `KernelOpError` from the TaskQueue role-trait to an HTTP-ready
-/// `ApiErrorResponse` (#3541 2/N). `NotFound` → 404, `Invalid` → 400,
-/// `Unavailable` → 503, anything else (including `Other(String)`) → 500.
-/// Lets handlers do `match err { ... } => map_kernel_op_err(err)` and skip
-/// the substring grep that the historical `String` error required.
+/// `ApiErrorResponse` (#3541 2/N).
+///
+/// Delegates to the central `From<KernelOpError>` mapping in
+/// `crate::error` so the status-code contract stays in one place:
+/// `NotFound → 404, Invalid → 400, Unavailable → 503, Serialize/Other → 500`.
+/// The earlier inline body mapped `Unavailable` to 500, which contradicted
+/// the documented contract on `KernelOpError::Unavailable` and stripped
+/// retryability semantics from clients.
 fn map_kernel_op_err(err: KernelOpError) -> ApiErrorResponse {
-    match err {
-        KernelOpError::NotFound { .. } => ApiErrorResponse::not_found(err.to_string()),
-        KernelOpError::Invalid { .. } => ApiErrorResponse::bad_request(err.to_string()),
-        KernelOpError::Unavailable { .. } => ApiErrorResponse::internal(err.to_string()),
-        other => ApiErrorResponse::internal(other.to_string()),
-    }
+    ApiErrorResponse::from(err)
 }
 
 /// Build routes for the task-queue domain.

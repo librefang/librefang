@@ -39,7 +39,9 @@ pub fn run_decay(
         return Ok(0);
     }
 
-    let db = conn.lock().map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
+    let db = conn
+        .lock()
+        .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
 
     let now = Utc::now();
     let now_unix = now.timestamp();
@@ -106,7 +108,9 @@ pub fn prune_soft_deleted_memories(
     if older_than_days == 0 {
         return Ok(0);
     }
-    let db = conn.lock().map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
+    let db = conn
+        .lock()
+        .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
     let cutoff = Utc::now().timestamp() - (older_than_days as i64) * 86_400;
     let pruned = db
         .execute(

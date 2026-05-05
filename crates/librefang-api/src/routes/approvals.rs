@@ -578,7 +578,12 @@ pub async fn reject_request(
             ),
         )
             .into_response(),
-        Err(e) => ApiErrorResponse::not_found(e.to_string()).into_json_tuple().into_response(),
+        // #3541: route the typed `KernelOpError` through the central
+        // status-code map. The previous `not_found(_)` was wrong — a
+        // `KernelOpError::Unavailable` (approval gate disabled) was
+        // surfacing as 404 instead of 503, and an internal `Other`
+        // failure surfaced as 404 instead of 500.
+        Err(e) => ApiErrorResponse::from(e).into_response(),
     }
 }
 
@@ -635,7 +640,10 @@ pub async fn modify_request(
             ),
         )
             .into_response(),
-        Err(e) => ApiErrorResponse::not_found(e.to_string()).into_json_tuple().into_response(),
+        // #3541: see `reject_request` above — route through the typed
+        // `KernelOpError` mapping so non-NotFound variants get the
+        // status code their semantics demand.
+        Err(e) => ApiErrorResponse::from(e).into_response(),
     }
 }
 
@@ -728,9 +736,8 @@ pub async fn batch_resolve(
                 "decision": resp.decision.as_str(),
                 "decided_at": resp.decided_at.to_rfc3339(),
             })),
-            Err(e) => {
-                result_json.push(serde_json::json!({"id": id, "status": "error", "message": e.to_string()}))
-            }
+            Err(e) => result_json
+                .push(serde_json::json!({"id": id, "status": "error", "message": e.to_string()})),
         }
     }
 
