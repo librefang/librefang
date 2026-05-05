@@ -588,18 +588,8 @@ pub async fn execute_tool_raw(
                         }
                     }
                 }
-                // Resolve config values; 0 means "use compiled default"
-                // (test call sites that don't populate the ctx fields).
-                let threshold = if *spill_threshold_bytes == 0 {
-                    16_384 // ToolResultsConfig::default().spill_threshold_bytes
-                } else {
-                    *spill_threshold_bytes
-                };
-                let max_artifact = if *max_artifact_bytes == 0 {
-                    crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES
-                } else {
-                    *max_artifact_bytes
-                };
+                let (threshold, max_artifact) =
+                    resolve_spill_config(*spill_threshold_bytes, *max_artifact_bytes);
                 if let Some(ctx) = web_ctx {
                     // #3347 5/N: also wire spill into the primary
                     // WebToolsContext::fetch path (Tavily / Brave / Jina /
@@ -621,16 +611,8 @@ pub async fn execute_tool_raw(
             None => Err("Missing 'query' parameter".to_string()),
             Some(query) => {
                 let max_results = input["max_results"].as_u64().unwrap_or(5) as usize;
-                let threshold = if *spill_threshold_bytes == 0 {
-                    16_384
-                } else {
-                    *spill_threshold_bytes
-                };
-                let max_artifact = if *max_artifact_bytes == 0 {
-                    crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES
-                } else {
-                    *max_artifact_bytes
-                };
+                let (threshold, max_artifact) =
+                    resolve_spill_config(*spill_threshold_bytes, *max_artifact_bytes);
                 if let Some(ctx) = web_ctx {
                     ctx.search.search(query, max_results).await.map(|body| {
                         spill_or_passthrough("web_search", body, threshold, max_artifact)
@@ -2749,6 +2731,24 @@ async fn tool_apply_patch(
 // ---------------------------------------------------------------------------
 // Web tools
 // ---------------------------------------------------------------------------
+
+/// Resolve `[tool_results]` spill threshold + per-artifact cap from raw
+/// `ToolExecContext` fields, falling back to compiled defaults when the
+/// caller passed `0` (test call sites that don't populate the ctx).
+fn resolve_spill_config(spill_threshold_bytes: u64, max_artifact_bytes: u64) -> (u64, u64) {
+    (
+        if spill_threshold_bytes == 0 {
+            16_384 // ToolResultsConfig::default().spill_threshold_bytes
+        } else {
+            spill_threshold_bytes
+        },
+        if max_artifact_bytes == 0 {
+            crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES
+        } else {
+            max_artifact_bytes
+        },
+    )
+}
 
 /// Apply artifact spill to a tool-result string, returning a compact stub
 /// when the body exceeds `threshold` and the spill write succeeds.  Falls
