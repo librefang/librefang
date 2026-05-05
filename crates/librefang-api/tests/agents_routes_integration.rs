@@ -129,6 +129,16 @@ fn patch_json(path: &str, body: serde_json::Value, bearer: Option<&str>) -> Requ
     b.body(Body::from(body.to_string())).unwrap()
 }
 
+fn post_json(path: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {}", TEST_TOKEN))
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/agents
 // ---------------------------------------------------------------------------
@@ -642,5 +652,129 @@ async fn test_agent_session_endpoint_surfaces_thinking_only_turns() {
     assert_eq!(
         assistant["thinking"], "reasoning that never reached an answer",
         "thinking field must surface so the dashboard's hasThinking branch can render — body={body:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Incognito mode — refs #4073
+// ---------------------------------------------------------------------------
+
+/// The `incognito` field in the POST /api/agents/{id}/message body must
+/// deserialize cleanly. A request with `incognito: true` must not return a
+/// 422 Unprocessable Entity; if the provider auth is missing (the test
+/// harness uses a fake ollama model) the server returns 412 as usual.
+/// This verifies the API surface is wired end-to-end without a real LLM.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_incognito_field_accepted_by_message_endpoint() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "incognito-test-agent");
+
+    // incognito: true — must NOT be 422 (unknown field / bad deserialize)
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{id}/message"),
+            serde_json::json!({"message": "hello", "incognito": true}),
+        ),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "incognito field must deserialize cleanly — body={body:?}",
+    );
+    // Provider is unconfigured → 412 or 500, NOT 422.
+    assert!(
+        status == StatusCode::PRECONDITION_FAILED || status.is_server_error(),
+        "expected provider-auth 412 or server error, got {status} — body={body:?}",
+    );
+}
+
+/// Omitting `incognito` entirely must still work (backward compat: defaults to false).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_incognito_defaults_to_false_when_omitted() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "incognito-omit-agent");
+
+    let (status, _body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{id}/message"),
+            serde_json::json!({"message": "hello"}),
+        ),
+    )
+    .await;
+    // Must not be 422 — the field absence defaults to false via #[serde(default)].
+    assert_ne!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// Session messages must NOT be persisted when incognito: true.
+///
+/// We seed a session with one user message, send an incognito message via
+/// the kernel directly (bypassing the LLM by using the incognito flag), and
+/// then re-read the session to confirm it was not extended. The test calls
+/// `kernel.send_message_with_incognito()` which will fail at the provider
+/// layer (no real LLM in test), but the session save is guarded before the
+/// LLM call, so the pre-existing messages must not grow regardless.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_incognito_message_does_not_persist_session() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "incognito-persist-agent");
+
+    // Plant one user message in the canonical session via memory substrate.
+    let mem = h.state.kernel.memory_substrate();
+    let mut session = mem.create_session(id).expect("create_session");
+    let seed_msg = librefang_types::message::Message {
+        role: librefang_types::message::Role::User,
+        content: librefang_types::message::MessageContent::Text(
+            "seed message before incognito".to_string(),
+        ),
+        pinned: false,
+        timestamp: None,
+    };
+    session.push_message(seed_msg);
+    let session_id = session.id;
+    mem.save_session(&session).expect("save_session");
+
+    // Confirm the session has exactly 1 message before the incognito call.
+    let before = mem
+        .get_session(session_id)
+        .expect("get_session")
+        .expect("session must exist");
+    assert_eq!(
+        before.messages.len(),
+        1,
+        "expected 1 seeded message before incognito call",
+    );
+
+    // Send an incognito message via the kernel. This will fail at the LLM
+    // provider level (no real model in test), but the test only cares that
+    // the session was not written to on the way out.
+    let _ = h
+        .state
+        .kernel
+        .send_message_with_incognito(
+            id,
+            "incognito message — must not persist",
+            None,
+            None,
+            None,
+            Some(session_id),
+            true,
+        )
+        .await;
+
+    // The session must still have exactly 1 message — the incognito turn must
+    // not have appended anything to SQLite.
+    let after = mem
+        .get_session(session_id)
+        .expect("get_session")
+        .expect("session must still exist");
+    assert_eq!(
+        after.messages.len(),
+        1,
+        "incognito turn must not persist new messages to the session (got {} messages) — messages={:?}",
+        after.messages.len(),
+        after.messages,
     );
 }

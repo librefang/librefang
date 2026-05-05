@@ -1847,15 +1847,17 @@ pub async fn send_message(
         let kernel_handle: Arc<dyn KernelHandle> = kernel.clone() as Arc<dyn KernelHandle>;
         let msg = effective_message.clone();
         let sc = sender_context;
+        let incognito = req.incognito;
         match run_cancel_on_disconnect(async move {
             kernel
-                .send_message_with_session_override(
+                .send_message_with_incognito(
                     agent_id,
                     &msg,
                     Some(kernel_handle),
                     sc.as_ref(),
                     thinking_override,
                     session_id_override,
+                    incognito,
                 )
                 .await
         })
@@ -2778,11 +2780,12 @@ pub async fn send_message_stream(
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
     let (rx, handle) = match state
         .kernel
-        .send_message_streaming_with_routing_and_session_override(
+        .send_message_streaming_with_incognito(
             agent_id,
             &req.message,
             Some(kernel_handle),
             session_id_override,
+            req.incognito,
         )
         .await
     {
@@ -6687,6 +6690,7 @@ mod tests {
             show_thinking: None,
             group_participants: None,
             session_id: None,
+            incognito: false,
         };
         assert!(request_sender_context(&req).is_none());
     }
@@ -6706,6 +6710,7 @@ mod tests {
             show_thinking: None,
             group_participants: None,
             session_id: None,
+            incognito: false,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.user_id, "u-123");
@@ -6729,6 +6734,7 @@ mod tests {
             show_thinking: None,
             group_participants: None,
             session_id: None,
+            incognito: false,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert!(sender.is_group);
@@ -6760,6 +6766,7 @@ mod tests {
             show_thinking: None,
             group_participants: Some(roster.clone()),
             session_id: None,
+            incognito: false,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.group_participants, roster);
