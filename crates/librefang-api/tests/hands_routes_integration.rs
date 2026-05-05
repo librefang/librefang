@@ -435,9 +435,9 @@ async fn set_hand_secret_unknown_hand_returns_400() {
     .await;
     // Handler reports "not a requirement of hand …" as 400, not 404.
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let err = body
-        .get("error")
-        .and_then(|v| v.as_str())
+    let err = body["error"]["message"]
+        .as_str()
+        .or_else(|| body["error"].as_str())
         .unwrap_or_default();
     assert!(
         err.contains("requirement") || err.contains("hand"),
