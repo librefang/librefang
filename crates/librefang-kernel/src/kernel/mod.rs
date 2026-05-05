@@ -1496,15 +1496,22 @@ impl LibreFangKernel {
     /// the result. Used by API/probe paths that previously held a write
     /// lock. Concurrent updates serialize correctly via the underlying CAS
     /// loop in `arc_swap::ArcSwap::rcu`.
-    pub fn model_catalog_update<F>(&self, mut f: F)
+    ///
+    /// The closure may run multiple times under contention, so it must be
+    /// idempotent on `cat`. The returned `R` reflects the **final** (winning)
+    /// attempt — useful for surfacing booleans like
+    /// `add_alias`/`remove_alias`/`add_custom_model` to the caller.
+    pub fn model_catalog_update<F, R>(&self, mut f: F) -> R
     where
-        F: FnMut(&mut librefang_runtime::model_catalog::ModelCatalog),
+        F: FnMut(&mut librefang_runtime::model_catalog::ModelCatalog) -> R,
     {
+        let mut result: Option<R> = None;
         self.model_catalog.rcu(|cat| {
             let mut next = (**cat).clone();
-            f(&mut next);
+            result = Some(f(&mut next));
             Arc::new(next)
         });
+        result.expect("rcu closure runs at least once")
     }
 
     /// Spawn background tasks to validate API keys for every `Configured` provider.

@@ -3601,11 +3601,7 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
         let provider = cfg.default_model.provider.clone();
         let model = cfg.default_model.model.clone();
         let agent_count = kernel.agent_registry().count();
-        let model_count = kernel
-            .model_catalog_ref()
-            .read()
-            .map(|c| c.list_models().len())
-            .unwrap_or(0);
+        let model_count = kernel.model_catalog_ref().load().list_models().len();
 
         ui::success(&i18n::t_args(
             "kernel-booted",
