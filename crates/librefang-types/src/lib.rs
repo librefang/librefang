@@ -12,6 +12,7 @@ pub mod capability;
 pub mod comms;
 pub mod config;
 pub mod error;
+pub mod error_code;
 pub mod event;
 pub mod goal;
 pub mod i18n;

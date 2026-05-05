@@ -157,6 +157,7 @@ fn webhook_unauthorized_response(message: String) -> axum::response::Response {
         code: Some("webhook_invalid_token".to_string()),
         r#type: Some("webhook_invalid_token".to_string()),
         details: None,
+        request_id: None,
         status: StatusCode::UNAUTHORIZED,
     };
     let mut resp = body.into_response();

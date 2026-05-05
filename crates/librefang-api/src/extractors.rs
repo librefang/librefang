@@ -10,8 +10,57 @@ use axum::http::request::Parts;
 use librefang_types::agent::AgentId;
 use librefang_types::i18n::{self, ErrorTranslator};
 
-use crate::middleware::RequestLanguage;
+use crate::middleware::{RequestIdExt, RequestLanguage};
 use crate::types::ApiErrorResponse;
+
+/// Typed extractor exposing the per-request correlation id (#3639) that
+/// the [`crate::middleware::request_logging`] middleware stamps into both
+/// the request extensions (before `next.run()`) and the response header.
+///
+/// Handlers that want to surface the id in a custom response body, or pass
+/// it down into the kernel call chain for log correlation, should declare
+/// this extractor in their argument list:
+///
+/// ```ignore
+/// pub async fn my_handler(RequestId(id): RequestId, ...) -> impl IntoResponse {
+///     tracing::info!(request_id = %id, "doing the thing");
+/// }
+/// ```
+///
+/// When the middleware is bypassed (a few tests build a router without
+/// `request_logging`), the extractor returns an empty string rather than
+/// rejecting the request — handlers using the id only for logging keep
+/// working in those harnesses.
+#[derive(Debug, Clone)]
+pub struct RequestId(pub String);
+
+impl RequestId {
+    /// Borrow the id as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume and return the inner `String`.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl<S> FromRequestParts<S> for RequestId
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let id = parts
+            .extensions
+            .get::<RequestIdExt>()
+            .map(|r| r.0.clone())
+            .unwrap_or_default();
+        Ok(RequestId(id))
+    }
+}
 
 /// Translation key used by handlers for "invalid agent id". Kept as a constant
 /// so the extractor and any remaining hand-rolled parse sites agree on the key.

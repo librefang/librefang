@@ -21,6 +21,7 @@
 pub use librefang_kernel::error::KernelError;
 
 use librefang_kernel_handle::KernelOpError;
+use librefang_types::error_code::ErrorCode;
 
 use crate::types::ApiErrorResponse;
 use axum::http::StatusCode;
@@ -52,16 +53,30 @@ pub fn kernel_op_status(err: &KernelOpError) -> StatusCode {
 }
 
 /// Stable machine-readable code for client-side switch logic.
+///
+/// Routed through [`ErrorCode`] (#3639) so the wire token is enforced by the
+/// type system; once a variant is shipped, its `as_str()` is part of the
+/// public contract.
 pub fn kernel_op_code(err: &KernelOpError) -> &'static str {
+    kernel_op_error_code(err).as_str()
+}
+
+/// Typed counterpart of [`kernel_op_code`] returning the [`ErrorCode`]
+/// variant. Useful when callers want to combine the code with other typed
+/// fields without a string round-trip.
+pub fn kernel_op_error_code(err: &KernelOpError) -> ErrorCode {
     match err {
-        KernelOpError::AgentNotFound(_) | KernelOpError::SessionNotFound(_) => "not_found",
+        KernelOpError::AgentNotFound(_) | KernelOpError::SessionNotFound(_) => ErrorCode::NotFound,
         KernelOpError::InvalidInput(_)
         | KernelOpError::InvalidState { .. }
-        | KernelOpError::ManifestParse(_) => "invalid_input",
-        KernelOpError::AuthDenied(_) | KernelOpError::CapabilityDenied(_) => "auth_denied",
-        KernelOpError::Unavailable(_) | KernelOpError::ShuttingDown => "service_unavailable",
-        KernelOpError::Serialization { .. } => "serialize_failed",
-        _ => "internal_error",
+        | KernelOpError::ManifestParse(_) => ErrorCode::InvalidInput,
+        KernelOpError::AuthDenied(_) => ErrorCode::Forbidden,
+        KernelOpError::CapabilityDenied(_) => ErrorCode::CapabilityDenied,
+        KernelOpError::Unavailable(_) | KernelOpError::ShuttingDown => {
+            ErrorCode::ServiceUnavailable
+        }
+        KernelOpError::Serialization { .. } => ErrorCode::SerializeFailed,
+        _ => ErrorCode::InternalError,
     }
 }
 
@@ -74,6 +89,7 @@ impl From<KernelOpError> for ApiErrorResponse {
             code: Some(code.clone()),
             r#type: Some(code),
             details: None,
+            request_id: None,
             status,
         }
     }

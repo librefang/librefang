@@ -1778,6 +1778,7 @@ pub async fn send_message(
                                 code: Some("provider_auth_missing".to_string()),
                                 r#type: Some("provider_auth_missing".to_string()),
                                 details: None,
+                                request_id: None,
                                 status: StatusCode::PRECONDITION_FAILED,
                             },
                         );
@@ -1992,6 +1993,7 @@ pub async fn send_message(
                 code: Some(code.to_string()),
                 r#type: Some(code.to_string()),
                 details: None,
+                request_id: None,
                 status,
             }
             .into_response()

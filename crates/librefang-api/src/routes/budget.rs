@@ -899,6 +899,13 @@ pub async fn update_user_budget(
     // existing caps via `UserBudgetConfig`'s `#[serde(default)]`. A typo
     // (`"max_hourly_usd": "1.0"` as a string) returns 400 instead of being
     // coerced to 0.0.
+    //
+    // `ApiErrorResponse` crossed the 128-byte threshold once `request_id`
+    // was added (#3639). The closure runs at most a handful of times per
+    // call and the response value flows straight into `into_response()`,
+    // so the heap allocation a `Box` would force is pure overhead. The
+    // canonical escape hatch from the clippy docs is the targeted allow.
+    #[allow(clippy::result_large_err)]
     let extract_f64 = |key: &str| -> Result<f64, ApiErrorResponse> {
         match body.get(key) {
             Some(v) => v.as_f64().ok_or_else(|| {

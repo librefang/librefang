@@ -56,6 +56,7 @@ fn media_error_response(err: MediaError) -> ApiErrorResponse {
         code: Some(code.to_string()),
         r#type: None,
         details: None,
+        request_id: None,
         status,
     }
 }

@@ -45,6 +45,10 @@ pub struct JsonArray(pub Vec<serde_json::Value>);
 /// Every error returned by the API uses this shape, ensuring clients can rely
 /// on a single parsing strategy.  The `code` and `details` fields are optional
 /// and only serialized when present.
+///
+/// `request_id` (#3639) is populated automatically by the
+/// [`crate::middleware::request_logging`] post-response hook on every JSON
+/// 4xx/5xx response, so handlers do not need to set it manually.
 #[derive(Debug, Serialize)]
 pub struct ApiErrorResponse {
     pub error: String,
@@ -58,6 +62,12 @@ pub struct ApiErrorResponse {
     pub r#type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
+    /// Stable per-request correlation id, surfaced both in the response body
+    /// and the `x-request-id` header (#3639). Set by the request-logging
+    /// middleware after the handler returns; handlers should leave this as
+    /// `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     /// HTTP status code — not serialized into the JSON body.
     #[serde(skip)]
     pub status: StatusCode,
@@ -92,6 +102,7 @@ pub fn api_error(
         code: Some(code.to_string()),
         r#type: Some(code.to_string()),
         details: None,
+        request_id: None,
         status,
     }
     .into_response()
@@ -105,6 +116,7 @@ impl ApiErrorResponse {
             code: None,
             r#type: None,
             details: None,
+            request_id: None,
             status: StatusCode::BAD_REQUEST,
         }
     }
@@ -116,6 +128,7 @@ impl ApiErrorResponse {
             code: None,
             r#type: None,
             details: None,
+            request_id: None,
             status: StatusCode::NOT_FOUND,
         }
     }
@@ -127,6 +140,7 @@ impl ApiErrorResponse {
             code: None,
             r#type: None,
             details: None,
+            request_id: None,
             status: StatusCode::FORBIDDEN,
         }
     }
@@ -138,6 +152,7 @@ impl ApiErrorResponse {
             code: None,
             r#type: None,
             details: None,
+            request_id: None,
             status: StatusCode::CONFLICT,
         }
     }
@@ -149,14 +164,26 @@ impl ApiErrorResponse {
             code: None,
             r#type: None,
             details: None,
+            request_id: None,
             status: StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
     /// Attach an error code (e.g. `"not_supported"`, `"rate_limited"`).
     pub fn with_code(mut self, code: impl Into<String>) -> Self {
-        self.code = Some(code.into());
+        let code = code.into();
+        self.r#type = Some(code.clone());
+        self.code = Some(code);
         self
+    }
+
+    /// Attach a typed [`librefang_types::error_code::ErrorCode`] (#3639).
+    ///
+    /// Preferred over [`Self::with_code`] for new code paths because the
+    /// stable wire token is enforced by the type system. Sets both `code`
+    /// and the legacy `type` alias.
+    pub fn with_error_code(self, code: librefang_types::error_code::ErrorCode) -> Self {
+        self.with_code(code.as_str())
     }
 
     /// Attach arbitrary detail payload.
@@ -168,6 +195,16 @@ impl ApiErrorResponse {
     /// Build with a custom status code.
     pub fn with_status(mut self, status: StatusCode) -> Self {
         self.status = status;
+        self
+    }
+
+    /// Stamp a `request_id` correlation token onto the body (#3639).
+    ///
+    /// Consumed by the request-logging middleware after `next.run()` so
+    /// every JSON error response carries the same id that appears in the
+    /// `x-request-id` response header and the structured access-log line.
+    pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
+        self.request_id = Some(request_id.into());
         self
     }
 
