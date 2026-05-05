@@ -146,7 +146,7 @@ async fn profiles_get_unknown_profile_returns_404() {
     let (status, body) = get_json(&h, "/api/profiles/no-such-profile").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(
-        body["error"].is_string(),
+        body["error"].is_string() || body["error"]["message"].is_string(),
         "404 must carry a structured error payload: {body}"
     );
 }
@@ -278,7 +278,10 @@ async fn templates_get_unknown_returns_404() {
     let h = boot().await;
     let (status, body) = get_json(&h, "/api/templates/does_not_exist_xyz").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-    assert!(body["error"].is_string(), "{body}");
+    assert!(
+        body["error"].is_string() || body["error"]["message"].is_string(),
+        "{body}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

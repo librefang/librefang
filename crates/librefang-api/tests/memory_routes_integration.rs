@@ -328,7 +328,10 @@ async fn delete_clear_level_rejects_unknown_level_with_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
     let body = read_json(resp).await;
-    let err = body["error"].as_str().unwrap_or("");
+    let err = body["error"]
+        .as_str()
+        .or_else(|| body["error"]["message"].as_str())
+        .unwrap_or("");
     assert!(
         err.contains("Invalid memory level") && err.contains("bogus"),
         "expected validation error mentioning 'bogus', got: {err}"

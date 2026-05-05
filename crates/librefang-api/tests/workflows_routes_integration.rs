@@ -143,7 +143,11 @@ async fn workflow_get_unknown_uuid_returns_404() {
     let (status, body) = get(&h, "/api/workflows/00000000-0000-0000-0000-000000000000").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("not found"),
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("not found"),
         "{body:?}"
     );
 }
@@ -156,6 +160,7 @@ async fn workflow_get_invalid_id_returns_400() {
     assert!(
         body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .contains("Invalid workflow ID"),
         "{body:?}"
@@ -227,7 +232,11 @@ async fn workflow_create_rejects_missing_steps() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("'steps'"),
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("'steps'"),
         "{body:?}"
     );
 }
@@ -247,7 +256,11 @@ async fn workflow_create_rejects_step_without_agent() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("agent_id"),
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("agent_id"),
         "{body:?}"
     );
 }
@@ -291,6 +304,7 @@ async fn workflow_run_get_invalid_id_returns_400() {
     assert!(
         body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .contains("Invalid run ID"),
         "{body:?}"
@@ -349,7 +363,11 @@ async fn trigger_create_rejects_missing_agent_id() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("agent_id"),
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("agent_id"),
         "{body:?}"
     );
 }
@@ -368,6 +386,7 @@ async fn trigger_create_rejects_invalid_agent_id() {
     assert!(
         body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .contains("Invalid agent_id"),
         "{body:?}"
@@ -386,7 +405,11 @@ async fn trigger_create_rejects_missing_pattern() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("pattern"),
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("pattern"),
         "{body:?}"
     );
 }
@@ -415,6 +438,7 @@ async fn schedule_get_invalid_id_returns_400() {
     assert!(
         body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .contains("Invalid schedule ID"),
         "{body:?}"
@@ -440,7 +464,11 @@ async fn schedule_create_rejects_missing_name() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("'name'"),
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("'name'"),
         "{body:?}"
     );
 }
@@ -457,7 +485,11 @@ async fn schedule_create_rejects_missing_cron() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("'cron'"),
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("'cron'"),
         "{body:?}"
     );
 }
@@ -483,6 +515,7 @@ async fn cron_jobs_list_rejects_invalid_agent_id_filter() {
     assert!(
         body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .contains("Invalid agent_id"),
         "{body:?}"
@@ -618,7 +651,11 @@ async fn workflow_template_get_unknown_returns_404() {
     let (status, body) = get(&h, "/api/workflow-templates/no-such-template").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("not found"),
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("not found"),
         "{body:?}"
     );
 }

@@ -337,7 +337,10 @@ async fn revoke_before_enrollment_is_bad_request() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got body: {body:?}");
-    let err = body["error"].as_str().unwrap_or_default();
+    let err = body["error"]
+        .as_str()
+        .or_else(|| body["error"]["message"].as_str())
+        .unwrap_or_default();
     assert!(
         err.contains("not enrolled"),
         "expected 'not enrolled' error, got: {err}"

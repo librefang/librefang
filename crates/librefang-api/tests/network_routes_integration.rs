@@ -163,6 +163,7 @@ async fn peers_get_returns_404_when_no_registry() {
     assert!(
         body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .to_lowercase()
             .contains("peer networking"),
@@ -186,6 +187,7 @@ async fn peers_get_returns_404_for_unknown_id() {
     assert!(
         body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .to_lowercase()
             .contains("not found"),
@@ -334,6 +336,7 @@ async fn comms_send_rejects_invalid_from_agent_id() {
     assert!(
         body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .to_lowercase()
             .contains("from_agent_id"),
@@ -360,6 +363,7 @@ async fn comms_send_rejects_unknown_from_agent() {
     assert!(
         body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .to_lowercase()
             .contains("source agent"),
@@ -417,6 +421,7 @@ async fn comms_send_rejects_oversize_message() {
     assert!(
         body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .to_lowercase()
             .contains("too large"),
