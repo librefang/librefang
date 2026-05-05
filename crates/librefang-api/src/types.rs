@@ -40,6 +40,24 @@ pub struct JsonArray(pub Vec<serde_json::Value>);
 // Unified API error response
 // ---------------------------------------------------------------------------
 
+/// Nested error body used by the #3639 envelope migration.
+///
+/// Serializes as `{"code": "...", "message": "...", "request_id": "..."}`.
+/// Lives at the top-level `error` key alongside the flat compatibility
+/// fields (`code`, `type`, `request_id`) so old and new clients can both
+/// parse a single response.
+#[derive(Debug, Serialize)]
+pub struct ApiErrorBody {
+    /// Stable machine-readable code (mirrors the flat top-level `code`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// Human-readable error message (mirrors the legacy flat `error` string).
+    pub message: String,
+    /// Per-request correlation id (mirrors the flat top-level `request_id`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+}
+
 /// A unified error response type for all API endpoints.
 ///
 /// Every error returned by the API uses this shape, ensuring clients can rely
@@ -49,28 +67,100 @@ pub struct JsonArray(pub Vec<serde_json::Value>);
 /// `request_id` (#3639) is populated automatically by the
 /// [`crate::middleware::request_logging`] post-response hook on every JSON
 /// 4xx/5xx response, so handlers do not need to set it manually.
-#[derive(Debug, Serialize)]
+///
+/// Wire shape (#3639 deferred — coexists for one minor):
+///
+/// ```json
+/// {
+///   "error": { "code": "not_found", "message": "...", "request_id": "..." },
+///   "message": "...",
+///   "code": "not_found",
+///   "type": "not_found",
+///   "request_id": "..."
+/// }
+/// ```
+///
+/// The nested `error` object is the long-term shape; the flat `code` /
+/// `type` / `request_id` fields are kept for one minor for backward
+/// compatibility with the dashboard and external callers that still
+/// parse the flat form. New consumers should prefer
+/// `response.error.code` over `response.code`.
+#[derive(Debug)]
 pub struct ApiErrorResponse {
-    pub error: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub code: Option<String>,
-    /// Backward-compatible alias for `code`.
+    /// Human-readable error message.
     ///
-    /// Old clients may parse `"type"` instead of `"code"`.  When both are
-    /// set they carry the same value.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Serialized as a top-level `message` field and mirrored inside the
+    /// nested `error.message`.
+    pub error: String,
+    /// Stable machine-readable error code (e.g. `"not_found"`).
+    ///
+    /// **Deprecated**: Removed in next minor; use nested `error.code` instead.
+    pub code: Option<String>,
+    /// Backward-compatible alias for `code` (legacy clients).
+    ///
+    /// **Deprecated**: Removed in next minor; use nested `error.code` instead.
     pub r#type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Optional structured details payload.
     pub details: Option<serde_json::Value>,
-    /// Stable per-request correlation id, surfaced both in the response body
-    /// and the `x-request-id` header (#3639). Set by the request-logging
-    /// middleware after the handler returns; handlers should leave this as
-    /// `None`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Per-request correlation id (matches the `x-request-id` header).
+    ///
+    /// **Deprecated**: Removed in next minor; use nested `error.request_id`
+    /// instead.
     pub request_id: Option<String>,
     /// HTTP status code — not serialized into the JSON body.
-    #[serde(skip)]
     pub status: StatusCode,
+}
+
+/// Custom serializer emits BOTH the legacy flat fields AND the new nested
+/// `error: ApiErrorBody` envelope (#3639 deferred). The flat fields are
+/// kept for one minor so the dashboard and external callers that still
+/// parse `response.code` / `response.request_id` keep working while new
+/// code migrates to `response.error.code` / `response.error.request_id`.
+impl Serialize for ApiErrorResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        // Field count: nested `error` + `message` always present; the rest
+        // are serialized only when populated.
+        let mut field_count = 2;
+        if self.code.is_some() {
+            field_count += 1;
+        }
+        if self.r#type.is_some() {
+            field_count += 1;
+        }
+        if self.details.is_some() {
+            field_count += 1;
+        }
+        if self.request_id.is_some() {
+            field_count += 1;
+        }
+
+        let mut map = serializer.serialize_map(Some(field_count))?;
+
+        // New nested envelope (#3639 — preferred shape).
+        let nested = ApiErrorBody {
+            code: self.code.clone(),
+            message: self.error.clone(),
+            request_id: self.request_id.clone(),
+        };
+        map.serialize_entry("error", &nested)?;
+
+        // Flat compatibility fields (deprecated, removed next minor).
+        map.serialize_entry("message", &self.error)?;
+        if let Some(code) = &self.code {
+            map.serialize_entry("code", code)?;
+        }
+        if let Some(t) = &self.r#type {
+            map.serialize_entry("type", t)?;
+        }
+        if let Some(details) = &self.details {
+            map.serialize_entry("details", details)?;
+        }
+        if let Some(request_id) = &self.request_id {
+            map.serialize_entry("request_id", request_id)?;
+        }
+        map.end()
+    }
 }
 
 impl IntoResponse for ApiErrorResponse {

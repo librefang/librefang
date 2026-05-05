@@ -1043,11 +1043,31 @@ async function parseError(response: Response): Promise<ApiError> {
   let code = `HTTP_${response.status}`;
   try {
     const json = JSON.parse(text) as Json;
-    // Prefer the human-readable `detail` field over the machine-code `error` field
-    if (typeof json.detail === "string") {
+    // #3639 deferred: prefer the nested `error: {code, message, request_id}`
+    // envelope; fall back to the legacy flat shape (`error` as string,
+    // top-level `code`, `detail`) so we keep parsing responses produced by
+    // ad-hoc `Json(json!({"error": "..."}))` route sites during rollout.
+    const nested =
+      typeof json.error === "object" && json.error !== null
+        ? (json.error as Record<string, unknown>)
+        : null;
+
+    if (nested && typeof nested.message === "string") {
+      message = nested.message;
+    } else if (typeof json.detail === "string") {
       message = json.detail;
+    } else if (typeof json.message === "string") {
+      message = json.message as string;
     } else if (typeof json.error === "string") {
       message = json.error;
+    }
+
+    if (nested && typeof nested.code === "string") {
+      code = nested.code;
+    } else if (typeof json.code === "string") {
+      code = json.code as string;
+    } else if (typeof json.error === "string") {
+      // Legacy: flat `error` doubled as both message and code token.
       code = json.error;
     }
   } catch {

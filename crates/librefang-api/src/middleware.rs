@@ -452,6 +452,8 @@ async fn normalize_json_error_body(response: Response<Body>, request_id: &str) -
     }
 
     let mut mutated = false;
+    let default_code = default_error_code_for_status(status_code);
+
     if !obj.contains_key("request_id") {
         obj.insert(
             "request_id".to_string(),
@@ -460,7 +462,6 @@ async fn normalize_json_error_body(response: Response<Body>, request_id: &str) -
         mutated = true;
     }
     if !obj.contains_key("code") {
-        let default_code = default_error_code_for_status(status_code);
         obj.insert(
             "code".to_string(),
             serde_json::Value::String(default_code.to_string()),
@@ -469,6 +470,28 @@ async fn normalize_json_error_body(response: Response<Body>, request_id: &str) -
         obj.entry("type")
             .or_insert(serde_json::Value::String(default_code.to_string()));
         mutated = true;
+    }
+
+    // #3639 deferred — also stamp into the nested `error` object when the
+    // handler emitted the new envelope shape (`error: {code, message,
+    // request_id}`). Ad-hoc `Json(json!({"error": "msg"}))` sites still
+    // emit `error` as a string and are left untouched here; the flat
+    // top-level fields above cover them.
+    if let Some(err_obj) = obj.get_mut("error").and_then(|v| v.as_object_mut()) {
+        if !err_obj.contains_key("request_id") {
+            err_obj.insert(
+                "request_id".to_string(),
+                serde_json::Value::String(request_id.to_string()),
+            );
+            mutated = true;
+        }
+        if !err_obj.contains_key("code") {
+            err_obj.insert(
+                "code".to_string(),
+                serde_json::Value::String(default_code.to_string()),
+            );
+            mutated = true;
+        }
     }
 
     if !mutated {

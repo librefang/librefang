@@ -128,6 +128,45 @@ async fn json_404_carries_request_id_matching_header() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn json_4xx_emits_both_nested_and_flat_envelope_during_migration() {
+    // #3639 deferred: while the flat shape is being phased out we serialize
+    // BOTH the new nested `error: {code, message, request_id}` envelope and
+    // the legacy flat `code` / `request_id` fields on the same response.
+    // Once the flat path is removed in the next minor, this test can be
+    // narrowed to the nested-only assertions.
+    let (app, _t) = boot_full_harness();
+    let (status, _headers, body) = send(&app, "/test/synthetic-404").await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Nested envelope: `error.code` and `error.message` must be populated.
+    assert!(
+        body.get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_str())
+            .is_some(),
+        "nested error.code must be present (#3639): body = {body}"
+    );
+    assert!(
+        body.get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .is_some(),
+        "nested error.message must be present (#3639): body = {body}"
+    );
+
+    // Flat compatibility: top-level `code` and `request_id` still emitted.
+    assert!(
+        body.get("code").and_then(|v| v.as_str()).is_some(),
+        "flat top-level `code` must remain for backward compat: body = {body}"
+    );
+    assert!(
+        body.get("request_id").and_then(|v| v.as_str()).is_some(),
+        "flat top-level `request_id` must remain for backward compat: body = {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn json_404_carries_default_stable_code() {
     let (app, _t) = boot_full_harness();
     let (_status, _headers, body) = send(&app, "/test/synthetic-404").await;
