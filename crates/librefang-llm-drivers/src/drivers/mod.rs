@@ -735,24 +735,25 @@ fn create_driver_from_entry(
                 config.base_url.clone(),
                 config.skip_permissions,
                 config.message_timeout_secs,
-            );
+            )
+            .with_emit_caller_trace_headers(config.emit_caller_trace_headers);
             if let Some(bridge) = config.mcp_bridge.clone() {
                 d = d.with_mcp_bridge(bridge);
             }
             Ok(Arc::new(d))
         }
-        ApiFormat::QwenCode => Ok(Arc::new(qwen_code::QwenCodeDriver::new(
-            config.base_url.clone(),
-            config.skip_permissions,
-        ))),
-        ApiFormat::GeminiCli => Ok(Arc::new(gemini_cli::GeminiCliDriver::new(
-            config.base_url.clone(),
-            config.skip_permissions,
-        ))),
-        ApiFormat::CodexCli => Ok(Arc::new(codex_cli::CodexCliDriver::new(
-            config.base_url.clone(),
-            config.skip_permissions,
-        ))),
+        ApiFormat::QwenCode => Ok(Arc::new(
+            qwen_code::QwenCodeDriver::new(config.base_url.clone(), config.skip_permissions)
+                .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+        )),
+        ApiFormat::GeminiCli => Ok(Arc::new(
+            gemini_cli::GeminiCliDriver::new(config.base_url.clone(), config.skip_permissions)
+                .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+        )),
+        ApiFormat::CodexCli => Ok(Arc::new(
+            codex_cli::CodexCliDriver::new(config.base_url.clone(), config.skip_permissions)
+                .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+        )),
         ApiFormat::ChatGpt => Ok(Arc::new(
             chatgpt::ChatGptDriver::with_proxy(api_key, base_url, proxy_url)
                 .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
