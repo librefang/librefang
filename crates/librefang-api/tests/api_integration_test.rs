@@ -1259,10 +1259,7 @@ async fn test_spawn_invalid_manifest_returns_400() {
         .unwrap();
     assert_eq!(resp.status(), 400);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("Invalid manifest"));
+    assert!(body["error"].as_str().unwrap().contains("Invalid manifest"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1437,7 +1434,7 @@ async fn test_agent_list_invalid_sort_returns_400() {
         .unwrap();
     assert_eq!(resp.status(), 400);
     let body: serde_json::Value = resp.json().await.unwrap();
-    let error = body["error"]["message"].as_str().unwrap();
+    let error = body["error"].as_str().unwrap();
     assert!(
         error.contains("Invalid sort field"),
         "Error should mention invalid sort field, got: {}",
@@ -1724,10 +1721,7 @@ async fn test_auth_rejects_no_token() {
         .unwrap();
     assert_eq!(resp.status(), 401);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("Missing"));
+    assert!(body["error"].as_str().unwrap().contains("Missing"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1745,10 +1739,7 @@ async fn test_auth_rejects_wrong_token() {
         .unwrap();
     assert_eq!(resp.status(), 401);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("Invalid"));
+    assert!(body["error"].as_str().unwrap().contains("Invalid"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
