@@ -140,7 +140,10 @@ async fn delete_without_confirm_returns_409_and_preserves_identity() {
     assert_eq!(resp.status(), 409, "bare DELETE must be 409 (refs #4614)");
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["code"], "delete_confirmation_required");
-    let err = body["error"].as_str().unwrap_or_default();
+    let err = body["error"]["message"]
+        .as_str()
+        .or_else(|| body["message"].as_str())
+        .unwrap_or_default();
     assert!(
         err.contains("canonical UUID") && err.contains("cannot be undone"),
         "warning text must mention canonical UUID + data-loss; got: {err}"
