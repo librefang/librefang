@@ -42,6 +42,11 @@ from pathlib import Path
 # common typo `(@-foo)` is rejected.
 ATTRIBUTION_RE = re.compile(r"\(@[A-Za-z0-9_][A-Za-z0-9_-]*\)")
 BULLET_RE = re.compile(r"^(\s*)-\s+\S")  # `- text` or `  - text` (nested)
+# Lines ending with `# pragma: no-attribution` are explicitly exempted from the
+# check. Use sparingly — only for entries added before the convention was
+# enforced that cannot be retroactively attributed (e.g. author is unknown or
+# the entry covers work from many people with no single owner).
+NO_ATTRIBUTION_RE = re.compile(r"#\s*pragma:\s*no-attribution\s*$")
 HEADER_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 UNRELEASED_RE = re.compile(r"^##\s+\[Unreleased\]\s*$")
 RELEASE_HEADER_RE = re.compile(r"^##\s+\[[^\]]+\]")  # any `## [...]` line
@@ -108,7 +113,7 @@ def is_bullet(line: str) -> bool:
 
 
 def has_attribution(line: str) -> bool:
-    return ATTRIBUTION_RE.search(line) is not None
+    return ATTRIBUTION_RE.search(line) is not None or NO_ATTRIBUTION_RE.search(line) is not None
 
 
 def report(violations: list[tuple[int, str]], scope: str) -> int:

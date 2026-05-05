@@ -280,6 +280,24 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python3 scripts/check-changelog-attribution.py
 
+  # ── CHANGELOG attribution release gate (#3307) ────────────────────────────────
+  # Complements the per-PR diff check above by scanning the ENTIRE [Unreleased]
+  # block — not just what this diff adds. Catches entries that slipped past
+  # pre-commit (--no-verify, web editor, CI auto-bump) and would otherwise ship
+  # to a release without attribution. Runs on PR + push to main.
+  # Lines exempted with `# pragma: no-attribution` (added before the convention
+  # was enforced and no longer attributable) are not flagged.
+  changelog-attribution-full:
+    name: CHANGELOG Attribution (full [Unreleased])
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+      - name: Validate (@user) attribution on all [Unreleased] bullets
+        run: python3 scripts/check-changelog-attribution.py --all-unreleased
+
   # ── OpenAPI / SDK drift check ──────────────────────────────────────────────────
   # Regenerates openapi.json and the four SDKs and fails if anything differs
   # from what was committed. The pre-commit hook tries to keep these in sync
