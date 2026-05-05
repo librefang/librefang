@@ -1476,7 +1476,19 @@ fn finalize_tool_use_results(
     );
     const MAX_PINNED_DELEGATION: usize = 10;
     let existing_pinned = session.messages.iter().filter(|m| m.pinned).count();
+    // Trust boundary: only internal `agent_send` delegation results are pinned.
+    // MCP / external tool output must never be pinned so it cannot be injected
+    // as persistent context.  `has_delegation_result` gates on the tool name
+    // "agent_send" which is an internal kernel-controlled tool, so external
+    // content cannot satisfy the predicate.
     let pin_this = has_delegation_result && existing_pinned < MAX_PINNED_DELEGATION;
+    debug_assert!(
+        !pin_this
+            || tool_result_blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolResult { tool_name, .. } if tool_name == "agent_send")),
+        "tool-result messages may only be pinned when they contain an agent_send result"
+    );
 
     let tool_results_msg = Message {
         role: Role::User,
@@ -3461,6 +3473,7 @@ pub async fn run_agent_loop(
     let tool_results_cfg = opts.tool_results_config.clone().unwrap_or_default();
     let tr_per_result = tool_results_cfg.spill_threshold_bytes as usize;
     let tr_per_turn = tool_results_cfg.max_bytes_per_turn as usize;
+    let tr_fold_after_turns = tool_results_cfg.history_fold_after_turns;
     // Context compressor — triggers LLM-based summarisation when token usage
     // exceeds 80% of the context window, before falling back to brute-force trim.
     let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();
@@ -3589,6 +3602,30 @@ pub async fn run_agent_loop(
                         warn!("Context engine compaction failed (continuing): {e}");
                     }
                 }
+            }
+        }
+
+        // History fold (#3347 3/N): replace stale tool-result messages with compact
+        // stubs before context assembly so the LLM never sees raw bulk payloads
+        // from old turns.  Runs fold first, then the compressor, mirroring the
+        // ordering rationale in the module-level doc.
+        if tr_fold_after_turns > 0 {
+            let (folded, fold_result) = crate::history_fold::fold_stale_tool_results(
+                messages,
+                tr_fold_after_turns,
+                &manifest.model.model,
+                opts.aux_client.as_deref(),
+                driver.clone(),
+            )
+            .await;
+            messages = folded;
+            if fold_result.groups_folded > 0 {
+                debug!(
+                    groups = fold_result.groups_folded,
+                    replaced = fold_result.messages_replaced,
+                    fallback = fold_result.used_fallback,
+                    "history_fold: fold pass complete (non-streaming)"
+                );
             }
         }
 
@@ -4891,6 +4928,7 @@ pub async fn run_agent_loop_streaming(
     let tool_results_cfg = opts.tool_results_config.clone().unwrap_or_default();
     let tr_per_result = tool_results_cfg.spill_threshold_bytes as usize;
     let tr_per_turn = tool_results_cfg.max_bytes_per_turn as usize;
+    let tr_fold_after_turns = tool_results_cfg.history_fold_after_turns;
     // Context compressor — LLM-based soft compression before hard trim.
     let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();
     let mut any_tools_executed = false;
@@ -5003,6 +5041,28 @@ pub async fn run_agent_loop_streaming(
                         warn!("Context engine compaction failed (continuing, streaming): {e}");
                     }
                 }
+            }
+        }
+
+        // History fold (#3347 3/N): replace stale tool-result messages with compact
+        // stubs before context assembly — streaming path mirrors non-streaming.
+        if tr_fold_after_turns > 0 {
+            let (folded, fold_result) = crate::history_fold::fold_stale_tool_results(
+                messages,
+                tr_fold_after_turns,
+                &manifest.model.model,
+                opts.aux_client.as_deref(),
+                driver.clone(),
+            )
+            .await;
+            messages = folded;
+            if fold_result.groups_folded > 0 {
+                debug!(
+                    groups = fold_result.groups_folded,
+                    replaced = fold_result.messages_replaced,
+                    fallback = fold_result.used_fallback,
+                    "history_fold: fold pass complete (streaming)"
+                );
             }
         }
 

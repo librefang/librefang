@@ -44,6 +44,9 @@ use tracing::{debug, info, warn};
 /// recognise that earlier tool results were compacted.
 const FOLD_PREFIX: &str = "[history-fold]";
 
+/// Number of characters shown in the per-tool preview inside the fold prompt.
+const FOLD_PREVIEW_CHARS: usize = 500;
+
 /// Result of a single fold pass.
 #[derive(Debug, Default)]
 pub struct FoldResult {
@@ -101,7 +104,7 @@ pub async fn fold_stale_tool_results(
 
     // Build the new message list, replacing each stale group.
     let mut out: Vec<Message> = Vec::with_capacity(messages.len());
-    let mut skip_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut skip_set: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     for g in &groups {
         for &i in g {
             skip_set.insert(i);
@@ -109,8 +112,8 @@ pub async fn fold_stale_tool_results(
     }
 
     // Map from first-index-in-group → summary stub (computed below).
-    let mut group_stubs: std::collections::HashMap<usize, Message> =
-        std::collections::HashMap::new();
+    let mut group_stubs: std::collections::BTreeMap<usize, Message> =
+        std::collections::BTreeMap::new();
 
     for (g_idx, group) in groups.iter().enumerate() {
         let count = group.len();
@@ -187,6 +190,8 @@ fn collect_stale_indices(messages: &[Message], fold_after_turns: usize) -> Vec<u
     }
 
     // Collect stale tool-result indices.
+    // Messages that already start with FOLD_PREFIX are previously-folded stubs;
+    // skip them to avoid redundant re-summarisation on every subsequent turn.
     messages
         .iter()
         .enumerate()
@@ -195,6 +200,7 @@ fn collect_stale_indices(messages: &[Message], fold_after_turns: usize) -> Vec<u
                 && !msg.pinned
                 && msg.role == Role::User
                 && is_tool_result_message(msg)
+                && !is_already_folded(msg)
         })
         .map(|(i, _)| i)
         .collect()
@@ -207,6 +213,18 @@ fn is_tool_result_message(msg: &Message) -> bool {
         MessageContent::Blocks(blocks) => blocks
             .iter()
             .any(|b| matches!(b, ContentBlock::ToolResult { .. })),
+        _ => false,
+    }
+}
+
+/// Returns true when `msg` is a previously-folded stub (starts with `FOLD_PREFIX`).
+///
+/// These messages are cheap text stubs produced by a prior fold pass and do not
+/// need to be re-summarised.  Re-folding them wastes an aux-LLM call and can
+/// produce misleading "summary of a summary" output.
+fn is_already_folded(msg: &Message) -> bool {
+    match &msg.content {
+        MessageContent::Text(t) => t.starts_with(FOLD_PREFIX),
         _ => false,
     }
 }
@@ -248,8 +266,8 @@ async fn summarise_group(
                         tool_name, content, ..
                     } = block
                     {
-                        let preview: String = content.chars().take(500).collect();
-                        let has_more = content.len() > 500;
+                        let preview: String = content.chars().take(FOLD_PREVIEW_CHARS).collect();
+                        let has_more = content.len() > FOLD_PREVIEW_CHARS;
                         text.push_str(&format!("- {tool_name}: {preview}"));
                         if has_more {
                             text.push_str(" ...[truncated]");
@@ -259,7 +277,7 @@ async fn summarise_group(
                 }
             }
             MessageContent::Text(t) => {
-                let preview: String = t.chars().take(500).collect();
+                let preview: String = t.chars().take(FOLD_PREVIEW_CHARS).collect();
                 text.push_str(&format!("- {preview}\n"));
             }
         }
@@ -290,7 +308,7 @@ async fn summarise_group(
                 .to_string(),
         ),
         thinking: None,
-        prompt_caching: false,
+        prompt_caching: true,
         cache_ttl: None,
         response_format: None,
         timeout_secs: None,
@@ -375,16 +393,7 @@ mod tests {
                 tool_calls: vec![],
                 stop_reason: librefang_types::message::StopReason::EndTurn,
                 usage: librefang_types::message::TokenUsage::default(),
-                model: None,
             })
-        }
-
-        async fn stream(
-            &self,
-            _req: CompletionRequest,
-            _tx: tokio::sync::mpsc::Sender<crate::llm_driver::StreamEvent>,
-        ) -> Result<(), LlmError> {
-            Ok(())
         }
     }
 
@@ -394,15 +403,7 @@ mod tests {
     #[async_trait::async_trait]
     impl LlmDriver for FailDriver {
         async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-            Err(LlmError::Other("simulated failure".to_string()))
-        }
-
-        async fn stream(
-            &self,
-            _req: CompletionRequest,
-            _tx: tokio::sync::mpsc::Sender<crate::llm_driver::StreamEvent>,
-        ) -> Result<(), LlmError> {
-            Ok(())
+            Err(LlmError::Http("simulated failure".to_string()))
         }
     }
 
@@ -511,6 +512,39 @@ mod tests {
     fn group_consecutive_basic() {
         let g = group_consecutive(vec![0, 1, 2, 5, 6, 9]);
         assert_eq!(g, vec![vec![0, 1, 2], vec![5, 6], vec![9]]);
+    }
+
+    #[tokio::test]
+    async fn already_folded_stub_not_re_folded() {
+        // Build history where one "stale" message is actually a prior fold stub.
+        // It must never be selected for re-folding regardless of turn count.
+        let mut msgs = vec![user_msg("initial question")];
+        // Inject an already-folded stub as if a previous pass ran.
+        msgs.push(Message {
+            role: Role::User,
+            content: MessageContent::Text(format!(
+                "{FOLD_PREFIX} 3 tool result(s): prior summary text"
+            )),
+            pinned: false,
+            timestamp: None,
+        });
+        // Add enough assistant turns to push the stub into the stale window.
+        for i in 0..10 {
+            msgs.push(assistant_msg(&format!("response {i}")));
+            msgs.push(tool_result_msg("shell", &format!("output {i}")));
+        }
+        let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver("new summary".to_string()));
+        let (out, result) = fold_stale_tool_results(msgs, 8, "test-model", None, driver).await;
+
+        // The existing fold stub must still be present in the output unchanged.
+        let existing_stub = out.iter().any(|m| {
+            matches!(&m.content, MessageContent::Text(t)
+                if t.starts_with(FOLD_PREFIX) && t.contains("prior summary text"))
+        });
+        assert!(
+            existing_stub,
+            "pre-existing fold stub must survive unchanged: {result:?}"
+        );
     }
 
     #[test]

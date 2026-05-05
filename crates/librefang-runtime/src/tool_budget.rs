@@ -382,4 +382,49 @@ mod tests {
         let t = truncate_to_byte_boundary(s, 7);
         assert_eq!(t, "日本");
     }
+
+    /// Verify that the per-turn budget enforcer counts post-spill (rewritten) bytes,
+    /// not the original raw content size.  A 50 KB raw result is first collapsed to a
+    /// compact summary stub by Layer 2 (`maybe_persist_result`).  When Layer 3
+    /// (`enforce_turn_budget`) runs on the already-rewritten entries, the stub is far
+    /// below the per-turn budget so no further spill occurs — confirming the enforcer
+    /// operates on post-rewrite content.
+    #[test]
+    fn layer3_counts_post_spill_bytes_not_raw() {
+        let dir = tempfile::tempdir().unwrap();
+        // Layer 2 threshold = 1 KB; per-turn budget = 10 KB.
+        let enforcer = ToolBudgetEnforcer {
+            per_result_threshold: 1024,
+            per_turn_budget: 10 * 1024,
+            temp_dir: dir.path().to_path_buf(),
+        };
+
+        // Simulate a ~50 KB raw result — well above per_result_threshold.
+        let raw_50kb = "R".repeat(50 * 1024);
+
+        // Layer 2: collapse to a persisted summary stub.
+        let post_l2 = enforcer.maybe_persist_result(&raw_50kb, "tool-big");
+        assert!(
+            post_l2.starts_with(PERSISTED_MARKER),
+            "Layer 2 should have persisted the large result"
+        );
+        // The stub is a few hundred bytes at most.
+        assert!(
+            post_l2.len() < 2048,
+            "post-L2 stub should be small, got {} bytes",
+            post_l2.len()
+        );
+
+        // Layer 3: run on the already-rewritten entry.  Total is the stub size, which
+        // is well under the 10 KB budget, so the entry must remain unchanged.
+        let mut entries = vec![ToolResultEntry {
+            tool_use_id: "tool-big".into(),
+            content: post_l2.clone(),
+        }];
+        enforcer.enforce_turn_budget(&mut entries);
+        assert_eq!(
+            entries[0].content, post_l2,
+            "Layer 3 must not re-spill an already-persisted stub"
+        );
+    }
 }
