@@ -13199,9 +13199,18 @@ system_prompt = "You are a helpful assistant."
         // file with mtime older than `[tool_results] artifact_max_age_days`.
         // Set to `0` in config to disable.  Idempotent across the lifetime
         // of the process — repeat calls are no-ops.
+        //
+        // Resolve the directory via `default_artifact_storage_dir()`, not
+        // `self.data_dir_boot`: the spill writers in `librefang-runtime`
+        // use the env-based path (`LIBREFANG_HOME/data/artifacts` or
+        // `~/.librefang/data/artifacts`) and would silently diverge from
+        // `config.data_dir` whenever an operator overrode `[data] data_dir`
+        // in `config.toml` without also setting `LIBREFANG_HOME` — GC
+        // would scan an empty directory while the artifact store grew
+        // unbounded under the env path.
         let max_age_days = cfg.tool_results.artifact_max_age_days;
         if max_age_days > 0 {
-            let artifact_dir = self.data_dir_boot.join("artifacts");
+            let artifact_dir = librefang_runtime::artifact_store::default_artifact_storage_dir();
             let max_age = std::time::Duration::from_secs(max_age_days as u64 * 24 * 60 * 60);
             librefang_runtime::artifact_store::run_startup_gc_once(&artifact_dir, max_age);
         }

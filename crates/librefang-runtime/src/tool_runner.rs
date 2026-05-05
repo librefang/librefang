@@ -1105,7 +1105,7 @@ pub async fn execute_tool_raw(
         // Artifact retrieval tool — recovers content spilled to disk by the
         // artifact store when a tool result exceeded `spill_threshold_bytes`.
         "read_artifact" => {
-            let artifact_dir = librefang_data_dir().join("artifacts");
+            let artifact_dir = crate::artifact_store::default_artifact_storage_dir();
             tool_read_artifact(input, &artifact_dir).await
         }
 
@@ -2768,7 +2768,7 @@ fn spill_or_passthrough(
         bytes,
         threshold,
         max_artifact,
-        &librefang_data_dir().join("artifacts"),
+        &crate::artifact_store::default_artifact_storage_dir(),
     ) {
         stub
     } else {
@@ -2814,7 +2814,7 @@ async fn tool_web_fetch_legacy(
         body_bytes,
         spill_threshold,
         max_artifact_bytes,
-        &librefang_data_dir().join("artifacts"),
+        &crate::artifact_store::default_artifact_storage_dir(),
     ) {
         return Ok(format!("HTTP {status}\n\n{stub}"));
     }
@@ -6395,21 +6395,6 @@ async fn tool_canvas_present(
 // ---------------------------------------------------------------------------
 // Artifact retrieval tool (#3347)
 // ---------------------------------------------------------------------------
-
-/// Derive the LibreFang data directory (used by `read_artifact`).
-///
-/// Priority: `LIBREFANG_HOME` env var > `~/.librefang`, then `data/`.
-/// Mirrors the logic in `librefang_types::config::types::librefang_home_dir`.
-fn librefang_data_dir() -> std::path::PathBuf {
-    let home = if let Ok(h) = std::env::var("LIBREFANG_HOME") {
-        std::path::PathBuf::from(h)
-    } else {
-        dirs::home_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join(".librefang")
-    };
-    home.join("data")
-}
 
 /// Implementation of the `read_artifact` tool.
 ///

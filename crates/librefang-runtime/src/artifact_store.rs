@@ -43,6 +43,30 @@ pub fn artifact_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("artifacts")
 }
 
+/// Canonical artifact-store directory used by spill writers,
+/// `read_artifact`, and the startup GC.
+///
+/// Resolution: `$LIBREFANG_HOME/data/artifacts` if `LIBREFANG_HOME` is
+/// set, otherwise `~/.librefang/data/artifacts` (with `std::env::temp_dir()`
+/// as a final fallback when no home is detectable).
+///
+/// Kept here, not on `Kernel`, so all three call sites (writer / reader /
+/// GC) share a single resolver.  Historically the kernel-side GC reached
+/// for `config.data_dir`, which silently diverged from the env-based path
+/// the spill writers in `librefang-runtime` actually use whenever an
+/// operator overrode `[data] data_dir` in `config.toml` — GC then scanned
+/// an empty directory and the artifact store grew unbounded.
+pub fn default_artifact_storage_dir() -> PathBuf {
+    let home = if let Ok(h) = std::env::var("LIBREFANG_HOME") {
+        PathBuf::from(h)
+    } else {
+        dirs::home_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join(".librefang")
+    };
+    home.join("data").join("artifacts")
+}
+
 /// A handle that uniquely identifies a stored artifact.
 ///
 /// The string form is `sha256:<64-hex-chars>` which is safe to embed in
@@ -647,6 +671,20 @@ mod tests {
         assert_eq!(report.scanned, 0);
         assert_eq!(report.evicted, 0);
         assert!(unrelated.exists(), "unrelated file must survive GC");
+    }
+
+    #[test]
+    fn default_artifact_storage_dir_ends_with_data_artifacts() {
+        // Avoid mutating LIBREFANG_HOME — std::env::set_var is unsafe under
+        // Rust 1.80+ and could race other tests in the same process.  We
+        // only need to verify the path shape: every resolution ends with
+        // `<home>/data/artifacts`.
+        let dir = default_artifact_storage_dir();
+        assert!(
+            dir.ends_with("data/artifacts") || dir.ends_with("data\\artifacts"),
+            "expected dir to end with data/artifacts, got: {}",
+            dir.display()
+        );
     }
 
     #[test]
