@@ -159,7 +159,7 @@ k256 = { version = "0.13", features = ["schnorr"] }
 subtle = "2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-hkdf = "0.12"
+hkdf = "0.13"
 rsa = "0.9.6"
 rand = "0.10"
 zeroize = { version = "1", features = ["derive"] }
