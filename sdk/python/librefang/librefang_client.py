@@ -671,8 +671,8 @@ class _NetworkResource(_Resource):
     def network_status(self):
         return self._c._request("GET", "/api/network/status")
 
-    def list_peers(self):
-        return self._c._request("GET", "/api/peers")
+    def list_peers(self, offset: Any = None, limit: Any = None):
+        return self._c._request("GET", "/api/peers", None, query={"offset": offset, "limit": limit})
 
     def get_peer(self, id: str):
         return self._c._request("GET", f"/api/peers/{id}")

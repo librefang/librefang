@@ -942,8 +942,8 @@ func (r *NetworkResource) NetworkStatus() (interface{}, error) {
 	return r.client.request("GET", "/api/network/status", nil, nil)
 }
 
-func (r *NetworkResource) ListPeers() (interface{}, error) {
-	return r.client.request("GET", "/api/peers", nil, nil)
+func (r *NetworkResource) ListPeers(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/peers", nil, query)
 }
 
 func (r *NetworkResource) GetPeer(id string) (interface{}, error) {
