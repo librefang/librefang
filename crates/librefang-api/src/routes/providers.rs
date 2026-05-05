@@ -80,11 +80,7 @@ pub async fn list_models(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let catalog = state
-        .kernel
-        .model_catalog_ref()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let catalog = state.kernel.model_catalog_ref().load();
     let provider_filter = params.get("provider").map(|s| s.to_lowercase());
     let tier_filter = params.get("tier").map(|s| s.to_lowercase());
     let available_only = params
@@ -213,8 +209,7 @@ pub async fn list_aliases(State(state): State<Arc<AppState>>) -> impl IntoRespon
     let aliases = state
         .kernel
         .model_catalog_ref()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
+        .load()
         .list_aliases()
         .clone();
     let entries: Vec<serde_json::Value> = aliases
@@ -262,13 +257,10 @@ pub async fn create_alias(
         return ApiErrorResponse::bad_request("Missing required field: model_id").into_json_tuple();
     }
 
-    let mut catalog = state
+    let added: bool = state
         .kernel
-        .model_catalog_ref()
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-
-    if !catalog.add_alias(&alias, &model_id) {
+        .model_catalog_update(|catalog| catalog.add_alias(&alias, &model_id));
+    if !added {
         return ApiErrorResponse::conflict(format!("Alias '{}' already exists", alias))
             .into_json_tuple();
     }
@@ -289,13 +281,10 @@ pub async fn delete_alias(
     State(state): State<Arc<AppState>>,
     Path(alias): Path<String>,
 ) -> impl IntoResponse {
-    let mut catalog = state
+    let removed: bool = state
         .kernel
-        .model_catalog_ref()
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-
-    if !catalog.remove_alias(&alias) {
+        .model_catalog_update(|catalog| catalog.remove_alias(&alias));
+    if !removed {
         return ApiErrorResponse::not_found(format!("Alias '{}' not found", alias))
             .into_json_tuple();
     }
@@ -308,11 +297,7 @@ pub async fn get_model(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let catalog = state
-        .kernel
-        .model_catalog_ref()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let catalog = state.kernel.model_catalog_ref().load();
     match catalog.find_model(&id) {
         Some(m) => {
             let available = catalog
@@ -355,11 +340,7 @@ pub async fn get_model_overrides(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let catalog = state
-        .kernel
-        .model_catalog_ref()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let catalog = state.kernel.model_catalog_ref().load();
     match catalog.get_overrides(&id) {
         Some(o) => (StatusCode::OK, Json(serde_json::to_value(o).unwrap())),
         None => (StatusCode::OK, Json(serde_json::json!({}))),
@@ -377,28 +358,41 @@ pub async fn set_model_overrides(
         .home_dir()
         .join("data")
         .join("model_overrides.json");
-    let mut catalog = state
-        .kernel
-        .model_catalog_ref()
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-    let previous = catalog.get_overrides(&id).cloned();
-    catalog.set_overrides(id.clone(), body);
-    if let Err(e) = catalog.save_overrides(&overrides_path) {
+    // RCU: capture previous + apply override. The closure may retry on CAS,
+    // so we clone `body` per attempt; final returned `previous` matches the
+    // attempt that won the CAS.
+    let id_for_closure = id.clone();
+    let body_for_closure = body.clone();
+    let previous = state.kernel.model_catalog_update(move |catalog| {
+        let prev = catalog.get_overrides(&id_for_closure).cloned();
+        catalog.set_overrides(id_for_closure.clone(), body_for_closure.clone());
+        prev
+    });
+    // Persist outside the RCU loop (disk IO must happen exactly once).
+    let snapshot = state.kernel.model_catalog_load();
+    if let Err(e) = snapshot.save_overrides(&overrides_path) {
+        drop(snapshot);
         tracing::warn!("Failed to persist model overrides: {e}");
-        // Roll back in-memory change so catalog stays consistent with disk.
-        match previous {
-            Some(prev) => catalog.set_overrides(id, prev),
-            None => {
-                catalog.remove_overrides(&id);
-            }
-        }
+        // Best-effort rollback. Race window: a concurrent set on the same id
+        // between the apply rcu and this rollback would be clobbered. Disk
+        // IO failures are rare enough that the simpler model is acceptable.
+        let id_for_rollback = id.clone();
+        state
+            .kernel
+            .model_catalog_update(move |catalog| match &previous {
+                Some(prev) => {
+                    catalog.set_overrides(id_for_rollback.clone(), prev.clone());
+                }
+                None => {
+                    catalog.remove_overrides(&id_for_rollback);
+                }
+            });
         return ApiErrorResponse::internal(format!("Failed to persist overrides: {e}"))
             .into_json_tuple();
     }
     // Return the persisted overrides entity so callers can `setQueryData`
     // without a follow-up GET. (Refs #3832.)
-    let persisted = catalog.get_overrides(&id).cloned().unwrap_or_default();
+    let persisted = snapshot.get_overrides(&id).cloned().unwrap_or_default();
     (
         StatusCode::OK,
         Json(serde_json::to_value(persisted).unwrap_or_else(|_| serde_json::json!({}))),
@@ -415,13 +409,15 @@ pub async fn delete_model_overrides(
         .home_dir()
         .join("data")
         .join("model_overrides.json");
-    let mut catalog = state
+    let id_for_closure = id.clone();
+    state
         .kernel
-        .model_catalog_ref()
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-    catalog.remove_overrides(&id);
-    if let Err(e) = catalog.save_overrides(&overrides_path) {
+        .model_catalog_update(move |catalog| catalog.remove_overrides(&id_for_closure));
+    if let Err(e) = state
+        .kernel
+        .model_catalog_load()
+        .save_overrides(&overrides_path)
+    {
         tracing::warn!("Failed to persist model overrides: {e}");
     }
     (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
@@ -433,15 +429,17 @@ fn attach_probe_result(
     entry: &mut serde_json::Value,
     probe: &librefang_runtime::provider_health::ProbeResult,
     provider_id: &str,
-    catalog: &std::sync::RwLock<librefang_runtime::model_catalog::ModelCatalog>,
+    kernel: &librefang_kernel::LibreFangKernel,
 ) {
     entry["is_local"] = serde_json::json!(true);
     entry["reachable"] = serde_json::json!(probe.reachable);
     entry["latency_ms"] = serde_json::json!(probe.latency_ms);
     if !probe.discovered_models.is_empty() {
         entry["discovered_models"] = serde_json::json!(&probe.discovered_models);
-        if let Ok(mut cat) = catalog.write() {
-            let info: Vec<_> = if probe.discovered_model_info.is_empty() {
+        // Pre-compute the merged info outside the RCU closure: the closure
+        // may re-run on CAS retry (#3384) so all allocation happens here once.
+        let info: Vec<librefang_runtime::provider_health::DiscoveredModelInfo> =
+            if probe.discovered_model_info.is_empty() {
                 probe
                     .discovered_models
                     .iter()
@@ -460,8 +458,9 @@ fn attach_probe_result(
             } else {
                 probe.discovered_model_info.clone()
             };
+        kernel.model_catalog_update(|cat| {
             cat.merge_discovered_models(provider_id, &info);
-        }
+        });
     }
     if !probe.discovered_model_info.is_empty() {
         entry["discovered_model_info"] = serde_json::json!(&probe.discovered_model_info);
@@ -490,11 +489,7 @@ fn attach_probe_result(
 )]
 pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let provider_list: Vec<librefang_types::model_catalog::ProviderInfo> = {
-        let catalog = state
-            .kernel
-            .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = state.kernel.model_catalog_ref().load();
         catalog.list_providers().to_vec()
     };
 
@@ -589,7 +584,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
         // auth_status when the service is not reachable so the dashboard
         // shows "needs setup" instead of "configured".
         if let Some(probe) = probe_map.remove(&i) {
-            attach_probe_result(&mut entry, &probe, &p.id, state.kernel.model_catalog_ref());
+            attach_probe_result(&mut entry, &probe, &p.id, &state.kernel);
             if !probe.reachable {
                 entry["auth_status"] = serde_json::json!("missing");
             }
@@ -627,11 +622,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// Returns providers list for the dashboard snapshot endpoint.
 pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json::Value> {
     let provider_list: Vec<librefang_types::model_catalog::ProviderInfo> = {
-        let catalog = state
-            .kernel
-            .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = state.kernel.model_catalog_ref().load();
         catalog.list_providers().to_vec()
     };
 
@@ -691,7 +682,7 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
             "is_custom": p.is_custom,
         });
         if let Some(probe) = probe_map.remove(&i) {
-            attach_probe_result(&mut entry, &probe, &p.id, state.kernel.model_catalog_ref());
+            attach_probe_result(&mut entry, &probe, &p.id, &state.kernel);
             if !probe.reachable {
                 entry["auth_status"] = serde_json::json!("missing");
             }
@@ -720,11 +711,7 @@ pub async fn get_provider(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     let (provider, models) = {
-        let catalog = state
-            .kernel
-            .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = state.kernel.model_catalog_ref().load();
         match catalog.get_provider(&name) {
             Some(p) => {
                 let models: Vec<serde_json::Value> = catalog
@@ -792,12 +779,7 @@ pub async fn get_provider(
         )
         .await;
 
-        attach_probe_result(
-            &mut entry,
-            &probe,
-            &provider.id,
-            state.kernel.model_catalog_ref(),
-        );
+        attach_probe_result(&mut entry, &probe, &provider.id, &state.kernel);
         if !probe.reachable {
             entry["auth_status"] = serde_json::json!("missing");
         }
@@ -900,13 +882,11 @@ pub async fn add_custom_model(
         return ApiErrorResponse::bad_request(e).into_json_tuple();
     }
 
-    let mut catalog = state
+    let entry_for_closure = entry.clone();
+    let added: bool = state
         .kernel
-        .model_catalog_ref()
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-
-    if !catalog.add_custom_model(entry) {
+        .model_catalog_update(move |catalog| catalog.add_custom_model(entry_for_closure.clone()));
+    if !added {
         return ApiErrorResponse::conflict(format!(
             "Model '{}' already exists for provider '{}'",
             id, provider
@@ -922,9 +902,16 @@ pub async fn add_custom_model(
         .home_dir()
         .join("data")
         .join("custom_models.json");
-    if let Err(e) = catalog.save_custom_models(&custom_path) {
+    if let Err(e) = state
+        .kernel
+        .model_catalog_load()
+        .save_custom_models(&custom_path)
+    {
         tracing::warn!("Failed to persist custom models: {e}");
-        catalog.remove_custom_model(&id);
+        let id_for_rollback = id.clone();
+        state.kernel.model_catalog_update(move |catalog| {
+            catalog.remove_custom_model(&id_for_rollback);
+        });
         return ApiErrorResponse::internal(format!("Failed to persist custom model: {e}"))
             .into_json_tuple();
     }
@@ -945,17 +932,16 @@ pub async fn remove_custom_model(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    let mut catalog = state
-        .kernel
-        .model_catalog_ref()
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-
     // Snapshot the entry before removing so we can restore it if the
     // subsequent persist fails — keeps the in-memory catalog consistent
     // with disk across failure paths.
-    let snapshot = catalog.find_model(&model_id).cloned();
-    if !catalog.remove_custom_model(&model_id) {
+    let model_id_for_closure = model_id.clone();
+    let (snapshot, removed) = state.kernel.model_catalog_update(move |catalog| {
+        let snap = catalog.find_model(&model_id_for_closure).cloned();
+        let ok = catalog.remove_custom_model(&model_id_for_closure);
+        (snap, ok)
+    });
+    if !removed {
         return ApiErrorResponse::not_found(format!("Custom model '{}' not found", model_id))
             .into_json_tuple();
     }
@@ -965,10 +951,16 @@ pub async fn remove_custom_model(
         .home_dir()
         .join("data")
         .join("custom_models.json");
-    if let Err(e) = catalog.save_custom_models(&custom_path) {
+    if let Err(e) = state
+        .kernel
+        .model_catalog_load()
+        .save_custom_models(&custom_path)
+    {
         tracing::warn!("Failed to persist custom models: {e}");
         if let Some(entry) = snapshot {
-            catalog.add_custom_model(entry);
+            state.kernel.model_catalog_update(move |catalog| {
+                catalog.add_custom_model(entry.clone());
+            });
         }
         return ApiErrorResponse::internal(format!("Failed to persist custom model: {e}"))
             .into_json_tuple();
@@ -994,11 +986,7 @@ pub async fn set_provider_key(
 
     // Look up env var from catalog; for unknown/custom providers derive one.
     let env_var = {
-        let catalog = state
-            .kernel
-            .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = state.kernel.model_catalog_ref().load();
         catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
@@ -1032,20 +1020,17 @@ pub async fn set_provider_key(
     // Re-enable fallback detection (user is adding a key, undo any prior suppress)
     // and refresh auth status.
     {
-        let mut catalog = state
+        let suppressed_path = state
             .kernel
-            .model_catalog_ref()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        catalog.unsuppress_provider(&name);
-        catalog.save_suppressed(
-            &state
-                .kernel
-                .home_dir()
-                .join("data")
-                .join("suppressed_providers.json"),
-        );
-        catalog.detect_auth();
+            .home_dir()
+            .join("data")
+            .join("suppressed_providers.json");
+        let name_for_closure = name.clone();
+        state.kernel.model_catalog_update(move |catalog| {
+            catalog.unsuppress_provider(&name_for_closure);
+            catalog.save_suppressed(&suppressed_path);
+            catalog.detect_auth();
+        });
     }
 
     // Kick off a background probe to validate the new key immediately so the
@@ -1084,11 +1069,7 @@ pub async fn set_provider_key(
     let switched = if !current_has_key && current_provider != name {
         // Find a default model for the newly-keyed provider
         let default_model = {
-            let catalog = state
-                .kernel
-                .model_catalog_ref()
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
+            let catalog = state.kernel.model_catalog_ref().load();
             catalog.default_model_for_provider(&name)
         };
         if let Some(model_id) = default_model {
@@ -1199,11 +1180,7 @@ pub async fn delete_provider_key(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     let env_var = {
-        let catalog = state
-            .kernel
-            .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = state.kernel.model_catalog_ref().load();
         catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
@@ -1231,20 +1208,17 @@ pub async fn delete_provider_key(
 
     // Suppress fallback/CLI detection for this provider and refresh auth
     {
-        let mut catalog = state
+        let suppressed_path = state
             .kernel
-            .model_catalog_ref()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        catalog.suppress_provider(&name);
-        catalog.save_suppressed(
-            &state
-                .kernel
-                .home_dir()
-                .join("data")
-                .join("suppressed_providers.json"),
-        );
-        catalog.detect_auth();
+            .home_dir()
+            .join("data")
+            .join("suppressed_providers.json");
+        let name_for_closure = name.clone();
+        state.kernel.model_catalog_update(move |catalog| {
+            catalog.suppress_provider(&name_for_closure);
+            catalog.save_suppressed(&suppressed_path);
+            catalog.detect_auth();
+        });
     }
 
     (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
@@ -1257,11 +1231,7 @@ pub async fn test_provider(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     let (env_var, base_url, key_required) = {
-        let catalog = state
-            .kernel
-            .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = state.kernel.model_catalog_ref().load();
         match catalog.get_provider(&name) {
             Some(p) => (p.api_key_env.clone(), p.base_url.clone(), p.key_required),
             None => {
@@ -1556,15 +1526,15 @@ pub async fn set_provider_url(
 
     // Update catalog in memory
     {
-        let mut catalog = state
-            .kernel
-            .model_catalog_ref()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        catalog.set_provider_url(&name, &base_url);
-        if let Some(ref pu) = proxy_url {
-            catalog.set_provider_proxy_url(&name, pu);
-        }
+        let name_for_closure = name.clone();
+        let base_url_for_closure = base_url.clone();
+        let proxy_url_for_closure = proxy_url.clone();
+        state.kernel.model_catalog_update(move |catalog| {
+            catalog.set_provider_url(&name_for_closure, &base_url_for_closure);
+            if let Some(ref pu) = proxy_url_for_closure {
+                catalog.set_provider_proxy_url(&name_for_closure, pu);
+            }
+        });
     }
 
     // Persist to config.toml [provider_urls] section
@@ -1583,11 +1553,7 @@ pub async fn set_provider_url(
     // the listing request — without this, they return 401 even when the
     // backing model server is healthy.
     let probe_env_var = {
-        let catalog = state
-            .kernel
-            .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = state.kernel.model_catalog_ref().load();
         catalog
             .get_provider(&name)
             .map(|p| p.api_key_env.clone())
@@ -1606,8 +1572,9 @@ pub async fn set_provider_url(
 
     // Merge discovered models into catalog
     if !probe.discovered_models.is_empty() {
-        if let Ok(mut catalog) = state.kernel.model_catalog_ref().write() {
-            let info: Vec<_> = if probe.discovered_model_info.is_empty() {
+        // Pre-compute info outside the RCU closure (closure may retry on CAS).
+        let info: Vec<librefang_runtime::provider_health::DiscoveredModelInfo> =
+            if probe.discovered_model_info.is_empty() {
                 probe
                     .discovered_models
                     .iter()
@@ -1626,8 +1593,9 @@ pub async fn set_provider_url(
             } else {
                 probe.discovered_model_info.clone()
             };
+        state.kernel.model_catalog_update(|catalog| {
             catalog.merge_discovered_models(&name, &info);
-        }
+        });
     }
 
     let mut resp = serde_json::json!({
@@ -1680,11 +1648,7 @@ pub async fn set_default_provider(
 
     // Verify the provider exists in the catalog
     let (default_model, env_var) = {
-        let catalog = state
-            .kernel
-            .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = state.kernel.model_catalog_ref().load();
         let provider = match catalog.get_provider(&name) {
             Some(p) => p.clone(),
             None => {
@@ -2094,12 +2058,9 @@ pub async fn copilot_oauth_poll(
             }
 
             // Refresh auth detection
-            state
-                .kernel
-                .model_catalog_ref()
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .detect_auth();
+            state.kernel.model_catalog_update(|catalog| {
+                catalog.detect_auth();
+            });
 
             // Clean up flow state
             COPILOT_FLOWS.remove(&poll_id);
@@ -2156,23 +2117,24 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
         Ok(result) => {
             // Refresh the in-memory catalog so the new models are available immediately
             {
-                let mut catalog = state
-                    .kernel
-                    .model_catalog_ref()
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner());
-                catalog.load_cached_catalog_for(state.kernel.home_dir());
+                let home_dir = state.kernel.home_dir().to_path_buf();
                 let cfg = state.kernel.config_ref();
-                if !cfg.provider_regions.is_empty() {
-                    let region_urls = catalog.resolve_region_urls(&cfg.provider_regions);
-                    if !region_urls.is_empty() {
-                        catalog.apply_url_overrides(&region_urls);
+                let provider_regions = cfg.provider_regions.clone();
+                let provider_urls = cfg.provider_urls.clone();
+                drop(cfg);
+                state.kernel.model_catalog_update(move |catalog| {
+                    catalog.load_cached_catalog_for(&home_dir);
+                    if !provider_regions.is_empty() {
+                        let region_urls = catalog.resolve_region_urls(&provider_regions);
+                        if !region_urls.is_empty() {
+                            catalog.apply_url_overrides(&region_urls);
+                        }
                     }
-                }
-                if !cfg.provider_urls.is_empty() {
-                    catalog.apply_url_overrides(&cfg.provider_urls);
-                }
-                catalog.detect_auth();
+                    if !provider_urls.is_empty() {
+                        catalog.apply_url_overrides(&provider_urls);
+                    }
+                    catalog.detect_auth();
+                });
             }
             (
                 StatusCode::OK,

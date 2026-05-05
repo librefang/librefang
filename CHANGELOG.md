@@ -395,8 +395,13 @@ _338 PRs from 7 contributors since v2026.4.28-beta7._
 ### Added
 
 - `cargo xtask check-changed` — local mirror of the `changes` job in `.github/workflows/ci.yml`. Computes which CI lanes a branch's diff would trigger (rust / docs / ci / install / workspace_cargo / xtask_src), the `full_run` and `full_test` decisions, and the affected crate set (with the schema-mirror rule that pulls `librefang-api` in for any `librefang-types` change). `--json` for tooling, `--run check,clippy,test` actually invokes scoped cargo commands. (#3296) (@houko)
+- `?offset=&limit=` pagination on `GET /api/peers` and `GET /api/skills`. Both endpoints now accept the canonical `PaginationQuery` and return the existing `PaginatedResponse{items,total,offset,limit}` envelope (skills also keeps the `categories` field). Server caps `limit` at 100; requests asking for more are silently clamped. Backward-compatible — clients that omit both query params still receive the unbounded list (full collection). Reusable `crate::types::PaginationQuery` + `paginate()` helper introduced in `librefang-api/src/types.rs` for future endpoints to adopt. (#3639 1/N) (@houko)
 - Config-driven session mode for agent triggers (`session_mode = "new" | "persistent"`) — per-agent default with per-trigger override
 - **Real-client-IP resolution for proxied deployments** via two new top-level config fields, `trusted_proxies` and `trust_forwarded_for`. When both are set and the TCP peer matches the allowlist, the GCRA + auth-login rate limiters and the WebSocket per-IP connection cap key on the IP from forwarding headers (`CF-Connecting-IP` → `X-Real-IP` → `Forwarded` (RFC 7239) → rightmost-untrusted hop in `X-Forwarded-For`) instead of the proxy's own address. Without both flags set, behaviour is unchanged: TCP peer only, headers ignored. Forged forwarding headers from peers outside the allowlist are still ignored, so a rotating `X-Forwarded-For` from the open internet can never bypass per-IP limits. Closes the long-standing TODO referenced in `rate_limiter::resolve_client_ip` (now retired).
+
+### Performance
+
+- Swap kernel `model_catalog` from `RwLock<ModelCatalog>` to `ArcSwap<ModelCatalog>` so the hot `send_message_full` path reads the catalog atomically instead of taking 5+ read locks per request. Writers (key validation, provider probes, catalog sync) use the RCU pattern via a new `LibreFangKernel::model_catalog_update(|cat| …)` helper. `ModelCatalog` gains `#[derive(Clone)]` (cheap by ref-count of Vec/HashMap members; only happens on the rare write paths). Removes the lock contention between concurrent agent loops on multi-tenant deployments without changing behaviour. (#3384) (@houko)
 
 ### Changed
 
@@ -422,6 +427,10 @@ _338 PRs from 7 contributors since v2026.4.28-beta7._
 ### Maintenance
 
 - Wire `cargo xtask integration-test` into CI as a `live-integration-smoke` job — spawns a real `target/debug/librefang start` daemon on every PR touching Rust or CI files, hits `/api/health`, `/api/agents`, `/api/budget`, `/api/network/status`, and SIGTERMs. Catches the failure modes the in-process integration tests miss (route not registered in `server.rs`, daemon failing to bind, config fields not deserializing). Runs with `--skip-llm` to keep the gate hermetic; the live-LLM branch is reserved for the release/nightly workflow that has provider keys. (#3405) (@houko)
+
+### Documentation
+
+- Per-crate `AGENTS.md` for the six core crates (`librefang-{kernel,runtime,types,llm-driver,extensions,channels}`). Telegraph-style: scope, module map, lock strategy, taboos, common gotchas. Each one ships with a sibling `CLAUDE.md` symlink so AI tooling that walks up looking for `CLAUDE.md` (older Claude Code builds, Codex CLI variants) finds the same rules. New CI gate `agents-claude-pair` verifies the symlink remains in place via `scripts/check-agents-claude-pair.sh`. The dashboard's existing `AGENTS.md` also gains the symlink. (#3297) (@houko)
 
 ## [2026.4.28] - 2026-04-28
 

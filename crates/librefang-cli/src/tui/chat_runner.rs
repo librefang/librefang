@@ -420,10 +420,7 @@ impl StandaloneChat {
                 }
             }
             Backend::InProcess { kernel } => {
-                let catalog = kernel
-                    .model_catalog_ref()
-                    .read()
-                    .unwrap_or_else(|p| p.into_inner());
+                let catalog = kernel.model_catalog_ref().load();
                 catalog
                     .available_models()
                     .into_iter()
@@ -494,8 +491,7 @@ impl StandaloneChat {
                 if let Some(id) = self.agent_id_inprocess {
                     let provider = kernel
                         .model_catalog_ref()
-                        .read()
-                        .unwrap_or_else(|p| p.into_inner())
+                        .load()
                         .find_model(model_id)
                         .map(|e| e.provider.clone());
                     let result = if let Some(ref prov) = provider {

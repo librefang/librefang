@@ -944,11 +944,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_models_text(&self) -> String {
-        let catalog = self
-            .kernel
-            .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = self.kernel.model_catalog_ref().load();
         let available = catalog.available_models();
         if available.is_empty() {
             return "No models available. Configure API keys to enable providers.".to_string();
@@ -986,11 +982,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_providers_interactive(&self) -> Vec<(String, String, bool)> {
-        let catalog = self
-            .kernel
-            .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = self.kernel.model_catalog_ref().load();
         catalog
             .list_providers()
             .iter()
@@ -1000,11 +992,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_models_by_provider(&self, provider_id: &str) -> Vec<(String, String)> {
-        let catalog = self
-            .kernel
-            .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = self.kernel.model_catalog_ref().load();
         catalog
             .models_by_provider(provider_id)
             .into_iter()
@@ -1013,11 +1001,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_providers_text(&self) -> String {
-        let catalog = self
-            .kernel
-            .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = self.kernel.model_catalog_ref().load();
         let mut msg = "Providers:\n".to_string();
         for p in catalog.list_providers() {
             let status = match p.auth_status {
