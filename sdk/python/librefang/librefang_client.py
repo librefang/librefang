@@ -163,11 +163,17 @@ class _AgentsResource(_Resource):
     def bulk_stop_agents(self, **data):
         return self._c._request("POST", "/api/agents/bulk/stop", data)
 
+    def list_agent_identities(self):
+        return self._c._request("GET", "/api/agents/identities")
+
+    def reset_agent_identity(self, name: str, confirm: Any = None):
+        return self._c._request("POST", f"/api/agents/identities/{name}/reset", None, query={"confirm": confirm})
+
     def get_agent(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}")
 
-    def kill_agent(self, id: str):
-        return self._c._request("DELETE", f"/api/agents/{id}")
+    def kill_agent(self, id: str, confirm: Any = None):
+        return self._c._request("DELETE", f"/api/agents/{id}", None, query={"confirm": confirm})
 
     def patch_agent(self, id: str, **data):
         return self._c._request("PATCH", f"/api/agents/{id}", data)

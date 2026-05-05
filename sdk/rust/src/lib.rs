@@ -270,12 +270,20 @@ impl AgentsResource {
         do_req(&self.client, &self.base_url, reqwest::Method::POST, &"/api/agents/bulk/stop".to_string(), Some(data), &[]).await
     }
 
+    pub async fn list_agent_identities(&self) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/agents/identities".to_string(), None, &[]).await
+    }
+
+    pub async fn reset_agent_identity(&self, name: &str, confirm: Option<&str>) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::POST, &format!("/api/agents/identities/{}/reset", name), None, &[("confirm", confirm)]).await
+    }
+
     pub async fn get_agent(&self, id: &str) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}", id), None, &[]).await
     }
 
-    pub async fn kill_agent(&self, id: &str) -> Result<Value> {
-        do_req(&self.client, &self.base_url, reqwest::Method::DELETE, &format!("/api/agents/{}", id), None, &[]).await
+    pub async fn kill_agent(&self, id: &str, confirm: Option<&str>) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::DELETE, &format!("/api/agents/{}", id), None, &[("confirm", confirm)]).await
     }
 
     pub async fn patch_agent(&self, id: &str, data: Value) -> Result<Value> {
