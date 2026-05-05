@@ -750,6 +750,12 @@ struct StagedToolUseTurn {
     /// Once `commit` runs this flips to true so a second commit call
     /// (or a drop-after-commit) is a no-op.
     committed: bool,
+    /// Layer 2 per-result spill threshold (bytes). Taken from
+    /// `LoopOptions::tool_results_config` at construction time.
+    per_result_threshold: usize,
+    /// Layer 3 per-turn aggregate budget (bytes). Taken from
+    /// `LoopOptions::tool_results_config` at construction time.
+    per_turn_budget: usize,
 }
 
 impl StagedToolUseTurn {
@@ -828,7 +834,13 @@ impl StagedToolUseTurn {
         // Step 3: delegate the user{tool_result} push to the existing
         // `finalize_tool_use_results` helper so guidance-block append
         // behaviour stays centralized.
-        finalize_tool_use_results(session, messages, &mut self.tool_result_blocks)
+        finalize_tool_use_results(
+            session,
+            messages,
+            &mut self.tool_result_blocks,
+            self.per_result_threshold,
+            self.per_turn_budget,
+        )
     }
 }
 
@@ -839,6 +851,8 @@ fn stage_tool_use_turn(
     response: &crate::llm_driver::CompletionResponse,
     session: &Session,
     available_tools: &[ToolDefinition],
+    per_result_threshold: usize,
+    per_turn_budget: usize,
 ) -> StagedToolUseTurn {
     let rationale_text = {
         let text = response.text();
@@ -870,6 +884,8 @@ fn stage_tool_use_turn(
         allowed_tool_names: available_tools.iter().map(|t| t.name.clone()).collect(),
         caller_id_str: session.agent_id.to_string(),
         committed: false,
+        per_result_threshold,
+        per_turn_budget,
     }
 }
 
@@ -1398,6 +1414,8 @@ fn finalize_tool_use_results(
     session: &mut Session,
     messages: &mut Vec<Message>,
     tool_result_blocks: &mut Vec<ContentBlock>,
+    per_result_threshold: usize,
+    per_turn_budget: usize,
 ) -> ToolResultOutcomeSummary {
     if tool_result_blocks.is_empty() {
         return ToolResultOutcomeSummary::default();
@@ -1409,11 +1427,12 @@ fn finalize_tool_use_results(
     // This must happen before Layer 3 mutates the blocks.
     let outcome_summary = ToolResultOutcomeSummary::from_blocks(tool_result_blocks);
 
-    // Layer 3: per-turn aggregate budget enforcement.
-    // Convert ToolResult blocks into ToolResultEntry values, run the enforcer,
-    // then write back any content that was modified (persisted or truncated).
+    // Layer 3: per-turn aggregate budget enforcement (#3347 2/N).
+    // Convert ToolResult blocks into ToolResultEntry values, run the enforcer
+    // with the configured thresholds, then write back any content that was
+    // modified (persisted or truncated).
     {
-        let enforcer = ToolBudgetEnforcer::default();
+        let enforcer = ToolBudgetEnforcer::new(per_result_threshold, per_turn_budget);
         let mut entries: Vec<ToolResultEntry> = tool_result_blocks
             .iter()
             .filter_map(|b| {
@@ -1813,6 +1832,14 @@ pub struct LoopOptions {
     /// TOCTOU race against `switch_agent_session` (#4291). For
     /// non-fork loops this field is ignored and should be left `None`.
     pub parent_session_id: Option<librefang_types::agent::SessionId>,
+    /// Tool-result budget configuration (#3347 2/N and 3/N).
+    ///
+    /// When `Some`, the per-result spill threshold, per-turn cumulative cap,
+    /// and history-fold turn count are taken from this config.  When `None`
+    /// (the default), all three fall back to [`ToolResultsConfig::default()`].
+    ///
+    /// Kernel populates this from `KernelConfig.runtime.tool_results`.
+    pub tool_results_config: Option<librefang_types::config::ToolResultsConfig>,
 }
 
 /// Result of an agent loop execution.
@@ -3430,6 +3457,10 @@ pub async fn run_agent_loop(
         UNKNOWN_MODEL_CONTEXT_WINDOW
     });
     let context_budget = ContextBudget::new(ctx_window);
+    // Resolve tool-results budget config from opts (falls back to compiled defaults).
+    let tool_results_cfg = opts.tool_results_config.clone().unwrap_or_default();
+    let tr_per_result = tool_results_cfg.spill_threshold_bytes as usize;
+    let tr_per_turn = tool_results_cfg.max_bytes_per_turn as usize;
     // Context compressor — triggers LLM-based summarisation when token usage
     // exceeds 80% of the context window, before falling back to brute-force trim.
     let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();
@@ -3957,7 +3988,13 @@ pub async fn run_agent_loop(
                 // the staged turn drops silently and session.messages is
                 // unchanged — by construction, no orphan ToolUse can
                 // reach the persistence layer. See #2381.
-                let mut staged = stage_tool_use_turn(&response, session, available_tools);
+                let mut staged = stage_tool_use_turn(
+                    &response,
+                    session,
+                    available_tools,
+                    tr_per_result,
+                    tr_per_turn,
+                );
 
                 // Execute each tool call with loop guard, timeout, and truncation.
                 let mut iteration_outcomes = ToolResultOutcomeSummary::default();
@@ -4023,11 +4060,12 @@ pub async fn run_agent_loop(
                         }
                     }
 
-                    // Layer 2: per-result budget — persist oversized outputs to disk.
-                    let budgeted_content = ToolBudgetEnforcer::default().maybe_persist_result(
-                        &executed.final_content,
-                        &executed.result.tool_use_id,
-                    );
+                    // Layer 2: per-result budget — persist oversized outputs to disk (#3347 2/N).
+                    let budgeted_content = ToolBudgetEnforcer::new(tr_per_result, tr_per_turn)
+                        .maybe_persist_result(
+                            &executed.final_content,
+                            &executed.result.tool_use_id,
+                        );
                     staged.append_result(ContentBlock::ToolResult {
                         tool_use_id: executed.result.tool_use_id.clone(),
                         tool_name: tool_call.name.clone(),
@@ -4849,6 +4887,10 @@ pub async fn run_agent_loop_streaming(
         UNKNOWN_MODEL_CONTEXT_WINDOW
     });
     let context_budget = ContextBudget::new(ctx_window);
+    // Resolve tool-results budget config from opts (falls back to compiled defaults).
+    let tool_results_cfg = opts.tool_results_config.clone().unwrap_or_default();
+    let tr_per_result = tool_results_cfg.spill_threshold_bytes as usize;
+    let tr_per_turn = tool_results_cfg.max_bytes_per_turn as usize;
     // Context compressor — LLM-based soft compression before hard trim.
     let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();
     let mut any_tools_executed = false;
@@ -5427,7 +5469,13 @@ pub async fn run_agent_loop_streaming(
                 // See non-streaming branch above for the full rationale
                 // — this is the streaming twin of the #2381 staged-commit
                 // fix.
-                let mut staged = stage_tool_use_turn(&response, session, available_tools);
+                let mut staged = stage_tool_use_turn(
+                    &response,
+                    session,
+                    available_tools,
+                    tr_per_result,
+                    tr_per_turn,
+                );
 
                 // Execute each tool call with loop guard, timeout, and truncation.
                 let mut iteration_outcomes = ToolResultOutcomeSummary::default();
@@ -5504,11 +5552,12 @@ pub async fn run_agent_loop_streaming(
                         }
                     }
 
-                    // Layer 2: per-result budget — persist oversized outputs to disk.
-                    let budgeted_content = ToolBudgetEnforcer::default().maybe_persist_result(
-                        &executed.final_content,
-                        &executed.result.tool_use_id,
-                    );
+                    // Layer 2: per-result budget — persist oversized outputs to disk (#3347 2/N).
+                    let budgeted_content = ToolBudgetEnforcer::new(tr_per_result, tr_per_turn)
+                        .maybe_persist_result(
+                            &executed.final_content,
+                            &executed.result.tool_use_id,
+                        );
 
                     // Notify client of tool execution result (detect dead consumer)
                     let preview: String = budgeted_content.chars().take(300).collect();
@@ -7100,8 +7149,13 @@ mod tests {
         let mut messages = Vec::new();
         let mut tool_result_blocks = Vec::new();
 
-        let outcomes =
-            finalize_tool_use_results(&mut session, &mut messages, &mut tool_result_blocks);
+        let outcomes = finalize_tool_use_results(
+            &mut session,
+            &mut messages,
+            &mut tool_result_blocks,
+            crate::tool_budget::PER_RESULT_THRESHOLD,
+            crate::tool_budget::PER_TURN_BUDGET,
+        );
 
         assert_eq!(outcomes, ToolResultOutcomeSummary::default());
         assert!(session.messages.is_empty());
@@ -7139,6 +7193,8 @@ mod tests {
             allowed_tool_names: Vec::new(),
             caller_id_str: session.agent_id.to_string(),
             committed: false,
+            per_result_threshold: crate::tool_budget::PER_RESULT_THRESHOLD,
+            per_turn_budget: crate::tool_budget::PER_TURN_BUDGET,
         };
         let (tx, rx) = mpsc::channel(1);
         tx.try_send(AgentLoopSignal::Message {
@@ -7230,6 +7286,8 @@ mod tests {
             allowed_tool_names: Vec::new(),
             caller_id_str: session.agent_id.to_string(),
             committed: false,
+            per_result_threshold: crate::tool_budget::PER_RESULT_THRESHOLD,
+            per_turn_budget: crate::tool_budget::PER_TURN_BUDGET,
         };
         let (tx, rx) = mpsc::channel(1);
         tx.try_send(AgentLoopSignal::Message {
@@ -7370,6 +7428,8 @@ mod tests {
             allowed_tool_names: Vec::new(),
             caller_id_str: session.agent_id.to_string(),
             committed: false,
+            per_result_threshold: crate::tool_budget::PER_RESULT_THRESHOLD,
+            per_turn_budget: crate::tool_budget::PER_TURN_BUDGET,
         };
         let (tx, rx) = mpsc::channel(1);
         tx.try_send(AgentLoopSignal::ApprovalResolved {
@@ -7548,6 +7608,8 @@ mod tests {
             allowed_tool_names: Vec::new(),
             caller_id_str: session_b.agent_id.to_string(),
             committed: false,
+            per_result_threshold: crate::tool_budget::PER_RESULT_THRESHOLD,
+            per_turn_budget: crate::tool_budget::PER_TURN_BUDGET,
         };
 
         // Channel mimicking session B's injection_senders entry. The
@@ -7649,6 +7711,8 @@ mod tests {
             allowed_tool_names: Vec::new(),
             caller_id_str: session_a.agent_id.to_string(),
             committed: false,
+            per_result_threshold: crate::tool_budget::PER_RESULT_THRESHOLD,
+            per_turn_budget: crate::tool_budget::PER_TURN_BUDGET,
         };
 
         let (tx, rx) = mpsc::channel(1);
@@ -8188,6 +8252,8 @@ mod tests {
             allowed_tool_names: Vec::new(),
             caller_id_str: session.agent_id.to_string(),
             committed: false,
+            per_result_threshold: crate::tool_budget::PER_RESULT_THRESHOLD,
+            per_turn_budget: crate::tool_budget::PER_TURN_BUDGET,
         };
         let (tx, rx) = mpsc::channel(1);
         tx.send(AgentLoopSignal::Message {
@@ -10720,6 +10786,8 @@ mod tests {
             allowed_tool_names: Vec::new(),
             caller_id_str: agent_id_str,
             committed: false,
+            per_result_threshold: crate::tool_budget::PER_RESULT_THRESHOLD,
+            per_turn_budget: crate::tool_budget::PER_TURN_BUDGET,
         }
     }
 
@@ -10978,6 +11046,8 @@ mod tests {
             allowed_tool_names: Vec::new(),
             caller_id_str: session.agent_id.to_string(),
             committed: false,
+            per_result_threshold: crate::tool_budget::PER_RESULT_THRESHOLD,
+            per_turn_budget: crate::tool_budget::PER_TURN_BUDGET,
         };
 
         // Simulate the batch executing end-to-end (no early break).

@@ -1035,6 +1035,9 @@ pub enum AuxTask {
     Vision,
     /// Browser-tool vision-driven page understanding.
     BrowserVision,
+    /// Tool-result history fold (#3347 3/N): summarise stale tool results
+    /// from turns older than `history_fold_after_turns` into a compact stub.
+    Fold,
 }
 
 impl AuxTask {
@@ -1046,6 +1049,7 @@ impl AuxTask {
             AuxTask::Search => "search",
             AuxTask::Vision => "vision",
             AuxTask::BrowserVision => "browser_vision",
+            AuxTask::Fold => "fold",
         }
     }
 }
@@ -7615,17 +7619,17 @@ impl Default for ParallelToolsConfig {
 /// the agent receives a compact stub with a handle it can pass to
 /// `read_artifact` to retrieve the content in chunks.
 ///
-/// `max_bytes_per_turn` and `history_fold_after_turns` are wired into the
-/// config schema for forward-compatibility but are **not yet active** — their
-/// enforcement mechanisms depend on the aux-LLM channel (#3314) and are
-/// tracked as follow-up work in #3347 2/N and 3/N.
+/// `max_bytes_per_turn` enforces a per-turn cumulative byte cap (#3347 2/N).
+/// `history_fold_after_turns` triggers tool-result history summarisation via
+/// the aux-LLM channel (#3347 3/N) — falls back to byte truncation when no
+/// aux-LLM is configured.
 ///
 /// ```toml
 /// [tool_results]
-/// spill_threshold_bytes   = 16384         # 16 KB — spill to artifact store above this
-/// max_artifact_bytes      = 67108864      # 64 MiB — per-artifact write cap
-/// max_bytes_per_turn      = 50000         # deferred: cumulative budget (unused)
-/// history_fold_after_turns = 8            # deferred: fold old results (unused)
+/// spill_threshold_bytes    = 16384        # 16 KB — spill to artifact store above this
+/// max_artifact_bytes       = 67108864     # 64 MiB — per-artifact write cap
+/// max_bytes_per_turn       = 50000        # cumulative byte cap across all tool results in one turn
+/// history_fold_after_turns = 8            # fold stale tool results after this many turns
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(default)]
@@ -7641,12 +7645,16 @@ pub struct ToolResultsConfig {
     /// Default: 67 108 864 bytes (64 MiB).
     #[serde(default = "default_max_artifact_bytes")]
     pub max_artifact_bytes: u64,
-    /// **Deferred (#3347 2/N)** — cumulative byte cap across all tool results
-    /// in a single LLM turn.  Not yet enforced.  Default: 50 000 bytes.
+    /// Cumulative byte cap across all tool results in a single LLM turn
+    /// (#3347 2/N).  When the running total would exceed this, the next
+    /// result is escalated to artifact spill (or tail truncation if spill
+    /// fails).  Resets between assistant turns.  Default: 50 000 bytes.
     #[serde(default = "default_max_bytes_per_turn")]
     pub max_bytes_per_turn: u64,
-    /// **Deferred (#3347 3/N)** — fold (summarise via aux-LLM) tool-result
-    /// history after this many turns.  Not yet enforced.  Default: 8 turns.
+    /// Fold (summarise via aux-LLM) stale tool results after this many turns
+    /// (#3347 3/N).  Tool-result messages older than this threshold are
+    /// replaced with a compact summary before the next LLM call.  Falls back
+    /// to byte truncation when no aux-LLM is configured.  Default: 8 turns.
     #[serde(default = "default_history_fold_after_turns")]
     pub history_fold_after_turns: u32,
 }

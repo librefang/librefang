@@ -32,6 +32,7 @@ pub mod docker_sandbox;
 pub use librefang_llm_drivers::drivers;
 pub mod embedding;
 pub mod graceful_shutdown;
+pub mod history_fold;
 pub mod hooks;
 pub use librefang_http as http_client;
 pub mod interrupt;
