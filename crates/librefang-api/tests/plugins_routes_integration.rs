@@ -393,7 +393,17 @@ async fn install_plugin_rejects_missing_source() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
-    assert!(body["error"]["message"].as_str().is_some(), "{body:?}");
+    // `/api/plugins/install` is Idempotency-Key wrapped (#3637) and emits the
+    // flat `{error: <string>, code, type}` envelope; sibling plugin routes use
+    // the nested `{error: {message, ...}}` shape (#3639). Accept both so the
+    // assertion does not break on whichever path an inner refactor lands on.
+    assert!(
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .is_some(),
+        "{body:?}"
+    );
 }
 
 /// `source = registry` requires `name`.
@@ -409,8 +419,9 @@ async fn install_plugin_registry_source_requires_name() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"]["message"]
+        body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .to_lowercase()
             .contains("name"),
@@ -784,8 +795,9 @@ async fn plugin_registry_search_rejects_invalid_registry_param() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"]["message"]
+        body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .contains("owner/repo"),
         "{body:?}"
