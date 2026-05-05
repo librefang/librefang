@@ -3288,7 +3288,7 @@ async fn maybe_fold_stale_tool_results(
 /// This is the core of LibreFang: it loads session context, recalls memories,
 /// runs the LLM in a tool-use loop, and saves the updated session.
 #[allow(clippy::too_many_arguments)]
-#[instrument(skip_all, fields(agent.name = %manifest.name, agent.id = %session.agent_id))]
+#[instrument(skip_all, fields(agent.name = %manifest.name, agent.id = %session.agent_id, session.id = %session.id))]
 pub async fn run_agent_loop(
     manifest: &AgentManifest,
     user_message: &str,
