@@ -6311,17 +6311,16 @@ fn cmd_workflow_list() {
     match body.as_array() {
         Some(workflows) if workflows.is_empty() => println!("No workflows registered."),
         Some(workflows) => {
-            println!("{:<38} {:<20} {:<6} CREATED", "ID", "NAME", "STEPS");
-            println!("{}", "-".repeat(80));
+            let mut t = crate::table::Table::new(&["ID", "NAME", "STEPS", "CREATED"]);
             for w in workflows {
-                println!(
-                    "{:<38} {:<20} {:<6} {}",
+                t.add_row(&[
                     w["id"].as_str().unwrap_or("?"),
                     w["name"].as_str().unwrap_or("?"),
-                    w["steps"].as_u64().unwrap_or(0),
+                    &w["steps"].as_u64().unwrap_or(0).to_string(),
                     w["created_at"].as_str().unwrap_or("?"),
-                );
+                ]);
             }
+            t.print();
         }
         None => println!("No workflows registered."),
     }
@@ -6403,21 +6402,23 @@ fn cmd_trigger_list(agent_id: Option<&str>) {
     match arr {
         Some(triggers) if triggers.is_empty() => println!("No triggers registered."),
         Some(triggers) => {
-            println!(
-                "{:<38} {:<38} {:<8} {:<6} PATTERN",
-                "TRIGGER ID", "AGENT ID", "ENABLED", "FIRES"
-            );
-            println!("{}", "-".repeat(110));
+            let mut tbl = crate::table::Table::new(&[
+                "TRIGGER ID",
+                "AGENT ID",
+                "ENABLED",
+                "FIRES",
+                "PATTERN",
+            ]);
             for t in triggers {
-                println!(
-                    "{:<38} {:<38} {:<8} {:<6} {}",
+                tbl.add_row(&[
                     t["id"].as_str().unwrap_or("?"),
                     t["agent_id"].as_str().unwrap_or("?"),
-                    t["enabled"].as_bool().unwrap_or(false),
-                    t["fire_count"].as_u64().unwrap_or(0),
-                    t["pattern"],
-                );
+                    &t["enabled"].as_bool().unwrap_or(false).to_string(),
+                    &t["fire_count"].as_u64().unwrap_or(0).to_string(),
+                    t["pattern"].as_str().unwrap_or("?"),
+                ]);
             }
+            tbl.print();
         }
         None => println!("No triggers registered."),
     }
@@ -6866,20 +6867,16 @@ fn cmd_skill_list(hand: Option<&str>) {
             } else {
                 println!("{count} skill(s) installed:\n");
             }
-            println!(
-                "{:<20} {:<10} {:<8} DESCRIPTION",
-                "NAME", "VERSION", "TOOLS"
-            );
-            println!("{}", "-".repeat(70));
+            let mut t = crate::table::Table::new(&["NAME", "VERSION", "TOOLS", "DESCRIPTION"]);
             for skill in registry.list() {
-                println!(
-                    "{:<20} {:<10} {:<8} {}",
-                    skill.manifest.skill.name,
-                    skill.manifest.skill.version,
-                    skill.manifest.tools.provided.len(),
-                    skill.manifest.skill.description,
-                );
+                t.add_row(&[
+                    &skill.manifest.skill.name,
+                    &skill.manifest.skill.version,
+                    &skill.manifest.tools.provided.len().to_string(),
+                    &skill.manifest.skill.description,
+                ]);
             }
+            t.print();
         }
         Err(e) => {
             eprintln!("Error loading skills: {e}");
@@ -7468,11 +7465,12 @@ fn cmd_skill_evolve(sub: EvolveCommands) {
                 println!("\nNo version history recorded.");
                 return;
             }
-            println!("\n{:<10} {:<25} CHANGELOG", "VERSION", "TIMESTAMP");
-            println!("{}", "-".repeat(70));
+            println!();
+            let mut t = crate::table::Table::new(&["VERSION", "TIMESTAMP", "CHANGELOG"]);
             for v in meta.versions.iter().rev() {
-                println!("{:<10} {:<25} {}", v.version, v.timestamp, v.changelog);
+                t.add_row(&[&v.version, &v.timestamp, &v.changelog]);
             }
+            t.print();
         }
     }
 }
@@ -7493,8 +7491,6 @@ fn cmd_channel_list() {
     let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
 
     println!("Channel Integrations:\n");
-    println!("{:<12} {:<10} STATUS", "CHANNEL", "ENV VAR");
-    println!("{}", "-".repeat(50));
 
     let channels: Vec<(&str, &str)> = vec![
         ("webchat", ""),
@@ -7507,6 +7503,7 @@ fn cmd_channel_list() {
         ("email", "EMAIL_PASSWORD"),
     ];
 
+    let mut t = crate::table::Table::new(&["CHANNEL", "ENV VAR", "STATUS"]);
     for (name, env_var) in channels {
         let configured = config_str.contains(&format!("[channels.{name}]"));
         let env_set = if env_var.is_empty() {
@@ -7514,20 +7511,22 @@ fn cmd_channel_list() {
         } else {
             std::env::var(env_var).is_ok()
         };
-
         let status = match (configured, env_set) {
             (true, true) => "Ready",
             (true, false) => "Missing env",
             (false, _) => "Not configured",
         };
-
-        println!(
-            "{:<12} {:<10} {}",
+        t.add_row(&[
             name,
-            if env_var.is_empty() { "—" } else { env_var },
+            if env_var.is_empty() {
+                "\u{2014}"
+            } else {
+                env_var
+            },
             status,
-        );
+        ]);
     }
+    t.print();
 
     println!("\nUse `librefang channel setup <channel>` to configure a channel.");
 }
@@ -7985,22 +7984,21 @@ fn cmd_hand_list() {
             println!("No hands available.");
             return;
         }
-        println!("{:<14} {:<20} {:<10} DESCRIPTION", "ID", "NAME", "CATEGORY");
-        println!("{}", "-".repeat(72));
+        let mut t = crate::table::Table::new(&["ID", "NAME", "CATEGORY", "DESCRIPTION"]);
         for h in arr {
-            println!(
-                "{:<14} {:<20} {:<10} {}",
+            t.add_row(&[
                 h["id"].as_str().unwrap_or("?"),
                 h["name"].as_str().unwrap_or("?"),
                 h["category"].as_str().unwrap_or("?"),
-                h["description"]
+                &h["description"]
                     .as_str()
                     .unwrap_or("")
                     .chars()
                     .take(40)
                     .collect::<String>(),
-            );
+            ]);
         }
+        t.print();
         println!("\nUse `librefang hand activate <id>` to activate a hand.");
     }
 }
@@ -8013,17 +8011,16 @@ fn cmd_hand_active() {
         println!("No active hands.");
         return;
     }
-    println!("{:<38} {:<14} {:<10} AGENT", "INSTANCE", "HAND", "STATUS");
-    println!("{}", "-".repeat(72));
+    let mut t = crate::table::Table::new(&["INSTANCE", "HAND", "STATUS", "AGENT"]);
     for i in &arr {
-        println!(
-            "{:<38} {:<14} {:<10} {}",
+        t.add_row(&[
             i["instance_id"].as_str().unwrap_or("?"),
             i["hand_id"].as_str().unwrap_or("?"),
             i["status"].as_str().unwrap_or("?"),
             i["agent_name"].as_str().unwrap_or("?"),
-        );
+        ]);
     }
+    t.print();
 }
 
 fn cmd_hand_status(id: Option<&str>) {
@@ -9938,17 +9935,16 @@ fn cmd_models_list(provider_filter: Option<&str>, json: bool) {
                 println!("No models found.");
                 return;
             }
-            println!("{:<40} {:<16} {:<8} CONTEXT", "MODEL", "PROVIDER", "TIER");
-            println!("{}", "-".repeat(80));
+            let mut t = crate::table::Table::new(&["MODEL", "PROVIDER", "TIER", "CONTEXT"]);
             for m in arr {
-                println!(
-                    "{:<40} {:<16} {:<8} {}",
+                t.add_row(&[
                     m["id"].as_str().unwrap_or("?"),
                     m["provider"].as_str().unwrap_or("?"),
                     m["tier"].as_str().unwrap_or("?"),
-                    m["context_window"].as_u64().unwrap_or(0),
-                );
+                    &m["context_window"].as_u64().unwrap_or(0).to_string(),
+                ]);
             }
+            t.print();
         } else {
             println!(
                 "{}",
@@ -9979,22 +9975,21 @@ fn cmd_models_list(provider_filter: Option<&str>, json: bool) {
             println!("No models in catalog.");
             return;
         }
-        println!("{:<40} {:<16} {:<8} CONTEXT", "MODEL", "PROVIDER", "TIER");
-        println!("{}", "-".repeat(80));
+        let mut t = crate::table::Table::new(&["MODEL", "PROVIDER", "TIER", "CONTEXT"]);
         for m in models {
             if let Some(p) = provider_filter {
                 if m.provider != p {
                     continue;
                 }
             }
-            println!(
-                "{:<40} {:<16} {:<8} {}",
-                m.id,
-                m.provider,
-                format!("{:?}", m.tier),
-                m.context_window,
-            );
+            t.add_row(&[
+                &m.id,
+                &m.provider,
+                &format!("{:?}", m.tier),
+                &m.context_window.to_string(),
+            ]);
         }
+        t.print();
     }
 }
 
@@ -10010,22 +10005,21 @@ fn cmd_models_aliases(json: bool) {
             return;
         }
         if let Some(arr) = body.get("aliases").and_then(|v| v.as_array()) {
-            println!("{:<30} RESOLVES TO", "ALIAS");
-            println!("{}", "-".repeat(60));
+            let mut t = crate::table::Table::new(&["ALIAS", "RESOLVES TO"]);
             for entry in arr {
-                println!(
-                    "{:<30} {}",
+                t.add_row(&[
                     entry["alias"].as_str().unwrap_or("?"),
                     entry["model_id"].as_str().unwrap_or("?"),
-                );
+                ]);
             }
+            t.print();
         } else if let Some(obj) = body.as_object() {
             // Fallback for plain {alias: model_id} format
-            println!("{:<30} RESOLVES TO", "ALIAS");
-            println!("{}", "-".repeat(60));
+            let mut t = crate::table::Table::new(&["ALIAS", "RESOLVES TO"]);
             for (alias, target) in obj {
-                println!("{:<30} {}", alias, target.as_str().unwrap_or("?"));
+                t.add_row(&[alias.as_str(), target.as_str().unwrap_or("?")]);
             }
+            t.print();
         } else {
             println!(
                 "{}",
@@ -10043,11 +10037,11 @@ fn cmd_models_aliases(json: bool) {
             println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
             return;
         }
-        println!("{:<30} RESOLVES TO", "ALIAS");
-        println!("{}", "-".repeat(60));
+        let mut t = crate::table::Table::new(&["ALIAS", "RESOLVES TO"]);
         for (alias, target) in aliases {
-            println!("{:<30} {}", alias, target);
+            t.add_row(&[alias, target]);
         }
+        t.print();
     }
 }
 
@@ -10067,20 +10061,16 @@ fn cmd_models_providers(json: bool) {
             .and_then(|v| v.as_array())
             .or_else(|| body.as_array())
         {
-            println!(
-                "{:<20} {:<12} {:<10} BASE URL",
-                "PROVIDER", "AUTH", "MODELS"
-            );
-            println!("{}", "-".repeat(70));
+            let mut t = crate::table::Table::new(&["PROVIDER", "AUTH", "MODELS", "BASE URL"]);
             for p in arr {
-                println!(
-                    "{:<20} {:<12} {:<10} {}",
+                t.add_row(&[
                     p["id"].as_str().unwrap_or("?"),
                     p["auth_status"].as_str().unwrap_or("?"),
-                    p["model_count"].as_u64().unwrap_or(0),
+                    &p["model_count"].as_u64().unwrap_or(0).to_string(),
                     p["base_url"].as_str().unwrap_or(""),
-                );
+                ]);
             }
+            t.print();
         } else {
             println!(
                 "{}",
@@ -10105,20 +10095,16 @@ fn cmd_models_providers(json: bool) {
             println!("{}", serde_json::to_string_pretty(&arr).unwrap_or_default());
             return;
         }
-        println!(
-            "{:<20} {:<12} {:<10} BASE URL",
-            "PROVIDER", "AUTH", "MODELS"
-        );
-        println!("{}", "-".repeat(70));
+        let mut t = crate::table::Table::new(&["PROVIDER", "AUTH", "MODELS", "BASE URL"]);
         for p in providers {
-            println!(
-                "{:<20} {:<12} {:<10} {}",
-                p.id,
-                format!("{:?}", p.auth_status),
-                p.model_count,
-                p.base_url,
-            );
+            t.add_row(&[
+                &p.id,
+                &format!("{:?}", p.auth_status),
+                &p.model_count.to_string(),
+                &p.base_url,
+            ]);
         }
+        t.print();
     }
 }
 
@@ -10229,17 +10215,16 @@ fn cmd_approvals_list(json: bool) {
             println!("No pending approvals.");
             return;
         }
-        println!("{:<38} {:<16} {:<12} REQUEST", "ID", "AGENT", "TYPE");
-        println!("{}", "-".repeat(80));
+        let mut t = crate::table::Table::new(&["ID", "AGENT", "TYPE", "REQUEST"]);
         for a in arr {
-            println!(
-                "{:<38} {:<16} {:<12} {}",
+            t.add_row(&[
                 a["id"].as_str().unwrap_or("?"),
                 a["agent_name"].as_str().unwrap_or("?"),
                 a["approval_type"].as_str().unwrap_or("?"),
                 a["description"].as_str().unwrap_or(""),
-            );
+            ]);
         }
+        t.print();
     } else {
         println!(
             "{}",
@@ -10293,14 +10278,9 @@ fn cmd_cron_list(json: bool) {
             println!("No scheduled jobs.");
             return;
         }
-        println!(
-            "{:<38} {:<16} {:<20} {:<8} PROMPT",
-            "ID", "AGENT", "SCHEDULE", "ENABLED"
-        );
-        println!("{}", "-".repeat(100));
+        let mut t = crate::table::Table::new(&["ID", "AGENT", "SCHEDULE", "ENABLED", "PROMPT"]);
         for j in arr {
-            println!(
-                "{:<38} {:<16} {:<20} {:<8} {}",
+            t.add_row(&[
                 j["id"].as_str().unwrap_or("?"),
                 j["agent_id"].as_str().unwrap_or("?"),
                 j["schedule"]["expr"]
@@ -10312,15 +10292,16 @@ fn cmd_cron_list(json: bool) {
                 } else {
                     "no"
                 },
-                j["action"]["message"]
+                &j["action"]["message"]
                     .as_str()
                     .or_else(|| j["prompt"].as_str())
                     .unwrap_or("")
                     .chars()
                     .take(40)
                     .collect::<String>(),
-            );
+            ]);
         }
+        t.print();
     } else {
         println!(
             "{}",
@@ -10517,31 +10498,32 @@ fn cmd_sessions(agent: Option<&str>, json: bool, active_only: bool) {
             }
             return;
         }
-        println!(
-            "{:<38} {:<16} {:<8} {:<8} LAST ACTIVE",
-            "ID", "AGENT", "MSGS", "STATE"
-        );
-        println!("{}", "-".repeat(90));
+        let mut t = crate::table::Table::new(&["ID", "AGENT", "MSGS", "STATE", "LAST ACTIVE"]);
         for s in filtered {
             let state = if is_running(s) { "running" } else { "idle" };
-            println!(
-                "{:<38} {:<16} {:<8} {:<8} {}",
+            let agent_id = s["agent_id"].as_str().unwrap_or("");
+            let agent_col = if agent_id.len() > 16 {
+                &agent_id[..16]
+            } else if agent_id.is_empty() {
+                s["agent_name"].as_str().unwrap_or("?")
+            } else {
+                agent_id
+            };
+            t.add_row(&[
                 s["session_id"]
                     .as_str()
                     .or_else(|| s["id"].as_str())
                     .unwrap_or("?"),
-                s["agent_id"]
-                    .as_str()
-                    .map(|id| if id.len() > 16 { &id[..16] } else { id })
-                    .unwrap_or(s["agent_name"].as_str().unwrap_or("?")),
-                s["message_count"].as_u64().unwrap_or(0),
+                agent_col,
+                &s["message_count"].as_u64().unwrap_or(0).to_string(),
                 state,
                 s["created_at"]
                     .as_str()
                     .or_else(|| s["last_active"].as_str())
                     .unwrap_or("?"),
-            );
+            ]);
         }
+        t.print();
     } else {
         println!(
             "{}",
@@ -10723,16 +10705,19 @@ fn cmd_security_audit(limit: usize, json: bool) {
             println!("No audit entries.");
             return;
         }
-        println!("{:<24} {:<16} {:<12} EVENT", "TIMESTAMP", "AGENT", "TYPE");
-        println!("{}", "-".repeat(80));
+        let mut t = crate::table::Table::new(&["TIMESTAMP", "AGENT", "TYPE", "EVENT"]);
         for entry in arr {
-            println!(
-                "{:<24} {:<16} {:<12} {}",
+            let agent_id = entry["agent_id"].as_str().unwrap_or("");
+            let agent_col = if agent_id.len() > 16 {
+                &agent_id[..16]
+            } else if agent_id.is_empty() {
+                entry["agent_name"].as_str().unwrap_or("?")
+            } else {
+                agent_id
+            };
+            t.add_row(&[
                 entry["timestamp"].as_str().unwrap_or("?"),
-                entry["agent_id"]
-                    .as_str()
-                    .map(|id| if id.len() > 16 { &id[..16] } else { id })
-                    .unwrap_or(entry["agent_name"].as_str().unwrap_or("?")),
+                agent_col,
                 entry["action"]
                     .as_str()
                     .or_else(|| entry["event_type"].as_str())
@@ -10741,8 +10726,9 @@ fn cmd_security_audit(limit: usize, json: bool) {
                     .as_str()
                     .or_else(|| entry["description"].as_str())
                     .unwrap_or(""),
-            );
+            ]);
         }
+        t.print();
     } else {
         println!(
             "{}",
@@ -10893,20 +10879,19 @@ fn cmd_memory_list(agent: &str, json: bool) {
             println!("No memory entries for agent '{agent}'.");
             return;
         }
-        println!("{:<30} VALUE", "KEY");
-        println!("{}", "-".repeat(60));
+        let mut t = crate::table::Table::new(&["KEY", "VALUE"]);
         for kv in arr {
-            println!(
-                "{:<30} {}",
+            t.add_row(&[
                 kv["key"].as_str().unwrap_or("?"),
-                kv["value"]
+                &kv["value"]
                     .as_str()
                     .unwrap_or("")
                     .chars()
                     .take(50)
                     .collect::<String>(),
-            );
+            ]);
         }
+        t.print();
     } else {
         println!(
             "{}",
@@ -11002,16 +10987,15 @@ fn cmd_devices_list(json: bool) {
             println!("No paired devices.");
             return;
         }
-        println!("{:<38} {:<20} LAST SEEN", "ID", "NAME");
-        println!("{}", "-".repeat(70));
+        let mut t = crate::table::Table::new(&["ID", "NAME", "LAST SEEN"]);
         for d in arr {
-            println!(
-                "{:<38} {:<20} {}",
+            t.add_row(&[
                 d["id"].as_str().unwrap_or("?"),
                 d["name"].as_str().unwrap_or("?"),
                 d["last_seen"].as_str().unwrap_or("?"),
-            );
+            ]);
         }
+        t.print();
     } else {
         println!(
             "{}",
@@ -11084,11 +11068,9 @@ fn cmd_webhooks_list(json: bool) {
             println!("No webhooks configured.");
             return;
         }
-        println!("{:<38} {:<20} {:<10} URL", "ID", "NAME", "ENABLED");
-        println!("{}", "-".repeat(90));
+        let mut t = crate::table::Table::new(&["ID", "NAME", "ENABLED", "URL"]);
         for w in arr {
-            println!(
-                "{:<38} {:<20} {:<10} {}",
+            t.add_row(&[
                 w["id"].as_str().unwrap_or("?"),
                 w["name"].as_str().unwrap_or("?"),
                 if w["enabled"].as_bool().unwrap_or(false) {
@@ -11097,8 +11079,9 @@ fn cmd_webhooks_list(json: bool) {
                     "no"
                 },
                 w["url"].as_str().unwrap_or(""),
-            );
+            ]);
         }
+        t.print();
     } else {
         println!(
             "{}",
