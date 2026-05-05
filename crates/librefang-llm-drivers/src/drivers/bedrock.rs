@@ -1,6 +1,15 @@
 //! AWS Bedrock Converse API driver.
 //!
 //! Authenticates via Bedrock API Keys (`AWS_BEARER_TOKEN_BEDROCK`) — Bearer token.
+//!
+//! Note on trace-header placement: this driver uses simple Bearer token auth
+//! (not SigV4 request signing). The `Authorization: Bearer` header is set
+//! directly on the `reqwest::RequestBuilder`; the `x-librefang-*` trace
+//! headers are appended via `.headers(map)` on the same builder, which means
+//! they travel alongside the Bearer token with no signing scope involved.
+//! If this driver is ever migrated to full SigV4 signing (where the signer
+//! inspects the `HeaderMap` before hashing), trace headers would need to be
+//! added AFTER signing — but that migration has not happened.
 
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError};
 use async_trait::async_trait;
@@ -18,6 +27,15 @@ pub struct BedrockDriver {
     api_key: Zeroizing<String>,
     region: String,
     client: reqwest::Client,
+    /// Whether to emit the three `x-librefang-{agent,session,step}-id` trace
+    /// headers on outbound requests. Mirrors
+    /// `KernelConfig.telemetry.emit_caller_trace_headers`; when `false`, no
+    /// trace headers are emitted regardless of whether `CompletionRequest`'s
+    /// caller-id fields are populated.
+    emit_caller_trace_headers: bool,
+    /// When set, replaces `https://bedrock-runtime.{region}.amazonaws.com` as
+    /// the URL base. Used only in tests to redirect requests to a mock server.
+    base_url_override: Option<String>,
 }
 
 impl BedrockDriver {
@@ -44,14 +62,44 @@ impl BedrockDriver {
             api_key: Zeroizing::new(api_key),
             region: resolved_region,
             client: librefang_http::proxied_client(),
+            emit_caller_trace_headers: true,
+            base_url_override: None,
         })
     }
 
+    /// Override the trace-header emission flag (mirrors
+    /// `KernelConfig.telemetry.emit_caller_trace_headers`). Default is `true`,
+    /// meaning the three `x-librefang-{agent,session,step}-id` headers are
+    /// emitted on every request that has those fields populated. Pass `false`
+    /// to suppress them entirely.
+    pub fn with_emit_caller_trace_headers(mut self, emit: bool) -> Self {
+        self.emit_caller_trace_headers = emit;
+        self
+    }
+
     fn build_endpoint(&self, model: &str) -> String {
+        if let Some(ref base) = self.base_url_override {
+            return format!("{}/model/{}/converse", base, model);
+        }
         format!(
             "https://bedrock-runtime.{}.amazonaws.com/model/{}/converse",
             self.region, model
         )
+    }
+
+    /// Test-only constructor that points the driver at a custom base URL
+    /// (e.g. a `wiremock::MockServer`) instead of the real AWS endpoint.
+    /// Requests go to `{base_url}/model/{model}/converse`, which wiremock
+    /// intercepts via `path_regex(r"^/model/.*/converse$")`.
+    #[doc(hidden)]
+    pub fn new_for_test(api_key: String, base_url: String) -> Self {
+        Self {
+            api_key: Zeroizing::new(api_key),
+            region: "us-east-1".to_string(),
+            client: librefang_http::proxied_client(),
+            emit_caller_trace_headers: true,
+            base_url_override: Some(base_url),
+        }
     }
 }
 
@@ -735,6 +783,15 @@ impl LlmDriver for BedrockDriver {
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", self.api_key.as_str()))
                 .header("Content-Type", "application/json")
+                // Trace headers are appended after the Bearer token header.
+                // This driver uses simple bearer-token auth (not SigV4), so
+                // there is no canonical-request hash to protect — the headers
+                // are safe to add here without signing-scope concerns.
+                .headers(super::trace_headers::build_trace_header_map(
+                    &[],
+                    &request,
+                    self.emit_caller_trace_headers,
+                ))
                 .body(body.clone());
 
             let resp = request_builder
