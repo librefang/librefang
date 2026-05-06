@@ -11,7 +11,7 @@
 //! in `librefang-api/tests/` so the API crate exercises the same
 //! seam from its build.
 
-use librefang_runtime::tool_exec_backend::{build_backend, ExecSpec};
+use librefang_runtime::tool_exec_backend::build_backend;
 use librefang_types::agent::AgentManifest;
 use librefang_types::config::{DockerSandboxConfig, KernelConfig};
 use librefang_types::tool_exec::{resolve_backend_kind, BackendKind, ToolExecConfig};
@@ -148,7 +148,9 @@ async fn end_to_end_local_dispatch_runs_command() {
 
     // 5. Run a benign command.
     let outcome = backend
-        .run_command(ExecSpec::new("echo end-to-end-3332"))
+        .run_command(librefang_runtime::tool_exec_backend::ExecSpec::new(
+            "echo end-to-end-3332",
+        ))
         .await
         .expect("local exec succeeds");
     assert_eq!(outcome.exit_code, 0);
