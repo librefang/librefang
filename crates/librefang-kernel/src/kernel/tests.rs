@@ -6784,3 +6784,60 @@ fn cron_compute_keep_count_empty_messages() {
     let keep = cron_compute_keep_count(&messages, Some(4), Some(1000));
     assert_eq!(keep, 0, "empty slice → keep 0");
 }
+
+// L9 — boundary / degenerate edge cases for cron_compute_keep_count
+
+#[test]
+fn cron_compute_keep_count_max_messages_zero_treated_as_none() {
+    use librefang_types::message::Message;
+    // Some(0) is coerced to None by resolve_cron_max_messages → keep all.
+    // cron_compute_keep_count itself receives None in that case; test both.
+    let messages: Vec<Message> = (0..5).map(|i| Message::user(format!("m{i}"))).collect();
+    // Passing None directly (resolve_cron_max_messages(Some(0)) == None).
+    let keep = cron_compute_keep_count(&messages, None, None);
+    assert_eq!(keep, 5, "None caps → keep all");
+}
+
+#[test]
+fn cron_compute_keep_count_max_tokens_zero_treated_as_none() {
+    use librefang_types::message::Message;
+    // resolve_cron_max_tokens(Some(0)) == None; passing None directly.
+    let messages: Vec<Message> = (0..5).map(|i| Message::user(format!("m{i}"))).collect();
+    let keep = cron_compute_keep_count(&messages, None, None);
+    assert_eq!(keep, 5, "None token cap → keep all");
+}
+
+#[test]
+fn cron_compute_keep_count_max_tokens_u64_max_keeps_all() {
+    use librefang_types::message::Message;
+    // An absurdly large token cap should keep all messages.
+    let messages: Vec<Message> = (0..8).map(|i| Message::user(format!("m{i}"))).collect();
+    let keep = cron_compute_keep_count(&messages, None, Some(u64::MAX));
+    assert_eq!(keep, 8, "u64::MAX token cap → keep all");
+}
+
+#[test]
+fn cron_compute_keep_count_single_giant_message_returns_one_or_zero() {
+    use librefang_runtime::compactor::estimate_token_count;
+    use librefang_types::message::Message;
+    // A single very large message whose estimated token count exceeds the cap.
+    // The loop exits with keep=0 because even 1 message is over budget.
+    let big = Message::user("x".repeat(50_000));
+    let messages = vec![big];
+    let est = estimate_token_count(&messages, None, None) as u64;
+    assert!(est > 0, "sanity: large message has non-zero token estimate");
+
+    // Budget smaller than the single message → keep = 0.
+    let keep = cron_compute_keep_count(&messages, None, Some(est / 2));
+    assert_eq!(
+        keep, 0,
+        "single oversized message with tight budget → keep 0"
+    );
+
+    // Budget equal to or larger → keep = 1.
+    let keep2 = cron_compute_keep_count(&messages, None, Some(est));
+    assert_eq!(
+        keep2, 1,
+        "single message fitting the budget exactly → keep 1"
+    );
+}

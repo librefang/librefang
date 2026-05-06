@@ -473,7 +473,11 @@ fn tail_has_matching_result(messages: &[Message], from_idx: usize, tool_use_id: 
 ///
 /// Returns the adjusted split index (or the original `split_at` if no
 /// adjustment is needed).
-fn adjust_split_for_tool_pair(messages: &[Message], split_at: usize, keep_recent: usize) -> usize {
+pub fn adjust_split_for_tool_pair(
+    messages: &[Message],
+    split_at: usize,
+    keep_recent: usize,
+) -> usize {
     if split_at == 0 {
         return split_at;
     }

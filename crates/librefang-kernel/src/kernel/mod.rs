@@ -158,7 +158,8 @@ pub(crate) fn cron_compute_keep_count(
 
     // Then apply token cap by trimming from the front.
     if let Some(max_tok) = max_tokens {
-        // Binary-search-like: trim from front until tokens fit.
+        // Linear scan from the cap downward (O(n) iterations × O(n) token estimation = O(n²);
+        // acceptable for cron session sizes seen in practice).
         let mut keep = after_msg_cap;
         while keep > 0 {
             let start = n - keep;
@@ -171,6 +172,96 @@ pub(crate) fn cron_compute_keep_count(
         keep
     } else {
         after_msg_cap
+    }
+}
+
+/// Apply a plain prune (drain-from-front) to a cron session, keeping the
+/// newest `session.messages.len() - drop_count` messages.
+///
+/// Used uniformly by the `Prune` main path, the `SummarizeTrim` fallback
+/// path, and the tool-pair-adjusted skip path so that all three paths
+/// produce identical side effects (`mark_messages_mutated`).
+fn apply_cron_prune(session: &mut librefang_memory::session::Session, drop_count: usize) {
+    if drop_count == 0 {
+        return;
+    }
+    session.messages.drain(0..drop_count);
+    session.mark_messages_mutated();
+}
+
+/// Attempt to summarize the messages that fall before `tail_start` using an
+/// LLM aux call, then stitch the result back as `[summary_msg] + tail`.
+///
+/// Returns `Some(new_messages)` on a real LLM success (non-empty, non-fallback
+/// summary). Returns `None` when the LLM fails or returns a fallback placeholder,
+/// so the caller can apply a plain prune instead.
+///
+/// The tool-pair boundary is adjusted with `adjust_split_for_tool_pair` before
+/// slicing so that `Assistant{ToolUse}` / `User{ToolResult}` pairs are never
+/// separated across the summary / tail boundary. If the adjustment pushes
+/// `tail_start` to `0` (nothing left to summarize) or to `messages.len()` (the
+/// keep_recent window consumed everything), `None` is returned immediately so the
+/// caller can decide whether to prune or skip.
+async fn try_summarize_trim(
+    messages: &[librefang_types::message::Message],
+    keep_recent: usize,
+    driver: std::sync::Arc<dyn librefang_runtime::llm_driver::LlmDriver>,
+    model: &str,
+    session_id: librefang_types::agent::SessionId,
+    agent_id: librefang_types::agent::AgentId,
+) -> Option<Vec<librefang_types::message::Message>> {
+    use librefang_runtime::compactor::{
+        adjust_split_for_tool_pair, compact_session, CompactionConfig,
+    };
+    use librefang_types::message::{Message, MessageContent, Role};
+
+    let raw_tail_start = messages.len().saturating_sub(keep_recent);
+
+    // Adjust so we never split an Assistant{ToolUse} / User{ToolResult} pair.
+    let tail_start = adjust_split_for_tool_pair(messages, raw_tail_start, keep_recent);
+
+    // Nothing to summarize — skip gracefully.
+    if tail_start == 0 || tail_start == messages.len() {
+        return None;
+    }
+
+    let to_summarize = &messages[..tail_start];
+    let kept_tail = messages[tail_start..].to_vec();
+
+    let compact_cfg = CompactionConfig {
+        threshold: 0,
+        keep_recent: 0,
+        ..CompactionConfig::default()
+    };
+    let tmp_session = librefang_memory::session::Session {
+        id: session_id,
+        agent_id,
+        messages: to_summarize.to_vec(),
+        context_window_tokens: 0,
+        label: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+    };
+
+    // Only accept a real LLM summary — reject empty summaries and fallback
+    // placeholders (used_fallback = true means the LLM was unavailable and
+    // compact_session substituted a synthetic "[Session compacted: ...]" stub).
+    match compact_session(driver, model, &tmp_session, &compact_cfg).await {
+        Ok(result) if !result.summary.is_empty() && !result.used_fallback => {
+            let summary_msg = Message {
+                role: Role::Assistant,
+                content: MessageContent::Text(format!(
+                    "[Cron session summary — {} messages compacted]\n\n{}",
+                    result.compacted_count, result.summary,
+                )),
+                pinned: false,
+                timestamp: None,
+            };
+            let mut new_messages = vec![summary_msg];
+            new_messages.extend(kept_tail);
+            Some(new_messages)
+        }
+        Ok(_) | Err(_) => None,
     }
 }
 
@@ -14422,7 +14513,13 @@ system_prompt = "You are a helpful assistant."
                                                         CronCompactionMode::SummarizeTrim => {
                                                             // Attempt LLM summarization of the
                                                             // messages that would be dropped.
-                                                            // Falls back to plain prune on error.
+                                                            // Falls back to plain prune on error
+                                                            // or when the LLM returns a fallback
+                                                            // placeholder (used_fallback=true).
+                                                            // adjust_split_for_tool_pair is applied
+                                                            // inside try_summarize_trim to avoid
+                                                            // cutting an Assistant{ToolUse} /
+                                                            // User{ToolResult} pair.
                                                             let driver = kernel_job
                                                                 .aux_client
                                                                 .load()
@@ -14443,94 +14540,35 @@ system_prompt = "You are a helpful assistant."
                                                                 })
                                                                 .unwrap_or_default();
 
-                                                            // Split: tail = keep_recent_cfg newest
-                                                            // messages, head = everything to summarize.
-                                                            let tail_start = session
-                                                                .messages
-                                                                .len()
-                                                                .saturating_sub(keep_recent_cfg);
-                                                            let to_summarize =
-                                                                &session.messages[..tail_start];
-                                                            let kept_tail = session.messages
-                                                                [tail_start..]
-                                                                .to_vec();
-
-                                                            use librefang_runtime::compactor::{
-                                                                compact_session, CompactionConfig,
-                                                            };
-                                                            // Build a minimal CompactionConfig
-                                                            // that compacts everything except
-                                                            // the tail we already carved out.
-                                                            let compact_cfg = CompactionConfig {
-                                                                threshold: 0,
-                                                                keep_recent: 0,
-                                                                ..CompactionConfig::default()
-                                                            };
-                                                            // Wrap to_summarize in a temporary
-                                                            // Session so compact_session can
-                                                            // read it.
-                                                            let tmp_session =
-                                                                librefang_memory::session::Session {
-                                                                    id: cron_sid,
-                                                                    agent_id,
-                                                                    messages: to_summarize
-                                                                        .to_vec(),
-                                                                    context_window_tokens: 0,
-                                                                    label: None,
-                                                                    messages_generation: 0,
-                                                                    last_repaired_generation: None,
-                                                                };
-
-                                                            match compact_session(
+                                                            match try_summarize_trim(
+                                                                &session.messages,
+                                                                keep_recent_cfg,
                                                                 driver,
                                                                 &model,
-                                                                &tmp_session,
-                                                                &compact_cfg,
+                                                                cron_sid,
+                                                                agent_id,
                                                             )
                                                             .await
                                                             {
-                                                                Ok(result)
-                                                                    if !result
-                                                                        .summary
-                                                                        .is_empty() =>
-                                                                {
-                                                                    // Replace session with
-                                                                    // [summary_msg] + kept_tail.
-                                                                    use librefang_types::message::{
-                                                                        Message, Role,
-                                                                    };
-                                                                    let summary_msg = Message {
-                                                                        role: Role::Assistant,
-                                                                        content: librefang_types::message::MessageContent::Text(
-                                                                            format!(
-                                                                                "[Cron session summary — {} messages compacted]\n\n{}",
-                                                                                result.compacted_count,
-                                                                                result.summary,
-                                                                            )
-                                                                        ),
-                                                                        pinned: false,
-                                                                        timestamp: None,
-                                                                    };
-                                                                    let mut new_messages =
-                                                                        vec![summary_msg];
-                                                                    new_messages.extend(kept_tail);
+                                                                Some(new_messages) => {
+                                                                    let kept = new_messages.len();
                                                                     session
                                                                         .set_messages(new_messages);
                                                                     tracing::info!(
                                                                         agent_id = %agent_id,
                                                                         session_id = %cron_sid,
                                                                         job = %job_name,
-                                                                        compacted = result.compacted_count,
-                                                                        kept = session.messages.len(),
-                                                                        used_fallback = result.used_fallback,
+                                                                        kept,
                                                                         "cron session summarize-and-trim complete"
                                                                     );
                                                                 }
-                                                                Ok(_) | Err(_) => {
-                                                                    // LLM unavailable or empty
-                                                                    // summary — fall back to plain
-                                                                    // prune so the fire is not
-                                                                    // blocked.
+                                                                None => {
+                                                                    // LLM unavailable, returned a
+                                                                    // fallback placeholder, or the
+                                                                    // tool-pair adjustment left
+                                                                    // nothing to summarize —
+                                                                    // fall back to plain prune so
+                                                                    // the fire is not blocked.
                                                                     tracing::warn!(
                                                                         agent_id = %agent_id,
                                                                         session_id = %cron_sid,
@@ -14541,10 +14579,10 @@ system_prompt = "You are a helpful assistant."
                                                                     let drop_count =
                                                                         session.messages.len()
                                                                             - keep_count;
-                                                                    session
-                                                                        .messages
-                                                                        .drain(0..drop_count);
-                                                                    session.mark_messages_mutated();
+                                                                    apply_cron_prune(
+                                                                        &mut session,
+                                                                        drop_count,
+                                                                    );
                                                                 }
                                                             }
                                                         }
@@ -14552,8 +14590,10 @@ system_prompt = "You are a helpful assistant."
                                                             // Plain drop-from-front.
                                                             let drop_count =
                                                                 session.messages.len() - keep_count;
-                                                            session.messages.drain(0..drop_count);
-                                                            session.mark_messages_mutated();
+                                                            apply_cron_prune(
+                                                                &mut session,
+                                                                drop_count,
+                                                            );
                                                         }
                                                     }
                                                 }

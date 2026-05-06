@@ -168,3 +168,31 @@ cron_session_compaction_keep_recent = 10
 | Continuous state machine, context continuity matters                           | `Persistent` + `cron_session_compaction_mode = "summarize_trim"`.             |
 | You want a soft early-warning before any cap is reached                        | Leave `cron_session_warn_fraction` at default; watch for the WARN.            |
 | Hard isolation between fires for safety / audit                                | `session_mode = "new"`; pruning knobs do not apply.                           |
+
+## Concurrency caveat
+
+When an agent has **multiple cron jobs** and all of them use
+`session_mode = "persistent"` (the default), every fire maps to the same shared
+`(agent, "cron")` session.
+
+Compaction is serialized through a **per-session mutex** (see the `prune_lock`
+path in `kernel/mod.rs`), so two fires that both need to prune cannot race each
+other's read-modify-write. However, the global `cron_lane` semaphore that caps
+total in-flight cron fires is **not scoped per session** — it only limits how
+many fires execute concurrently across the whole daemon.
+
+`SummarizeTrim` amplifies the race window significantly: a plain prune takes
+microseconds, while an LLM summary call may take several seconds. During that
+window a second fire for the same agent can:
+
+1. Acquire the per-session mutex (the first fire released it before calling the
+   LLM).
+2. Load the same session — which has not yet been compacted.
+3. Run to completion and write back its response.
+4. The first fire then writes its compacted session, silently overwriting the
+   second fire's new messages (last-write-wins).
+
+**Mitigation**: if an agent has multiple cron jobs that need independent context
+or if missing a fire's output is unacceptable, configure those jobs (or the
+agent) with `session_mode = "new"`. Each fire then gets its own deterministic,
+isolated session and the shared `(agent, "cron")` session is never touched.

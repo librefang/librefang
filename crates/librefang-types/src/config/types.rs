@@ -2850,8 +2850,13 @@ pub struct KernelConfig {
     /// Number of recent messages to preserve verbatim after summarization when
     /// `cron_session_compaction_mode = "summarize_trim"` is active.
     ///
-    /// The LLM summary replaces everything older than the kept tail. Must be at
-    /// least 1; values below `1` are treated as `1`. Default: `8`.
+    /// The LLM summary replaces everything older than the kept tail.
+    ///
+    /// **Reasonable range**: `1` – `64`. Values below `1` are clamped to `1` at
+    /// runtime. Values larger than the current session length are silently
+    /// clamped to the session length (nothing gets summarized in that case and
+    /// the code falls back to plain prune). Setting this to a very large number
+    /// defeats the purpose of summarization. Default: `8`.
     #[serde(default = "default_cron_session_compaction_keep_recent")]
     pub cron_session_compaction_keep_recent: usize,
     /// Config include files — loaded and deep-merged before the root config.
