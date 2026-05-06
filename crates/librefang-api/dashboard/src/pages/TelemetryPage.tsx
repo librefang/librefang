@@ -282,7 +282,7 @@ function StatusBar({ ok, redirect, client, server, total, maxTotal }: {
 // ── Component ────────────────────────────────────────────────────────
 
 export function TelemetryPage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const metricsQuery = useTelemetryMetrics();
   const [rawExpanded, setRawExpanded] = useState(false);
 
@@ -346,7 +346,7 @@ export function TelemetryPage() {
         actions={
           lastUpdated ? (
             <span className="text-[11px] font-medium text-text-dim/70">
-              {t("telemetry.last_updated")} {lastUpdated.toLocaleTimeString()}
+              {t("telemetry.last_updated")} {lastUpdated.toLocaleTimeString(i18n.language)}
             </span>
           ) : undefined
         }
@@ -519,7 +519,7 @@ export function TelemetryPage() {
                           )}
                           <span className="text-sm font-black text-brand text-right tabular-nums" title={a.tokens.toLocaleString()}>
                             {formatCompact(a.tokens)}
-                            <span className="text-[10px] font-normal text-text-dim ml-0.5">tok</span>
+                            <span className="text-[10px] font-normal text-text-dim ml-0.5">{t("telemetry.unit_tokens")}</span>
                           </span>
                         </div>
                         {/* in/out split — green = input, amber = output */}
@@ -615,7 +615,7 @@ export function TelemetryPage() {
                   {metricsQuery.data?.slice(0, 8000) || ""}
                 </pre>
                 {(metricsQuery.data?.length || 0) > 8000 && (
-                  <span className="text-xs text-text-dim mt-2 block">...truncated</span>
+                  <span className="text-xs text-text-dim mt-2 block">{t("telemetry.truncated")}</span>
                 )}
               </>
             )}
