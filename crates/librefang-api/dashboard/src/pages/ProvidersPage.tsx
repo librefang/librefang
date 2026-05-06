@@ -1085,7 +1085,6 @@ export function ProvidersPage() {
   const providers = providersQuery.data ?? [];
   const currentDefaultProvider = statusQuery.data?.default_provider ?? "";
   const configuredCount = useMemo(() => providers.filter(p => isProviderAvailable(p.auth_status)).length, [providers]);
-  const unconfiguredCount = useMemo(() => providers.filter(p => !isProviderAvailable(p.auth_status)).length, [providers]);
 
   // Configured providers are the main page content. Filter/sort applies
   // to those only; the unconfigured catalog lives behind the Add picker.
@@ -1222,15 +1221,15 @@ export function ProvidersPage() {
         helpText={t("providers.help")}
         actions={
           <div className="flex items-center gap-2">
+            {/* Always enabled: even with every catalog provider configured,
+                the picker still exposes "Create custom provider" — disabling
+                would strand mouse users away from the wizard. */}
             <Button
               variant="primary"
               size="sm"
               onClick={openPicker}
               leftIcon={<Plus className="w-3.5 h-3.5" />}
-              disabled={unconfiguredCount === 0}
-              title={unconfiguredCount === 0
-                ? t("providers.all_configured", { defaultValue: "All providers configured" })
-                : t("providers.add") + " (n)"}
+              title={t("providers.add") + " (n)"}
             >
               <span>{t("providers.add")}</span>
               <kbd className="hidden sm:inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-white/30 bg-white/10 px-1 text-[8px] font-mono font-semibold ml-1.5">n</kbd>
