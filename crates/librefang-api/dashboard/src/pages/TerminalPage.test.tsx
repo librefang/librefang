@@ -311,6 +311,42 @@ describe("TerminalPage", () => {
     }
   });
 
+  it("stops auto-reconnect when WS opens but never receives `started` (#4675)", async () => {
+    // Host-side spawn-failure path: the daemon accepts the WS handshake
+    // but cannot reach the point of sending `started` (shell binary
+    // missing, PTY allocation fails, panic during spawn). The server
+    // closes the WS within FAST_EXIT_WINDOW_MS of `open`. Two of these
+    // in a row must trip the same giveup as the started→exit-fast path.
+    vi.useFakeTimers();
+    try {
+      renderPage();
+
+      const fastFailNoStarted = async (ws: MockWebSocket) => {
+        await act(async () => {
+          ws.emitOpen();
+          // No `started`, no `exit` — the server just closed.
+          ws.readyState = MockWebSocket.CLOSED;
+          ws.onclose?.({ code: 1006, reason: "" } as unknown as CloseEvent);
+        });
+      };
+
+      await fastFailNoStarted(MockWebSocket.instances[0]);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(MockWebSocket.instances.length).toBe(2);
+
+      await fastFailNoStarted(MockWebSocket.instances[1]);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(MockWebSocket.instances.length).toBe(2);
+      expect(screen.getByText("terminal.fast_exit_giveup")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not resend null desired window on reconnect after disconnect before active window", async () => {
     const user = userEvent.setup();
     renderPage();

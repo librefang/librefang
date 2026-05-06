@@ -2636,7 +2636,7 @@
     "websocket_error": "WebSocket connection error",
     "connection_closed_non_recoverable": "Connection closed due to a non-recoverable error",
     "max_reconnect_exceeded": "Max reconnection attempts reached. Please connect manually.",
-    "fast_exit_giveup": "Terminal launch failed — the shell exited immediately. Check the daemon host's TERM / terminfo (the `xterm-256color` entry must be installed: `ncurses-term` on Debian/Ubuntu, `ncurses-terminfo-base` on Alpine, `ncurses-base` on RHEL/Fedora) and tmux configuration; reconnecting won't help until the underlying error is fixed.",
+    "fast_exit_giveup": "Terminal launch failed — the shell could not start (or exited immediately). Check the daemon host's shell binary, TERM / terminfo (the `xterm-256color` entry must be installed: `ncurses-term` on Debian/Ubuntu, `ncurses-terminfo-base` on Alpine, `ncurses-base` on RHEL/Fedora) and tmux configuration; reconnecting won't help until the underlying error is fixed.",
     "root_warning": "Warning: The daemon is running as root. Terminal commands execute with full privileges.",
     "enter_fullscreen": "Enter fullscreen",
     "exit_fullscreen": "Exit fullscreen (Esc)",

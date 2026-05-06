@@ -110,12 +110,19 @@ export function TerminalPage() {
   const connectRef = useRef<() => void>(() => {});
   const attemptRef = useRef(0);
   const desiredWindowIdRef = useRef<string | null>(null);
-  // #4675: fast-fail tracking — `startedAtRef` is set when the server emits
-  // `started` for the current WS, `connectionFastFailRef` flips true if
-  // `exit` arrives within FAST_EXIT_WINDOW_MS with a non-zero code, and
-  // `consecutiveFastFailRef` counts how many connections in a row hit that
-  // pattern. The reconnect loop bails once it crosses MAX_CONSECUTIVE_FAST_FAILS.
+  // #4675: fast-fail tracking. Two paths flip `connectionFastFailRef` true:
+  // (1) the shell started and then exited with a non-zero code within
+  //     FAST_EXIT_WINDOW_MS of `started` — host could spawn but the shell
+  //     immediately died (tmux missing terminfo, broken rc files, etc.);
+  // (2) the WS opened but `started` never arrived and the close fired
+  //     within FAST_EXIT_WINDOW_MS of `open` — host couldn't even reach
+  //     the spawn-success point (shell binary missing, PTY allocation
+  //     failure, daemon-side panic).
+  // `wsOpenedAtRef` is the anchor for path (2); `startedAtRef` for (1).
+  // `consecutiveFastFailRef` counts how many connections in a row hit
+  // either path; the reconnect loop bails at MAX_CONSECUTIVE_FAST_FAILS.
   const startedAtRef = useRef<number | null>(null);
+  const wsOpenedAtRef = useRef<number | null>(null);
   const connectionFastFailRef = useRef(false);
   const consecutiveFastFailRef = useRef(0);
 
@@ -178,6 +185,7 @@ export function TerminalPage() {
     // counter (`consecutiveFastFailRef`) is left alone so the close handler
     // can compare this connection's outcome against the previous run.
     startedAtRef.current = null;
+    wsOpenedAtRef.current = null;
     connectionFastFailRef.current = false;
     const { url: wsUrl, protocols: wsProtocols } =
       buildAuthenticatedWebSocket("/api/terminal/ws");
@@ -196,6 +204,9 @@ export function TerminalPage() {
     wsRef.current = ws;
 
     ws.onopen = () => {
+      // #4675: anchor the no-started fast-fail window from the moment
+      // the WS handshake completes. Read in the close handler below.
+      wsOpenedAtRef.current = Date.now();
       const wasReconnect = attemptRef.current > 0;
       setIsConnecting(false);
       setIsConnected(true);
@@ -320,12 +331,28 @@ export function TerminalPage() {
         return;
       }
 
-      // #4675: a connection that opened, got `started`, and then exited
-      // fast with a non-zero code is almost always a host-side
-      // configuration problem (TERM/terminfo, missing tmux binary, broken
-      // shell startup) — reconnecting won't fix it. Track consecutive
-      // occurrences and bail out of the retry loop after a small ceiling
-      // so the user gets a clear error instead of a forever-spinning page.
+      // #4675: ALSO classify the connection as a fast-fail when it opened
+      // but `started` never arrived and the close fired inside the same
+      // window. That covers host-side spawn failures (shell binary
+      // missing, PTY allocation failure, daemon panic during spawn) where
+      // the daemon never reached the point of telling us the shell was
+      // up. The other path (started + non-zero exit fast) sets the flag
+      // in the `case "exit"` branch above.
+      if (
+        !connectionFastFailRef.current &&
+        startedAtRef.current === null &&
+        wsOpenedAtRef.current !== null &&
+        Date.now() - wsOpenedAtRef.current < FAST_EXIT_WINDOW_MS
+      ) {
+        connectionFastFailRef.current = true;
+      }
+
+      // #4675: a connection that fast-failed (either path) is almost
+      // always a host-side configuration problem (TERM/terminfo, missing
+      // tmux binary, missing shell binary, broken shell startup) —
+      // reconnecting won't fix it. Track consecutive occurrences and
+      // bail out of the retry loop after a small ceiling so the user
+      // gets a clear error instead of a forever-spinning page.
       if (connectionFastFailRef.current) {
         consecutiveFastFailRef.current += 1;
         if (consecutiveFastFailRef.current >= MAX_CONSECUTIVE_FAST_FAILS) {
