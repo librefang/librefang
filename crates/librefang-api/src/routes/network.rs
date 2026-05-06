@@ -1976,7 +1976,7 @@ pub async fn comms_send(
         }
     };
 
-    let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
+    let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
     match state
         .kernel
         .send_message_with_handle_and_blocks(

@@ -407,7 +407,7 @@ async fn spawn_agent_inner(
         }
     };
 
-    match state.kernel.spawn_agent(resolved.manifest) {
+    match state.kernel.spawn_agent_typed(resolved.manifest) {
         Ok(id) => {
             let body = serde_json::to_vec(&SpawnResponse {
                 agent_id: id.to_string(),
@@ -512,7 +512,7 @@ pub async fn bulk_create_agents(
             }
             Ok(resolved) => {
                 let name = resolved.name.clone();
-                match state.kernel.spawn_agent(resolved.manifest) {
+                match state.kernel.spawn_agent_typed(resolved.manifest) {
                     Ok(id) => {
                         results.push(BulkCreateResult {
                             index,
@@ -605,7 +605,7 @@ pub async fn bulk_delete_agents(
                 continue;
             }
         }
-        match state.kernel.kill_agent(agent_id) {
+        match state.kernel.kill_agent_typed(agent_id) {
             Ok(()) => {
                 results.push(BulkActionResult {
                     agent_id: id_str.clone(),
@@ -1784,7 +1784,7 @@ pub async fn send_message(
     } else {
         let sender_context = request_sender_context(&req);
         let kernel = state.kernel.clone();
-        let kernel_handle: Arc<dyn KernelHandle> = kernel.clone() as Arc<dyn KernelHandle>;
+        let kernel_handle: Arc<dyn KernelHandle> = kernel.clone();
         let msg = effective_message.clone();
         let sc = sender_context;
         let incognito = req.incognito;
@@ -1794,7 +1794,7 @@ pub async fn send_message(
                     agent_id,
                     &msg,
                     Some(kernel_handle),
-                    sc.as_ref(),
+                    sc,
                     thinking_override,
                     session_id_override,
                     incognito,
@@ -2717,9 +2717,10 @@ pub async fn send_message_stream(
         },
     };
 
-    let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
+    let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
     let (rx, handle) = match state
         .kernel
+        .clone()
         .send_message_streaming_with_incognito(
             agent_id,
             &req.message,
@@ -5145,7 +5146,7 @@ pub async fn clone_agent(
     apply_clone_inclusion_flags(&mut cloned_manifest, &req);
 
     // Spawn the cloned agent
-    let new_id = match state.kernel.spawn_agent(cloned_manifest) {
+    let new_id = match state.kernel.spawn_agent_typed(cloned_manifest) {
         Ok(id) => id,
         Err(e) => {
             return (
@@ -7205,7 +7206,7 @@ mod monitoring_tests {
             name: name.to_string(),
             ..AgentManifest::default()
         };
-        state.kernel.spawn_agent(manifest).unwrap()
+        state.kernel.spawn_agent_typed(manifest).unwrap()
     }
 
     async fn json_response(response: impl IntoResponse) -> (StatusCode, serde_json::Value) {
@@ -7310,7 +7311,7 @@ mod monitoring_tests {
             mcp_servers: vec!["server-a".to_string()],
             ..AgentManifest::default()
         };
-        let agent_id = state.kernel.spawn_agent(manifest).unwrap();
+        let agent_id = state.kernel.spawn_agent_typed(manifest).unwrap();
 
         let (status, body) = json_response(
             patch_agent(
@@ -7356,7 +7357,7 @@ mod monitoring_tests {
             mcp_servers: vec!["server-b".to_string()],
             ..AgentManifest::default()
         };
-        let agent_id = state.kernel.spawn_agent(manifest).unwrap();
+        let agent_id = state.kernel.spawn_agent_typed(manifest).unwrap();
 
         let (status, body) = json_response(
             patch_agent(

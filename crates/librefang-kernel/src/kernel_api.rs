@@ -39,6 +39,7 @@ use crate::cron::CronScheduler;
 use crate::error::KernelResult;
 use crate::event_bus::EventBus;
 use crate::inbox::InboxStatus;
+use crate::kernel_handle::KernelHandle;
 use crate::pairing::PairingManager;
 use crate::registry::AgentRegistry;
 use crate::scheduler::AgentScheduler;
@@ -60,8 +61,14 @@ use librefang_types::tool::ToolDefinition;
 /// `AppState.kernel` is `Arc<dyn KernelApi>`. Routes interact with the
 /// kernel exclusively through this trait — there is no `state.kernel.X`
 /// path that bypasses it.
+///
+/// Extends [`KernelHandle`] (the runtime-facing super-trait that bundles
+/// every role trait) so `Arc<dyn KernelApi>` can upcast to
+/// `Arc<dyn KernelHandle>` (and to any individual role trait) for the
+/// runtime-call paths the dashboard uses (e.g. proxying task-board /
+/// channel-send / approval-resolve through the same kernel object).
 #[async_trait]
-pub trait KernelApi: Send + Sync {
+pub trait KernelApi: KernelHandle + Send + Sync {
     // ====================================================================
     // Subsystem accessors — return refs/handles to internal subsystems.
     // ====================================================================
@@ -154,8 +161,16 @@ pub trait KernelApi: Send + Sync {
     // Agent lifecycle / sessions
     // ====================================================================
 
-    fn spawn_agent(&self, manifest: AgentManifest) -> KernelResult<AgentId>;
-    fn kill_agent(&self, agent_id: AgentId) -> KernelResult<()>;
+    /// Spawn a new agent from an already-parsed [`AgentManifest`]. Distinct
+    /// from `AgentControl::spawn_agent` (which takes a TOML string and is
+    /// the runtime-side variant) — routes parse the manifest before calling
+    /// in so they can return validation errors with line/col info.
+    fn spawn_agent_typed(&self, manifest: AgentManifest) -> KernelResult<AgentId>;
+    /// Kill an agent by typed [`AgentId`]. Distinct from
+    /// `AgentControl::kill_agent` (which takes a `&str`) — routes already
+    /// hold a typed id and we don't want to round-trip through string
+    /// parsing.
+    fn kill_agent_typed(&self, agent_id: AgentId) -> KernelResult<()>;
     fn kill_agent_with_purge(&self, agent_id: AgentId, purge_identity: bool) -> KernelResult<()>;
     fn stop_agent_run(&self, agent_id: AgentId) -> KernelResult<bool>;
     fn stop_session_run(&self, agent_id: AgentId, session_id: SessionId) -> KernelResult<bool>;
@@ -276,7 +291,10 @@ pub trait KernelApi: Send + Sync {
         &self,
         workflow: crate::workflow::Workflow,
     ) -> crate::workflow::WorkflowId;
-    async fn run_workflow(
+    /// Run a workflow by typed id. Distinct from
+    /// `WorkflowRunner::run_workflow` (which takes `&str`) — routes hold a
+    /// typed `WorkflowId` and want the typed `WorkflowRunId` back.
+    async fn run_workflow_typed(
         &self,
         workflow_id: crate::workflow::WorkflowId,
         input: String,
@@ -286,7 +304,10 @@ pub trait KernelApi: Send + Sync {
         workflow_id: crate::workflow::WorkflowId,
         input: String,
     ) -> KernelResult<Vec<crate::workflow::DryRunStep>>;
-    async fn publish_event(&self, event: librefang_types::event::Event) -> Vec<TriggerMatch>;
+    /// Publish a typed [`Event`](librefang_types::event::Event) and return
+    /// the matched trigger fires. Distinct from `EventBus::publish_event`
+    /// (which takes `(event_type: &str, payload: Value)`).
+    async fn publish_typed_event(&self, event: librefang_types::event::Event) -> Vec<TriggerMatch>;
 
     // ====================================================================
     // Agent bindings (channel ↔ agent mapping)
@@ -322,6 +343,186 @@ pub trait KernelApi: Send + Sync {
         name: &str,
         schedule: &librefang_types::agent::ScheduleMode,
     );
+
+    // ====================================================================
+    // Additional kernel-inherent methods used by API/WS/server.rs.
+    //
+    // (Methods on the role traits — TaskQueue, PromptStore, ChannelSender,
+    // ApprovalGate, CronControl, ApiAuth, EventBus, … — are reachable via
+    // the `KernelHandle` super-trait, so they are not duplicated here. Routes
+    // that call e.g. `state.kernel.task_get(&id)` resolve through TaskQueue;
+    // bring the role traits into scope with
+    // `use librefang_kernel::kernel_handle::prelude::*;`.)
+    // ====================================================================
+
+    fn agent_has_active_session(&self, agent_id: AgentId) -> bool;
+    fn a2a_agents(&self) -> &std::sync::Mutex<Vec<(String, librefang_runtime::a2a::AgentCard)>>;
+    fn a2a_tasks(&self) -> &librefang_runtime::a2a::A2aTaskStore;
+    fn context_report(
+        &self,
+        agent_id: AgentId,
+    ) -> KernelResult<librefang_runtime::compactor::ContextReport>;
+    fn effective_mcp_servers_ref(
+        &self,
+    ) -> &std::sync::RwLock<Vec<librefang_types::config::McpServerConfigEntry>>;
+    fn embedding(
+        &self,
+    ) -> Option<&Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>>;
+    async fn inject_message_for_session(
+        &self,
+        agent_id: AgentId,
+        session_id: Option<SessionId>,
+        message: &str,
+    ) -> KernelResult<bool>;
+    fn provider_unconfigured_flag(&self) -> &std::sync::atomic::AtomicBool;
+    fn session_usage_cost(&self, agent_id: AgentId) -> KernelResult<(u64, u64, f64)>;
+    fn set_agent_model(
+        &self,
+        agent_id: AgentId,
+        model: &str,
+        explicit_provider: Option<&str>,
+    ) -> KernelResult<()>;
+    fn sync_default_model_agents(
+        &self,
+        old_provider: &str,
+        dm: &librefang_types::config::DefaultModelConfig,
+    );
+    fn traces(&self) -> &dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>;
+    fn update_hand_agent_runtime_override(
+        &self,
+        agent_id: AgentId,
+        override_config: librefang_hands::HandAgentRuntimeOverride,
+    ) -> KernelResult<()>;
+
+    // ====================================================================
+    // Streaming + handle-aware send_message variants.
+    // ====================================================================
+
+    async fn send_message_with_handle(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
+    async fn send_message_with_handle_and_blocks(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+        content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
+    async fn send_message_with_incognito(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+        sender_context: Option<librefang_channels::types::SenderContext>,
+        thinking_override: Option<bool>,
+        session_id_override: Option<SessionId>,
+        incognito: bool,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
+    async fn send_message_streaming_with_routing(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
+    )>;
+    async fn send_message_streaming_with_incognito(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+        session_id_override: Option<SessionId>,
+        incognito: bool,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
+    )>;
+    async fn send_message_streaming_with_sender_context_routing_thinking_and_session(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+        sender: librefang_channels::types::SenderContext,
+        thinking_override: Option<bool>,
+        session_id_override: Option<SessionId>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
+    )>;
+
+    // ====================================================================
+    // Spawn-tasks / probe — Arc<Self> receivers.
+    // ====================================================================
+
+    fn spawn_key_validation(self: Arc<Self>);
+    async fn auto_dream_trigger_manual(
+        self: Arc<Self>,
+        agent_id: AgentId,
+    ) -> crate::auto_dream::TriggerOutcome;
+    async fn probe_local_provider(
+        self: Arc<Self>,
+        provider_id: &str,
+        base_url: &str,
+        log_offline_as_warn: bool,
+    ) -> librefang_runtime::provider_health::ProbeResult;
+
+    // ====================================================================
+    // Additional channel / trigger / engine accessors and send_message
+    // variants used by channel_bridge and routes.
+    // ====================================================================
+
+    fn channel_adapters_ref(
+        &self,
+    ) -> &dashmap::DashMap<String, Arc<dyn librefang_channels::types::ChannelAdapter>>;
+    fn trigger_engine(&self) -> &crate::triggers::TriggerEngine;
+    fn broadcast_ref(&self) -> &librefang_types::config::BroadcastConfig;
+    fn auto_reply(&self) -> &crate::auto_reply::AutoReplyEngine;
+    async fn one_shot_llm_call(&self, model: &str, prompt: &str) -> Result<String, String>;
+    async fn send_message_with_blocks(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        blocks: Vec<librefang_types::message::ContentBlock>,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
+    async fn send_message_with_sender_context(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: librefang_channels::types::SenderContext,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
+    async fn send_message_with_blocks_and_sender(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        blocks: Vec<librefang_types::message::ContentBlock>,
+        sender: librefang_channels::types::SenderContext,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
+    async fn send_message_streaming_with_sender_context_and_routing(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+        sender: librefang_channels::types::SenderContext,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
+    )>;
+
+    // ====================================================================
+    // Test-only / boot-only kernel ops surfaced for integration tests
+    // (`tests/api_integration_test.rs`, `network_routes_integration`, …).
+    // ====================================================================
+
+    fn data_dir(&self) -> &Path;
+    fn install_peer_registry_for_test(
+        &self,
+        registry: librefang_wire::PeerRegistry,
+    ) -> Result<(), librefang_wire::PeerRegistry>;
+    fn set_self_handle(self: Arc<Self>);
 }
 
 #[async_trait]
@@ -503,10 +704,10 @@ impl KernelApi for LibreFangKernel {
     }
 
     // -- Agent lifecycle --
-    fn spawn_agent(&self, manifest: AgentManifest) -> KernelResult<AgentId> {
+    fn spawn_agent_typed(&self, manifest: AgentManifest) -> KernelResult<AgentId> {
         Self::spawn_agent(self, manifest)
     }
-    fn kill_agent(&self, agent_id: AgentId) -> KernelResult<()> {
+    fn kill_agent_typed(&self, agent_id: AgentId) -> KernelResult<()> {
         Self::kill_agent(self, agent_id)
     }
     fn kill_agent_with_purge(&self, agent_id: AgentId, purge_identity: bool) -> KernelResult<()> {
@@ -722,7 +923,7 @@ impl KernelApi for LibreFangKernel {
     ) -> crate::workflow::WorkflowId {
         Self::register_workflow(self, workflow).await
     }
-    async fn run_workflow(
+    async fn run_workflow_typed(
         &self,
         workflow_id: crate::workflow::WorkflowId,
         input: String,
@@ -736,7 +937,7 @@ impl KernelApi for LibreFangKernel {
     ) -> KernelResult<Vec<crate::workflow::DryRunStep>> {
         Self::dry_run_workflow(self, workflow_id, input).await
     }
-    async fn publish_event(&self, event: librefang_types::event::Event) -> Vec<TriggerMatch> {
+    async fn publish_typed_event(&self, event: librefang_types::event::Event) -> Vec<TriggerMatch> {
         Self::publish_event(self, event).await
     }
 
@@ -775,6 +976,278 @@ impl KernelApi for LibreFangKernel {
         schedule: &librefang_types::agent::ScheduleMode,
     ) {
         LibreFangKernel::start_background_for_agent(&self, agent_id, name, schedule);
+    }
+
+    // -- Additional inherent methods --
+    fn agent_has_active_session(&self, agent_id: AgentId) -> bool {
+        Self::agent_has_active_session(self, agent_id)
+    }
+    fn a2a_agents(&self) -> &std::sync::Mutex<Vec<(String, librefang_runtime::a2a::AgentCard)>> {
+        Self::a2a_agents(self)
+    }
+    fn a2a_tasks(&self) -> &librefang_runtime::a2a::A2aTaskStore {
+        Self::a2a_tasks(self)
+    }
+    fn context_report(
+        &self,
+        agent_id: AgentId,
+    ) -> KernelResult<librefang_runtime::compactor::ContextReport> {
+        Self::context_report(self, agent_id)
+    }
+    fn effective_mcp_servers_ref(
+        &self,
+    ) -> &std::sync::RwLock<Vec<librefang_types::config::McpServerConfigEntry>> {
+        Self::effective_mcp_servers_ref(self)
+    }
+    fn embedding(
+        &self,
+    ) -> Option<&Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>> {
+        Self::embedding(self)
+    }
+    async fn inject_message_for_session(
+        &self,
+        agent_id: AgentId,
+        session_id: Option<SessionId>,
+        message: &str,
+    ) -> KernelResult<bool> {
+        Self::inject_message_for_session(self, agent_id, session_id, message).await
+    }
+    fn provider_unconfigured_flag(&self) -> &std::sync::atomic::AtomicBool {
+        Self::provider_unconfigured_flag(self)
+    }
+    fn session_usage_cost(&self, agent_id: AgentId) -> KernelResult<(u64, u64, f64)> {
+        Self::session_usage_cost(self, agent_id)
+    }
+    fn set_agent_model(
+        &self,
+        agent_id: AgentId,
+        model: &str,
+        explicit_provider: Option<&str>,
+    ) -> KernelResult<()> {
+        Self::set_agent_model(self, agent_id, model, explicit_provider)
+    }
+    fn sync_default_model_agents(
+        &self,
+        old_provider: &str,
+        dm: &librefang_types::config::DefaultModelConfig,
+    ) {
+        Self::sync_default_model_agents(self, old_provider, dm);
+    }
+    fn traces(&self) -> &dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>> {
+        Self::traces(self)
+    }
+    fn update_hand_agent_runtime_override(
+        &self,
+        agent_id: AgentId,
+        override_config: librefang_hands::HandAgentRuntimeOverride,
+    ) -> KernelResult<()> {
+        Self::update_hand_agent_runtime_override(self, agent_id, override_config)
+    }
+
+    // -- Streaming + handle-aware send_message variants --
+    async fn send_message_with_handle(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
+        Self::send_message_with_handle(self, agent_id, message, kernel_handle).await
+    }
+    async fn send_message_with_handle_and_blocks(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+        content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
+        Self::send_message_with_handle_and_blocks(
+            self,
+            agent_id,
+            message,
+            kernel_handle,
+            content_blocks,
+        )
+        .await
+    }
+    async fn send_message_with_incognito(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+        sender_context: Option<librefang_channels::types::SenderContext>,
+        thinking_override: Option<bool>,
+        session_id_override: Option<SessionId>,
+        incognito: bool,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
+        Self::send_message_with_incognito(
+            self,
+            agent_id,
+            message,
+            kernel_handle,
+            sender_context.as_ref(),
+            thinking_override,
+            session_id_override,
+            incognito,
+        )
+        .await
+    }
+    async fn send_message_streaming_with_routing(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
+    )> {
+        LibreFangKernel::send_message_streaming_with_routing(
+            &self,
+            agent_id,
+            message,
+            kernel_handle,
+        )
+        .await
+    }
+    async fn send_message_streaming_with_incognito(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+        session_id_override: Option<SessionId>,
+        incognito: bool,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
+    )> {
+        LibreFangKernel::send_message_streaming_with_incognito(
+            &self,
+            agent_id,
+            message,
+            kernel_handle,
+            session_id_override,
+            incognito,
+        )
+        .await
+    }
+    async fn send_message_streaming_with_sender_context_routing_thinking_and_session(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+        sender: librefang_channels::types::SenderContext,
+        thinking_override: Option<bool>,
+        session_id_override: Option<SessionId>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
+    )> {
+        LibreFangKernel::send_message_streaming_with_sender_context_routing_thinking_and_session(
+            &self,
+            agent_id,
+            message,
+            kernel_handle,
+            &sender,
+            thinking_override,
+            session_id_override,
+        )
+        .await
+    }
+
+    // -- Spawn-tasks / probe --
+    fn spawn_key_validation(self: Arc<Self>) {
+        LibreFangKernel::spawn_key_validation(self);
+    }
+    async fn auto_dream_trigger_manual(
+        self: Arc<Self>,
+        agent_id: AgentId,
+    ) -> crate::auto_dream::TriggerOutcome {
+        LibreFangKernel::auto_dream_trigger_manual(self, agent_id).await
+    }
+    async fn probe_local_provider(
+        self: Arc<Self>,
+        provider_id: &str,
+        base_url: &str,
+        log_offline_as_warn: bool,
+    ) -> librefang_runtime::provider_health::ProbeResult {
+        LibreFangKernel::probe_local_provider(&self, provider_id, base_url, log_offline_as_warn)
+            .await
+    }
+
+    // -- Channel / trigger / engine accessors and send_message variants --
+    fn channel_adapters_ref(
+        &self,
+    ) -> &dashmap::DashMap<String, Arc<dyn librefang_channels::types::ChannelAdapter>> {
+        Self::channel_adapters_ref(self)
+    }
+    fn trigger_engine(&self) -> &crate::triggers::TriggerEngine {
+        Self::trigger_engine(self)
+    }
+    fn broadcast_ref(&self) -> &librefang_types::config::BroadcastConfig {
+        Self::broadcast_ref(self)
+    }
+    fn auto_reply(&self) -> &crate::auto_reply::AutoReplyEngine {
+        Self::auto_reply(self)
+    }
+    async fn one_shot_llm_call(&self, model: &str, prompt: &str) -> Result<String, String> {
+        Self::one_shot_llm_call(self, model, prompt).await
+    }
+    async fn send_message_with_blocks(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        blocks: Vec<librefang_types::message::ContentBlock>,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
+        Self::send_message_with_blocks(self, agent_id, message, blocks).await
+    }
+    async fn send_message_with_sender_context(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: librefang_channels::types::SenderContext,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
+        Self::send_message_with_sender_context(self, agent_id, message, &sender).await
+    }
+    async fn send_message_with_blocks_and_sender(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        blocks: Vec<librefang_types::message::ContentBlock>,
+        sender: librefang_channels::types::SenderContext,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
+        Self::send_message_with_blocks_and_sender(self, agent_id, message, blocks, &sender).await
+    }
+    async fn send_message_streaming_with_sender_context_and_routing(
+        self: Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
+        sender: librefang_channels::types::SenderContext,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<librefang_runtime::llm_driver::StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<librefang_runtime::agent_loop::AgentLoopResult>>,
+    )> {
+        LibreFangKernel::send_message_streaming_with_sender_context_and_routing(
+            &self,
+            agent_id,
+            message,
+            kernel_handle,
+            &sender,
+        )
+        .await
+    }
+
+    // -- Test-only / boot-only ops --
+    fn data_dir(&self) -> &Path {
+        Self::data_dir(self)
+    }
+    fn install_peer_registry_for_test(
+        &self,
+        registry: librefang_wire::PeerRegistry,
+    ) -> Result<(), librefang_wire::PeerRegistry> {
+        Self::install_peer_registry_for_test(self, registry)
+    }
+    fn set_self_handle(self: Arc<Self>) {
+        LibreFangKernel::set_self_handle(&self);
     }
 }
 

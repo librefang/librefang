@@ -352,7 +352,7 @@ pub async fn update_budget(
 
     // Apply updates — accept both config field names (max_hourly_usd) and
     // GET response field names (hourly_limit) so read-modify-write works.
-    state.kernel.update_budget_config(|budget| {
+    state.kernel.update_budget_config(&|budget| {
         if let Some(v) = body["max_hourly_usd"]
             .as_f64()
             .or_else(|| body["hourly_limit"].as_f64())

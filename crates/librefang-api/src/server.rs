@@ -1705,7 +1705,7 @@ pub async fn run_daemon(
                         let home_dir = cfg.home_dir.clone();
                         let provider_regions = cfg.provider_regions.clone();
                         let provider_urls = cfg.provider_urls.clone();
-                        kernel.model_catalog_update(|catalog| {
+                        kernel.model_catalog_update(&mut |catalog| {
                             catalog.load_cached_catalog_for(&home_dir);
                             if !provider_regions.is_empty() {
                                 let region_urls = catalog.resolve_region_urls(&provider_regions);
