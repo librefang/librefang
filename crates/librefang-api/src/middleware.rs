@@ -688,6 +688,7 @@ pub const PUBLIC_ROUTES_ALWAYS: &[PublicRoute] = &[
     PublicRoute::exact_any("/"),
     PublicRoute::exact_any("/favicon.ico"),
     PublicRoute::exact_any("/logo.png"),
+    PublicRoute::exact_any("/boss-libre.png"),
     // Auth flow entry points (method-free so POST also works)
     PublicRoute::exact_any("/api/auth/callback"),
     PublicRoute::exact_any("/api/auth/dashboard-check"),

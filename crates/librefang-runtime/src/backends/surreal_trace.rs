@@ -66,9 +66,26 @@ impl SurrealTraceBackend {
     /// [`librefang_storage::migrations`]) before calling this.
     #[must_use]
     pub fn open(session: &SurrealSession) -> Self {
-        Self {
-            db: session.client().clone(),
-        }
+        let db = session.client().clone();
+        // Defensive re-selection: the SurrealDB Rust SDK may not preserve the
+        // namespace/database context when a client is cloned. Re-selecting
+        // here guards against "Database is not defined" errors in all
+        // subsequent queries on this backend's db handle.
+        block_on(async {
+            if let Err(e) = db
+                .use_ns(session.namespace())
+                .use_db(session.database())
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    namespace = session.namespace(),
+                    database = session.database(),
+                    "trace backend: failed to re-select ns/db after clone; queries may fail"
+                );
+            }
+        });
+        Self { db }
     }
 
     fn insert_inner(&self, plugin: &str, trace: &HookTrace) -> TraceBackendResult<()> {

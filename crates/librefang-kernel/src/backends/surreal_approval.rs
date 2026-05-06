@@ -42,11 +42,28 @@ struct LockoutRow {
 
 impl SurrealTotpLockoutBackend {
     /// Open the backend against an existing session.
+    ///
+    /// Defensively re-selects the namespace/database after cloning the
+    /// client, because the SurrealDB Rust SDK may not preserve NS/DB
+    /// context through a clone (guard against "Database is not defined").
     #[must_use]
     pub fn open(session: &SurrealSession) -> Self {
-        Self {
-            db: session.client().clone(),
-        }
+        let db = session.client().clone();
+        block_on(async {
+            if let Err(e) = db
+                .use_ns(session.namespace())
+                .use_db(session.database())
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    namespace = session.namespace(),
+                    database = session.database(),
+                    "totp-lockout backend: failed to re-select ns/db after clone"
+                );
+            }
+        });
+        Self { db }
     }
 }
 

@@ -130,6 +130,10 @@ impl CodexCliDriver {
             args.push("--full-auto".to_string());
         }
 
+        // Always skip the git-repo trust check — the daemon workspace is not
+        // required to be a git repo; Codex's own auth gates handle trust.
+        args.push("--skip-git-repo-check".to_string());
+
         let model_flag = Self::model_flag(model);
         if let Some(ref m) = model_flag {
             args.push("--model".to_string());

@@ -165,6 +165,16 @@ impl SurrealAuditStore {
     /// scan fails.
     pub fn open(session: &SurrealSession) -> Result<Self, String> {
         let db = session.client().clone();
+        // Defensive re-selection: the SurrealDB Rust SDK may not preserve the
+        // namespace/database context when a client is cloned. Re-selecting
+        // here guards against "Database is not defined" errors from the
+        // initial `load_all` scan and all subsequent queries on `self.db`.
+        block_on(async {
+            db.use_ns(session.namespace())
+                .use_db(session.database())
+                .await
+                .map_err(|e| format!("audit store: re-select ns/db: {e}"))
+        })?;
         let entries = block_on(async { load_all(&db).await })?;
         let tip = entries
             .last()

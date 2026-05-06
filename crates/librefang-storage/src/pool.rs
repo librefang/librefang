@@ -46,6 +46,31 @@ impl SurrealSession {
     pub fn client(&self) -> &surrealdb::Surreal<surrealdb::engine::any::Any> {
         &self.client
     }
+
+    /// Clone the underlying client and immediately re-select the session's
+    /// namespace and database on the clone.
+    ///
+    /// The SurrealDB Rust SDK does **not** preserve NS/DB context when a
+    /// [`surrealdb::Surreal`] is cloned — each clone starts as a fresh
+    /// session. Backends that need an *owned* client (e.g. to store in a
+    /// struct) should call this method instead of `client().clone()` so their
+    /// queries run in the correct database context and do not fail with
+    /// "Database is not defined".
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::Backend`] if the `USE NS / USE DB` call fails.
+    #[cfg(feature = "surreal-backend")]
+    pub async fn clone_db(
+        &self,
+    ) -> crate::error::StorageResult<surrealdb::Surreal<surrealdb::engine::any::Any>> {
+        let db = self.client.clone();
+        db.use_ns(&self.namespace)
+            .use_db(&self.database)
+            .await
+            .map_err(|e| crate::error::StorageError::Backend(e.to_string()))?;
+        Ok(db)
+    }
 }
 
 impl std::fmt::Debug for SurrealSession {
