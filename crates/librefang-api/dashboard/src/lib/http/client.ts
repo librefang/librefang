@@ -119,6 +119,10 @@ export {
   listTerminalWindows,
   // auto-dream
   getAutoDreamStatus,
+  // tools
+  listTools,
+  getAgentTools,
+  getAgentTemplateToml,
   // overview
   loadDashboardSnapshot,
   getVersionInfo,
@@ -167,6 +171,8 @@ export {
   patchAgentConfig,
   patchHandAgentRuntimeConfig,
   clearHandAgentRuntimeConfig,
+  resetAgentSession,
+  updateAgentTools,
   createAgentSession,
   switchAgentSession,
   deleteSession,

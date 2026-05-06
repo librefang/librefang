@@ -39,6 +39,13 @@ export const agentKeys = {
     [...agentKeys.all, "experiments", agentId] as const,
   experimentMetrics: (experimentId: string) =>
     [...agentKeys.all, "experimentMetrics", experimentId] as const,
+  tools: (agentId: string) =>
+    [...agentKeys.all, "tools", agentId] as const,
+};
+
+export const toolKeys = {
+  all: ["tools"] as const,
+  list: () => [...toolKeys.all, "list"] as const,
 };
 
 export const modelKeys = {
