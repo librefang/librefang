@@ -70,6 +70,11 @@ libc = "0.2"
 serial_test = "3"
 proptest = "1"
 metrics-util = { version = "0.20", features = ["debugging"] }
+# Used by the Daytona backend wire-shape tests (#4677 review). Same
+# version that `librefang-channels`, `librefang-llm-drivers`, and
+# `librefang-runtime-mcp` already pin in this workspace, so no new
+# transitive deps land in `Cargo.lock`.
+wiremock = "0.6"
 
 [features]
 landlock-sandbox = ["dep:landlock"]

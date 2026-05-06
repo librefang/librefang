@@ -576,4 +576,335 @@ mod tests {
             other => panic!("expected UnsupportedForBackend, got {other:?}"),
         }
     }
+
+    // -----------------------------------------------------------------
+    // Wire-shape tests against a `wiremock`-faked Daytona server.
+    //
+    // The PR landed without any HTTP-level coverage for the
+    // `workspace_create` / `exec` / `cleanup` round-trips; this block
+    // closes the #4677-HIGH gap. Each test:
+    //   1. Spins up a `wiremock::MockServer`.
+    //   2. Points `DaytonaBackend` at `server.uri()` via `cfg_for`.
+    //   3. Sets a unique env var (`LIBREFANG_DAYTONA_WIRE_KEY_*`) so
+    //      `api_key()` succeeds without colliding with sibling tests.
+    //   4. Asserts the request shape (method + path + bearer +
+    //      body-fragment) AND the parsed response shape.
+    //
+    // Why per-test env-var names: tokio test threads run in parallel
+    // and `set_var` is `unsafe`. Each test name owns its own var so
+    // there is no shared mutable state between tests.
+    // -----------------------------------------------------------------
+
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Set an env var for the duration of one test.
+    /// SAFETY: each caller passes a name unique to that test, so
+    /// concurrent test threads cannot race on the same key.
+    fn set_test_env(name: &'static str, value: &str) {
+        // SAFETY: name is unique per test (see helper docstring), so
+        // concurrent tests cannot mutate the same key.
+        unsafe { std::env::set_var(name, value) };
+    }
+    fn clear_test_env(name: &'static str) {
+        // SAFETY: see `set_test_env`.
+        unsafe { std::env::remove_var(name) };
+    }
+
+    /// Happy path: a `run_command` call should
+    ///   1. POST `/api/workspaces` with `{name, image}` + bearer auth.
+    ///   2. POST `/api/workspaces/<id>/exec` with `{command, ...}`.
+    ///   3. Surface the response stdout/stderr/exit_code verbatim.
+    #[tokio::test]
+    async fn workspace_create_and_exec_happy_path() {
+        const VAR: &str = "LIBREFANG_DAYTONA_WIRE_KEY_HAPPY";
+        set_test_env(VAR, "test-token");
+
+        let server = MockServer::start().await;
+
+        // Stage 1: workspace create.
+        Mock::given(method("POST"))
+            .and(path("/api/workspaces"))
+            .and(header("authorization", "Bearer test-token"))
+            .and(body_partial_json(serde_json::json!({
+                "image": "ubuntu:22.04",
+            })))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": "ws-123"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Stage 2: exec on that workspace.
+        Mock::given(method("POST"))
+            .and(path("/api/workspaces/ws-123/exec"))
+            .and(header("authorization", "Bearer test-token"))
+            .and(body_partial_json(serde_json::json!({
+                "command": "echo hi",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "stdout": "hi\n",
+                "stderr": "",
+                "exit_code": 0,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let backend = DaytonaBackend::new(cfg_for(server.uri(), VAR.into()), "agent-happy".into());
+        let outcome = backend
+            .run_command(ExecSpec::new("echo hi"))
+            .await
+            .expect("run_command must succeed");
+
+        assert_eq!(outcome.exit_code, 0);
+        assert_eq!(outcome.stdout, "hi\n");
+        assert_eq!(outcome.stderr, "");
+        assert_eq!(outcome.backend_id.as_deref(), Some("daytona:ws-123"));
+
+        clear_test_env(VAR);
+    }
+
+    /// `workspace_create` returning 4xx should surface as an
+    /// `ExecError::Other` carrying the (sanitized) status + body.
+    #[tokio::test]
+    async fn workspace_create_4xx_returns_error() {
+        const VAR: &str = "LIBREFANG_DAYTONA_WIRE_KEY_CREATE_4XX";
+        set_test_env(VAR, "test-token");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/workspaces"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_body_string(r#"{"error":"forbidden: insufficient quota"}"#),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let backend = DaytonaBackend::new(cfg_for(server.uri(), VAR.into()), "agent-403".into());
+        match backend.run_command(ExecSpec::new("echo nope")).await {
+            Err(ExecError::Other(msg)) => {
+                assert!(msg.contains("403"), "expected 403 in error: {msg}");
+                assert!(
+                    msg.contains("forbidden") || msg.contains("quota"),
+                    "expected body fragment: {msg}"
+                );
+            }
+            other => panic!("expected ExecError::Other, got {other:?}"),
+        }
+
+        clear_test_env(VAR);
+    }
+
+    /// `exec` returning 5xx should surface as `ExecError::Other` and
+    /// must NOT poison the workspace cache (a follow-up call should
+    /// reuse the same workspace id).
+    #[tokio::test]
+    async fn exec_5xx_returns_error_and_keeps_workspace_cached() {
+        const VAR: &str = "LIBREFANG_DAYTONA_WIRE_KEY_EXEC_5XX";
+        set_test_env(VAR, "test-token");
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/workspaces"))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": "ws-5xx"})),
+            )
+            // Only one create — second run_command must reuse the cache.
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/workspaces/ws-5xx/exec"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("upstream unavailable"))
+            // Two calls, both 503.
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let backend = DaytonaBackend::new(cfg_for(server.uri(), VAR.into()), "agent-5xx".into());
+        for attempt in 0..2 {
+            match backend.run_command(ExecSpec::new("true")).await {
+                Err(ExecError::Other(msg)) => {
+                    assert!(msg.contains("503"), "attempt {attempt}: {msg}");
+                }
+                other => panic!("attempt {attempt}: expected Other, got {other:?}"),
+            }
+        }
+
+        clear_test_env(VAR);
+    }
+
+    /// `cleanup` happy path: DELETE `/api/workspaces/<id>` with bearer.
+    /// After success the cache is empty — a follow-up `run_command`
+    /// should re-create the workspace.
+    #[tokio::test]
+    async fn cleanup_deletes_workspace_and_clears_cache() {
+        const VAR: &str = "LIBREFANG_DAYTONA_WIRE_KEY_CLEANUP_OK";
+        set_test_env(VAR, "test-token");
+
+        let server = MockServer::start().await;
+
+        // Two creates expected: once before cleanup, once after.
+        Mock::given(method("POST"))
+            .and(path("/api/workspaces"))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": "ws-clean"})),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/workspaces/ws-clean/exec"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "stdout": "",
+                "stderr": "",
+                "exit_code": 0,
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/api/workspaces/ws-clean"))
+            .and(header("authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let backend = DaytonaBackend::new(cfg_for(server.uri(), VAR.into()), "agent-cl".into());
+        backend.run_command(ExecSpec::new("true")).await.unwrap();
+        backend.cleanup().await.expect("cleanup must succeed");
+        // Cache cleared → second exec creates a fresh workspace.
+        backend.run_command(ExecSpec::new("true")).await.unwrap();
+
+        clear_test_env(VAR);
+    }
+
+    /// `cleanup` non-2xx: warn-and-restore-cache so a later attempt can
+    /// retry the delete instead of leaking the workspace.
+    #[tokio::test]
+    async fn cleanup_non_2xx_restores_cache_for_retry() {
+        const VAR: &str = "LIBREFANG_DAYTONA_WIRE_KEY_CLEANUP_5XX";
+        set_test_env(VAR, "test-token");
+
+        let server = MockServer::start().await;
+
+        // Single create — both cleanups run against the same cached id.
+        Mock::given(method("POST"))
+            .and(path("/api/workspaces"))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": "ws-retry"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/workspaces/ws-retry/exec"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "stdout": "",
+                "stderr": "",
+                "exit_code": 0,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // First DELETE → 502; second DELETE → 204. The backend must
+        // call DELETE twice (because the first failure restored the
+        // cache).
+        Mock::given(method("DELETE"))
+            .and(path("/api/workspaces/ws-retry"))
+            .respond_with(ResponseTemplate::new(502).set_body_string("bad gateway"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let backend = DaytonaBackend::new(cfg_for(server.uri(), VAR.into()), "agent-rt".into());
+        backend.run_command(ExecSpec::new("true")).await.unwrap();
+        backend
+            .cleanup()
+            .await
+            .expect("cleanup is idempotent — Ok even on 5xx");
+
+        // Cache was restored. We can't easily assert "the second
+        // cleanup retries the delete" without staging a second mock —
+        // so swap the mock now and call cleanup again.
+        server.reset().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/workspaces/ws-retry"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        backend
+            .cleanup()
+            .await
+            .expect("retry cleanup hits the second mock");
+
+        clear_test_env(VAR);
+    }
+
+    /// #4677 MED-3: an agent that puts the daytona auth env-var name
+    /// on `ExecSpec::env` must NOT have it forwarded to the remote
+    /// shell. The bearer travels via the `Authorization` header only.
+    #[tokio::test]
+    async fn exec_does_not_forward_api_key_env_var_to_remote_shell() {
+        const VAR: &str = "LIBREFANG_DAYTONA_WIRE_KEY_GUARD";
+        set_test_env(VAR, "secret-token-do-not-leak");
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/workspaces"))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": "ws-guard"})),
+            )
+            .mount(&server)
+            .await;
+
+        // Capture the request body — it must NOT contain the env-var
+        // name as a `KEY=value ` prefix on the remote command.
+        Mock::given(method("POST"))
+            .and(path("/api/workspaces/ws-guard/exec"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "stdout": "",
+                "stderr": "",
+                "exit_code": 0,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let backend = DaytonaBackend::new(cfg_for(server.uri(), VAR.into()), "agent-grd".into());
+        let spec = ExecSpec::new("echo hi").with_env(VAR, "agent-supplied-bogus");
+        backend.run_command(spec).await.unwrap();
+
+        // Inspect what the mock saw.
+        let received = server.received_requests().await.expect("requests recorded");
+        let exec_req = received
+            .iter()
+            .find(|r| r.url.path() == "/api/workspaces/ws-guard/exec")
+            .expect("exec request must be present");
+        let body = std::str::from_utf8(&exec_req.body).unwrap_or("");
+        assert!(
+            !body.contains(VAR),
+            "daytona auth env var leaked into remote command body: {body}"
+        );
+        // Sanity: the actual command still made it through.
+        assert!(
+            body.contains("echo hi"),
+            "command missing from body: {body}"
+        );
+
+        clear_test_env(VAR);
+    }
 }
