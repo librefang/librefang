@@ -194,6 +194,29 @@ pub(crate) fn cron_clamp_keep_recent(keep_recent_cfg: usize, keep_count: usize) 
     keep_recent_cfg.min(keep_count.saturating_sub(1)).max(1)
 }
 
+/// Decide which compaction mode to actually apply for this cron fire.
+///
+/// `SummarizeTrim` with `keep_count < 2` would write `[summary, last_msg]`
+/// (always 2 messages) into a session whose cap permits at most
+/// `keep_count` messages. The next fire would re-trigger `SummarizeTrim`
+/// and re-summarize 1 message into 1 summary forever, burning aux LLM
+/// calls without converging. We re-route those fires to `Prune` so the
+/// session shrinks deterministically.
+///
+/// `keep_count == 0` is the same shape — happens when even the single
+/// newest message exceeds `cron_session_max_tokens`. `Prune` empties the
+/// session in that case (which the LLM call would never do).
+pub(crate) fn cron_resolve_compaction_mode(
+    configured: librefang_types::config::CronCompactionMode,
+    keep_count: usize,
+) -> librefang_types::config::CronCompactionMode {
+    use librefang_types::config::CronCompactionMode;
+    match configured {
+        CronCompactionMode::SummarizeTrim if keep_count < 2 => CronCompactionMode::Prune,
+        m => m,
+    }
+}
+
 /// Apply a plain prune (drain-from-front) to a cron session, keeping the
 /// newest `session.messages.len() - drop_count` messages.
 ///
@@ -14533,7 +14556,33 @@ system_prompt = "You are a helpful assistant."
 
                                                 if mutated {
                                                     use librefang_types::config::CronCompactionMode;
-                                                    match compaction_mode {
+                                                    // #4683 review: re-route SummarizeTrim → Prune
+                                                    // when the cap is too tight for [summary] +
+                                                    // 1-msg-tail (keep_count < 2). Without this,
+                                                    // SummarizeTrim would always write 2 messages
+                                                    // back into a session whose cap permits at
+                                                    // most keep_count, and the next fire would
+                                                    // re-enter SummarizeTrim → endless aux LLM
+                                                    // round-trips with no convergence.
+                                                    let effective_compaction_mode =
+                                                        cron_resolve_compaction_mode(
+                                                            compaction_mode,
+                                                            keep_count,
+                                                        );
+                                                    if compaction_mode
+                                                        == CronCompactionMode::SummarizeTrim
+                                                        && effective_compaction_mode
+                                                            == CronCompactionMode::Prune
+                                                    {
+                                                        tracing::warn!(
+                                                            agent_id = %agent_id,
+                                                            session_id = %cron_sid,
+                                                            job = %job_name,
+                                                            keep_count,
+                                                            "cron SummarizeTrim: cap too tight for [summary] + tail (keep_count < 2); falling back to Prune"
+                                                        );
+                                                    }
+                                                    match effective_compaction_mode {
                                                         CronCompactionMode::SummarizeTrim => {
                                                             // Attempt LLM summarization of the
                                                             // messages that would be dropped.

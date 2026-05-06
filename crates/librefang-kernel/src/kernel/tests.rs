@@ -6929,3 +6929,94 @@ fn cron_clamp_combined_with_compute_keep_count_invariant() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// cron_resolve_compaction_mode (#4683 review M1)
+//
+// Routing layer that protects SummarizeTrim from being run against caps so
+// tight that `[summary] + 1-msg-tail` would still violate them, which would
+// loop forever burning aux LLM calls without converging the session.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cron_resolve_compaction_mode_summarize_trim_with_keep_count_zero_routes_to_prune() {
+    use librefang_types::config::CronCompactionMode;
+    // keep_count = 0 happens when even the single newest message exceeds
+    // cron_session_max_tokens — Prune empties the session, which is the
+    // only meaningful action here.
+    assert_eq!(
+        cron_resolve_compaction_mode(CronCompactionMode::SummarizeTrim, 0),
+        CronCompactionMode::Prune,
+    );
+}
+
+#[test]
+fn cron_resolve_compaction_mode_summarize_trim_with_keep_count_one_routes_to_prune() {
+    use librefang_types::config::CronCompactionMode;
+    // keep_count = 1 means cap permits exactly 1 message. SummarizeTrim
+    // would write [summary, tail_msg] = 2, violating the cap and
+    // triggering the same compaction on the next fire — the loop the
+    // bug describes.
+    assert_eq!(
+        cron_resolve_compaction_mode(CronCompactionMode::SummarizeTrim, 1),
+        CronCompactionMode::Prune,
+    );
+}
+
+#[test]
+fn cron_resolve_compaction_mode_summarize_trim_at_threshold_keeps_summarize() {
+    use librefang_types::config::CronCompactionMode;
+    // keep_count = 2 is the smallest value that fits [summary] + 1-tail
+    // exactly. SummarizeTrim is allowed.
+    assert_eq!(
+        cron_resolve_compaction_mode(CronCompactionMode::SummarizeTrim, 2),
+        CronCompactionMode::SummarizeTrim,
+    );
+}
+
+#[test]
+fn cron_resolve_compaction_mode_summarize_trim_with_normal_keep_count_unchanged() {
+    use librefang_types::config::CronCompactionMode;
+    // Typical case: cap allows plenty of room. No re-routing.
+    assert_eq!(
+        cron_resolve_compaction_mode(CronCompactionMode::SummarizeTrim, 50),
+        CronCompactionMode::SummarizeTrim,
+    );
+}
+
+#[test]
+fn cron_resolve_compaction_mode_prune_is_never_re_routed() {
+    use librefang_types::config::CronCompactionMode;
+    // The router only re-routes SummarizeTrim → Prune. Configured Prune
+    // passes through unchanged at every keep_count (including 0).
+    for keep_count in [0usize, 1, 2, 8, 100] {
+        assert_eq!(
+            cron_resolve_compaction_mode(CronCompactionMode::Prune, keep_count),
+            CronCompactionMode::Prune,
+            "Prune must pass through unchanged at keep_count={keep_count}"
+        );
+    }
+}
+
+#[test]
+fn cron_resolve_compaction_mode_combined_with_compute_keep_count_tight_cap() {
+    // L2 / integration-shaped invariant: for caps so tight that the
+    // helper would compute keep_count < 2, SummarizeTrim must resolve
+    // to Prune so the kernel dispatches to apply_cron_prune (which
+    // shrinks deterministically) and not to try_summarize_trim (which
+    // would write 2 messages back and loop).
+    use librefang_types::config::CronCompactionMode;
+    use librefang_types::message::Message;
+
+    // 10 plain messages; max_messages = 1 → keep_count = 1.
+    let messages: Vec<Message> = (0..10).map(|i| Message::user(format!("m{i}"))).collect();
+    let keep_count = cron_compute_keep_count(&messages, Some(1), None);
+    assert_eq!(keep_count, 1, "max_messages=1 must produce keep_count=1");
+
+    let resolved = cron_resolve_compaction_mode(CronCompactionMode::SummarizeTrim, keep_count);
+    assert_eq!(
+        resolved,
+        CronCompactionMode::Prune,
+        "tight cap (keep_count=1) must downgrade SummarizeTrim → Prune"
+    );
+}

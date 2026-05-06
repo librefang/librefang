@@ -473,6 +473,12 @@ fn tail_has_matching_result(messages: &[Message], from_idx: usize, tool_use_id: 
 ///
 /// Returns the adjusted split index (or the original `split_at` if no
 /// adjustment is needed).
+///
+/// **Internal helper** — exposed publicly only so the kernel's
+/// `try_summarize_trim` (#3693) can call across the runtime ↔ kernel crate
+/// boundary. Treat the signature as workspace-internal: it may change
+/// without a semver bump and is not intended for external dependents.
+#[doc(hidden)]
 pub fn adjust_split_for_tool_pair(
     messages: &[Message],
     split_at: usize,
