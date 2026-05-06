@@ -473,7 +473,17 @@ fn tail_has_matching_result(messages: &[Message], from_idx: usize, tool_use_id: 
 ///
 /// Returns the adjusted split index (or the original `split_at` if no
 /// adjustment is needed).
-fn adjust_split_for_tool_pair(messages: &[Message], split_at: usize, keep_recent: usize) -> usize {
+///
+/// **Internal helper** — exposed publicly only so the kernel's
+/// `try_summarize_trim` (#3693) can call across the runtime ↔ kernel crate
+/// boundary. Treat the signature as workspace-internal: it may change
+/// without a semver bump and is not intended for external dependents.
+#[doc(hidden)]
+pub fn adjust_split_for_tool_pair(
+    messages: &[Message],
+    split_at: usize,
+    keep_recent: usize,
+) -> usize {
     if split_at == 0 {
         return split_at;
     }
@@ -854,11 +864,36 @@ pub async fn compact_session(
     session: &Session,
     config: &CompactionConfig,
 ) -> Result<CompactionResult, String> {
-    let msg_count = session.messages.len();
+    compact_messages(driver, model, &session.messages, config).await
+}
+
+/// Same as [`compact_session`] but takes a raw message slice instead of a
+/// `Session`. Useful for callers that already hold a `&[Message]` (e.g. the
+/// kernel's cron `SummarizeTrim` path, #3693) and would otherwise have to
+/// fabricate a throwaway `Session` purely to satisfy the signature.
+///
+/// The behavioural contract is identical: 3-stage summarization (full →
+/// chunked → minimal fallback), `used_fallback` flagged when the LLM is
+/// unavailable, and `adjust_split_for_tool_pair` applied at the head/tail
+/// boundary.
+///
+/// **Internal helper** — exposed publicly only so the kernel's
+/// `try_summarize_trim` (#3693) can call across the runtime ↔ kernel crate
+/// boundary. Treat the signature as workspace-internal: it may change without
+/// a semver bump and is not intended for external dependents (mirrors the
+/// `#[doc(hidden)]` carve-out on [`adjust_split_for_tool_pair`]).
+#[doc(hidden)]
+pub async fn compact_messages(
+    driver: Arc<dyn LlmDriver>,
+    model: &str,
+    messages: &[Message],
+    config: &CompactionConfig,
+) -> Result<CompactionResult, String> {
+    let msg_count = messages.len();
     if msg_count <= config.keep_recent {
         return Ok(CompactionResult {
             summary: String::new(),
-            kept_messages: session.messages.clone(),
+            kept_messages: messages.to_vec(),
             compacted_count: 0,
             chunks_used: 0,
             used_fallback: false,
@@ -871,10 +906,10 @@ pub async fn compact_session(
     // If the head ends with an unresolved ToolUse and the tail starts with the
     // matching ToolResult delivery, extend the head to include that result so the
     // pair is not separated by summarization.
-    let split_at = adjust_split_for_tool_pair(&session.messages, split_at, config.keep_recent);
+    let split_at = adjust_split_for_tool_pair(messages, split_at, config.keep_recent);
 
-    let to_compact = &session.messages[..split_at];
-    let kept = &session.messages[split_at..];
+    let to_compact = &messages[..split_at];
+    let kept = &messages[split_at..];
 
     info!(
         total = msg_count,
