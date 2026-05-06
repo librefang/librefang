@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
-import { Link, useRouter } from "@tanstack/react-router";
+import { Link, useBlocker } from "@tanstack/react-router";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import {
@@ -84,14 +84,17 @@ function sectionLabelFallback(key: string): string {
   return key.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
 
+const ACRONYM_MAP: Record<string, string> = {
+  Api: "API", Url: "URL", Sql: "SQL", Ssl: "SSL", Tls: "TLS",
+  Ttl: "TTL", Env: "Env Var", Id: "ID", Usd: "USD", Llm: "LLM",
+  Mdns: "mDNS", Totp: "TOTP",
+};
+
 function fieldLabelFallback(key: string): string {
-  return key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
-    .replace(/\bApi\b/g, "API").replace(/\bUrl\b/g, "URL")
-    .replace(/\bSql\b/g, "SQL").replace(/\bSsl\b/g, "SSL")
-    .replace(/\bTls\b/g, "TLS").replace(/\bTtl\b/g, "TTL")
-    .replace(/\bEnv\b/g, "Env Var").replace(/\bId\b/g, "ID")
-    .replace(/\bUsd\b/g, "USD").replace(/\bLlm\b/g, "LLM")
-    .replace(/\bMdns\b/g, "mDNS").replace(/\bTotp\b/g, "TOTP");
+  return key
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .replace(/\b\w+\b/g, (w) => ACRONYM_MAP[w] ?? w);
 }
 
 /* ------------------------------------------------------------------ */
@@ -553,7 +556,6 @@ function ConfigFieldInput({
 
 export function ConfigPage({ category }: { category: string }) {
   const { t } = useTranslation();
-  const router = useRouter();
 
   const schemaQuery = useConfigSchema();
   const configQuery = useFullConfig();
@@ -565,6 +567,7 @@ export function ConfigPage({ category }: { category: string }) {
   const [activeSection, setActiveSection] = useState<string | null>(null);
   const [showRawToml, setShowRawToml] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  const saveStatusTimeoutRefs = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const rawTomlQuery = useRawConfigToml(showRawToml);
 
   const hasPendingChanges = Object.keys(pendingChanges).length > 0;
@@ -613,18 +616,22 @@ export function ConfigPage({ category }: { category: string }) {
     return () => window.removeEventListener("beforeunload", handler);
   }, [hasPendingChanges]);
 
+  const blocker = useBlocker({
+    shouldBlockFn: () => hasPendingChanges,
+    withResolver: true,
+  });
+  const blockerRef = useRef(blocker);
+  blockerRef.current = blocker;
+
   useEffect(() => {
-    if (!hasPendingChanges) return;
-    const unsub = router.subscribe("onBeforeNavigate", () => {
-      if (Object.keys(pendingChanges).length > 0) {
-        if (!window.confirm(t("config.unsaved_warning", "You have unsaved changes. Discard them?"))) {
-          throw new Error("Navigation cancelled");
-        }
-        setPendingChanges({});
-      }
-    });
-    return unsub;
-  }, [hasPendingChanges, pendingChanges, router, t]);
+    if (blockerRef.current.status !== "blocked") return;
+    if (window.confirm(t("config.unsaved_warning", "You have unsaved changes. Discard them?"))) {
+      setPendingChanges({});
+      blockerRef.current.proceed();
+    } else {
+      blockerRef.current.reset();
+    }
+  }, [blocker.status, t]);
 
   const handleFieldChange = useCallback(
     (sectionKey: string, fieldKey: string, value: unknown, rootLevel?: boolean) => {
@@ -677,11 +684,21 @@ export function ConfigPage({ category }: { category: string }) {
         }
         return p;
       });
-      setTimeout(() => setSaveStatus((s) => { const next = { ...s }; delete next[variables.path]; return next; }), 3000);
+      const existing = saveStatusTimeoutRefs.current[variables.path];
+      if (existing) clearTimeout(existing);
+      saveStatusTimeoutRefs.current[variables.path] = setTimeout(() => {
+        setSaveStatus((s) => { const next = { ...s }; delete next[variables.path]; return next; });
+        delete saveStatusTimeoutRefs.current[variables.path];
+      }, 3000);
     },
     onError: (err: Error, variables) => {
       setSaveStatus((s) => ({ ...s, [variables.path]: { ok: false, msg: err.message } }));
-      setTimeout(() => setSaveStatus((s) => { const next = { ...s }; delete next[variables.path]; return next; }), 3000);
+      const existing = saveStatusTimeoutRefs.current[variables.path];
+      if (existing) clearTimeout(existing);
+      saveStatusTimeoutRefs.current[variables.path] = setTimeout(() => {
+        setSaveStatus((s) => { const next = { ...s }; delete next[variables.path]; return next; });
+        delete saveStatusTimeoutRefs.current[variables.path];
+      }, 3000);
     },
   });
 
@@ -705,6 +722,9 @@ export function ConfigPage({ category }: { category: string }) {
 
   useEffect(() => () => {
     for (const timeoutId of Object.values(batchStatusTimeoutRefs.current)) {
+      clearTimeout(timeoutId);
+    }
+    for (const timeoutId of Object.values(saveStatusTimeoutRefs.current)) {
       clearTimeout(timeoutId);
     }
   }, []);
@@ -757,11 +777,16 @@ export function ConfigPage({ category }: { category: string }) {
         ...s,
         __batch__: { ok: false, msg: err.message || t("config.save_failed") },
       }));
-      setTimeout(() => setSaveStatus((s) => {
-        const next = { ...s };
-        delete next.__batch__;
-        return next;
-      }), 5000);
+      const existing = batchStatusTimeoutRefs.current["__batch__"];
+      if (existing) clearTimeout(existing);
+      batchStatusTimeoutRefs.current["__batch__"] = setTimeout(() => {
+        setSaveStatus((s) => {
+          const next = { ...s };
+          delete next.__batch__;
+          return next;
+        });
+        delete batchStatusTimeoutRefs.current["__batch__"];
+      }, 5000);
     },
   });
   const handleBatchSave = useCallback(async () => {
@@ -825,16 +850,27 @@ export function ConfigPage({ category }: { category: string }) {
     : (activeSection && sectionKeys.includes(activeSection) ? activeSection : sectionKeys[0] ?? null);
 
   // Which sections have pending changes (for tab dot indicators)
-  const sectionHasPending = useCallback((sKey: string): boolean => {
-    const desc = sectionsByKey[sKey];
-    if (!desc) return false;
-    return Object.keys(pendingChanges).some((path) => {
+  const sectionsWithPending = useMemo(() => {
+    const set = new Set<string>();
+    const rootFieldMap = new Map<string, string>();
+    for (const [sKey, desc] of Object.entries(sectionsByKey)) {
       if (desc.root_level) {
-        return (resolvedFields[sKey] ?? []).some(([fKey]) => fKey === path);
+        for (const [fKey] of resolvedFields[sKey] ?? []) {
+          rootFieldMap.set(fKey, sKey);
+        }
       }
-      return path.startsWith(sKey + ".");
-    });
-  }, [sectionsByKey, resolvedFields, pendingChanges]);
+    }
+    for (const path of Object.keys(pendingChanges)) {
+      const dotIdx = path.indexOf(".");
+      if (dotIdx !== -1) {
+        set.add(path.slice(0, dotIdx));
+      } else {
+        const sKey = rootFieldMap.get(path);
+        if (sKey) set.add(sKey);
+      }
+    }
+    return set;
+  }, [pendingChanges, sectionsByKey, resolvedFields]);
 
   const filteredSections = useMemo(() => {
     const keysToShow = effectiveTab ? [effectiveTab] : sectionKeys;
@@ -943,7 +979,7 @@ export function ConfigPage({ category }: { category: string }) {
         <div className="flex items-center border-b border-border-subtle -mx-6 px-6">
           {sectionKeys.map((sKey) => {
             const isActive = !isSearching && effectiveTab === sKey;
-            const hasDot = sectionHasPending(sKey);
+            const hasDot = sectionsWithPending.has(sKey);
             return (
               <button
                 key={sKey}
