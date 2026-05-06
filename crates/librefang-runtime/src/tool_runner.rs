@@ -844,6 +844,11 @@ pub async fn execute_tool_raw(
         "memory_recall" => tool_memory_recall(input, *kernel, *sender_id),
         "memory_list" => tool_memory_list(*kernel, *sender_id),
 
+        // Memory wiki tools (issue #3329)
+        "wiki_get" => tool_wiki_get(input, *kernel),
+        "wiki_search" => tool_wiki_search(input, *kernel),
+        "wiki_write" => tool_wiki_write(input, *kernel, *caller_agent_id, *sender_id),
+
         // Collaboration tools
         "agent_find" => tool_agent_find(input, *kernel),
         "task_post" => tool_task_post(input, *kernel, *caller_agent_id).await,
@@ -1694,6 +1699,61 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
+            }),
+        },
+        // --- Memory wiki tools (issue #3329) — return KernelOpError::unavailable
+        //     when [memory_wiki] enabled = false in config.toml. ---
+        ToolDefinition {
+            name: "wiki_get".to_string(),
+            description:
+                "Read a wiki page by topic from the durable knowledge vault. \
+                 Returns the page as JSON: {topic, frontmatter, body}. The \
+                 frontmatter carries provenance (which agents/sessions \
+                 contributed and when)."
+                    .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "topic": { "type": "string", "description": "Page topic — must match [a-zA-Z0-9_-]+ and not be `index` or `_*`" }
+                },
+                "required": ["topic"]
+            }),
+        },
+        ToolDefinition {
+            name: "wiki_search".to_string(),
+            description:
+                "Search wiki page bodies (case-insensitive substring). Topic \
+                 hits outrank body hits. Returns an array of \
+                 {topic, snippet, score} sorted by score descending."
+                    .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Search query" },
+                    "limit": { "type": "integer", "description": "Max hits (default 10)" }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolDefinition {
+            name: "wiki_write".to_string(),
+            description:
+                "Write or update a wiki page. Body may use [[topic]] \
+                 placeholders for cross-references; the vault rewrites them \
+                 per its render mode. Provenance is auto-filled from the \
+                 calling agent. If the page was edited externally since the \
+                 last write, the call fails unless `force = true`, in which \
+                 case the external body is preserved and only provenance is \
+                 appended."
+                    .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "topic": { "type": "string", "description": "Page topic — must match [a-zA-Z0-9_-]+" },
+                    "body":  { "type": "string", "description": "Markdown body. Use [[other-topic]] placeholders for cross-references." },
+                    "force": { "type": "boolean", "description": "Overwrite even if the page was edited externally (default false)" }
+                },
+                "required": ["topic", "body"]
             }),
         },
         // --- Collaboration tools ---
@@ -3550,6 +3610,69 @@ fn tool_memory_list(
         return Ok("No entries found in shared memory.".to_string());
     }
     Ok(serde_json::to_string_pretty(&keys).unwrap_or_else(|_| format!("{:?}", keys)))
+}
+
+// ---------------------------------------------------------------------------
+// Memory wiki tools (issue #3329)
+// ---------------------------------------------------------------------------
+
+fn tool_wiki_get(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let topic = input["topic"].as_str().ok_or("Missing 'topic' parameter")?;
+    let value = kh.wiki_get(topic).map_err(|e| e.to_string())?;
+    Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
+}
+
+fn tool_wiki_search(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let query = input["query"].as_str().ok_or("Missing 'query' parameter")?;
+    let limit = input
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(10);
+    let value = kh.wiki_search(query, limit).map_err(|e| e.to_string())?;
+    Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
+}
+
+fn tool_wiki_write(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+    sender_id: Option<&str>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let topic = input["topic"].as_str().ok_or("Missing 'topic' parameter")?;
+    let body = input["body"].as_str().ok_or("Missing 'body' parameter")?;
+    let force = input
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Provenance is constructed kernel-side rather than left to the LLM:
+    // (1) every write is required to carry an agent attribution per #3329's
+    //     acceptance criterion #3, and (2) the calling agent / sender ids
+    //     are authoritative — letting the model spoof them would defeat the
+    //     audit value of the frontmatter.
+    let agent = caller_agent_id
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let provenance = serde_json::json!({
+        "agent": agent,
+        "channel": sender_id,
+        "at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    let value = kh
+        .wiki_write(topic, body, provenance, force)
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -6804,6 +6927,8 @@ mod tests {
         }
     }
 
+    impl WikiAccess for ApprovalKernel {}
+
     #[async_trait::async_trait]
     impl TaskQueue for ApprovalKernel {
         async fn task_post(
@@ -7040,6 +7165,8 @@ mod tests {
             Err("not used".into())
         }
     }
+
+    impl WikiAccess for ForceHumanCapturingKernel {}
 
     #[async_trait::async_trait]
     impl TaskQueue for ForceHumanCapturingKernel {
@@ -7642,6 +7769,8 @@ mod tests {
             Err("not used".into())
         }
     }
+
+    impl WikiAccess for NamedWsKernel {}
 
     #[async_trait::async_trait]
     impl TaskQueue for NamedWsKernel {
@@ -10350,6 +10479,8 @@ mod tests {
             Err("not used".into())
         }
     }
+
+    impl WikiAccess for SpawnCheckKernel {}
 
     #[async_trait::async_trait]
     impl TaskQueue for SpawnCheckKernel {

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/librefang-types",
     "crates/librefang-memory",
+    "crates/librefang-memory-wiki",
     "crates/librefang-runtime",
     "crates/librefang-runtime-mcp",
     "crates/librefang-runtime-oauth",

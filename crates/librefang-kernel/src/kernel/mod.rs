@@ -778,6 +778,10 @@ pub struct LibreFangKernel {
     pub(crate) scheduler: AgentScheduler,
     /// Memory substrate.
     pub(crate) memory: Arc<MemorySubstrate>,
+    /// Memory wiki vault (issue #3329). `None` when `[memory_wiki] enabled
+    /// = false`, in which case the `WikiAccess` trait methods short-circuit
+    /// to `KernelOpError::unavailable("wiki")`.
+    pub(crate) wiki_vault: Option<Arc<librefang_memory_wiki::WikiVault>>,
     /// Proactive memory store (mem0-style auto_retrieve/auto_memorize).
     pub(crate) proactive_memory: OnceLock<Arc<librefang_memory::ProactiveMemoryStore>>,
     /// Concrete handle to the LLM-backed memory extractor used by
@@ -3904,6 +3908,28 @@ impl LibreFangKernel {
             None => config.data_dir.join("audit.anchor"),
         };
         let hooks_dir = config.home_dir.join("hooks");
+        // Optional memory-wiki vault (issue #3329). Off by default; only
+        // constructed when the operator has flipped `[memory_wiki] enabled
+        // = true`. A construction failure (e.g. unwritable vault path)
+        // logs a warning and disables the vault for this boot — it must
+        // not abort the kernel because the rest of the daemon is
+        // independent of the wiki feature.
+        let wiki_vault: Option<Arc<librefang_memory_wiki::WikiVault>> =
+            if config.memory_wiki.enabled {
+                match librefang_memory_wiki::WikiVault::new(&config.memory_wiki) {
+                    Ok(v) => Some(Arc::new(v)),
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "[memory_wiki] enabled but vault construction failed; \
+                             wiki tools will return KernelOpError::unavailable"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
         // Snapshot the initial taint rule registry into a shared
         // `Arc<ArcSwap<...>>`. This swap is the single source of truth read
         // by every connected MCP server's scanner — `Self::reload_config`
@@ -3954,6 +3980,7 @@ impl LibreFangKernel {
             session_stream_hub: Arc::new(crate::session_stream_hub::SessionStreamHub::new()),
             scheduler: AgentScheduler::new(),
             memory: memory.clone(),
+            wiki_vault: wiki_vault.clone(),
             proactive_memory: OnceLock::new(),
             proactive_memory_extractor: OnceLock::new(),
             prompt_store: OnceLock::new(),
@@ -18776,6 +18803,74 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         }
         let user_id = self.auth.resolve_user(sender_id, channel)?;
         self.auth.memory_acl_for(user_id)
+    }
+}
+
+impl kernel_handle::WikiAccess for LibreFangKernel {
+    fn wiki_get(&self, topic: &str) -> Result<serde_json::Value, kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
+        let vault = self
+            .wiki_vault
+            .as_ref()
+            .ok_or_else(|| KernelOpError::unavailable("wiki"))?;
+        match vault.get(topic) {
+            Ok(page) => serde_json::to_value(&page)
+                .map_err(|e| KernelOpError::Internal(format!("Wiki get serialize: {e}"))),
+            Err(librefang_memory_wiki::WikiError::NotFound(_)) => Err(KernelOpError::Internal(
+                format!("wiki topic `{topic}` not found"),
+            )),
+            Err(err) => Err(KernelOpError::Internal(format!("Wiki get failed: {err}"))),
+        }
+    }
+
+    fn wiki_search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<serde_json::Value, kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
+        let vault = self
+            .wiki_vault
+            .as_ref()
+            .ok_or_else(|| KernelOpError::unavailable("wiki"))?;
+        let hits = vault
+            .search(query, limit)
+            .map_err(|e| KernelOpError::Internal(format!("Wiki search failed: {e}")))?;
+        serde_json::to_value(&hits)
+            .map_err(|e| KernelOpError::Internal(format!("Wiki search serialize: {e}")))
+    }
+
+    fn wiki_write(
+        &self,
+        topic: &str,
+        body: &str,
+        provenance: serde_json::Value,
+        force: bool,
+    ) -> Result<serde_json::Value, kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
+        let vault = self
+            .wiki_vault
+            .as_ref()
+            .ok_or_else(|| KernelOpError::unavailable("wiki"))?;
+        let prov: librefang_memory_wiki::ProvenanceEntry = serde_json::from_value(provenance)
+            .map_err(|e| {
+                KernelOpError::InvalidInput(format!(
+                    "wiki_write `provenance` must be {{agent, [session], [channel], [turn], at}}: {e}"
+                ))
+            })?;
+        match vault.write(topic, body, prov, force) {
+            Ok(outcome) => serde_json::to_value(&outcome)
+                .map_err(|e| KernelOpError::Internal(format!("Wiki write serialize: {e}"))),
+            Err(librefang_memory_wiki::WikiError::HandEditConflict { topic }) => {
+                Err(KernelOpError::Internal(format!(
+                    "wiki page `{topic}` was edited externally; re-read the file or pass force=true"
+                )))
+            }
+            Err(librefang_memory_wiki::WikiError::InvalidTopic { topic, reason }) => Err(
+                KernelOpError::InvalidInput(format!("wiki_write topic `{topic}`: {reason}")),
+            ),
+            Err(err) => Err(KernelOpError::Internal(format!("Wiki write failed: {err}"))),
+        }
     }
 }
 

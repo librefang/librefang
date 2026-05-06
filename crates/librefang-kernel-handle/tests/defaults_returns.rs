@@ -62,6 +62,8 @@ impl MemoryAccess for NoopKernelHandle {
     }
 }
 
+impl WikiAccess for NoopKernelHandle {}
+
 #[async_trait]
 impl TaskQueue for NoopKernelHandle {
     async fn task_post(
