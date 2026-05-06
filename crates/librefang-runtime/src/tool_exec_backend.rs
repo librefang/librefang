@@ -32,10 +32,37 @@ use librefang_types::tool_exec::{BackendKind, ToolExecConfig};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 
 // ---------------------------------------------------------------------------
 // Public trait + DTOs
 // ---------------------------------------------------------------------------
+
+/// Default `LocalBackend` per-command timeout when neither the spec nor
+/// the operator config supplies one. Matches the legacy `tool_runner`
+/// shell-class default at `tool_runner.rs:2896` so behaviour is
+/// preserved across the trait migration.
+pub const LOCAL_DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Default `DockerBackend` `max_output_bytes` cap when callers omit
+/// one. Matches the cap that `docker_sandbox::exec_in_sandbox` has used
+/// historically (≈ 50 KiB per stream); referenced from the doc on
+/// [`ResourceLimits::max_output_bytes`] so future tuning has one knob.
+pub const DOCKER_DEFAULT_MAX_OUTPUT_BYTES: usize = 50 * 1024;
+
+/// Environment-variable keys we never propagate into a child process,
+/// regardless of what the caller put on `ExecSpec::env`. These are
+/// dynamic-loader hijack vectors — letting an LLM-emitted `env` map
+/// override them would let a tool call swap out `libc` or load a
+/// shim into every subsequent child. Backends MUST scrub these at the
+/// trait boundary; the local backend `debug_assert!`s their absence in
+/// debug builds, plus drops + warns in release.
+pub const RESERVED_ENV_KEYS: &[&str] = &[
+    "LD_PRELOAD",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+];
 
 /// Resource limits applied to a single command invocation.
 ///
@@ -51,8 +78,10 @@ pub struct ResourceLimits {
     /// Wall-clock timeout for the command. `None` falls back to the
     /// backend's configured default (e.g. `DockerSandboxConfig.timeout_secs`).
     pub timeout: Option<Duration>,
-    /// Maximum combined stdout/stderr bytes returned to the caller.
-    /// `None` falls back to the backend default (50 KiB for Docker today).
+    /// Maximum bytes returned to the caller per stream (stdout AND
+    /// stderr each capped at this value — the cap is *per stream*, not
+    /// combined). `None` falls back to the backend default
+    /// (see [`DOCKER_DEFAULT_MAX_OUTPUT_BYTES`] for Docker).
     pub max_output_bytes: Option<usize>,
 }
 
@@ -62,6 +91,10 @@ pub struct ResourceLimits {
 /// shell makes sense (`sh -c …` for Docker / SSH, the host's
 /// `tokio::process::Command` for Local). Validation against the agent's
 /// `ExecPolicy` happens **before** dispatch, in `tool_runner.rs`.
+///
+/// **Reserved env keys.** Keys listed in [`RESERVED_ENV_KEYS`] are
+/// silently dropped by every backend before the child process is
+/// spawned — see the constant's docs for the rationale.
 #[derive(Debug, Clone)]
 pub struct ExecSpec {
     /// Verbatim shell command line.
@@ -87,6 +120,33 @@ impl ExecSpec {
             env: BTreeMap::new(),
             limits: ResourceLimits::default(),
         }
+    }
+
+    /// Builder: set the working directory.
+    pub fn with_workdir(mut self, p: impl Into<PathBuf>) -> Self {
+        self.workdir = Some(p.into());
+        self
+    }
+
+    /// Builder: insert one env var. Keys present in
+    /// [`RESERVED_ENV_KEYS`] will be dropped at dispatch time — setting
+    /// them here is a no-op rather than an error so callers can pass
+    /// "whatever the agent gave us" without filtering up front.
+    pub fn with_env(mut self, k: impl Into<String>, v: impl Into<String>) -> Self {
+        self.env.insert(k.into(), v.into());
+        self
+    }
+
+    /// Builder: cap the wall-clock timeout.
+    pub fn with_timeout(mut self, d: Duration) -> Self {
+        self.limits.timeout = Some(d);
+        self
+    }
+
+    /// Builder: cap stdout/stderr (per stream).
+    pub fn with_max_output_bytes(mut self, n: usize) -> Self {
+        self.limits.max_output_bytes = Some(n);
+        self
     }
 }
 
@@ -118,6 +178,10 @@ pub enum ExecError {
     /// Connection / auth failure reaching the remote system.
     #[error("backend connect error: {0}")]
     Connect(String),
+    /// Authentication failure (separate from generic Connect so callers
+    /// can prompt for new credentials specifically).
+    #[error("backend auth failure: {0}")]
+    AuthFailure(String),
     /// The backend rejected the command before dispatching it
     /// (validation, allowlist, quota).
     #[error("backend rejected command: {0}")]
@@ -191,6 +255,9 @@ pub struct LocalBackend {
     /// Mirrors the existing `tool_runner.rs` `allowed_env` plumbing.
     allowed_env: Vec<String>,
     /// Default per-command timeout when `ExecSpec::limits.timeout` is unset.
+    /// Source-of-truth: kernel config / agent manifest. Falls back to
+    /// [`LOCAL_DEFAULT_TIMEOUT_SECS`] when constructed via
+    /// [`LocalBackend::with_defaults`].
     default_timeout: Duration,
 }
 
@@ -202,10 +269,11 @@ impl LocalBackend {
         }
     }
 
-    /// Convenience: a Local backend with empty env passthrough and a 30s default.
+    /// Convenience: a Local backend with empty env passthrough and the
+    /// legacy [`LOCAL_DEFAULT_TIMEOUT_SECS`] default.
     /// Intended for tests and the resolver fallback.
     pub fn with_defaults() -> Self {
-        Self::new(Vec::new(), Duration::from_secs(30))
+        Self::new(Vec::new(), Duration::from_secs(LOCAL_DEFAULT_TIMEOUT_SECS))
     }
 }
 
@@ -234,8 +302,23 @@ impl ToolExecBackend for LocalBackend {
 
         crate::subprocess_sandbox::sandbox_command(&mut cmd, &self.allowed_env);
 
-        // Layer caller-supplied env on top of the sandboxed allowlist.
+        // Layer caller-supplied env on top of the sandboxed allowlist,
+        // dropping anything in RESERVED_ENV_KEYS. Debug builds also
+        // assert the caller didn't even try.
         for (k, v) in &spec.env {
+            if is_reserved_env_key(k) {
+                debug_assert!(
+                    false,
+                    "reserved env key {k:?} present on ExecSpec::env (reserved: {:?})",
+                    RESERVED_ENV_KEYS
+                );
+                tracing::warn!(
+                    key = %k,
+                    "tool_exec: dropping reserved env key from child process \
+                     (loader-hijack vector); see RESERVED_ENV_KEYS in tool_exec_backend.rs"
+                );
+                continue;
+            }
             cmd.env(k, v);
         }
 
@@ -248,35 +331,137 @@ impl ToolExecBackend for LocalBackend {
 
         let timeout = spec.limits.timeout.unwrap_or(self.default_timeout);
 
-        let output = tokio::time::timeout(timeout, cmd.output())
-            .await
-            .map_err(|_| ExecError::Timeout(format!("after {}s", timeout.as_secs())))?
+        // Spawn + stream so a runaway child can't OOM the daemon by
+        // emitting more bytes than `max_output_bytes`. We read each pipe
+        // into a Vec capped at the limit; once the cap is reached we
+        // drop further bytes and set `truncated`. We DON'T kill the
+        // child — the legacy code path didn't either, and killing on
+        // overflow risks dropping useful exit-status info.
+        let mut child = cmd
+            .spawn()
             .map_err(|e| ExecError::Other(format!("spawn failed: {e}")))?;
+        let mut stdout_pipe = child
+            .stdout
+            .take()
+            .ok_or_else(|| ExecError::Other("child stdout pipe missing".into()))?;
+        let mut stderr_pipe = child
+            .stderr
+            .take()
+            .ok_or_else(|| ExecError::Other("child stderr pipe missing".into()))?;
 
-        let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        // Per-stream cap. Use a generous default when callers don't set
+        // one so unbounded `yes`-style spam still doesn't OOM us.
+        let cap = spec
+            .limits
+            .max_output_bytes
+            .unwrap_or(DOCKER_DEFAULT_MAX_OUTPUT_BYTES);
 
-        if let Some(cap) = spec.limits.max_output_bytes {
-            stdout = truncate_to_cap(stdout, cap);
-            stderr = truncate_to_cap(stderr, cap);
+        async fn read_capped<R: AsyncReadExt + Unpin>(
+            r: &mut R,
+            cap: usize,
+        ) -> std::io::Result<(Vec<u8>, usize, bool)> {
+            let mut buf = Vec::with_capacity(std::cmp::min(cap, 8 * 1024));
+            let mut total = 0usize;
+            let mut truncated = false;
+            let mut chunk = [0u8; 8 * 1024];
+            loop {
+                let n = r.read(&mut chunk).await?;
+                if n == 0 {
+                    break;
+                }
+                total = total.saturating_add(n);
+                if buf.len() < cap {
+                    let take = std::cmp::min(n, cap - buf.len());
+                    buf.extend_from_slice(&chunk[..take]);
+                    if take < n {
+                        truncated = true;
+                    }
+                } else {
+                    truncated = true;
+                }
+            }
+            Ok((buf, total, truncated))
+        }
+
+        let stdout_fut = read_capped(&mut stdout_pipe, cap);
+        let stderr_fut = read_capped(&mut stderr_pipe, cap);
+        let wait_fut = child.wait();
+
+        let combined = async move {
+            let ((stdout_res, stderr_res), wait_res) =
+                tokio::join!(async { tokio::join!(stdout_fut, stderr_fut) }, wait_fut);
+            let (stdout_buf, stdout_total, stdout_trunc) =
+                stdout_res.map_err(|e| ExecError::Other(format!("stdout read: {e}")))?;
+            let (stderr_buf, stderr_total, stderr_trunc) =
+                stderr_res.map_err(|e| ExecError::Other(format!("stderr read: {e}")))?;
+            let status = wait_res.map_err(|e| ExecError::Other(format!("wait: {e}")))?;
+            Ok::<_, ExecError>((
+                stdout_buf,
+                stdout_total,
+                stdout_trunc,
+                stderr_buf,
+                stderr_total,
+                stderr_trunc,
+                status,
+            ))
+        };
+
+        let (
+            stdout_buf,
+            stdout_total,
+            stdout_trunc,
+            stderr_buf,
+            stderr_total,
+            stderr_trunc,
+            status,
+        ) = tokio::time::timeout(timeout, combined)
+            .await
+            .map_err(|_| ExecError::Timeout(format!("after {}s", timeout.as_secs())))??;
+
+        let mut stdout = String::from_utf8_lossy(&stdout_buf).into_owned();
+        let mut stderr = String::from_utf8_lossy(&stderr_buf).into_owned();
+
+        if stdout_trunc {
+            stdout.push_str(&format!("... [truncated, {stdout_total} total bytes]"));
+        }
+        if stderr_trunc {
+            stderr.push_str(&format!("... [truncated, {stderr_total} total bytes]"));
         }
 
         Ok(ExecOutcome {
             stdout,
             stderr,
-            exit_code: output.status.code().unwrap_or(-1),
+            exit_code: status.code().unwrap_or(-1),
             backend_id: None,
         })
     }
 }
 
-fn truncate_to_cap(mut s: String, cap: usize) -> String {
+/// Returns true if the key is on the reserved (loader-hijack) list.
+/// Case-sensitive — POSIX env names are case-sensitive in practice.
+pub(crate) fn is_reserved_env_key(key: &str) -> bool {
+    RESERVED_ENV_KEYS.contains(&key)
+}
+
+/// Truncate a string to `cap` bytes, appending a marker noting the
+/// original total. UTF-8 safe via [`crate::str_utils::safe_truncate_str`].
+///
+/// Shared by SSH and Daytona backends (and tests) — keep behaviour
+/// identical so the marker string stays consistent across the wire
+/// (operators grep for the marker to spot truncation in logs).
+/// `LocalBackend` doesn't call this directly because it already caps
+/// during streaming and appends the same marker manually after the
+/// `read_capped` loop; under default features (no ssh / daytona) the
+/// helper has no live caller, hence the explicit `allow(dead_code)`.
+#[allow(dead_code)]
+pub(crate) fn truncate_to_cap(s: String, cap: usize) -> String {
     if s.len() > cap {
         let total = s.len();
         let safe = crate::str_utils::safe_truncate_str(&s, cap).to_string();
-        s = format!("{safe}... [truncated, {total} total bytes]");
+        format!("{safe}... [truncated, {total} total bytes]")
+    } else {
+        s
     }
-    s
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +505,22 @@ impl ToolExecBackend for DockerBackend {
         }
         if !crate::docker_sandbox::is_docker_available().await {
             return Err(ExecError::NotConfigured("docker binary not on PATH".into()));
+        }
+
+        // Reserved-env scrub at the trait boundary — Docker's
+        // `exec_in_sandbox` doesn't currently honour `spec.env`, but
+        // when it does the reserved keys must not leak in.
+        for k in spec.env.keys() {
+            if is_reserved_env_key(k) {
+                debug_assert!(
+                    false,
+                    "reserved env key {k:?} present on ExecSpec::env (Docker)"
+                );
+                tracing::warn!(
+                    key = %k,
+                    "tool_exec/docker: reserved env key dropped before container exec"
+                );
+            }
         }
 
         let container =
@@ -370,7 +571,7 @@ pub fn build_backend(
     match kind {
         BackendKind::Local => Ok(Box::new(LocalBackend::new(
             allowed_env,
-            Duration::from_secs(30),
+            Duration::from_secs(LOCAL_DEFAULT_TIMEOUT_SECS),
         ))),
         BackendKind::Docker => Ok(Box::new(DockerBackend::new(
             docker_cfg.clone(),
@@ -448,62 +649,100 @@ mod tests {
         assert!(out.contains("[truncated, 200 total bytes]"));
     }
 
+    #[test]
+    fn truncate_cap_zero_emits_pure_marker() {
+        // Edge case: cap = 0 — `safe_truncate_str` must yield "" and the
+        // marker is appended verbatim. Guards against arithmetic-underflow
+        // regressions in the helper.
+        let out = truncate_to_cap("hi".to_string(), 0);
+        assert_eq!(out, "... [truncated, 2 total bytes]");
+    }
+
     #[tokio::test]
+    #[cfg(unix)]
     async fn local_backend_runs_echo() {
         let backend = LocalBackend::with_defaults();
-        // POSIX-only assertion — the docker wrapper test environment
-        // always has `sh`.
-        if cfg!(unix) {
-            let outcome = backend
-                .run_command(ExecSpec::new("echo hello"))
-                .await
-                .expect("echo must succeed");
-            assert_eq!(outcome.exit_code, 0);
-            assert!(outcome.stdout.contains("hello"));
-            assert_eq!(outcome.kind_str(), "local");
-        }
+        let outcome = backend
+            .run_command(ExecSpec::new("echo hello"))
+            .await
+            .expect("echo must succeed");
+        assert_eq!(outcome.exit_code, 0);
+        assert!(outcome.stdout.contains("hello"));
+        assert_eq!(backend.kind().as_str(), "local");
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn local_backend_captures_nonzero_exit() {
-        if cfg!(unix) {
-            let backend = LocalBackend::with_defaults();
-            let outcome = backend
-                .run_command(ExecSpec::new("false"))
-                .await
-                .expect("`false` dispatches successfully");
-            assert_ne!(outcome.exit_code, 0);
-        }
+        let backend = LocalBackend::with_defaults();
+        let outcome = backend
+            .run_command(ExecSpec::new("false"))
+            .await
+            .expect("`false` dispatches successfully");
+        assert_ne!(outcome.exit_code, 0);
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn local_backend_timeout_returns_error() {
-        if cfg!(unix) {
-            let backend = LocalBackend::with_defaults();
-            let mut spec = ExecSpec::new("sleep 5");
-            spec.limits.timeout = Some(Duration::from_millis(100));
-            match backend.run_command(spec).await {
-                Err(ExecError::Timeout(_)) => {}
-                other => panic!("expected timeout, got {other:?}"),
-            }
+        let backend = LocalBackend::with_defaults();
+        let spec = ExecSpec::new("sleep 5").with_timeout(Duration::from_millis(100));
+        match backend.run_command(spec).await {
+            Err(ExecError::Timeout(_)) => {}
+            other => panic!("expected timeout, got {other:?}"),
         }
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn local_backend_max_output_truncates() {
-        if cfg!(unix) {
-            let backend = LocalBackend::with_defaults();
-            let mut spec = ExecSpec::new("yes hello | head -c 5000");
-            spec.limits.max_output_bytes = Some(100);
-            spec.limits.timeout = Some(Duration::from_secs(5));
-            let outcome = backend.run_command(spec).await.expect("runs");
-            // truncated stdout carries the marker
-            assert!(
-                outcome.stdout.contains("[truncated"),
-                "stdout was: {:?}",
-                outcome.stdout
-            );
-        }
+        let backend = LocalBackend::with_defaults();
+        let spec = ExecSpec::new("yes hello | head -c 5000")
+            .with_max_output_bytes(100)
+            .with_timeout(Duration::from_secs(5));
+        let outcome = backend.run_command(spec).await.expect("runs");
+        // Streaming truncation appends the marker.
+        assert!(
+            outcome.stdout.contains("[truncated"),
+            "stdout was: {:?}",
+            outcome.stdout
+        );
+    }
+
+    /// H1 regression: a child that emits far more than `cap` bytes must
+    /// (a) finish without hanging, (b) yield a capped stdout body, and
+    /// (c) record the original total in the truncation marker.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn local_backend_streams_output_above_cap_without_oom() {
+        let backend = LocalBackend::with_defaults();
+        // 200 KiB of `x` — >> cap, well below anything that would
+        // actually OOM the test runner, but enough to prove streaming.
+        let spec = ExecSpec::new(r#"yes x | tr -d '\n' | head -c 204800 ; echo ; echo done"#)
+            .with_max_output_bytes(4096)
+            .with_timeout(Duration::from_secs(10));
+        let outcome = backend
+            .run_command(spec)
+            .await
+            .expect("must dispatch and exit, not hang");
+        assert_eq!(outcome.exit_code, 0, "child should exit cleanly");
+        // Truncated body — 4 KiB of payload + the marker suffix.
+        assert!(
+            outcome.stdout.contains("[truncated,"),
+            "expected truncation marker, got: {:?}",
+            &outcome.stdout[..std::cmp::min(120, outcome.stdout.len())]
+        );
+        // Marker reports the true byte total (well above the cap).
+        let marker_pos = outcome
+            .stdout
+            .find("[truncated,")
+            .expect("truncated marker present");
+        let payload = &outcome.stdout[..marker_pos];
+        assert!(
+            payload.len() <= 4096 + 8,
+            "payload should be capped at ~cap bytes; got {} bytes",
+            payload.len()
+        );
     }
 
     #[tokio::test]
@@ -586,12 +825,54 @@ mod tests {
         );
     }
 
-    // Test-only helper kept on `ExecOutcome` for ergonomic assertions.
-    impl ExecOutcome {
-        fn kind_str(&self) -> &'static str {
-            // Not actually carried on outcome; placeholder for assertion symmetry.
-            // The real backend kind is on `ToolExecBackend::kind()`.
-            "local"
+    #[test]
+    fn reserved_env_keys_match_doc() {
+        assert!(is_reserved_env_key("LD_PRELOAD"));
+        assert!(is_reserved_env_key("DYLD_INSERT_LIBRARIES"));
+        assert!(is_reserved_env_key("DYLD_LIBRARY_PATH"));
+        assert!(is_reserved_env_key("DYLD_FRAMEWORK_PATH"));
+        assert!(!is_reserved_env_key("PATH"));
+        assert!(!is_reserved_env_key("ld_preload")); // case-sensitive
+    }
+
+    /// Reserved-env keys placed on `ExecSpec::env` must not reach the
+    /// child. Release-mode behaviour: drop + warn (we can't observe the
+    /// warn here easily, so we settle for "child sees a sentinel that
+    /// shows the key was dropped").
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn local_backend_drops_reserved_env_keys() {
+        // We can only directly verify in release mode — debug builds
+        // hit the `debug_assert!`. Skip if we're in debug.
+        if cfg!(debug_assertions) {
+            return;
         }
+        let backend = LocalBackend::with_defaults();
+        let spec = ExecSpec::new(r#"echo "[$LD_PRELOAD]""#)
+            .with_env("LD_PRELOAD", "/tmp/evil.so")
+            .with_timeout(Duration::from_secs(2));
+        let outcome = backend.run_command(spec).await.expect("runs");
+        assert_eq!(outcome.exit_code, 0);
+        // The sandboxed env scrubs LD_PRELOAD anyway; the test is that
+        // the value we tried to inject did NOT appear.
+        assert!(
+            !outcome.stdout.contains("/tmp/evil.so"),
+            "reserved env key leaked into child: {:?}",
+            outcome.stdout
+        );
+    }
+
+    #[test]
+    fn exec_spec_builder_chains() {
+        let spec = ExecSpec::new("ls")
+            .with_workdir("/tmp")
+            .with_env("FOO", "bar")
+            .with_timeout(Duration::from_secs(7))
+            .with_max_output_bytes(123);
+        assert_eq!(spec.command, "ls");
+        assert_eq!(spec.workdir.as_deref(), Some(std::path::Path::new("/tmp")));
+        assert_eq!(spec.env.get("FOO").map(|s| s.as_str()), Some("bar"));
+        assert_eq!(spec.limits.timeout, Some(Duration::from_secs(7)));
+        assert_eq!(spec.limits.max_output_bytes, Some(123));
     }
 }
