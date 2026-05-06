@@ -22,10 +22,16 @@
 //!   formats supported by `russh-keys`). When the key file is encrypted,
 //!   set `key_passphrase_env` to the env var holding the passphrase.
 //! - `password_env` set → password auth from the named env var.
-//! - Neither set → tries publickey-from-agent, falling back to none.
-//!   This last branch only succeeds against hosts that explicitly
-//!   `PermitEmptyPasswords yes`, which we expect to be vanishingly
-//!   rare. The point is to avoid panicking on misconfiguration.
+//! - Neither set → falls back to `authenticate_none` ("none" auth
+//!   method, RFC 4252 §5.2). This only succeeds against hosts that
+//!   accept the `none` method (vanishingly rare in practice — most
+//!   sshd configs reject it). The fallback exists so a misconfigured
+//!   backend returns a clean [`ExecError::AuthFailure`] rather than
+//!   panicking. **There is no SSH-agent fallback** — `russh` exposes
+//!   one but we don't wire it up; operators who want agent auth
+//!   should explicitly point `key_path` at a key file. (Removed the
+//!   stale "publickey-from-agent" claim that the #4677 review
+//!   surfaced as drift between doc and code.)
 //!
 //! ## Host-key verification
 //!
