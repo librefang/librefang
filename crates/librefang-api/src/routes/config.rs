@@ -2104,6 +2104,7 @@ pub fn ui_sections_overlay() -> serde_json::Value {
                 "cors_origin", "trust_forwarded_for",
                 "cron_session_max_tokens", "cron_session_max_messages",
                 "cron_session_warn_fraction", "cron_session_warn_total_tokens",
+                "cron_session_compaction_mode", "cron_session_compaction_keep_recent",
                 "strict_config"
             ]
         },
@@ -2158,6 +2159,7 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         {"key": "prompt_intelligence", "struct_field": "prompt_intelligence"},
         {"key": "rate_limit", "struct_field": "rate_limit"},
         {"key": "tool_invoke", "struct_field": "tool_invoke"},
+        {"key": "tool_exec", "struct_field": "tool_exec"},
         {"key": "parallel_tools", "struct_field": "parallel_tools"},
         {"key": "tool_results", "struct_field": "tool_results"},
         {"key": "compaction", "struct_field": "compaction"},
