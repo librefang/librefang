@@ -1064,6 +1064,7 @@ impl WorkflowEngine {
                 reason: "Interrupted by daemon shutdown".to_string(),
                 paused_at: now,
             };
+            self.upsert_run_to_store(run);
             drained += 1;
         }
         if drained > 0 || !self.runs.is_empty() {
@@ -2571,40 +2572,6 @@ impl WorkflowEngine {
         }
 
         Ok(imported)
-    }
-
-    /// Transition Running/Pending runs to Failed and persist.
-    ///
-    /// Called during kernel shutdown to ensure in-flight runs are
-    /// recorded as interrupted rather than silently disappearing.
-    /// Each transitioned run is immediately upserted to SQLite (or
-    /// included in the JSON batch persist).
-    pub fn drain_on_shutdown(&self) {
-        let now = Utc::now();
-        let mut drained: usize = 0;
-        for mut entry in self.runs.iter_mut() {
-            let run = entry.value_mut();
-            if !matches!(
-                run.state,
-                WorkflowRunState::Running | WorkflowRunState::Pending
-            ) {
-                continue;
-            }
-            info!(
-                run_id = %run.id,
-                state = ?run.state,
-                "Draining in-flight workflow run on shutdown"
-            );
-            run.state = WorkflowRunState::Failed;
-            run.error = Some("Interrupted by daemon shutdown".to_string());
-            run.completed_at = Some(now);
-            run.clear_pause_state();
-            drained += 1;
-        }
-        if drained > 0 {
-            info!(drained, "Drained in-flight workflow runs on shutdown");
-            self.persist_runs();
-        }
     }
 }
 
