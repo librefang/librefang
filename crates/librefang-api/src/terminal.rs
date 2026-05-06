@@ -5,6 +5,16 @@ use std::io::{Read, Write};
 use tokio::sync::mpsc;
 use tracing::info;
 
+/// `TERM` advertised to the spawned shell / tmux. xterm.js (the dashboard
+/// terminal emulator) speaks the xterm-256color escape-sequence set, and
+/// every modern terminfo database — including the Docker base image
+/// (`node:*-bookworm-slim`, via `ncurses-base`) — ships the matching entry.
+/// Setting it explicitly fixes #4675: when the daemon is launched without a
+/// controlling TTY (docker `CMD`, systemd, supervisord) it inherits an empty
+/// or `dumb` `TERM`, and tmux exits immediately with `open terminal failed:
+/// terminal does not support clear` because it cannot find the cap entry.
+const TERMINAL_TERM: &str = "xterm-256color";
+
 pub struct PtySession {
     _master: Box<dyn portable_pty::MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send>,
@@ -34,6 +44,12 @@ impl PtySession {
 
         let mut cmd = CommandBuilder::new(shell.clone());
         // No args — spawn an interactive shell
+
+        // #4675: pin TERM so the shell and any TUI it launches see a value
+        // backed by the host's terminfo database instead of the (often empty
+        // or `dumb`) value inherited from a daemon process started without a
+        // TTY. Same rationale and value for the tmux path below.
+        cmd.env("TERM", TERMINAL_TERM);
 
         // Set CWD to the user's home directory so the shell does not inherit
         // the daemon's working directory, which would expose server internals.
@@ -133,6 +149,11 @@ impl PtySession {
 
         // Clear TMUX env to prevent nesting when daemon inherits user's tmux session.
         cmd.env("TMUX", "");
+
+        // #4675: tmux refuses to start if the inherited TERM has no terminfo
+        // entry (`open terminal failed: terminal does not support clear`).
+        // Pin to the value xterm.js speaks; see TERMINAL_TERM doc-comment.
+        cmd.env("TERM", TERMINAL_TERM);
 
         // CWD = $HOME, not daemon's working directory.
         let home_dir = {
@@ -265,5 +286,19 @@ pub fn is_running_as_root() -> bool {
     #[cfg(not(unix))]
     {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #4675 contract lock: the public TERM value the dashboard's xterm.js
+    /// expects, and the value tmux looks up in terminfo. Changing it without
+    /// updating xterm.js / Dockerfile assumptions will silently re-break
+    /// tmux on container hosts.
+    #[test]
+    fn terminal_term_is_xterm_256color() {
+        assert_eq!(TERMINAL_TERM, "xterm-256color");
     }
 }
