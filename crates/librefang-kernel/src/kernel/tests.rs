@@ -7311,7 +7311,13 @@ async fn reload_config_with_invalid_toml_preserves_live_config() {
     // Write a valid baseline config.toml that round-trips through KernelConfig
     // serialization — this is what the kernel will load at boot AND what
     // `reload_config` will read on the next tick if we leave it untouched.
-    let baseline = KernelConfig {
+    //
+    // Clamp first so the on-disk file matches what `boot_with_config` actually
+    // holds in memory (it clamps too at construction time). Without this, a
+    // future change that lands a `Default` value outside the clamp window
+    // would silently desync test fixture vs. live state and quietly hollow
+    // out this regression's coverage.
+    let mut baseline = KernelConfig {
         home_dir: home_dir.clone(),
         data_dir: home_dir.join("data"),
         default_model: DefaultModelConfig {
@@ -7325,6 +7331,7 @@ async fn reload_config_with_invalid_toml_preserves_live_config() {
         },
         ..KernelConfig::default()
     };
+    baseline.clamp_bounds();
     let baseline_toml = toml::to_string_pretty(&baseline).expect("serialize baseline config");
     let config_path = home_dir.join("config.toml");
     std::fs::write(&config_path, &baseline_toml).expect("write baseline config.toml");
