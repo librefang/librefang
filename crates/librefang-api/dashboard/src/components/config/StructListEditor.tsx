@@ -35,15 +35,30 @@ function defaultItemFor(itemSchema: JsonSchema | undefined, root: ConfigSchemaRo
     for (const [k, node] of Object.entries(target.properties)) {
       if (node.default !== undefined) {
         out[k] = node.default;
-      } else if (Array.isArray(node.type) ? node.type.includes("null") : false) {
+        continue;
+      }
+      // schemars emits `Option<T>` as `type: ["T", "null"]`. Picking the
+      // non-null branch lets us still produce a sensible default for
+      // optional integer / boolean / array fields instead of falling
+      // through to the empty-string default (round-4 review of #4678).
+      const rawType = node.type;
+      const effectiveType: string | undefined = Array.isArray(rawType)
+        ? rawType.find((t) => t !== "null")
+        : rawType;
+      const nullable = Array.isArray(rawType) && rawType.includes("null");
+      if (nullable && node.default === undefined) {
+        // Optional fields default to null rather than to the zero-value of
+        // the inner type — matches Rust's `Option::None` round-trip.
         out[k] = null;
-      } else if (node.type === "boolean") {
+        continue;
+      }
+      if (effectiveType === "boolean") {
         out[k] = false;
-      } else if (node.type === "integer" || node.type === "number") {
+      } else if (effectiveType === "integer" || effectiveType === "number") {
         out[k] = 0;
-      } else if (node.type === "array") {
+      } else if (effectiveType === "array") {
         out[k] = [];
-      } else if (node.type === "object") {
+      } else if (effectiveType === "object") {
         out[k] = {};
       } else {
         out[k] = "";
@@ -51,6 +66,34 @@ function defaultItemFor(itemSchema: JsonSchema | undefined, root: ConfigSchemaRo
     }
   }
   return out;
+}
+
+// Stable runtime ids for items so React's key= prop tracks each row
+// across reorders/removals. Stored in a non-enumerable property so the
+// JSON.stringify of an item the user sees in the textarea doesn't
+// surface this implementation detail. We re-attach on incoming items
+// that don't have one yet (e.g. from a fresh /api/config GET).
+let itemIdCounter = 0;
+function newItemId(): string {
+  itemIdCounter += 1;
+  return `i${itemIdCounter}`;
+}
+const ITEM_ID = Symbol("structListEditor.itemId");
+type WithItemId = { [ITEM_ID]?: string };
+function ensureItemId(item: unknown): string {
+  if (item !== null && typeof item === "object") {
+    const obj = item as WithItemId;
+    if (typeof obj[ITEM_ID] === "string") return obj[ITEM_ID]!;
+    const id = newItemId();
+    Object.defineProperty(obj, ITEM_ID, {
+      value: id,
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+    return id;
+  }
+  return newItemId();
 }
 
 type Props = {
@@ -85,7 +128,11 @@ export function StructListEditor({ value, onChange, itemSchema, schemaRoot }: Pr
       )}
       {items.map((item, idx) => (
         <StructListRow
-          key={idx}
+          // Stable id survives reordering / removal so the row's
+          // expanded state and in-progress JSON edit don't desync to
+          // the wrong item when a sibling row is deleted (round-4
+          // review of #4678).
+          key={ensureItemId(item)}
           headline={headlineFor(item, idx)}
           item={item}
           onChange={(next) => updateItem(idx, next)}

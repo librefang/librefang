@@ -634,14 +634,22 @@ export function ConfigPage({ category }: { category: string }) {
         // Cascading: when provider changes in default_model, clear model if
         // the current selection doesn't belong to the new provider. Pulls
         // the model catalog straight from the x-ui-options overlay.
+        //
+        // If the catalog hasn't loaded yet (schema query still pending) we
+        // can't tell whether the existing model is still valid, so we
+        // conservatively clear it — better to ask the user to re-pick than
+        // to leave a stale (provider, model) pair that fails at the LLM
+        // call site (round-4 review of #4678).
         if (sectionKey === "default_model" && fieldKey === "provider" && value) {
           const modelPath = "default_model.model";
           const currentModel = modelPath in p ? p[modelPath] : getNestedValue(configQuery.data ?? {}, "default_model", "model");
-          const modelOptions = schemaRoot?.["x-ui-options"]?.["/default_model/model"]?.select_objects;
-          if (modelOptions && currentModel) {
-            const modelBelongsToProvider = modelOptions.some(
-              (m) => m.id === String(currentModel) && m.provider === String(value),
-            );
+          if (currentModel) {
+            const modelOptions = schemaRoot?.["x-ui-options"]?.["/default_model/model"]?.select_objects;
+            const modelBelongsToProvider = modelOptions
+              ? modelOptions.some(
+                  (m) => m.id === String(currentModel) && m.provider === String(value),
+                )
+              : false;
             if (!modelBelongsToProvider) {
               next[modelPath] = null;
             }
