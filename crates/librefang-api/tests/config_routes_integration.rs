@@ -786,6 +786,33 @@ async fn config_reload_with_broken_include_returns_error_and_preserves_live_conf
     .await;
 }
 
+/// End-to-end regression locking in the `live config unchanged` reload-
+/// boundary contract for the *post-loader* validation path
+/// (`config_reload::validate_config_for_reload`). The strict loader
+/// accepts the file (parses cleanly, deserialises into a valid
+/// `KernelConfig`), but the validator rejects the result — e.g.
+/// `network_enabled = true` with an empty `network.shared_secret`.
+///
+/// Without the contract being uniform, a future regression on this
+/// branch would surface as a confusing assertion-helper diff rather
+/// than the clear "wrapper missing" message. Asserting the substring
+/// here means the helper covers every reload-rejection branch
+/// regardless of which one trips.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_reload_with_validation_failure_returns_error_and_preserves_live_config() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    assert_reload_rejects_and_preserves_default_model(
+        &h,
+        "config.toml",
+        // Parses + deserialises fine; validator refuses because
+        // network_enabled requires a non-empty shared_secret.
+        "network_enabled = true\n[network]\nshared_secret = \"\"\n",
+        &[],
+        "post-loader validation failure",
+    )
+    .await;
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/health/detail (#3776)
 //

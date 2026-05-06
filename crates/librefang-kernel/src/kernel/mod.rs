@@ -12420,9 +12420,17 @@ system_prompt = "You are a helpful assistant."
         // startup path normally corrects.
         new_config.clamp_bounds();
 
-        // Validate new config
+        // Validate new config. Use the same `live config unchanged` wrapper as
+        // the strict-loader path so every reload-rejection error carries the
+        // operator-actionable pledge — both for log readability and so the
+        // integration helper `assert_reload_rejects_and_preserves_default_model`
+        // (api crate) can assert reload-boundary semantics with one substring
+        // regardless of which inner branch tripped.
         if let Err(errors) = validate_config_for_reload(&new_config) {
-            return Err(format!("Validation failed: {}", errors.join("; ")));
+            return Err(format!(
+                "Config reload failed; live config unchanged: validation: {}",
+                errors.join("; ")
+            ));
         }
 
         // Build the reload plan against the live capability set so changes
