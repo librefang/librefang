@@ -9,7 +9,13 @@ import { useMcpServers } from "../lib/queries/mcp";
 import { usePeers } from "../lib/queries/network";
 import { useSchedules } from "../lib/queries/schedules";
 import { useSessions } from "../lib/queries/sessions";
-import { useBudgetStatus } from "../lib/queries/analytics";
+import {
+  useBudgetStatus,
+  useUsageDaily,
+  useUsageByAgent,
+  useUsageByModel,
+  useModelPerformance,
+} from "../lib/queries/analytics";
 
 vi.mock("../lib/queries/overview", () => ({
   useDashboardSnapshot: vi.fn(),
@@ -42,6 +48,10 @@ vi.mock("../lib/queries/sessions", () => ({
 
 vi.mock("../lib/queries/analytics", () => ({
   useBudgetStatus: vi.fn(),
+  useUsageDaily: vi.fn(),
+  useUsageByAgent: vi.fn(),
+  useUsageByModel: vi.fn(),
+  useModelPerformance: vi.fn(),
 }));
 
 vi.mock("react-i18next", async () => {
@@ -69,6 +79,10 @@ const usePeersMock = usePeers as unknown as ReturnType<typeof vi.fn>;
 const useSchedulesMock = useSchedules as unknown as ReturnType<typeof vi.fn>;
 const useSessionsMock = useSessions as unknown as ReturnType<typeof vi.fn>;
 const useBudgetStatusMock = useBudgetStatus as unknown as ReturnType<typeof vi.fn>;
+const useUsageDailyMock = useUsageDaily as unknown as ReturnType<typeof vi.fn>;
+const useUsageByAgentMock = useUsageByAgent as unknown as ReturnType<typeof vi.fn>;
+const useUsageByModelMock = useUsageByModel as unknown as ReturnType<typeof vi.fn>;
+const useModelPerformanceMock = useModelPerformance as unknown as ReturnType<typeof vi.fn>;
 
 function setQuickInitDefault(): void {
   useQuickInitMock.mockReturnValue({
@@ -86,6 +100,10 @@ function setSidecarHooksDefault(): void {
   useSchedulesMock.mockReturnValue({ data: [] });
   useSessionsMock.mockReturnValue({ data: [] });
   useBudgetStatusMock.mockReturnValue({ data: undefined });
+  useUsageDailyMock.mockReturnValue({ data: { days: [], today_cost_usd: 0 } });
+  useUsageByAgentMock.mockReturnValue({ data: [] });
+  useUsageByModelMock.mockReturnValue({ data: [] });
+  useModelPerformanceMock.mockReturnValue({ data: [] });
 }
 
 function renderPage(): void {
