@@ -260,6 +260,16 @@ async fn try_summarize_trim(
     };
     use librefang_types::message::{Message, MessageContent, Role};
 
+    // Fast-fail when the caller could not resolve a model name (e.g. the agent
+    // disappeared from the registry between cron tick and prune). With an empty
+    // model name `compact_messages` would still walk stage-1 (with retries) →
+    // stage-2 (chunked) → stage-3 (fallback placeholder) and only then return
+    // `used_fallback = true`, holding the per-session mutex and one cron_lane
+    // slot for the full fail-out chain. Skip straight to the prune fallback.
+    if model.is_empty() {
+        return None;
+    }
+
     let raw_tail_start = messages.len().saturating_sub(keep_recent);
 
     // Adjust so we never split an Assistant{ToolUse} / User{ToolResult} pair.
@@ -275,9 +285,19 @@ async fn try_summarize_trim(
 
     // We've already split off the kept tail above; tell `compact_messages` to
     // summarise the entire input it receives by setting `keep_recent = 0`.
+    //
+    // `max_retries = 1` (cron-only override): the per-session mutex and one
+    // cron_lane slot are held across this LLM call. The default of 3 retries
+    // inside stage-1 single-pass + the additional stage-2 chunked attempt can
+    // stretch to tens of seconds on a flaky provider, blocking sibling fires
+    // for the same `(agent, "cron")` session. Cron's failure mode is "fall
+    // back to plain prune", so a single attempt is sufficient — operators who
+    // want more aggressive retries should configure them in the aux driver
+    // itself, not amplify them here.
     let compact_cfg = CompactionConfig {
         threshold: 0,
         keep_recent: 0,
+        max_retries: 1,
         ..CompactionConfig::default()
     };
 
@@ -14543,9 +14563,16 @@ system_prompt = "You are a helpful assistant."
                                                     max_messages,
                                                     max_tokens,
                                                 );
-                                                let mutated = keep_count < session.messages.len();
+                                                // "Did the cap demand a shrink?" — set once from
+                                                // the helper's verdict and never re-read inside the
+                                                // mutating arms. All three apply paths (SummarizeTrim
+                                                // success / fallback prune / configured prune) leave
+                                                // the session in a state that needs to be persisted
+                                                // when this is true.
+                                                let needs_compaction =
+                                                    keep_count < session.messages.len();
 
-                                                if mutated {
+                                                if needs_compaction {
                                                     use librefang_types::config::CronCompactionMode;
                                                     // #4683 review: re-route SummarizeTrim → Prune
                                                     // when the cap is too tight for [summary] +
@@ -14591,16 +14618,16 @@ system_prompt = "You are a helpful assistant."
                                                                     librefang_types::config::AuxTask::Compression,
                                                                 );
                                                             // Model: use the agent's model when
-                                                            // available, otherwise the driver's
-                                                            // default (empty string). An empty
-                                                            // model name will almost certainly make
-                                                            // the LLM call fail, in which case
-                                                            // try_summarize_trim returns None and
-                                                            // we fall back to plain prune — but
-                                                            // missing the agent from the registry
-                                                            // mid-cron is a symptom of a registry
-                                                            // / scheduler inconsistency that should
-                                                            // be visible in logs.
+                                                            // available, otherwise an empty string.
+                                                            // `try_summarize_trim` fast-fails on
+                                                            // empty model names so we skip the LLM
+                                                            // call (and the per-session mutex hold
+                                                            // it would imply) entirely and route
+                                                            // straight to the plain-prune fallback
+                                                            // below. Missing the agent from the
+                                                            // registry mid-cron is a symptom of a
+                                                            // registry / scheduler inconsistency
+                                                            // worth surfacing in logs.
                                                             let model = match kernel_job
                                                                 .registry
                                                                 .get(agent_id)
@@ -14617,8 +14644,7 @@ system_prompt = "You are a helpful assistant."
                                                                         session_id = %cron_sid,
                                                                         job = %job_name,
                                                                         "cron SummarizeTrim: agent missing from registry; \
-                                                                         summary call will use empty model name and almost \
-                                                                         certainly fall back to plain prune"
+                                                                         skipping LLM summary and falling back to plain prune"
                                                                     );
                                                                     String::new()
                                                                 }
@@ -14705,6 +14731,18 @@ system_prompt = "You are a helpful assistant."
                                                         as u64;
                                                     if estimated >= threshold {
                                                         let budget = max_tokens.or(warn_fallback);
+                                                        // `post_compaction` distinguishes "we just
+                                                        // shrank and the session is still over the
+                                                        // soft threshold" (real signal — the
+                                                        // current fire's content is large) from
+                                                        // "the session was already over threshold
+                                                        // before any compaction" (operator should
+                                                        // tighten the cap). After SummarizeTrim
+                                                        // succeeds, the synthetic summary message
+                                                        // can itself be large enough to keep the
+                                                        // estimate above threshold, so this warn
+                                                        // landing right after a successful
+                                                        // compaction is expected — not a bug.
                                                         tracing::warn!(
                                                             agent_id = %agent_id,
                                                             session_id = %cron_sid,
@@ -14713,6 +14751,7 @@ system_prompt = "You are a helpful assistant."
                                                             threshold = threshold,
                                                             budget = ?budget,
                                                             messages = session.messages.len(),
+                                                            post_compaction = needs_compaction,
                                                             "cron session approaching context budget — \
                                                              consider lowering cron_session_max_tokens, \
                                                              enabling cron_session_max_messages, or \
@@ -14720,7 +14759,7 @@ system_prompt = "You are a helpful assistant."
                                                         );
                                                     }
                                                 }
-                                                if mutated {
+                                                if needs_compaction {
                                                     let _ = kernel_job
                                                         .memory
                                                         .save_session_async(&session)

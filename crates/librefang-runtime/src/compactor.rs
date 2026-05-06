@@ -876,6 +876,13 @@ pub async fn compact_session(
 /// chunked → minimal fallback), `used_fallback` flagged when the LLM is
 /// unavailable, and `adjust_split_for_tool_pair` applied at the head/tail
 /// boundary.
+///
+/// **Internal helper** — exposed publicly only so the kernel's
+/// `try_summarize_trim` (#3693) can call across the runtime ↔ kernel crate
+/// boundary. Treat the signature as workspace-internal: it may change without
+/// a semver bump and is not intended for external dependents (mirrors the
+/// `#[doc(hidden)]` carve-out on [`adjust_split_for_tool_pair`]).
+#[doc(hidden)]
 pub async fn compact_messages(
     driver: Arc<dyn LlmDriver>,
     model: &str,
