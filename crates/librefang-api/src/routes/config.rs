@@ -2694,6 +2694,18 @@ fn is_writable_config_path(path: &str) -> bool {
         "provider_proxy_urls",
         "provider_request_timeout_secs",
         "tool_timeouts",
+        // ── Round-5 review of #4678 — safe network knobs ──
+        // The whole `network.` prefix was withdrawn (see SECTION_PREFIXES
+        // comment below) because `network.bootstrap_peers` was reachable
+        // as a depth-1 leaf and post-auth flips would redirect DHT
+        // discovery to attacker-controlled peers. The display knobs
+        // listed here have no peer-redirection or auth surface.
+        // Excludes `listen_addresses` (binding 0.0.0.0 post-auth would
+        // expose a previously loopback-only API surface — edit on disk),
+        // and excludes `bootstrap_peers` / `shared_secret`.
+        "network.mdns_enabled",
+        "network.max_peers",
+        "network.max_messages_per_peer_per_minute",
     ];
     if EXACT.contains(&path) {
         return true;
@@ -2803,8 +2815,14 @@ fn is_writable_config_path(path: &str) -> bool {
         // load-bearing identity fields aren't in SCRUB. Edit on disk.
         // Terminal access controls.
         "terminal.",
-        // Network behaviour (shared_secret SCRUB-blocked).
-        "network.",
+        // Note: `network.` is intentionally NOT here (round-5 review of
+        // #4678). `network.bootstrap_peers` was reachable as a depth-1
+        // leaf and is a `Vec<String>`; an Owner-role attacker who flipped
+        // it post-auth could redirect DHT discovery to attacker peers
+        // (parallel threat model to the round-4 removal of `proxy.`
+        // for outbound LLM MITM). Safe display knobs (`mdns_enabled`,
+        // `max_peers`, `max_messages_per_peer_per_minute`) are EXACT-listed
+        // above; everything else stays edit-on-disk.
         // Approval policy fields are intentionally NOT a section prefix:
         // the existing EXACT list above covers the safe display knobs
         // (`auto_approve_autonomous`, `auto_approve`, `totp_grace_period_secs`),
@@ -2819,13 +2837,35 @@ fn is_writable_config_path(path: &str) -> bool {
         "plugins.",
         "skills.",
     ];
+    // Section prefixes where the depth-1 leaf (vendor / collection-element)
+    // is itself a struct containing credential-shaped fields that
+    // SCRUB_SUFFIXES cannot police inside a wholesale JSON payload.
+    // Writes against these prefixes must be depth-2 (per-leaf) only —
+    // same defect class round-4 explicitly removed `sidecar_channels` /
+    // `fallback_providers` / `taint_rules` for. Round-5 review of #4678.
+    //
+    // `channels.<vendor>` is `OneOrMany<*Config>` containing
+    // `*_token_env` / `*_secret_env` / etc.; depth-1 wholesale-replacement
+    // would let an Owner-role caller redirect the env-var that resolves
+    // a bot/API token. Depth-2 (`channels.telegram.enabled` etc.) goes
+    // through SCRUB_SUFFIXES which catches the `_env` blanket.
+    const DEPTH_2_ONLY_PREFIXES: &[&str] = &["channels."];
     let in_section = SECTION_PREFIXES.iter().any(|pfx| {
-        path.starts_with(pfx) && path.len() > pfx.len() && !path[pfx.len()..].contains('.')
-            // Allow a single nested level too (e.g. "channels.telegram.enabled")
-            || path.starts_with(pfx) && {
-                let rest = &path[pfx.len()..];
-                rest.split('.').count() == 2
-            }
+        if !path.starts_with(pfx) {
+            return false;
+        }
+        let rest = &path[pfx.len()..];
+        if rest.is_empty() {
+            return false;
+        }
+        let segments = rest.split('.').count();
+        if DEPTH_2_ONLY_PREFIXES.contains(pfx) {
+            segments == 2
+        } else {
+            // Single leaf (e.g. "web.search_provider") or one nested level
+            // (e.g. "default_model.provider") — not deeper.
+            segments == 1 || segments == 2
+        }
     });
     if !in_section {
         return false;
@@ -3411,6 +3451,30 @@ url = "https://search.example.com"
         assert!(!super::is_writable_config_path("sidecar_channels"));
         assert!(!super::is_writable_config_path("fallback_providers"));
         assert!(!super::is_writable_config_path("taint_rules"));
+
+        // ── Round-5 review of #4678 ──────────────────────────────────
+        // `channels.<vendor>` (depth-1 wholesale-replace) MUST reject;
+        // depth-2 leaves under the same vendor stay open (per-field
+        // toggles via the dashboard).
+        assert!(!super::is_writable_config_path("channels.telegram"));
+        assert!(!super::is_writable_config_path("channels.discord"));
+        assert!(!super::is_writable_config_path("channels.slack"));
+        assert!(!super::is_writable_config_path("channels.whatsapp"));
+        assert!(!super::is_writable_config_path("channels.matrix"));
+        assert!(!super::is_writable_config_path("channels.email"));
+        assert!(super::is_writable_config_path("channels.telegram.enabled"));
+        assert!(super::is_writable_config_path("channels.discord.enabled"));
+
+        // `network.bootstrap_peers` MUST reject (DHT MITM via post-auth
+        // peer redirect, threat model parallel to the round-4 removal
+        // of `proxy.http_proxy`). Display knobs stay open via EXACT.
+        assert!(!super::is_writable_config_path("network.bootstrap_peers"));
+        assert!(!super::is_writable_config_path("network.listen_addresses"));
+        assert!(super::is_writable_config_path("network.mdns_enabled"));
+        assert!(super::is_writable_config_path("network.max_peers"));
+        assert!(super::is_writable_config_path(
+            "network.max_messages_per_peer_per_minute"
+        ));
     }
 
     #[test]
