@@ -6841,3 +6841,91 @@ fn cron_compute_keep_count_single_giant_message_returns_one_or_zero() {
         "single message fitting the budget exactly → keep 1"
     );
 }
+
+// ---------------------------------------------------------------------------
+// cron_clamp_keep_recent (#3693 PR #4683 review feedback)
+//
+// Regression coverage for the cap-violation bug where SummarizeTrim used the
+// raw cron_session_compaction_keep_recent without considering the active size
+// cap. The clamp guarantees [summary] + tail ≤ keep_count.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cron_clamp_keep_recent_respects_cap() {
+    // keep_count = 5 ⇒ tail ≤ 4 (one slot reserved for the summary).
+    assert_eq!(cron_clamp_keep_recent(8, 5), 4);
+    assert_eq!(cron_clamp_keep_recent(4, 5), 4);
+    assert_eq!(cron_clamp_keep_recent(3, 5), 3);
+}
+
+#[test]
+fn cron_clamp_keep_recent_preserves_user_value_when_under_cap() {
+    // keep_count = 100, user wants 8 → 8 (no clamp needed).
+    assert_eq!(cron_clamp_keep_recent(8, 100), 8);
+}
+
+#[test]
+fn cron_clamp_keep_recent_floor_is_one() {
+    // keep_count = 1 → cap permits a single message; clamp floors at 1.
+    // try_summarize_trim will then short-circuit because tail_start ==
+    // messages.len() once keep_recent ≥ n; the kernel falls back to plain
+    // prune in that case — exercising the floor here is just defensive.
+    assert_eq!(cron_clamp_keep_recent(8, 1), 1);
+    assert_eq!(cron_clamp_keep_recent(0, 1), 1);
+}
+
+#[test]
+fn cron_clamp_keep_recent_keep_count_zero_floors_to_one() {
+    // keep_count = 0 (cap would empty the session) — saturating_sub stays
+    // at 0, the .max(1) floor pulls the result back to 1. The caller is
+    // responsible for noticing keep_count == 0 separately; this only
+    // guarantees we never return 0 to try_summarize_trim, which would
+    // make tail_start == messages.len() and skip summarization entirely.
+    assert_eq!(cron_clamp_keep_recent(8, 0), 1);
+}
+
+#[test]
+fn cron_clamp_keep_recent_zero_cfg_floors_to_one() {
+    // Defensive: even though resolve_cron_max_* coerce 0 to None upstream,
+    // the helper itself must never return 0 because try_summarize_trim
+    // treats tail_start == messages.len() as "nothing to summarize".
+    assert_eq!(cron_clamp_keep_recent(0, 5), 1);
+}
+
+#[test]
+fn cron_clamp_combined_with_compute_keep_count_invariant() {
+    // End-to-end invariant for the SummarizeTrim path: across realistic
+    // (n, max_messages, keep_recent_cfg) combos, the post-compaction size
+    // (1 summary + clamped tail) must always satisfy the cap that
+    // cron_compute_keep_count would have produced.
+    use librefang_types::message::Message;
+
+    // Only cases where the kernel actually enters SummarizeTrim
+    // (i.e. keep_count < n, so `mutated == true`) and the cap allows
+    // at least the [summary] + 1-msg-tail minimum (keep_count >= 2).
+    let cases = [
+        // (n, max_messages, keep_recent_cfg)
+        (20, Some(5), 8),  // user wants 8, cap allows 5 → tail = 4 → result = 5
+        (20, Some(10), 8), // user wants 8, cap allows 10 → tail = 8 → result = 9
+        (20, Some(2), 8),  // tight cap → tail = 1 → result = 2
+    ];
+
+    for (n, max_msgs, keep_recent_cfg) in cases {
+        let messages: Vec<Message> = (0..n).map(|i| Message::user(format!("m{i}"))).collect();
+        let keep_count = cron_compute_keep_count(&messages, max_msgs, None);
+        // Sanity: this case should be one that triggers compaction.
+        assert!(
+            keep_count < n && keep_count >= 2,
+            "test case precondition: keep_count={keep_count} must be in [2, n) for n={n}"
+        );
+
+        let tail = cron_clamp_keep_recent(keep_recent_cfg, keep_count);
+        let post_size = 1 + tail; // [summary] + tail
+
+        assert!(
+            post_size <= keep_count,
+            "case (n={n}, max_messages={max_msgs:?}, keep_recent_cfg={keep_recent_cfg}): \
+             post_size={post_size} must fit within keep_count={keep_count}"
+        );
+    }
+}

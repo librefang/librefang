@@ -252,12 +252,11 @@ fn adjust_split_does_not_cut_tool_use_tool_result_pair() {
         role: Role::User,
         content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
             tool_use_id: tool_use_id.clone(),
-            content: vec![ContentBlock::Text {
-                text: "hi".to_string(),
-                provider_metadata: None,
-            }],
+            tool_name: String::new(),
+            content: "hi".to_string(),
             is_error: false,
-            provider_metadata: None,
+            status: librefang_types::tool::ToolExecutionStatus::default(),
+            approval_request_id: None,
         }]),
         pinned: false,
         timestamp: None,

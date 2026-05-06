@@ -175,6 +175,25 @@ pub(crate) fn cron_compute_keep_count(
     }
 }
 
+/// Clamp the configured `cron_session_compaction_keep_recent` so that
+/// `[summary] + tail` never exceeds the size cap.
+///
+/// `keep_count` is the result of `cron_compute_keep_count` — i.e. how many
+/// messages the cap would allow on its own. After `SummarizeTrim`, the
+/// session contains `1 + tail_size` messages, so `tail_size` must be at
+/// most `keep_count - 1`. We also enforce a floor of `1` to keep at least
+/// one message of context after the summary.
+///
+/// Without this clamp, e.g. `cron_session_max_messages = 5` and
+/// `cron_session_compaction_keep_recent = 8` would yield `1 + 8 = 9`
+/// messages on the first fire (cap violated) and on subsequent fires
+/// `try_summarize_trim` would summarize a single message into a single
+/// summary, burning aux LLM calls without ever shrinking the session
+/// (#3693 review feedback on PR #4683).
+pub(crate) fn cron_clamp_keep_recent(keep_recent_cfg: usize, keep_count: usize) -> usize {
+    keep_recent_cfg.min(keep_count.saturating_sub(1)).max(1)
+}
+
 /// Apply a plain prune (drain-from-front) to a cron session, keeping the
 /// newest `session.messages.len() - drop_count` messages.
 ///
@@ -202,6 +221,11 @@ fn apply_cron_prune(session: &mut librefang_memory::session::Session, drop_count
 /// `tail_start` to `0` (nothing left to summarize) or to `messages.len()` (the
 /// keep_recent window consumed everything), `None` is returned immediately so the
 /// caller can decide whether to prune or skip.
+///
+/// Note: the caller holds the per-session mutex (`_prune_guard`) across this
+/// await, which spans the entire LLM summary call. This is intentional — it
+/// serialises `SummarizeTrim` runs on the same session so two concurrent fires
+/// cannot each start a summary against the same un-compacted snapshot.
 async fn try_summarize_trim(
     messages: &[librefang_types::message::Message],
     keep_recent: usize,
@@ -14528,21 +14552,49 @@ system_prompt = "You are a helpful assistant."
                                                                 );
                                                             // Model: use the agent's model when
                                                             // available, otherwise the driver's
-                                                            // default (empty string).
-                                                            let model = kernel_job
+                                                            // default (empty string). An empty
+                                                            // model name will almost certainly make
+                                                            // the LLM call fail, in which case
+                                                            // try_summarize_trim returns None and
+                                                            // we fall back to plain prune — but
+                                                            // missing the agent from the registry
+                                                            // mid-cron is a symptom of a registry
+                                                            // / scheduler inconsistency that should
+                                                            // be visible in logs.
+                                                            let model = match kernel_job
                                                                 .registry
                                                                 .get(agent_id)
-                                                                .map(|e| {
+                                                            {
+                                                                Some(e) => {
                                                                     librefang_runtime::agent_loop::strip_provider_prefix(
                                                                         &e.manifest.model.model,
                                                                         &e.manifest.model.provider,
                                                                     )
-                                                                })
-                                                                .unwrap_or_default();
+                                                                }
+                                                                None => {
+                                                                    tracing::warn!(
+                                                                        agent_id = %agent_id,
+                                                                        session_id = %cron_sid,
+                                                                        job = %job_name,
+                                                                        "cron SummarizeTrim: agent missing from registry; \
+                                                                         summary call will use empty model name and almost \
+                                                                         certainly fall back to plain prune"
+                                                                    );
+                                                                    String::new()
+                                                                }
+                                                            };
 
+                                                            // Clamp keep_recent so [summary] + tail
+                                                            // never exceeds the size cap (see
+                                                            // cron_clamp_keep_recent for rationale).
+                                                            let effective_keep_recent =
+                                                                cron_clamp_keep_recent(
+                                                                    keep_recent_cfg,
+                                                                    keep_count,
+                                                                );
                                                             match try_summarize_trim(
                                                                 &session.messages,
-                                                                keep_recent_cfg,
+                                                                effective_keep_recent,
                                                                 driver,
                                                                 &model,
                                                                 cron_sid,

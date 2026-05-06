@@ -149,7 +149,17 @@ Number of messages preserved verbatim **after** the summary (the "tail").
 Only meaningful when `cron_session_compaction_mode = "summarize_trim"`.
 
 - Default: `8`
-- Minimum: `1` (values below are clamped to `1`)
+- Minimum: `1` (values below are clamped at runtime to `1` via `.max(1)` in
+  cron fire dispatch, before `SummarizeTrim` splits the session)
+- Effective maximum: bounded by the size cap. The post-compaction session is
+  `[1 summary] + tail`, so the runtime clamps `keep_recent` to `keep_count - 1`
+  where `keep_count` is the number of messages the cap would allow on its own.
+  Concretely: with `cron_session_max_messages = 5` and
+  `cron_session_compaction_keep_recent = 8`, the runtime uses `keep_recent = 4`
+  (= `5 - 1`) so the result is exactly 5 messages. Without this clamp the next
+  fire would still violate the cap (1 summary + 8 tail = 9) and the loop would
+  re-summarize 1 message into 1 summary forever, burning aux LLM calls without
+  making progress.
 
 **Example config.toml:**
 
@@ -181,16 +191,13 @@ other's read-modify-write. However, the global `cron_lane` semaphore that caps
 total in-flight cron fires is **not scoped per session** — it only limits how
 many fires execute concurrently across the whole daemon.
 
-`SummarizeTrim` amplifies the race window significantly: a plain prune takes
-microseconds, while an LLM summary call may take several seconds. During that
-window a second fire for the same agent can:
-
-1. Acquire the per-session mutex (the first fire released it before calling the
-   LLM).
-2. Load the same session — which has not yet been compacted.
-3. Run to completion and write back its response.
-4. The first fire then writes its compacted session, silently overwriting the
-   second fire's new messages (last-write-wins).
+`SummarizeTrim` holds the per-session mutex **across the entire LLM summary
+call** (which may take several seconds). This is intentional: it serialises
+`SummarizeTrim` runs on the same session so two concurrent fires cannot each
+start a summary against the same un-compacted snapshot. The side effect is that
+a second fire for the same agent that also needs to prune will **block** at the
+mutex until the first fire's summary + apply completes, and it holds one slot of
+the `cron_lane` semaphore for the full duration of the LLM call.
 
 **Mitigation**: if an agent has multiple cron jobs that need independent context
 or if missing a fire's output is unacceptable, configure those jobs (or the
