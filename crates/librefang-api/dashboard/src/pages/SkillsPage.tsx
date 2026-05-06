@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { formatDate } from "../lib/datetime";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   type ClawHubBrowseItem,
@@ -172,7 +172,7 @@ interface SkillCardProps {
   t: (key: string, opts?: Record<string, unknown>) => string;
 }
 
-function SkillCard({
+const SkillCard = React.memo(function SkillCard({
   name,
   version,
   description,
@@ -354,7 +354,6 @@ function SkillCard({
           ) : null}
         </div>
 
-        {/* Tags */}
         {tags && tags.length > 0 && (
           <div className="flex flex-wrap gap-1">
             {tags.slice(0, 4).map((tag) => (
@@ -370,7 +369,7 @@ function SkillCard({
       </div>
     </Card>
   );
-}
+});
 
 // ─── Category chips ───────────────────────────────────────────────────────────
 
@@ -884,12 +883,14 @@ function EvolveUploadPane({
   onSubmit,
   onCancel,
   busy,
+  addToast,
   t,
 }: {
   skillName: string;
   onSubmit: (params: { path: string; content: string }) => void;
   onCancel: () => void;
   busy: boolean;
+  addToast: (msg: string, type: "success" | "error" | "info") => void;
   t: (key: string, opts?: Record<string, unknown>) => string;
 }) {
   const [subdir, setSubdir] = useState("references");
@@ -899,8 +900,9 @@ function EvolveUploadPane({
 
   const handleFilePick = async (file: File) => {
     if (file.size > 1024 * 1024) {
-      alert(
+      addToast(
         t("skills.evo_file_too_large", { defaultValue: "File exceeds 1 MiB limit" }),
+        "error",
       );
       return;
     }
@@ -1084,11 +1086,17 @@ function SkillDetailModal({
   const [pane, setPane] = useState<EvolvePane>("none");
   const [viewingFile, setViewingFile] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<{
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  } | null>(null);
 
   useEffect(() => {
     if (!isOpen) {
       setPane("none");
       setViewingFile(null);
+      setConfirmAction(null);
     }
   }, [isOpen, skillName]);
 
@@ -1109,64 +1117,68 @@ function SkillDetailModal({
 
   const handleRollback = () => {
     if (!skillName) return;
-    if (
-      !confirm(
-        t("skills.evo_rollback_confirm", {
-          defaultValue:
-            "Roll back to the previous version? This cannot be undone unless you patch again.",
-        }),
-      )
-    )
-      return;
-    void runMutation(
-      () => rollbackMutation.mutateAsync({ name: skillName }),
-      t("skills.evo_rolled_back", { defaultValue: "Skill rolled back" }),
-    );
+    setConfirmAction({
+      title: t("skills.evo_rollback", { defaultValue: "Rollback" }),
+      message: t("skills.evo_rollback_confirm", {
+        defaultValue:
+          "Roll back to the previous version? This cannot be undone unless you patch again.",
+      }),
+      onConfirm: () => {
+        setConfirmAction(null);
+        void runMutation(
+          () => rollbackMutation.mutateAsync({ name: skillName }),
+          t("skills.evo_rolled_back", { defaultValue: "Skill rolled back" }),
+        );
+      },
+    });
   };
 
   const handleRemoveFile = (path: string) => {
     if (!skillName) return;
-    if (
-      !confirm(
-        t("skills.evo_remove_file_confirm", {
-          defaultValue: `Remove ${path}?`,
-          path,
-        }),
-      )
-    )
-      return;
-    void runMutation(
-      () => removeFileMutation.mutateAsync({ name: skillName, path }),
-      t("skills.evo_file_removed", { defaultValue: "File removed" }),
-    );
+    setConfirmAction({
+      title: t("skills.evo_remove_file", { defaultValue: "Remove File" }),
+      message: t("skills.evo_remove_file_confirm", {
+        defaultValue: `Remove ${path}?`,
+        path,
+      }),
+      onConfirm: () => {
+        setConfirmAction(null);
+        void runMutation(
+          () => removeFileMutation.mutateAsync({ name: skillName, path }),
+          t("skills.evo_file_removed", { defaultValue: "File removed" }),
+        );
+      },
+    });
   };
 
   const handleDelete = () => {
     if (!skillName) return;
-    if (
-      !confirm(
-        t("skills.evo_delete_confirm", {
-          defaultValue: `Permanently delete ${skillName}? This cannot be undone.`,
-          name: skillName,
-        }),
-      )
-    )
-      return;
-    (async () => {
-      setBusy(true);
-      try {
-        await deleteSkillMutation.mutateAsync({ name: skillName });
-        addToast(
-          t("skills.evo_deleted", { defaultValue: "Skill deleted" }),
-          "success",
-        );
-        onClose();
-      } catch (e: unknown) {
-        addToast(e instanceof Error ? e.message : t("skills.evo_delete_failed"), "error");
-      } finally {
-        setBusy(false);
-      }
-    })();
+    setConfirmAction({
+      title: t("skills.evo_delete", { defaultValue: "Delete" }),
+      message: t("skills.evo_delete_confirm", {
+        defaultValue: `Permanently delete ${skillName}? This cannot be undone.`,
+        name: skillName,
+      }),
+      onConfirm: () => {
+        const name = skillName;
+        setConfirmAction(null);
+        (async () => {
+          setBusy(true);
+          try {
+            await deleteSkillMutation.mutateAsync({ name });
+            addToast(
+              t("skills.evo_deleted", { defaultValue: "Skill deleted" }),
+              "success",
+            );
+            onClose();
+          } catch (e: unknown) {
+            addToast(e instanceof Error ? e.message : t("skills.evo_delete_failed"), "error");
+          } finally {
+            setBusy(false);
+          }
+        })();
+      },
+    });
   };
 
   return (
@@ -1300,6 +1312,7 @@ function SkillDetailModal({
               }
               onCancel={() => setPane("none")}
               busy={busy}
+              addToast={addToast}
               t={t}
             />
           )}
@@ -1448,6 +1461,14 @@ function SkillDetailModal({
           {t("skills.evo_not_found", { defaultValue: "Skill not found" })}
         </p>
       )}
+      <ConfirmDialog
+        isOpen={!!confirmAction}
+        title={confirmAction?.title ?? ""}
+        message={confirmAction?.message ?? ""}
+        tone="destructive"
+        onConfirm={() => confirmAction?.onConfirm()}
+        onClose={() => setConfirmAction(null)}
+      />
     </DrawerPanel>
   );
 }
@@ -1560,39 +1581,35 @@ export function SkillsPage() {
 
   // ── Filtered data ─────────────────────────────────────────────────────────
 
+  const installedSlugSet = useMemo(() => {
+    const set = new Set<string>();
+    for (const s of installedSkills) {
+      const src = s.source;
+      const srcType = src?.type ?? "";
+      const srcSlug = src?.slug;
+      if (srcSlug) {
+        if (srcType === "clawhub" || srcType === "clawhub-cn") {
+          set.add(`clawhub:${srcSlug}`);
+          set.add(`clawhub-cn:${srcSlug}`);
+        } else {
+          set.add(`${srcType}:${srcSlug}`);
+        }
+      }
+      if (srcType === "" || srcType === "local") {
+        set.add(`name:${s.name}`);
+      }
+    }
+    return set;
+  }, [installedSkills]);
+
   const isInstalledFromMarketplace = useCallback(
     (slug: string, src: MarketplaceSource) => {
-      // clawhub and clawhub-cn share the same slug namespace (same content)
-      const matchTypes =
-        src === "clawhub" || src === "clawhub-cn"
-          ? ["clawhub", "clawhub-cn"]
-          : [src];
-      return installedSkills.some((s) => {
-        const sourceType = s.source?.type ?? "";
-        const sourceSlug = s.source?.slug;
-        if (matchTypes.includes(sourceType) && sourceSlug === slug) {
-          return true;
-        }
-        // #4689 fallback — some install paths (notably the FangHub registry
-        // copy and historical ClawHub installs that pre-date provenance
-        // patching) leave `manifest.source` either unset or set to "local",
-        // which makes the strict (type, slug) match miss freshly installed
-        // skills. Falling back to a name match against the slug is conservative
-        // because skill names and hub slugs share a kebab-case namespace and
-        // collisions across hubs are rare; the user-visible cost of a false
-        // positive (button shows "Installed" when it isn't) is far smaller
-        // than the false negative the issue reports (button stays clickable
-        // and re-clicking 409s with "already installed").
-        if (
-          (sourceType === "" || sourceType === "local") &&
-          s.name === slug
-        ) {
-          return true;
-        }
-        return false;
-      });
+      if (src === "clawhub" || src === "clawhub-cn") {
+        return installedSlugSet.has(`clawhub:${slug}`) || installedSlugSet.has(`clawhub-cn:${slug}`) || installedSlugSet.has(`name:${slug}`);
+      }
+      return installedSlugSet.has(`${src}:${slug}`) || installedSlugSet.has(`name:${slug}`);
     },
-    [installedSkills],
+    [installedSlugSet],
   );
 
   /** Items from a non-fanghub remote registry, normalized with

@@ -1,5 +1,5 @@
 import { formatCompact, formatCost } from "../lib/format";
-import { useMemo, useState, useCallback } from "react";
+import { useMemo, useState, useCallback, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import type { UsageByAgentItem, UsageByModelItem, UsageDailyItem } from "../api";
 import { useUsageSummary, useUsageByAgent, useUsageByModel, useUsageDaily, useModelPerformance, useBudgetStatus } from "../lib/queries/analytics";
@@ -54,7 +54,10 @@ export function AnalyticsPage() {
       .sort((a, b) => (b.total_cost_usd ?? 0) - (a.total_cost_usd ?? 0)),
     [usageByAgentQuery.data],
   );
-  const usageByModel = (usageByModelQuery.data ?? []) as AnalyticsModelRow[];
+  const usageByModel = useMemo<AnalyticsModelRow[]>(
+    () => (usageByModelQuery.data ?? []) as AnalyticsModelRow[],
+    [usageByModelQuery.data],
+  );
   const daily = dailyQuery.data ?? null;
   const modelPerformance = modelPerformanceQuery.data ?? [];
 
@@ -63,6 +66,8 @@ export function AnalyticsPage() {
   const dailyChartData = useMemo(() => (daily?.days || []).slice(-30).map((d: UsageDailyItem) => ({ ...d, date: (d.date || "").slice(5), cost: d.cost_usd || 0 })), [daily]);
 
   const [budgetForm, setBudgetForm] = useState<Partial<BudgetForm>>({});
+  const budgetResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (budgetResetTimerRef.current) clearTimeout(budgetResetTimerRef.current); }, []);
 
   const isLoading =
     usageQuery.isLoading ||
@@ -157,7 +162,7 @@ export function AnalyticsPage() {
       dailyQuery.refetch(),
       modelPerformanceQuery.refetch(),
       budgetQuery.refetch(),
-    ]);
+    ]).catch(() => {});
   }, [usageQuery, usageByAgentQuery, usageByModelQuery, dailyQuery, modelPerformanceQuery, budgetQuery]);
 
   return (
@@ -213,7 +218,7 @@ export function AnalyticsPage() {
               {usageByAgent.length === 0 ? (
                 <EmptyState icon={<Users />} title={t("common.no_data")} description={t("analytics.no_agent_data")} />
               ) : (
-                <ResponsiveContainer width="100%" height={Math.max(usageByAgent.length * 36, 100)}>
+                <ResponsiveContainer width="100%" height={Math.min(Math.max(usageByAgent.length * 36, 100), 600)}>
                   <BarChart data={agentChartData} layout="vertical" margin={{ left: 0, right: 20 }}>
                     <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
@@ -232,7 +237,7 @@ export function AnalyticsPage() {
               {usageByModel.length === 0 ? (
                 <EmptyState icon={<Cpu />} title={t("common.no_data")} description={t("analytics.no_model_data")} />
               ) : (
-                <ResponsiveContainer width="100%" height={Math.max(usageByModel.length * 36, 100)}>
+                <ResponsiveContainer width="100%" height={Math.min(Math.max(usageByModel.length * 36, 100), 600)}>
                   <BarChart data={modelChartData} layout="vertical" margin={{ left: 0, right: 20 }}>
                     <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
@@ -401,7 +406,13 @@ export function AnalyticsPage() {
                     const parsed = parseFloat(budgetForm.alert);
                     if (!isNaN(parsed) && parsed >= 0) payload.alert_threshold = parsed;
                   }
-                  budgetMutation.mutate(payload);
+                  budgetMutation.mutate(payload, {
+                    onSuccess: () => {
+                      setBudgetForm({});
+                      if (budgetResetTimerRef.current) clearTimeout(budgetResetTimerRef.current);
+                      budgetResetTimerRef.current = setTimeout(() => budgetMutation.reset(), 2000);
+                    },
+                  });
                 }}
                 disabled={budgetMutation.isPending}>
                 {budgetMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Save className="w-3.5 h-3.5 mr-1" />}
