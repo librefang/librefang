@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -93,6 +93,22 @@ export function SettingsPage() {
   const setLanguage = useUIStore((s) => s.setLanguage);
   const navLayout = useUIStore((s) => s.navLayout);
   const setNavLayout = useUIStore((s) => s.setNavLayout);
+
+  const themeOptions = useMemo(() => [
+    { value: "light" as const, icon: Sun, label: t("settings.theme_light") },
+    { value: "dark" as const, icon: Moon, label: t("settings.theme_dark") },
+  ], [t]);
+
+  const languageOptions = useMemo(() => [
+    { value: "en" as const, icon: Globe, label: "English" },
+    { value: "zh" as const, icon: Globe, label: "中文" },
+  ], []);
+
+  const navLayoutOptions = useMemo(() => [
+    { value: "grouped" as const, icon: PanelLeft, label: t("settings.nav_grouped") },
+    { value: "collapsible" as const, icon: PanelLeftClose, label: t("settings.nav_collapsible") },
+  ], [t]);
+
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
       <PageHeader
@@ -119,10 +135,7 @@ export function SettingsPage() {
             <SegmentControl
               value={theme}
               onChange={(v) => v !== theme && toggleTheme()}
-              options={[
-                { value: "light", icon: Sun, label: t("settings.theme_light") },
-                { value: "dark", icon: Moon, label: t("settings.theme_dark") },
-              ]}
+              options={themeOptions}
             />
           </SettingRow>
 
@@ -135,10 +148,7 @@ export function SettingsPage() {
             <SegmentControl
               value={language}
               onChange={setLanguage}
-              options={[
-                { value: "en", icon: Globe, label: "English" },
-                { value: "zh", icon: Globe, label: "中文" },
-              ]}
+              options={languageOptions}
             />
           </SettingRow>
 
@@ -151,10 +161,7 @@ export function SettingsPage() {
             <SegmentControl
               value={navLayout}
               onChange={setNavLayout}
-              options={[
-                { value: "grouped", icon: PanelLeft, label: t("settings.nav_grouped") },
-                { value: "collapsible", icon: PanelLeftClose, label: t("settings.nav_collapsible") },
-              ]}
+              options={navLayoutOptions}
             />
           </SettingRow>
         </div>
@@ -528,27 +535,38 @@ function ConfigBackupSection() {
 // hours" label. Returns "never" when ts is 0 or undefined — the status
 // endpoint omits `next_eligible_at_ms` for never-dreamed agents, and
 // `last_consolidated_at_ms` is 0 in the same case.
-function formatRelativeMs(ts: number | undefined, now: number): string {
-  if (ts === undefined || ts === 0) return "never";
+function formatRelativeMs(
+  ts: number | undefined,
+  now: number,
+  locale: string,
+  t: (key: string) => string,
+): string {
+  if (ts === undefined || ts === 0) return t("common.never");
   const diff = ts - now;
-  const absHours = Math.abs(diff) / 3_600_000;
-  if (absHours < 1) {
-    const mins = Math.round(Math.abs(diff) / 60_000);
-    return diff >= 0 ? `in ${mins}m` : `${mins}m ago`;
+  const absMinutes = Math.abs(diff) / 60_000;
+  const rtf = new Intl.RelativeTimeFormat(locale, {
+    numeric: "auto",
+    style: "narrow",
+  });
+  if (absMinutes < 60) {
+    return rtf.format(Math.round(diff / 60_000), "minute");
   }
-  const h = absHours >= 24 ? `${(absHours / 24).toFixed(1)}d` : `${absHours.toFixed(1)}h`;
-  return diff >= 0 ? `in ${h}` : `${h} ago`;
+  const absHours = absMinutes / 60;
+  if (absHours < 24) {
+    return rtf.format(parseFloat((diff / 3_600_000).toFixed(1)), "hour");
+  }
+  return rtf.format(parseFloat((diff / 86_400_000).toFixed(1)), "day");
 }
 
 // Human-readable duration for effective_min_hours. Switches between hours,
 // days, and weeks so "every 168h" renders as "every 1w" etc.
-function formatHours(hours: number): string {
-  if (hours < 1) return `${(hours * 60).toFixed(0)}m`;
-  if (hours < 24) return `${hours % 1 === 0 ? hours.toFixed(0) : hours.toFixed(1)}h`;
+function formatHours(hours: number, t: (key: string) => string): string {
+  if (hours < 1) return `${(hours * 60).toFixed(0)}${t("settings.auto_dream_dur_minute")}`;
+  if (hours < 24) return `${hours % 1 === 0 ? hours.toFixed(0) : hours.toFixed(1)}${t("settings.auto_dream_dur_hour")}`;
   const days = hours / 24;
-  if (days < 7) return `${days % 1 === 0 ? days.toFixed(0) : days.toFixed(1)}d`;
+  if (days < 7) return `${days % 1 === 0 ? days.toFixed(0) : days.toFixed(1)}${t("settings.auto_dream_dur_day")}`;
   const weeks = days / 7;
-  return `${weeks % 1 === 0 ? weeks.toFixed(0) : weeks.toFixed(1)}w`;
+  return `${weeks % 1 === 0 ? weeks.toFixed(0) : weeks.toFixed(1)}${t("settings.auto_dream_dur_week")}`;
 }
 
 function AutoDreamAgentRow({
@@ -570,7 +588,7 @@ function AutoDreamAgentRow({
   abortPending: boolean;
   togglePending: boolean;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const now = Date.now();
   const progress = agent.progress;
   const running = progress?.status === "running";
@@ -612,10 +630,10 @@ function AutoDreamAgentRow({
             {optedIn ? (
               <p className="text-[11px] text-text-dim">
                 {t("settings.auto_dream_last", "Last")}:{" "}
-                {formatRelativeMs(agent.last_consolidated_at_ms, now)}
+                {formatRelativeMs(agent.last_consolidated_at_ms, now, i18n.language, t)}
                 {" · "}
                 {t("settings.auto_dream_next", "Next")}:{" "}
-                {formatRelativeMs(agent.next_eligible_at_ms, now)}
+                {formatRelativeMs(agent.next_eligible_at_ms, now, i18n.language, t)}
                 {" · "}
                 {agent.effective_min_sessions > 0 ? (
                   <span
@@ -641,7 +659,7 @@ function AutoDreamAgentRow({
                   )}
                 >
                   {t("settings.auto_dream_every", "every")}{" "}
-                  {formatHours(agent.effective_min_hours)}
+                  {formatHours(agent.effective_min_hours, t)}
                 </span>
               </p>
             ) : running ? (
@@ -895,9 +913,9 @@ function AutoDreamSection() {
                 onTrigger={onTrigger}
                 onAbort={onAbort}
                 onToggle={onToggle}
-                triggerPending={trigger.isPending}
-                abortPending={abort.isPending}
-                togglePending={setEnabled.isPending}
+                triggerPending={trigger.isPending && trigger.variables === a.agent_id}
+                abortPending={abort.isPending && abort.variables === a.agent_id}
+                togglePending={setEnabled.isPending && setEnabled.variables?.agentId === a.agent_id}
               />
             ))}
           </div>
