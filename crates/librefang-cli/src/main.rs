@@ -13640,6 +13640,81 @@ input_schema = { type = "object" }
         assert_eq!(hex, "0123456789abcdef0123456789abcdef");
     }
 
+    /// Pins the daemon's compact-format behavior: when an event fires inside
+    /// a span carrying `agent.id` / `session.id` fields, the rendered line
+    /// MUST include both as inline span suffix tokens (the format
+    /// `tracing-subscriber`'s `Compact` formatter emits is
+    /// `<level> <span_name>: <message> <field>=<value> ...`). Daemon log
+    /// search relies on this to correlate any line back to the originating
+    /// agent + session — see also the `#[instrument]` on `run_agent_loop`
+    /// in `librefang-runtime/src/agent_loop.rs`.
+    #[test]
+    fn with_trace_id_compact_format_carries_agent_and_session_ids_from_span() {
+        use super::WithTraceId;
+        use std::sync::{Arc, Mutex};
+        use tracing::{info_span, warn};
+        use tracing_subscriber::fmt::MakeWriter;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone)]
+        struct VecWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for VecWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for VecWriter {
+            type Writer = VecWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = VecWriter(buf.clone());
+        let inner = tracing_subscriber::fmt::format()
+            .without_time()
+            .with_target(false)
+            .compact();
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .event_format(WithTraceId(inner));
+        let subscriber = tracing_subscriber::registry().with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = info_span!(
+                "run_agent_loop",
+                agent.id = "agent-uuid-aaaa",
+                session.id = "session-uuid-bbbb",
+            );
+            let _entered = span.enter();
+            warn!("shell exec full mode");
+        });
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).expect("utf8");
+        assert!(
+            captured.contains("agent.id=\"agent-uuid-aaaa\""),
+            "expected agent.id span field in line, got: {captured:?}"
+        );
+        assert!(
+            captured.contains("session.id=\"session-uuid-bbbb\""),
+            "expected session.id span field in line, got: {captured:?}"
+        );
+        assert!(
+            captured.contains("run_agent_loop"),
+            "expected span name prefix, got: {captured:?}"
+        );
+        assert!(
+            captured.contains("shell exec full mode"),
+            "expected original message preserved, got: {captured:?}"
+        );
+    }
+
     // --- Daemon detection / launcher port logic (#3582) ---
     //
     // These exercise the `find_daemon_with_probe` core, which was extracted
