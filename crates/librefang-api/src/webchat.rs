@@ -101,15 +101,28 @@ fn embedded_dashboard_available() -> bool {
     REACT_DIST.get_file("index.html").is_some()
 }
 
-/// Returns `true` when the operator has opted into embedded-only dashboard
-/// mode via [`EMBEDDED_ONLY_ENV`]. Any of `1`, `true`, `yes`, `on` (case
-/// insensitive) counts as truthy.
+/// BossFang fork: always serve the compile-time-embedded dashboard so the
+/// upstream `sync_dashboard` path can never overwrite our branded assets by
+/// downloading from `github.com/librefang/librefang`.
+///
+/// Default is **embedded-only** (returns `true`). Opt out by setting
+/// `LIBREFANG_DASHBOARD_EMBEDDED_ONLY=0` (or `false`, `no`, `off`) if you
+/// explicitly want the runtime-dir override for local dev.
 fn embedded_only_mode() -> bool {
-    is_embedded_only_value(std::env::var(EMBEDDED_ONLY_ENV).ok().as_deref())
+    // BossFang default: embedded-only=true unless explicitly opted out.
+    match std::env::var(EMBEDDED_ONLY_ENV).ok().as_deref() {
+        Some(v) => {
+            let n = v.trim().to_ascii_lowercase();
+            // A falsy value opts OUT of embedded-only (i.e. allows runtime dir).
+            !matches!(n.as_str(), "0" | "false" | "no" | "off")
+        }
+        None => true, // default: always use embedded BossFang assets
+    }
 }
 
 /// Pure parser split out so tests can exercise the value grammar without
 /// touching process-global environment state.
+#[cfg(test)]
 fn is_embedded_only_value(raw: Option<&str>) -> bool {
     match raw {
         Some(v) => {
