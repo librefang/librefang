@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { wechatQrStart, wechatQrStatus, whatsappQrStart, whatsappQrStatus, type ChannelItem } from "../api";
 import { useChannels } from "../lib/queries/channels";
@@ -57,7 +57,7 @@ interface ChannelCardProps {
   t: (key: string, opts?: { defaultValue?: string }) => string;
 }
 
-function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, onViewDetails, t }: ChannelCardProps) {
+const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, onViewDetails, t }: ChannelCardProps) {
   // Whole-card click opens the details drawer. Inner controls
   // (checkbox, Configure button) call e.stopPropagation() so the
   // card-level handler doesn't fire when the user clicks them.
@@ -133,7 +133,7 @@ function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, 
       )}
     </Card>
   );
-}
+});
 
 // Details Modal
 function DetailsModal({ channel, onClose, onConfigure, onTest, t }: {
@@ -462,6 +462,7 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
       // The backend holds each request ~30s (long-poll), so setInterval would
       // stack up parallel requests that all resolve at once on scan → flashing UI.
       const pollLoop = async () => {
+        let retries = 0;
         while (!cancelledRef.current && pollIdRef.current === pollId) {
           try {
             const status = await qrStatus(res.qr_code!);
@@ -491,6 +492,12 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
           } catch {
             // Transient error — wait briefly then retry
             if (cancelledRef.current || pollIdRef.current !== pollId) break;
+            retries += 1;
+            if (retries >= 15) {
+              setPhase("error");
+              setMessage(t("channels.qr_failed") || "Connection lost. Please try again.");
+              return;
+            }
             await new Promise(r => setTimeout(r, 3000));
           }
         }
@@ -592,10 +599,15 @@ export function ChannelsPage() {
       onError: (err) => addToast(toastErr(err, t("common.error")), "error"),
     });
   };
+  const closeQrLogin = useCallback(() => setQrLoginChannel(null), []);
+  const handleCardConfigure = useCallback((ch: Channel) => {
+    if (ch.setup_type === "qr") setQrLoginChannel(ch);
+    else setConfiguringChannel(ch);
+  }, []);
 
   const channels = channelsQuery.data ?? [];
   const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);
-  const unconfiguredCount = useMemo(() => channels.filter(c => !c.configured).length, [channels]);
+  const unconfiguredCount = channels.length - configuredCount;
 
   // Configured channels are the main page content. Filter/sort applies
   // to those only; the unconfigured catalog lives behind the Add picker.
@@ -614,8 +626,6 @@ export function ChannelsPage() {
       }),
     [channels, search, sortField, sortOrder],
   );
-
-  const paginatedChannels = filteredChannels;
 
   // Catalog of unconfigured channel types, surfaced in the Add picker.
   const pickerChannels = useMemo(
@@ -647,24 +657,24 @@ export function ChannelsPage() {
     }
   };
 
-  const handleSelect = (name: string, checked: boolean) => {
+  const handleSelect = useCallback((name: string, checked: boolean) => {
     setSelectedIds(prev => {
       const next = new Set(prev);
       if (checked) next.add(name);
       else next.delete(name);
       return next;
     });
-  };
+  }, []);
 
   const handleSelectAll = () => {
-    if (selectedIds.size === paginatedChannels.length) {
+    if (selectedIds.size === filteredChannels.length) {
       setSelectedIds(new Set());
     } else {
-      setSelectedIds(new Set(paginatedChannels.map(c => c.name)));
+      setSelectedIds(new Set(filteredChannels.map(c => c.name)));
     }
   };
 
-  const allSelected = paginatedChannels.length > 0 && selectedIds.size === paginatedChannels.length;
+  const allSelected = filteredChannels.length > 0 && selectedIds.size === filteredChannels.length;
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -801,14 +811,14 @@ export function ChannelsPage() {
           </div>
 
           <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
-            {paginatedChannels.map((c) => (
+            {filteredChannels.map((c) => (
               <ChannelCard
                 key={c.name}
                 channel={c}
                 isSelected={selectedIds.has(c.name)}
                 viewMode={viewMode}
                 onSelect={handleSelect}
-                onConfigure={(ch) => ch.setup_type === "qr" ? setQrLoginChannel(ch) : setConfiguringChannel(ch)}
+                onConfigure={handleCardConfigure}
                 onViewDetails={setDetailsChannel}
                 t={t}
               />
@@ -840,6 +850,7 @@ export function ChannelsPage() {
       {/* Config Dialog */}
       {configuringChannel && (
         <ConfigDialog
+          key={configuringChannel?.name}
           channel={configuringChannel}
           onClose={() => setConfiguringChannel(null)}
           t={t}
@@ -850,7 +861,7 @@ export function ChannelsPage() {
       {qrLoginChannel && (
         <QrLoginDialog
           channel={qrLoginChannel}
-          onClose={() => setQrLoginChannel(null)}
+          onClose={closeQrLogin}
           t={t}
         />
       )}
