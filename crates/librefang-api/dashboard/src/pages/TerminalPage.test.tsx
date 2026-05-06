@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -121,13 +121,18 @@ vi.mock("../lib/queries/terminal", () => ({
   useTerminalHealth: (...args: unknown[]) => useTerminalHealthMock(...args),
 }));
 
-vi.mock("../lib/store", () => ({
-  useUIStore: (selector: (state: {
+vi.mock("../lib/store", () => {
+  const useUIStore = (selector: (state: {
     terminalEnabled: boolean | null;
     addToast: (message: string, type?: "success" | "error" | "info") => void;
-  }) => unknown) =>
-    useUIStoreMock(selector),
-}));
+  }) => unknown) => useUIStoreMock(selector);
+  // The reconnect path reads `useUIStore.getState().toasts` to grab the
+  // most-recent toast id; expose a stub so the test that exercises a
+  // reconnect doesn't crash on a missing static method.
+  (useUIStore as unknown as { getState: () => { toasts: unknown[] } }).getState =
+    () => ({ toasts: [] });
+  return { useUIStore };
+});
 
 vi.mock("../components/TerminalTabs", () => ({
   TerminalTabs: (props: {
@@ -215,6 +220,131 @@ describe("TerminalPage", () => {
     });
     expect(invalidateQueries).not.toHaveBeenCalledWith({ queryKey: ["terminal"] });
     expect(invalidateQueries).not.toHaveBeenCalledWith({ queryKey: ["terminal", "health"] });
+  });
+
+  it("stops auto-reconnect after consecutive fast-failed launches (#4675)", async () => {
+    // Two back-to-back connections that get `started` and then `exit` with
+    // a non-zero code inside the FAST_EXIT_WINDOW_MS slot must trip the
+    // give-up path: no third socket, error banner shows the giveup string.
+    vi.useFakeTimers();
+    try {
+      renderPage();
+
+      const fastFail = async (ws: MockWebSocket) => {
+        await act(async () => {
+          ws.emitOpen();
+          ws.emitMessage({ type: "started", shell: "tmux", pid: 1234 });
+          ws.emitMessage({ type: "exit", code: 1 });
+          // The reconnect path requires either wsRef===null or
+          // readyState===CLOSED; mirror what a real WS close would do.
+          ws.readyState = MockWebSocket.CLOSED;
+          ws.onclose?.({ code: 1006, reason: "" } as unknown as CloseEvent);
+        });
+      };
+
+      // First fast-fail — handler classifies as transient, schedules a
+      // reconnect with the 2 s base delay; counter goes 0 → 1.
+      await fastFail(MockWebSocket.instances[0]);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(MockWebSocket.instances.length).toBe(2);
+
+      // Second fast-fail — counter goes 1 → 2, hits MAX_CONSECUTIVE_FAST_FAILS.
+      await fastFail(MockWebSocket.instances[1]);
+      await act(async () => {
+        // Long enough to cover any delayed retry that should NOT fire.
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(MockWebSocket.instances.length).toBe(2);
+      expect(screen.getByText("terminal.fast_exit_giveup")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers after giveup when user clicks Connect (#4675)", async () => {
+    // After two consecutive fast-fails the auto-reconnect bails. The
+    // manual Connect button must reset both ceilings (auto-attempt
+    // counter AND consecutive-fast-fail counter) so the user can retry
+    // once they fix the host config — without reloading the page.
+    // Without manualConnect resetting `consecutiveFastFailRef`, a
+    // fresh click would immediately re-bail on the next close.
+    vi.useFakeTimers();
+    try {
+      renderPage();
+
+      const fastFail = async (ws: MockWebSocket) => {
+        await act(async () => {
+          ws.emitOpen();
+          ws.emitMessage({ type: "started", shell: "tmux", pid: 1234 });
+          ws.emitMessage({ type: "exit", code: 1 });
+          ws.readyState = MockWebSocket.CLOSED;
+          ws.onclose?.({ code: 1006, reason: "" } as unknown as CloseEvent);
+        });
+      };
+
+      // Trip the giveup with two consecutive fast-fails.
+      await fastFail(MockWebSocket.instances[0]);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      await fastFail(MockWebSocket.instances[1]);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(MockWebSocket.instances.length).toBe(2);
+      expect(screen.getByText("terminal.fast_exit_giveup")).toBeInTheDocument();
+
+      // User clicks Connect — manualConnect must reset both ceilings
+      // and open a third socket. fireEvent stays synchronous;
+      // userEvent's internal timers conflict with the fake-timer
+      // scope this test runs under.
+      act(() => {
+        fireEvent.click(
+          screen.getByRole("button", { name: "terminal.connect" })
+        );
+      });
+      expect(MockWebSocket.instances.length).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops auto-reconnect when WS opens but never receives `started` (#4675)", async () => {
+    // Host-side spawn-failure path: the daemon accepts the WS handshake
+    // but cannot reach the point of sending `started` (shell binary
+    // missing, PTY allocation fails, panic during spawn). The server
+    // closes the WS within FAST_EXIT_WINDOW_MS of `open`. Two of these
+    // in a row must trip the same giveup as the started→exit-fast path.
+    vi.useFakeTimers();
+    try {
+      renderPage();
+
+      const fastFailNoStarted = async (ws: MockWebSocket) => {
+        await act(async () => {
+          ws.emitOpen();
+          // No `started`, no `exit` — the server just closed.
+          ws.readyState = MockWebSocket.CLOSED;
+          ws.onclose?.({ code: 1006, reason: "" } as unknown as CloseEvent);
+        });
+      };
+
+      await fastFailNoStarted(MockWebSocket.instances[0]);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(MockWebSocket.instances.length).toBe(2);
+
+      await fastFailNoStarted(MockWebSocket.instances[1]);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(MockWebSocket.instances.length).toBe(2);
+      expect(screen.getByText("terminal.fast_exit_giveup")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not resend null desired window on reconnect after disconnect before active window", async () => {

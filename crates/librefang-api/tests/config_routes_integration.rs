@@ -329,6 +329,213 @@ async fn config_set_rejects_missing_value_field() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+// ---------------------------------------------------------------------------
+// POST /api/config/set — collection-typed sections (#4678)
+//
+// Round-trips for the BTreeMap<String, String|u64> sections that the
+// dashboard's StringMapEditor / NumberMapEditor save as a whole-blob
+// payload at the section's bare path. Vec<Struct> sections (sidecar_channels,
+// fallback_providers, taint_rules) and tightened-out section prefixes
+// (external_auth, oauth, audit, telemetry, proxy) must be rejected.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_writes_provider_urls_collection_to_toml() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let payload = serde_json::json!({
+        "openai": "https://api.openai.com/v1",
+        "ollama": "http://127.0.0.1:11434/v1",
+    });
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "provider_urls", "value": payload.clone()}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "expected 200 for whole-collection provider_urls write, got {status}: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let written = std::fs::read_to_string(h.home.join("config.toml")).expect("toml exists");
+    let parsed: toml::Value = toml::from_str(&written).expect("valid toml");
+    let urls = parsed
+        .get("provider_urls")
+        .and_then(|v| v.as_table())
+        .expect("provider_urls table present");
+    assert_eq!(
+        urls.get("openai").and_then(|v| v.as_str()),
+        Some("https://api.openai.com/v1"),
+        "wrote: {written}"
+    );
+    assert_eq!(
+        urls.get("ollama").and_then(|v| v.as_str()),
+        Some("http://127.0.0.1:11434/v1"),
+        "wrote: {written}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_writes_tool_timeouts_number_map_to_toml() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "tool_timeouts", "value": {"shell": 60, "fetch": 30}}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "tool_timeouts whole-collection write should round-trip; got {status}: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let written = std::fs::read_to_string(h.home.join("config.toml")).expect("toml exists");
+    let parsed: toml::Value = toml::from_str(&written).expect("valid toml");
+    let timeouts = parsed
+        .get("tool_timeouts")
+        .and_then(|v| v.as_table())
+        .expect("tool_timeouts table");
+    assert_eq!(timeouts.get("shell").and_then(|v| v.as_integer()), Some(60));
+    assert_eq!(timeouts.get("fetch").and_then(|v| v.as_integer()), Some(30));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_rejects_sidecar_channels_whole_blob_write() {
+    // Vec<Struct> sections cannot be whole-blob-written — their items
+    // contain nested env maps that the path-string SCRUB cannot police
+    // when they arrive as a JSON payload at the section's bare path.
+    let h = boot_router_with_api_key(API_KEY).await;
+    let evil_payload = serde_json::json!([
+        {
+            "name": "evil",
+            "command": "/bin/cat",
+            "channel_type": "telegram",
+            "env": {"AWS_SECRET_ACCESS_KEY": "stolen"}
+        }
+    ]);
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "sidecar_channels", "value": evil_payload}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "sidecar_channels whole-blob write must 403; got {status}: {}",
+        String::from_utf8_lossy(&body)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_rejects_fallback_providers_whole_blob_write() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({
+                "path": "fallback_providers",
+                "value": [{"provider": "openai", "model": "gpt-4o", "api_key_env": "STOLEN"}]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_rejects_external_auth_issuer_url() {
+    // external_auth.* is intentionally NOT in SECTION_PREFIXES — flipping
+    // issuer_url post-auth would let an Owner-role attacker redirect login
+    // to an attacker IDP (regression vector for #3703).
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({
+                "path": "external_auth.issuer_url",
+                "value": "https://attacker.example/"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_rejects_audit_anchor_path() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "audit.anchor_path", "value": "/tmp/evil-anchor"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_rejects_telemetry_otlp_endpoint() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({
+                "path": "telemetry.otlp_endpoint",
+                "value": "https://attacker.example:4317"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_rejects_proxy_http_proxy() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "proxy.http_proxy", "value": "http://attacker:8080"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_rejects_env_suffix_redirect_inside_writable_section() {
+    // SCRUB_SUFFIXES extension catches `<anything>_env` so an attacker
+    // can't repoint `default_model.api_key_env` (or any *.token_env /
+    // *.client_secret_env / *.password_env) at an arbitrary daemon env var.
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "default_model.api_key_env", "value": "HOME"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn config_set_requires_auth_when_key_set() {
     let h = boot_router_with_api_key(API_KEY).await;
