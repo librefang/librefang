@@ -20024,8 +20024,8 @@ impl kernel_handle::ToolPolicy for LibreFangKernel {
             return t;
         }
         // 2. Best glob match — longest pattern wins (most specific first).
-        // HashMap iteration is unordered; picking the longest matching pattern
-        // gives deterministic resolution when multiple globs match.
+        // BTreeMap iteration is sorted by key; picking the longest matching
+        // pattern gives deterministic resolution when multiple globs match.
         let best = cfg
             .tool_timeouts
             .iter()

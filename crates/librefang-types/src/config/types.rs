@@ -3040,7 +3040,7 @@ pub struct KernelConfig {
     /// shell_exec    = 300
     /// ```
     #[serde(default)]
-    pub tool_timeouts: std::collections::HashMap<String, u64>,
+    pub tool_timeouts: std::collections::BTreeMap<String, u64>,
     /// Maximum upload size in bytes (default: 10 MB).
     /// Enterprise deployments may need larger file uploads.
     #[serde(default = "default_max_upload_size_bytes")]
@@ -4947,7 +4947,7 @@ impl Default for KernelConfig {
             update_channel: UpdateChannel::default(),
             rate_limit: RateLimitConfig::default(),
             tool_timeout_secs: default_tool_timeout_secs(),
-            tool_timeouts: std::collections::HashMap::new(),
+            tool_timeouts: std::collections::BTreeMap::new(),
             max_upload_size_bytes: default_max_upload_size_bytes(),
             max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
             max_agent_call_depth: default_max_agent_call_depth(),
