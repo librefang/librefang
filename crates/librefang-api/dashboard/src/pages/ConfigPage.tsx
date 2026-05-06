@@ -25,6 +25,8 @@ import {
   useReloadConfig,
 } from "../lib/mutations/config";
 import { TomlViewer } from "../components/TomlViewer";
+import { StringMapEditor } from "../components/config/StringMapEditor";
+import { StructListEditor } from "../components/config/StructListEditor";
 
 /* ------------------------------------------------------------------ */
 /*  Category → sections mapping                                        */
@@ -104,6 +106,10 @@ type FieldRender = {
   min?: number;
   max?: number;
   step?: number;
+  // For "struct_list" fields — the JSON Schema of one item, used to seed
+  // sensible defaults when the user clicks "Add". Only set when type is
+  // "struct_list" (Vec<Struct>) and the items shape is resolvable.
+  itemSchema?: JsonSchema;
 };
 
 function pickType(node: JsonSchema): string {
@@ -234,6 +240,29 @@ function resolveSectionFields(
     }
   }
   if (target?.$ref) target = resolveRef(root, target.$ref);
+
+  // Collection-typed sections (BTreeMap / HashMap / Vec<Struct>) — emit a
+  // single synthetic "field" whose key matches the section key so the
+  // section renders as one editor instead of a property grid. Path
+  // computation in the renderer treats this as root-level so the value is
+  // posted to /api/config/set under the section key directly.
+  if (target?.type === "object" && target.additionalProperties &&
+      typeof target.additionalProperties === "object") {
+    const apType = target.additionalProperties.type;
+    const valueType: "number_map" | "string_map" =
+      apType === "integer" || apType === "number" ? "number_map" : "string_map";
+    return [[desc.key, { type: valueType }]];
+  }
+  if (target?.type === "array" && target.items) {
+    const items = target.items;
+    if (items.$ref || items.type === "object") {
+      return [[desc.key, { type: "struct_list", itemSchema: items }]];
+    }
+    // Vec<String> as a whole-section field (no shipping cases today; falls
+    // through to the existing string[] treatment if the section happens to
+    // wrap a Vec<String>).
+  }
+
   if (!target?.properties) return [];
 
   const declared = Object.entries(target.properties);
@@ -292,6 +321,9 @@ const TYPE_COLORS: Record<string, string> = {
   array:   "text-teal-500 bg-teal-500/10",
   "string[]": "text-teal-500 bg-teal-500/10",
   object:  "text-orange-500 bg-orange-500/10",
+  string_map: "text-pink-500 bg-pink-500/10",
+  number_map: "text-pink-500 bg-pink-500/10",
+  struct_list: "text-indigo-500 bg-indigo-500/10",
   string:  "text-text-dim bg-border-subtle/50",
 };
 
@@ -388,6 +420,7 @@ type SelectOption = string | { id: string; name: string; provider: string } | { 
 
 function ConfigFieldInput({
   fieldKey, fieldType, options, min, max, step, value, onChange,
+  itemSchema, schemaRoot,
 }: {
   fieldKey: string;
   fieldType: string;
@@ -397,6 +430,10 @@ function ConfigFieldInput({
   step?: number;
   value: unknown;
   onChange: (v: unknown) => void;
+  // Only used by `struct_list` to seed sensible defaults when the user
+  // clicks "Add" on a Vec<Struct> section. Optional otherwise.
+  itemSchema?: JsonSchema;
+  schemaRoot?: ConfigSchemaRoot;
 }) {
   const { t } = useTranslation();
   const inputClass =
@@ -465,6 +502,40 @@ function ConfigFieldInput({
 
   if (fieldType === "object") {
     return <JsonEditor value={value} onChange={onChange} />;
+  }
+
+  if (fieldType === "string_map") {
+    return (
+      <StringMapEditor
+        value={value as Record<string, string> | null | undefined}
+        onChange={onChange}
+        valueType="string"
+      />
+    );
+  }
+
+  if (fieldType === "number_map") {
+    return (
+      <StringMapEditor
+        value={value as Record<string, number> | null | undefined}
+        onChange={onChange}
+        valueType="number"
+        min={min}
+        max={max}
+        step={step}
+      />
+    );
+  }
+
+  if (fieldType === "struct_list") {
+    return (
+      <StructListEditor
+        value={Array.isArray(value) ? value : []}
+        onChange={onChange}
+        itemSchema={itemSchema}
+        schemaRoot={schemaRoot}
+      />
+    );
   }
 
   const isSensitive = fieldType === "string" && SENSITIVE_PATTERNS.test(fieldKey);
@@ -971,11 +1042,21 @@ export function ConfigPage({ category }: { category: string }) {
               )}
               <div className="divide-y divide-border-subtle/30">
                 {fieldsToShow.map(([fieldKey, render]) => {
-                  const { type: fieldType, options: rawOptions, min, max, step } = render;
-                  const path = desc.root_level ? fieldKey : `${sKey}.${fieldKey}`;
+                  const { type: fieldType, options: rawOptions, min, max, step, itemSchema } = render;
+                  // Collection-typed sections (string_map / number_map /
+                  // struct_list) emit a single synthetic field whose key
+                  // matches the section key. Treat them as root-level for
+                  // path / value lookup so the editor reads from and posts
+                  // to /<sectionKey>, not /<sectionKey>/<sectionKey>.
+                  const isCollection =
+                    fieldType === "string_map" ||
+                    fieldType === "number_map" ||
+                    fieldType === "struct_list";
+                  const useRootSemantics = desc.root_level || isCollection;
+                  const path = useRootSemantics ? fieldKey : `${sKey}.${fieldKey}`;
                   const currentValue = path in pendingChanges
                     ? pendingChanges[path]
-                    : getNestedValue(config, sKey, fieldKey, desc.root_level);
+                    : getNestedValue(config, sKey, fieldKey, useRootSemantics);
                   const hasPending = path in pendingChanges;
                   const isSaving = saveMutation.isPending && saveMutation.variables?.path === path;
                   const statusForField = saveStatus[path] ?? null;
@@ -1025,7 +1106,9 @@ export function ConfigPage({ category }: { category: string }) {
                           max={max}
                           step={step}
                           value={currentValue}
-                          onChange={(v) => handleFieldChange(sKey, fieldKey, v, desc.root_level)}
+                          onChange={(v) => handleFieldChange(sKey, fieldKey, v, useRootSemantics)}
+                          itemSchema={itemSchema}
+                          schemaRoot={schemaRoot}
                         />
                         {fieldDesc && (
                           <p className="text-[10px] text-text-dim leading-relaxed">{fieldDesc}</p>
