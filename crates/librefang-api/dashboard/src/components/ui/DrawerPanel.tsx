@@ -24,7 +24,11 @@ export interface DrawerPanelProps {
 //      The watcher below detects the external close while we still think
 //      `isOpen=true` and calls `props.onClose()` so the parent flips its
 //      own state. Single source of close-callback firing.
-//   3. Unmount while open → close the store, so a body referencing this
+//   3. Parent-driven close: when the parent flips `isOpen` from true →
+//      false (mutation `onSuccess`, Cancel button, etc.) we tear the
+//      store back down ourselves; otherwise the global slot stays
+//      mounted and the drawer never disappears (#4687).
+//   4. Unmount while open → close the store, so a body referencing this
 //      page's local state never lingers in the global slot.
 export function DrawerPanel({
   isOpen,
@@ -57,6 +61,26 @@ export function DrawerPanel({
       onClose: () => onCloseRef.current(),
     });
   }, [isOpen, title, size, hideCloseButton, children, open]);
+
+  // Parent-driven close: when the parent flips `isOpen` from true → false
+  // (e.g. after a successful mutation in `onSuccess`, or when the Cancel
+  // button calls `setOpen(false)`), tear the store back down so the
+  // global drawer slot collapses. Without this, only Esc / X / mobile
+  // backdrop / unmount could close the drawer — programmatic
+  // dismissals from the parent silently no-op'd, leaving the form
+  // visible with a perpetually spinning submit button (#4687).
+  //
+  // The watcher above guards on `isOpen && wasOpen && !drawerOpen` and
+  // therefore won't double-fire `onClose` on this path: by the time the
+  // store flip lands, `isOpen` is already false.
+  const prevIsOpenRef = useRef(isOpen);
+  useEffect(() => {
+    const wasOpen = prevIsOpenRef.current;
+    prevIsOpenRef.current = isOpen;
+    if (wasOpen && !isOpen && drawerOpen) {
+      close();
+    }
+  }, [isOpen, drawerOpen, close]);
 
   // External close → bubble up to the parent so it can flip its state.
   // Only fires on a real `true → false` transition. On first mount the
