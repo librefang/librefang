@@ -83,14 +83,99 @@ jobs:
               return; // skipped/neutral/etc — nothing to do
             }
 
-            const body = [
-              `Main CI **${conclusion}** on commit ${shortSha}.`,
-              ``,
-              `Run: ${runUrl}`,
-              ``,
-              `Every open PR will inherit this failure on its next CI run.`,
-              `Either land a fix (preferred) or revert the offending merge.`,
-            ].join('\n');
+            // ── Resolve the PR that introduced the breakage ──────────────
+            // The merge commit subject conventionally ends in `(#NNNN)`.
+            // Falling back to the listPullRequestsAssociatedWithCommit API
+            // covers squash-merges that ship without the PR suffix in the
+            // subject. Best-effort — title/body still readable if both fail.
+            let prNumber = null;
+            let commitSubject = '';
+            let commitAuthor = '';
+            try {
+              const { data: commit } = await github.rest.repos.getCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: headSha,
+              });
+              commitSubject = (commit.commit.message || '').split('\n')[0];
+              commitAuthor = commit.author?.login || commit.commit.author?.name || '';
+              const m = commitSubject.match(/\(#(\d+)\)\s*$/);
+              if (m) {
+                prNumber = parseInt(m[1], 10);
+              } else {
+                const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  commit_sha: headSha,
+                });
+                if (prs.length > 0) prNumber = prs[0].number;
+              }
+            } catch (e) {
+              core.warning(`Could not resolve commit metadata for ${shortSha}: ${e.message}`);
+            }
+
+            // ── Enumerate failing jobs (with the failing step's name) ────
+            const failedJobs = [];
+            try {
+              const jobs = await github.paginate(
+                github.rest.actions.listJobsForWorkflowRun,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: context.payload.workflow_run.id,
+                  per_page: 100,
+                }
+              );
+              for (const job of jobs) {
+                if (job.conclusion === 'failure' || job.conclusion === 'timed_out' || job.conclusion === 'cancelled') {
+                  const failedStep = (job.steps || []).find(s => s.conclusion === 'failure' || s.conclusion === 'timed_out');
+                  failedJobs.push({
+                    name: job.name,
+                    conclusion: job.conclusion,
+                    step: failedStep ? failedStep.name : null,
+                    url: job.html_url,
+                  });
+                }
+              }
+            } catch (e) {
+              core.warning(`Could not enumerate failing jobs: ${e.message}`);
+            }
+
+            // ── Build the issue body ─────────────────────────────────────
+            const cleanSubject = commitSubject.replace(/\s*\(#\d+\)\s*$/, '');
+            const lines = [];
+            if (prNumber) {
+              const subj = cleanSubject ? ` — ${cleanSubject}` : '';
+              const by = commitAuthor ? ` by @${commitAuthor}` : '';
+              lines.push(`Main CI **${conclusion}** on PR #${prNumber}${subj}${by} (commit ${shortSha}).`);
+            } else {
+              const subj = cleanSubject ? ` — ${cleanSubject}` : '';
+              const by = commitAuthor ? ` by @${commitAuthor}` : '';
+              lines.push(`Main CI **${conclusion}** on commit ${shortSha}${subj}${by}.`);
+            }
+            lines.push('');
+            lines.push(`Run: ${runUrl}`);
+            lines.push('');
+
+            if (failedJobs.length > 0) {
+              lines.push(`**Failed jobs** (${failedJobs.length}):`);
+              for (const j of failedJobs) {
+                const stepSuffix = j.step ? ` — failed at step \`${j.step}\`` : '';
+                lines.push(`- [${j.name}](${j.url}) (${j.conclusion})${stepSuffix}`);
+              }
+              lines.push('');
+            }
+
+            lines.push(`Every open PR will inherit this failure on its next CI run.`);
+            if (prNumber) {
+              lines.push(`Either land a fix (preferred) or revert PR #${prNumber}.`);
+            } else {
+              lines.push(`Either land a fix (preferred) or revert the offending merge.`);
+            }
+
+            const body = lines.join('\n');
+            const titleSuffix = prNumber ? `PR #${prNumber}` : `${shortSha}`;
+            const title = `[main red] CI ${conclusion} on ${titleSuffix}`;
 
             if (open.length > 0) {
               await github.rest.issues.createComment({
@@ -103,7 +188,7 @@ jobs:
               await github.rest.issues.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                title: `[main red] CI ${conclusion} on ${shortSha}`,
+                title,
                 body,
                 labels: [label],
               });

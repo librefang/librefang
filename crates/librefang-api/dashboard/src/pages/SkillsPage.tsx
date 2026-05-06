@@ -1567,9 +1567,30 @@ export function SkillsPage() {
         src === "clawhub" || src === "clawhub-cn"
           ? ["clawhub", "clawhub-cn"]
           : [src];
-      return installedSkills.some(
-        (s) => matchTypes.includes(s.source?.type ?? "") && s.source?.slug === slug,
-      );
+      return installedSkills.some((s) => {
+        const sourceType = s.source?.type ?? "";
+        const sourceSlug = s.source?.slug;
+        if (matchTypes.includes(sourceType) && sourceSlug === slug) {
+          return true;
+        }
+        // #4689 fallback — some install paths (notably the FangHub registry
+        // copy and historical ClawHub installs that pre-date provenance
+        // patching) leave `manifest.source` either unset or set to "local",
+        // which makes the strict (type, slug) match miss freshly installed
+        // skills. Falling back to a name match against the slug is conservative
+        // because skill names and hub slugs share a kebab-case namespace and
+        // collisions across hubs are rare; the user-visible cost of a false
+        // positive (button shows "Installed" when it isn't) is far smaller
+        // than the false negative the issue reports (button stays clickable
+        // and re-clicking 409s with "already installed").
+        if (
+          (sourceType === "" || sourceType === "local") &&
+          s.name === slug
+        ) {
+          return true;
+        }
+        return false;
+      });
     },
     [installedSkills],
   );

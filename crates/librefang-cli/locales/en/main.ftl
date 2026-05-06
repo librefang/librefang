@@ -28,6 +28,22 @@ daemon-start-fail = Could not start daemon: { $error }
 daemon-start-fail-fix = Start it manually: librefang start
 shutdown-request-fail = Shutdown request failed ({ $status })
 could-not-reach-daemon = Could not reach daemon: { $error }
+# Issue #4693 — after `curl install.sh | sh` upgrades the binary without
+# restarting the running daemon, `librefang restart` (new CLI) hits the old
+# daemon's `/api/shutdown` and is rejected with 401 because the new CLI's
+# Authorization header does not match the old daemon's expected key (typical
+# trigger: locked vault, rotated `[api] api_key`, or freshly enabled
+# dashboard credentials). Surface the cause + auto-fall-back to PID-based
+# shutdown so users can move forward without hand-editing config.
+shutdown-401-detected = Shutdown request was rejected by the running daemon (401 Unauthorized).
+shutdown-401-explainer = The new CLI cannot authenticate against the daemon that is currently running. This usually happens after `curl install.sh | sh` upgrades the binary without restarting the daemon — the running daemon was started with a different api_key, or the vault that holds it could not be unlocked.
+shutdown-401-fallback-attempt = Falling back to a PID-based stop (PID { $pid })...
+shutdown-401-fallback-success = Daemon stopped via PID { $pid }
+shutdown-401-fallback-fail = PID-based stop did not work either.
+shutdown-401-fallback-fix = Stop the daemon manually, then start it again:
+    kill { $pid }    # or: kill -9 { $pid } if it does not exit
+    librefang start
+shutdown-401-no-pid-fix = Could not read the daemon PID from { $path }. Run `ps -ef | grep librefang` to find it, then `kill <pid>` and `librefang start`.
 
 # --- Labels ---
 label-api = API
