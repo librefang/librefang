@@ -18,6 +18,12 @@ import { useActiveHandsWhen } from "../lib/queries/hands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
+import {
+  chatSessionCacheKey,
+  deleteCachedChatMessages,
+  getCachedChatMessages,
+  setCachedChatMessages,
+} from "../lib/chatSessionCache";
 import { useTtsManager } from "../lib/tts";
 import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
@@ -350,32 +356,9 @@ function useWebSocket(
 // previously-viewed session's messages whenever the user switched sessions on
 // the same agent, because the cache hit on a fresh mount didn't consult the
 // requested sessionId.
-const MAX_CACHE_ENTRIES = 50;
-const CACHE_TTL_MS = 30 * 60 * 1000;
-const sessionCache = new Map<string, { messages: ChatMessage[]; expiresAt: number }>();
-const cacheKey = (agentId: string, sessionId: string | null): string =>
-  `${agentId}:${sessionId ?? ""}`;
-function evictCacheIfNeeded() {
-  if (sessionCache.size < MAX_CACHE_ENTRIES) return;
-  const now = Date.now();
-  for (const [k, v] of sessionCache) {
-    if (v.expiresAt <= now) { sessionCache.delete(k); }
-  }
-  if (sessionCache.size >= MAX_CACHE_ENTRIES) {
-    const firstKey = sessionCache.keys().next().value;
-    if (firstKey !== undefined) sessionCache.delete(firstKey);
-  }
-}
-function cacheGet(key: string): ChatMessage[] | undefined {
-  const entry = sessionCache.get(key);
-  if (!entry) return undefined;
-  if (entry.expiresAt <= Date.now()) { sessionCache.delete(key); return undefined; }
-  return entry.messages;
-}
-function cacheSet(key: string, msgs: ChatMessage[]) {
-  evictCacheIfNeeded();
-  sessionCache.set(key, { messages: msgs, expiresAt: Date.now() + CACHE_TTL_MS });
-}
+const cacheKey = chatSessionCacheKey;
+const cacheGet = getCachedChatMessages<ChatMessage>;
+const cacheSet = setCachedChatMessages<ChatMessage>;
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
@@ -572,7 +555,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
         return;
       }
     } else {
-      sessionCache.delete(key);
+      deleteCachedChatMessages(key);
     }
 
     setMessages([]);
@@ -664,7 +647,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     }
     try {
       await clearAgentHistory(agentId);
-      sessionCache.delete(cacheKey(agentId, sessionId));
+      deleteCachedChatMessages(cacheKey(agentId, sessionId));
       if (prevAgentRef.current === agentId) {
         messagesRef.current = [];
       }

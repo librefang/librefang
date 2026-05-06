@@ -226,12 +226,14 @@
     "refreshing": "刷新中…",
     "new_agent": "新建智能体",
     "updated": "更新",
-    "tokens_by_agent": "各智能体 Token 用量 · 24h",
+    "tokens_by_agent": "各智能体 Token 用量 · 全部时间",
     "kpi": {
       "active_agents": "活跃智能体",
       "configured": "已配置",
       "spend": "支出",
       "prior": "前期",
+      "no_prior": "无前期支出",
+      "tokens_over_7d": "近 7 天 token",
       "peak": "tokens/s 峰值",
       "p95_latency": "P95 延迟",
       "default_model": "默认模型"
@@ -243,7 +245,9 @@
     },
     "cost": {
       "title": "费用",
-      "vs_prior": "对比上期"
+      "vs_prior": "对比上期",
+      "no_prior": "无前期支出",
+      "provider_all_time": "全部时间提供商占比"
     },
     "alerts": {
       "title": "告警",

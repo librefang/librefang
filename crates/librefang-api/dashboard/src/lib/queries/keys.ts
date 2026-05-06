@@ -27,8 +27,10 @@ export const agentKeys = {
   // History snapshot for a single (agent, session) pair — hydrates ChatPage
   // when the user navigates to an agent or switches sessions. `sessionId`
   // omitted/null means "the agent's current active session".
+  sessionSnapshots: (agentId: string) =>
+    [...agentKeys.all, "session", agentId] as const,
   session: (agentId: string, sessionId?: string | null) =>
-    [...agentKeys.all, "session", agentId, sessionId ?? null] as const,
+    [...agentKeys.sessionSnapshots(agentId), sessionId ?? null] as const,
   stats: (agentId: string) =>
     [...agentKeys.all, "stats", agentId] as const,
   events: (agentId: string, limit: number) =>

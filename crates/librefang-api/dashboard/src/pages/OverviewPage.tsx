@@ -6,7 +6,6 @@ import {
   CheckCircle2,
   ChevronRight,
   Clock,
-  Filter,
   Plus,
   RefreshCw,
   Rocket,
@@ -32,7 +31,7 @@ import { formatCompact, formatCost } from "../lib/format";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 
-type Range = "7d" | "30d" | "90d";
+type Range = "7d";
 
 function computeRangeData(
   days: { date?: string; cost_usd?: number }[] | undefined,
@@ -41,7 +40,7 @@ function computeRangeData(
   const empty = { trend: [] as number[], cost: 0, prior: 0, labelKey: `overview.range.${range}` as string };
   if (!days || days.length === 0) return empty;
   const sorted = [...days].sort((a, b) => (a.date ?? "").localeCompare(b.date ?? ""));
-  const n = range === "7d" ? 7 : range === "30d" ? 30 : 90;
+  const n = 7;
   const recent = sorted.slice(-n);
   const older = sorted.slice(-(n * 2), -n);
   const cost = recent.reduce((s, d) => s + (d.cost_usd ?? 0), 0);
@@ -64,6 +63,13 @@ function CostChart({ data, height = 170 }: { data: number[]; height?: number }) 
   }
   const w = 1000;
   const max = Math.max(...data) * 1.2;
+  if (max <= 0) {
+    return (
+      <div className={`h-[130px] lg:h-[170px] flex items-center justify-center text-text-dim text-xs`}>
+        —
+      </div>
+    );
+  }
   const stepX = w / (data.length - 1);
   const path = data.map((v, i) => `${i === 0 ? "M" : "L"}${i * stepX},${height - (v / max) * (height - 16)}`).join(" ");
   const fill = `${path} L${w},${height} L0,${height} Z`;
@@ -272,7 +278,7 @@ export function OverviewPage() {
   const isError = snapshotQuery.isError;
   const needsInit = snapshot?.status?.config_exists === false;
 
-  const [range, setRange] = useState<Range>("30d");
+  const range: Range = "7d";
   const [dismissedAlerts, setDismissedAlerts] = useState<string[]>([]);
   const [showAllAlerts, setShowAllAlerts] = useState(false);
 
@@ -321,8 +327,15 @@ export function OverviewPage() {
 
   const rangeData = useMemo(() => computeRangeData(dailyQuery.data?.days, range), [dailyQuery.data?.days, range]);
   const costDelta = rangeData.cost - rangeData.prior;
-  const costDeltaPct = rangeData.prior > 0 ? Math.abs((costDelta / rangeData.prior) * 100) : 0;
-  const costTrendDir: "up" | "down" = costDelta > 0 ? "up" : "down";
+  const hasPriorCost = rangeData.prior > 0;
+  const costDeltaPct = hasPriorCost ? Math.abs((costDelta / rangeData.prior) * 100) : undefined;
+  const costTrendDir: "up" | "down" | "flat" = !hasPriorCost || costDelta === 0 ? "flat" : costDelta > 0 ? "up" : "down";
+  const costDeltaLabel = costDeltaPct == null
+    ? t("overview.kpi.no_prior", { defaultValue: "no prior spend" })
+    : `${costDelta > 0 ? "+" : "−"}${costDeltaPct.toFixed(0)}%`;
+  const costDeltaAmountLabel = hasPriorCost
+    ? `${costDelta > 0 ? "+" : costDelta < 0 ? "−" : ""}$${Math.abs(costDelta).toFixed(0)} ${t("overview.cost.vs_prior", { defaultValue: "vs prior" })}`
+    : t("overview.cost.no_prior", { defaultValue: "no prior spend" });
 
   const dailyTokens = useMemo(
     () => (dailyQuery.data?.days ?? []).map((d) => d.tokens ?? 0),
@@ -592,17 +605,9 @@ export function OverviewPage() {
           >
             {snapshotQuery.isFetching ? t("overview.refreshing", { defaultValue: "Refreshing…" }) : t("overview.refresh", { defaultValue: "Refresh" })}
           </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            leftIcon={<Filter className="w-3.5 h-3.5" />}
-            onClick={() => {
-              const next: Range = range === "30d" ? "7d" : range === "7d" ? "90d" : "30d";
-              setRange(next);
-            }}
-          >
-            {t(rangeData.labelKey, { defaultValue: range === "7d" ? "7 days" : range === "30d" ? "30 days" : "90 days" })}
-          </Button>
+          <span className="h-8 px-2.5 rounded-md border border-border-subtle bg-surface text-text-dim inline-flex items-center text-[11px] font-mono">
+            {t(rangeData.labelKey, { defaultValue: "7 days" })}
+          </span>
           <Button variant="primary" size="sm" leftIcon={<Plus className="w-3.5 h-3.5" />} onClick={() => navigate({ to: "/agents" })}>
             {t("overview.new_agent", { defaultValue: "New agent" })}
           </Button>
@@ -617,17 +622,9 @@ export function OverviewPage() {
           >
             <RefreshCw className={`w-4 h-4 ${snapshotQuery.isFetching ? "animate-spin" : ""}`} />
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              const next: Range = range === "30d" ? "7d" : range === "7d" ? "90d" : "30d";
-              setRange(next);
-            }}
-            className="h-9 px-2.5 rounded-md border border-border-subtle bg-surface text-text-dim hover:text-text-main hover:border-brand/30 inline-flex items-center gap-1 text-[11px] font-mono transition-colors"
-          >
-            <Filter className="w-3.5 h-3.5" />
-            <span>{range}</span>
-          </button>
+          <span className="h-9 px-2.5 rounded-md border border-border-subtle bg-surface text-text-dim inline-flex items-center text-[11px] font-mono">
+            {range}
+          </span>
           <button
             type="button"
             onClick={() => navigate({ to: "/agents" })}
@@ -685,7 +682,7 @@ export function OverviewPage() {
         <Kpi
           label={`${t("overview.kpi.spend", { defaultValue: "Spend" })} · ${t(rangeData.labelKey, { defaultValue: range })}`}
           value={`$${rangeData.cost.toFixed(2)}`}
-          delta={`${costTrendDir === "up" ? "+" : "−"}${costDeltaPct.toFixed(0)}%`}
+          delta={costDeltaLabel}
           trend={costTrendDir}
           sub={`vs $${rangeData.prior.toFixed(2)} ${t("overview.kpi.prior", { defaultValue: "prior" })}`}
           sparkline={<Sparkline data={rangeData.trend.slice(-12)} width={70} height={28} color="#a78bfa" />}
@@ -694,12 +691,12 @@ export function OverviewPage() {
         <Kpi
           label={`${t("nav.sessions", { defaultValue: "Sessions" })} · 24h`}
           value={sessionsCount > 0 ? formatCompact(sessionsCount) : "0"}
-          sub={dailyTokens.length > 0 ? `${formatCompact(dailyTokens.reduce((a, b) => a + b, 0))} ${t("overview.kpi.total_tokens_24h", { defaultValue: "tokens · 24h" })}` : undefined}
+          sub={dailyTokens.length > 0 ? `${formatCompact(dailyTokens.reduce((a, b) => a + b, 0))} ${t("overview.kpi.tokens_over_7d", { defaultValue: "tokens over 7d" })}` : undefined}
           sparkline={dailyTokens.length > 1 ? <Sparkline data={dailyTokens.slice(-12)} width={70} height={28} color="#34d399" /> : undefined}
           onClick={() => navigate({ to: "/sessions" })}
         />
         <Kpi
-          label={t("overview.kpi.p95_latency", { defaultValue: "P95 latency" })}
+          label={t("analytics.avg_latency", { defaultValue: "Avg Latency" })}
           value={avgLatency != null ? `${Math.round(avgLatency)}` : "-"}
           unit={avgLatency != null ? "ms" : undefined}
           sub={defaultModel}
@@ -717,18 +714,18 @@ export function OverviewPage() {
               </SectionLabel>
               <div className="flex items-baseline gap-2 flex-wrap">
                 <span className="font-mono font-semibold text-lg lg:text-[22px] tracking-[-0.02em] tabular-nums">${rangeData.cost.toFixed(2)}</span>
-                <span className={`text-[11px] font-mono tabular-nums ${costTrendDir === "up" ? "text-rose-400" : "text-emerald-400"}`}>
-                  {costTrendDir === "up" ? "+" : "−"}${Math.abs(costDelta).toFixed(0)} {t("overview.cost.vs_prior", { defaultValue: "vs prior" })}
+                <span className={`text-[11px] font-mono tabular-nums ${costTrendDir === "up" ? "text-rose-400" : costTrendDir === "down" ? "text-emerald-400" : "text-text-dim"}`}>
+                  {costDeltaAmountLabel}
                 </span>
               </div>
             </div>
             <div className="flex gap-1 lg:gap-1.5 shrink-0">
-              {(["7d", "30d", "90d"] as const).map((p) => {
+              {(["7d"] as const).map((p) => {
                 const active = p === range;
                 return (
                   <button
                     key={p}
-                    onClick={() => setRange(p)}
+                    type="button"
                     className={`px-2 lg:px-2.5 py-0.5 text-[11px] rounded-md font-mono cursor-pointer transition-colors ${
                       active
                         ? "bg-brand/10 border border-brand/30 text-brand"
@@ -745,13 +742,16 @@ export function OverviewPage() {
             <CostChart data={rangeData.trend} height={170} />
           </div>
            <div className="flex flex-wrap gap-x-3 gap-y-1 lg:gap-4 px-3 lg:px-4 pb-3 text-[10.5px] lg:text-[11px] text-text-dim">
-             {providerBreakdown ? providerBreakdown.map((p, i) => (
-               <span key={p.name} className="inline-flex items-center gap-1.5">
-                 <span className="w-2 h-0.5 rounded-sm" style={{ backgroundColor: PROVIDER_DOT_COLORS[i % PROVIDER_DOT_COLORS.length] }} /> {p.name} · {p.pct}%
-               </span>
-             )) : (
-               <span className="text-text-dim/60">{t("overview.cost.no_provider_data", { defaultValue: "No provider data" })}</span>
-             )}
+              {providerBreakdown ? providerBreakdown.map((p, i) => (
+                <span key={p.name} className="inline-flex items-center gap-1.5">
+                  <span className="w-2 h-0.5 rounded-sm" style={{ backgroundColor: PROVIDER_DOT_COLORS[i % PROVIDER_DOT_COLORS.length] }} /> {p.name} · {p.pct}%
+                </span>
+              )) : (
+                <span className="text-text-dim/60">{t("overview.cost.no_provider_data", { defaultValue: "No provider data" })}</span>
+              )}
+              {providerBreakdown ? (
+                <span className="text-text-dim/60">{t("overview.cost.provider_all_time", { defaultValue: "provider share all-time" })}</span>
+              ) : null}
            </div>
         </Card>
 
@@ -1071,7 +1071,7 @@ export function OverviewPage() {
       {/* Bottom dual: tokens-by-agent + system tiles */}
       <div className="hidden md:grid md:grid-cols-2 gap-3">
         <Card padding="md" className="surface-lit">
-          <SectionLabel>{t("overview.tokens_by_agent", { defaultValue: "Tokens by agent · 24h" })}</SectionLabel>
+          <SectionLabel>{t("overview.tokens_by_agent", { defaultValue: "Tokens by agent · all-time" })}</SectionLabel>
           <div className="flex flex-col gap-2 mt-1">
             {usageByAgent.length > 0 ? (() => {
               const maxTokens = usageByAgent[0].total_tokens ?? 1;

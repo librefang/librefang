@@ -20,7 +20,7 @@ i18n
     },
     ...(import.meta.env.DEV && {
       saveMissing: true,
-      missingKeyHandler: (_lngs: string[], ns: string, key: string) => {
+      missingKeyHandler: (_lngs: readonly string[], ns: string, key: string) => {
         console.warn(`[i18n] missing key: ${ns}:${key}`);
       },
     }),

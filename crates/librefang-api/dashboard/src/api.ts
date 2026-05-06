@@ -1445,7 +1445,7 @@ export async function clearAgentHistory(agentId: string): Promise<ApiActionRespo
 }
 
 export async function resetAgentSession(agentId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/reset`, {});
+  return post<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/session/reset`, {});
 }
 
 export async function loadAgentSession(

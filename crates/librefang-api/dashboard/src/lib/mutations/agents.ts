@@ -28,6 +28,7 @@ import {
   getAgentTemplateToml,
 } from "../http/client";
 import type { PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
+import { clearChatSessionCacheForAgent } from "../chatSessionCache";
 import { agentKeys, approvalKeys, handKeys, overviewKeys, sessionKeys } from "../queries/keys";
 
 /**
@@ -482,8 +483,12 @@ export function useResetAgentSession() {
   return useMutation({
     mutationFn: resetAgentSession,
     onSuccess: (_data, agentId) => {
+      clearChatSessionCacheForAgent(agentId);
       qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.sessionSnapshots(agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.sessions(agentId) });
+      qc.invalidateQueries({ queryKey: sessionKeys.lists() });
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
 }

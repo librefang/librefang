@@ -2,15 +2,17 @@ import { ApiError } from "./http/errors";
 
 const MAX_CAUSE_DEPTH = 5;
 
+type ErrorWithCause = Error & { cause?: unknown };
+
 function deepestCauseMessage(err: Error): string | undefined {
-  let cur: Error | undefined = err.cause as Error | undefined;
+  let cur = (err as ErrorWithCause).cause;
   let found: string | undefined;
   let depth = 0;
   while (cur instanceof Error && depth < MAX_CAUSE_DEPTH) {
     if (cur.message && cur.message !== err.message) {
       found = cur.message;
     }
-    cur = cur.cause as Error | undefined;
+    cur = (cur as ErrorWithCause).cause;
     depth++;
   }
   return found;

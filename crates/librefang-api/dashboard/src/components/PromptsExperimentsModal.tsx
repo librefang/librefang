@@ -36,6 +36,7 @@ import { Button } from "./ui/Button";
 import { Badge } from "./ui/Badge";
 import { EmptyState } from "./ui/EmptyState";
 import { CardSkeleton } from "./ui/Skeleton";
+import { buildEvenTrafficSplit } from "./trafficSplit";
 
 export function PromptsExperimentsModal({
   agentId,
@@ -609,10 +610,8 @@ export function PromptsExperimentsModal({
                                   experiment: {
                                     name: newExperimentName,
                                     status: "draft",
-                                    traffic_split: selectedVariantIds.map(() =>
-                                      Math.floor(
-                                        100 / selectedVariantIds.length,
-                                      ),
+                                    traffic_split: buildEvenTrafficSplit(
+                                      selectedVariantIds.length,
                                     ),
                                     success_criteria: {
                                       require_user_helpful: true,

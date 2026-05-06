@@ -226,12 +226,14 @@
     "refreshing": "Refreshing…",
     "new_agent": "New agent",
     "updated": "updated",
-    "tokens_by_agent": "Tokens by agent · 24h",
+    "tokens_by_agent": "Tokens by agent · all-time",
     "kpi": {
       "active_agents": "Active agents",
       "configured": "configured",
       "spend": "Spend",
       "prior": "prior",
+      "no_prior": "no prior spend",
+      "tokens_over_7d": "tokens over 7d",
       "peak": "tokens/s peak",
       "p95_latency": "P95 latency",
       "default_model": "default model"
@@ -243,7 +245,9 @@
     },
     "cost": {
       "title": "Cost",
-      "vs_prior": "vs prior"
+      "vs_prior": "vs prior",
+      "no_prior": "no prior spend",
+      "provider_all_time": "provider share all-time"
     },
     "alerts": {
       "title": "Alerts",

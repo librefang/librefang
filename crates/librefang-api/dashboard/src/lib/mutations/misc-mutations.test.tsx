@@ -1,6 +1,6 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { useCompleteExperiment } from "./agents";
+import { useCompleteExperiment, useResetAgentSession } from "./agents";
 import { useSetSessionLabel } from "./sessions";
 import { useInstallSkill } from "./skills";
 import {
@@ -11,7 +11,14 @@ import {
   clawhubKeys,
   clawhubCnKeys,
   skillhubKeys,
+  overviewKeys,
 } from "../queries/keys";
+import {
+  chatSessionCacheKey,
+  clearChatSessionCacheForAgent,
+  getCachedChatMessages,
+  setCachedChatMessages,
+} from "../chatSessionCache";
 import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", async () => {
@@ -21,6 +28,7 @@ vi.mock("../http/client", async () => {
   return {
     ...actual,
     completeExperiment: vi.fn().mockResolvedValue({}),
+    resetAgentSession: vi.fn().mockResolvedValue({}),
     setSessionLabel: vi.fn().mockResolvedValue({}),
     installSkill: vi.fn().mockResolvedValue({}),
   };
@@ -46,6 +54,51 @@ describe("useCompleteExperiment", () => {
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.experimentMetrics("exp-1"),
+    });
+  });
+});
+
+describe("useResetAgentSession", () => {
+  afterEach(() => {
+    clearChatSessionCacheForAgent("agent-1");
+    clearChatSessionCacheForAgent("agent-2");
+  });
+
+  it("invalidates reset-stale query keys and clears cached chat messages", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    const agentSessionKey = chatSessionCacheKey("agent-1", "sess-1");
+    const otherAgentSessionKey = chatSessionCacheKey("agent-2", "sess-1");
+    setCachedChatMessages(agentSessionKey, ["stale"]);
+    setCachedChatMessages(chatSessionCacheKey("agent-1", null), ["stale-current"]);
+    setCachedChatMessages(otherAgentSessionKey, ["fresh"]);
+
+    const { result } = renderHook(() => useResetAgentSession(), {
+      wrapper,
+    });
+
+    await result.current.mutateAsync("agent-1");
+
+    await waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalledTimes(5);
+    });
+    expect(getCachedChatMessages(agentSessionKey)).toBeUndefined();
+    expect(getCachedChatMessages(chatSessionCacheKey("agent-1", null))).toBeUndefined();
+    expect(getCachedChatMessages(otherAgentSessionKey)).toEqual(["fresh"]);
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.detail("agent-1"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.sessionSnapshots("agent-1"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.sessions("agent-1"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: sessionKeys.lists(),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: overviewKeys.snapshot(),
     });
   });
 });
