@@ -1,3 +1,7 @@
+// `KernelApi`'s `async_trait`-expanded methods nest pinned futures deeply
+// enough that the default 128-step layout pass tips over (#3566).
+#![recursion_limit = "256"]
+
 //! Core kernel for the LibreFang Agent Operating System.
 //!
 //! The kernel manages agent lifecycles, memory, permissions, scheduling,
