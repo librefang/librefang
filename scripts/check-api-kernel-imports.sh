@@ -90,11 +90,20 @@ ALLOWLIST=(
 fail=0
 
 # Collect all non-comment lines referencing LibreFangKernel, skip test modules.
-# grep -v ':[0-9]*:.*//.*LibreFangKernel' strips both leading `//` and trailing
-# `// LibreFangKernel note` style comments that the older first-char-only
-# pattern missed.
+#
+# Stripping comments via `sed 's|//.*$||'` rather than `grep -v '//.*LibreFangKernel'`:
+# the latter would also drop legitimate production lines that happen to carry
+# a trailing `// ...LibreFangKernel...` comment (e.g.
+# `pub fn boot_app(k: LibreFangKernel) -> AppState  // wraps LibreFangKernel`),
+# silently letting concrete-type leaks bypass the gate.  Stripping the
+# `//` tail first then re-grepping for the bare identifier catches both
+# leading and trailing comment forms while keeping production code in the
+# scan.  Standard caveat: `//` inside string literals would be stripped
+# too, but no such literal currently mentions `LibreFangKernel` and
+# adding one would deserve a code review anyway.
 "${SCAN_LFK[@]}" \
-    | grep -v ':[0-9]*:.*//.*LibreFangKernel' \
+    | sed 's|//.*$||' \
+    | grep 'LibreFangKernel' \
     | grep -v '#\[cfg(test' \
     | grep -v 'boot_with_config' \
     > /tmp/api-lfk-refs.txt 2>/dev/null || true

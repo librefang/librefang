@@ -350,9 +350,12 @@ pub async fn agent_ws(
     uri: axum::http::Uri,
 ) -> impl IntoResponse {
     // SECURITY: Authenticate WebSocket upgrades (bypasses HTTP middleware).
-    let valid_tokens = crate::server::valid_api_tokens(state.kernel.as_ref());
-    let user_api_keys = crate::server::configured_user_api_keys(state.kernel.as_ref());
-    let dashboard_auth = crate::server::has_dashboard_credentials(state.kernel.as_ref());
+    // Single snapshot so all three derived flags come from the same hot-reload
+    // generation (#3744 review #2).
+    let auth_snap = librefang_kernel::kernel_handle::ApiAuth::auth_snapshot(state.kernel.as_ref());
+    let valid_tokens = crate::server::valid_api_tokens(&auth_snap);
+    let user_api_keys = crate::server::configured_user_api_keys(&auth_snap);
+    let dashboard_auth = crate::server::has_dashboard_credentials(&auth_snap);
     let auth_required = !valid_tokens.is_empty() || !user_api_keys.is_empty() || dashboard_auth;
 
     // Mirror middleware: when no auth is configured, only allow loopback

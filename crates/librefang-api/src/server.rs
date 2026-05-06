@@ -8,7 +8,7 @@ use crate::webchat;
 use axum::response::IntoResponse;
 use axum::Router;
 use librefang_kernel::config_reload::HotAction;
-use librefang_kernel::kernel_handle::{ApiAuth, DashboardRawConfig};
+use librefang_kernel::kernel_handle::{ApiAuth, ApiAuthSnapshot, DashboardRawConfig};
 use librefang_kernel::LibreFangKernel;
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -149,15 +149,14 @@ fn resolve_dashboard_credential(
 }
 
 #[allow(deprecated)]
-pub(crate) fn dashboard_session_token(kernel: &dyn ApiAuth) -> Option<String> {
+pub(crate) fn dashboard_session_token(snap: &ApiAuthSnapshot) -> Option<String> {
     let DashboardRawConfig {
         user,
         pass,
         pass_hash,
-    } = kernel.dashboard_raw_config();
-    let home = kernel.auth_home_dir();
-    let username = resolve_dashboard_credential(&user, "LIBREFANG_DASHBOARD_USER", home);
-    let password = resolve_dashboard_credential(&pass, "LIBREFANG_DASHBOARD_PASS", home);
+    } = &snap.dashboard;
+    let username = resolve_dashboard_credential(user, "LIBREFANG_DASHBOARD_USER", &snap.home_dir);
+    let password = resolve_dashboard_credential(pass, "LIBREFANG_DASHBOARD_PASS", &snap.home_dir);
 
     crate::password_hash::derive_dashboard_session_token(
         username.trim(),
@@ -166,46 +165,44 @@ pub(crate) fn dashboard_session_token(kernel: &dyn ApiAuth) -> Option<String> {
     )
 }
 
-pub(crate) fn valid_api_tokens(kernel: &dyn ApiAuth) -> Vec<String> {
+pub(crate) fn valid_api_tokens(snap: &ApiAuthSnapshot) -> Vec<String> {
     let mut tokens = Vec::new();
-    let explicit_api_key = kernel.auth_api_key();
-    if explicit_api_key.trim().is_empty() {
+    let explicit_api_key = snap.api_key.trim();
+    if explicit_api_key.is_empty() {
         // No api_key configured — API is open, no auth required.
         // Dashboard login is handled separately by session cookie checks.
         return tokens;
     }
-    tokens.push(explicit_api_key.trim().to_string());
-    if let Some(token) = dashboard_session_token(kernel) {
+    tokens.push(explicit_api_key.to_string());
+    if let Some(token) = dashboard_session_token(snap) {
         tokens.push(token);
     }
     tokens
 }
 
-pub(crate) fn has_dashboard_credentials(kernel: &dyn ApiAuth) -> bool {
+pub(crate) fn has_dashboard_credentials(snap: &ApiAuthSnapshot) -> bool {
     let DashboardRawConfig {
         user,
         pass,
         pass_hash,
-    } = kernel.dashboard_raw_config();
-    let home = kernel.auth_home_dir();
-    let username = resolve_dashboard_credential(&user, "LIBREFANG_DASHBOARD_USER", home);
-    let password = resolve_dashboard_credential(&pass, "LIBREFANG_DASHBOARD_PASS", home);
+    } = &snap.dashboard;
+    let username = resolve_dashboard_credential(user, "LIBREFANG_DASHBOARD_USER", &snap.home_dir);
+    let password = resolve_dashboard_credential(pass, "LIBREFANG_DASHBOARD_PASS", &snap.home_dir);
     !username.trim().is_empty() && (!pass_hash.trim().is_empty() || !password.trim().is_empty())
 }
 
-pub(crate) fn configured_user_api_keys(kernel: &dyn ApiAuth) -> Vec<middleware::ApiUserAuth> {
-    kernel
-        .auth_config_users()
-        .into_iter()
+pub(crate) fn configured_user_api_keys(snap: &ApiAuthSnapshot) -> Vec<middleware::ApiUserAuth> {
+    snap.config_users
+        .iter()
         .filter_map(|user| {
-            let api_key_hash = user.api_key_hash?.trim().to_string();
+            let api_key_hash = user.api_key_hash.as_deref()?.trim();
             if api_key_hash.is_empty() {
                 return None;
             }
             Some(middleware::ApiUserAuth {
                 name: user.name.clone(),
                 role: middleware::UserRole::from_str_role(&user.role),
-                api_key_hash,
+                api_key_hash: api_key_hash.to_string(),
                 user_id: librefang_types::agent::UserId::from_name(&user.name),
             })
         })
@@ -217,16 +214,15 @@ pub(crate) fn configured_user_api_keys(kernel: &dyn ApiAuth) -> Vec<middleware::
 /// table it uses for config-defined users. `device:{id}` namespacing keeps
 /// device entries distinguishable from regular users — `pairing_remove_device`
 /// also keys on this prefix when revoking access.
-pub(crate) fn paired_device_user_keys(kernel: &dyn ApiAuth) -> Vec<middleware::ApiUserAuth> {
-    kernel
-        .auth_device_api_keys()
-        .into_iter()
+pub(crate) fn paired_device_user_keys(snap: &ApiAuthSnapshot) -> Vec<middleware::ApiUserAuth> {
+    snap.device_api_keys
+        .iter()
         .map(|(device_id, api_key_hash)| {
             let name = format!("device:{device_id}");
             middleware::ApiUserAuth {
                 user_id: librefang_types::agent::UserId::from_name(&name),
                 role: middleware::UserRole::User,
-                api_key_hash,
+                api_key_hash: api_key_hash.clone(),
                 name,
             }
         })
@@ -237,16 +233,16 @@ pub(crate) fn paired_device_user_keys(kernel: &dyn ApiAuth) -> Vec<middleware::A
 /// the daemon: an explicit `api_key`, any `[[users]]` entry with an
 /// `api_key_hash`, any paired device, or dashboard credentials. Used at boot
 /// (#3572) to decide whether a non-loopback bind is safe.
-fn any_auth_configured(kernel: &dyn ApiAuth) -> bool {
-    let api_key_set = !kernel.auth_api_key().trim().is_empty();
-    let users_have_keys = kernel.auth_config_users().iter().any(|u| {
+fn any_auth_configured(snap: &ApiAuthSnapshot) -> bool {
+    let api_key_set = !snap.api_key.trim().is_empty();
+    let users_have_keys = snap.config_users.iter().any(|u| {
         u.api_key_hash
             .as_deref()
             .map(|h| !h.trim().is_empty())
             .unwrap_or(false)
     });
-    let paired_devices = !kernel.auth_device_api_keys().is_empty();
-    let dashboard = has_dashboard_credentials(kernel);
+    let paired_devices = !snap.device_api_keys.is_empty();
+    let dashboard = has_dashboard_credentials(snap);
     api_key_set || users_have_keys || paired_devices || dashboard
 }
 
@@ -311,10 +307,10 @@ pub(crate) fn evaluate_bind_auth_safety(
 /// CLI prints it and exits non-zero rather than running open and dropping
 /// every request at the middleware layer.
 pub(crate) fn check_bind_auth_safety(
-    kernel: &dyn ApiAuth,
+    snap: &ApiAuthSnapshot,
     addr: &SocketAddr,
 ) -> Result<(), String> {
-    match evaluate_bind_auth_safety(addr, any_auth_configured(kernel), allow_no_auth_env()) {
+    match evaluate_bind_auth_safety(addr, any_auth_configured(snap), allow_no_auth_env()) {
         BindAuthCheck::Ok => Ok(()),
         BindAuthCheck::OkWithExplicitOptIn => {
             tracing::error!(
@@ -868,7 +864,8 @@ pub(crate) async fn change_password(
     }
 
     // Update api_key_lock so the derived static token reflects new credentials immediately
-    let new_api_key = valid_api_tokens(state.kernel.as_ref()).join("\n");
+    let snap = state.kernel.auth_snapshot();
+    let new_api_key = valid_api_tokens(&snap).join("\n");
     *state.api_key_lock.write().await = new_api_key;
 
     // Invalidate all existing sessions to force re-login
@@ -1031,7 +1028,10 @@ pub async fn build_router(
     let webhook_router = Arc::new(tokio::sync::RwLock::new(Arc::new(initial_webhook_router)));
 
     // Create api_key_lock before AppState so both AppState and AuthState share the same Arc.
-    let api_key = valid_api_tokens(kernel.as_ref()).join("\n");
+    // Snapshot once so api_key, dashboard creds, user keys, and device keys all
+    // come from the same hot-reload generation (#3744 review #2).
+    let auth_snap = kernel.auth_snapshot();
+    let api_key = valid_api_tokens(&auth_snap).join("\n");
     let api_key_lock = Arc::new(tokio::sync::RwLock::new(api_key));
     // Per-user API key snapshot is wrapped in a `RwLock` so the rotate-key
     // endpoint (`POST /api/users/{name}/rotate-key`) can swap entries live —
@@ -1039,8 +1039,8 @@ pub async fn build_router(
     // the next request after rotation sees the new hash and the old plaintext
     // bearer token immediately fails authentication.
     let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new({
-        let mut keys = configured_user_api_keys(kernel.as_ref());
-        keys.extend(paired_device_user_keys(kernel.as_ref()));
+        let mut keys = configured_user_api_keys(&auth_snap);
+        keys.extend(paired_device_user_keys(&auth_snap));
         keys
     }));
 
@@ -1147,8 +1147,11 @@ pub async fn build_router(
     // change_password / rotate-key can update them live without a daemon
     // restart.
     let user_api_keys_initial_len = state.user_api_keys.read().await.len();
-    let dashboard_auth_enabled = has_dashboard_credentials(state.kernel.as_ref());
-    let api_key_set = !state.kernel.config_ref().api_key.trim().is_empty();
+    // Atomic snapshot so dashboard_auth_enabled and api_key_set come from
+    // the same config generation (#3744 review #2).
+    let snap = state.kernel.auth_snapshot();
+    let dashboard_auth_enabled = has_dashboard_credentials(&snap);
+    let api_key_set = !snap.api_key.trim().is_empty();
     let any_auth = api_key_set || user_api_keys_initial_len > 0 || dashboard_auth_enabled;
 
     // Resolve the effective value of `require_auth_for_reads`.
@@ -1432,7 +1435,7 @@ pub async fn run_daemon(
     // boot makes the misconfiguration impossible to miss — instead of every
     // unauthenticated request returning 401 indefinitely, the daemon refuses
     // to come up and prints an actionable error.
-    if let Err(msg) = check_bind_auth_safety(&kernel, &addr) {
+    if let Err(msg) = check_bind_auth_safety(&kernel.auth_snapshot(), &addr) {
         return Err(msg.into());
     }
 

@@ -918,7 +918,7 @@ pub trait ToolPolicy: Send + Sync {
 // ============================================================================
 
 /// A snapshot of the user-config values needed for API-key table construction.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ApiUserConfigSnapshot {
     pub name: String,
     pub role: String,
@@ -928,28 +928,38 @@ pub struct ApiUserConfigSnapshot {
 /// Raw dashboard credential strings from config (before env-var / vault
 /// resolution). The HTTP server resolves them with `LIBREFANG_DASHBOARD_USER`,
 /// `LIBREFANG_DASHBOARD_PASS`, and the `vault:KEY` prefix logic.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DashboardRawConfig {
     pub user: String,
     pub pass: String,
     pub pass_hash: String,
 }
 
-pub trait ApiAuth: Send + Sync {
+/// One-shot snapshot of every auth-relevant config field. Returned by
+/// [`ApiAuth::auth_snapshot`] from a single `config.load()` so all fields
+/// observe the same hot-reload generation — preventing per-request
+/// middleware (`valid_api_tokens`, `paired_device_user_keys`) from mixing
+/// pre-reload and post-reload config when a reload races with the request.
+#[derive(Debug, Clone, Default)]
+pub struct ApiAuthSnapshot {
     /// Raw `api_key` value from config (may be empty when auth is open).
-    fn auth_api_key(&self) -> String;
-
-    /// Raw dashboard credential strings from config (before resolution).
-    fn dashboard_raw_config(&self) -> DashboardRawConfig;
-
-    /// Absolute path to the daemon home directory.
-    fn auth_home_dir(&self) -> &std::path::Path;
-
+    pub api_key: String,
+    /// Raw dashboard credential strings (before env-var / vault resolution).
+    pub dashboard: DashboardRawConfig,
+    /// Absolute path to the daemon home directory (owned so the snapshot
+    /// is fully self-contained and not tied to the kernel's lifetime).
+    pub home_dir: std::path::PathBuf,
     /// Paired-device (mobile) API key hashes: `(device_id, api_key_hash)`.
-    fn auth_device_api_keys(&self) -> Vec<(String, String)>;
-
+    pub device_api_keys: Vec<(String, String)>,
     /// Per-user config entries used to build the user API-key table.
-    fn auth_config_users(&self) -> Vec<ApiUserConfigSnapshot>;
+    pub config_users: Vec<ApiUserConfigSnapshot>,
+}
+
+pub trait ApiAuth: Send + Sync {
+    /// Atomic snapshot of every auth-relevant config field. Implementations
+    /// MUST acquire all values from a single config snapshot so callers see
+    /// a consistent view across hot-reload boundaries.
+    fn auth_snapshot(&self) -> ApiAuthSnapshot;
 }
 
 // ============================================================================
@@ -964,6 +974,14 @@ pub trait SessionWriter: Send + Sync {
     /// Pre-insert `blocks` as a User-role message into the agent's current
     /// session so the LLM sees the content in the next turn.  No-op (with a
     /// `warn!`) when the agent is not found; best-effort on save failure.
+    ///
+    /// **Blocking I/O notice.**  The current production implementation
+    /// (`LibreFangKernel`) calls `MemorySubstrate::save_session` synchronously,
+    /// which blocks on a SQLite write.  Callers running inside an async
+    /// runtime should wrap the call in `tokio::task::spawn_blocking` to
+    /// avoid stalling worker threads under contention. (#3579 will move the
+    /// substrate to `tokio::fs`-aware async; once that lands, the trait
+    /// itself can become `async fn` and this caveat goes away.)
     fn inject_attachment_blocks(
         &self,
         agent_id: librefang_types::agent::AgentId,
@@ -1030,10 +1048,10 @@ impl<T> KernelHandle for T where
 /// resolve. Replaces the pre-#3746 single-trait import pattern.
 pub mod prelude {
     pub use super::{
-        A2ARegistry, AgentControl, AgentInfo, ApiAuth, ApiUserConfigSnapshot, ApprovalGate,
-        ChannelSender, CronControl, DashboardRawConfig, EventBus, GoalControl, HandsControl,
-        KernelHandle, KnowledgeGraph, MemoryAccess, PromptStore, SessionWriter, TaskQueue,
-        ToolPolicy, WorkflowRunner,
+        A2ARegistry, AgentControl, AgentInfo, ApiAuth, ApiAuthSnapshot, ApiUserConfigSnapshot,
+        ApprovalGate, ChannelSender, CronControl, DashboardRawConfig, EventBus, GoalControl,
+        HandsControl, KernelHandle, KnowledgeGraph, MemoryAccess, PromptStore, SessionWriter,
+        TaskQueue, ToolPolicy, WorkflowRunner,
     };
 }
 
@@ -1191,24 +1209,8 @@ mod tests {
     impl GoalControl for StubKernel {}
     impl ToolPolicy for StubKernel {}
     impl ApiAuth for StubKernel {
-        fn auth_api_key(&self) -> String {
-            String::new()
-        }
-        fn dashboard_raw_config(&self) -> DashboardRawConfig {
-            DashboardRawConfig {
-                user: String::new(),
-                pass: String::new(),
-                pass_hash: String::new(),
-            }
-        }
-        fn auth_home_dir(&self) -> &std::path::Path {
-            std::path::Path::new("/tmp")
-        }
-        fn auth_device_api_keys(&self) -> Vec<(String, String)> {
-            vec![]
-        }
-        fn auth_config_users(&self) -> Vec<ApiUserConfigSnapshot> {
-            vec![]
+        fn auth_snapshot(&self) -> ApiAuthSnapshot {
+            ApiAuthSnapshot::default()
         }
     }
     impl SessionWriter for StubKernel {

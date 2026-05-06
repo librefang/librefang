@@ -19975,38 +19975,31 @@ impl kernel_handle::ToolPolicy for LibreFangKernel {
 // ---- BEGIN ApiAuth + SessionWriter impls (#3744) ----
 
 impl kernel_handle::ApiAuth for LibreFangKernel {
-    fn auth_api_key(&self) -> String {
-        self.config.load().api_key.clone()
-    }
-
-    fn dashboard_raw_config(&self) -> kernel_handle::DashboardRawConfig {
+    fn auth_snapshot(&self) -> kernel_handle::ApiAuthSnapshot {
+        // Single `config.load()` so every field in the snapshot comes from
+        // the same hot-reload generation. Per-request middleware would
+        // otherwise race the reload barrier and observe e.g. an old
+        // `api_key` alongside a new `dashboard_pass_hash`.
         let cfg = self.config.load();
-        kernel_handle::DashboardRawConfig {
-            user: cfg.dashboard_user.clone(),
-            pass: cfg.dashboard_pass.clone(),
-            pass_hash: cfg.dashboard_pass_hash.clone(),
+        kernel_handle::ApiAuthSnapshot {
+            api_key: cfg.api_key.clone(),
+            dashboard: kernel_handle::DashboardRawConfig {
+                user: cfg.dashboard_user.clone(),
+                pass: cfg.dashboard_pass.clone(),
+                pass_hash: cfg.dashboard_pass_hash.clone(),
+            },
+            home_dir: self.home_dir().to_path_buf(),
+            device_api_keys: self.pairing.device_api_keys(),
+            config_users: cfg
+                .users
+                .iter()
+                .map(|u| kernel_handle::ApiUserConfigSnapshot {
+                    name: u.name.clone(),
+                    role: u.role.clone(),
+                    api_key_hash: u.api_key_hash.clone(),
+                })
+                .collect(),
         }
-    }
-
-    fn auth_home_dir(&self) -> &std::path::Path {
-        self.home_dir()
-    }
-
-    fn auth_device_api_keys(&self) -> Vec<(String, String)> {
-        self.pairing.device_api_keys()
-    }
-
-    fn auth_config_users(&self) -> Vec<kernel_handle::ApiUserConfigSnapshot> {
-        self.config
-            .load()
-            .users
-            .iter()
-            .map(|u| kernel_handle::ApiUserConfigSnapshot {
-                name: u.name.clone(),
-                role: u.role.clone(),
-                api_key_hash: u.api_key_hash.clone(),
-            })
-            .collect()
     }
 }
 

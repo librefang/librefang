@@ -6931,24 +6931,8 @@ mod tests {
     impl GoalControl for ApprovalKernel {}
     impl ToolPolicy for ApprovalKernel {}
     impl ApiAuth for ApprovalKernel {
-        fn auth_api_key(&self) -> String {
-            String::new()
-        }
-        fn dashboard_raw_config(&self) -> DashboardRawConfig {
-            DashboardRawConfig {
-                user: String::new(),
-                pass: String::new(),
-                pass_hash: String::new(),
-            }
-        }
-        fn auth_home_dir(&self) -> &std::path::Path {
-            std::path::Path::new("/tmp")
-        }
-        fn auth_device_api_keys(&self) -> Vec<(String, String)> {
-            vec![]
-        }
-        fn auth_config_users(&self) -> Vec<ApiUserConfigSnapshot> {
-            vec![]
+        fn auth_snapshot(&self) -> ApiAuthSnapshot {
+            ApiAuthSnapshot::default()
         }
     }
     impl SessionWriter for ApprovalKernel {
@@ -7171,24 +7155,8 @@ mod tests {
     impl GoalControl for ForceHumanCapturingKernel {}
     impl ToolPolicy for ForceHumanCapturingKernel {}
     impl ApiAuth for ForceHumanCapturingKernel {
-        fn auth_api_key(&self) -> String {
-            String::new()
-        }
-        fn dashboard_raw_config(&self) -> DashboardRawConfig {
-            DashboardRawConfig {
-                user: String::new(),
-                pass: String::new(),
-                pass_hash: String::new(),
-            }
-        }
-        fn auth_home_dir(&self) -> &std::path::Path {
-            std::path::Path::new("/tmp")
-        }
-        fn auth_device_api_keys(&self) -> Vec<(String, String)> {
-            vec![]
-        }
-        fn auth_config_users(&self) -> Vec<ApiUserConfigSnapshot> {
-            vec![]
+        fn auth_snapshot(&self) -> ApiAuthSnapshot {
+            ApiAuthSnapshot::default()
         }
     }
     impl SessionWriter for ForceHumanCapturingKernel {
@@ -7773,24 +7741,8 @@ mod tests {
     impl WorkflowRunner for NamedWsKernel {}
     impl GoalControl for NamedWsKernel {}
     impl ApiAuth for NamedWsKernel {
-        fn auth_api_key(&self) -> String {
-            String::new()
-        }
-        fn dashboard_raw_config(&self) -> DashboardRawConfig {
-            DashboardRawConfig {
-                user: String::new(),
-                pass: String::new(),
-                pass_hash: String::new(),
-            }
-        }
-        fn auth_home_dir(&self) -> &std::path::Path {
-            std::path::Path::new("/tmp")
-        }
-        fn auth_device_api_keys(&self) -> Vec<(String, String)> {
-            vec![]
-        }
-        fn auth_config_users(&self) -> Vec<ApiUserConfigSnapshot> {
-            vec![]
+        fn auth_snapshot(&self) -> ApiAuthSnapshot {
+            ApiAuthSnapshot::default()
         }
     }
     impl SessionWriter for NamedWsKernel {
@@ -10478,24 +10430,8 @@ mod tests {
     impl GoalControl for SpawnCheckKernel {}
     impl ToolPolicy for SpawnCheckKernel {}
     impl ApiAuth for SpawnCheckKernel {
-        fn auth_api_key(&self) -> String {
-            String::new()
-        }
-        fn dashboard_raw_config(&self) -> DashboardRawConfig {
-            DashboardRawConfig {
-                user: String::new(),
-                pass: String::new(),
-                pass_hash: String::new(),
-            }
-        }
-        fn auth_home_dir(&self) -> &std::path::Path {
-            std::path::Path::new("/tmp")
-        }
-        fn auth_device_api_keys(&self) -> Vec<(String, String)> {
-            vec![]
-        }
-        fn auth_config_users(&self) -> Vec<ApiUserConfigSnapshot> {
-            vec![]
+        fn auth_snapshot(&self) -> ApiAuthSnapshot {
+            ApiAuthSnapshot::default()
         }
     }
     impl SessionWriter for SpawnCheckKernel {
