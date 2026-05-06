@@ -4,6 +4,8 @@ import { useTranslation } from "react-i18next";
 import type { UsageByAgentItem, UsageByModelItem, UsageDailyItem } from "../api";
 import { useUsageSummary, useUsageByAgent, useUsageByModel, useUsageDaily, useModelPerformance, useBudgetStatus } from "../lib/queries/analytics";
 import { useUpdateBudget } from "../lib/mutations/analytics";
+import { useUIStore } from "../lib/store";
+import { toastErr } from "../lib/errors";
 
 // The kernel ships extra columns on these rows (is_hand, total_cost_usd,
 // call_count / calls) that haven't been promoted into the canonical
@@ -38,6 +40,7 @@ interface BudgetForm {
 
 export function AnalyticsPage() {
   const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
 
   const usageQuery = useUsageSummary();
   const usageByAgentQuery = useUsageByAgent();
@@ -155,15 +158,19 @@ export function AnalyticsPage() {
   }, [modelPerformance, t]);
 
   const handleRefresh = useCallback(() => {
-    void Promise.all([
+    Promise.all([
       usageQuery.refetch(),
       usageByAgentQuery.refetch(),
       usageByModelQuery.refetch(),
       dailyQuery.refetch(),
       modelPerformanceQuery.refetch(),
       budgetQuery.refetch(),
-    ]).catch(() => {});
-  }, [usageQuery, usageByAgentQuery, usageByModelQuery, dailyQuery, modelPerformanceQuery, budgetQuery]);
+    ]).catch((e) => {
+      // Match NetworkPage's pattern (#4718 review L1) — surface refresh
+      // failures as a toast rather than silently swallowing them.
+      addToast(toastErr(e, t("common.error")), "error");
+    });
+  }, [usageQuery, usageByAgentQuery, usageByModelQuery, dailyQuery, modelPerformanceQuery, budgetQuery, addToast, t]);
 
   return (
     <div className="flex flex-col gap-4 sm:gap-6 transition-colors duration-300">
