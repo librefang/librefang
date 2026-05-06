@@ -3,6 +3,12 @@
 //! Exposes agent management, status, and chat via JSON REST endpoints.
 //! The kernel runs in-process; the CLI connects over HTTP.
 
+// `routes::config::ui_sections_overlay()` builds a 32-entry
+// `serde_json::json!([...])` literal that exceeds the default 128-token macro
+// recursion limit. Lift it to 256 — well below `rustc`'s practical ceiling
+// and headroom for future sections without re-touching this attribute.
+#![recursion_limit = "256"]
+
 /// Decode percent-encoded strings (e.g. `%2B` -> `+`).
 ///
 /// Used to normalise `?token=` values without using

@@ -967,6 +967,17 @@ pub struct AgentManifest {
     /// on the next message.
     #[serde(default)]
     pub cache_context: bool,
+    /// Per-agent tool-execution backend override (#3332).
+    ///
+    /// Resolution order: this field > `KernelConfig.tool_exec.kind` >
+    /// compiled-in default (`local`). The backend selected here is used
+    /// for shell / docker_exec / tool process spawns originating from
+    /// this agent. Setting this to `ssh` or `daytona` requires the
+    /// matching subtable in `config.toml: [tool_exec.ssh]` /
+    /// `[tool_exec.daytona]` so the runtime knows where to dispatch.
+    /// `None` means inherit from kernel config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_exec_backend: Option<crate::tool_exec::BackendKind>,
 }
 
 /// Access mode for a named workspace.
@@ -1071,6 +1082,7 @@ impl Default for AgentManifest {
             channel_overrides: None,
             max_history_messages: None,
             cache_context: false,
+            tool_exec_backend: None,
         }
     }
 }

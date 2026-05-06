@@ -2831,6 +2831,34 @@ pub struct KernelConfig {
     /// configured).
     #[serde(default = "default_cron_session_warn_total_tokens")]
     pub cron_session_warn_total_tokens: Option<u64>,
+    /// Compaction strategy applied when the cron session exceeds
+    /// `cron_session_max_tokens` or `cron_session_max_messages` (#3693).
+    ///
+    /// - `"prune"` (default) — drop oldest messages from the front until the
+    ///   budget is satisfied. Identical to the pre-#3693 behaviour.
+    /// - `"summarize_trim"` — summarize the messages that would be dropped with
+    ///   a lightweight LLM call, replace them with a single synthetic summary
+    ///   message, then keep the most recent
+    ///   `cron_session_compaction_keep_recent` messages verbatim. Falls back to
+    ///   `prune` (with a `tracing::warn!`) when the LLM call fails.
+    ///
+    /// Only takes effect when at least one size cap (`cron_session_max_tokens`
+    /// or `cron_session_max_messages`) is configured. The field is ignored and
+    /// session-mode-`new` jobs always skip this path entirely.
+    #[serde(default)]
+    pub cron_session_compaction_mode: CronCompactionMode,
+    /// Number of recent messages to preserve verbatim after summarization when
+    /// `cron_session_compaction_mode = "summarize_trim"` is active.
+    ///
+    /// The LLM summary replaces everything older than the kept tail.
+    ///
+    /// **Reasonable range**: `1` – `64`. Values below `1` are clamped to `1` at
+    /// runtime. Values larger than the current session length are silently
+    /// clamped to the session length (nothing gets summarized in that case and
+    /// the code falls back to plain prune). Setting this to a very large number
+    /// defeats the purpose of summarization. Default: `8`.
+    #[serde(default = "default_cron_session_compaction_keep_recent")]
+    pub cron_session_compaction_keep_recent: usize,
     /// Config include files — loaded and deep-merged before the root config.
     /// Paths are relative to the root config file's directory.
     /// Security: absolute paths and `..` components are rejected.
@@ -2857,6 +2885,13 @@ pub struct KernelConfig {
     /// Docker container sandbox configuration.
     #[serde(default)]
     pub docker: DockerSandboxConfig,
+    /// Pluggable tool-execution backend selection (#3332).
+    /// Default: `local` — keeps the long-standing subprocess-on-daemon
+    /// behavior. Set to `ssh` / `daytona` (with the matching subtable)
+    /// to route tool exec to a remote / managed host. Per-agent
+    /// override available via `agent.toml: tool_exec_backend`.
+    #[serde(default)]
+    pub tool_exec: crate::tool_exec::ToolExecConfig,
     /// Device pairing configuration.
     #[serde(default)]
     pub pairing: PairingConfig,
@@ -3040,7 +3075,7 @@ pub struct KernelConfig {
     /// shell_exec    = 300
     /// ```
     #[serde(default)]
-    pub tool_timeouts: std::collections::HashMap<String, u64>,
+    pub tool_timeouts: std::collections::BTreeMap<String, u64>,
     /// Maximum upload size in bytes (default: 10 MB).
     /// Enterprise deployments may need larger file uploads.
     #[serde(default = "default_max_upload_size_bytes")]
@@ -4051,6 +4086,41 @@ fn default_max_cron_jobs() -> usize {
     500
 }
 
+/// Compaction strategy for Persistent cron sessions (#3693).
+///
+/// Controls what happens when the session exceeds `cron_session_max_tokens`
+/// or `cron_session_max_messages` before a cron fire.
+///
+/// Configure in config.toml:
+/// ```toml
+/// cron_session_compaction_mode = "summarize_trim"
+/// cron_session_compaction_keep_recent = 8
+/// ```
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CronCompactionMode {
+    /// Drop oldest messages from the front of the session until the budget is
+    /// satisfied. Fast and deterministic, but lossy — dropped context is gone.
+    /// This is the historical behaviour and remains the default.
+    #[default]
+    Prune,
+    /// Summarize messages that would be dropped using an LLM call, then keep
+    /// the summary as a synthetic assistant message followed by the most recent
+    /// `cron_session_compaction_keep_recent` messages. Preserves semantic
+    /// continuity at the cost of a lightweight LLM round-trip per fire when the
+    /// session exceeds the budget. Falls back to `Prune` on LLM failure with a
+    /// `tracing::warn!`.
+    SummarizeTrim,
+}
+
+/// Default number of recent messages kept verbatim when
+/// `cron_session_compaction_mode = "summarize_trim"` runs (#3693).
+fn default_cron_session_compaction_keep_recent() -> usize {
+    8
+}
+
 /// Default warn fraction for cron session size (#3693): 80% of the
 /// effective token budget.
 fn default_cron_session_warn_fraction() -> Option<f64> {
@@ -4894,6 +4964,8 @@ impl Default for KernelConfig {
             cron_session_max_messages: None,
             cron_session_warn_fraction: default_cron_session_warn_fraction(),
             cron_session_warn_total_tokens: default_cron_session_warn_total_tokens(),
+            cron_session_compaction_mode: CronCompactionMode::default(),
+            cron_session_compaction_keep_recent: default_cron_session_compaction_keep_recent(),
             include: Vec::new(),
             exec_policy: ExecPolicy::default(),
             bindings: Vec::new(),
@@ -4902,6 +4974,7 @@ impl Default for KernelConfig {
             canvas: CanvasConfig::default(),
             tts: TtsConfig::default(),
             docker: DockerSandboxConfig::default(),
+            tool_exec: crate::tool_exec::ToolExecConfig::default(),
             pairing: PairingConfig::default(),
             auth_profiles: BTreeMap::new(),
             thinking: None,
@@ -4947,7 +5020,7 @@ impl Default for KernelConfig {
             update_channel: UpdateChannel::default(),
             rate_limit: RateLimitConfig::default(),
             tool_timeout_secs: default_tool_timeout_secs(),
-            tool_timeouts: std::collections::HashMap::new(),
+            tool_timeouts: std::collections::BTreeMap::new(),
             max_upload_size_bytes: default_max_upload_size_bytes(),
             max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
             max_agent_call_depth: default_max_agent_call_depth(),
