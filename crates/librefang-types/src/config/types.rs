@@ -7655,14 +7655,26 @@ pub struct ToolResultsConfig {
     #[serde(default = "default_max_bytes_per_turn")]
     pub max_bytes_per_turn: u64,
     /// Fold (summarise via aux-LLM) stale tool results after this many turns
-    /// (#3347 3/N).  Tool-result messages older than this threshold are
-    /// replaced with a compact summary before the next LLM call.  Falls back
-    /// to a static-stub replacement (`[history-fold: N tool result(s)
-    /// [summarisation unavailable]]`) when no aux-LLM is configured or the
-    /// aux call fails, so stale payload is always removed from context.
-    /// Default: 8 turns.
+    /// (#3347 3/N).  Tool-result messages older than this threshold have
+    /// each `ContentBlock::ToolResult.content` rewritten in place to a
+    /// compact `[history-fold] <summary>` stub before the next LLM call.
+    /// `tool_use_id` / `tool_name` / `is_error` / `status` are preserved so
+    /// every assistant `tool_use` block keeps its matching `tool_result`
+    /// (provider APIs reject mismatched ids with 400). Falls back to a
+    /// static `[summarisation unavailable]` stub when no aux-LLM is
+    /// configured or the aux call fails, so stale payload is always
+    /// removed from context.  Default: 8 turns.
     #[serde(default = "default_history_fold_after_turns")]
     pub history_fold_after_turns: u32,
+    /// Minimum number of newly-stale tool-result messages required to
+    /// trigger a fold pass.  Without a batch threshold a long-running
+    /// session would drag exactly one new message across the staleness
+    /// boundary every turn and pay an aux-LLM round-trip per turn just to
+    /// fold a single message.  Skipping until at least N have accumulated
+    /// amortises that cost.  Set to `1` to fold every turn (no batching);
+    /// `0` is treated as `1`.  Default: 4.
+    #[serde(default = "default_fold_min_batch_size")]
+    pub fold_min_batch_size: u32,
     /// Evict spill artifacts older than this many days at daemon startup
     /// (#3347 4/N).  The artifact store grows unbounded otherwise — every
     /// large tool result writes a content-addressed file under
@@ -7692,6 +7704,10 @@ fn default_history_fold_after_turns() -> u32 {
     8
 }
 
+fn default_fold_min_batch_size() -> u32 {
+    4
+}
+
 fn default_artifact_max_age_days() -> u32 {
     30
 }
@@ -7703,6 +7719,7 @@ impl Default for ToolResultsConfig {
             max_artifact_bytes: default_max_artifact_bytes(),
             max_bytes_per_turn: default_max_bytes_per_turn(),
             history_fold_after_turns: default_history_fold_after_turns(),
+            fold_min_batch_size: default_fold_min_batch_size(),
             artifact_max_age_days: default_artifact_max_age_days(),
         }
     }

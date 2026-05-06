@@ -7,19 +7,37 @@
 //!    not the responsibility of this module.
 //!
 //! 2. **Layer 2 (per-result)**: After a tool returns, if its output exceeds
-//!    [`PER_RESULT_THRESHOLD`] (default 50 KB), the full content is written to
-//!    a temp file and the in-context content is replaced with a compact summary
-//!    block containing a file path and a short preview. Fallback: if the write
-//!    fails, the content is truncated inline and a notice is appended.
+//!    [`PER_RESULT_THRESHOLD`] (default 50 KB), the full content is spilled
+//!    to the **artifact store** ([`crate::artifact_store::maybe_spill`]) and
+//!    replaced in context with a compact `[tool_result: ... | sha256:... |
+//!    N bytes | preview:]` stub.  The handle is content-addressed so the
+//!    LLM can fetch the original via `read_artifact(handle, offset, length)`.
+//!    Fallback: if the write fails, the content is truncated inline.
 //!
 //! 3. **Layer 3 (per-turn aggregate)**: After all tool results in a single
 //!    assistant turn have been collected, if their combined size exceeds
 //!    [`PER_TURN_BUDGET`] (default 200 KB), the largest non-persisted results
-//!    are spilled to disk in descending-size order until the aggregate is under
-//!    budget.
+//!    are spilled to the same artifact store in descending-size order until
+//!    the aggregate is under budget.
+//!
+//! # Why the artifact store
+//!
+//! Earlier drafts wrote both layers to a parallel `/tmp/librefang-results/`
+//! directory with `.txt` filenames keyed by `tool_use_id`.  That had three
+//! problems:
+//! * the LLM had no tool to read those files back — `read_artifact` only
+//!   accepts `sha256:<hex>` handles, so Layer 2/3-spilled data was
+//!   permanently lost from the model's perspective;
+//! * the `.txt` files weren't in the artifact-store GC's `.bin`/`.tmp`
+//!   allowlist, so long-running daemons accumulated the directory forever;
+//! * the two stub formats (`[Tool output too large ...]` vs `[tool_result:
+//!   ...]`) split the prompt-engineering surface for no benefit.
+//!
+//! Routing both layers through `crate::artifact_store::maybe_spill` unifies
+//! the spill format, makes every spilled result `read_artifact`-recoverable,
+//! and lets the existing startup GC reclaim the bytes.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing::{debug, warn};
 
 /// Default per-result persistence threshold (50 KB).
@@ -28,16 +46,18 @@ pub const PER_RESULT_THRESHOLD: usize = 50 * 1024;
 /// Default per-turn aggregate budget (200 KB).
 pub const PER_TURN_BUDGET: usize = 200 * 1024;
 
-/// Number of characters shown in the preview block.
-const PREVIEW_CHARS: usize = 500;
-
-/// Marker string used to detect already-persisted results (Layer 3 skip guard).
-const PERSISTED_MARKER: &str = "[Tool output too large";
+/// Marker substring used to detect already-spilled results (Layer 3 skip
+/// guard).  Matches the prefix of the stub produced by
+/// [`crate::artifact_store::build_spill_stub`].
+const PERSISTED_MARKER: &str = "[tool_result:";
 
 /// A single tool result entry used by the per-turn budget enforcer.
 #[derive(Debug)]
 pub struct ToolResultEntry {
-    /// The `tool_use_id` for this result (used as the spill filename stem).
+    /// The `tool_use_id` for this result.  Forwarded to the artifact-store
+    /// spill so per-tool-call traces show up in spill log lines (see
+    /// `tracing::debug!(tool_use_id = …)` below).  Not used as a filename
+    /// stem any more — `artifact_store` is content-addressed.
     pub tool_use_id: String,
     /// Content of the result. May be replaced in-place by the enforcer.
     pub content: String,
@@ -46,33 +66,55 @@ pub struct ToolResultEntry {
 /// Enforces per-result and per-turn-aggregate size budgets on tool outputs.
 ///
 /// Constructed once per agent loop instantiation and reused across turns.
-/// All file I/O uses only `std::fs` — no async, no external dependencies.
+/// All spill I/O is delegated to [`crate::artifact_store`] so:
+/// * spilled results are `read_artifact`-recoverable from the LLM
+/// * the artifact-store startup GC reclaims old bytes (#3347 4/N)
+/// * every spilled tool result lands under the same content-addressed
+///   directory, regardless of which layer triggered the write.
 pub struct ToolBudgetEnforcer {
-    /// Layer 2 threshold: results larger than this are persisted to disk.
+    /// Layer 2 threshold: results larger than this are spilled.
     pub per_result_threshold: usize,
     /// Layer 3 threshold: if total bytes across all results in a turn
     /// exceeds this, the largest non-persisted results are spilled.
     pub per_turn_budget: usize,
-    /// Directory used for spill files. Created lazily on first use.
-    temp_dir: PathBuf,
+    /// Per-artifact byte cap forwarded to
+    /// [`crate::artifact_store::maybe_spill`].  Above this the spill is
+    /// rejected and the enforcer falls back to inline truncation.
+    pub max_artifact_bytes: u64,
+    /// Resolved canonical artifact-store directory.  Same value as
+    /// [`crate::artifact_store::default_artifact_storage_dir`]; cached on
+    /// the enforcer so we don't re-resolve env vars per tool call.
+    artifact_dir: PathBuf,
 }
 
 impl Default for ToolBudgetEnforcer {
     fn default() -> Self {
-        Self::new(PER_RESULT_THRESHOLD, PER_TURN_BUDGET)
+        Self::new(
+            PER_RESULT_THRESHOLD,
+            PER_TURN_BUDGET,
+            crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
+        )
     }
 }
 
 impl ToolBudgetEnforcer {
-    /// Create an enforcer with custom thresholds.
-    ///
-    /// `temp_dir` defaults to `std::env::temp_dir()/librefang-results`.
-    pub fn new(per_result_threshold: usize, per_turn_budget: usize) -> Self {
-        let temp_dir = std::env::temp_dir().join("librefang-results");
+    /// Create an enforcer with custom thresholds.  `artifact_dir` resolves
+    /// to [`crate::artifact_store::default_artifact_storage_dir`] so reader
+    /// (`read_artifact`), writer (this enforcer + web-tool spill), and the
+    /// startup GC all touch the same directory.  Long history: the writer
+    /// path used to point at `/tmp/librefang-results/` while the reader
+    /// only knew about `~/.librefang/data/artifacts/`, which is why
+    /// Layer-3-spilled data was unreachable from the LLM.
+    pub fn new(
+        per_result_threshold: usize,
+        per_turn_budget: usize,
+        max_artifact_bytes: u64,
+    ) -> Self {
         Self {
             per_result_threshold,
             per_turn_budget,
-            temp_dir,
+            max_artifact_bytes,
+            artifact_dir: crate::artifact_store::default_artifact_storage_dir(),
         }
     }
 
@@ -83,36 +125,43 @@ impl ToolBudgetEnforcer {
     /// Apply Layer 2 budget to a single tool result.
     ///
     /// If `content` is within the threshold, it is returned unchanged.
-    /// Otherwise the full content is written to a temp file and a compact
-    /// summary block (file path + 500-char preview) is returned instead.
+    /// Otherwise the full content is spilled to the artifact store and a
+    /// compact `[tool_result: ... | sha256:... | N bytes | preview:]` stub
+    /// is returned instead — recoverable by the LLM via `read_artifact`.
     ///
-    /// **Fallback**: if the file write fails for any reason, the content is
-    /// truncated to `per_result_threshold` bytes and a notice is appended.
-    /// This function never panics.
+    /// **Fallback**: if the spill fails (per-artifact cap exceeded, disk
+    /// full), the content is truncated inline to `per_result_threshold`
+    /// bytes.  Never panics.
     pub fn maybe_persist_result(&self, content: &str, tool_use_id: &str) -> String {
         if content.len() <= self.per_result_threshold {
             return content.to_string();
         }
 
         let original_len = content.len();
-        let file_path = self.temp_dir.join(format!("{tool_use_id}.txt"));
-
-        match self.write_spill_file(&file_path, content) {
-            Ok(()) => {
+        let bytes = content.as_bytes();
+        match crate::artifact_store::maybe_spill(
+            // The artifact-store stub embeds `tool_name`; we pass
+            // `tool_use_id` here so spilled stubs trace back to the
+            // originating tool call instead of being labelled "unknown".
+            tool_use_id,
+            bytes,
+            self.per_result_threshold as u64,
+            self.max_artifact_bytes,
+            &self.artifact_dir,
+        ) {
+            Some(stub) => {
                 debug!(
                     tool_use_id,
                     bytes = original_len,
-                    path = %file_path.display(),
-                    "tool_budget: persisted oversized result (Layer 2)"
+                    "tool_budget: spilled oversized result to artifact store (Layer 2)"
                 );
-                build_persisted_summary(content, original_len, &file_path)
+                stub
             }
-            Err(e) => {
+            None => {
                 warn!(
                     tool_use_id,
                     bytes = original_len,
-                    error = %e,
-                    "tool_budget: failed to persist result, falling back to inline truncation"
+                    "tool_budget: artifact spill failed at Layer 2, falling back to inline truncation"
                 );
                 inline_truncate(content, self.per_result_threshold)
             }
@@ -162,26 +211,32 @@ impl ToolBudgetEnforcer {
             }
 
             let entry = &mut results[idx];
-            let file_path = self
-                .temp_dir
-                .join(format!("{}-budget.txt", entry.tool_use_id));
-
-            let replacement = match self.write_spill_file(&file_path, &entry.content) {
-                Ok(()) => {
+            let bytes = entry.content.as_bytes();
+            // Layer 3 spills with `threshold = 1` so any non-empty content
+            // is materialised — the budget exceedance is the gate, not the
+            // size of an individual result. `max_artifact_bytes` and the
+            // shared `artifact_dir` route the spill through the same
+            // content-addressed store as Layer 2.
+            let replacement = match crate::artifact_store::maybe_spill(
+                &entry.tool_use_id,
+                bytes,
+                1,
+                self.max_artifact_bytes,
+                &self.artifact_dir,
+            ) {
+                Some(stub) => {
                     debug!(
                         tool_use_id = %entry.tool_use_id,
                         bytes = size,
-                        path = %file_path.display(),
                         "tool_budget: spilled result for turn budget (Layer 3)"
                     );
-                    build_persisted_summary(&entry.content, size, &file_path)
+                    stub
                 }
-                Err(e) => {
+                None => {
                     warn!(
                         tool_use_id = %entry.tool_use_id,
                         bytes = size,
-                        error = %e,
-                        "tool_budget: turn-budget spill failed, truncating inline"
+                        "tool_budget: artifact spill failed at Layer 3, truncating inline"
                     );
                     inline_truncate(&entry.content, self.per_result_threshold)
                 }
@@ -191,41 +246,15 @@ impl ToolBudgetEnforcer {
             entry.content = replacement;
         }
     }
-
-    // ──────────────────────────────────────────────────────────────────────────
-    // Internal helpers
-    // ──────────────────────────────────────────────────────────────────────────
-
-    /// Create the spill directory if needed, then write `content` to `path`.
-    fn write_spill_file(&self, path: &Path, content: &str) -> std::io::Result<()> {
-        fs::create_dir_all(&self.temp_dir)?;
-        fs::write(path, content.as_bytes())?;
-        Ok(())
-    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Free helpers (pure, no I/O)
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Build the compact summary block shown in-context when a result is persisted.
-fn build_persisted_summary(content: &str, original_bytes: usize, path: &Path) -> String {
-    let preview: String = content.chars().take(PREVIEW_CHARS).collect();
-    let has_more = content.chars().count() > PREVIEW_CHARS;
-    let mut out = format!(
-        "[Tool output too large ({original_bytes} bytes). Saved to: {}]\n\
-         Preview (first {PREVIEW_CHARS} chars):\n\
-         {preview}",
-        path.display()
-    );
-    if has_more {
-        out.push_str("\n...");
-    }
-    out
-}
-
 /// Truncate `content` to at most `max_bytes` UTF-8 bytes (snapping to a char
-/// boundary) and append a notice. Used as the fallback when file I/O fails.
+/// boundary) and append a notice. Used as the fallback when artifact spill
+/// fails.
 fn inline_truncate(content: &str, max_bytes: usize) -> String {
     let truncated = truncate_to_byte_boundary(content, max_bytes);
     format!("{truncated}\n[Truncated: could not save full output]")
@@ -257,7 +286,8 @@ mod tests {
         ToolBudgetEnforcer {
             per_result_threshold: 100,
             per_turn_budget: 300,
-            temp_dir: tmpdir.to_path_buf(),
+            max_artifact_bytes: crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
+            artifact_dir: tmpdir.to_path_buf(),
         }
     }
 
@@ -278,27 +308,33 @@ mod tests {
         let enforcer = make_enforcer(dir.path());
         let content = "y".repeat(200);
         let result = enforcer.maybe_persist_result(&content, "id-2");
+        // Stub from `artifact_store::build_spill_stub` carries the
+        // `PERSISTED_MARKER` prefix and an `sha256:<hex>` handle.
         assert!(result.starts_with(PERSISTED_MARKER));
-        assert!(result.contains("id-2.txt"));
-        // File should exist and contain the original content.
-        let written = fs::read_to_string(dir.path().join("id-2.txt")).unwrap();
-        assert_eq!(written, content);
+        assert!(result.contains("sha256:"));
+        assert!(result.contains("read_artifact"));
+        // A `<hash>.bin` file should exist in the artifact dir.
+        let any_bin = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .any(|e| e.path().extension().is_some_and(|x| x == "bin"));
+        assert!(any_bin, "Layer 2 must materialise a .bin artifact");
     }
 
     #[test]
     #[cfg(unix)]
-    fn layer2_fallback_on_bad_path() {
-        // Use an unwriteable path to force the fallback. `/proc` on Linux is a
-        // read-only virtual filesystem; macOS has no `/proc` so `create_dir_all`
-        // fails at the filesystem root. Either way, the write must fail so the
-        // fallback path in `maybe_persist_result` runs.
-        //
-        // Skipped on Windows because `/proc/...` gets resolved to
-        // `C:\proc\...`, which is writeable under a standard user account.
+    fn layer2_fallback_when_artifact_cap_blocks_spill() {
+        // Drive the spill into the fallback by setting `max_artifact_bytes`
+        // below the content size — `artifact_store::write` rejects the
+        // write and `maybe_spill` returns `None`.  Was previously a
+        // bad-path test; since spill now goes through `artifact_store`,
+        // the per-artifact cap is the cleanest way to trigger fallback.
+        let dir = tempfile::tempdir().unwrap();
         let enforcer = ToolBudgetEnforcer {
             per_result_threshold: 10,
             per_turn_budget: 1000,
-            temp_dir: PathBuf::from("/proc/no-such-dir-librefang-test"),
+            max_artifact_bytes: 8, // smaller than `content`, write rejected
+            artifact_dir: dir.path().to_path_buf(),
         };
         let content = "z".repeat(100);
         let result = enforcer.maybe_persist_result(&content, "bad-id");
@@ -345,14 +381,19 @@ mod tests {
         // The largest entry (200 bytes, index 1) should be persisted.
         let large_entry = entries.iter().find(|e| e.tool_use_id == "large").unwrap();
         assert!(large_entry.content.starts_with(PERSISTED_MARKER));
+        assert!(large_entry.content.contains("sha256:"));
     }
 
     #[test]
     fn layer3_skips_already_persisted() {
         let dir = tempfile::tempdir().unwrap();
         let enforcer = make_enforcer(dir.path());
+        // Synthesise a stub that already starts with `PERSISTED_MARKER`
+        // (matches `artifact_store::build_spill_stub`'s output prefix),
+        // so `enforce_turn_budget` recognises it as already-spilled and
+        // skips it.
         let persisted_content = format!(
-            "{} (99999 bytes). Saved to: /tmp/old.txt]\nPreview (first 500 chars):\nabc",
+            "{} pretool | sha256:abcd | 99999 bytes | preview:]\nfoo\n-- truncated. Use read_artifact",
             PERSISTED_MARKER
         );
         let mut entries = vec![
@@ -396,7 +437,8 @@ mod tests {
         let enforcer = ToolBudgetEnforcer {
             per_result_threshold: 1024,
             per_turn_budget: 10 * 1024,
-            temp_dir: dir.path().to_path_buf(),
+            max_artifact_bytes: crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
+            artifact_dir: dir.path().to_path_buf(),
         };
 
         // Simulate a ~50 KB raw result — well above per_result_threshold.

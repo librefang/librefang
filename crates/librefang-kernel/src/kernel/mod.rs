@@ -5491,9 +5491,12 @@ system_prompt = "You are a helpful assistant."
                 max_history_messages: self.config.load().max_history_messages,
                 aux_client: Some(self.aux_client.load_full()),
                 parent_session_id: None,
-                // Ephemeral /btw sessions start with empty history so no stale
-                // tool results can accumulate — None uses compiled defaults which
-                // is fine; the fold guard exits early on short histories.
+                // Ephemeral /btw sessions start with empty history so no
+                // stale tool results can accumulate — `None` uses compiled
+                // defaults, which is fine.  The fold helper's length
+                // fast-path exits on short histories.  Layer 2 / Layer 3
+                // byte-budget enforcement (defaults: 16 KB per result,
+                // 50 KB per turn) still applies — only fold no-ops here.
                 tool_results_config: None,
             },
         )

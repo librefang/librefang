@@ -756,6 +756,11 @@ struct StagedToolUseTurn {
     /// Layer 3 per-turn aggregate budget (bytes). Taken from
     /// `LoopOptions::tool_results_config` at construction time.
     per_turn_budget: usize,
+    /// Per-artifact write cap forwarded into `ToolBudgetEnforcer` so its
+    /// underlying `artifact_store::maybe_spill` rejects writes above this
+    /// (and the enforcer falls back to inline truncation).  Taken from
+    /// `LoopOptions::tool_results_config.max_artifact_bytes`.
+    max_artifact_bytes: u64,
 }
 
 impl StagedToolUseTurn {
@@ -840,6 +845,7 @@ impl StagedToolUseTurn {
             &mut self.tool_result_blocks,
             self.per_result_threshold,
             self.per_turn_budget,
+            self.max_artifact_bytes,
         )
     }
 }
@@ -853,6 +859,7 @@ fn stage_tool_use_turn(
     available_tools: &[ToolDefinition],
     per_result_threshold: usize,
     per_turn_budget: usize,
+    max_artifact_bytes: u64,
 ) -> StagedToolUseTurn {
     let rationale_text = {
         let text = response.text();
@@ -886,6 +893,7 @@ fn stage_tool_use_turn(
         committed: false,
         per_result_threshold,
         per_turn_budget,
+        max_artifact_bytes,
     }
 }
 
@@ -1416,6 +1424,7 @@ fn finalize_tool_use_results(
     tool_result_blocks: &mut Vec<ContentBlock>,
     per_result_threshold: usize,
     per_turn_budget: usize,
+    max_artifact_bytes: u64,
 ) -> ToolResultOutcomeSummary {
     if tool_result_blocks.is_empty() {
         return ToolResultOutcomeSummary::default();
@@ -1423,7 +1432,7 @@ fn finalize_tool_use_results(
 
     // Compute outcome_summary from the original (pre-budget) content so that
     // is_soft_error_content checks match the actual tool error text, not the
-    // [Tool output too large ...] replacement that Layer 3 may substitute.
+    // [tool_result: ... | sha256:...] replacement that Layer 3 may substitute.
     // This must happen before Layer 3 mutates the blocks.
     let outcome_summary = ToolResultOutcomeSummary::from_blocks(tool_result_blocks);
 
@@ -1432,7 +1441,8 @@ fn finalize_tool_use_results(
     // with the configured thresholds, then write back any content that was
     // modified (persisted or truncated).
     {
-        let enforcer = ToolBudgetEnforcer::new(per_result_threshold, per_turn_budget);
+        let enforcer =
+            ToolBudgetEnforcer::new(per_result_threshold, per_turn_budget, max_artifact_bytes);
         let mut entries: Vec<ToolResultEntry> = tool_result_blocks
             .iter()
             .filter_map(|b| {
@@ -1482,15 +1492,25 @@ fn finalize_tool_use_results(
     // "agent_send" which is an internal kernel-controlled tool, so external
     // content cannot satisfy the predicate.
     let mut pin_this = has_delegation_result && existing_pinned < MAX_PINNED_DELEGATION;
-    // Trust-boundary guard: only tool-result messages that actually contain an
-    // `agent_send` block may be pinned.  External / MCP tool output must never
-    // reach the pinned set regardless of how `has_delegation_result` was derived.
-    // This is a runtime check (not debug-only) so the invariant holds in release.
-    if pin_this
-        && !tool_result_blocks
-            .iter()
-            .any(|b| matches!(b, ContentBlock::ToolResult { tool_name, .. } if tool_name == "agent_send"))
-    {
+    // Trust-boundary guard (#6 review-followup hardening): the upstream
+    // predicate `has_delegation_result` is itself derived from a
+    // `tool_name == "agent_send"` scan at the call site, so under normal
+    // control flow we expect the two checks to agree.  If they disagree,
+    // a real bug has occurred — `has_delegation_result` was computed
+    // against a different `tool_result_blocks` view than the one we hold
+    // here.  Crash dev/CI builds via `debug_assert!` so the regression
+    // shows up in tests; in release builds we additionally clear
+    // `pin_this` and emit `error!` so external content never reaches the
+    // pinned set even if the bug shipped.
+    let blocks_have_agent_send = tool_result_blocks.iter().any(
+        |b| matches!(b, ContentBlock::ToolResult { tool_name, .. } if tool_name == "agent_send"),
+    );
+    debug_assert!(
+        !pin_this || blocks_have_agent_send,
+        "pin_this/blocks divergence: has_delegation_result implied agent_send but \
+         tool_result_blocks contains none — fix the upstream predicate at the call site"
+    );
+    if pin_this && !blocks_have_agent_send {
         tracing::error!(
             target: "trust_boundary",
             "refusing to pin tool-result message that contains no agent_send block; \
@@ -3185,6 +3205,58 @@ async fn finalize_successful_end_turn(
     })
 }
 
+/// Shared fold pass for the streaming and non-streaming agent loops
+/// (#3347 3/N + #4 review-followup DRY).  Both loops previously inlined
+/// the same fast-path / call / debug-log block; collapsing them into one
+/// helper prevents the two paths from drifting (e.g. one branch picking
+/// up a new `min_batch_size` knob and the other lagging).
+///
+/// Returns the (possibly modified) message list — same semantics as
+/// [`crate::history_fold::fold_stale_tool_results`] but with the fast-path
+/// and call-site logging baked in.  `streaming` flips the log target so
+/// operators can grep `"streaming"` vs `"non-streaming"` in production.
+async fn maybe_fold_stale_tool_results(
+    messages: Vec<Message>,
+    fold_after_turns: u32,
+    fold_min_batch_size: u32,
+    model: &str,
+    aux_client: Option<&crate::aux_client::AuxClient>,
+    driver: Arc<dyn LlmDriver>,
+    streaming: bool,
+) -> Vec<Message> {
+    // Fast-path: a fold pass needs at least `fold_after_turns` *recent*
+    // assistant turns plus one stale turn — i.e. more than
+    // `fold_after_turns * 2` messages — before any tool-result can be
+    // classified stale.  Skipping the call avoids even the index walk
+    // inside `collect_stale_indices` on every short-session iteration.
+    if fold_after_turns == 0 || messages.len() <= (fold_after_turns as usize).saturating_mul(2) {
+        return messages;
+    }
+    let (folded, fold_result) = crate::history_fold::fold_stale_tool_results(
+        messages,
+        fold_after_turns,
+        fold_min_batch_size,
+        model,
+        aux_client,
+        driver,
+    )
+    .await;
+    if fold_result.groups_folded > 0 {
+        let label = if streaming {
+            "streaming"
+        } else {
+            "non-streaming"
+        };
+        debug!(
+            groups = fold_result.groups_folded,
+            replaced = fold_result.messages_replaced,
+            groups_used_fallback = fold_result.groups_used_fallback,
+            "history_fold: fold pass complete ({label})"
+        );
+    }
+    folded
+}
+
 /// Run the agent execution loop for a single user message.
 ///
 /// This is the core of LibreFang: it loads session context, recalls memories,
@@ -3482,7 +3554,9 @@ pub async fn run_agent_loop(
     let tool_results_cfg = opts.tool_results_config.clone().unwrap_or_default();
     let tr_per_result = tool_results_cfg.spill_threshold_bytes as usize;
     let tr_per_turn = tool_results_cfg.max_bytes_per_turn as usize;
+    let tr_max_artifact_bytes = tool_results_cfg.max_artifact_bytes;
     let tr_fold_after_turns = tool_results_cfg.history_fold_after_turns;
+    let tr_fold_min_batch_size = tool_results_cfg.fold_min_batch_size;
     // Context compressor — triggers LLM-based summarisation when token usage
     // exceeds 80% of the context window, before falling back to brute-force trim.
     let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();
@@ -3614,37 +3688,20 @@ pub async fn run_agent_loop(
             }
         }
 
-        // History fold (#3347 3/N): replace stale tool-result messages with compact
-        // stubs before context assembly so the LLM never sees raw bulk payloads
-        // from old turns.  Runs fold first, then the compressor, mirroring the
-        // ordering rationale in the module-level doc.
-        //
-        // Fast-path: skip the call entirely when the history is too short to
-        // contain any stale turns.  Minimum for staleness: fold_after_turns
-        // assistant turns plus at least one older turn means we need more than
-        // `fold_after_turns * 2` messages.  This avoids even the index-walk
-        // inside `collect_stale_indices` on every short-session iteration.
-        if tr_fold_after_turns > 0
-            && messages.len() > (tr_fold_after_turns as usize).saturating_mul(2)
-        {
-            let (folded, fold_result) = crate::history_fold::fold_stale_tool_results(
-                messages,
-                tr_fold_after_turns,
-                &manifest.model.model,
-                opts.aux_client.as_deref(),
-                driver.clone(),
-            )
-            .await;
-            messages = folded;
-            if fold_result.groups_folded > 0 {
-                debug!(
-                    groups = fold_result.groups_folded,
-                    replaced = fold_result.messages_replaced,
-                    fallback = fold_result.used_fallback,
-                    "history_fold: fold pass complete (non-streaming)"
-                );
-            }
-        }
+        // History fold (#3347 3/N): rewrite stale tool-result blocks in place
+        // before context assembly so the LLM never sees raw bulk payloads
+        // from old turns.  Runs fold first, then the compressor, mirroring
+        // the ordering rationale in `history_fold`'s module-level doc.
+        messages = maybe_fold_stale_tool_results(
+            messages,
+            tr_fold_after_turns,
+            tr_fold_min_batch_size,
+            &manifest.model.model,
+            opts.aux_client.as_deref(),
+            driver.clone(),
+            false,
+        )
+        .await;
 
         // Context assembly — use context engine if available, else inline logic
         if let Some(engine) = context_engine {
@@ -4048,6 +4105,7 @@ pub async fn run_agent_loop(
                     available_tools,
                     tr_per_result,
                     tr_per_turn,
+                    tr_max_artifact_bytes,
                 );
 
                 // Execute each tool call with loop guard, timeout, and truncation.
@@ -4114,12 +4172,14 @@ pub async fn run_agent_loop(
                         }
                     }
 
-                    // Layer 2: per-result budget — persist oversized outputs to disk (#3347 2/N).
-                    let budgeted_content = ToolBudgetEnforcer::new(tr_per_result, tr_per_turn)
-                        .maybe_persist_result(
-                            &executed.final_content,
-                            &executed.result.tool_use_id,
-                        );
+                    // Layer 2: per-result budget — spill oversized outputs to
+                    // the artifact store (#3347 2/N + #2 review-followup).
+                    let budgeted_content =
+                        ToolBudgetEnforcer::new(tr_per_result, tr_per_turn, tr_max_artifact_bytes)
+                            .maybe_persist_result(
+                                &executed.final_content,
+                                &executed.result.tool_use_id,
+                            );
                     staged.append_result(ContentBlock::ToolResult {
                         tool_use_id: executed.result.tool_use_id.clone(),
                         tool_name: tool_call.name.clone(),
@@ -4945,7 +5005,9 @@ pub async fn run_agent_loop_streaming(
     let tool_results_cfg = opts.tool_results_config.clone().unwrap_or_default();
     let tr_per_result = tool_results_cfg.spill_threshold_bytes as usize;
     let tr_per_turn = tool_results_cfg.max_bytes_per_turn as usize;
+    let tr_max_artifact_bytes = tool_results_cfg.max_artifact_bytes;
     let tr_fold_after_turns = tool_results_cfg.history_fold_after_turns;
+    let tr_fold_min_batch_size = tool_results_cfg.fold_min_batch_size;
     // Context compressor — LLM-based soft compression before hard trim.
     let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();
     let mut any_tools_executed = false;
@@ -5061,30 +5123,19 @@ pub async fn run_agent_loop_streaming(
             }
         }
 
-        // History fold (#3347 3/N): replace stale tool-result messages with compact
-        // stubs before context assembly — streaming path mirrors non-streaming.
-        // Fast-path: same length guard as the non-streaming path above.
-        if tr_fold_after_turns > 0
-            && messages.len() > (tr_fold_after_turns as usize).saturating_mul(2)
-        {
-            let (folded, fold_result) = crate::history_fold::fold_stale_tool_results(
-                messages,
-                tr_fold_after_turns,
-                &manifest.model.model,
-                opts.aux_client.as_deref(),
-                driver.clone(),
-            )
-            .await;
-            messages = folded;
-            if fold_result.groups_folded > 0 {
-                debug!(
-                    groups = fold_result.groups_folded,
-                    replaced = fold_result.messages_replaced,
-                    fallback = fold_result.used_fallback,
-                    "history_fold: fold pass complete (streaming)"
-                );
-            }
-        }
+        // History fold (#3347 3/N): rewrite stale tool-result blocks in place
+        // before context assembly — streaming path mirrors non-streaming via
+        // `maybe_fold_stale_tool_results` (#4 review-followup DRY).
+        messages = maybe_fold_stale_tool_results(
+            messages,
+            tr_fold_after_turns,
+            tr_fold_min_batch_size,
+            &manifest.model.model,
+            opts.aux_client.as_deref(),
+            driver.clone(),
+            true,
+        )
+        .await;
 
         // Context assembly — use context engine if available, else inline logic
         let recovery = if let Some(engine) = context_engine {
@@ -5555,6 +5606,7 @@ pub async fn run_agent_loop_streaming(
                     available_tools,
                     tr_per_result,
                     tr_per_turn,
+                    tr_max_artifact_bytes,
                 );
 
                 // Execute each tool call with loop guard, timeout, and truncation.
@@ -5632,12 +5684,14 @@ pub async fn run_agent_loop_streaming(
                         }
                     }
 
-                    // Layer 2: per-result budget — persist oversized outputs to disk (#3347 2/N).
-                    let budgeted_content = ToolBudgetEnforcer::new(tr_per_result, tr_per_turn)
-                        .maybe_persist_result(
-                            &executed.final_content,
-                            &executed.result.tool_use_id,
-                        );
+                    // Layer 2: per-result budget — spill oversized outputs to
+                    // the artifact store (#3347 2/N + #2 review-followup).
+                    let budgeted_content =
+                        ToolBudgetEnforcer::new(tr_per_result, tr_per_turn, tr_max_artifact_bytes)
+                            .maybe_persist_result(
+                                &executed.final_content,
+                                &executed.result.tool_use_id,
+                            );
 
                     // Notify client of tool execution result (detect dead consumer)
                     let preview: String = budgeted_content.chars().take(300).collect();
@@ -7235,6 +7289,7 @@ mod tests {
             &mut tool_result_blocks,
             crate::tool_budget::PER_RESULT_THRESHOLD,
             crate::tool_budget::PER_TURN_BUDGET,
+            crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
         );
 
         assert_eq!(outcomes, ToolResultOutcomeSummary::default());
@@ -7275,6 +7330,7 @@ mod tests {
             committed: false,
             per_result_threshold: crate::tool_budget::PER_RESULT_THRESHOLD,
             per_turn_budget: crate::tool_budget::PER_TURN_BUDGET,
+            max_artifact_bytes: crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
         };
         let (tx, rx) = mpsc::channel(1);
         tx.try_send(AgentLoopSignal::Message {
@@ -7368,6 +7424,7 @@ mod tests {
             committed: false,
             per_result_threshold: crate::tool_budget::PER_RESULT_THRESHOLD,
             per_turn_budget: crate::tool_budget::PER_TURN_BUDGET,
+            max_artifact_bytes: crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
         };
         let (tx, rx) = mpsc::channel(1);
         tx.try_send(AgentLoopSignal::Message {
@@ -7510,6 +7567,7 @@ mod tests {
             committed: false,
             per_result_threshold: crate::tool_budget::PER_RESULT_THRESHOLD,
             per_turn_budget: crate::tool_budget::PER_TURN_BUDGET,
+            max_artifact_bytes: crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
         };
         let (tx, rx) = mpsc::channel(1);
         tx.try_send(AgentLoopSignal::ApprovalResolved {
@@ -7690,6 +7748,7 @@ mod tests {
             committed: false,
             per_result_threshold: crate::tool_budget::PER_RESULT_THRESHOLD,
             per_turn_budget: crate::tool_budget::PER_TURN_BUDGET,
+            max_artifact_bytes: crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
         };
 
         // Channel mimicking session B's injection_senders entry. The
@@ -7793,6 +7852,7 @@ mod tests {
             committed: false,
             per_result_threshold: crate::tool_budget::PER_RESULT_THRESHOLD,
             per_turn_budget: crate::tool_budget::PER_TURN_BUDGET,
+            max_artifact_bytes: crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
         };
 
         let (tx, rx) = mpsc::channel(1);
@@ -8334,6 +8394,7 @@ mod tests {
             committed: false,
             per_result_threshold: crate::tool_budget::PER_RESULT_THRESHOLD,
             per_turn_budget: crate::tool_budget::PER_TURN_BUDGET,
+            max_artifact_bytes: crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
         };
         let (tx, rx) = mpsc::channel(1);
         tx.send(AgentLoopSignal::Message {
@@ -9098,9 +9159,12 @@ mod tests {
 
         // fold_after_turns=3 so turns 0..6 are stale by the time we have 10
         // assistant turns, guaranteeing at least one fold group before the
-        // final LLM call that returns EndTurn.
+        // final LLM call that returns EndTurn.  `fold_min_batch_size: 1`
+        // disables the cost amortiser so the test exercises fold on the
+        // first eligible turn instead of waiting for 4 stale messages.
         let tool_results_cfg = ToolResultsConfig {
             history_fold_after_turns: 3,
+            fold_min_batch_size: 1,
             ..ToolResultsConfig::default()
         };
 
@@ -9160,17 +9224,26 @@ mod tests {
         // calls must be a [history-fold] stub — this proves fold_stale_tool_results
         // ran and replaced stale tool-result entries before the LLM call.
         // The prefix "[history-fold]" mirrors `history_fold::FOLD_PREFIX`.
+        // Post-#1 review: fold now rewrites `ContentBlock::ToolResult.content`
+        // in place (preserving tool_use_id pairing), so we look for the
+        // prefix inside ToolResult blocks rather than in a Text-content
+        // message.
         const FOLD_PREFIX_STR: &str = "[history-fold]";
         let seen = primary.seen_messages.lock().unwrap();
-        let fold_stub_found = seen.iter().any(|m| {
-            matches!(&m.content,
-                librefang_types::message::MessageContent::Text(t)
-                    if t.starts_with(FOLD_PREFIX_STR))
+        let fold_stub_found = seen.iter().any(|m| match &m.content {
+            librefang_types::message::MessageContent::Blocks(blocks) => blocks.iter().any(|b| {
+                matches!(
+                    b,
+                    librefang_types::message::ContentBlock::ToolResult { content, .. }
+                        if content.starts_with(FOLD_PREFIX_STR)
+                )
+            }),
+            _ => false,
         });
         assert!(
             fold_stub_found,
-            "expected at least one [history-fold] stub in a CompletionRequest after 10 tool \
-             cycles with fold_after_turns=3; messages seen by primary driver: {:#?}",
+            "expected at least one [history-fold] ToolResult stub in a CompletionRequest after 10 \
+             tool cycles with fold_after_turns=3; messages seen by primary driver: {:#?}",
             seen.iter()
                 .map(|m| format!("{:?}: {:?}", m.role, m.content))
                 .collect::<Vec<_>>()
@@ -11098,6 +11171,7 @@ mod tests {
             committed: false,
             per_result_threshold: crate::tool_budget::PER_RESULT_THRESHOLD,
             per_turn_budget: crate::tool_budget::PER_TURN_BUDGET,
+            max_artifact_bytes: crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
         }
     }
 
@@ -11358,6 +11432,7 @@ mod tests {
             committed: false,
             per_result_threshold: crate::tool_budget::PER_RESULT_THRESHOLD,
             per_turn_budget: crate::tool_budget::PER_TURN_BUDGET,
+            max_artifact_bytes: crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES,
         };
 
         // Simulate the batch executing end-to-end (no early break).

@@ -3,8 +3,8 @@
 //! After `history_fold_after_turns` assistant turns have elapsed, tool-result
 //! messages from those older turns are "stale" and contribute noise to the
 //! context window without materially helping the agent.  This module folds
-//! them into a single compact summary message so the LLM sees the history
-//! without the raw payload bulk.
+//! them into compact summaries so the LLM sees the history without the raw
+//! payload bulk.
 //!
 //! # Algorithm
 //!
@@ -14,9 +14,26 @@
 //! 2. Group consecutive stale tool-result messages and ask the aux-LLM (or the
 //!    primary driver when no aux chain is configured) to produce a 1–2 sentence
 //!    summary per group.
-//! 3. Replace each group with a single synthetic `[user]` message:
-//!    `[history-fold: <count> tool result(s) from turns <range> ago: <summary>]`
+//! 3. Rewrite **each `ContentBlock::ToolResult` in the stale group in place**:
+//!    `tool_use_id` / `tool_name` / `is_error` / `status` are preserved, only
+//!    `content` is replaced with `"[history-fold] <summary>"`.
 //! 4. Pinned messages are never folded (they are protected work product).
+//!
+//! # tool_use ↔ tool_result pairing — why we don't replace messages
+//!
+//! Earlier drafts of this module replaced each stale tool-result message with
+//! a single `Message::user(Text("[history-fold] ..."))` plain-text message.
+//! That broke conversation invariants: provider APIs (Anthropic Messages,
+//! OpenAI Responses, Gemini function_call) require every assistant
+//! `tool_use` block to be answered by a `tool_result` block carrying the
+//! same `tool_use_id`.  Replacing the user message with free-form text
+//! left the matching assistant `tool_use` orphaned, and the next provider
+//! call returned `400 invalid_request_error: messages: tool_use ids must
+//! match tool_result tool_use_ids`.
+//!
+//! Rewriting `ToolResult.content` in place keeps the `Blocks([ToolResult{
+//! tool_use_id, ...}])` shape so every original `tool_use` still has its
+//! matching `tool_result` — only the payload contracts.
 //!
 //! # Boundary choice
 //!
@@ -54,21 +71,31 @@ pub struct FoldResult {
     pub groups_folded: usize,
     /// Total tool-result messages that were replaced.
     pub messages_replaced: usize,
-    /// Whether the LLM summarisation was available (false = fallback used).
-    pub used_fallback: bool,
+    /// Number of groups that fell back to the static stub because the
+    /// aux-LLM summarisation failed (#7 review follow-up: was previously a
+    /// single-bit `used_fallback`, which lost fidelity when one group in
+    /// the pass failed and others succeeded).
+    pub groups_used_fallback: usize,
 }
 
 /// Fold stale tool-result messages in `messages`.
 ///
 /// `fold_after_turns` — fold tool results older than this many assistant turns.
+/// `min_batch_size` — only run a fold pass when at least this many newly-stale
+/// (i.e. not already-folded) tool-result messages have accumulated. Amortises
+/// the aux-LLM cost on long sessions where each new turn would otherwise drag
+/// exactly one new message across the staleness boundary and trigger another
+/// fold call. Set to `1` to disable the batch threshold (fold every turn);
+/// `0` is treated as `1`.
 /// `model` — model slug forwarded to the summariser.
 /// `aux_client` — optional aux-LLM client; when `None`, fallback text is used.
 /// `driver` — primary driver (used when aux chain resolves to primary).
 ///
 /// Returns the (possibly modified) message list and a [`FoldResult`] summary.
 pub async fn fold_stale_tool_results(
-    messages: Vec<Message>,
+    mut messages: Vec<Message>,
     fold_after_turns: u32,
+    min_batch_size: u32,
     model: &str,
     aux_client: Option<&AuxClient>,
     driver: Arc<dyn LlmDriver>,
@@ -86,6 +113,21 @@ pub async fn fold_stale_tool_results(
         return (messages, FoldResult::default());
     }
 
+    // Cost amortiser (#3 review follow-up): on a long-running session every
+    // new turn pushes exactly one fresh message across the staleness
+    // boundary, which would trigger an aux-LLM call per turn just to fold a
+    // single message. Skip the pass until at least `min_batch_size`
+    // newly-stale messages have accumulated.
+    let batch_size = std::cmp::max(min_batch_size, 1) as usize;
+    if stale_indices.len() < batch_size {
+        debug!(
+            stale_count = stale_indices.len(),
+            min_batch_size = batch_size,
+            "history_fold: skip — newly-stale below batch threshold"
+        );
+        return (messages, FoldResult::default());
+    }
+
     debug!(
         stale_count = stale_indices.len(),
         fold_after_turns, "history_fold: folding stale tool-result messages"
@@ -96,67 +138,68 @@ pub async fn fold_stale_tool_results(
         .map(|c| c.driver_for(AuxTask::Fold))
         .unwrap_or_else(|| Arc::clone(&driver));
 
-    // Group consecutive stale indices so we produce one stub per contiguous run.
+    // Group consecutive stale indices so we produce one summary call per
+    // contiguous run; the summary text is then assigned to the `content`
+    // field of every `ToolResult` block in the group.
     let groups = group_consecutive(stale_indices);
 
     let mut result = FoldResult::default();
-    let mut used_fallback = false;
 
-    // Build the new message list, replacing each stale group.
-    let mut out: Vec<Message> = Vec::with_capacity(messages.len());
-    let mut skip_set: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
-    for g in &groups {
-        for &i in g {
-            skip_set.insert(i);
-        }
-    }
-
-    // Map from first-index-in-group → summary stub (computed below).
-    let mut group_stubs: std::collections::BTreeMap<usize, Message> =
-        std::collections::BTreeMap::new();
-
+    // Compute a summary string for each group.
+    let mut group_summaries: Vec<(Vec<usize>, String)> = Vec::with_capacity(groups.len());
     for (g_idx, group) in groups.iter().enumerate() {
         let count = group.len();
         let group_msgs: Vec<&Message> = group.iter().map(|&i| &messages[i]).collect();
         let summary = summarise_group(group_msgs.as_slice(), model, &*summary_driver, g_idx).await;
-        match summary {
+        let text = match summary {
             Ok(text) => {
                 info!(
                     count,
                     "history_fold: summarised group of {count} tool-result(s)"
                 );
-                let stub = Message::user(format!("{FOLD_PREFIX} {count} tool result(s): {text}"));
-                group_stubs.insert(group[0], stub);
+                text
             }
             Err(e) => {
-                warn!(count, error = %e, "history_fold: summarisation failed, using fallback stub");
-                used_fallback = true;
-                let stub = Message::user(format!(
-                    "{FOLD_PREFIX} {count} tool result(s) [summarisation unavailable]"
-                ));
-                group_stubs.insert(group[0], stub);
+                warn!(
+                    count,
+                    error = %e,
+                    "history_fold: summarisation failed, using fallback stub"
+                );
+                result.groups_used_fallback += 1;
+                FALLBACK_SUMMARY.to_string()
             }
-        }
+        };
         result.groups_folded += 1;
         result.messages_replaced += count;
+        group_summaries.push((group.clone(), text));
     }
 
-    // Reconstruct the message list.
-    for (i, msg) in messages.into_iter().enumerate() {
-        if skip_set.contains(&i) {
-            // First index in a group → emit the stub; rest → skip.
-            if let Some(stub) = group_stubs.remove(&i) {
-                out.push(stub);
+    // Apply the summary by rewriting `ContentBlock::ToolResult.content` in
+    // place — preserving `tool_use_id` / `tool_name` / `is_error` / `status`
+    // so every original assistant `tool_use` block keeps its matching
+    // `tool_result` block.  This is the difference vs. the earlier draft
+    // that emitted a free-text stub: provider APIs reject mismatched
+    // tool_use_ids with `400 invalid_request_error`. (Pairing-preservation
+    // is module-doc invariant; see the test suite below.)
+    for (group, summary) in &group_summaries {
+        let stub_content = format!("{FOLD_PREFIX} {summary}");
+        for &i in group {
+            if let MessageContent::Blocks(blocks) = &mut messages[i].content {
+                for block in blocks.iter_mut() {
+                    if let ContentBlock::ToolResult { content, .. } = block {
+                        *content = stub_content.clone();
+                    }
+                }
             }
-            // else: non-first member of the group, already represented by the stub.
-        } else {
-            out.push(msg);
         }
     }
 
-    result.used_fallback = used_fallback;
-    (out, result)
+    (messages, result)
 }
+
+/// Static-stub text used when the aux-LLM summarisation call fails.  Kept as
+/// a const so tests and call sites can spot it without string-matching.
+const FALLBACK_SUMMARY: &str = "[summarisation unavailable]";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
@@ -217,15 +260,22 @@ fn is_tool_result_message(msg: &Message) -> bool {
     }
 }
 
-/// Returns true when `msg` is a previously-folded stub (starts with `FOLD_PREFIX`).
-///
-/// These messages are cheap text stubs produced by a prior fold pass and do not
-/// need to be re-summarised.  Re-folding them wastes an aux-LLM call and can
-/// produce misleading "summary of a summary" output.
+/// Returns true when `msg`'s tool-result blocks have already been collapsed
+/// by a prior fold pass.  Detection: any `ToolResult.content` starts with
+/// `FOLD_PREFIX`.  These messages are cheap stubs and re-folding them would
+/// produce summary-of-summary output AND burn another aux-LLM call.
 fn is_already_folded(msg: &Message) -> bool {
     match &msg.content {
+        MessageContent::Blocks(blocks) => blocks.iter().any(|b| {
+            matches!(
+                b,
+                ContentBlock::ToolResult { content, .. } if content.starts_with(FOLD_PREFIX)
+            )
+        }),
+        // Legacy: previous draft emitted plain-text stubs. Recognise those
+        // too so an in-flight session that was folded by an older binary
+        // doesn't get re-folded on first run after upgrade.
         MessageContent::Text(t) => t.starts_with(FOLD_PREFIX),
-        _ => false,
     }
 }
 
@@ -308,7 +358,11 @@ async fn summarise_group(
                 .to_string(),
         ),
         thinking: None,
-        prompt_caching: true,
+        // Each summary prompt embeds distinct tool-result previews, so
+        // there is no shared prefix to amortise. Caching only adds the
+        // cache-write latency / token cost without any subsequent hit.
+        // (#5 review follow-up.)
+        prompt_caching: false,
         cache_ttl: None,
         response_format: None,
         timeout_secs: None,
@@ -423,13 +477,40 @@ mod tests {
         msgs
     }
 
+    /// Returns true when any `ToolResult.content` in `msg` starts with
+    /// `FOLD_PREFIX` — the post-#1-review fold-detection predicate.
+    fn has_folded_tool_result(msg: &Message) -> bool {
+        matches!(&msg.content, MessageContent::Blocks(blocks)
+        if blocks.iter().any(|b| matches!(
+            b,
+            ContentBlock::ToolResult { content, .. } if content.starts_with(FOLD_PREFIX)
+        )))
+    }
+
+    /// Helper: extract every `tool_use_id` from `msg`'s ToolResult blocks.
+    /// Used by pairing-preservation tests to confirm fold did not drop ids.
+    fn tool_use_ids_in(msg: &Message) -> Vec<String> {
+        match &msg.content {
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     #[tokio::test]
     async fn fold_after_8_folds_old_turns() {
         // 10 turns total; fold_after=8 → turns 0 and 1 are stale (oldest 2).
         let messages = build_history(10);
+        let pre_ids: Vec<Vec<String>> = messages.iter().map(tool_use_ids_in).collect();
         let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver("nice summary".to_string()));
 
-        let (out, result) = fold_stale_tool_results(messages, 8, "test-model", None, driver).await;
+        let (out, result) =
+            fold_stale_tool_results(messages, 8, 1, "test-model", None, driver).await;
 
         assert!(
             result.groups_folded >= 1,
@@ -439,14 +520,16 @@ mod tests {
             result.messages_replaced >= 1,
             "expected at least one message replaced"
         );
-        // Folded stubs should start with FOLD_PREFIX.
-        let fold_msgs: Vec<_> = out
-            .iter()
-            .filter(|m| matches!(&m.content, MessageContent::Text(t) if t.starts_with(FOLD_PREFIX)))
-            .collect();
+        // tool_use_ids must survive — pairing invariant.
+        let post_ids: Vec<Vec<String>> = out.iter().map(tool_use_ids_in).collect();
+        assert_eq!(
+            pre_ids, post_ids,
+            "fold must preserve every ToolResult.tool_use_id (pairing invariant)"
+        );
+        // Folded ToolResult.content must carry the FOLD_PREFIX marker.
         assert!(
-            !fold_msgs.is_empty(),
-            "expected fold stub message in output"
+            out.iter().any(has_folded_tool_result),
+            "expected at least one folded ToolResult in output"
         );
     }
 
@@ -457,7 +540,8 @@ mod tests {
         let original_len = messages.len();
         let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver("summary".to_string()));
 
-        let (out, result) = fold_stale_tool_results(messages, 8, "test-model", None, driver).await;
+        let (out, result) =
+            fold_stale_tool_results(messages, 8, 1, "test-model", None, driver).await;
 
         assert_eq!(result.groups_folded, 0);
         assert_eq!(result.messages_replaced, 0);
@@ -470,19 +554,118 @@ mod tests {
         let messages = build_history(10);
         let driver: Arc<dyn LlmDriver> = Arc::new(FailDriver);
 
-        let (out, result) = fold_stale_tool_results(messages, 8, "test-model", None, driver).await;
+        let (out, result) =
+            fold_stale_tool_results(messages, 8, 1, "test-model", None, driver).await;
 
         // Should still fold (with fallback stubs).
-        assert!(result.used_fallback, "expected fallback to be used");
+        assert!(
+            result.groups_used_fallback >= 1,
+            "expected at least one group to use the fallback stub"
+        );
         assert!(result.groups_folded >= 1);
-        let fold_msgs: Vec<_> = out
-            .iter()
-            .filter(|m| {
-                matches!(&m.content, MessageContent::Text(t)
-                    if t.starts_with(FOLD_PREFIX) && t.contains("summarisation unavailable"))
-            })
-            .collect();
-        assert!(!fold_msgs.is_empty(), "expected fallback stub in output");
+        let fallback_present = out.iter().any(|m| match &m.content {
+            MessageContent::Blocks(blocks) => blocks.iter().any(|b| match b {
+                ContentBlock::ToolResult { content, .. } => {
+                    content.starts_with(FOLD_PREFIX)
+                        && content.contains("summarisation unavailable")
+                }
+                _ => false,
+            }),
+            _ => false,
+        });
+        assert!(
+            fallback_present,
+            "expected fallback summary in a folded ToolResult.content"
+        );
+    }
+
+    /// Pairing invariant explicit check: feed a turn whose assistant message
+    /// has a `ToolUse{id="abc"}` and a corresponding user `ToolResult{
+    /// tool_use_id="abc"}`, fold, and confirm the tool_use_id survives.
+    #[tokio::test]
+    async fn fold_preserves_tool_use_id_pairing() {
+        let mut msgs: Vec<Message> = Vec::new();
+        msgs.push(user_msg("user question"));
+        // Stale turn (fold_after=2 means turns >= 2 from end are stale).
+        msgs.push(Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: "tid_stale".to_string(),
+                name: "shell".to_string(),
+                input: serde_json::json!({"cmd": "ls"}),
+                provider_metadata: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        });
+        msgs.push(Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "tid_stale".to_string(),
+                tool_name: "shell".to_string(),
+                content: "<original 50KB stale output>".to_string(),
+                is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::Completed,
+                approval_request_id: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        });
+        // Two recent turns to push the stale one across the boundary.
+        for i in 0..3 {
+            msgs.push(assistant_msg(&format!("recent {i}")));
+            msgs.push(tool_result_msg("recent_tool", &format!("recent {i}")));
+        }
+        let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver("compact summary".to_string()));
+        let (out, _result) = fold_stale_tool_results(msgs, 2, 1, "test-model", None, driver).await;
+
+        // The stale ToolResult must still exist with its tool_use_id intact,
+        // only `content` rewritten — without this the assistant's ToolUse{
+        // id="tid_stale"} would be orphaned and the next provider call would
+        // 400 with "tool_use ids must match tool_result tool_use_ids".
+        let stale_tr_block = out.iter().find_map(|m| match &m.content {
+            MessageContent::Blocks(blocks) => blocks.iter().find_map(|b| match b {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } if tool_use_id == "tid_stale" => Some(content.clone()),
+                _ => None,
+            }),
+            _ => None,
+        });
+        let content = stale_tr_block.expect(
+            "stale ToolResult{tool_use_id=tid_stale} must survive fold to keep \
+             tool_use/tool_result pairing intact",
+        );
+        assert!(
+            content.starts_with(FOLD_PREFIX),
+            "stale ToolResult.content must be rewritten to a fold stub, got: {content:?}"
+        );
+    }
+
+    /// Cost amortiser (#3): when `min_batch_size > stale_count` the fold
+    /// pass exits early without calling the aux-LLM.
+    #[tokio::test]
+    async fn min_batch_size_skips_fold_when_below_threshold() {
+        // 3 stale turns; min_batch_size=4 → no fold, no aux call.
+        let messages = build_history(11);
+        let stale = collect_stale_indices(&messages, 8);
+        assert_eq!(stale.len(), 3, "test setup: expected 3 stale tool results");
+
+        let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver(
+            "should never be called — fold should skip below batch threshold".to_string(),
+        ));
+        let (out, result) =
+            fold_stale_tool_results(messages.clone(), 8, 4, "test-model", None, driver).await;
+
+        assert_eq!(
+            result.groups_folded, 0,
+            "fold must skip when stale_count < min_batch_size"
+        );
+        assert_eq!(result.messages_replaced, 0);
+        // History returns unchanged.
+        assert_eq!(out.len(), messages.len());
     }
 
     #[test]
@@ -516,15 +699,21 @@ mod tests {
 
     #[tokio::test]
     async fn already_folded_stub_not_re_folded() {
-        // Build history where one "stale" message is actually a prior fold stub.
-        // It must never be selected for re-folding regardless of turn count.
+        // Build history where one "stale" message is already a fold stub
+        // (Blocks with a ToolResult.content prefixed by FOLD_PREFIX). It
+        // must never be re-selected for folding regardless of turn count.
         let mut msgs = vec![user_msg("initial question")];
-        // Inject an already-folded stub as if a previous pass ran.
+        msgs.push(assistant_msg("prior assistant turn"));
         msgs.push(Message {
             role: Role::User,
-            content: MessageContent::Text(format!(
-                "{FOLD_PREFIX} 3 tool result(s): prior summary text"
-            )),
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "tid_prior".to_string(),
+                tool_name: "shell".to_string(),
+                content: format!("{FOLD_PREFIX} prior summary text"),
+                is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::Completed,
+                approval_request_id: None,
+            }]),
             pinned: false,
             timestamp: None,
         });
@@ -534,15 +723,20 @@ mod tests {
             msgs.push(tool_result_msg("shell", &format!("output {i}")));
         }
         let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver("new summary".to_string()));
-        let (out, result) = fold_stale_tool_results(msgs, 8, "test-model", None, driver).await;
+        let (out, result) = fold_stale_tool_results(msgs, 8, 1, "test-model", None, driver).await;
 
         // The existing fold stub must still be present in the output unchanged.
-        let existing_stub = out.iter().any(|m| {
-            matches!(&m.content, MessageContent::Text(t)
-                if t.starts_with(FOLD_PREFIX) && t.contains("prior summary text"))
+        let prior_stub_present = out.iter().any(|m| match &m.content {
+            MessageContent::Blocks(blocks) => blocks.iter().any(|b| match b {
+                ContentBlock::ToolResult { content, .. } => {
+                    content.starts_with(FOLD_PREFIX) && content.contains("prior summary text")
+                }
+                _ => false,
+            }),
+            _ => false,
         });
         assert!(
-            existing_stub,
+            prior_stub_present,
             "pre-existing fold stub must survive unchanged: {result:?}"
         );
     }
