@@ -223,8 +223,15 @@ impl WorkflowStore {
                     ?14, ?15, ?16, ?17
                 ) ON CONFLICT(id) DO UPDATE SET
                     state = excluded.state,
+                    input = excluded.input,
                     output = excluded.output,
                     error = excluded.error,
+                    resume_token = excluded.resume_token,
+                    pause_reason = excluded.pause_reason,
+                    paused_at = excluded.paused_at,
+                    paused_step_index = excluded.paused_step_index,
+                    paused_variables = excluded.paused_variables,
+                    paused_current_input = excluded.paused_current_input,
                     step_results = excluded.step_results,
                     completed_at = excluded.completed_at",
                 rusqlite::params![

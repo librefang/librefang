@@ -358,6 +358,10 @@ pub struct WorkflowEngine {
     /// through SQLite instead of the JSON file. The JSON path is still
     /// kept for the one-time migration (`migrate_from_json`).
     store: Option<WorkflowStore>,
+    /// Directory for workflow definition files (`~/.librefang/workflows/`).
+    /// When set, `register` and `update_workflow` auto-persist definitions
+    /// to `<id>.workflow.json` so they survive restart.
+    workflows_dir: Option<PathBuf>,
 }
 
 /// Evaluate a conditional expression against the previous step output.
@@ -470,6 +474,7 @@ impl WorkflowEngine {
             runs: Arc::new(DashMap::new()),
             persist_path: None,
             persist_lock: Arc::new(std::sync::Mutex::new(())),
+            workflows_dir: None,
             store: None,
         }
     }
@@ -484,6 +489,7 @@ impl WorkflowEngine {
             persist_path: Some(home_dir.join("data").join("workflow_runs.json")),
             persist_lock: Arc::new(std::sync::Mutex::new(())),
             store: None,
+            workflows_dir: Some(home_dir.join("workflows")),
         }
     }
 
@@ -499,6 +505,7 @@ impl WorkflowEngine {
             persist_path: Some(home_dir.join("data").join("workflow_runs.json")),
             persist_lock: Arc::new(std::sync::Mutex::new(())),
             store: Some(store),
+            workflows_dir: Some(home_dir.join("workflows")),
         }
     }
 
@@ -724,9 +731,43 @@ impl WorkflowEngine {
         }
     }
 
+    /// Persist a workflow definition to disk as JSON.
+    fn persist_workflow_to_disk(&self, workflow: &Workflow) {
+        let dir = match &self.workflows_dir {
+            Some(d) => d,
+            None => return,
+        };
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            warn!(path = %dir.display(), "Failed to create workflows dir: {e}");
+            return;
+        }
+        let path = dir.join(format!("{}.workflow.json", workflow.id));
+        match serde_json::to_string_pretty(workflow) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    warn!(path = %path.display(), "Failed to write workflow file: {e}");
+                }
+            }
+            Err(e) => warn!(workflow_id = %workflow.id, "Failed to serialize workflow: {e}"),
+        }
+    }
+
+    /// Delete a workflow definition file from disk.
+    fn delete_workflow_from_disk(&self, id: WorkflowId) {
+        let dir = match &self.workflows_dir {
+            Some(d) => d,
+            None => return,
+        };
+        let json_path = dir.join(format!("{}.workflow.json", id));
+        let toml_path = dir.join(format!("{}.workflow.toml", id));
+        let _ = std::fs::remove_file(&json_path);
+        let _ = std::fs::remove_file(&toml_path);
+    }
+
     /// Register a new workflow definition.
     pub async fn register(&self, workflow: Workflow) -> WorkflowId {
         let id = workflow.id;
+        self.persist_workflow_to_disk(&workflow);
         self.workflows.write().await.insert(id, workflow);
         info!(workflow_id = %id, "Workflow registered");
         id
@@ -860,7 +901,8 @@ impl WorkflowEngine {
     pub async fn update_workflow(&self, id: WorkflowId, mut workflow: Workflow) -> bool {
         let mut workflows = self.workflows.write().await;
         if let std::collections::hash_map::Entry::Occupied(mut entry) = workflows.entry(id) {
-            workflow.id = id; // ensure ID stays the same
+            workflow.id = id;
+            self.persist_workflow_to_disk(&workflow);
             entry.insert(workflow);
             true
         } else {
@@ -870,7 +912,11 @@ impl WorkflowEngine {
 
     /// Remove a workflow definition.
     pub async fn remove_workflow(&self, id: WorkflowId) -> bool {
-        self.workflows.write().await.remove(&id).is_some()
+        let removed = self.workflows.write().await.remove(&id).is_some();
+        if removed {
+            self.delete_workflow_from_disk(id);
+        }
+        removed
     }
 
     /// Maximum number of retained workflow runs. Oldest completed/failed
@@ -906,7 +952,8 @@ impl WorkflowEngine {
             paused_current_input: None,
         };
 
-        self.runs.insert(run_id, run);
+        self.runs.insert(run_id, run.clone());
+        self.upsert_run_to_store(&run);
 
         // Evict oldest completed/failed runs when we exceed the cap
         if self.runs.len() > Self::MAX_RETAINED_RUNS {
@@ -980,6 +1027,7 @@ impl WorkflowEngine {
             run.error = Some("Interrupted by daemon restart".to_string());
             run.completed_at = Some(now);
             run.clear_pause_state();
+            self.upsert_run_to_store(run);
             recovered += 1;
         }
         recovered
