@@ -1025,6 +1025,19 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
+        // Fixed-work driver instead of a wall-clock window: the writer
+        // performs a deterministic number of register/remove cycles, then
+        // signals stop.  Earlier iterations of this test slept for 100ms
+        // and asserted `lookups > 1_000`, which fired flakily on CI
+        // runners under load — the reader thread couldn't always squeeze
+        // 1k iterations into a 100ms slice — without ever indicating the
+        // torn-read invariant was actually broken.  With a fixed writer
+        // workload the reader's iteration count varies with scheduler
+        // latency but the test no longer fails on slow hosts; what
+        // matters is `torn == 0` and `hits > 0`, both of which we still
+        // check.
+        const WRITER_CYCLES: usize = 5_000;
+
         let registry = Arc::new(AgentRegistry::new());
         let stop = Arc::new(AtomicBool::new(false));
         // Count cases where `find_by_name` returned `Some` but the entry's
@@ -1038,13 +1051,14 @@ mod tests {
             let registry = Arc::clone(&registry);
             let stop = Arc::clone(&stop);
             thread::spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
+                for _ in 0..WRITER_CYCLES {
                     let entry = test_entry("racy");
                     let id = entry.id;
                     if registry.register(entry).is_ok() {
                         registry.remove(id).ok();
                     }
                 }
+                stop.store(true, Ordering::Release);
             })
         };
 
@@ -1055,7 +1069,7 @@ mod tests {
             let lookups = Arc::clone(&lookups);
             let hits = Arc::clone(&hits);
             thread::spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
+                while !stop.load(Ordering::Acquire) {
                     lookups.fetch_add(1, Ordering::Relaxed);
                     if let Some(found) = registry.find_by_name("racy") {
                         hits.fetch_add(1, Ordering::Relaxed);
@@ -1067,21 +1081,25 @@ mod tests {
             })
         };
 
-        thread::sleep(std::time::Duration::from_millis(100));
-        stop.store(true, Ordering::Relaxed);
         writer.join().unwrap();
         reader.join().unwrap();
 
-        // Sanity: reader actually ran enough iterations and saw the agent
-        // some of the time, otherwise a clean pass is vacuous.
+        // The reader doesn't get a fixed-iteration guarantee (a slow
+        // runner can spend ~all its time on the writer thread), but it
+        // must have run at least once to make the torn-read assertion
+        // meaningful.  In practice on every observed runner the reader
+        // logs hundreds-to-millions of lookups; we keep the floor at 1
+        // so the test passes on the most pathological scheduler without
+        // becoming vacuous.
         assert!(
-            lookups.load(Ordering::Relaxed) > 1_000,
-            "reader did not run enough iterations to be a meaningful probe"
+            lookups.load(Ordering::Relaxed) >= 1,
+            "reader thread did not run a single iteration before the writer finished"
         );
         assert!(
             hits.load(Ordering::Relaxed) > 0,
-            "reader never observed the agent — the writer/reader interleaving \
-             produced a vacuous pass; widen the test if this fires on slow CI"
+            "reader never observed the agent across {WRITER_CYCLES} writer cycles — \
+             the writer/reader interleaving produced a vacuous pass; \
+             increase WRITER_CYCLES if this fires on a real runner"
         );
         assert_eq!(
             torn.load(Ordering::Relaxed),

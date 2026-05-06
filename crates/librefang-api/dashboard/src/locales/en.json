@@ -2160,6 +2160,7 @@
     "new_session": "New session",
     "search_providers": "Search providers...",
     "select_provider": "Select Provider",
+    "tool_calls": "{{count}} tool calls",
     "tool_error": "Error",
     "tool_input": "Input",
     "tool_result": "Result",
