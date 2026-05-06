@@ -2677,6 +2677,22 @@ fn is_writable_config_path(path: &str) -> bool {
         "mode",
         "agent_max_iterations",
         "max_cron_jobs",
+        // ── Collection-typed sections (#4678) ──
+        // The dashboard's StringMapEditor / NumberMapEditor /
+        // StructListEditor save the entire collection as one JSON value
+        // posted at the section's path. Allowing the bare section name
+        // here lets the editors round-trip; SCRUB_SUFFIXES still blocks
+        // writes to *.api_key / *.token / *.shared_secret embedded inside
+        // the collection's items at higher nesting (those write to a
+        // longer path that hits SECTION_PREFIXES, not EXACT).
+        "provider_urls",
+        "provider_regions",
+        "provider_proxy_urls",
+        "provider_request_timeout_secs",
+        "tool_timeouts",
+        "fallback_providers",
+        "sidecar_channels",
+        "taint_rules",
     ];
     if EXACT.contains(&path) {
         return true;
