@@ -10,7 +10,10 @@
 //!   stdout / stderr / exit code. The workspace is reused across calls
 //!   for the same agent ID.
 //! - `cleanup()` issues a delete on the workspace so background
-//!   sessions don't bleed budget when the agent is despawned.
+//!   sessions don't bleed budget when the agent is despawned. Failure
+//!   to delete is logged at WARN; the cached id is restored so a later
+//!   `cleanup` retries (avoids leaking workspaces on transient
+//!   network blips).
 //! - File I/O (`upload` / `download`) is **not** implemented in this
 //!   landing — Daytona's archive endpoint takes more shape than fits
 //!   in the issue scope. See `docs/architecture/tool-exec-backends.md`.
@@ -22,6 +25,14 @@
 //! daemon never persists the token — operators are expected to wire it
 //! in via systemd / launchd / docker secrets. See the architecture doc
 //! for setup notes.
+//!
+//! ## Error sanitization
+//!
+//! Response bodies that surface in `ExecError` messages are capped at
+//! `ERR_BODY_TRUNCATE` bytes and have any `Bearer <token>` substrings
+//! stripped before they hit the public message. Full bodies go to
+//! `tracing::debug!` only — operators who need to debug a 5xx still
+//! have the raw payload, but the value never leaves the daemon's logs.
 
 use crate::tool_exec_backend::{ExecError, ExecOutcome, ExecSpec, ToolExecBackend};
 use async_trait::async_trait;
@@ -29,16 +40,30 @@ use librefang_types::tool_exec::{BackendKind, DaytonaBackendConfig};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
+
+/// Cap for response-body fragments that end up inside public
+/// `ExecError` messages. Keep small — bodies past this go to
+/// debug-level tracing only.
+const ERR_BODY_TRUNCATE: usize = 256;
+
+/// Cap for the `tracing::debug!` body — large but bounded so a
+/// pathological 1 GiB response can't blow up logs.
+const DEBUG_BODY_TRUNCATE: usize = 1024;
 
 /// Daytona backend handle. Cheap to clone — owns the `reqwest::Client`
-/// behind an `Arc` and the workspace-id cache behind a `Mutex` so
+/// behind an `Arc` and the workspace-id cache behind an `RwLock` so
 /// multiple `run_command` calls in flight reuse the same workspace.
 pub struct DaytonaBackend {
     cfg: DaytonaBackendConfig,
     agent_id: String,
     client: reqwest::Client,
-    workspace_id: Arc<Mutex<Option<String>>>,
+    /// Workspace-id cache. `RwLock<Option<String>>` so the common
+    /// "already initialised" path takes a read lock (fast), and only
+    /// the first `ensure_workspace` call (or a post-cleanup retry)
+    /// takes the write lock. Double-checked locking keeps the write
+    /// branch from racing.
+    workspace_id: Arc<RwLock<Option<String>>>,
 }
 
 impl DaytonaBackend {
@@ -50,7 +75,7 @@ impl DaytonaBackend {
                 .user_agent(crate::USER_AGENT)
                 .build()
                 .unwrap_or_default(),
-            workspace_id: Arc::new(Mutex::new(None)),
+            workspace_id: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -73,9 +98,18 @@ impl DaytonaBackend {
     }
 
     /// Ensure a Daytona workspace exists for this agent; return its id.
-    /// Cached for the lifetime of this backend instance.
+    /// Cached for the lifetime of this backend instance unless cleanup
+    /// clears it (or fails and re-stores it).
     async fn ensure_workspace(&self) -> Result<String, ExecError> {
-        let mut guard = self.workspace_id.lock().await;
+        // Fast path: read lock — no allocation, no contention with
+        // other concurrent `ensure_workspace` calls once initialised.
+        if let Some(id) = self.workspace_id.read().await.as_ref() {
+            return Ok(id.clone());
+        }
+
+        // Slow path: take write lock and re-check. Another task may
+        // have raced ahead while we were waiting.
+        let mut guard = self.workspace_id.write().await;
         if let Some(id) = guard.as_ref() {
             return Ok(id.clone());
         }
@@ -89,25 +123,34 @@ impl DaytonaBackend {
             ),
             image: self.cfg.image.clone(),
         };
-        let resp = self
-            .client
-            .post(self.url("/api/workspaces"))
-            .bearer_auth(&key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ExecError::Connect(format!("daytona create workspace: {e}")))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(ExecError::Other(format!(
-                "daytona create workspace HTTP {status}: {text}"
-            )));
-        }
-        let parsed: WorkspaceResponse = resp
-            .json()
-            .await
-            .map_err(|e| ExecError::Other(format!("daytona response decode: {e}")))?;
+        let timeout = Duration::from_secs(self.cfg.timeout_secs);
+        let url = self.url("/api/workspaces");
+        let send_fut = self.client.post(&url).bearer_auth(&key).json(&body).send();
+        let parsed: WorkspaceResponse = tokio::time::timeout(timeout, async {
+            let resp = send_fut
+                .await
+                .map_err(|e| ExecError::Connect(format!("daytona create workspace: {e}")))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let raw = resp.text().await.unwrap_or_default();
+                tracing::debug!(
+                    %status, body = %truncate_for_log(&raw, DEBUG_BODY_TRUNCATE),
+                    "daytona create workspace failed"
+                );
+                return Err(ExecError::Other(format!(
+                    "daytona create workspace HTTP {status}: {}",
+                    sanitize_error_body(&raw, ERR_BODY_TRUNCATE)
+                )));
+            }
+            resp.json::<WorkspaceResponse>()
+                .await
+                .map_err(|e| ExecError::Other(format!("daytona response decode: {e}")))
+        })
+        .await
+        .map_err(|_| {
+            ExecError::Timeout(format!("daytona create after {}s", timeout.as_secs()))
+        })??;
+
         *guard = Some(parsed.id.clone());
         Ok(parsed.id)
     }
@@ -130,6 +173,15 @@ impl ToolExecBackend for DaytonaBackend {
         // Compose env-prefixed command so callers' env survives the wire.
         let mut full_cmd = String::new();
         for (k, v) in &spec.env {
+            // Reserved-env keys (LD_PRELOAD, DYLD_*) are scrubbed at
+            // the trait boundary — they can never reach a remote shell.
+            if crate::tool_exec_backend::is_reserved_env_key(k) {
+                tracing::warn!(
+                    key = %k,
+                    "tool_exec/daytona: dropping reserved env key from remote command"
+                );
+                continue;
+            }
             // Daytona's exec endpoint takes a single shell string; we
             // prefix `KEY=value` assignments and let the remote shell
             // export them for the duration of `command`.
@@ -145,35 +197,45 @@ impl ToolExecBackend for DaytonaBackend {
                 .and_then(|p| p.to_str())
                 .map(String::from),
         };
-        let resp = tokio::time::timeout(
-            timeout,
-            self.client
-                .post(self.url(&format!("/api/workspaces/{workspace}/exec")))
+
+        // Wrap the entire request lifecycle (send + status check + body
+        // decode) in one timeout. Mirrors SSH's `timeout(total, do_exec)`
+        // pattern; without it a server that streams headers fast but
+        // then stalls on the body could block forever.
+        let url = self.url(&format!("/api/workspaces/{workspace}/exec"));
+        let parsed: ExecResponse = tokio::time::timeout(timeout, async {
+            let resp = self
+                .client
+                .post(&url)
                 .bearer_auth(&key)
                 .json(&body)
-                .send(),
-        )
+                .send()
+                .await
+                .map_err(|e| ExecError::Connect(format!("daytona exec: {e}")))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let raw = resp.text().await.unwrap_or_default();
+                tracing::debug!(
+                    %status, body = %truncate_for_log(&raw, DEBUG_BODY_TRUNCATE),
+                    "daytona exec failed"
+                );
+                return Err(ExecError::Other(format!(
+                    "daytona exec HTTP {status}: {}",
+                    sanitize_error_body(&raw, ERR_BODY_TRUNCATE)
+                )));
+            }
+            resp.json::<ExecResponse>()
+                .await
+                .map_err(|e| ExecError::Other(format!("daytona exec decode: {e}")))
+        })
         .await
-        .map_err(|_| ExecError::Timeout(format!("daytona exec after {}s", timeout.as_secs())))?
-        .map_err(|e| ExecError::Connect(format!("daytona exec: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(ExecError::Other(format!(
-                "daytona exec HTTP {status}: {text}"
-            )));
-        }
-        let parsed: ExecResponse = resp
-            .json()
-            .await
-            .map_err(|e| ExecError::Other(format!("daytona exec decode: {e}")))?;
+        .map_err(|_| ExecError::Timeout(format!("daytona exec after {}s", timeout.as_secs())))??;
 
         let mut stdout = parsed.stdout;
         let mut stderr = parsed.stderr;
         if let Some(cap) = spec.limits.max_output_bytes {
-            stdout = truncate_to_cap(stdout, cap);
-            stderr = truncate_to_cap(stderr, cap);
+            stdout = crate::tool_exec_backend::truncate_to_cap(stdout, cap);
+            stderr = crate::tool_exec_backend::truncate_to_cap(stderr, cap);
         }
         Ok(ExecOutcome {
             stdout,
@@ -184,21 +246,50 @@ impl ToolExecBackend for DaytonaBackend {
     }
 
     async fn cleanup(&self) -> Result<(), ExecError> {
-        let mut guard = self.workspace_id.lock().await;
-        let id = match guard.take() {
-            Some(id) => id,
-            None => return Ok(()),
+        // Take the cached id under write lock so a parallel `run_command`
+        // doesn't see a half-deleted workspace.
+        let id = {
+            let mut guard = self.workspace_id.write().await;
+            match guard.take() {
+                Some(id) => id,
+                None => return Ok(()),
+            }
         };
-        let key = self.api_key().ok();
-        if let Some(key) = key {
-            let _ = self
-                .client
-                .delete(self.url(&format!("/api/workspaces/{id}")))
-                .bearer_auth(key)
-                .send()
-                .await;
+        let key = match self.api_key() {
+            Ok(k) => k,
+            Err(_) => {
+                // No key means nothing we can do remotely; drop the cache
+                // and return Ok so cleanup is idempotent on torn-down envs.
+                return Ok(());
+            }
+        };
+        let url = self.url(&format!("/api/workspaces/{id}"));
+        match self.client.delete(&url).bearer_auth(&key).send().await {
+            Ok(resp) if resp.status().is_success() => Ok(()),
+            Ok(resp) => {
+                let status = resp.status();
+                let raw = resp.text().await.unwrap_or_default();
+                tracing::warn!(
+                    workspace = %id,
+                    %status,
+                    body = %truncate_for_log(&raw, DEBUG_BODY_TRUNCATE),
+                    "daytona cleanup non-2xx; restoring cached id so a future cleanup retries"
+                );
+                // Re-store so a later cleanup attempt retries the
+                // delete instead of silently leaking the workspace.
+                *self.workspace_id.write().await = Some(id);
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    workspace = %id,
+                    error = %e,
+                    "daytona cleanup transport error; restoring cached id"
+                );
+                *self.workspace_id.write().await = Some(id);
+                Ok(())
+            }
         }
-        Ok(())
     }
 }
 
@@ -237,21 +328,33 @@ struct ExecResponse {
 
 /// Daytona requires alphanumeric / dash workspace names. Sanitize the
 /// agent id to avoid 4xx on creation when ids contain underscores.
+///
+/// Polish: collapse runs of `-` into a single dash, trim leading and
+/// trailing dashes, and fall back to `"agent"` if the result is empty.
 fn sanitize_id(agent_id: &str) -> String {
-    let s: String = agent_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                c
-            } else {
-                '-'
+    let mut out = String::with_capacity(agent_id.len());
+    let mut last_dash = false;
+    for c in agent_id.chars() {
+        let safe = if c.is_ascii_alphanumeric() || c == '-' {
+            c
+        } else {
+            '-'
+        };
+        if safe == '-' {
+            if last_dash {
+                continue;
             }
-        })
-        .collect();
-    if s.is_empty() {
+            last_dash = true;
+        } else {
+            last_dash = false;
+        }
+        out.push(safe);
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
         "agent".to_string()
     } else {
-        s
+        trimmed.to_string()
     }
 }
 
@@ -268,13 +371,46 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
-fn truncate_to_cap(s: String, cap: usize) -> String {
+/// Truncate a body for `tracing::debug!` use. Doesn't strip Bearer
+/// tokens — debug logs are operator-controlled and the operator owns
+/// the token anyway. Public-facing messages MUST go through
+/// `sanitize_error_body`.
+fn truncate_for_log(s: &str, cap: usize) -> String {
     if s.len() > cap {
-        let total = s.len();
-        let safe = crate::str_utils::safe_truncate_str(&s, cap).to_string();
+        format!(
+            "{}... [+{} bytes]",
+            crate::str_utils::safe_truncate_str(s, cap),
+            s.len() - cap
+        )
+    } else {
+        s.to_string()
+    }
+}
+
+/// Strip `Bearer <token>` substrings AND truncate.
+///
+/// Public error messages never contain raw response bodies past `cap`
+/// chars; full body goes to `tracing::debug!` only. We do simple
+/// substring scanning rather than pulling in the `regex` crate — the
+/// pattern is fixed (`Bearer ` followed by non-whitespace).
+fn sanitize_error_body(s: &str, cap: usize) -> String {
+    let mut out = String::with_capacity(s.len().min(cap + 32));
+    let mut rest = s;
+    while let Some(idx) = rest.find("Bearer ") {
+        out.push_str(&rest[..idx]);
+        out.push_str("Bearer <redacted>");
+        // Skip past the Bearer prefix, then to the next whitespace.
+        let after = &rest[idx + "Bearer ".len()..];
+        let advance = after.find(char::is_whitespace).unwrap_or(after.len());
+        rest = &after[advance..];
+    }
+    out.push_str(rest);
+    if out.len() > cap {
+        let total = out.len();
+        let safe = crate::str_utils::safe_truncate_str(&out, cap).to_string();
         format!("{safe}... [truncated, {total} total bytes]")
     } else {
-        s
+        out
     }
 }
 
@@ -287,10 +423,10 @@ fn truncate_to_cap(s: String, cap: usize) -> String {
 mod tests {
     use super::*;
 
-    fn cfg_for(api_url: String) -> DaytonaBackendConfig {
+    fn cfg_for(api_url: String, api_key_env: String) -> DaytonaBackendConfig {
         DaytonaBackendConfig {
             api_url,
-            api_key_env: "LIBREFANG_DAYTONA_TEST_KEY".to_string(),
+            api_key_env,
             image: "ubuntu:22.04".to_string(),
             timeout_secs: 5,
             workspace_prefix: "test".to_string(),
@@ -299,7 +435,13 @@ mod tests {
 
     #[test]
     fn kind_is_daytona() {
-        let backend = DaytonaBackend::new(cfg_for("https://example.invalid".into()), "a".into());
+        let backend = DaytonaBackend::new(
+            cfg_for(
+                "https://example.invalid".into(),
+                "LIBREFANG_DAYTONA_TEST_KEY_KIND".into(),
+            ),
+            "a".into(),
+        );
         assert_eq!(backend.kind(), BackendKind::Daytona);
     }
 
@@ -318,9 +460,17 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_id_collapses_runs() {
+        assert_eq!(sanitize_id("---abc---"), "abc");
+        assert_eq!(sanitize_id("a/b/c"), "a-b-c");
+        assert_eq!(sanitize_id("a___b"), "a-b");
+    }
+
+    #[test]
     fn sanitize_id_falls_back_when_empty() {
         assert_eq!(sanitize_id(""), "agent");
-        assert_eq!(sanitize_id("///"), "---");
+        assert_eq!(sanitize_id("///"), "agent");
+        assert_eq!(sanitize_id("---"), "agent");
     }
 
     #[test]
@@ -334,28 +484,59 @@ mod tests {
     }
 
     #[test]
-    fn truncate_to_cap_under_unchanged() {
-        assert_eq!(truncate_to_cap("ok".into(), 10), "ok");
+    fn truncate_for_log_under_cap_unchanged() {
+        assert_eq!(truncate_for_log("ok", 100), "ok");
     }
 
     #[test]
-    fn truncate_to_cap_over_appends_marker() {
-        let s = "x".repeat(50);
-        let out = truncate_to_cap(s, 20);
-        assert!(out.contains("[truncated"));
+    fn truncate_for_log_over_cap_appends_marker() {
+        let s = "x".repeat(2000);
+        let out = truncate_for_log(&s, 100);
+        assert!(out.contains("[+1900 bytes]"), "got: {out}");
     }
 
+    #[test]
+    fn sanitize_error_body_redacts_bearer() {
+        let raw = "denied: Bearer dt_pat_abc123def something happened";
+        let out = sanitize_error_body(raw, 200);
+        assert!(out.contains("Bearer <redacted>"), "got: {out}");
+        assert!(!out.contains("dt_pat_abc123def"), "got: {out}");
+    }
+
+    #[test]
+    fn sanitize_error_body_truncates_long_bodies() {
+        let raw = "x".repeat(2000);
+        let out = sanitize_error_body(&raw, 256);
+        assert!(out.contains("[truncated"), "got: {out}");
+        // 256 chars + marker — overall length is bounded.
+        assert!(out.len() < 2000, "should truncate; got len={}", out.len());
+    }
+
+    #[test]
+    fn sanitize_error_body_handles_multiple_bearers() {
+        let raw = "Bearer aaa Bearer bbb done";
+        let out = sanitize_error_body(raw, 200);
+        assert!(!out.contains("aaa"));
+        assert!(!out.contains("bbb"));
+        assert_eq!(out.matches("Bearer <redacted>").count(), 2);
+    }
+
+    /// L5: this test MUST use a unique env-var name so it cannot
+    /// collide with other tests in the module that also touch
+    /// `LIBREFANG_DAYTONA_TEST_KEY*`. Removed the `unsafe` block by
+    /// using a name no other test references.
     #[tokio::test]
     async fn missing_api_key_env_errors() {
-        // Make sure the env var is unset for this test.
-        // SAFETY: tests in this module run serially via tokio::test only when
-        // they don't share state; unset is idempotent.
-        // SAFETY: env mutation happens in single-threaded tokio test; harmless.
-        unsafe { std::env::remove_var("LIBREFANG_DAYTONA_TEST_KEY") };
-        let backend = DaytonaBackend::new(cfg_for("http://127.0.0.1:1".into()), "a".into());
+        const VAR: &str = "LIBREFANG_DAYTONA_TEST_KEY_MISSING_API_KEY_ENV";
+        // SAFETY: The env-var name is unique to this test, and we
+        // only `remove_var`. Even with parallel test execution, no
+        // other test reads or writes this name.
+        unsafe { std::env::remove_var(VAR) };
+        let backend =
+            DaytonaBackend::new(cfg_for("http://127.0.0.1:1".into(), VAR.into()), "a".into());
         match backend.run_command(ExecSpec::new("echo hi")).await {
             Err(ExecError::NotConfigured(msg)) => {
-                assert!(msg.contains("LIBREFANG_DAYTONA_TEST_KEY"));
+                assert!(msg.contains(VAR));
             }
             other => panic!("expected NotConfigured, got {other:?}"),
         }
@@ -363,7 +544,13 @@ mod tests {
 
     #[tokio::test]
     async fn upload_returns_unsupported() {
-        let backend = DaytonaBackend::new(cfg_for("http://127.0.0.1:1".into()), "a".into());
+        let backend = DaytonaBackend::new(
+            cfg_for(
+                "http://127.0.0.1:1".into(),
+                "LIBREFANG_DAYTONA_TEST_KEY_UPLOAD".into(),
+            ),
+            "a".into(),
+        );
         match backend.upload("/tmp/x", b"hi").await {
             Err(ExecError::UnsupportedForBackend { backend, operation }) => {
                 assert_eq!(backend, "daytona");
