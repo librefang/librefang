@@ -18869,6 +18869,11 @@ impl kernel_handle::WikiAccess for LibreFangKernel {
             Err(librefang_memory_wiki::WikiError::InvalidTopic { topic, reason }) => Err(
                 KernelOpError::InvalidInput(format!("wiki_write topic `{topic}`: {reason}")),
             ),
+            Err(librefang_memory_wiki::WikiError::BodyTooLarge { topic, size, cap }) => {
+                Err(KernelOpError::InvalidInput(format!(
+                    "wiki_write body for `{topic}` is {size} bytes; exceeds the {cap}-byte cap"
+                )))
+            }
             Err(err) => Err(KernelOpError::Internal(format!("Wiki write failed: {err}"))),
         }
     }

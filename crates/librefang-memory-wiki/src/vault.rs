@@ -203,9 +203,10 @@ impl WikiVault {
     ) -> WikiResult<WikiWriteOutcome> {
         validate_topic(topic)?;
         if body_with_placeholders.len() > MAX_BODY_BYTES {
-            return Err(WikiError::InvalidTopic {
+            return Err(WikiError::BodyTooLarge {
                 topic: topic.to_string(),
-                reason: "body exceeds 1 MiB cap; split across multiple pages",
+                size: body_with_placeholders.len(),
+                cap: MAX_BODY_BYTES,
             });
         }
         let _guard = self.write_lock.lock().expect("vault write lock poisoned");
@@ -845,7 +846,14 @@ mod tests {
         let err = vault
             .write("big", &too_big, provenance("a"), false)
             .unwrap_err();
-        assert!(matches!(err, WikiError::InvalidTopic { .. }));
+        match err {
+            WikiError::BodyTooLarge { topic, size, cap } => {
+                assert_eq!(topic, "big");
+                assert_eq!(size, MAX_BODY_BYTES + 1);
+                assert_eq!(cap, MAX_BODY_BYTES);
+            }
+            other => panic!("expected BodyTooLarge, got {other:?}"),
+        }
     }
 
     #[test]

@@ -11,6 +11,16 @@ pub enum WikiError {
     #[error("invalid topic `{topic}`: {reason}")]
     InvalidTopic { topic: String, reason: &'static str },
 
+    #[error(
+        "body for topic `{topic}` is {size} bytes, exceeds the {cap}-byte cap — \
+         split across multiple pages"
+    )]
+    BodyTooLarge {
+        topic: String,
+        size: usize,
+        cap: usize,
+    },
+
     #[error("topic `{0}` not found")]
     NotFound(String),
 
