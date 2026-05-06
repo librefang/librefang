@@ -13,6 +13,13 @@ use tracing::info;
 /// controlling TTY (docker `CMD`, systemd, supervisord) it inherits an empty
 /// or `dumb` `TERM`, and tmux exits immediately with `open terminal failed:
 /// terminal does not support clear` because it cannot find the cap entry.
+///
+/// Set unconditionally — any inherited `TERM` is overridden. The consumer
+/// of this PTY's output is the dashboard's xterm.js renderer, not the
+/// host's TTY emulator, so a fixed value is the correct contract; a
+/// fallback that respected inheritance would create the diagnostic mess
+/// of "works in this deploy, doesn't in that one" depending on whether
+/// the daemon happened to launch under a TTY.
 const TERMINAL_TERM: &str = "xterm-256color";
 
 pub struct PtySession {
