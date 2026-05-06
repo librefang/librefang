@@ -55,8 +55,12 @@ pub const DOCKER_DEFAULT_MAX_OUTPUT_BYTES: usize = 50 * 1024;
 /// dynamic-loader hijack vectors — letting an LLM-emitted `env` map
 /// override them would let a tool call swap out `libc` or load a
 /// shim into every subsequent child. Backends MUST scrub these at the
-/// trait boundary; the local backend `debug_assert!`s their absence in
-/// debug builds, plus drops + warns in release.
+/// trait boundary, **uniformly via warn-and-skip** (no
+/// `debug_assert!`). Rationale: a reserved key showing up here is a
+/// user / agent configuration mistake, not a runtime invariant
+/// violation, and SSH / Daytona already chose warn-and-skip — making
+/// Local / Docker panic in debug builds was an inconsistency caught
+/// in the #4677 review. See `is_reserved_env_key`.
 pub const RESERVED_ENV_KEYS: &[&str] = &[
     "LD_PRELOAD",
     "DYLD_INSERT_LIBRARIES",
@@ -303,18 +307,14 @@ impl ToolExecBackend for LocalBackend {
         crate::subprocess_sandbox::sandbox_command(&mut cmd, &self.allowed_env);
 
         // Layer caller-supplied env on top of the sandboxed allowlist,
-        // dropping anything in RESERVED_ENV_KEYS. Debug builds also
-        // assert the caller didn't even try.
+        // dropping anything in RESERVED_ENV_KEYS. Behaviour is uniform
+        // across backends — warn and skip, never panic. See
+        // `RESERVED_ENV_KEYS` for the rationale.
         for (k, v) in &spec.env {
             if is_reserved_env_key(k) {
-                debug_assert!(
-                    false,
-                    "reserved env key {k:?} present on ExecSpec::env (reserved: {:?})",
-                    RESERVED_ENV_KEYS
-                );
                 tracing::warn!(
                     key = %k,
-                    "tool_exec: dropping reserved env key from child process \
+                    "tool_exec/local: dropping reserved env key from child process \
                      (loader-hijack vector); see RESERVED_ENV_KEYS in tool_exec_backend.rs"
                 );
                 continue;
@@ -509,13 +509,11 @@ impl ToolExecBackend for DockerBackend {
 
         // Reserved-env scrub at the trait boundary — Docker's
         // `exec_in_sandbox` doesn't currently honour `spec.env`, but
-        // when it does the reserved keys must not leak in.
+        // when it does the reserved keys must not leak in. Uniform
+        // warn-and-skip (no panic) across backends — see
+        // `RESERVED_ENV_KEYS`.
         for k in spec.env.keys() {
             if is_reserved_env_key(k) {
-                debug_assert!(
-                    false,
-                    "reserved env key {k:?} present on ExecSpec::env (Docker)"
-                );
                 tracing::warn!(
                     key = %k,
                     "tool_exec/docker: reserved env key dropped before container exec"
@@ -836,17 +834,14 @@ mod tests {
     }
 
     /// Reserved-env keys placed on `ExecSpec::env` must not reach the
-    /// child. Release-mode behaviour: drop + warn (we can't observe the
-    /// warn here easily, so we settle for "child sees a sentinel that
-    /// shows the key was dropped").
+    /// child. Behaviour is uniform across debug and release builds —
+    /// warn-and-skip, never panic. The #4677 review aligned Local /
+    /// Docker on warn-and-skip (matching SSH / Daytona); the previous
+    /// `debug_assert!(false)` form silently disabled this test in
+    /// debug builds.
     #[tokio::test]
     #[cfg(unix)]
     async fn local_backend_drops_reserved_env_keys() {
-        // We can only directly verify in release mode — debug builds
-        // hit the `debug_assert!`. Skip if we're in debug.
-        if cfg!(debug_assertions) {
-            return;
-        }
         let backend = LocalBackend::with_defaults();
         let spec = ExecSpec::new(r#"echo "[$LD_PRELOAD]""#)
             .with_env("LD_PRELOAD", "/tmp/evil.so")
