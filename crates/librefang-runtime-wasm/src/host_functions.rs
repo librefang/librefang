@@ -1384,6 +1384,19 @@ mod tests {
     impl librefang_kernel_handle::WorkflowRunner for RecordingKernel {}
     impl librefang_kernel_handle::GoalControl for RecordingKernel {}
     impl librefang_kernel_handle::ToolPolicy for RecordingKernel {}
+    impl librefang_kernel_handle::ApiAuth for RecordingKernel {
+        fn auth_snapshot(&self) -> librefang_kernel_handle::ApiAuthSnapshot {
+            librefang_kernel_handle::ApiAuthSnapshot::default()
+        }
+    }
+    impl librefang_kernel_handle::SessionWriter for RecordingKernel {
+        fn inject_attachment_blocks(
+            &self,
+            _agent_id: librefang_types::agent::AgentId,
+            _blocks: Vec<librefang_types::message::ContentBlock>,
+        ) {
+        }
+    }
 
     fn state_with_kernel(
         agent_id: &str,
