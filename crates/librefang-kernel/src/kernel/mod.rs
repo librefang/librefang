@@ -5519,6 +5519,7 @@ system_prompt = "You are a helpful assistant."
             None, // no pending messages
             &librefang_runtime::agent_loop::LoopOptions {
                 is_fork: false,
+                incognito: false,
                 allowed_tools: None,
                 interrupt: Some(librefang_runtime::interrupt::SessionInterrupt::new()),
                 max_iterations: self.config.load().agent_max_iterations,
@@ -5782,6 +5783,7 @@ system_prompt = "You are a helpful assistant."
                     thinking_override,
                     resolved_session_id.or(session_id_override),
                     upstream_interrupt,
+                    incognito,
                 )
                 .await
             }
@@ -6417,6 +6419,7 @@ system_prompt = "You are a helpful assistant."
             };
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: true,
+            incognito: false,
             allowed_tools,
             interrupt: Some(interrupt),
             max_iterations: self.config.load().agent_max_iterations,
@@ -6489,6 +6492,7 @@ system_prompt = "You are a helpful assistant."
         let session_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: false,
+            incognito: false,
             allowed_tools: None,
             interrupt: Some(session_interrupt),
             max_iterations: self.config.load().agent_max_iterations,
@@ -8234,6 +8238,7 @@ system_prompt = "You are a helpful assistant."
             channel = sender_context.map(|c| c.channel.as_str()).unwrap_or("direct"),
         ),
     )]
+    #[allow(clippy::too_many_arguments)]
     async fn execute_llm_agent(
         &self,
         entry: &AgentEntry,
@@ -8246,6 +8251,7 @@ system_prompt = "You are a helpful assistant."
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
         upstream_interrupt: Option<librefang_runtime::interrupt::SessionInterrupt>,
+        incognito: bool,
     ) -> KernelResult<AgentLoopResult> {
         let cfg = self.config.load_full();
         // Check metering quota before starting
