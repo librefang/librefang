@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 34;
+const SCHEMA_VERSION: u32 = 35;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -80,6 +80,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // POSTs. The API layer reads/writes this table from the same shared
     // SQLite connection (`MemorySubstrate::usage_conn`).
     run_step!(34, migrate_v34);
+    // v35 (#3335): workflow run persistence in SQLite. Replaces the
+    // tmp+rename JSON file (`workflow_runs.json`) that lost Running/Pending
+    // state on any shutdown and didn't survive power loss.
+    run_step!(35, migrate_v35);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1236,6 +1240,47 @@ fn migrate_v33(conn: &Connection) -> Result<(), rusqlite::Error> {
 #[cfg(test)]
 pub(crate) fn __test_only_run_v33(conn: &Connection) {
     migrate_v33(conn).expect("migrate_v33 in test harness must succeed");
+}
+
+/// Version 35: Workflow run persistence in SQLite (#3335).
+///
+/// Replaces the `workflow_runs.json` tmp+rename file with a proper SQLite
+/// table. Running and Pending states are now persisted — previous JSON
+/// approach filtered them out, losing in-flight work on daemon shutdown
+/// or power loss. The `state` CHECK constraint is enforced by the database
+/// so invalid values cannot be written by buggy callers.
+fn migrate_v35(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS workflow_runs (
+            id                   TEXT PRIMARY KEY,
+            workflow_id          TEXT NOT NULL,
+            workflow_name        TEXT NOT NULL DEFAULT '',
+            state                TEXT NOT NULL CHECK (state IN ('pending','running','paused','completed','failed')),
+            input                TEXT NOT NULL DEFAULT '',
+            output               TEXT,
+            error                TEXT,
+            resume_token         TEXT,
+            pause_reason         TEXT,
+            paused_at            TEXT,
+            paused_step_index    INTEGER,
+            paused_variables     TEXT,
+            paused_current_input TEXT,
+            step_results         TEXT NOT NULL DEFAULT '[]',
+            started_at           TEXT NOT NULL,
+            completed_at         TEXT,
+            created_at           TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_state
+            ON workflow_runs(state);
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id
+            ON workflow_runs(workflow_id);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (35, datetime('now'), 'Add workflow_runs table for SQLite-backed workflow persistence (#3335)')",
+        [],
+    )?;
+    Ok(())
 }
 
 /// Version 34: Persistent Idempotency-Key cache for state-creating POSTs (#3637).

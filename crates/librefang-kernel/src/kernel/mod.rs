@@ -3745,7 +3745,10 @@ impl LibreFangKernel {
             proactive_memory_extractor: OnceLock::new(),
             prompt_store: OnceLock::new(),
             supervisor,
-            workflows: WorkflowEngine::new_with_persistence(&workflow_home_dir),
+            workflows: WorkflowEngine::new_with_store(
+                librefang_memory::WorkflowStore::new(memory.usage_conn()),
+                &workflow_home_dir,
+            ),
             template_registry: WorkflowTemplateRegistry::new(),
             triggers: trigger_engine,
             background,
@@ -4504,11 +4507,24 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Load persisted workflow runs (completed/failed) from disk.
+        // Migrate legacy JSON workflow runs to SQLite (one-time, idempotent).
+        {
+            match tokio::task::block_in_place(|| kernel.workflows.migrate_from_json()) {
+                Ok(count) if count > 0 => {
+                    info!("Migrated {count} workflow run(s) from JSON to SQLite");
+                }
+                Err(e) => {
+                    warn!("Failed to migrate workflow runs from JSON to SQLite: {e}");
+                }
+                _ => {}
+            }
+        }
+
+        // Load persisted workflow runs from SQLite into memory.
         {
             match tokio::task::block_in_place(|| kernel.workflows.load_runs()) {
                 Ok(count) if count > 0 => {
-                    info!("Loaded {count} persisted workflow run(s) from disk");
+                    info!("Loaded {count} persisted workflow run(s)");
                 }
                 Err(e) => {
                     warn!("Failed to load persisted workflow runs: {e}");
@@ -15009,6 +15025,13 @@ system_prompt = "You are a helpful assistant."
         }
 
         self.supervisor.shutdown();
+
+        // Drain in-flight workflow runs — transition Running/Pending to
+        // Failed and persist so they are not silently lost (#3335).
+        self.workflows.drain_on_shutdown();
+
+        // Flush the WAL so all workflow (and other) writes are durable.
+        self.memory.wal_checkpoint();
 
         // Update agent states to Suspended in persistent storage (not delete).
         // Track failures so we can emit a single critical summary if any
