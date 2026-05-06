@@ -1661,6 +1661,7 @@ fn timeout_decision(request: &ApprovalRequest, fallback: &TimeoutFallback) -> Ex
 mod tests {
     use super::*;
     use librefang_types::approval::ApprovalPolicy;
+    use std::sync::Arc;
 
     fn default_manager() -> ApprovalManager {
         ApprovalManager::new(ApprovalPolicy::default())

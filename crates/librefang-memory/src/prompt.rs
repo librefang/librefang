@@ -108,12 +108,14 @@ impl PromptStore {
     /// This avoids sharing a connection with UsageStore, preventing potential
     /// conflicts during concurrent writes.
     pub fn new_with_path<P: AsRef<std::path::Path>>(db_path: P) -> LibreFangResult<Self> {
-        let manager = r2d2_sqlite::SqliteConnectionManager::file(db_path.as_ref())
-            .with_init(|c| {
-                c.execute_batch(
-                    "PRAGMA journal_mode=WAL;                      PRAGMA busy_timeout=5000;                      PRAGMA cache_size=-2000;                      PRAGMA mmap_size=0;",
-                )
-            });
+        let manager = r2d2_sqlite::SqliteConnectionManager::file(db_path.as_ref()).with_init(|c| {
+            c.execute_batch(
+                "PRAGMA journal_mode=WAL; \
+                     PRAGMA busy_timeout=5000; \
+                     PRAGMA cache_size=-2000; \
+                     PRAGMA mmap_size=0;",
+            )
+        });
         let pool = r2d2::Pool::builder()
             .max_size(8)
             .build(manager)

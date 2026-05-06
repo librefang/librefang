@@ -55,9 +55,24 @@ impl MemorySubstrate {
         decay_rate: f32,
         chunk_config: ChunkConfig,
     ) -> LibreFangResult<Self> {
+        // PRAGMAs run on every pooled connection's first checkout. The set
+        // mirrors the pre-pool single-connection init: WAL journal for
+        // multi-reader concurrency; 5 s busy_timeout so writers wait for the
+        // reserved lock instead of failing fast; cache_size=-2000 caps the
+        // per-connection page cache at 2 MiB (the pool can hold up to 8
+        // connections, so total ceiling is ~16 MiB); mmap_size=0 disables
+        // mmap'd reads (kept for parity with the pre-pool config — flipping
+        // this is a separate decision); foreign_keys=ON enforces the schema
+        // FKs the migrations rely on; synchronous=NORMAL is the WAL-default
+        // durability/perf tradeoff.
         let manager = SqliteConnectionManager::file(db_path).with_init(|c| {
             c.execute_batch(
-                "PRAGMA journal_mode=WAL;                  PRAGMA busy_timeout=5000;                  PRAGMA foreign_keys=ON;                  PRAGMA synchronous=NORMAL;",
+                "PRAGMA journal_mode=WAL; \
+                 PRAGMA busy_timeout=5000; \
+                 PRAGMA cache_size=-2000; \
+                 PRAGMA mmap_size=0; \
+                 PRAGMA foreign_keys=ON; \
+                 PRAGMA synchronous=NORMAL;",
             )
         });
         let pool = Pool::builder()
