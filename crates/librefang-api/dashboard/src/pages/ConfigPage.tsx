@@ -852,16 +852,21 @@ export function ConfigPage({ category }: { category: string }) {
   // Which sections have pending changes (for tab dot indicators)
   const sectionsWithPending = useMemo(() => {
     const set = new Set<string>();
+    const rootFieldMap = new Map<string, string>();
+    for (const [sKey, desc] of Object.entries(sectionsByKey)) {
+      if (desc.root_level) {
+        for (const [fKey] of resolvedFields[sKey] ?? []) {
+          rootFieldMap.set(fKey, sKey);
+        }
+      }
+    }
     for (const path of Object.keys(pendingChanges)) {
       const dotIdx = path.indexOf(".");
       if (dotIdx !== -1) {
         set.add(path.slice(0, dotIdx));
       } else {
-        for (const [sKey, desc] of Object.entries(sectionsByKey)) {
-          if (desc.root_level && (resolvedFields[sKey] ?? []).some(([fKey]) => fKey === path)) {
-            set.add(sKey);
-          }
-        }
+        const sKey = rootFieldMap.get(path);
+        if (sKey) set.add(sKey);
       }
     }
     return set;

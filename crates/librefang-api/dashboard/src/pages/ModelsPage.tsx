@@ -770,8 +770,10 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
   const [state, dispatch] = useReducer(settingsReducer, settingsInitial);
   const stateRef = useRef(state);
   stateRef.current = state;
+  const hydratedRef = useRef(false);
 
   useEffect(() => {
+    if (hydratedRef.current) return;
     const o = overridesQuery.data;
     if (!o) return;
     const payload: Partial<SettingsState> = {};
@@ -786,6 +788,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
     if (o.no_system_role != null) payload.noSystemRole = o.no_system_role;
     if (o.force_max_tokens != null) payload.forceMaxTokens = o.force_max_tokens;
     dispatch({ type: "HYDRATE", payload });
+    hydratedRef.current = true;
   }, [overridesQuery.data]);
 
   const handleSave = useCallback(async () => {

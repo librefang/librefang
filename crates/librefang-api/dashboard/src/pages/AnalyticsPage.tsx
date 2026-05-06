@@ -1,5 +1,5 @@
 import { formatCompact, formatCost } from "../lib/format";
-import { useMemo, useState, useCallback } from "react";
+import { useMemo, useState, useCallback, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import type { UsageByAgentItem, UsageByModelItem, UsageDailyItem } from "../api";
 import { useUsageSummary, useUsageByAgent, useUsageByModel, useUsageDaily, useModelPerformance, useBudgetStatus } from "../lib/queries/analytics";
@@ -66,6 +66,8 @@ export function AnalyticsPage() {
   const dailyChartData = useMemo(() => (daily?.days || []).slice(-30).map((d: UsageDailyItem) => ({ ...d, date: (d.date || "").slice(5), cost: d.cost_usd || 0 })), [daily]);
 
   const [budgetForm, setBudgetForm] = useState<Partial<BudgetForm>>({});
+  const budgetResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (budgetResetTimerRef.current) clearTimeout(budgetResetTimerRef.current); }, []);
 
   const isLoading =
     usageQuery.isLoading ||
@@ -407,7 +409,8 @@ export function AnalyticsPage() {
                   budgetMutation.mutate(payload, {
                     onSuccess: () => {
                       setBudgetForm({});
-                      setTimeout(() => budgetMutation.reset(), 2000);
+                      if (budgetResetTimerRef.current) clearTimeout(budgetResetTimerRef.current);
+                      budgetResetTimerRef.current = setTimeout(() => budgetMutation.reset(), 2000);
                     },
                   });
                 }}
