@@ -7,29 +7,26 @@ use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{
     Entity, EntityType, GraphMatch, GraphPattern, Relation, RelationType,
 };
-use rusqlite::Connection;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 /// Knowledge graph store backed by SQLite.
 #[derive(Clone)]
 pub struct KnowledgeStore {
-    conn: Arc<Mutex<Connection>>,
+    pool: Pool<SqliteConnectionManager>,
 }
 
 impl KnowledgeStore {
     /// Create a new knowledge store wrapping the given connection.
-    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+    pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
+        Self { pool }
     }
 
     /// Add an entity to the knowledge graph.
     pub fn add_entity(&self, entity: Entity, agent_id: &str) -> LibreFangResult<String> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let id = if entity.id.is_empty() {
             Uuid::new_v4().to_string()
         } else {
@@ -52,10 +49,7 @@ impl KnowledgeStore {
 
     /// Add a relation between two entities.
     pub fn add_relation(&self, relation: Relation, agent_id: &str) -> LibreFangResult<String> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let id = Uuid::new_v4().to_string();
         let rel_type_str =
             serde_json::to_string(&relation.relation).map_err(LibreFangError::serialization)?;
@@ -86,10 +80,7 @@ impl KnowledgeStore {
     /// failure can't leave orphan entities (relations referencing entities
     /// silently broke ranking on the next graph query). See #3501.
     pub fn delete_by_agent(&self, agent_id: &str) -> LibreFangResult<u64> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let tx = conn
             .unchecked_transaction()
             .map_err(LibreFangError::memory)?;
@@ -116,10 +107,7 @@ impl KnowledgeStore {
         relation_type: &RelationType,
         target_id: &str,
     ) -> LibreFangResult<bool> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let rel_str =
             serde_json::to_string(relation_type).map_err(LibreFangError::serialization)?;
         let count: i64 = conn
@@ -137,10 +125,7 @@ impl KnowledgeStore {
 
     /// Query the knowledge graph with a pattern.
     pub fn query_graph(&self, pattern: GraphPattern) -> LibreFangResult<Vec<GraphMatch>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         let mut sql = String::from(
             "SELECT
@@ -330,9 +315,10 @@ mod tests {
     use crate::migration::run_migrations;
 
     fn setup() -> KnowledgeStore {
-        let conn = Connection::open_in_memory().unwrap();
-        run_migrations(&conn).unwrap();
-        KnowledgeStore::new(Arc::new(Mutex::new(conn)))
+        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+        let pool = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
+        run_migrations(&pool.get().unwrap()).unwrap();
+        KnowledgeStore::new(pool)
     }
 
     #[test]

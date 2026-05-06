@@ -6685,9 +6685,8 @@ mod tests {
     use async_trait::async_trait;
     use librefang_memory::session::SessionStore;
     use librefang_types::tool::ToolCall;
-    use rusqlite::Connection;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     #[test]
     fn test_max_iterations_constant() {
@@ -8230,9 +8229,13 @@ mod tests {
             Message::user("real turn"),
         ];
 
-        let conn = Connection::open_in_memory().unwrap();
-        librefang_memory::migration::run_migrations(&conn).unwrap();
-        let store = SessionStore::new(Arc::new(Mutex::new(conn)));
+        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+        let pool = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
+        {
+            let conn = pool.get().unwrap();
+            librefang_memory::migration::run_migrations(&conn).unwrap();
+        }
+        let store = SessionStore::new(pool);
         store
             .save_session(&Session {
                 id: session_id,
