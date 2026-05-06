@@ -2119,6 +2119,7 @@
     "new_session": "新建会话",
     "search_providers": "搜索供应商...",
     "select_provider": "选择供应商",
+    "tool_calls": "{{count}} 个工具调用",
     "tool_error": "错误",
     "tool_input": "输入",
     "tool_result": "结果",

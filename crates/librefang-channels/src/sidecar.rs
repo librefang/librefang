@@ -555,8 +555,11 @@ mod tests {
             .await
             .expect("Failed to send message to sidecar — process may have exited early");
 
-        // Read the echo reply (10s timeout for Windows cold start)
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(10), stream.next())
+        // Read the echo reply. Windows-2025 GitHub runners under load have been
+        // observed to spend > 10s in Python cold-start (panicked at 11.346s in
+        // CI for c176b2a — see #4676). 30s gives ample headroom while still
+        // catching real hangs via nextest's overall test timeout.
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next())
             .await
             .expect("Timed out waiting for echo reply")
             .expect("Stream ended unexpectedly");
