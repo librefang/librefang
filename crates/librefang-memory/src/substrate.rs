@@ -43,6 +43,14 @@ pub struct MemorySubstrate {
     chunk_config: ChunkConfig,
 }
 
+/// Default pool size when callers do not pass an explicit value.
+///
+/// Mirrors `default_memory_pool_size` in `librefang-types::config` so that
+/// callers constructing a substrate without a full `MemoryConfig` (tests,
+/// the `open` shortcut, ad-hoc tools) still land on a value consistent with
+/// what `config.toml: [memory] pool_size` defaults to.
+pub const DEFAULT_POOL_SIZE: u32 = 8;
+
 impl MemorySubstrate {
     /// Open or create a memory substrate at the given database path.
     pub fn open(db_path: &Path, decay_rate: f32) -> LibreFangResult<Self> {
@@ -50,21 +58,41 @@ impl MemorySubstrate {
     }
 
     /// Open or create a memory substrate with explicit chunking configuration.
+    ///
+    /// Uses [`DEFAULT_POOL_SIZE`] for the underlying r2d2 pool; production
+    /// callers that need to honour `config.toml: [memory] pool_size` should
+    /// use [`Self::open_with_pool_size`] instead.
     pub fn open_with_chunking(
         db_path: &Path,
         decay_rate: f32,
         chunk_config: ChunkConfig,
     ) -> LibreFangResult<Self> {
+        Self::open_with_pool_size(db_path, decay_rate, chunk_config, DEFAULT_POOL_SIZE)
+    }
+
+    /// Open or create a memory substrate with explicit chunking configuration
+    /// **and** pool sizing.
+    ///
+    /// `pool_size` is the maximum number of pooled SQLite connections; values
+    /// of 0 are clamped up to 1 (r2d2 panics on `max_size = 0`). The kernel
+    /// boot path passes `config.memory.pool_size` so operators can tune for
+    /// their concurrency profile (#3378 follow-up).
+    pub fn open_with_pool_size(
+        db_path: &Path,
+        decay_rate: f32,
+        chunk_config: ChunkConfig,
+        pool_size: u32,
+    ) -> LibreFangResult<Self> {
         // PRAGMAs run on every pooled connection's first checkout. The set
         // mirrors the pre-pool single-connection init: WAL journal for
         // multi-reader concurrency; 5 s busy_timeout so writers wait for the
         // reserved lock instead of failing fast; cache_size=-2000 caps the
-        // per-connection page cache at 2 MiB (the pool can hold up to 8
-        // connections, so total ceiling is ~16 MiB); mmap_size=0 disables
-        // mmap'd reads (kept for parity with the pre-pool config — flipping
-        // this is a separate decision); foreign_keys=ON enforces the schema
-        // FKs the migrations rely on; synchronous=NORMAL is the WAL-default
-        // durability/perf tradeoff.
+        // per-connection page cache at 2 MiB (so total page cache ceiling is
+        // `pool_size * 2 MiB`); mmap_size=0 disables mmap'd reads (kept for
+        // parity with the pre-pool config — flipping this is a separate
+        // decision); foreign_keys=ON enforces the schema FKs the migrations
+        // rely on; synchronous=NORMAL is the WAL-default durability/perf
+        // tradeoff.
         let manager = SqliteConnectionManager::file(db_path).with_init(|c| {
             c.execute_batch(
                 "PRAGMA journal_mode=WAL; \
@@ -75,8 +103,11 @@ impl MemorySubstrate {
                  PRAGMA synchronous=NORMAL;",
             )
         });
+        // Clamp to >= 1: r2d2 panics on `max_size = 0`, and a deserialised
+        // `pool_size = 0` (operator typo) should fail soft, not crash boot.
+        let max_size = pool_size.max(1);
         let pool = Pool::builder()
-            .max_size(8)
+            .max_size(max_size)
             .idle_timeout(Some(Duration::from_secs(30)))
             .max_lifetime(Some(Duration::from_secs(3600)))
             .build(manager)

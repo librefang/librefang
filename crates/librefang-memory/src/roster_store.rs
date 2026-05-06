@@ -40,6 +40,12 @@ impl RosterStore {
             return;
         }
         let Ok(c) = self.pool.get() else {
+            metrics::counter!(
+                "librefang_memory_pool_get_failed_total",
+                "store" => "roster",
+                "op" => "upsert",
+            )
+            .increment(1);
             tracing::warn!(
                 "roster pool exhausted; skipping upsert for {}/{}",
                 channel,
@@ -61,6 +67,12 @@ impl RosterStore {
     /// List all members of a group chat, ordered by display name.
     pub fn members(&self, channel: &str, chat_id: &str) -> Vec<(String, String, Option<String>)> {
         let Ok(c) = self.pool.get() else {
+            metrics::counter!(
+                "librefang_memory_pool_get_failed_total",
+                "store" => "roster",
+                "op" => "members",
+            )
+            .increment(1);
             tracing::warn!(
                 "roster pool exhausted; returning empty members for {}/{}",
                 channel,
@@ -90,6 +102,12 @@ impl RosterStore {
     /// Remove a single member from the roster.
     pub fn remove_member(&self, channel: &str, chat_id: &str, user_id: &str) {
         let Ok(c) = self.pool.get() else {
+            metrics::counter!(
+                "librefang_memory_pool_get_failed_total",
+                "store" => "roster",
+                "op" => "remove_member",
+            )
+            .increment(1);
             tracing::warn!(
                 "roster pool exhausted; skipping remove_member for {}/{}",
                 channel,
@@ -106,6 +124,12 @@ impl RosterStore {
     /// Count the members in a group chat.
     pub fn member_count(&self, channel: &str, chat_id: &str) -> usize {
         let Ok(c) = self.pool.get() else {
+            metrics::counter!(
+                "librefang_memory_pool_get_failed_total",
+                "store" => "roster",
+                "op" => "member_count",
+            )
+            .increment(1);
             tracing::warn!(
                 "roster pool exhausted; returning 0 for member_count {}/{}",
                 channel,

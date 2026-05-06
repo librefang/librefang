@@ -5222,10 +5222,29 @@ pub struct MemoryConfig {
     /// stay forever, leaking embedding storage — see #3467).
     #[serde(default = "default_soft_delete_retention_days")]
     pub soft_delete_retention_days: u64,
+    /// Maximum number of pooled SQLite connections served by the memory
+    /// substrate (#3378 follow-up). The pre-pool design serialised every
+    /// SQLite call through a single `Mutex<Connection>`; the r2d2 pool
+    /// removes that bottleneck but introduces a new ceiling — too low and
+    /// the trigger lane / channel bridges / cron / audit / idempotency
+    /// callers contend on `pool.get()`, too high and per-connection page
+    /// caches add up (each connection holds at most ~2 MiB via
+    /// `PRAGMA cache_size=-2000`). The default of 8 matches
+    /// `queue.concurrency.trigger_lane` so the lane semaphore, not the
+    /// pool, is the limiting factor under typical workloads. Bump in
+    /// lockstep with `trigger_lane` if you raise that, or lower for
+    /// memory-constrained deployments. Pool exhaustion is surfaced via
+    /// the `librefang_memory_pool_get_failed_total{store=...}` counter.
+    #[serde(default = "default_memory_pool_size")]
+    pub pool_size: u32,
 }
 
 fn default_soft_delete_retention_days() -> u64 {
     30
+}
+
+fn default_memory_pool_size() -> u32 {
+    8
 }
 
 /// Configuration for splitting long documents into overlapping chunks.
@@ -5271,6 +5290,7 @@ impl Default for MemoryConfig {
             vector_backend: None,
             vector_store_url: None,
             soft_delete_retention_days: default_soft_delete_retention_days(),
+            pool_size: default_memory_pool_size(),
         }
     }
 }

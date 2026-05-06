@@ -4520,6 +4520,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "librefang-types",
+ "metrics",
  "r2d2",
  "r2d2_sqlite",
  "reqwest",

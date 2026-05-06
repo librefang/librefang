@@ -104,10 +104,16 @@ impl PromptStore {
         Self { pool }
     }
 
-    /// Create a new PromptStore with its own dedicated connection.
+    /// Create a new PromptStore with its own dedicated connection pool.
     /// This avoids sharing a connection with UsageStore, preventing potential
     /// conflicts during concurrent writes.
-    pub fn new_with_path<P: AsRef<std::path::Path>>(db_path: P) -> LibreFangResult<Self> {
+    ///
+    /// `pool_size` mirrors `config.toml: [memory] pool_size`; values of 0 are
+    /// clamped up to 1 (r2d2 panics on `max_size = 0`).
+    pub fn new_with_path<P: AsRef<std::path::Path>>(
+        db_path: P,
+        pool_size: u32,
+    ) -> LibreFangResult<Self> {
         let manager = r2d2_sqlite::SqliteConnectionManager::file(db_path.as_ref()).with_init(|c| {
             c.execute_batch(
                 "PRAGMA journal_mode=WAL; \
@@ -117,7 +123,7 @@ impl PromptStore {
             )
         });
         let pool = r2d2::Pool::builder()
-            .max_size(8)
+            .max_size(pool_size.max(1))
             .build(manager)
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         Ok(Self { pool })

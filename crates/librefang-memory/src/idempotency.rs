@@ -115,9 +115,23 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// Increment the shared pool-exhaustion counter so operators can see
+/// `pool.get()` failures before they cause user-visible request errors.
+fn record_pool_failure(op: &'static str) {
+    metrics::counter!(
+        "librefang_memory_pool_get_failed_total",
+        "store" => "idempotency",
+        "op" => op,
+    )
+    .increment(1);
+}
+
 impl IdempotencyStore for SqliteIdempotencyStore {
     fn lookup(&self, key: &str) -> Result<Option<StoredRecord>, IdempotencyError> {
-        let conn = self.pool.get()?;
+        let conn = self
+            .pool
+            .get()
+            .inspect_err(|_| record_pool_failure("lookup"))?;
         let now = now_unix();
         // Drop the row if it's expired so the lookup behaves like a
         // fresh miss; the write path will then re-INSERT cleanly.
@@ -152,7 +166,10 @@ impl IdempotencyStore for SqliteIdempotencyStore {
         body_hash: &str,
         response: &CachedResponse,
     ) -> Result<(), IdempotencyError> {
-        let conn = self.pool.get()?;
+        let conn = self
+            .pool
+            .get()
+            .inspect_err(|_| record_pool_failure("put"))?;
         let now = now_unix();
         let expires = now + TTL_SECONDS;
         conn.execute(
@@ -172,7 +189,10 @@ impl IdempotencyStore for SqliteIdempotencyStore {
     }
 
     fn prune_expired(&self) -> Result<(), IdempotencyError> {
-        let conn = self.pool.get()?;
+        let conn = self
+            .pool
+            .get()
+            .inspect_err(|_| record_pool_failure("prune_expired"))?;
         let now = now_unix();
         conn.execute(
             "DELETE FROM idempotency_keys WHERE expires_at <= ?1",

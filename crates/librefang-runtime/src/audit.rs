@@ -647,6 +647,12 @@ impl AuditLog {
                     }
                 }
                 Err(e) => {
+                    metrics::counter!(
+                        "librefang_memory_pool_get_failed_total",
+                        "store" => "audit",
+                        "op" => "record",
+                    )
+                    .increment(1);
                     tracing::error!(
                         seq = entry.seq,
                         "Audit DB pool get failed ({e:?}); chain NOT advanced."

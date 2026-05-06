@@ -2736,10 +2736,11 @@ impl LibreFangKernel {
             .sqlite_path
             .clone()
             .unwrap_or_else(|| config.data_dir.join("librefang.db"));
-        let mut substrate = MemorySubstrate::open_with_chunking(
+        let mut substrate = MemorySubstrate::open_with_pool_size(
             &db_path,
             config.memory.decay_rate as f32,
             config.memory.chunking.clone(),
+            config.memory.pool_size,
         )
         .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?;
 
@@ -3122,8 +3123,9 @@ impl LibreFangKernel {
 
         // Initialize prompt versioning and A/B experiment store with its own connection
         // to avoid conflicts with UsageStore concurrent writes
-        let prompt_store = librefang_memory::PromptStore::new_with_path(&db_path)
-            .map_err(|e| KernelError::BootFailed(format!("Prompt store init failed: {e}")))?;
+        let prompt_store =
+            librefang_memory::PromptStore::new_with_path(&db_path, config.memory.pool_size)
+                .map_err(|e| KernelError::BootFailed(format!("Prompt store init failed: {e}")))?;
 
         let supervisor = Supervisor::new();
         let background = BackgroundExecutor::with_concurrency(
