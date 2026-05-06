@@ -24,7 +24,7 @@ import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
-import { ToolCallCard } from "../components/ui/ToolCallCard";
+import { ToolCallsPanel } from "../components/ui/ToolCallsPanel";
 import { filterVisible } from "../lib/hiddenModels";
 import { useVoiceInput } from "../lib/useVoiceInput";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
@@ -1194,12 +1194,11 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
           </div>
         )}
 
-        {/* Tool calls — rendered above text for assistant messages */}
+        {/* Tool calls — one pill per message bubble that opens a Modal
+            listing every call in this turn (input/result for each). */}
         {!isUser && message.tools && message.tools.length > 0 && (
-          <div className="w-full mb-1">
-            {message.tools.map((tool, i) => (
-              <ToolCallCard key={tool._call_id ?? `${tool.name}-${i}`} tool={tool} />
-            ))}
+          <div className="w-full mb-1.5">
+            <ToolCallsPanel tools={message.tools} />
           </div>
         )}
 
