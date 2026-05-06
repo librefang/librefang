@@ -2077,6 +2077,34 @@ fn sanitize_sender_label(name: &str) -> String {
     }
 }
 
+/// Distinguishes system-fired turns from real human ones in the user
+/// message itself. The kernel synthesises a `SenderContext` with
+/// `channel = "cron"` or `"autonomous"` for scheduled / loop fires, but
+/// the user message that reaches the LLM is otherwise indistinguishable
+/// from a real human turn. The model has been observed answering a
+/// scheduled trigger as if a person had asked, then conflating that
+/// response with the next real human request that arrives.
+///
+/// Returns a typed marker prepended to the user message so the LLM can
+/// distinguish "this came from a cron job" from "this came from a person".
+/// The string is stable so few-shot examples and persona rules can
+/// reference it explicitly. Returns `None` for human-driven channels so
+/// 1:1 chats and API calls keep their existing un-prefixed message shape.
+///
+/// **Prompt cache safety**: the marker is byte-stable per channel (no
+/// clock or PID interpolation) and only mutates the *current* user
+/// message tail — historical session bytes are not rewritten. This is the
+/// distinction the `build_sender_prefix` carve-out below cares about:
+/// dynamic per-turn names like a Web-UI display would invalidate the
+/// cache; a fixed channel-keyed marker does not.
+fn build_automation_marker_prefix(sender_channel: Option<&str>) -> Option<&'static str> {
+    match sender_channel {
+        Some("cron") => Some("[Scheduled trigger]\n"),
+        Some("autonomous") => Some("[Autonomous trigger]\n"),
+        _ => None,
+    }
+}
+
 /// Build the `[sender]: message` prefix for a user turn.
 ///
 /// Emits a sanitized prefix when a real human sender identity is available
@@ -3461,7 +3489,20 @@ pub async fn run_agent_loop(
     // names that look like emails/phones do not get redacted into the stored
     // content.
     let sender_prefix = build_sender_prefix(manifest, sender_user_id.as_deref());
-    let effective_user_message = match &sender_prefix {
+    // Automation marker for cron / autonomous-loop fires so the model can
+    // tell a scheduled trigger from a real human turn. Orthogonal to
+    // `sender_prefix`: cron / autonomous channels are in the carve-out
+    // above, so `sender_prefix` is None there and the combined form is
+    // just the marker. The marker is byte-stable per channel and so does
+    // not invalidate the provider prompt cache.
+    let automation_marker = build_automation_marker_prefix(sender_channel.as_deref());
+    let combined_prefix: Option<String> = match (automation_marker, sender_prefix.as_deref()) {
+        (Some(m), Some(p)) => Some(format!("{m}{p}")),
+        (Some(m), None) => Some(m.to_string()),
+        (None, Some(p)) => Some(p.to_string()),
+        (None, None) => None,
+    };
+    let effective_user_message = match &combined_prefix {
         Some(p) => format!("{p}{user_message}"),
         None => user_message.to_string(),
     };
@@ -3510,7 +3551,7 @@ pub async fn run_agent_loop(
         guarded_user_content_blocks,
         &pii_filter,
         &privacy_config,
-        sender_prefix.as_deref(),
+        combined_prefix.as_deref(),
     );
 
     let max_history = resolve_max_history(manifest, opts);
@@ -4923,7 +4964,20 @@ pub async fn run_agent_loop_streaming(
     // names that look like emails/phones do not get redacted into the stored
     // content.
     let sender_prefix = build_sender_prefix(manifest, sender_user_id.as_deref());
-    let effective_user_message = match &sender_prefix {
+    // Automation marker for cron / autonomous-loop fires so the model can
+    // tell a scheduled trigger from a real human turn. Orthogonal to
+    // `sender_prefix`: cron / autonomous channels are in the carve-out
+    // above, so `sender_prefix` is None there and the combined form is
+    // just the marker. The marker is byte-stable per channel and so does
+    // not invalidate the provider prompt cache.
+    let automation_marker = build_automation_marker_prefix(sender_channel.as_deref());
+    let combined_prefix: Option<String> = match (automation_marker, sender_prefix.as_deref()) {
+        (Some(m), Some(p)) => Some(format!("{m}{p}")),
+        (Some(m), None) => Some(m.to_string()),
+        (None, Some(p)) => Some(p.to_string()),
+        (None, None) => None,
+    };
+    let effective_user_message = match &combined_prefix {
         Some(p) => format!("{p}{user_message}"),
         None => user_message.to_string(),
     };
@@ -4972,7 +5026,7 @@ pub async fn run_agent_loop_streaming(
         guarded_user_content_blocks,
         &pii_filter,
         &privacy_config,
-        sender_prefix.as_deref(),
+        combined_prefix.as_deref(),
     );
 
     let max_history = resolve_max_history(manifest, opts);
@@ -7180,6 +7234,30 @@ mod tests {
             build_sender_prefix(&m, Some("user-1")),
             Some("[Alice]: ".to_string())
         );
+    }
+
+    #[test]
+    fn test_build_automation_marker_prefix_cron() {
+        assert_eq!(
+            build_automation_marker_prefix(Some("cron")),
+            Some("[Scheduled trigger]\n"),
+        );
+        assert_eq!(
+            build_automation_marker_prefix(Some("autonomous")),
+            Some("[Autonomous trigger]\n"),
+        );
+    }
+
+    #[test]
+    fn test_build_automation_marker_prefix_human_channels() {
+        for ch in ["telegram", "whatsapp", "signal", "discord", "api", ""] {
+            assert_eq!(
+                build_automation_marker_prefix(Some(ch)),
+                None,
+                "channel {ch:?} should not produce an automation marker",
+            );
+        }
+        assert_eq!(build_automation_marker_prefix(None), None);
     }
 
     #[test]
