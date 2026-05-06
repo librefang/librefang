@@ -1043,7 +1043,7 @@ async fn execute_single_tool_call_inner(
                 tool_use_id: tool_call.id.clone(),
                 content: "ok".to_string(),
                 is_error: false,
-                status: librefang_types::tool::ToolExecutionStatus::Success,
+                status: librefang_types::tool::ToolExecutionStatus::Completed,
                 ..Default::default()
             },
             final_content: "ok".to_string(),
