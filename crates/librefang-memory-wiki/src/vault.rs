@@ -43,6 +43,11 @@ const META_DIR: &str = "_meta";
 const COMPILE_STATE_FILE: &str = "compile-state.json";
 const BACKLINKS_FILE: &str = "backlinks.json";
 const MAX_TOPIC_LEN: usize = 100;
+/// Soft cap on a single page body. Sized to comfortably hold a long-form
+/// agent note (essays, research summaries) while preventing a runaway LLM
+/// from filling the disk page-by-page. Bytes are counted **after**
+/// `[[link]]` rewrite, since that is what actually lands on disk.
+const MAX_BODY_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WikiPage {
@@ -87,7 +92,9 @@ struct PageState {
     /// `SystemTime` modified, expressed as nanoseconds since the UNIX
     /// epoch. Stored as a string because some json consumers can't take a
     /// 128-bit number; precision varies by filesystem but is self-
-    /// consistent within a single host.
+    /// consistent within a single host. Format is canonical decimal with
+    /// no leading zeros and no thousands separators (`u128::to_string`),
+    /// so equality across two snapshots is a stable byte compare.
     mtime_ns: String,
     /// `Frontmatter::hash_body(rendered_body)` of the page body emitted by
     /// the last successful compile. Diverges immediately if a human saves
@@ -127,6 +134,19 @@ impl WikiVault {
             MemoryWikiMode::UnsafeLocal => {
                 return Err(WikiError::ModeNotImplemented("unsafe_local"));
             }
+        }
+        // `ingest_filter = All` is reserved for the future memory-event
+        // subscription path. v1 ingests via explicit `wiki_write` only, so
+        // the field has no behavioural effect today. Tell operators
+        // loudly rather than silently — a non-default value is a usable
+        // signal of misconfigured expectations.
+        if matches!(config.ingest_filter, MemoryWikiIngestFilter::All) {
+            tracing::warn!(
+                "[memory_wiki] ingest_filter = \"all\" has no effect in v1 — \
+                 the field is reserved for future memory-event ingest \
+                 (issue #3329 follow-up). Today every wiki_write is \
+                 accepted regardless of this setting."
+            );
         }
         let root = config.resolved_vault_path();
         Self::with_root(
@@ -176,6 +196,12 @@ impl WikiVault {
         force: bool,
     ) -> WikiResult<WikiWriteOutcome> {
         validate_topic(topic)?;
+        if body_with_placeholders.len() > MAX_BODY_BYTES {
+            return Err(WikiError::InvalidTopic {
+                topic: topic.to_string(),
+                reason: "body exceeds 1 MiB cap; split across multiple pages",
+            });
+        }
         let _guard = self.write_lock.lock().expect("vault write lock poisoned");
 
         let path = self.page_path(topic);
@@ -283,7 +309,12 @@ impl WikiVault {
                 score += 10.0;
             }
             let body_matches = body_lc.matches(&query_lc).count();
-            score += body_matches as f64;
+            // Sub-linear weighting on body hits so a single long page can't
+            // bury short topic-only matches under sheer volume. The +1
+            // shift keeps ln() non-negative on the first hit.
+            if body_matches > 0 {
+                score += (1.0 + body_matches as f64).ln();
+            }
             if score <= 0.0 {
                 continue;
             }
@@ -486,7 +517,25 @@ fn read_page_if_present(path: &Path, topic: &str) -> WikiResult<Option<WikiPage>
     let raw = fs::read_to_string(path).map_err(|e| WikiError::io(path.display().to_string(), e))?;
     let (yaml, body) = frontmatter::split(&raw);
     let frontmatter = match yaml {
-        Some(y) => frontmatter::parse(y, topic)?,
+        Some(y) => match frontmatter::parse(y, topic) {
+            Ok(fm) => fm,
+            // The page exists but the YAML block is malformed (e.g. a hand
+            // editor saved invalid YAML, or the file was hand-typed without
+            // following the schema). Don't fail the read — that would brick
+            // every read after the bad save. Synthesise a default header so
+            // the body remains accessible; the next successful `wiki_write`
+            // re-renders the page with a clean header.
+            Err(err) => {
+                tracing::warn!(
+                    topic = %topic,
+                    path = %path.display(),
+                    error = %err,
+                    "wiki page frontmatter failed to parse; falling back to a synthetic header — \
+                     write the page again to repair the YAML block"
+                );
+                Frontmatter::default_for(topic)
+            }
+        },
         None => Frontmatter::default_for(topic),
     };
     Ok(Some(WikiPage {
@@ -762,5 +811,77 @@ mod tests {
         cfg.mode = MemoryWikiMode::UnsafeLocal;
         let err = WikiVault::new(&cfg).unwrap_err();
         assert!(matches!(err, WikiError::ModeNotImplemented("unsafe_local")));
+    }
+
+    #[test]
+    fn write_rejects_body_over_one_mib() {
+        let (vault, _dir) = fresh_vault(RenderMode::Native);
+        let too_big = "x".repeat(MAX_BODY_BYTES + 1);
+        let err = vault
+            .write("big", &too_big, provenance("a"), false)
+            .unwrap_err();
+        assert!(matches!(err, WikiError::InvalidTopic { .. }));
+    }
+
+    #[test]
+    fn malformed_frontmatter_falls_back_instead_of_failing_get() {
+        let (vault, dir) = fresh_vault(RenderMode::Native);
+        // Land a clean page first so the file exists, then corrupt the
+        // YAML block with a hand-edit.
+        vault
+            .write("topic", "real body", provenance("a"), false)
+            .unwrap();
+        let path = dir.path().join("topic.md");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let body_at = raw.find("\n---\n\n").expect("split marker present");
+        let mut corrupted = String::from("---\nthis: is\n: not valid: yaml: at all\n");
+        corrupted.push_str(&raw[body_at..]);
+        std::fs::write(&path, corrupted).unwrap();
+        // `get` must succeed despite the broken header — the body should
+        // still come through with a synthetic default frontmatter.
+        let page = vault.get("topic").unwrap();
+        assert!(page.body.contains("real body"));
+        assert_eq!(page.frontmatter.topic, "topic");
+        assert!(page.frontmatter.provenance.is_empty());
+    }
+
+    #[test]
+    fn concurrent_writes_to_same_topic_are_serialised() {
+        use std::sync::Arc;
+        use std::thread;
+        let dir = TempDir::new().unwrap();
+        let vault = Arc::new(
+            WikiVault::with_root(
+                dir.path().to_path_buf(),
+                RenderMode::Native,
+                MemoryWikiIngestFilter::Tagged,
+            )
+            .unwrap(),
+        );
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let v = Arc::clone(&vault);
+            handles.push(thread::spawn(move || {
+                v.write(
+                    "shared",
+                    &format!("body from thread {i}"),
+                    provenance(&format!("agent_{i}")),
+                    false,
+                )
+            }));
+        }
+        let mut ok_count = 0;
+        for h in handles {
+            if h.join().unwrap().is_ok() {
+                ok_count += 1;
+            }
+        }
+        // Every write either serialises cleanly or is rejected by the
+        // hand-edit detector (a previous write within the same race
+        // already updated mtime/sha) — neither outcome is data loss.
+        assert!(ok_count >= 1, "at least one write should land");
+        let page = vault.get("shared").unwrap();
+        // Provenance is monotonic: surviving writes appended their entries.
+        assert_eq!(page.frontmatter.provenance.len(), ok_count);
     }
 }

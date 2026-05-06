@@ -18812,7 +18812,7 @@ impl kernel_handle::WikiAccess for LibreFangKernel {
         let vault = self
             .wiki_vault
             .as_ref()
-            .ok_or_else(|| KernelOpError::unavailable("wiki"))?;
+            .ok_or_else(|| KernelOpError::unavailable("wiki_get"))?;
         match vault.get(topic) {
             Ok(page) => serde_json::to_value(&page)
                 .map_err(|e| KernelOpError::Internal(format!("Wiki get serialize: {e}"))),
@@ -18832,7 +18832,7 @@ impl kernel_handle::WikiAccess for LibreFangKernel {
         let vault = self
             .wiki_vault
             .as_ref()
-            .ok_or_else(|| KernelOpError::unavailable("wiki"))?;
+            .ok_or_else(|| KernelOpError::unavailable("wiki_search"))?;
         let hits = vault
             .search(query, limit)
             .map_err(|e| KernelOpError::Internal(format!("Wiki search failed: {e}")))?;
@@ -18851,7 +18851,7 @@ impl kernel_handle::WikiAccess for LibreFangKernel {
         let vault = self
             .wiki_vault
             .as_ref()
-            .ok_or_else(|| KernelOpError::unavailable("wiki"))?;
+            .ok_or_else(|| KernelOpError::unavailable("wiki_write"))?;
         let prov: librefang_memory_wiki::ProvenanceEntry = serde_json::from_value(provenance)
             .map_err(|e| {
                 KernelOpError::InvalidInput(format!(

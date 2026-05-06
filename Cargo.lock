@@ -4601,6 +4601,7 @@ name = "librefang-memory-wiki"
 version = "2026.5.2-beta8"
 dependencies = [
  "chrono",
+ "librefang-kernel-handle",
  "librefang-types",
  "serde",
  "serde_json",

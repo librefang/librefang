@@ -17,6 +17,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+librefang-kernel-handle = { path = "../librefang-kernel-handle" }
 
 [lints]
 workspace = true

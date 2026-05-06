@@ -236,3 +236,29 @@ fn test_workspace_prefix_defaults_empty() {
     assert!(handle.readonly_workspace_prefixes("any_agent").is_empty());
     assert!(handle.named_workspace_prefixes("any_agent").is_empty());
 }
+
+/// `WikiAccess` default impls (#3329) — when a kernel does not override
+/// any of the three wiki methods, every call must surface the
+/// per-method `Unavailable("wiki_<verb>")` capability name so callers
+/// (and audit logs) can tell which wiki entry-point was hit while the
+/// vault was disabled.
+#[test]
+fn test_wiki_access_defaults_return_unavailable_with_method_name() {
+    use librefang_kernel_handle::KernelOpError;
+    let handle = NoopKernelHandle;
+
+    match handle.wiki_get("anything") {
+        Err(KernelOpError::Unavailable(c)) if c == "wiki_get" => {}
+        other => panic!("wiki_get: expected Unavailable(\"wiki_get\"), got {other:?}"),
+    }
+
+    match handle.wiki_search("anything", 10) {
+        Err(KernelOpError::Unavailable(c)) if c == "wiki_search" => {}
+        other => panic!("wiki_search: expected Unavailable(\"wiki_search\"), got {other:?}"),
+    }
+
+    match handle.wiki_write("any", "body", serde_json::json!({}), false) {
+        Err(KernelOpError::Unavailable(c)) if c == "wiki_write" => {}
+        other => panic!("wiki_write: expected Unavailable(\"wiki_write\"), got {other:?}"),
+    }
+}

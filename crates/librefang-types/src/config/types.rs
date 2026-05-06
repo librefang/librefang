@@ -5457,8 +5457,13 @@ pub struct MemoryWikiConfig {
 }
 
 impl MemoryWikiConfig {
-    /// Resolve the effective vault root. Honours `~` expansion and falls
-    /// back to `<librefang_home>/wiki/main` when `vault_path` is unset.
+    /// Resolve the effective vault root. Honours the leading `~` and
+    /// `~/...` forms (current user's home directory) and falls back to
+    /// `<librefang_home>/wiki/main` when `vault_path` is unset.
+    ///
+    /// `~user/...` (POSIX user-name expansion) is **not** honoured — only
+    /// the bare `~` and `~/...` forms are. Set the path explicitly with
+    /// no `~` prefix when targeting another user's home.
     pub fn resolved_vault_path(&self) -> PathBuf {
         if let Some(path) = &self.vault_path {
             return expand_tilde(path);
@@ -5467,6 +5472,9 @@ impl MemoryWikiConfig {
     }
 }
 
+/// Expand a leading `~` or `~/...` to the current user's home directory.
+/// Other forms (including `~user/...`) are returned unchanged — see
+/// [`MemoryWikiConfig::resolved_vault_path`] for the rationale.
 fn expand_tilde(path: &std::path::Path) -> PathBuf {
     let raw = path.to_string_lossy();
     if let Some(rest) = raw.strip_prefix("~/") {
