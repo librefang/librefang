@@ -194,6 +194,97 @@ pub fn load_config(path: Option<&Path>) -> KernelConfig {
     KernelConfig::default()
 }
 
+/// Strict counterpart of [`load_config`] that returns `Err` on every failure
+/// mode instead of silently falling back to [`KernelConfig::default`].
+///
+/// Used by [`crate::kernel::Kernel::reload_config`] (issue #4664) so a bad
+/// on-disk config — TOML syntax error, broken `include = [...]`, migration
+/// failure, deserialize-shape mismatch — never wipes the operator's live
+/// in-memory state. The hot-reload watcher and `POST /api/config/reload`
+/// handler both already map `Err(...)` to a warning + 400 respectively,
+/// so the live config stays intact and the operator gets an actionable
+/// error.
+///
+/// Differences from `load_config`:
+///
+/// - No write-back of the migrated TOML to disk. The reload path doesn't
+///   own the file, and a partial migration that fails downstream would
+///   leave the disk file in a half-migrated state. The next initial-boot
+///   `load_config` call still does the write-back.
+/// - Unknown fields under `strict_config = true` produce `Err` instead of
+///   "return defaults with `strict_config: true`" — same intent, but
+///   surfaced as an error so the reload path can refuse to apply it.
+/// - Unknown fields under `strict_config = false` (or unset) still warn
+///   and proceed, matching `load_config`'s tolerant behaviour.
+pub fn try_load_config(path: &Path) -> Result<KernelConfig, String> {
+    if !path.exists() {
+        return Err(format!("Config file not found: {}", path.display()));
+    }
+    let contents =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read config file: {e}"))?;
+    let mut root_value: toml::Value =
+        toml::from_str(&contents).map_err(|e| format!("Config file has invalid TOML: {e}"))?;
+
+    // Resolve `include = [...]` chains. Failures here include: missing
+    // file, unparseable include, traversal / absolute-path attempts,
+    // circular references, depth overflow.
+    let config_dir = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let mut visited = HashSet::new();
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        visited.insert(canonical);
+    } else {
+        visited.insert(path.to_path_buf());
+    }
+    resolve_config_includes(&mut root_value, &config_dir, &mut visited, 0)
+        .map_err(|e| format!("Config include resolution failed: {e}"))?;
+    if let toml::Value::Table(ref mut tbl) = root_value {
+        tbl.remove("include");
+    }
+
+    // Migrate older config versions in place. We do NOT write the result
+    // back to disk from the reload path (see doc comment above).
+    let file_version = root_value
+        .as_table()
+        .and_then(|t| t.get("config_version"))
+        .and_then(|v| v.as_integer())
+        .map(|v| v as u32)
+        .unwrap_or_else(default_config_version);
+    if file_version < CONFIG_VERSION {
+        run_migrations(&mut root_value, file_version).map_err(|e| {
+            format!("Config migration failed (from v{file_version} to v{CONFIG_VERSION}): {e}")
+        })?;
+    }
+
+    // Strict mode: refuse to load when unknown / typo'd fields are present.
+    let unknown_fields = KernelConfig::detect_unknown_fields(&root_value);
+    let unknown_nested = KernelConfig::detect_unknown_nested_fields(&root_value);
+    let is_strict = root_value
+        .as_table()
+        .and_then(|t| t.get("strict_config"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut all_unknown: Vec<String> = unknown_fields.into_iter().chain(unknown_nested).collect();
+    all_unknown.sort();
+    if !all_unknown.is_empty() {
+        if is_strict {
+            return Err(format!(
+                "strict_config is enabled and config contains unknown fields: {}",
+                all_unknown.join(", ")
+            ));
+        }
+        for field in &all_unknown {
+            tracing::warn!(field, "Unknown config field (ignored on reload)");
+        }
+    }
+
+    root_value
+        .try_into::<KernelConfig>()
+        .map_err(|e| format!("Failed to deserialize config: {e}"))
+}
+
 /// Resolve config includes by deep-merging included files into the root value.
 ///
 /// Included files are loaded first and the root config overrides them.
@@ -843,5 +934,147 @@ mod tests {
         // Should fall back to defaults (users deserialization fails)
         assert_eq!(config.log_level, "info"); // default, not "warn"
         assert!(config.users.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // try_load_config — strict variant used by reload (#4664)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_try_load_config_happy_path_returns_kernel_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "log_level = \"warn\"").unwrap();
+        drop(f);
+
+        let cfg = try_load_config(&root).expect("strict load must succeed on a clean file");
+        assert_eq!(cfg.log_level, "warn");
+    }
+
+    #[test]
+    fn test_try_load_config_missing_file_is_error_not_default() {
+        // Tolerant `load_config` returns defaults for a missing file because
+        // initial boot wants to come up. The strict variant must `Err` so the
+        // reload path does not silently rewrite the live state.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("nonexistent.toml");
+
+        let err = try_load_config(&root).expect_err("missing file must surface as Err");
+        assert!(
+            err.contains("not found"),
+            "missing-file error must be operator-actionable; got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_try_load_config_invalid_toml_is_error() {
+        // The exact failure shape from #4664: duplicate `[web.searxng]` key.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "[web.searxng]").unwrap();
+        writeln!(f, "url = \"http://first\"").unwrap();
+        writeln!(f, "[web.searxng]").unwrap();
+        writeln!(f, "url = \"http://second\"").unwrap();
+        drop(f);
+
+        let err = try_load_config(&root).expect_err("duplicate key must surface as Err");
+        assert!(
+            err.contains("invalid TOML"),
+            "TOML syntax error must be tagged so the reload caller can wrap it; got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_try_load_config_broken_include_chain_is_error() {
+        // Root is well-formed but points at an unparseable include — tolerant
+        // `load_config` warns and silently proceeds with root-only, which on a
+        // reload path would still effectively zero the operator's settings
+        // that lived in the include. Strict variant must refuse.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+        let bad_include = dir.path().join("bad.toml");
+
+        let mut f = std::fs::File::create(&bad_include).unwrap();
+        // Same duplicate-key shape as the bug report, just inside the include.
+        writeln!(f, "[memory]").unwrap();
+        writeln!(f, "decay_rate = 0.1").unwrap();
+        writeln!(f, "[memory]").unwrap();
+        writeln!(f, "decay_rate = 0.2").unwrap();
+        drop(f);
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "include = [\"bad.toml\"]").unwrap();
+        writeln!(f, "log_level = \"debug\"").unwrap();
+        drop(f);
+
+        let err = try_load_config(&root).expect_err("broken include must surface as Err");
+        assert!(
+            err.contains("include"),
+            "include-failure error must be tagged so the operator knows where to look; got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_try_load_config_deserialize_shape_mismatch_is_error() {
+        // TOML parses cleanly but a field has the wrong shape — `default_model`
+        // is a struct, not a scalar. Tolerant `load_config` warns and returns
+        // defaults; strict variant must refuse so the reload caller cannot
+        // accidentally apply defaults as the diff target.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "default_model = \"not-a-table\"").unwrap();
+        drop(f);
+
+        let err = try_load_config(&root).expect_err("wrong-shape field must surface as Err");
+        assert!(
+            err.contains("deserialize"),
+            "deserialize-failure error must be tagged; got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_try_load_config_strict_mode_rejects_unknown_field() {
+        // Mirrors the tolerant `load_config` behaviour test, but the strict
+        // variant returns `Err` instead of "defaults with strict_config=true"
+        // so the reload path can refuse to swap rather than silently zeroing.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "strict_config = true").unwrap();
+        writeln!(f, "log_level = \"warn\"").unwrap();
+        writeln!(f, "bogus_field = \"oops\"").unwrap();
+        drop(f);
+
+        let err =
+            try_load_config(&root).expect_err("strict_config + unknown field must surface as Err");
+        assert!(
+            err.contains("unknown field"),
+            "unknown-field error must be tagged; got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_try_load_config_tolerant_mode_warns_on_unknown_field_but_still_loads() {
+        // strict_config defaults to false. Unknown fields warn but don't block,
+        // matching `load_config`'s tolerant semantics — otherwise a typo
+        // anywhere would brick the reload.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "log_level = \"warn\"").unwrap();
+        writeln!(f, "bogus_field = \"oops\"").unwrap();
+        drop(f);
+
+        let cfg =
+            try_load_config(&root).expect("tolerant unknown fields must not fail strict load");
+        assert_eq!(cfg.log_level, "warn");
     }
 }
