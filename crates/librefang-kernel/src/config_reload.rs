@@ -246,6 +246,18 @@ pub fn build_reload_plan_with_caps(
             .push("memory config changed".to_string());
     }
 
+    // Memory wiki config (#3329) — the vault is constructed once at
+    // boot and held in `LibreFangKernel.wiki_vault`; toggling
+    // `enabled`, switching `mode` / `render_mode`, or pointing
+    // `vault_path` somewhere else cannot be picked up without a
+    // rebuild. Mark restart-required so an operator gets a loud signal
+    // instead of a silent no-op.
+    if field_changed(&old.memory_wiki, &new.memory_wiki) {
+        plan.restart_required = true;
+        plan.restart_reasons
+            .push("memory_wiki config changed".to_string());
+    }
+
     // Proxy config — hot-reloadable: re-export env vars and flush driver cache.
     if field_changed(&old.proxy, &new.proxy) {
         plan.hot_actions.push(HotAction::ReloadProxy);

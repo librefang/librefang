@@ -39,7 +39,8 @@ fn vault_in(dir: &TempDir, render: RenderMode) -> WikiVault {
 fn default_config_is_disabled_and_construction_short_circuits() {
     let cfg = MemoryWikiConfig::default();
     assert!(!cfg.enabled, "default must be off");
-    let err = WikiVault::new(&cfg).expect_err("disabled vault must not construct");
+    let err = WikiVault::new(&cfg, std::path::Path::new("/tmp"))
+        .expect_err("disabled vault must not construct");
     assert!(matches!(err, librefang_memory_wiki::WikiError::Disabled));
 }
 
@@ -342,7 +343,7 @@ fn reserved_modes_return_specific_error() {
         render_mode: MemoryWikiRenderMode::Native,
         ingest_filter: MemoryWikiIngestFilter::Tagged,
     };
-    let err = WikiVault::new(&cfg).unwrap_err();
+    let err = WikiVault::new(&cfg, dir.path()).unwrap_err();
     assert!(matches!(
         err,
         librefang_memory_wiki::WikiError::ModeNotImplemented("bridge")

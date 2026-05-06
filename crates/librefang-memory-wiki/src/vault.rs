@@ -117,12 +117,18 @@ pub struct WikiVault {
 }
 
 impl WikiVault {
-    /// Construct a new isolated-mode vault.
+    /// Construct a new isolated-mode vault rooted under `home_dir`.
+    ///
+    /// `home_dir` is consulted only when `config.vault_path` is unset —
+    /// it is the kernel's own home directory (`KernelConfig.home_dir`)
+    /// rather than the env-derived `LIBREFANG_HOME`, so embedded
+    /// profiles and tests don't silently mix data with a developer's
+    /// `~/.librefang/wiki/main`.
     ///
     /// Returns `WikiError::Disabled` when the operator has not flipped
     /// `enabled = true`, and `WikiError::ModeNotImplemented` for the
     /// `bridge` / `unsafe_local` modes that v1 does not wire.
-    pub fn new(config: &MemoryWikiConfig) -> WikiResult<Self> {
+    pub fn new(config: &MemoryWikiConfig, home_dir: &Path) -> WikiResult<Self> {
         if !config.enabled {
             return Err(WikiError::Disabled);
         }
@@ -148,7 +154,7 @@ impl WikiVault {
                  accepted regardless of this setting."
             );
         }
-        let root = config.resolved_vault_path();
+        let root = config.resolved_vault_path(home_dir);
         Self::with_root(
             root,
             RenderMode::from(config.render_mode),
@@ -793,7 +799,8 @@ mod tests {
     #[test]
     fn disabled_config_returns_disabled_error() {
         let cfg = MemoryWikiConfig::default();
-        let err = WikiVault::new(&cfg).unwrap_err();
+        // home_dir is unused on the disabled-fast-path; pass anything.
+        let err = WikiVault::new(&cfg, Path::new("/tmp")).unwrap_err();
         assert!(matches!(err, WikiError::Disabled));
     }
 
@@ -806,11 +813,29 @@ mod tests {
             vault_path: Some(dir.path().to_path_buf()),
             ..MemoryWikiConfig::default()
         };
-        let err = WikiVault::new(&cfg).unwrap_err();
+        let err = WikiVault::new(&cfg, dir.path()).unwrap_err();
         assert!(matches!(err, WikiError::ModeNotImplemented("bridge")));
         cfg.mode = MemoryWikiMode::UnsafeLocal;
-        let err = WikiVault::new(&cfg).unwrap_err();
+        let err = WikiVault::new(&cfg, dir.path()).unwrap_err();
         assert!(matches!(err, WikiError::ModeNotImplemented("unsafe_local")));
+    }
+
+    #[test]
+    fn default_vault_path_uses_caller_home_not_env() {
+        // When vault_path is unset, the resolved vault root must live
+        // under the caller-supplied home_dir, not under the env-derived
+        // librefang_home_dir().
+        let dir = TempDir::new().unwrap();
+        let cfg = MemoryWikiConfig {
+            enabled: true,
+            ..MemoryWikiConfig::default()
+        };
+        let resolved = cfg.resolved_vault_path(dir.path());
+        assert!(
+            resolved.starts_with(dir.path()),
+            "resolved vault path {resolved:?} must be under {:?}",
+            dir.path()
+        );
     }
 
     #[test]

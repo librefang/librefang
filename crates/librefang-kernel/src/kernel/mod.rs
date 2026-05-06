@@ -3916,7 +3916,7 @@ impl LibreFangKernel {
         // independent of the wiki feature.
         let wiki_vault: Option<Arc<librefang_memory_wiki::WikiVault>> =
             if config.memory_wiki.enabled {
-                match librefang_memory_wiki::WikiVault::new(&config.memory_wiki) {
+                match librefang_memory_wiki::WikiVault::new(&config.memory_wiki, &config.home_dir) {
                     Ok(v) => Some(Arc::new(v)),
                     Err(err) => {
                         tracing::warn!(

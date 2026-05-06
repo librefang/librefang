@@ -5457,18 +5457,24 @@ pub struct MemoryWikiConfig {
 }
 
 impl MemoryWikiConfig {
-    /// Resolve the effective vault root. Honours the leading `~` and
-    /// `~/...` forms (current user's home directory) and falls back to
-    /// `<librefang_home>/wiki/main` when `vault_path` is unset.
+    /// Resolve the effective vault root against the kernel's home
+    /// directory. Honours the leading `~` and `~/...` forms (current
+    /// user's home directory) on `vault_path`; falls back to
+    /// `<librefang_home>/wiki/main` when `vault_path` is unset, where
+    /// `<librefang_home>` is the **caller-supplied** `home_dir` rather
+    /// than the env-derived `LIBREFANG_HOME`. That matters for embedded
+    /// or test profiles whose `KernelConfig.home_dir` deliberately
+    /// points somewhere other than `~/.librefang` — the wiki must not
+    /// leak data across profiles.
     ///
-    /// `~user/...` (POSIX user-name expansion) is **not** honoured — only
-    /// the bare `~` and `~/...` forms are. Set the path explicitly with
-    /// no `~` prefix when targeting another user's home.
-    pub fn resolved_vault_path(&self) -> PathBuf {
+    /// `~user/...` (POSIX user-name expansion) is **not** honoured —
+    /// only the bare `~` and `~/...` forms are. Set the path explicitly
+    /// with no `~` prefix when targeting another user's home.
+    pub fn resolved_vault_path(&self, home_dir: &std::path::Path) -> PathBuf {
         if let Some(path) = &self.vault_path {
             return expand_tilde(path);
         }
-        librefang_home_dir().join("wiki").join("main")
+        home_dir.join("wiki").join("main")
     }
 }
 
