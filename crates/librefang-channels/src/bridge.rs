@@ -1046,6 +1046,11 @@ pub struct BridgeManager {
     /// Single-process thread-ownership claims. Suppresses multi-agent
     /// duplicate replies in shared group threads (#3334).
     thread_ownership: Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
+    /// buffer of group messages skipped by gating, drained
+    /// when the agent is next addressed in the same group so it doesn't
+    /// lose the attachments and context other participants posted while
+    /// it was silent.
+    group_history: Arc<crate::group_history::GroupHistoryBuffer>,
 }
 
 impl BridgeManager {
@@ -1064,6 +1069,11 @@ impl BridgeManager {
             webhook_routes: Vec::new(),
             journal: None,
             thread_ownership: Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new()),
+            // install process-wide buffer on first construct so
+            // dispatch helpers can reach it without signature churn.
+            group_history: crate::group_history::install_global(Arc::new(
+                crate::group_history::GroupHistoryBuffer::with_default_retention(),
+            )),
         }
     }
 
@@ -1086,6 +1096,11 @@ impl BridgeManager {
             webhook_routes: Vec::new(),
             journal: None,
             thread_ownership: Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new()),
+            // install process-wide buffer on first construct so
+            // dispatch helpers can reach it without signature churn.
+            group_history: crate::group_history::install_global(Arc::new(
+                crate::group_history::GroupHistoryBuffer::with_default_retention(),
+            )),
         }
     }
 
@@ -1098,6 +1113,15 @@ impl BridgeManager {
     /// Get a reference to the journal (if configured).
     pub fn journal(&self) -> Option<&crate::message_journal::MessageJournal> {
         self.journal.as_ref()
+    }
+
+    /// accessor for the group-history buffer. Lets the
+    /// dispatch path record skipped group messages and drain them on
+    /// the next gating-pass for the same group. Returned as `Arc` so
+    /// the per-adapter spawn task can capture it independently of the
+    /// `BridgeManager` lifetime.
+    pub fn group_history(&self) -> Arc<crate::group_history::GroupHistoryBuffer> {
+        Arc::clone(&self.group_history)
     }
 
     /// Recover messages that were in-flight when the daemon last crashed.
@@ -2553,8 +2577,59 @@ async fn dispatch_message(
     // --- DM/Group policy check ---
     if let Some(ref ov) = overrides {
         if message.is_group {
+            // capture the group_jid before the gating call so
+            // both branches (record-on-skip, drain-on-pass) can use the
+            // same key without re-deriving it. The bridge keys group
+            // messages by `sender.platform_id` (= chat JID for groups).
+            let group_id = message.sender.platform_id.clone();
+
             if !should_process_group_message(ct_str, ov, message) {
+                // Record the skipped message into the per-group buffer so
+                // its attachments + text survive until the next addressed
+                // turn on this group. No-op when the global buffer hasn't
+                // been installed (e.g. unit tests that don't construct a
+                // full BridgeManager).
+                if let Some(buffer) = crate::group_history::global() {
+                    let entry = crate::group_history::HistoryEntry {
+                        sender_display_name: message.sender.display_name.clone(),
+                        sender_platform_id: message.sender.platform_id.clone(),
+                        text: text_content(message).unwrap_or("").to_string(),
+                        content_blocks: Vec::new(),
+                        captured_at: std::time::Instant::now(),
+                    };
+                    let has_text = !entry.text.is_empty();
+                    let has_attachment = !matches!(
+                        message.content,
+                        ChannelContent::Text(_) | ChannelContent::Command { .. }
+                    );
+                    if has_text || has_attachment {
+                        buffer
+                            .record(&crate::group_history::group_key(ct_str, &group_id), entry)
+                            .await;
+                    }
+                }
                 return;
+            }
+            // Gating pass: drain the buffer for this group so the
+            // accumulated context is consumed exactly once. The drained
+            // entries are logged structurally (tracing) so downstream
+            // observability can correlate the agent's response to the
+            // prior context, even though the kernel-side prompt
+            // enrichment is not yet wired here (follow-up
+            // — needs `&mut ChannelMessage` plumbing through dispatch
+            // or equivalent).
+            if let Some(buffer) = crate::group_history::global() {
+                let key = crate::group_history::group_key(ct_str, &group_id);
+                if let Some(drained) = buffer.drain(&key).await {
+                    info!(
+                        event = "group_history_drained",
+                        channel = ct_str,
+                        group = %group_id,
+                        entries = drained.len(),
+                        "drained {} prior group entries on gating pass",
+                        drained.len(),
+                    );
+                }
             }
             // Reply-intent precheck: lightweight LLM classification for group
             // messages when group_policy is "all" and precheck is enabled.
