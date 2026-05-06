@@ -672,7 +672,7 @@ mod tests {
 
     fn setup() -> MeteringEngine {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
-        let store = Arc::new(UsageStore::new(substrate.usage_conn()));
+        let store = Arc::new(UsageStore::new(substrate.pool()));
         MeteringEngine::new(store)
     }
 

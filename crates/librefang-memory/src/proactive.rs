@@ -139,11 +139,11 @@ impl Clone for ProactiveMemoryStore {
 impl ProactiveMemoryStore {
     /// Create a new proactive memory store with default extractor.
     pub fn new(substrate: Arc<MemorySubstrate>, config: ProactiveMemoryConfig) -> Self {
-        let conn = substrate.usage_conn();
+        let pool = substrate.pool();
         let knowledge = substrate.knowledge().clone();
         Self {
-            structured: StructuredStore::new(Arc::clone(&conn)),
-            semantic: SemanticStore::new(conn),
+            structured: StructuredStore::new(pool.clone()),
+            semantic: SemanticStore::new(pool),
             knowledge,
             substrate,
             config: Arc::new(RwLock::new(config)),
@@ -161,11 +161,11 @@ impl ProactiveMemoryStore {
         config: ProactiveMemoryConfig,
         extractor: Arc<dyn MemoryExtractor>,
     ) -> Self {
-        let conn = substrate.usage_conn();
+        let pool = substrate.pool();
         let knowledge = substrate.knowledge().clone();
         Self {
-            structured: StructuredStore::new(Arc::clone(&conn)),
-            semantic: SemanticStore::new(conn),
+            structured: StructuredStore::new(pool.clone()),
+            semantic: SemanticStore::new(pool),
             knowledge,
             substrate,
             config: Arc::new(RwLock::new(config)),
@@ -229,8 +229,8 @@ impl ProactiveMemoryStore {
         // Fetch all non-deleted memories that haven't been accessed in > 1 day
         let conn = self
             .semantic
-            .conn()
-            .lock()
+            .pool()
+            .get()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
         let mut stmt = conn
@@ -355,8 +355,8 @@ impl ProactiveMemoryStore {
         let agent_ids: Vec<String> = {
             let conn = self
                 .semantic
-                .conn()
-                .lock()
+                .pool()
+                .get()
                 .map_err(|e| LibreFangError::Internal(e.to_string()))?;
             let mut stmt = conn
                 .prepare(

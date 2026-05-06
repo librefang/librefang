@@ -2116,7 +2116,7 @@ mod tests {
         let idempotency_store: Arc<
             dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync,
         > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
-            kernel.memory_substrate().usage_conn(),
+            kernel.memory_substrate().pool(),
         ));
         let state = Arc::new(AppState {
             kernel: kernel.clone(),

@@ -77,8 +77,8 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // unicode61 tokenizer + backfill any sessions missing FTS rows.
     run_step!(33, migrate_v33);
     // v34 (#3637): persistent Idempotency-Key cache for state-creating
-    // POSTs. The API layer reads/writes this table from the same shared
-    // SQLite connection (`MemorySubstrate::usage_conn`).
+    // POSTs. The API layer reads/writes this table via the substrate
+    // connection pool (handed out via `MemorySubstrate::pool()`).
     run_step!(34, migrate_v34);
 
     // Audit-trail consistency (#3538): user_version must match the count
