@@ -551,6 +551,16 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     if !sdk_status.success() {
         return Err("python3 scripts/codegen-sdks.py failed".into());
     }
+    // Refresh schema sha256 baselines (xtask/baselines/openapi.sha256 etc.)
+    // so the openapi-drift CI gate stays green. Skipping this is what made
+    // every prior version bump land a follow-up baseline-only commit (#4690).
+    let baseline_status = Command::new("cargo")
+        .args(["xtask", "schema-check", "gen"])
+        .current_dir(&root)
+        .status()?;
+    if !baseline_status.success() {
+        return Err("cargo xtask schema-check gen failed".into());
+    }
 
     // --- Generate Dev.to article (skip for pre-releases or --no-article) ---
     let article_path = if !args.no_article && !is_prerelease && !is_lts {
@@ -919,6 +929,16 @@ fn run_lts_patch(root: &Path, args: &ReleaseArgs) -> Result<(), Box<dyn std::err
         .status()?;
     if !sdk_status.success() {
         return Err("python3 scripts/codegen-sdks.py failed".into());
+    }
+    // Refresh schema sha256 baselines (xtask/baselines/openapi.sha256 etc.)
+    // so the openapi-drift CI gate stays green. Skipping this is what made
+    // every prior LTS bump land a follow-up baseline-only commit (#4690).
+    let baseline_status = Command::new("cargo")
+        .args(["xtask", "schema-check", "gen"])
+        .current_dir(root)
+        .status()?;
+    if !baseline_status.success() {
+        return Err("cargo xtask schema-check gen failed".into());
     }
 
     // Commit version bump if there are changes
