@@ -8961,7 +8961,12 @@ mod tests {
     // start with the "[history-fold]" prefix.
 
     /// Driver that emits `N` tool-use rounds then finishes with EndTurn text.
-    /// Each tool-use call names "probe_tool" (unknown → hard error returned by
+    /// Each tool-use call hits the meta-tool `tool_search` (which always succeeds
+    /// with `is_error=false` even against an empty registry — see
+    /// `tool_runner::tool_meta_search`). A succeeding tool keeps
+    /// `consecutive_all_failed = 0` so the `MAX_CONSECUTIVE_ALL_FAILED = 3`
+    /// circuit breaker does not abort the loop before the fold path runs.
+    /// Earlier draft used `probe_tool` (unknown → hard error returned by
     /// the loop), accumulating tool-result messages in the working history.
     /// Also records all CompletionRequest message lists it receives so the
     /// test can assert that fold stubs appeared in a request.
@@ -8998,15 +9003,15 @@ mod tests {
                 Ok(CompletionResponse {
                     content: vec![ContentBlock::ToolUse {
                         id: format!("tid_{call}"),
-                        name: "probe_tool".to_string(),
-                        input: serde_json::json!({"n": call}),
+                        name: "tool_search".to_string(),
+                        input: serde_json::json!({"query": format!("probe-{call}")}),
                         provider_metadata: None,
                     }],
                     stop_reason: StopReason::ToolUse,
                     tool_calls: vec![ToolCall {
                         id: format!("tid_{call}"),
-                        name: "probe_tool".to_string(),
-                        input: serde_json::json!({"n": call}),
+                        name: "tool_search".to_string(),
+                        input: serde_json::json!({"query": format!("probe-{call}")}),
                     }],
                     usage: TokenUsage {
                         input_tokens: 10,
@@ -9105,13 +9110,19 @@ mod tests {
             ..LoopOptions::default()
         };
 
+        // `tool_search` is dispatched by name in `tool_runner::execute_tool_raw`,
+        // but the outer `execute_tool` enforces the capability allowlist
+        // (`available_tool_names`) which is built from this `&[ToolDefinition]`
+        // slice — so the meta-tool name still has to appear here, otherwise
+        // the agent_loop returns a "Permission denied" hard error.
+        let tool_search_def = fake_tool("tool_search");
         let result = run_agent_loop(
             &manifest,
             "Run many tool cycles",
             &mut session,
             &memory,
             driver,
-            &[], // no tool definitions — probe_tool is unknown, gets hard error
+            std::slice::from_ref(&tool_search_def),
             None,
             None,
             None,
