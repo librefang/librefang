@@ -23,6 +23,13 @@
 //! agent/memory/task primitives, while the API cares about admin /
 //! observability surface (audit, config, MCP wiring, hot-reload, …).
 
+// `register_trigger_with_target` and `send_message_with_incognito` mirror
+// the kernel-inherent signatures verbatim — both already exceed clippy's
+// 7-arg threshold on the kernel side. Splitting the trait method into a
+// builder would diverge the trait surface from the inherent surface and
+// break the "trait is a thin facade" invariant of #3566.
+#![allow(clippy::too_many_arguments)]
+
 use std::path::Path;
 use std::sync::Arc;
 
