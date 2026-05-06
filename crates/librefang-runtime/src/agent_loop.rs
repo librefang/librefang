@@ -962,7 +962,7 @@ async fn execute_single_tool_call_inner(
                 warn!(tool = %tool_call.name, "Circuit breaker triggered");
             }
             repair_session_before_save(ctx.session, ctx.agent_id_str, "circuit_breaker");
-            if !ctx.opts.is_fork {
+            if !ctx.opts.is_fork && !ctx.opts.incognito {
                 if let Err(e) = ctx.memory.save_session_async(ctx.session).await {
                     warn!("Failed to save session on circuit break: {e}");
                 }
@@ -1030,6 +1030,24 @@ async fn execute_single_tool_call_inner(
                 final_content: msg,
             });
         }
+    }
+
+    // Incognito mode: silently drop memory_store calls so the LLM's perception
+    // of a successful write is preserved (it gets an ok response) but nothing
+    // is committed to the proactive memory store. Memory reads remain
+    // full-access per #4073 spec.
+    if ctx.opts.incognito && tool_call.name == "memory_store" {
+        tracing::debug!(target: "incognito", tool = "memory_store", "memory_store call dropped during incognito turn");
+        return Ok(ExecutedToolCall {
+            result: librefang_types::tool::ToolResult {
+                tool_use_id: tool_call.id.clone(),
+                content: "ok".to_string(),
+                is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::Completed,
+                ..Default::default()
+            },
+            final_content: "ok".to_string(),
+        });
     }
 
     if ctx.streaming {
@@ -1749,6 +1767,16 @@ pub struct LoopOptions {
     /// what gets sent to the provider — only what happens at the
     /// post-response persistence boundary.
     pub is_fork: bool,
+    /// When true, this turn runs in **incognito mode**: session messages and
+    /// proactive-memory writes are suppressed while memory *reads* remain
+    /// fully operational. Incognito turns are useful for brainstorming,
+    /// sensitive queries, and debugging agent configuration without polluting
+    /// the persistent conversation history.
+    ///
+    /// Mechanically identical to `is_fork` for the persistence boundary
+    /// (all `save_session_async` calls are skipped), but without the other
+    /// fork semantics (shared parent-session prefix, tool allowlist, etc.).
+    pub incognito: bool,
     /// Runtime tool allowlist. When `Some`, any `tool_use` the model
     /// emits that names a tool outside this list is denied at execute
     /// time (a synthetic error result is returned to the model so it can
@@ -2994,11 +3022,12 @@ async fn finalize_successful_end_turn(
         ctx.session.mark_messages_mutated();
     }
 
-    // Fork turns are ephemeral — skip the persist so the parent agent's
-    // canonical session history isn't polluted by derivative calls like
-    // auto-dream consolidation. The LLM already ran and we have its
-    // response in memory; we just don't write messages back to disk.
-    if !ctx.opts.is_fork {
+    // Fork and incognito turns are ephemeral — skip the persist so the
+    // parent agent's canonical session history isn't polluted by
+    // derivative calls like auto-dream consolidation or incognito chats.
+    // The LLM already ran and we have its response in memory; we just
+    // don't write messages back to disk.
+    if !ctx.opts.is_fork && !ctx.opts.incognito {
         ctx.memory
             .save_session_async(ctx.session)
             .await
@@ -3006,16 +3035,13 @@ async fn finalize_successful_end_turn(
     }
 
     // Post-turn memory writes and context-engine updates are skipped for
-    // fork turns. Three reasons: (1) the fork's conversation is ephemeral
-    // by design — persisting its content to the memory bank would leak
-    // derivative artefacts into long-term memory; (2) `context_engine`
-    // state tracked across real turns (summary chains, token budgets)
-    // shouldn't be advanced by a fork that doesn't count as a real user
-    // interaction; (3) critical — `auto_memorize` below would fire
-    // `run_forked_agent_oneshot` again on the fork's own completion,
-    // recursing into another fork, ad infinitum. Gating here is what
-    // stops that cycle.
-    if !ctx.opts.is_fork {
+    // fork and incognito turns. Three reasons for fork (unchanged): (1)
+    // ephemeral conversation must not leak into long-term memory; (2)
+    // context_engine state shouldn't advance; (3) auto_memorize recursion
+    // guard. For incognito: memory reads remain full-access (the agent
+    // already recalled memories before this point), but writes are
+    // silently dropped so the private conversation leaves no trace.
+    if !ctx.opts.is_fork && !ctx.opts.incognito {
         let interaction_text = format!(
             "User asked: {}\nI responded: {}",
             ctx.user_message, end_turn.final_response
@@ -3777,7 +3803,7 @@ pub async fn run_agent_loop(
                     session
                         .messages
                         .push(Message::assistant("[no reply needed]".to_string()));
-                    if !opts.is_fork {
+                    if !opts.is_fork && !opts.incognito {
                         memory
                             .save_session_async(session)
                             .await
@@ -3812,10 +3838,12 @@ pub async fn run_agent_loop(
                     session
                         .messages
                         .push(Message::assistant("[no reply needed]".to_string()));
-                    memory
-                        .save_session_async(session)
-                        .await
-                        .map_err(LibreFangError::memory)?;
+                    if !opts.is_fork && !opts.incognito {
+                        memory
+                            .save_session_async(session)
+                            .await
+                            .map_err(LibreFangError::memory)?;
+                    }
                     return Ok(build_silent_agent_loop_result(
                         total_usage,
                         iteration + 1,
@@ -4097,9 +4125,9 @@ pub async fn run_agent_loop(
                 }
 
                 // Interim save after tool execution to prevent data loss on crash.
-                // Skipped for fork turns — forks are ephemeral and must not
-                // pollute the canonical session even on mid-turn crashes.
-                if !opts.is_fork {
+                // Skipped for fork and incognito turns — both are ephemeral and
+                // must not pollute the canonical session even on mid-turn crashes.
+                if !opts.is_fork && !opts.incognito {
                     if let Err(e) = memory.save_session_async(session).await {
                         warn!("Failed to interim-save session: {e}");
                     }
@@ -4157,7 +4185,7 @@ pub async fn run_agent_loop(
                         crate::reply_directives::parse_directives(&text);
                     let text = cleaned_text;
                     session.push_message(Message::assistant(&text));
-                    if !opts.is_fork {
+                    if !opts.is_fork && !opts.incognito {
                         if let Err(e) = memory.save_session_async(session).await {
                             warn!("Failed to save session on max continuations: {e}");
                         }
@@ -4231,7 +4259,7 @@ pub async fn run_agent_loop(
                     "LLM response blocked by provider safety / content filter"
                 );
                 session.push_message(Message::assistant(&partial));
-                if !opts.is_fork {
+                if !opts.is_fork && !opts.incognito {
                     if let Err(e) = memory.save_session_async(session).await {
                         warn!("Failed to save session on content filter: {e}");
                     }
@@ -4242,10 +4270,10 @@ pub async fn run_agent_loop(
     }
 
     // Save session before failing so conversation history is preserved.
-    // Fork turns skip — they're ephemeral and must not pollute canonical
-    // session history even when the loop bailed out.
+    // Fork and incognito turns skip — both are ephemeral and must not
+    // pollute canonical session history even when the loop bailed out.
     repair_session_before_save(session, agent_id_str.as_str(), "max_iterations");
-    if !opts.is_fork {
+    if !opts.is_fork && !opts.incognito {
         if let Err(e) = memory.save_session_async(session).await {
             warn!("Failed to save session on max iterations: {e}");
         }
@@ -5148,7 +5176,7 @@ pub async fn run_agent_loop_streaming(
                     );
                     session.push_message(Message::assistant(note));
                     repair_session_before_save(session, agent_id_str.as_str(), "streaming_timeout");
-                    if !opts.is_fork {
+                    if !opts.is_fork && !opts.incognito {
                         if let Err(save_err) = memory.save_session_async(session).await {
                             warn!(
                                 "Failed to persist timeout note to session: {save_err}. \
@@ -5230,7 +5258,7 @@ pub async fn run_agent_loop_streaming(
                     session
                         .messages
                         .push(Message::assistant("[no reply needed]".to_string()));
-                    if !opts.is_fork {
+                    if !opts.is_fork && !opts.incognito {
                         memory
                             .save_session_async(session)
                             .await
@@ -5262,10 +5290,12 @@ pub async fn run_agent_loop_streaming(
                     session
                         .messages
                         .push(Message::assistant("[no reply needed]".to_string()));
-                    memory
-                        .save_session_async(session)
-                        .await
-                        .map_err(LibreFangError::memory)?;
+                    if !opts.is_fork && !opts.incognito {
+                        memory
+                            .save_session_async(session)
+                            .await
+                            .map_err(LibreFangError::memory)?;
+                    }
                     return Ok(build_silent_agent_loop_result(
                         total_usage,
                         iteration + 1,
@@ -5582,7 +5612,7 @@ pub async fn run_agent_loop_streaming(
                     iteration_outcomes.accumulate(staged.commit(session, &mut messages));
                 }
 
-                if !opts.is_fork {
+                if !opts.is_fork && !opts.incognito {
                     if let Err(e) = memory.save_session_async(session).await {
                         warn!("Failed to interim-save session: {e}");
                     }
@@ -5634,7 +5664,7 @@ pub async fn run_agent_loop_streaming(
                         crate::reply_directives::parse_directives(&text);
                     let text = cleaned_text;
                     session.push_message(Message::assistant(&text));
-                    if !opts.is_fork {
+                    if !opts.is_fork && !opts.incognito {
                         if let Err(e) = memory.save_session_async(session).await {
                             warn!("Failed to save session on max continuations: {e}");
                         }
@@ -5706,7 +5736,7 @@ pub async fn run_agent_loop_streaming(
                     "LLM response blocked by provider safety / content filter (streaming)"
                 );
                 session.push_message(Message::assistant(&partial));
-                if !opts.is_fork {
+                if !opts.is_fork && !opts.incognito {
                     if let Err(e) = memory.save_session_async(session).await {
                         warn!("Failed to save session on content filter: {e}");
                     }
@@ -5718,7 +5748,7 @@ pub async fn run_agent_loop_streaming(
     }
 
     repair_session_before_save(session, agent_id_str.as_str(), "streaming_max_iterations");
-    if !opts.is_fork {
+    if !opts.is_fork && !opts.incognito {
         if let Err(e) = memory.save_session_async(session).await {
             warn!("Failed to save session on max iterations: {e}");
         }
@@ -11392,6 +11422,167 @@ mod tests {
         assert!(
             success_counter.is_some(),
             "outcome=success counter must be recorded for successful tool calls"
+        );
+    }
+
+    // ── Incognito persistence guards (refs #4073) ──────────────────────────
+    //
+    // These two tests prove the `LoopOptions::incognito` guard at the
+    // `finalize_successful_end_turn` save site actually skips the SQLite
+    // write. Replaces the earlier `test_incognito_message_does_not_persist_session`
+    // integration test which never reached the save site (it used a
+    // misconfigured provider so the LLM call failed before any save was
+    // attempted, making the assertion vacuously true regardless of whether
+    // the guard was wired in).
+
+    /// Control: a normal end-turn with `incognito: false` MUST persist the
+    /// session via `finalize_successful_end_turn`. If this fails, the
+    /// incognito test below loses its meaning (it might be passing because
+    /// the save path is broken, not because the guard worked).
+    #[tokio::test]
+    async fn test_normal_turn_persists_session_as_incognito_control() {
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let session_id = librefang_types::agent::SessionId::new();
+        let mut session = librefang_memory::session::Session {
+            id: session_id,
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+        };
+        let manifest = test_manifest();
+        let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
+
+        run_agent_loop(
+            &manifest,
+            "Say hello",
+            &mut session,
+            &memory,
+            driver,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &LoopOptions::default(),
+        )
+        .await
+        .expect("loop should complete");
+
+        let persisted = memory
+            .get_session(session_id)
+            .expect("get_session must not error");
+        assert!(
+            persisted.is_some(),
+            "control: normal (non-incognito) end-turn MUST persist session — \
+             if this fails, the incognito test below tests nothing",
+        );
+        let persisted = persisted.unwrap();
+        assert!(
+            persisted.messages.len() >= 2,
+            "control: normal end-turn must persist user msg + assistant reply, got {} msgs",
+            persisted.messages.len(),
+        );
+    }
+
+    /// `LoopOptions::incognito = true` MUST suppress the SQLite write at
+    /// `finalize_successful_end_turn` even on a clean end-turn.
+    #[tokio::test]
+    async fn test_incognito_skips_session_save_on_end_turn() {
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let session_id = librefang_types::agent::SessionId::new();
+        let mut session = librefang_memory::session::Session {
+            id: session_id,
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+        };
+        let manifest = test_manifest();
+        let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
+        let opts = LoopOptions {
+            incognito: true,
+            ..LoopOptions::default()
+        };
+
+        let result = run_agent_loop(
+            &manifest,
+            "Say hello",
+            &mut session,
+            &memory,
+            driver,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &opts,
+        )
+        .await
+        .expect("loop should complete");
+
+        // The LLM must still have produced a normal response — incognito
+        // only suppresses persistence, not the turn itself.
+        assert_eq!(result.response, "Hello from the agent!");
+
+        // Session row must NOT exist in SQLite — `save_session_async` is
+        // skipped at every site under the `incognito` guard.
+        let persisted = memory
+            .get_session(session_id)
+            .expect("get_session must not error");
+        assert!(
+            persisted.is_none(),
+            "incognito turn MUST NOT persist session to SQLite, got: {persisted:?}",
+        );
+
+        // The in-memory `session` object held by the caller still reflects
+        // the turn — the LLM saw full context and the assistant reply was
+        // appended in-process. Only the disk write was suppressed.
+        assert!(
+            session.messages.len() >= 2,
+            "in-memory session must still contain user msg + assistant reply (only the \
+             SQLite write is suppressed) — got {} msgs",
+            session.messages.len(),
         );
     }
 }

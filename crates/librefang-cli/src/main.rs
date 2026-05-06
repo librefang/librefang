@@ -456,7 +456,7 @@ enum Commands {
     Configure,
     /// Send a one-shot message to an agent.
     #[command(
-        long_about = "Send a single message to an agent and print the response.\n\nUnlike `chat`, this does not start an interactive session. Useful for\nscripting and automation.\n\nExamples:\n  librefang message coder \"Fix the bug in main.rs\"\n  librefang message coder \"Summarize this file\" --json"
+        long_about = "Send a single message to an agent and print the response.\n\nUnlike `chat`, this does not start an interactive session. Useful for\nscripting and automation.\n\nExamples:\n  librefang message coder \"Fix the bug in main.rs\"\n  librefang message coder \"Summarize this file\" --json\n  librefang message coder \"Draft this email\" --incognito"
     )]
     Message {
         /// Agent name or ID.
@@ -466,6 +466,10 @@ enum Commands {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
+        /// Run in incognito mode: session messages and memory writes are
+        /// suppressed while memory reads remain fully operational.
+        #[arg(long)]
+        incognito: bool,
     },
     /// System info and version [*].
     #[command(
@@ -2318,7 +2322,12 @@ fn main() {
             }
         }
         Some(Commands::Configure) => cmd_init(false),
-        Some(Commands::Message { agent, text, json }) => cmd_message(&agent, &text, json),
+        Some(Commands::Message {
+            agent,
+            text,
+            json,
+            incognito,
+        }) => cmd_message(&agent, &text, json, incognito),
         Some(Commands::System(sub)) => match sub {
             SystemCommands::Info { json } => cmd_system_info(json),
             SystemCommands::Version { json } => cmd_system_version(json),
@@ -11423,14 +11432,14 @@ fn resolve_agent_id(base: &str, name_or_id: &str) -> String {
     name_or_id.to_string()
 }
 
-fn cmd_message(agent: &str, text: &str, json: bool) {
+fn cmd_message(agent: &str, text: &str, json: bool, incognito: bool) {
     let base = require_daemon("message");
     let agent_id = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
             .post(format!("{base}/api/agents/{agent_id}/message"))
-            .json(&serde_json::json!({"message": text}))
+            .json(&serde_json::json!({"message": text, "incognito": incognito}))
             .send(),
     );
     if json {

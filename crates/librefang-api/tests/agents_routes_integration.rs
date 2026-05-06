@@ -129,6 +129,16 @@ fn patch_json(path: &str, body: serde_json::Value, bearer: Option<&str>) -> Requ
     b.body(Body::from(body.to_string())).unwrap()
 }
 
+fn post_json(path: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {}", TEST_TOKEN))
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/agents
 // ---------------------------------------------------------------------------
@@ -644,3 +654,73 @@ async fn test_agent_session_endpoint_surfaces_thinking_only_turns() {
         "thinking field must surface so the dashboard's hasThinking branch can render — body={body:?}",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Incognito mode — refs #4073
+// ---------------------------------------------------------------------------
+
+/// The `incognito` field in the POST /api/agents/{id}/message body must
+/// deserialize cleanly. A request with `incognito: true` must not return a
+/// 422 Unprocessable Entity; if the provider auth is missing (the test
+/// harness uses a fake ollama model) the server returns 412 as usual.
+/// This verifies the API surface is wired end-to-end without a real LLM.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_incognito_field_accepted_by_message_endpoint() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "incognito-test-agent");
+
+    // incognito: true — must NOT be 422 (unknown field / bad deserialize)
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{id}/message"),
+            serde_json::json!({"message": "hello", "incognito": true}),
+        ),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "incognito field must deserialize cleanly — body={body:?}",
+    );
+    // Provider is unconfigured → 412 or 500, NOT 422.
+    assert!(
+        status == StatusCode::PRECONDITION_FAILED || status.is_server_error(),
+        "expected provider-auth 412 or server error, got {status} — body={body:?}",
+    );
+}
+
+/// Omitting `incognito` entirely must still work (backward compat: defaults to false).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_incognito_defaults_to_false_when_omitted() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "incognito-omit-agent");
+
+    let (status, _body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{id}/message"),
+            serde_json::json!({"message": "hello"}),
+        ),
+    )
+    .await;
+    // Must not be 422 — the field absence defaults to false via #[serde(default)].
+    assert_ne!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+// The actual persistence-guard assertion lives in
+// `librefang-runtime/src/agent_loop.rs`'s `#[cfg(test)] mod tests` as
+// `test_incognito_skips_session_save_on_end_turn` (with a positive control
+// `test_normal_turn_persists_session_as_incognito_control` next to it).
+//
+// Driving a real end-turn through this integration-test surface requires
+// a mock LLM driver wired through `MockKernelBuilder` — but the kernel
+// resolves drivers from the agent manifest (`provider`/`model` lookup),
+// and `MockKernelBuilder` does not yet expose a driver-injection hook.
+// Without that hook the LLM call fails before reaching any
+// `save_session_async` site, so the test's premise (compare pre-call vs
+// post-call message counts) is true by default whether or not the
+// `incognito` guard is wired in. The two runtime-level tests exercise
+// the `LoopOptions::incognito` guard at `finalize_successful_end_turn`
+// end-to-end against a `NormalDriver` canned response, which is the
+// minimum needed to actually verify the persistence-skip semantics.
