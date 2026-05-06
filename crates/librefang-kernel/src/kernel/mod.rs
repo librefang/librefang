@@ -5103,6 +5103,7 @@ system_prompt = "You are a helpful assistant."
             None,
             None,
             upstream,
+            false,
         )
         .await
     }
@@ -5161,6 +5162,39 @@ system_prompt = "You are a helpful assistant."
             None,
             thinking_override,
             session_id_override,
+        )
+        .await
+    }
+
+    /// Send a message in **incognito mode**: the LLM turn runs normally (memory
+    /// reads are full-access) but session messages and proactive-memory writes
+    /// are silently suppressed. The conversation leaves no trace in SQLite.
+    ///
+    /// `incognito` is analogous to `is_fork` at the persistence boundary but
+    /// without the fork semantics (no shared parent prefix, no tool allowlist).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_message_with_incognito(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender_context: Option<&SenderContext>,
+        thinking_override: Option<bool>,
+        session_id_override: Option<SessionId>,
+        incognito: bool,
+    ) -> KernelResult<AgentLoopResult> {
+        let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
+        self.send_message_full_with_upstream(
+            agent_id,
+            message,
+            handle,
+            None,
+            sender_context,
+            None,
+            thinking_override,
+            session_id_override,
+            None,
+            incognito,
         )
         .await
     }
@@ -5485,6 +5519,7 @@ system_prompt = "You are a helpful assistant."
             None, // no pending messages
             &librefang_runtime::agent_loop::LoopOptions {
                 is_fork: false,
+                incognito: false,
                 allowed_tools: None,
                 interrupt: Some(librefang_runtime::interrupt::SessionInterrupt::new()),
                 max_iterations: self.config.load().agent_max_iterations,
@@ -5598,6 +5633,7 @@ system_prompt = "You are a helpful assistant."
             thinking_override,
             session_id_override,
             None,
+            false,
         )
         .await
     }
@@ -5618,6 +5654,7 @@ system_prompt = "You are a helpful assistant."
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
         upstream_interrupt: Option<librefang_runtime::interrupt::SessionInterrupt>,
+        incognito: bool,
     ) -> KernelResult<AgentLoopResult> {
         // Briefly acquire the config reload barrier to ensure we observe a
         // fully-applied hot-reload (config swap + side effects are atomic
@@ -5753,6 +5790,7 @@ system_prompt = "You are a helpful assistant."
                     thinking_override,
                     resolved_session_id.or(session_id_override),
                     upstream_interrupt,
+                    incognito,
                 )
                 .await
             }
@@ -6179,6 +6217,49 @@ system_prompt = "You are a helpful assistant."
         .await
     }
 
+    /// Streaming variant of [`Self::send_message_with_incognito`].
+    ///
+    /// Runs a normal streaming agent turn but with `incognito: true` in
+    /// `LoopOptions` so session messages and proactive-memory writes are
+    /// suppressed while memory reads remain full-access.
+    pub async fn send_message_streaming_with_incognito(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        session_id_override: Option<SessionId>,
+        incognito: bool,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
+        let effective_id = self
+            .resolve_assistant_target(agent_id, message, None)
+            .await?;
+        let session_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
+        let loop_opts = librefang_runtime::agent_loop::LoopOptions {
+            is_fork: false,
+            incognito,
+            allowed_tools: None,
+            interrupt: Some(session_interrupt),
+            max_iterations: self.config.load().agent_max_iterations,
+            max_history_messages: self.config.load().max_history_messages,
+            aux_client: Some(self.aux_client.load_full()),
+            parent_session_id: None,
+            tool_results_config: Some(self.config.load().tool_results.clone()),
+        };
+        self.send_message_streaming_with_sender_and_opts(
+            effective_id,
+            message,
+            handle,
+            None,
+            None,
+            session_id_override,
+            loop_opts,
+        )
+    }
+
     /// Sender-aware streaming entry point for channel bridges.
     pub async fn send_message_streaming_with_sender_context_and_routing(
         self: &Arc<Self>,
@@ -6346,6 +6427,7 @@ system_prompt = "You are a helpful assistant."
             };
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: true,
+            incognito: false,
             allowed_tools,
             interrupt: Some(interrupt),
             max_iterations: self.config.load().agent_max_iterations,
@@ -6419,6 +6501,7 @@ system_prompt = "You are a helpful assistant."
         let session_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: false,
+            incognito: false,
             allowed_tools: None,
             interrupt: Some(session_interrupt),
             max_iterations: self.config.load().agent_max_iterations,
@@ -8165,6 +8248,7 @@ system_prompt = "You are a helpful assistant."
             channel = sender_context.map(|c| c.channel.as_str()).unwrap_or("direct"),
         ),
     )]
+    #[allow(clippy::too_many_arguments)]
     async fn execute_llm_agent(
         &self,
         entry: &AgentEntry,
@@ -8177,6 +8261,7 @@ system_prompt = "You are a helpful assistant."
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
         upstream_interrupt: Option<librefang_runtime::interrupt::SessionInterrupt>,
+        incognito: bool,
     ) -> KernelResult<AgentLoopResult> {
         let cfg = self.config.load_full();
         // Check metering quota before starting
@@ -8825,6 +8910,7 @@ system_prompt = "You are a helpful assistant."
             .insert((agent_id, effective_session_id), session_interrupt.clone());
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: false,
+            incognito,
             allowed_tools: None,
             interrupt: Some(session_interrupt),
             max_iterations: cfg.agent_max_iterations,
@@ -20002,6 +20088,113 @@ impl kernel_handle::ToolPolicy for LibreFangKernel {
                 )
             })
             .collect()
+    }
+}
+
+// ---- BEGIN ApiAuth + SessionWriter impls (#3744) ----
+
+impl kernel_handle::ApiAuth for LibreFangKernel {
+    fn auth_snapshot(&self) -> kernel_handle::ApiAuthSnapshot {
+        // Single `config.load()` so every field in the snapshot comes from
+        // the same hot-reload generation. Per-request middleware would
+        // otherwise race the reload barrier and observe e.g. an old
+        // `api_key` alongside a new `dashboard_pass_hash`.
+        let cfg = self.config.load();
+        kernel_handle::ApiAuthSnapshot {
+            api_key: cfg.api_key.clone(),
+            dashboard: kernel_handle::DashboardRawConfig {
+                user: cfg.dashboard_user.clone(),
+                pass: cfg.dashboard_pass.clone(),
+                pass_hash: cfg.dashboard_pass_hash.clone(),
+            },
+            home_dir: self.home_dir().to_path_buf(),
+            device_api_keys: self.pairing.device_api_keys(),
+            config_users: cfg
+                .users
+                .iter()
+                .map(|u| kernel_handle::ApiUserConfigSnapshot {
+                    name: u.name.clone(),
+                    role: u.role.clone(),
+                    api_key_hash: u.api_key_hash.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl kernel_handle::SessionWriter for LibreFangKernel {
+    fn inject_attachment_blocks(
+        &self,
+        agent_id: librefang_types::agent::AgentId,
+        blocks: Vec<librefang_types::message::ContentBlock>,
+    ) {
+        use librefang_types::message::{Message, MessageContent, Role};
+
+        let entry = match self.registry.get(agent_id) {
+            Some(e) => e,
+            None => {
+                tracing::warn!(
+                    agent_id = ?agent_id,
+                    "inject_attachment_blocks: agent not found in registry"
+                );
+                return;
+            }
+        };
+
+        let mut session = match self.memory.get_session(entry.session_id) {
+            Ok(Some(s)) => s,
+            _ => librefang_memory::session::Session {
+                id: entry.session_id,
+                agent_id,
+                messages: Vec::new(),
+                context_window_tokens: 0,
+                label: None,
+                messages_generation: 0,
+                last_repaired_generation: None,
+            },
+        };
+
+        let block_count = blocks.len();
+        let block_kinds: Vec<&'static str> = blocks
+            .iter()
+            .map(|b| match b {
+                librefang_types::message::ContentBlock::Image { .. } => "image",
+                librefang_types::message::ContentBlock::Text { .. } => "text",
+                librefang_types::message::ContentBlock::ImageFile { .. } => "image_file",
+                librefang_types::message::ContentBlock::ToolUse { .. } => "tool_use",
+                librefang_types::message::ContentBlock::ToolResult { .. } => "tool_result",
+                librefang_types::message::ContentBlock::Thinking { .. } => "thinking",
+                librefang_types::message::ContentBlock::Unknown => "unknown",
+            })
+            .collect();
+
+        session.push_message(Message {
+            role: Role::User,
+            content: MessageContent::Blocks(blocks),
+            pinned: false,
+            timestamp: Some(chrono::Utc::now()),
+        });
+
+        let total_messages_after = session.messages.len();
+
+        if let Err(e) = self.memory.save_session(&session) {
+            tracing::warn!(
+                agent_id = ?agent_id,
+                session_id = ?entry.session_id,
+                block_count,
+                error = %e,
+                "inject_attachment_blocks: failed to save session"
+            );
+        } else {
+            tracing::info!(
+                agent_id = ?agent_id,
+                session_id = ?entry.session_id,
+                block_count,
+                block_kinds = ?block_kinds,
+                total_messages_after,
+                "inject_attachment_blocks: injected content blocks into session"
+            );
+        }
     }
 }
 

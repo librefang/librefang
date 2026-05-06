@@ -909,7 +909,88 @@ pub trait ToolPolicy: Send + Sync {
 }
 
 // ============================================================================
-// KernelHandle — supertrait alias of all 14 role traits.
+// 15. ApiAuth — raw auth-config values needed by the HTTP server layer to
+//     build middleware token tables and bind-safety checks at startup.
+//
+//     Deliberately returns *raw* (unresolved) config strings so the API
+//     server can apply its own credential-resolution logic (env-var override,
+//     vault: prefix, literal) without pulling KernelConfig into that layer.
+// ============================================================================
+
+/// A snapshot of the user-config values needed for API-key table construction.
+#[derive(Debug, Clone, Default)]
+pub struct ApiUserConfigSnapshot {
+    pub name: String,
+    pub role: String,
+    pub api_key_hash: Option<String>,
+}
+
+/// Raw dashboard credential strings from config (before env-var / vault
+/// resolution). The HTTP server resolves them with `LIBREFANG_DASHBOARD_USER`,
+/// `LIBREFANG_DASHBOARD_PASS`, and the `vault:KEY` prefix logic.
+#[derive(Debug, Clone, Default)]
+pub struct DashboardRawConfig {
+    pub user: String,
+    pub pass: String,
+    pub pass_hash: String,
+}
+
+/// One-shot snapshot of every auth-relevant config field. Returned by
+/// [`ApiAuth::auth_snapshot`] from a single `config.load()` so all fields
+/// observe the same hot-reload generation — preventing per-request
+/// middleware (`valid_api_tokens`, `paired_device_user_keys`) from mixing
+/// pre-reload and post-reload config when a reload races with the request.
+#[derive(Debug, Clone, Default)]
+pub struct ApiAuthSnapshot {
+    /// Raw `api_key` value from config (may be empty when auth is open).
+    pub api_key: String,
+    /// Raw dashboard credential strings (before env-var / vault resolution).
+    pub dashboard: DashboardRawConfig,
+    /// Absolute path to the daemon home directory (owned so the snapshot
+    /// is fully self-contained and not tied to the kernel's lifetime).
+    pub home_dir: std::path::PathBuf,
+    /// Paired-device (mobile) API key hashes: `(device_id, api_key_hash)`.
+    pub device_api_keys: Vec<(String, String)>,
+    /// Per-user config entries used to build the user API-key table.
+    pub config_users: Vec<ApiUserConfigSnapshot>,
+}
+
+pub trait ApiAuth: Send + Sync {
+    /// Atomic snapshot of every auth-relevant config field. Implementations
+    /// MUST acquire all values from a single config snapshot so callers see
+    /// a consistent view across hot-reload boundaries.
+    fn auth_snapshot(&self) -> ApiAuthSnapshot;
+}
+
+// ============================================================================
+// 16. SessionWriter — pre-inject content blocks into an agent session before
+//     an LLM turn, used by the HTTP attachment upload path (#3744).
+//
+//     Abstracts over `agent_registry()` + `memory_substrate()` so callers
+//     in librefang-api do not need to import the concrete kernel type.
+// ============================================================================
+
+pub trait SessionWriter: Send + Sync {
+    /// Pre-insert `blocks` as a User-role message into the agent's current
+    /// session so the LLM sees the content in the next turn.  No-op (with a
+    /// `warn!`) when the agent is not found; best-effort on save failure.
+    ///
+    /// **Blocking I/O notice.**  The current production implementation
+    /// (`LibreFangKernel`) calls `MemorySubstrate::save_session` synchronously,
+    /// which blocks on a SQLite write.  Callers running inside an async
+    /// runtime should wrap the call in `tokio::task::spawn_blocking` to
+    /// avoid stalling worker threads under contention. (#3579 will move the
+    /// substrate to `tokio::fs`-aware async; once that lands, the trait
+    /// itself can become `async fn` and this caveat goes away.)
+    fn inject_attachment_blocks(
+        &self,
+        agent_id: librefang_types::agent::AgentId,
+        blocks: Vec<librefang_types::message::ContentBlock>,
+    );
+}
+
+// ============================================================================
+// KernelHandle — supertrait alias of all 16 role traits.
 //
 // Existing call sites take `Arc<dyn KernelHandle>`; that keeps working because
 // any type that impls every role trait automatically gets `KernelHandle` via
@@ -932,6 +1013,8 @@ pub trait KernelHandle:
     + WorkflowRunner
     + GoalControl
     + ToolPolicy
+    + ApiAuth
+    + SessionWriter
     + Send
     + Sync
 {
@@ -952,6 +1035,8 @@ impl<T> KernelHandle for T where
         + WorkflowRunner
         + GoalControl
         + ToolPolicy
+        + ApiAuth
+        + SessionWriter
         + Send
         + Sync
         + ?Sized
@@ -963,8 +1048,9 @@ impl<T> KernelHandle for T where
 /// resolve. Replaces the pre-#3746 single-trait import pattern.
 pub mod prelude {
     pub use super::{
-        A2ARegistry, AgentControl, AgentInfo, ApprovalGate, ChannelSender, CronControl, EventBus,
-        GoalControl, HandsControl, KernelHandle, KnowledgeGraph, MemoryAccess, PromptStore,
+        A2ARegistry, AgentControl, AgentInfo, ApiAuth, ApiAuthSnapshot, ApiUserConfigSnapshot,
+        ApprovalGate, ChannelSender, CronControl, DashboardRawConfig, EventBus, GoalControl,
+        HandsControl, KernelHandle, KnowledgeGraph, MemoryAccess, PromptStore, SessionWriter,
         TaskQueue, ToolPolicy, WorkflowRunner,
     };
 }
@@ -1122,6 +1208,19 @@ mod tests {
     impl WorkflowRunner for StubKernel {}
     impl GoalControl for StubKernel {}
     impl ToolPolicy for StubKernel {}
+    impl ApiAuth for StubKernel {
+        fn auth_snapshot(&self) -> ApiAuthSnapshot {
+            ApiAuthSnapshot::default()
+        }
+    }
+    impl SessionWriter for StubKernel {
+        fn inject_attachment_blocks(
+            &self,
+            _agent_id: librefang_types::agent::AgentId,
+            _blocks: Vec<librefang_types::message::ContentBlock>,
+        ) {
+        }
+    }
 
     #[test]
     fn stub_satisfies_kernel_handle_via_blanket_impl() {
@@ -1153,5 +1252,7 @@ mod tests {
         let _wf: Arc<dyn WorkflowRunner> = Arc::new(StubKernel);
         let _goal: Arc<dyn GoalControl> = Arc::new(StubKernel);
         let _tp: Arc<dyn ToolPolicy> = Arc::new(StubKernel);
+        let _auth: Arc<dyn ApiAuth> = Arc::new(StubKernel);
+        let _sw: Arc<dyn SessionWriter> = Arc::new(StubKernel);
     }
 }
