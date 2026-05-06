@@ -3735,6 +3735,48 @@ fn cmd_stop(config: Option<PathBuf>) {
                     }
                     ui::success(&i18n::t("daemon-stopped-forced"));
                 }
+                Ok(r) if r.status().as_u16() == 401 => {
+                    // Issue #4693 — the new CLI cannot authenticate against
+                    // the running daemon. Typical trigger: `curl install.sh
+                    // | sh` upgraded the binary without restarting the
+                    // daemon, so the running daemon was started with an
+                    // api_key the new CLI no longer reads (locked vault,
+                    // rotated key, freshly-enabled dashboard credentials).
+                    // Surface the cause and fall back to PID-based stop so
+                    // the user is not stuck on a half-restarted machine.
+                    ui::error(&i18n::t("shutdown-401-detected"));
+                    ui::hint(&i18n::t("shutdown-401-explainer"));
+                    if let Some(info) = read_daemon_info(&daemon.home_dir) {
+                        let pid = info.pid;
+                        ui::hint(&i18n::t_args(
+                            "shutdown-401-fallback-attempt",
+                            &[("pid", &pid.to_string())],
+                        ));
+                        force_kill_pid(pid);
+                        for _ in 0..10 {
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            if find_daemon_in_home(&daemon.home_dir).is_none() {
+                                let _ = std::fs::remove_file(daemon.home_dir.join("daemon.json"));
+                                ui::success(&i18n::t_args(
+                                    "shutdown-401-fallback-success",
+                                    &[("pid", &pid.to_string())],
+                                ));
+                                return;
+                            }
+                        }
+                        ui::error(&i18n::t("shutdown-401-fallback-fail"));
+                        ui::hint(&i18n::t_args(
+                            "shutdown-401-fallback-fix",
+                            &[("pid", &pid.to_string())],
+                        ));
+                    } else {
+                        let info_path = daemon.home_dir.join("daemon.json");
+                        ui::hint(&i18n::t_args(
+                            "shutdown-401-no-pid-fix",
+                            &[("path", &info_path.display().to_string())],
+                        ));
+                    }
+                }
                 Ok(r) => {
                     ui::error(&i18n::t_args(
                         "shutdown-request-fail",

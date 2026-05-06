@@ -11,6 +11,7 @@
 #   1. cargo fmt --check on staged *.rs files only (no full-workspace scan)
 #   2. CHANGELOG guard: reject duplicate `## [Unreleased]` headings (#3395)
 #   3. detect-secrets scan against .secrets.baseline (if installed)
+#   4. openapi.sha256 baseline auto-sync when openapi.json is staged (#4690)
 
 set -eu
 
@@ -79,5 +80,37 @@ if [ -f .secrets.baseline ]; then
     else
         echo "warning: detect-secrets not installed; skipping secret scan." >&2
         echo "  install with: pipx install detect-secrets" >&2
+    fi
+fi
+
+# 4. openapi.sha256 baseline auto-sync (#4690).
+#
+# When openapi.json is in the staged diff, recompute its sha256 and
+# auto-stage the matching xtask/baselines/openapi.sha256 line so the
+# bump commit is internally consistent. Without this, every version
+# bump (or any direct openapi.json edit) lands a baseline mismatch
+# that the openapi-drift CI gate rejects, forcing a follow-up fixup
+# commit (PR #4695 was such a fixup). cargo xtask schema-check gen
+# is too slow for a sub-2s pre-commit, so this hook does the same
+# single-line update via plain shasum.
+#
+# `shasum -a 256` is used (vs. sha256sum) because it ships by default
+# on both macOS and Linux (perl-provided), so contributors don't need
+# to install GNU coreutils.
+if git diff --cached --name-only | grep -qx "openapi.json"; then
+    BASELINE_FILE="xtask/baselines/openapi.sha256"
+    if [ -f openapi.json ] && [ -f "$BASELINE_FILE" ]; then
+        if command -v shasum >/dev/null 2>&1; then
+            EXPECTED=$(shasum -a 256 openapi.json | awk '{print $1}')
+            RECORDED=$(awk '{print $1}' "$BASELINE_FILE")
+            if [ "$EXPECTED" != "$RECORDED" ]; then
+                printf '%s  openapi.json\n' "$EXPECTED" > "$BASELINE_FILE"
+                git add "$BASELINE_FILE"
+                echo "info: auto-staged refreshed openapi.sha256 baseline (#4690)" >&2
+            fi
+        else
+            echo "warning: shasum not available; skipping openapi baseline sync." >&2
+            echo "  CI openapi-drift gate may reject this commit." >&2
+        fi
     fi
 fi
