@@ -7020,3 +7020,272 @@ fn cron_resolve_compaction_mode_combined_with_compute_keep_count_tight_cap() {
         "tight cap (keep_count=1) must downgrade SummarizeTrim → Prune"
     );
 }
+
+// ---------------------------------------------------------------------------
+// try_summarize_trim direct unit tests (#3693 / PR #4683 review M1)
+//
+// `try_summarize_trim` is the file-private async helper that the cron tick
+// calls when SummarizeTrim mode is active. It is reachable from this child
+// test module because Rust gives child modules access to their parent's
+// private items, and we exploit that to test the helper's branches directly
+// rather than reconstruct them via `compact_messages` (the integration suite
+// in `tests/cron_compaction_test.rs` already covers that).
+//
+// What these tests pin down:
+//   - L2 fast-fail: empty model name returns None *without* calling the LLM
+//     driver (verified via a counting mock).
+//   - keep_recent ≥ messages.len() short-circuit returns None instead of
+//     handing an empty / consume-everything prefix to compact_messages.
+//   - Successful path produces `[summary_msg, …kept_tail]` with the kernel's
+//     wrapper format (`[Cron session summary — N messages compacted]\n\n…`).
+//   - LLM-failure path (used_fallback=true via a failing driver) is rejected
+//     by the `!used_fallback && !empty` guard inside try_summarize_trim and
+//     returns None — so the caller drops to plain prune.
+//   - adjust_split_for_tool_pair is reused so a ToolUse / ToolResult pair is
+//     never split across the summary / tail boundary.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod try_summarize_trim_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use librefang_runtime::llm_driver::{
+        CompletionRequest, CompletionResponse, LlmDriver, LlmError,
+    };
+    use librefang_types::message::{
+        ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
+    };
+
+    /// Returns a canned non-empty summary string. `calls` counts how many
+    /// times `complete` is invoked so tests can assert the L2 fast-fail
+    /// short-circuits before reaching the driver.
+    struct CountingFakeDriver {
+        summary: String,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LlmDriver for CountingFakeDriver {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: self.summary.clone(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage {
+                    input_tokens: 50,
+                    output_tokens: 10,
+                    ..Default::default()
+                },
+            })
+        }
+    }
+
+    /// Always errors. Forces `compact_messages` through stage-1 → stage-2 →
+    /// stage-3 placeholder so it returns Ok with `used_fallback=true`.
+    struct AlwaysFailingDriver;
+
+    #[async_trait]
+    impl LlmDriver for AlwaysFailingDriver {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::Http("connection refused".to_string()))
+        }
+    }
+
+    /// L2 fast-fail: empty model name must skip the LLM call entirely.
+    /// Holding the per-session mutex / cron_lane slot across a guaranteed-fail
+    /// LLM round-trip is exactly what the L2 patch was added to prevent, so
+    /// the regression check is "driver was never called".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn try_summarize_trim_empty_model_short_circuits_without_calling_driver() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let driver: Arc<dyn LlmDriver> = Arc::new(CountingFakeDriver {
+            summary: "should never appear".to_string(),
+            calls: calls.clone(),
+        });
+        let messages: Vec<Message> = (0..10)
+            .map(|i| Message::user(format!("turn {i}")))
+            .collect();
+
+        let out = super::try_summarize_trim(&messages, 4, driver, "").await;
+
+        assert!(out.is_none(), "empty model name must short-circuit to None");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "L2 fast-fail must not invoke the LLM driver"
+        );
+    }
+
+    /// `keep_recent >= messages.len()` makes `tail_start == messages.len()`,
+    /// which means there is nothing to summarise. The function must return
+    /// None so the caller can decide whether to plain-prune or skip.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn try_summarize_trim_keep_recent_covers_everything_returns_none() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let driver: Arc<dyn LlmDriver> = Arc::new(CountingFakeDriver {
+            summary: "should never appear".to_string(),
+            calls: calls.clone(),
+        });
+        let messages: Vec<Message> = (0..3).map(|i| Message::user(format!("turn {i}"))).collect();
+
+        // keep_recent = 5 > 3 messages → raw_tail_start = 0 (saturating_sub),
+        // adjust_split_for_tool_pair leaves it at 0, so we hit the
+        // "tail_start == 0" short-circuit branch.
+        let out = super::try_summarize_trim(&messages, 5, driver, "test-model").await;
+
+        assert!(
+            out.is_none(),
+            "keep_recent >= len must short-circuit to None"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "no summary needed → driver must not be called"
+        );
+    }
+
+    /// Happy path: a working LLM produces a real summary and
+    /// try_summarize_trim returns `Some([summary_msg] + tail)` where the
+    /// summary message has the kernel's expected wrapper format.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn try_summarize_trim_successful_returns_summary_plus_tail() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let driver: Arc<dyn LlmDriver> = Arc::new(CountingFakeDriver {
+            summary: "Older turns covered tasks A and B.".to_string(),
+            calls: calls.clone(),
+        });
+        let messages: Vec<Message> = (0..10)
+            .map(|i| Message::user(format!("turn {i}")))
+            .collect();
+        let keep_recent = 3usize;
+
+        let out = super::try_summarize_trim(&messages, keep_recent, driver, "test-model")
+            .await
+            .expect("a working driver with non-empty content must yield Some(_)");
+
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "driver must be called at least once"
+        );
+        assert_eq!(
+            out.len(),
+            1 + keep_recent,
+            "output must be [summary] + kept tail"
+        );
+
+        // First message is the synthetic summary with the kernel's wrapper.
+        let head_text = out[0].content.text_content();
+        assert!(
+            head_text.contains("[Cron session summary"),
+            "summary message must use the kernel's '[Cron session summary — N messages compacted]' wrapper, got: {head_text}",
+        );
+        assert!(
+            head_text.contains("Older turns covered tasks A and B."),
+            "summary message must embed the LLM-produced summary text, got: {head_text}",
+        );
+        // The wrapper must report the count of messages that were compacted
+        // (10 - 3 = 7 here), not the kept-tail count.
+        assert!(
+            head_text.contains("7 messages compacted"),
+            "summary wrapper must count compacted messages (10 - keep_recent=3 = 7), got: {head_text}",
+        );
+
+        // Tail must be the verbatim newest 3 messages, in order.
+        assert_eq!(out[1].content.text_content(), "turn 7");
+        assert_eq!(out[2].content.text_content(), "turn 8");
+        assert_eq!(out[3].content.text_content(), "turn 9");
+    }
+
+    /// LLM failure path: when every stage of `compact_messages` fails, it
+    /// returns `Ok(result)` with `used_fallback = true` and a non-empty
+    /// placeholder summary string. The kernel's M4 guard
+    /// (`!summary.is_empty() && !used_fallback`) must reject that result so
+    /// `try_summarize_trim` returns None and the caller drops to plain prune.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn try_summarize_trim_llm_failure_via_used_fallback_returns_none() {
+        let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysFailingDriver);
+        let messages: Vec<Message> = (0..10)
+            .map(|i| Message::user(format!("turn {i}")))
+            .collect();
+
+        let out = super::try_summarize_trim(&messages, 3, driver, "test-model").await;
+
+        assert!(
+            out.is_none(),
+            "used_fallback=true result must be rejected so the caller can plain-prune"
+        );
+    }
+
+    /// Tool-pair edge case: with an Assistant{ToolUse} / User{ToolResult}
+    /// pair sitting at the would-be summary/tail boundary, the helper must
+    /// shift the split (via adjust_split_for_tool_pair) so the pair stays on
+    /// the same side. Concretely: the kept tail in the returned vec must not
+    /// contain a dangling ToolResult whose ToolUse was summarised away.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn try_summarize_trim_does_not_split_tool_pair_across_summary_boundary() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let driver: Arc<dyn LlmDriver> = Arc::new(CountingFakeDriver {
+            summary: "summarised older turns including the tool call.".to_string(),
+            calls: calls.clone(),
+        });
+
+        let tool_use_id = "tool-xyz-789".to_string();
+
+        // 6 plain messages, then ToolUse @6 / ToolResult @7, then 2 plain follow-ups.
+        let mut messages: Vec<Message> =
+            (0..6).map(|i| Message::user(format!("pre {i}"))).collect();
+        messages.push(Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: tool_use_id.clone(),
+                name: "shell_exec".to_string(),
+                input: serde_json::json!({"cmd": "echo hi"}),
+                provider_metadata: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        });
+        messages.push(Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                tool_name: String::new(),
+                content: "hi".to_string(),
+                is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::default(),
+                approval_request_id: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        });
+        messages.push(Message::user("post 0".to_string()));
+        messages.push(Message::user("post 1".to_string()));
+
+        // Total: 10 messages. keep_recent = 3 → raw split = 7 (between
+        // ToolUse @6 and ToolResult @7). adjust_split_for_tool_pair must
+        // shift the split forward so the pair stays together; the ToolResult
+        // therefore must NOT appear in the kept tail.
+        let out = super::try_summarize_trim(&messages, 3, driver, "test-model")
+            .await
+            .expect("working driver must yield Some(_)");
+
+        // out[0] is the summary message; out[1..] is the kept tail.
+        let tail = &out[1..];
+        let tail_has_orphan_tool_result = tail.iter().any(|m| {
+            matches!(&m.content, MessageContent::Blocks(blocks)
+            if blocks.iter().any(|b|
+                matches!(b, ContentBlock::ToolResult { tool_use_id: id, .. } if id == &tool_use_id)
+            ))
+        });
+        assert!(
+            !tail_has_orphan_tool_result,
+            "tool-pair must not be split across summary/tail: ToolUse was summarised away but ToolResult landed in the tail",
+        );
+    }
+}
