@@ -241,10 +241,8 @@ mod transport {
             use russh::ChannelMsg;
             match msg {
                 ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
-                ChannelMsg::ExtendedData { ext, data } => {
-                    if ext == 1 {
-                        stderr.extend_from_slice(&data);
-                    }
+                ChannelMsg::ExtendedData { ext: 1, data } => {
+                    stderr.extend_from_slice(&data);
                 }
                 ChannelMsg::ExitStatus { exit_status } => {
                     exit_code = Some(exit_status as i32);
@@ -330,10 +328,11 @@ mod tests {
     use super::*;
 
     fn cfg() -> SshBackendConfig {
-        let mut c = SshBackendConfig::default();
-        c.host = "example.invalid".into();
-        c.user = "agent".into();
-        c
+        SshBackendConfig {
+            host: "example.invalid".into(),
+            user: "agent".into(),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -344,8 +343,10 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_empty_host() {
-        let mut c = cfg();
-        c.host = String::new();
+        let c = SshBackendConfig {
+            host: String::new(),
+            ..cfg()
+        };
         let backend = SshBackend::new(c);
         match backend.run_command(ExecSpec::new("true")).await {
             Err(ExecError::NotConfigured(msg)) => {
@@ -357,8 +358,10 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_empty_user() {
-        let mut c = cfg();
-        c.user = String::new();
+        let c = SshBackendConfig {
+            user: String::new(),
+            ..cfg()
+        };
         let backend = SshBackend::new(c);
         match backend.run_command(ExecSpec::new("true")).await {
             Err(ExecError::NotConfigured(msg)) => {
@@ -418,12 +421,14 @@ mod tests {
             .and_then(|s| s.parse().ok())
             .unwrap_or(22);
 
-        let mut c = SshBackendConfig::default();
-        c.host = host;
-        c.user = user;
-        c.port = port;
-        c.key_path = Some(std::path::PathBuf::from(key_path));
-        c.timeout_secs = 30;
+        let c = SshBackendConfig {
+            host,
+            user,
+            port,
+            key_path: Some(std::path::PathBuf::from(key_path)),
+            timeout_secs: 30,
+            ..Default::default()
+        };
 
         let backend = SshBackend::new(c);
         let outcome = backend
