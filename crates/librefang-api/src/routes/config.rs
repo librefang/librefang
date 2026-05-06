@@ -2677,22 +2677,23 @@ fn is_writable_config_path(path: &str) -> bool {
         "mode",
         "agent_max_iterations",
         "max_cron_jobs",
-        // ── Collection-typed sections (#4678) ──
-        // The dashboard's StringMapEditor / NumberMapEditor /
-        // StructListEditor save the entire collection as one JSON value
-        // posted at the section's path. Allowing the bare section name
-        // here lets the editors round-trip; SCRUB_SUFFIXES still blocks
-        // writes to *.api_key / *.token / *.shared_secret embedded inside
-        // the collection's items at higher nesting (those write to a
-        // longer path that hits SECTION_PREFIXES, not EXACT).
+        // ── Collection-typed sections, primitive-valued only (#4678) ──
+        // The dashboard's StringMapEditor / NumberMapEditor saves the
+        // entire collection as one JSON value posted at the section's
+        // bare path. Restricted to BTreeMap<String, String|u64> sections
+        // because their value type is primitive — there is no nested
+        // payload that could carry a credential past the path-string
+        // SCRUB check. Vec<Struct> sections (sidecar_channels,
+        // fallback_providers, taint_rules) are intentionally NOT here:
+        // their items have nested fields (e.g. SidecarChannel.env) that
+        // SCRUB_SUFFIXES — which only inspects the dotted path string —
+        // cannot police inside a wholesale JSON payload. Those sections
+        // remain edit-on-disk for now (round-4 review of #4678).
         "provider_urls",
         "provider_regions",
         "provider_proxy_urls",
         "provider_request_timeout_secs",
         "tool_timeouts",
-        "fallback_providers",
-        "sidecar_channels",
-        "taint_rules",
     ];
     if EXACT.contains(&path) {
         return true;
@@ -2753,11 +2754,16 @@ fn is_writable_config_path(path: &str) -> bool {
         // Pairing & A2A — token_env / shared_secret keys are blocked by SCRUB.
         "pairing.",
         "a2a.",
-        // Sanitize / audit / telemetry / privacy switches.
+        // Sanitize / privacy display switches.
         "sanitize.",
-        "audit.",
-        "telemetry.",
         "privacy.",
+        // Note: `audit.` and `telemetry.` are intentionally NOT here
+        // (round-4 review of #4678). They expose `audit.anchor_path`
+        // (Merkle tamper-detect target) and `telemetry.otlp_endpoint`
+        // (trace export destination) — neither is acceptable to mutate
+        // post-auth. Display knobs (sample_rate, retention_days) are
+        // available via /api/config but not via /api/config/set; users
+        // edit those on disk where the change leaves a file mtime trail.
         // Webhook trigger toggles (token / token_env still SCRUB-blocked).
         "webhook_triggers.",
         // Auto-reply / broadcast routing.
@@ -2769,10 +2775,15 @@ fn is_writable_config_path(path: &str) -> bool {
         "provider_regions.",
         "provider_proxy_urls.",
         "provider_request_timeout_secs.",
-        // HTTP proxy + Vertex AI region + Azure OpenAI endpoint/version.
-        "proxy.",
+        // Vertex AI region + Azure OpenAI configuration knobs (the
+        // SCRUB suffix list still blocks api_key/_env/client_secret
+        // entries embedded in either section).
         "vertex_ai.",
         "azure_openai.",
+        // Note: `proxy.` is intentionally NOT here (round-4 review of
+        // #4678). Owner-role posting `proxy.http_proxy` could MITM all
+        // outbound LLM traffic in flight. The proxy URL is a system
+        // boundary that should be edited on disk (file mtime trail).
         // Default model selection (provider/model/base_url; api_key SCRUB-blocked).
         "default_model.",
         // Extended thinking parameters.
@@ -2781,10 +2792,15 @@ fn is_writable_config_path(path: &str) -> bool {
         "budget.",
         // Reload mode/debounce.
         "reload.",
-        // External OAuth provider configuration (client_secret keys SCRUB-blocked).
-        "external_oauth.",
-        "external_auth.",
-        "oauth.",
+        // Note: `external_oauth.`, `external_auth.`, `oauth.` are
+        // intentionally NOT here (round-4 review of #4678). They expose
+        // `*.issuer_url`, `*.allowed_domains`, `*.redirect_url`,
+        // `*.require_email_verified`, `*.client_id` — flipping any of
+        // those post-auth lets an Owner-role attacker redirect login,
+        // broaden the email allowlist, or skip email verification
+        // (regression vector for #3703). SCRUB only blocks
+        // `_secret_env` and the new `_env` suffix; non-secret-but-
+        // load-bearing identity fields aren't in SCRUB. Edit on disk.
         // Terminal access controls.
         "terminal.",
         // Network behaviour (shared_secret SCRUB-blocked).
@@ -2827,6 +2843,23 @@ fn is_writable_config_path(path: &str) -> bool {
         ".bypass",
         ".admin",
         ".owner",
+        // Round-4 review of #4678: env-var-name redirects. Codebase
+        // pervasively uses `*_token_env`, `*_password_env`,
+        // `*_secret_env`, `*_client_secret_env`, `*_api_key_env`,
+        // `bot_token_env`, `access_token_env`, `cdp_auth_token_env`.
+        // The original SCRUB only blocked literal `.api_key` etc., so
+        // an attacker could repoint `<section>.api_key_env` at any env
+        // var the daemon has access to and force a credential rotation
+        // through a logged channel. The blanket `_env` suffix catches
+        // every variant the workspace currently uses (verified by grep
+        // against librefang-types/src/config/types.rs).
+        "_env",
+        // OAuth public identity that's safe to *display* but not safe
+        // to mutate (issuer redirect / consent skipping). External
+        // auth sections are mostly off the prefix list now, but defense
+        // in depth in case anything slips through a writable section.
+        ".client_id",
+        ".client_secret",
     ];
     if SCRUB_SUFFIXES.iter().any(|s| path.ends_with(s)) {
         return false;
@@ -3321,6 +3354,63 @@ url = "https://search.example.com"
         assert!(!super::is_writable_config_path("network.shared_secret"));
         assert!(!super::is_writable_config_path("migration_state"));
         assert!(!super::is_writable_config_path("nonsense.key"));
+
+        // ── Round-4 review of #4678 ──────────────────────────────────
+        // Sections that are intentionally NOT in SECTION_PREFIXES
+        // because their fields control auth redirect / observability
+        // export / outbound traffic interception. Owner-role still
+        // edits these on disk; the API write path stays closed.
+        assert!(!super::is_writable_config_path("external_auth.issuer_url"));
+        assert!(!super::is_writable_config_path(
+            "external_auth.allowed_domains"
+        ));
+        assert!(!super::is_writable_config_path(
+            "external_auth.redirect_url"
+        ));
+        assert!(!super::is_writable_config_path(
+            "external_auth.require_email_verified"
+        ));
+        assert!(!super::is_writable_config_path("oauth.google_client_id"));
+        assert!(!super::is_writable_config_path("audit.anchor_path"));
+        assert!(!super::is_writable_config_path("audit.retention_days"));
+        assert!(!super::is_writable_config_path("telemetry.otlp_endpoint"));
+        assert!(!super::is_writable_config_path("telemetry.sample_rate"));
+        assert!(!super::is_writable_config_path("proxy.http_proxy"));
+        assert!(!super::is_writable_config_path("proxy.https_proxy"));
+
+        // ── _env / client_id / client_secret SCRUB ────────────────────
+        // The original SCRUB only blocked `.api_key` etc. literally;
+        // the codebase pervasively names env-var-name fields with the
+        // `_env` suffix (bot_token_env, client_secret_env, …). All of
+        // those now reject regardless of which section they're in.
+        assert!(!super::is_writable_config_path(
+            "channels.telegram.bot_token_env"
+        ));
+        assert!(!super::is_writable_config_path("default_model.api_key_env"));
+        assert!(!super::is_writable_config_path(
+            "channels.slack.access_token_env"
+        ));
+        assert!(!super::is_writable_config_path("default_model.client_id"));
+        assert!(!super::is_writable_config_path(
+            "default_model.client_secret"
+        ));
+
+        // ── Collection paths: primitive maps allowed, Vec<Struct> rejected ──
+        // BTreeMap<String, String|u64> sections accept whole-blob writes
+        // because their value type is primitive — no nested credential
+        // surface. Vec<Struct> sections (sidecar_channels,
+        // fallback_providers, taint_rules) reject whole-blob writes:
+        // their items have nested fields (env maps, api_key_env) that
+        // SCRUB can't police inside a wholesale JSON payload.
+        assert!(super::is_writable_config_path("provider_urls"));
+        assert!(super::is_writable_config_path("provider_regions"));
+        assert!(super::is_writable_config_path(
+            "provider_request_timeout_secs"
+        ));
+        assert!(super::is_writable_config_path("tool_timeouts"));
+        assert!(!super::is_writable_config_path("sidecar_channels"));
+        assert!(!super::is_writable_config_path("fallback_providers"));
+        assert!(!super::is_writable_config_path("taint_rules"));
     }
 
     #[test]
