@@ -588,23 +588,21 @@ pub async fn execute_tool_raw(
                         }
                     }
                 }
+                let (threshold, max_artifact) =
+                    resolve_spill_config(*spill_threshold_bytes, *max_artifact_bytes);
                 if let Some(ctx) = web_ctx {
+                    // #3347 5/N: also wire spill into the primary
+                    // WebToolsContext::fetch path (Tavily / Brave / Jina /
+                    // SSRF-protected GET).  #4651 only wired the legacy
+                    // plain-HTTP fallback; large readability-converted
+                    // payloads on the main path were still inlined.
                     ctx.fetch
                         .fetch_with_options(url, method, headers, body)
                         .await
+                        .map(|body| {
+                            spill_or_passthrough("web_fetch", body, threshold, max_artifact)
+                        })
                 } else {
-                    // Resolve config values; 0 means "use compiled default"
-                    // (test call sites that don't populate the ctx fields).
-                    let threshold = if *spill_threshold_bytes == 0 {
-                        16_384 // ToolResultsConfig::default().spill_threshold_bytes
-                    } else {
-                        *spill_threshold_bytes
-                    };
-                    let max_artifact = if *max_artifact_bytes == 0 {
-                        crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES
-                    } else {
-                        *max_artifact_bytes
-                    };
                     tool_web_fetch_legacy(input, threshold, max_artifact).await
                 }
             }
@@ -613,10 +611,16 @@ pub async fn execute_tool_raw(
             None => Err("Missing 'query' parameter".to_string()),
             Some(query) => {
                 let max_results = input["max_results"].as_u64().unwrap_or(5) as usize;
+                let (threshold, max_artifact) =
+                    resolve_spill_config(*spill_threshold_bytes, *max_artifact_bytes);
                 if let Some(ctx) = web_ctx {
-                    ctx.search.search(query, max_results).await
+                    ctx.search.search(query, max_results).await.map(|body| {
+                        spill_or_passthrough("web_search", body, threshold, max_artifact)
+                    })
                 } else {
-                    tool_web_search_legacy(input).await
+                    tool_web_search_legacy(input).await.map(|body| {
+                        spill_or_passthrough("web_search", body, threshold, max_artifact)
+                    })
                 }
             }
         },
@@ -1083,7 +1087,7 @@ pub async fn execute_tool_raw(
         // Artifact retrieval tool — recovers content spilled to disk by the
         // artifact store when a tool result exceeded `spill_threshold_bytes`.
         "read_artifact" => {
-            let artifact_dir = librefang_data_dir().join("artifacts");
+            let artifact_dir = crate::artifact_store::default_artifact_storage_dir();
             tool_read_artifact(input, &artifact_dir).await
         }
 
@@ -2728,6 +2732,50 @@ async fn tool_apply_patch(
 // Web tools
 // ---------------------------------------------------------------------------
 
+/// Resolve `[tool_results]` spill threshold + per-artifact cap from raw
+/// `ToolExecContext` fields, falling back to compiled defaults when the
+/// caller passed `0` (test call sites that don't populate the ctx).
+fn resolve_spill_config(spill_threshold_bytes: u64, max_artifact_bytes: u64) -> (u64, u64) {
+    (
+        if spill_threshold_bytes == 0 {
+            16_384 // ToolResultsConfig::default().spill_threshold_bytes
+        } else {
+            spill_threshold_bytes
+        },
+        if max_artifact_bytes == 0 {
+            crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES
+        } else {
+            max_artifact_bytes
+        },
+    )
+}
+
+/// Apply artifact spill to a tool-result string, returning a compact stub
+/// when the body exceeds `threshold` and the spill write succeeds.  Falls
+/// through to the original body when below the threshold or when the
+/// write fails (e.g. per-artifact cap exceeded, disk full).
+///
+/// Shared by `web_fetch` (primary + legacy) and `web_search` (#3347 5/N).
+fn spill_or_passthrough(
+    tool_name: &str,
+    body: String,
+    threshold: u64,
+    max_artifact: u64,
+) -> String {
+    let bytes = body.as_bytes();
+    if let Some(stub) = crate::artifact_store::maybe_spill(
+        tool_name,
+        bytes,
+        threshold,
+        max_artifact,
+        &crate::artifact_store::default_artifact_storage_dir(),
+    ) {
+        stub
+    } else {
+        body
+    }
+}
+
 /// Legacy web fetch (no SSRF protection, no readability). Used when WebToolsContext is unavailable.
 async fn tool_web_fetch_legacy(
     input: &serde_json::Value,
@@ -2766,7 +2814,7 @@ async fn tool_web_fetch_legacy(
         body_bytes,
         spill_threshold,
         max_artifact_bytes,
-        &librefang_data_dir().join("artifacts"),
+        &crate::artifact_store::default_artifact_storage_dir(),
     ) {
         return Ok(format!("HTTP {status}\n\n{stub}"));
     }
@@ -6348,21 +6396,6 @@ async fn tool_canvas_present(
 // Artifact retrieval tool (#3347)
 // ---------------------------------------------------------------------------
 
-/// Derive the LibreFang data directory (used by `read_artifact`).
-///
-/// Priority: `LIBREFANG_HOME` env var > `~/.librefang`, then `data/`.
-/// Mirrors the logic in `librefang_types::config::types::librefang_home_dir`.
-fn librefang_data_dir() -> std::path::PathBuf {
-    let home = if let Ok(h) = std::env::var("LIBREFANG_HOME") {
-        std::path::PathBuf::from(h)
-    } else {
-        dirs::home_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join(".librefang")
-    };
-    home.join("data")
-}
-
 /// Implementation of the `read_artifact` tool.
 ///
 /// Reads up to `length` bytes from the artifact identified by `handle`,
@@ -6930,6 +6963,19 @@ mod tests {
     impl WorkflowRunner for ApprovalKernel {}
     impl GoalControl for ApprovalKernel {}
     impl ToolPolicy for ApprovalKernel {}
+    impl ApiAuth for ApprovalKernel {
+        fn auth_snapshot(&self) -> ApiAuthSnapshot {
+            ApiAuthSnapshot::default()
+        }
+    }
+    impl SessionWriter for ApprovalKernel {
+        fn inject_attachment_blocks(
+            &self,
+            _agent_id: librefang_types::agent::AgentId,
+            _blocks: Vec<librefang_types::message::ContentBlock>,
+        ) {
+        }
+    }
 
     // ---- END role-trait impls (#3746) ----
 
@@ -7141,6 +7187,19 @@ mod tests {
     impl WorkflowRunner for ForceHumanCapturingKernel {}
     impl GoalControl for ForceHumanCapturingKernel {}
     impl ToolPolicy for ForceHumanCapturingKernel {}
+    impl ApiAuth for ForceHumanCapturingKernel {
+        fn auth_snapshot(&self) -> ApiAuthSnapshot {
+            ApiAuthSnapshot::default()
+        }
+    }
+    impl SessionWriter for ForceHumanCapturingKernel {
+        fn inject_attachment_blocks(
+            &self,
+            _agent_id: librefang_types::agent::AgentId,
+            _blocks: Vec<librefang_types::message::ContentBlock>,
+        ) {
+        }
+    }
 
     // ---- END role-trait impls (#3746) ----
 
@@ -7714,6 +7773,19 @@ mod tests {
     impl PromptStore for NamedWsKernel {}
     impl WorkflowRunner for NamedWsKernel {}
     impl GoalControl for NamedWsKernel {}
+    impl ApiAuth for NamedWsKernel {
+        fn auth_snapshot(&self) -> ApiAuthSnapshot {
+            ApiAuthSnapshot::default()
+        }
+    }
+    impl SessionWriter for NamedWsKernel {
+        fn inject_attachment_blocks(
+            &self,
+            _agent_id: librefang_types::agent::AgentId,
+            _blocks: Vec<librefang_types::message::ContentBlock>,
+        ) {
+        }
+    }
 
     // ---- END role-trait impls (#3746) ----
 
@@ -10390,6 +10462,19 @@ mod tests {
     impl WorkflowRunner for SpawnCheckKernel {}
     impl GoalControl for SpawnCheckKernel {}
     impl ToolPolicy for SpawnCheckKernel {}
+    impl ApiAuth for SpawnCheckKernel {
+        fn auth_snapshot(&self) -> ApiAuthSnapshot {
+            ApiAuthSnapshot::default()
+        }
+    }
+    impl SessionWriter for SpawnCheckKernel {
+        fn inject_attachment_blocks(
+            &self,
+            _agent_id: librefang_types::agent::AgentId,
+            _blocks: Vec<librefang_types::message::ContentBlock>,
+        ) {
+        }
+    }
 
     // ---- END role-trait impls (#3746) ----
 

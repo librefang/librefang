@@ -1025,8 +1025,34 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
+        // Two-phase deterministic driver. Earlier iterations:
+        //   v1 (#4393): wall-clock 100ms slice + `lookups > 1_000`. Flaked
+        //     on Ubuntu shard 1 under load (reader couldn't squeeze 1k
+        //     iterations in time).
+        //   v2 (#4673): fixed 5_000 writer cycles + `hits > 0`. Removed
+        //     the wall-clock dependency but introduced a probabilistic
+        //     vacuous-pass: on a fast runner that gives the writer
+        //     priority (observed on macOS, #4704), the writer can drain
+        //     all 5_000 register/remove cycles before the reader thread
+        //     ever schedules — `hits` stays 0 and the assertion fires.
+        //
+        // v3 (this): split into two phases.
+        //   Phase 1 — establish that the reader actually ran. Writer
+        //     registers "racy" once and waits on `phase1_done` until
+        //     the reader has observed the entry at least once. No race
+        //     here: "racy" is permanently in the registry, so the
+        //     reader's first hit is structural, not probabilistic.
+        //   Phase 2 — race phase. Writer cycles register/remove; reader
+        //     keeps polling. This is what actually exercises the
+        //     torn-read invariant.
+        // After this, `hits > 0` is guaranteed (Phase 1 sets it),
+        // `torn == 0` is the real invariant under test, and the test
+        // is no longer schedule-dependent.
+        const WRITER_CYCLES: usize = 5_000;
+
         let registry = Arc::new(AgentRegistry::new());
         let stop = Arc::new(AtomicBool::new(false));
+        let phase1_done = Arc::new(AtomicBool::new(false));
         // Count cases where `find_by_name` returned `Some` but the entry's
         // name disagreed with the lookup key (impossible if registry is
         // self-consistent; would catch torn reads).
@@ -1037,28 +1063,48 @@ mod tests {
         let writer = {
             let registry = Arc::clone(&registry);
             let stop = Arc::clone(&stop);
+            let phase1_done = Arc::clone(&phase1_done);
             thread::spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
+                // Phase 1: register "racy" once, wait for reader to observe.
+                let entry = test_entry("racy");
+                let id = entry.id;
+                registry
+                    .register(entry)
+                    .expect("phase 1: initial register should succeed");
+                while !phase1_done.load(Ordering::Acquire) {
+                    std::hint::spin_loop();
+                }
+                registry.remove(id).ok();
+
+                // Phase 2: race cycles.
+                for _ in 0..WRITER_CYCLES {
                     let entry = test_entry("racy");
                     let id = entry.id;
                     if registry.register(entry).is_ok() {
                         registry.remove(id).ok();
                     }
                 }
+                stop.store(true, Ordering::Release);
             })
         };
 
         let reader = {
             let registry = Arc::clone(&registry);
             let stop = Arc::clone(&stop);
+            let phase1_done = Arc::clone(&phase1_done);
             let torn = Arc::clone(&torn);
             let lookups = Arc::clone(&lookups);
             let hits = Arc::clone(&hits);
             thread::spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
+                while !stop.load(Ordering::Acquire) {
                     lookups.fetch_add(1, Ordering::Relaxed);
                     if let Some(found) = registry.find_by_name("racy") {
                         hits.fetch_add(1, Ordering::Relaxed);
+                        // Release-store so the writer's Acquire-load on
+                        // phase1_done sees the same memory state where
+                        // we incremented `hits`. Cheap to do every hit;
+                        // the writer only checks during Phase 1.
+                        phase1_done.store(true, Ordering::Release);
                         if found.name != "racy" {
                             torn.fetch_add(1, Ordering::Relaxed);
                         }
@@ -1067,21 +1113,21 @@ mod tests {
             })
         };
 
-        thread::sleep(std::time::Duration::from_millis(100));
-        stop.store(true, Ordering::Relaxed);
         writer.join().unwrap();
         reader.join().unwrap();
 
-        // Sanity: reader actually ran enough iterations and saw the agent
-        // some of the time, otherwise a clean pass is vacuous.
+        // Reader ran (vacuous on a truly broken scheduler, but if Phase 1
+        // signalled `phase1_done` the reader must have observed at least
+        // once — both this and the `hits > 0` assertion below should hold).
         assert!(
-            lookups.load(Ordering::Relaxed) > 1_000,
-            "reader did not run enough iterations to be a meaningful probe"
+            lookups.load(Ordering::Relaxed) >= 1,
+            "reader thread did not run a single iteration before the writer finished"
         );
         assert!(
             hits.load(Ordering::Relaxed) > 0,
-            "reader never observed the agent — the writer/reader interleaving \
-             produced a vacuous pass; widen the test if this fires on slow CI"
+            "reader never observed the agent — Phase 1 was supposed to make this \
+             structural; if this fires the registry's find_by_name is broken or \
+             the phase1 hand-off is wrong"
         );
         assert_eq!(
             torn.load(Ordering::Relaxed),

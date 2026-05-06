@@ -1088,9 +1088,15 @@ impl McpConnection {
         // Expand environment variable references ($VAR, ${VAR}) in args so
         // templates can use e.g. "$HOME" without wrapping in `sh -c`.
         // Expansion is restricted to the allowlist above. (#3823)
+        // Then expand a leading tilde (`~` or `~/...`) to the user's home
+        // directory so user-edited args using shell-style paths work too.
+        // Tilde expansion runs after env-var expansion so it has the final
+        // word — e.g. an arg of `$UNSET/sub` is left as `$UNSET/sub` and is
+        // not silently treated as a tilde. (#4680)
         let args_owned: Vec<String> = args
             .iter()
             .map(|a| expand_env_vars(a, &expand_allowlist))
+            .map(|a| expand_leading_tilde(&a))
             .collect();
         let env_owned: Vec<String> = extra_env.to_vec();
 
@@ -2516,6 +2522,37 @@ fn expand_env_vars(input: &str, allowed_vars: &std::collections::HashSet<String>
         }
     }
     result
+}
+
+/// Expand a leading tilde (`~` or `~/...` / `~\...`) to the user's home
+/// directory.
+///
+/// Embedded tildes (`foo~bar`), tilde-user (`~alice/...`), and strings whose
+/// first segment is already a literal path are left unchanged. Returns the
+/// input unchanged if neither `HOME` nor `USERPROFILE` is set, so the caller
+/// surfaces the original arg in the spawn error rather than silently
+/// substituting the wrong path. (#4680)
+fn expand_leading_tilde(input: &str) -> String {
+    if input == "~" {
+        return std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| input.to_string());
+    }
+    let rest = if let Some(r) = input.strip_prefix("~/") {
+        r
+    } else if let Some(r) = input.strip_prefix("~\\") {
+        r
+    } else {
+        return input.to_string();
+    };
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    if home.is_empty() {
+        return input.to_string();
+    }
+    let trimmed = home.trim_end_matches(['/', '\\']);
+    format!("{trimmed}/{rest}")
 }
 
 #[cfg(test)]
@@ -3984,6 +4021,56 @@ mod tests {
         let result = expand_env_vars("$_TEST_UNSET_DECLARED/bin", &allowed);
         // Must keep the original token, not substitute empty string or panic.
         assert_eq!(result, "$_TEST_UNSET_DECLARED/bin");
+    }
+
+    // ── expand_leading_tilde tests (#4680) ────────────────────────────────
+
+    #[test]
+    fn test_expand_leading_tilde_alone() {
+        std::env::set_var("HOME", "/Users/alice");
+        assert_eq!(expand_leading_tilde("~"), "/Users/alice");
+    }
+
+    #[test]
+    fn test_expand_leading_tilde_with_subpath() {
+        std::env::set_var("HOME", "/Users/alice");
+        assert_eq!(
+            expand_leading_tilde("~/work/repo"),
+            "/Users/alice/work/repo"
+        );
+    }
+
+    #[test]
+    fn test_expand_leading_tilde_strips_trailing_separators_in_home() {
+        // Defends against double-slash if HOME ends with `/`.
+        std::env::set_var("HOME", "/Users/alice/");
+        assert_eq!(expand_leading_tilde("~/work"), "/Users/alice/work");
+    }
+
+    #[test]
+    fn test_expand_leading_tilde_does_not_expand_embedded() {
+        std::env::set_var("HOME", "/Users/alice");
+        assert_eq!(expand_leading_tilde("/tmp/~foo"), "/tmp/~foo");
+        assert_eq!(expand_leading_tilde("foo~"), "foo~");
+    }
+
+    #[test]
+    fn test_expand_leading_tilde_does_not_expand_tilde_user() {
+        // `~bob/...` is shell tilde-user expansion which we intentionally do
+        // not support — leave the literal alone so the spawn surfaces the
+        // real path in any downstream error.
+        std::env::set_var("HOME", "/Users/alice");
+        assert_eq!(expand_leading_tilde("~bob/work"), "~bob/work");
+    }
+
+    #[test]
+    fn test_expand_leading_tilde_plain_string_unchanged() {
+        std::env::set_var("HOME", "/Users/alice");
+        assert_eq!(expand_leading_tilde("/usr/local/bin"), "/usr/local/bin");
+        assert_eq!(
+            expand_leading_tilde("@scope/pkg@latest"),
+            "@scope/pkg@latest"
+        );
     }
 
     // ── read_response_bytes_capped tests (#3801) ──────────────────────────

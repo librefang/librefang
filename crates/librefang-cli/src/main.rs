@@ -471,7 +471,7 @@ enum Commands {
     Configure,
     /// Send a one-shot message to an agent.
     #[command(
-        long_about = "Send a single message to an agent and print the response.\n\nUnlike `chat`, this does not start an interactive session. Useful for\nscripting and automation.\n\nExamples:\n  librefang message coder \"Fix the bug in main.rs\"\n  librefang message coder \"Summarize this file\" --json"
+        long_about = "Send a single message to an agent and print the response.\n\nUnlike `chat`, this does not start an interactive session. Useful for\nscripting and automation.\n\nExamples:\n  librefang message coder \"Fix the bug in main.rs\"\n  librefang message coder \"Summarize this file\" --json\n  librefang message coder \"Draft this email\" --incognito"
     )]
     Message {
         /// Agent name or ID.
@@ -481,6 +481,10 @@ enum Commands {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
+        /// Run in incognito mode: session messages and memory writes are
+        /// suppressed while memory reads remain fully operational.
+        #[arg(long)]
+        incognito: bool,
     },
     /// System info and version [*].
     #[command(
@@ -2476,7 +2480,12 @@ fn main() {
             }
         }
         Some(Commands::Configure) => cmd_init(false),
-        Some(Commands::Message { agent, text, json }) => cmd_message(&agent, &text, json),
+        Some(Commands::Message {
+            agent,
+            text,
+            json,
+            incognito,
+        }) => cmd_message(&agent, &text, json, incognito),
         Some(Commands::System(sub)) => match sub {
             SystemCommands::Info { json } => cmd_system_info(json),
             SystemCommands::Version { json } => cmd_system_version(json),
@@ -3896,6 +3905,48 @@ fn cmd_stop(config: Option<PathBuf>) {
                         let _ = std::fs::remove_file(daemon.home_dir.join("daemon.json"));
                     }
                     ui::success(&i18n::t("daemon-stopped-forced"));
+                }
+                Ok(r) if r.status().as_u16() == 401 => {
+                    // Issue #4693 — the new CLI cannot authenticate against
+                    // the running daemon. Typical trigger: `curl install.sh
+                    // | sh` upgraded the binary without restarting the
+                    // daemon, so the running daemon was started with an
+                    // api_key the new CLI no longer reads (locked vault,
+                    // rotated key, freshly-enabled dashboard credentials).
+                    // Surface the cause and fall back to PID-based stop so
+                    // the user is not stuck on a half-restarted machine.
+                    ui::error(&i18n::t("shutdown-401-detected"));
+                    ui::hint(&i18n::t("shutdown-401-explainer"));
+                    if let Some(info) = read_daemon_info(&daemon.home_dir) {
+                        let pid = info.pid;
+                        ui::hint(&i18n::t_args(
+                            "shutdown-401-fallback-attempt",
+                            &[("pid", &pid.to_string())],
+                        ));
+                        force_kill_pid(pid);
+                        for _ in 0..10 {
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            if find_daemon_in_home(&daemon.home_dir).is_none() {
+                                let _ = std::fs::remove_file(daemon.home_dir.join("daemon.json"));
+                                ui::success(&i18n::t_args(
+                                    "shutdown-401-fallback-success",
+                                    &[("pid", &pid.to_string())],
+                                ));
+                                return;
+                            }
+                        }
+                        ui::error(&i18n::t("shutdown-401-fallback-fail"));
+                        ui::hint(&i18n::t_args(
+                            "shutdown-401-fallback-fix",
+                            &[("pid", &pid.to_string())],
+                        ));
+                    } else {
+                        let info_path = daemon.home_dir.join("daemon.json");
+                        ui::hint(&i18n::t_args(
+                            "shutdown-401-no-pid-fix",
+                            &[("path", &info_path.display().to_string())],
+                        ));
+                    }
                 }
                 Ok(r) => {
                     ui::error(&i18n::t_args(
@@ -12174,14 +12225,14 @@ fn resolve_agent_id(base: &str, name_or_id: &str) -> String {
     name_or_id.to_string()
 }
 
-fn cmd_message(agent: &str, text: &str, json: bool) {
+fn cmd_message(agent: &str, text: &str, json: bool, incognito: bool) {
     let base = require_daemon("message");
     let agent_id = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
             .post(format!("{base}/api/agents/{agent_id}/message"))
-            .json(&serde_json::json!({"message": text}))
+            .json(&serde_json::json!({"message": text, "incognito": incognito}))
             .send(),
     );
     if json {

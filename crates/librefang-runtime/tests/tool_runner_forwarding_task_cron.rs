@@ -216,6 +216,19 @@ impl PromptStore for CapturingKernel {}
 impl WorkflowRunner for CapturingKernel {}
 impl GoalControl for CapturingKernel {}
 impl ToolPolicy for CapturingKernel {}
+impl librefang_kernel_handle::ApiAuth for CapturingKernel {
+    fn auth_snapshot(&self) -> librefang_kernel_handle::ApiAuthSnapshot {
+        librefang_kernel_handle::ApiAuthSnapshot::default()
+    }
+}
+impl librefang_kernel_handle::SessionWriter for CapturingKernel {
+    fn inject_attachment_blocks(
+        &self,
+        _agent_id: librefang_types::agent::AgentId,
+        _blocks: Vec<librefang_types::message::ContentBlock>,
+    ) {
+    }
+}
 
 fn make_ctx<'a>(
     kernel: &'a Arc<dyn KernelHandle>,

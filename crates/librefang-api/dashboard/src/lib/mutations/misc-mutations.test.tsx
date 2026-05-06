@@ -3,7 +3,15 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { useCompleteExperiment } from "./agents";
 import { useSetSessionLabel } from "./sessions";
 import { useInstallSkill } from "./skills";
-import { agentKeys, sessionKeys, skillKeys, fanghubKeys } from "../queries/keys";
+import {
+  agentKeys,
+  sessionKeys,
+  skillKeys,
+  fanghubKeys,
+  clawhubKeys,
+  clawhubCnKeys,
+  skillhubKeys,
+} from "../queries/keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", async () => {
@@ -94,7 +102,18 @@ describe("useSetSessionLabel", () => {
 });
 
 describe("useInstallSkill", () => {
-  it("invalidates skillKeys.all and fanghubKeys.all", async () => {
+  // #4689 — skill install must invalidate every hub surface so the per-hub
+  // browse buttons (FangHub / SkillHub / ClawHub / ClawHub-CN) flip to
+  // "Installed" without waiting for the next refetchInterval.
+  const ALL_SKILL_SURFACE_KEYS = [
+    skillKeys.all,
+    fanghubKeys.all,
+    clawhubKeys.all,
+    clawhubCnKeys.all,
+    skillhubKeys.all,
+  ] as const;
+
+  it("invalidates every skill surface", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -105,17 +124,14 @@ describe("useInstallSkill", () => {
     await result.current.mutateAsync({ name: "test-skill" });
 
     await waitFor(() => {
-      expect(invalidateSpy).toHaveBeenCalledTimes(2);
+      expect(invalidateSpy).toHaveBeenCalledTimes(ALL_SKILL_SURFACE_KEYS.length);
     });
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: skillKeys.all,
-    });
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: fanghubKeys.all,
-    });
+    for (const key of ALL_SKILL_SURFACE_KEYS) {
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: key });
+    }
   });
 
-  it("invalidates skillKeys.all and fanghubKeys.all with hand parameter", async () => {
+  it("invalidates every skill surface with hand parameter", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -126,13 +142,10 @@ describe("useInstallSkill", () => {
     await result.current.mutateAsync({ name: "test-skill", hand: "test-hand" });
 
     await waitFor(() => {
-      expect(invalidateSpy).toHaveBeenCalledTimes(2);
+      expect(invalidateSpy).toHaveBeenCalledTimes(ALL_SKILL_SURFACE_KEYS.length);
     });
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: skillKeys.all,
-    });
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: fanghubKeys.all,
-    });
+    for (const key of ALL_SKILL_SURFACE_KEYS) {
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: key });
+    }
   });
 });

@@ -205,7 +205,7 @@ use axum::Json;
 use dashmap::DashMap;
 use librefang_channels::types::SenderContext;
 use librefang_kernel::kernel_handle::prelude::*;
-use librefang_kernel::LibreFangKernel;
+use librefang_kernel::kernel_handle::SessionWriter;
 use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest};
 use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
@@ -1495,75 +1495,15 @@ pub fn resolve_attachments(
 /// kernel adds the user's text message, so the LLM receives:
 /// `[..., User(attach_blocks), User(text)]`. session_repair will merge
 /// those two consecutive user-role messages into one for the wire format.
+///
+/// Delegates to [`SessionWriter::inject_attachment_blocks`] so this call
+/// site does not need to import the concrete `LibreFangKernel` type (#3744).
 pub fn inject_attachments_into_session(
-    kernel: &LibreFangKernel,
+    kernel: &dyn SessionWriter,
     agent_id: AgentId,
     attachment_blocks: Vec<librefang_types::message::ContentBlock>,
 ) {
-    use librefang_types::message::{Message, MessageContent, Role};
-
-    let entry = match kernel.agent_registry().get(agent_id) {
-        Some(e) => e,
-        None => {
-            tracing::warn!(agent_id = ?agent_id, "Cannot inject attachments: agent not found in registry");
-            return;
-        }
-    };
-
-    let mut session = match kernel.memory_substrate().get_session(entry.session_id) {
-        Ok(Some(s)) => s,
-        _ => librefang_memory::session::Session {
-            id: entry.session_id,
-            agent_id,
-            messages: Vec::new(),
-            context_window_tokens: 0,
-            label: None,
-            messages_generation: 0,
-            last_repaired_generation: None,
-        },
-    };
-
-    let block_count = attachment_blocks.len();
-    let block_kinds: Vec<&'static str> = attachment_blocks
-        .iter()
-        .map(|b| match b {
-            librefang_types::message::ContentBlock::Image { .. } => "image",
-            librefang_types::message::ContentBlock::Text { .. } => "text",
-            librefang_types::message::ContentBlock::ImageFile { .. } => "image_file",
-            librefang_types::message::ContentBlock::ToolUse { .. } => "tool_use",
-            librefang_types::message::ContentBlock::ToolResult { .. } => "tool_result",
-            librefang_types::message::ContentBlock::Thinking { .. } => "thinking",
-            librefang_types::message::ContentBlock::Unknown => "unknown",
-        })
-        .collect();
-
-    session.push_message(Message {
-        role: Role::User,
-        content: MessageContent::Blocks(attachment_blocks),
-        pinned: false,
-        timestamp: Some(chrono::Utc::now()),
-    });
-
-    let total_messages_after = session.messages.len();
-
-    if let Err(e) = kernel.memory_substrate().save_session(&session) {
-        tracing::warn!(
-            agent_id = ?agent_id,
-            session_id = ?entry.session_id,
-            block_count,
-            error = %e,
-            "Failed to save session with attachment blocks"
-        );
-    } else {
-        tracing::info!(
-            agent_id = ?agent_id,
-            session_id = ?entry.session_id,
-            block_count,
-            block_kinds = ?block_kinds,
-            total_messages_after,
-            "Injected attachment blocks into session"
-        );
-    }
+    kernel.inject_attachment_blocks(agent_id, attachment_blocks);
 }
 
 /// Resolve URL-based attachments into image content blocks.
@@ -1797,7 +1737,7 @@ pub async fn send_message(
     if !req.attachments.is_empty() {
         let image_blocks = resolve_attachments(&state, &req.attachments);
         if !image_blocks.is_empty() {
-            inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
+            inject_attachments_into_session(state.kernel.as_ref(), agent_id, image_blocks);
         }
     }
 
@@ -1852,15 +1792,17 @@ pub async fn send_message(
         let kernel_handle: Arc<dyn KernelHandle> = kernel.clone() as Arc<dyn KernelHandle>;
         let msg = effective_message.clone();
         let sc = sender_context;
+        let incognito = req.incognito;
         match run_cancel_on_disconnect(async move {
             kernel
-                .send_message_with_session_override(
+                .send_message_with_incognito(
                     agent_id,
                     &msg,
                     Some(kernel_handle),
                     sc.as_ref(),
                     thinking_override,
                     session_id_override,
+                    incognito,
                 )
                 .await
         })
@@ -2763,7 +2705,7 @@ pub async fn send_message_stream(
     if !req.attachments.is_empty() {
         let image_blocks = resolve_attachments(&state, &req.attachments);
         if !image_blocks.is_empty() {
-            inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
+            inject_attachments_into_session(state.kernel.as_ref(), agent_id, image_blocks);
         }
     }
 
@@ -2783,11 +2725,12 @@ pub async fn send_message_stream(
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
     let (rx, handle) = match state
         .kernel
-        .send_message_streaming_with_routing_and_session_override(
+        .send_message_streaming_with_incognito(
             agent_id,
             &req.message,
             Some(kernel_handle),
             session_id_override,
+            req.incognito,
         )
         .await
     {
@@ -6782,6 +6725,7 @@ mod tests {
             show_thinking: None,
             group_participants: None,
             session_id: None,
+            incognito: false,
         };
         assert!(request_sender_context(&req).is_none());
     }
@@ -6801,6 +6745,7 @@ mod tests {
             show_thinking: None,
             group_participants: None,
             session_id: None,
+            incognito: false,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.user_id, "u-123");
@@ -6824,6 +6769,7 @@ mod tests {
             show_thinking: None,
             group_participants: None,
             session_id: None,
+            incognito: false,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert!(sender.is_group);
@@ -6855,6 +6801,7 @@ mod tests {
             show_thinking: None,
             group_participants: Some(roster.clone()),
             session_id: None,
+            incognito: false,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.group_participants, roster);

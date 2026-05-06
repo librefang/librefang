@@ -328,7 +328,7 @@ dependencies = [
  "base64ct",
  "blake2",
  "cpufeatures 0.2.17",
- "password-hash",
+ "password-hash 0.5.0",
 ]
 
 [[package]]
@@ -1043,6 +1043,17 @@ dependencies = [
  "getrandom 0.3.4",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "bcrypt-pbkdf"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6aeac2e1fe888769f34f05ac343bbef98b14d1ffb292ab69d4608b3abc86f2a2"
+dependencies = [
+ "blowfish",
+ "pbkdf2 0.12.2",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -2015,6 +2026,17 @@ name = "cfg_aliases"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
+
+[[package]]
+name = "chacha20"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3613f74bd2eac03dad61bd53dbe620703d4371614fe0bc3b9f04dd36fe4e818"
+dependencies = [
+ "cfg-if",
+ "cipher 0.4.4",
+ "cpufeatures 0.2.17",
+]
 
 [[package]]
 name = "chacha20"
@@ -3207,7 +3229,7 @@ dependencies = [
  "foldhash 0.1.5",
  "hashbrown 0.15.5",
  "log",
- "md5",
+ "md5 0.8.0",
  "serde",
  "serde_json",
  "spin 0.10.0",
@@ -3722,6 +3744,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "des"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffdd80ce8ce993de27e9f063a444a4d53ce8e8db4c1f00cc03af5ad5a9867a1e"
+dependencies = [
+ "cipher 0.4.4",
 ]
 
 [[package]]
@@ -5835,6 +5866,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hex-literal"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fe2267d4ed49bc07b63801559be28c718ea06c4738b7a03c94df7386d2cde46"
+
+[[package]]
 name = "hexf-parse"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7440,7 +7477,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-api"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7514,7 +7551,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-channels"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "aes 0.9.0",
  "async-trait",
@@ -7565,7 +7602,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-cli"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -7611,7 +7648,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-desktop"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "axum",
  "clap",
@@ -7642,7 +7679,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-extensions"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -7675,7 +7712,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-hands"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "chrono",
  "dashmap",
@@ -7693,7 +7730,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-http"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "librefang-types",
  "reqwest 0.13.3",
@@ -7705,7 +7742,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -7761,7 +7798,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-handle"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7775,7 +7812,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-metering"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "librefang-memory",
  "librefang-runtime",
@@ -7785,7 +7822,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-router"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "dirs 6.0.0",
  "librefang-hands",
@@ -7800,7 +7837,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-driver"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "async-trait",
  "librefang-types",
@@ -7812,7 +7849,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-drivers"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7842,7 +7879,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7866,7 +7903,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-migrate"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -7884,7 +7921,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7921,6 +7958,8 @@ dependencies = [
  "regex-lite",
  "reqwest 0.13.3",
  "rusqlite",
+ "russh",
+ "russh-keys",
  "seccompiler",
  "serde",
  "serde_json",
@@ -7938,12 +7977,13 @@ dependencies = [
  "ureq 3.3.0",
  "url",
  "uuid",
+ "wiremock",
  "zeroize",
 ]
 
 [[package]]
 name = "librefang-runtime-mcp"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -7966,7 +8006,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-oauth"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -7985,7 +8025,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-wasm"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8002,7 +8042,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-skills"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "aho-corasick",
  "chrono",
@@ -8030,7 +8070,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-storage"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "async-trait",
  "chrono",
@@ -8052,7 +8092,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-telemetry"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "librefang-types",
  "metrics",
@@ -8060,7 +8100,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-testing"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -8087,7 +8127,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-types"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "async-trait",
  "chrono",
@@ -8113,7 +8153,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-uar-spec"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "chrono",
  "librefang-types",
@@ -8126,7 +8166,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-wire"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -8680,6 +8720,12 @@ dependencies = [
  "cfg-if",
  "digest 0.10.7",
 ]
+
+[[package]]
+name = "md5"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
 name = "md5"
@@ -9285,6 +9331,7 @@ checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
 dependencies = [
  "num-integer",
  "num-traits",
+ "rand 0.8.5",
 ]
 
 [[package]]
@@ -10021,6 +10068,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "p521"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fc9e2161f1f215afdfce23677034ae137bbd45016a880c2eb3ba8eb95f085b2"
+dependencies = [
+ "base16ct",
+ "ecdsa",
+ "elliptic-curve",
+ "primeorder",
+ "rand_core 0.6.4",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "page_size"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10096,6 +10157,17 @@ dependencies = [
 
 [[package]]
 name = "password-hash"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7676374caaee8a325c9e7a2ae557f216c5563a171d6997b0ef8a65af35147700"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
+]
+
+[[package]]
+name = "password-hash"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
@@ -10137,13 +10209,25 @@ checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
 
 [[package]]
 name = "pbkdf2"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83a0692ec44e4cf1ef28ca317f14f8f07da2d95ec3fa01f86e4467b725e60917"
+dependencies = [
+ "digest 0.10.7",
+ "hmac 0.12.1",
+ "password-hash 0.4.2",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "pbkdf2"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
 dependencies = [
  "digest 0.10.7",
  "hmac 0.12.1",
- "password-hash",
+ "password-hash 0.5.0",
  "sha2 0.10.9",
 ]
 
@@ -10544,12 +10628,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkcs5"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e847e2c91a18bfa887dd028ec33f2fe6f25db77db3619024764914affe8b69a6"
+dependencies = [
+ "aes 0.8.4",
+ "cbc 0.1.2",
+ "der",
+ "pbkdf2 0.12.2",
+ "scrypt",
+ "sha2 0.10.9",
+ "spki",
+]
+
+[[package]]
 name = "pkcs8"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
 dependencies = [
  "der",
+ "pkcs5",
+ "rand_core 0.6.4",
  "spki",
 ]
 
@@ -10644,6 +10745,17 @@ dependencies = [
  "pin-project-lite",
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "poly1305"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8159bd90725d2df49889a078b54f4f79e87f1f8a8444194cdca81d38f5393abf"
+dependencies = [
+ "cpufeatures 0.2.17",
+ "opaque-debug",
+ "universal-hash",
 ]
 
 [[package]]
@@ -11345,7 +11457,7 @@ version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
 dependencies = [
- "chacha20",
+ "chacha20 0.10.0",
  "getrandom 0.4.2",
  "rand_core 0.10.0",
 ]
@@ -12230,6 +12342,7 @@ dependencies = [
  "pkcs1",
  "pkcs8",
  "rand_core 0.6.4",
+ "sha2 0.10.9",
  "signature",
  "spki",
  "subtle",
@@ -12371,6 +12484,110 @@ dependencies = [
  "serde_json",
  "smallvec",
  "sqlite-wasm-rs",
+]
+
+[[package]]
+name = "russh"
+version = "0.45.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a229f2a03daea3f62cee897b40329ce548600cca615906d98d58b8db3029b19"
+dependencies = [
+ "aes 0.8.4",
+ "aes-gcm",
+ "async-trait",
+ "bitflags 2.11.1",
+ "byteorder",
+ "cbc 0.1.2",
+ "chacha20 0.9.1",
+ "ctr",
+ "curve25519-dalek",
+ "des",
+ "digest 0.10.7",
+ "elliptic-curve",
+ "flate2",
+ "futures",
+ "generic-array 0.14.7",
+ "hex-literal",
+ "hmac 0.12.1",
+ "log",
+ "num-bigint",
+ "once_cell",
+ "p256",
+ "p384",
+ "p521",
+ "poly1305",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "russh-cryptovec",
+ "russh-keys",
+ "sha1",
+ "sha2 0.10.9",
+ "ssh-encoding",
+ "ssh-key",
+ "subtle",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "russh-cryptovec"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fadd2c0ab350e21c66556f94ee06f766d8bdae3213857ba7610bfd8e10e51880"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
+name = "russh-keys"
+version = "0.45.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89757474f7c9ee30121d8cc7fe293a954ba10b204a82ccf5850a5352a532ebc7"
+dependencies = [
+ "aes 0.8.4",
+ "async-trait",
+ "bcrypt-pbkdf",
+ "block-padding 0.3.3",
+ "byteorder",
+ "cbc 0.1.2",
+ "ctr",
+ "data-encoding",
+ "der",
+ "digest 0.10.7",
+ "ecdsa",
+ "ed25519-dalek",
+ "elliptic-curve",
+ "futures",
+ "hmac 0.12.1",
+ "home",
+ "inout 0.1.4",
+ "log",
+ "md5 0.7.0",
+ "num-integer",
+ "p256",
+ "p384",
+ "p521",
+ "pbkdf2 0.11.0",
+ "pkcs1",
+ "pkcs5",
+ "pkcs8",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "rsa",
+ "russh-cryptovec",
+ "sec1",
+ "serde",
+ "sha1",
+ "sha2 0.10.9",
+ "spki",
+ "ssh-encoding",
+ "ssh-key",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "typenum",
+ "zeroize",
 ]
 
 [[package]]
@@ -12755,8 +12972,8 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0516a385866c09368f0b5bcd1caff3366aace790fcd46e2bb032697bb172fd1f"
 dependencies = [
- "password-hash",
- "pbkdf2",
+ "password-hash 0.5.0",
+ "pbkdf2 0.12.2",
  "salsa20",
  "sha2 0.10.9",
 ]
@@ -13653,6 +13870,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "ssh-cipher"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caac132742f0d33c3af65bfcde7f6aa8f62f0e991d80db99149eb9d44708784f"
+dependencies = [
+ "aes 0.8.4",
+ "aes-gcm",
+ "cbc 0.1.2",
+ "chacha20 0.9.1",
+ "cipher 0.4.4",
+ "ctr",
+ "poly1305",
+ "ssh-encoding",
+ "subtle",
+]
+
+[[package]]
+name = "ssh-encoding"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb9242b9ef4108a78e8cd1a2c98e193ef372437f8c22be363075233321dd4a15"
+dependencies = [
+ "base64ct",
+ "pem-rfc7468",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "ssh-key"
+version = "0.6.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b86f5297f0f04d08cabaa0f6bff7cb6aec4d9c3b49d87990d63da9d9156a8c3"
+dependencies = [
+ "bcrypt-pbkdf",
+ "ed25519-dalek",
+ "num-bigint-dig",
+ "p256",
+ "p384",
+ "p521",
+ "rand_core 0.6.4",
+ "rsa",
+ "sec1",
+ "sha2 0.10.9",
+ "signature",
+ "ssh-cipher",
+ "ssh-encoding",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "stable-vec"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13822,7 +14090,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "surreal-memory"
 version = "0.1.0"
-source = "git+https://github.com/Prometheus-AGS/surreal-memory-server?branch=main#36f4bb5170220ae8346295b15c096c27d11d5b30"
+source = "git+https://github.com/Prometheus-AGS/surreal-memory-server?branch=main#edca63d3ea0f384d3ddddb08a1ebf906f3128a90"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13928,7 +14196,7 @@ dependencies = [
  "object_store",
  "parking_lot",
  "path-clean",
- "pbkdf2",
+ "pbkdf2 0.12.2",
  "phf 0.13.1",
  "pin-project-lite",
  "quick_cache",
@@ -18179,7 +18447,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
 name = "xtask"
-version = "2026.5.2-beta8"
+version = "2026.5.6-beta.9"
 dependencies = [
  "base64 0.22.1",
  "chrono",

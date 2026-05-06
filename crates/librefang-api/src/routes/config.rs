@@ -1366,7 +1366,266 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         );
     }
 
+    // ── Newly surfaced sections (#4678) ──
+
+    // Top-level scalar additions exposed in the "general" section overlay.
+    set!(
+        "update_channel",
+        serde_json::to_value(config.update_channel).unwrap_or(serde_json::json!("stable"))
+    );
+    set!("max_history_messages", config.max_history_messages);
+    set!("max_upload_size_bytes", config.max_upload_size_bytes);
+    set!("max_concurrent_bg_llm", config.max_concurrent_bg_llm);
+    set!("max_agent_call_depth", config.max_agent_call_depth);
+    set!("max_request_body_bytes", config.max_request_body_bytes);
+    set!(
+        "workflow_stale_timeout_minutes",
+        config.workflow_stale_timeout_minutes
+    );
+    set!("tool_timeout_secs", config.tool_timeout_secs);
+    set!(
+        "local_probe_interval_secs",
+        config.local_probe_interval_secs
+    );
+    set!("require_auth_for_reads", config.require_auth_for_reads);
+    set!("dashboard_user", config.dashboard_user);
+    set!(
+        "log_dir",
+        config
+            .log_dir
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+    );
+    set!("cors_origin", config.cors_origin);
+    set!("trust_forwarded_for", config.trust_forwarded_for);
+    set!("cron_session_max_tokens", config.cron_session_max_tokens);
+    set!(
+        "cron_session_max_messages",
+        config.cron_session_max_messages
+    );
+    set!(
+        "cron_session_warn_fraction",
+        config.cron_session_warn_fraction
+    );
+    set!(
+        "cron_session_warn_total_tokens",
+        config.cron_session_warn_total_tokens
+    );
+    set!("strict_config", config.strict_config);
+
+    // ── llm (auxiliary fallback chains; provider:model strings — not secrets) ──
+    set!("llm", {
+        "auxiliary": serde_json::to_value(&config.llm.auxiliary).unwrap_or(serde_json::json!({})),
+    });
+
+    // ── skills ──
+    set!("skills", {
+        "load_user": config.skills.load_user,
+        "extra_dirs": config.skills.extra_dirs.iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect::<Vec<_>>(),
+        "disabled": config.skills.disabled,
+        "env_passthrough_denied_patterns": config.skills.env_passthrough_denied_patterns,
+        "env_passthrough_per_skill": config.skills.env_passthrough_per_skill,
+    });
+
+    // ── triggers ──
+    set!("triggers", {
+        "cooldown_secs": config.triggers.cooldown_secs,
+        "max_per_event": config.triggers.max_per_event,
+        "max_depth": config.triggers.max_depth,
+        "max_workflow_secs": config.triggers.max_workflow_secs,
+    });
+
+    // ── notification (channel routing — recipients are not secrets, but pass through unchanged) ──
+    set!(
+        "notification",
+        serde_json::to_value(&config.notification).unwrap_or(serde_json::json!({}))
+    );
+
+    // ── task_board ──
+    set!("task_board", {
+        "claim_ttl_secs": config.task_board.claim_ttl_secs,
+        "sweep_interval_secs": config.task_board.sweep_interval_secs,
+        "max_retries": config.task_board.max_retries,
+    });
+
+    // ── tool_policy (rules + groups, no secrets) ──
+    set!(
+        "tool_policy",
+        serde_json::to_value(&config.tool_policy).unwrap_or(serde_json::json!({}))
+    );
+
+    // ── context_engine (engine name, plugin paths, hook scripts — no secrets) ──
+    set!(
+        "context_engine",
+        serde_json::to_value(&config.context_engine).unwrap_or(serde_json::json!({}))
+    );
+
+    // ── audit ──
+    set!("audit", {
+        "retention_days": config.audit.retention_days,
+        "anchor_path": config.audit.anchor_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+        "retention": serde_json::to_value(&config.audit.retention).unwrap_or(serde_json::json!({})),
+    });
+
+    // ── health_check ──
+    set!("health_check", {
+        "health_check_interval_secs": config.health_check.health_check_interval_secs,
+    });
+
+    // ── heartbeat ──
+    set!("heartbeat", {
+        "check_interval_secs": config.heartbeat.check_interval_secs,
+        "default_timeout_secs": config.heartbeat.default_timeout_secs,
+        "keep_recent": config.heartbeat.keep_recent,
+    });
+
+    // ── plugins ──
+    set!("plugins", {
+        "plugin_registries": config.plugins.plugin_registries,
+    });
+
+    // ── registry (mirror URL is not a secret, just a public proxy prefix) ──
+    set!("registry", {
+        "cache_ttl_secs": config.registry.cache_ttl_secs,
+        "registry_mirror": config.registry.registry_mirror,
+    });
+
+    // ── privacy ──
+    set!("privacy", {
+        "mode": serde_json::to_value(&config.privacy.mode).unwrap_or(serde_json::json!("off")),
+        "redact_patterns": config.privacy.redact_patterns,
+    });
+
+    // ── sanitize ──
+    set!(
+        "sanitize",
+        serde_json::to_value(&config.sanitize).unwrap_or(serde_json::json!({}))
+    );
+
+    // ── inbox ──
+    set!("inbox", {
+        "enabled": config.inbox.enabled,
+        "directory": config.inbox.directory,
+        "poll_interval_secs": config.inbox.poll_interval_secs,
+        "default_agent": config.inbox.default_agent,
+    });
+
+    // ── telemetry (otlp_endpoint may carry credentials in URL; keep host/port only) ──
+    set!("telemetry", {
+        "enabled": config.telemetry.enabled,
+        "otlp_endpoint": redact_url_credentials(&config.telemetry.otlp_endpoint),
+        "service_name": config.telemetry.service_name,
+        "sample_rate": config.telemetry.sample_rate,
+        "prometheus_enabled": config.telemetry.prometheus_enabled,
+        "auto_start_observability_stack": config.telemetry.auto_start_observability_stack,
+        "emit_caller_trace_headers": config.telemetry.emit_caller_trace_headers,
+    });
+
+    // ── prompt_intelligence ──
+    set!("prompt_intelligence", {
+        "enabled": config.prompt_intelligence.enabled,
+        "hash_prompts": config.prompt_intelligence.hash_prompts,
+        "max_versions_per_agent": config.prompt_intelligence.max_versions_per_agent,
+    });
+
+    // ── rate_limit ──
+    set!("rate_limit", {
+        "api_requests_per_minute": config.rate_limit.api_requests_per_minute,
+        "retry_after_secs": config.rate_limit.retry_after_secs,
+        "max_ws_per_ip": config.rate_limit.max_ws_per_ip,
+        "ws_messages_per_minute": config.rate_limit.ws_messages_per_minute,
+        "ws_terminal_messages_per_minute": config.rate_limit.ws_terminal_messages_per_minute,
+        "ws_idle_timeout_secs": config.rate_limit.ws_idle_timeout_secs,
+        "ws_debounce_ms": config.rate_limit.ws_debounce_ms,
+        "ws_debounce_chars": config.rate_limit.ws_debounce_chars,
+        "auth_rate_limit_per_ip": config.rate_limit.auth_rate_limit_per_ip,
+    });
+
+    // ── tool_invoke ──
+    set!("tool_invoke", {
+        "enabled": config.tool_invoke.enabled,
+        "allowlist": config.tool_invoke.allowlist,
+    });
+
+    // ── parallel_tools ──
+    set!("parallel_tools", {
+        "enabled": config.parallel_tools.enabled,
+        "max_concurrent": config.parallel_tools.max_concurrent,
+        "mcp_default_safety": config.parallel_tools.mcp_default_safety,
+        "mcp_readonly_allowlist": config.parallel_tools.mcp_readonly_allowlist,
+    });
+
+    // ── tool_results ──
+    set!("tool_results", {
+        "spill_threshold_bytes": config.tool_results.spill_threshold_bytes,
+        "max_artifact_bytes": config.tool_results.max_artifact_bytes,
+        "max_bytes_per_turn": config.tool_results.max_bytes_per_turn,
+        "history_fold_after_turns": config.tool_results.history_fold_after_turns,
+        "fold_min_batch_size": config.tool_results.fold_min_batch_size,
+        "artifact_max_age_days": config.tool_results.artifact_max_age_days,
+    });
+
+    // ── compaction ──
+    set!("compaction", {
+        "threshold_messages": config.compaction.threshold_messages,
+        "keep_recent": config.compaction.keep_recent,
+        "max_summary_tokens": config.compaction.max_summary_tokens,
+        "token_threshold_ratio": config.compaction.token_threshold_ratio,
+        "max_chunk_chars": config.compaction.max_chunk_chars,
+        "max_retries": config.compaction.max_retries,
+    });
+
+    // ── azure_openai (endpoint URL may identify a tenant; keep as-is, deployment is non-secret) ──
+    set!("azure_openai", {
+        "endpoint": config.azure_openai.endpoint,
+        "api_version": config.azure_openai.api_version,
+        "deployment": config.azure_openai.deployment,
+    });
+
+    // ── proxy (URLs may carry user:pass — strip credentials before exposing) ──
+    set!("proxy", {
+        "http_proxy": config.proxy.http_proxy.as_deref().map(librefang_types::config::redact_proxy_url),
+        "https_proxy": config.proxy.https_proxy.as_deref().map(librefang_types::config::redact_proxy_url),
+        "no_proxy": config.proxy.no_proxy,
+    });
+
+    // ── taint_rules: pass-through (rule names + actions; no secrets) ──
+    set!(
+        "taint_rules",
+        serde_json::to_value(&config.taint_rules).unwrap_or(serde_json::json!([]))
+    );
+
+    // ── sidecar_channels (already redacted above — env_keys only, no values) ──
+    set!("sidecar_channels", sidecar_channels);
+
+    // ── Provider URL/region/timeout maps (#4678): non-secret, pass-through ──
+    set!(
+        "provider_request_timeout_secs",
+        config.provider_request_timeout_secs
+    );
+    // Note: `provider_urls`, `provider_proxy_urls`, `provider_regions`, and
+    // `provider_api_keys` are already inserted above. `tool_timeouts`:
+    set!("tool_timeouts", config.tool_timeouts);
+
     Json(serde_json::Value::Object(out))
+}
+
+/// Strip embedded `user:pass@` credentials from a URL, keeping host/port.
+///
+/// Used for telemetry / OTLP endpoints that may legitimately contain a
+/// basic-auth tuple in the URL. Returns the input unchanged when no `@`
+/// follows the scheme — i.e. when there is nothing to redact.
+fn redact_url_credentials(url: &str) -> String {
+    if let Some(scheme_end) = url.find("://") {
+        let after_scheme = &url[scheme_end + 3..];
+        if let Some(at_pos) = after_scheme.find('@') {
+            let host_and_rest = &after_scheme[at_pos..]; // includes '@'
+            return format!("{}://***{}", &url[..scheme_end], host_and_rest);
+        }
+    }
+    url.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1835,7 +2094,17 @@ pub fn ui_sections_overlay() -> serde_json::Value {
             "fields": [
                 "api_listen", "api_key", "log_level", "network_enabled", "mode",
                 "language", "usage_footer", "stable_prefix_mode", "prompt_caching",
-                "max_cron_jobs", "agent_max_iterations", "workspaces_dir"
+                "max_cron_jobs", "agent_max_iterations", "workspaces_dir",
+                // Newly surfaced root-level scalars (#4678).
+                "update_channel", "max_history_messages", "max_upload_size_bytes",
+                "max_concurrent_bg_llm", "max_agent_call_depth", "max_request_body_bytes",
+                "workflow_stale_timeout_minutes", "tool_timeout_secs",
+                "local_probe_interval_secs", "require_auth_for_reads",
+                "dashboard_user", "log_dir", "data_dir", "home_dir",
+                "cors_origin", "trust_forwarded_for",
+                "cron_session_max_tokens", "cron_session_max_messages",
+                "cron_session_warn_fraction", "cron_session_warn_total_tokens",
+                "strict_config"
             ]
         },
         {"key": "default_model", "struct_field": "default_model", "hot_reloadable": true},
@@ -1868,7 +2137,41 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         {"key": "thinking", "struct_field": "thinking"},
         {"key": "pairing", "struct_field": "pairing"},
         {"key": "broadcast", "struct_field": "broadcast"},
-        {"key": "auto_reply", "struct_field": "auto_reply"}
+        {"key": "auto_reply", "struct_field": "auto_reply"},
+        // ── Newly exposed sub-struct sections (#4678) ──
+        {"key": "llm", "struct_field": "llm"},
+        {"key": "skills", "struct_field": "skills"},
+        {"key": "triggers", "struct_field": "triggers"},
+        {"key": "notification", "struct_field": "notification"},
+        {"key": "task_board", "struct_field": "task_board"},
+        {"key": "tool_policy", "struct_field": "tool_policy"},
+        {"key": "context_engine", "struct_field": "context_engine"},
+        {"key": "audit", "struct_field": "audit"},
+        {"key": "health_check", "struct_field": "health_check"},
+        {"key": "heartbeat", "struct_field": "heartbeat"},
+        {"key": "plugins", "struct_field": "plugins"},
+        {"key": "registry", "struct_field": "registry"},
+        {"key": "privacy", "struct_field": "privacy"},
+        {"key": "sanitize", "struct_field": "sanitize"},
+        {"key": "inbox", "struct_field": "inbox"},
+        {"key": "telemetry", "struct_field": "telemetry"},
+        {"key": "prompt_intelligence", "struct_field": "prompt_intelligence"},
+        {"key": "rate_limit", "struct_field": "rate_limit"},
+        {"key": "tool_invoke", "struct_field": "tool_invoke"},
+        {"key": "parallel_tools", "struct_field": "parallel_tools"},
+        {"key": "tool_results", "struct_field": "tool_results"},
+        {"key": "compaction", "struct_field": "compaction"},
+        {"key": "azure_openai", "struct_field": "azure_openai"},
+        {"key": "proxy", "struct_field": "proxy"},
+        // ── Newly exposed collection-typed sections (#4678) ──
+        {"key": "taint_rules", "struct_field": "taint_rules"},
+        {"key": "fallback_providers", "struct_field": "fallback_providers"},
+        {"key": "sidecar_channels", "struct_field": "sidecar_channels"},
+        {"key": "provider_urls", "struct_field": "provider_urls"},
+        {"key": "provider_proxy_urls", "struct_field": "provider_proxy_urls"},
+        {"key": "provider_regions", "struct_field": "provider_regions"},
+        {"key": "provider_request_timeout_secs", "struct_field": "provider_request_timeout_secs"},
+        {"key": "tool_timeouts", "struct_field": "tool_timeouts"}
     ])
 }
 
@@ -1962,7 +2265,47 @@ pub fn ui_options_overlay(
         "/extensions/health_check_interval_secs": {"min": 5, "max": 3600, "step": 1},
 
         // ── terminal ──
-        "/terminal/max_windows": {"min": 1, "max": 64, "step": 1}
+        "/terminal/max_windows": {"min": 1, "max": 64, "step": 1},
+
+        // ── rate_limit ──
+        "/rate_limit/api_requests_per_minute": {"min": 0, "max": 100_000, "step": 100},
+        "/rate_limit/retry_after_secs": {"min": 1, "max": 3600, "step": 1},
+        "/rate_limit/max_ws_per_ip": {"min": 1, "max": 100, "step": 1},
+
+        // ── triggers ──
+        "/triggers/cooldown_secs": {"min": 0, "max": 3600, "step": 1},
+        "/triggers/max_per_event": {"min": 1, "max": 1000, "step": 1},
+        "/triggers/max_depth": {"min": 1, "max": 50, "step": 1},
+
+        // ── compaction ──
+        "/compaction/threshold_messages": {"min": 5, "max": 1000, "step": 1},
+        "/compaction/keep_recent": {"min": 1, "max": 100, "step": 1},
+        "/compaction/max_summary_tokens": {"min": 100, "max": 16_000, "step": 100},
+        "/compaction/token_threshold_ratio": {"min": 0, "max": 1, "step": 0.05},
+
+        // ── registry ──
+        "/registry/cache_ttl_secs": {"min": 60, "max": 604_800, "step": 60},
+
+        // ── health_check ──
+        "/health_check/health_check_interval_secs": {"min": 5, "max": 3600, "step": 1},
+
+        // ── heartbeat ──
+        "/heartbeat/check_interval_secs": {"min": 5, "max": 3600, "step": 1},
+
+        // ── inbox ──
+        "/inbox/poll_interval_secs": {"min": 1, "max": 600, "step": 1},
+
+        // ── audit ──
+        "/audit/retention_days": {"min": 1, "max": 3650, "step": 1},
+
+        // ── telemetry ──
+        "/telemetry/sample_rate": {"min": 0, "max": 1, "step": 0.01},
+
+        // ── parallel_tools ──
+        "/parallel_tools/max_concurrent": {"min": 1, "max": 64, "step": 1},
+
+        // ── tool_results ──
+        "/tool_results/spill_threshold_bytes": {"min": 1024, "max": 10_485_760, "step": 1024}
     })
 }
 
@@ -2312,6 +2655,57 @@ fn is_writable_config_path(path: &str) -> bool {
         "approval.auto_approve_autonomous",
         "approval.auto_approve",
         "approval.totp_grace_period_secs",
+        // ── Newly user-tunable root-level scalars (#4678) ──
+        // Update channel + size / depth caps; default model / mode flags;
+        // localisation. Deliberately excludes `api_key`, `dashboard_pass*`,
+        // `dashboard_user`, `cors_origin`, `trust_forwarded_for`,
+        // `network_enabled`, `api_listen`, `trusted_*`, `home_dir`, `data_dir`,
+        // `log_dir`, `cron_session_*`, and `require_auth_for_reads` — those
+        // are infrastructure / auth knobs that need a deliberate file edit.
+        "update_channel",
+        "max_upload_size_bytes",
+        "max_concurrent_bg_llm",
+        "max_agent_call_depth",
+        "max_request_body_bytes",
+        "workflow_stale_timeout_minutes",
+        "tool_timeout_secs",
+        "local_probe_interval_secs",
+        "prompt_caching",
+        "stable_prefix_mode",
+        "usage_footer",
+        "language",
+        "mode",
+        "agent_max_iterations",
+        "max_cron_jobs",
+        // ── Collection-typed sections, primitive-valued only (#4678) ──
+        // The dashboard's StringMapEditor / NumberMapEditor saves the
+        // entire collection as one JSON value posted at the section's
+        // bare path. Restricted to BTreeMap<String, String|u64> sections
+        // because their value type is primitive — there is no nested
+        // payload that could carry a credential past the path-string
+        // SCRUB check. Vec<Struct> sections (sidecar_channels,
+        // fallback_providers, taint_rules) are intentionally NOT here:
+        // their items have nested fields (e.g. SidecarChannel.env) that
+        // SCRUB_SUFFIXES — which only inspects the dotted path string —
+        // cannot police inside a wholesale JSON payload. Those sections
+        // remain edit-on-disk for now (round-4 review of #4678).
+        "provider_urls",
+        "provider_regions",
+        "provider_proxy_urls",
+        "provider_request_timeout_secs",
+        "tool_timeouts",
+        // ── Round-5 review of #4678 — safe network knobs ──
+        // The whole `network.` prefix was withdrawn (see SECTION_PREFIXES
+        // comment below) because `network.bootstrap_peers` was reachable
+        // as a depth-1 leaf and post-auth flips would redirect DHT
+        // discovery to attacker-controlled peers. The display knobs
+        // listed here have no peer-redirection or auth surface.
+        // Excludes `listen_addresses` (binding 0.0.0.0 post-auth would
+        // expose a previously loopback-only API surface — edit on disk),
+        // and excludes `bootstrap_peers` / `shared_secret`.
+        "network.mdns_enabled",
+        "network.max_peers",
+        "network.max_messages_per_peer_per_minute",
     ];
     if EXACT.contains(&path) {
         return true;
@@ -2330,14 +2724,148 @@ fn is_writable_config_path(path: &str) -> bool {
         "rate_limit.",
         // Queue / concurrency tuning.
         "queue.",
+        // ── Newly user-tunable section prefixes (#4678) ──
+        // Tool invocation / parallelism / result spill / policy.
+        "tool_invoke.",
+        "parallel_tools.",
+        "tool_results.",
+        "tool_policy.",
+        // Per-tool timeout overrides — values are integers (seconds), no secrets.
+        "tool_timeouts.",
+        // Compaction & trigger system tuning.
+        "compaction.",
+        "triggers.",
+        // Registry / inbox / health / heartbeat / notification.
+        "registry.",
+        "inbox.",
+        "health_check.",
+        "heartbeat.",
+        "notification.",
+        // Task board, prompt intelligence, context engine.
+        "task_board.",
+        "prompt_intelligence.",
+        "context_engine.",
+        // Auto-dream scheduler.
+        "auto_dream.",
+        // Media / link / TTS / canvas behaviour.
+        "media.",
+        "links.",
+        "tts.",
+        "canvas.",
+        // Extensions reconnect tuning, session retention.
+        "extensions.",
+        "session.",
+        // Memory tuning.
+        "proactive_memory.",
+        "memory.",
+        // Browser / Docker sandbox / vault tuning. SCRUB_SUFFIXES still
+        // blocks `*.api_key`, `*.password`, `*.bypass`, `*.admin`, `*.owner`.
+        "browser.",
+        "docker.",
+        "vault.",
+        // Pairing & A2A — token_env / shared_secret keys are blocked by SCRUB.
+        "pairing.",
+        "a2a.",
+        // Sanitize / privacy display switches.
+        "sanitize.",
+        "privacy.",
+        // Note: `audit.` and `telemetry.` are intentionally NOT here
+        // (round-4 review of #4678). They expose `audit.anchor_path`
+        // (Merkle tamper-detect target) and `telemetry.otlp_endpoint`
+        // (trace export destination) — neither is acceptable to mutate
+        // post-auth. Display knobs (sample_rate, retention_days) are
+        // available via /api/config but not via /api/config/set; users
+        // edit those on disk where the change leaves a file mtime trail.
+        // Webhook trigger toggles (token / token_env still SCRUB-blocked).
+        "webhook_triggers.",
+        // Auto-reply / broadcast routing.
+        "auto_reply.",
+        "broadcast.",
+        // Provider URL/region/timeout/proxy maps (URLs are public endpoints;
+        // SCRUB-suffix list still blocks any `*.api_key` keys that snuck in).
+        "provider_urls.",
+        "provider_regions.",
+        "provider_proxy_urls.",
+        "provider_request_timeout_secs.",
+        // Vertex AI region + Azure OpenAI configuration knobs (the
+        // SCRUB suffix list still blocks api_key/_env/client_secret
+        // entries embedded in either section).
+        "vertex_ai.",
+        "azure_openai.",
+        // Note: `proxy.` is intentionally NOT here (round-4 review of
+        // #4678). Owner-role posting `proxy.http_proxy` could MITM all
+        // outbound LLM traffic in flight. The proxy URL is a system
+        // boundary that should be edited on disk (file mtime trail).
+        // Default model selection (provider/model/base_url; api_key SCRUB-blocked).
+        "default_model.",
+        // Extended thinking parameters.
+        "thinking.",
+        // Budget caps (USD ceilings, alert threshold, per-hour token cap).
+        "budget.",
+        // Reload mode/debounce.
+        "reload.",
+        // Note: `external_oauth.`, `external_auth.`, `oauth.` are
+        // intentionally NOT here (round-4 review of #4678). They expose
+        // `*.issuer_url`, `*.allowed_domains`, `*.redirect_url`,
+        // `*.require_email_verified`, `*.client_id` — flipping any of
+        // those post-auth lets an Owner-role attacker redirect login,
+        // broaden the email allowlist, or skip email verification
+        // (regression vector for #3703). SCRUB only blocks
+        // `_secret_env` and the new `_env` suffix; non-secret-but-
+        // load-bearing identity fields aren't in SCRUB. Edit on disk.
+        // Terminal access controls.
+        "terminal.",
+        // Note: `network.` is intentionally NOT here (round-5 review of
+        // #4678). `network.bootstrap_peers` was reachable as a depth-1
+        // leaf and is a `Vec<String>`; an Owner-role attacker who flipped
+        // it post-auth could redirect DHT discovery to attacker peers
+        // (parallel threat model to the round-4 removal of `proxy.`
+        // for outbound LLM MITM). Safe display knobs (`mdns_enabled`,
+        // `max_peers`, `max_messages_per_peer_per_minute`) are EXACT-listed
+        // above; everything else stays edit-on-disk.
+        // Approval policy fields are intentionally NOT a section prefix:
+        // the existing EXACT list above covers the safe display knobs
+        // (`auto_approve_autonomous`, `auto_approve`, `totp_grace_period_secs`),
+        // and the test suite asserts that `approval.second_factor` stays
+        // closed — flipping it via the dashboard would let an Owner-role
+        // attacker silently disable 2FA after an API-key leak.
+        // Shell exec policy (timeouts, mode, allowed_env_vars list).
+        "exec_policy.",
+        // LLM auxiliary chains.
+        "llm.",
+        // Plugins / skills tuning.
+        "plugins.",
+        "skills.",
     ];
+    // Section prefixes where the depth-1 leaf (vendor / collection-element)
+    // is itself a struct containing credential-shaped fields that
+    // SCRUB_SUFFIXES cannot police inside a wholesale JSON payload.
+    // Writes against these prefixes must be depth-2 (per-leaf) only —
+    // same defect class round-4 explicitly removed `sidecar_channels` /
+    // `fallback_providers` / `taint_rules` for. Round-5 review of #4678.
+    //
+    // `channels.<vendor>` is `OneOrMany<*Config>` containing
+    // `*_token_env` / `*_secret_env` / etc.; depth-1 wholesale-replacement
+    // would let an Owner-role caller redirect the env-var that resolves
+    // a bot/API token. Depth-2 (`channels.telegram.enabled` etc.) goes
+    // through SCRUB_SUFFIXES which catches the `_env` blanket.
+    const DEPTH_2_ONLY_PREFIXES: &[&str] = &["channels."];
     let in_section = SECTION_PREFIXES.iter().any(|pfx| {
-        path.starts_with(pfx) && path.len() > pfx.len() && !path[pfx.len()..].contains('.')
-            // Allow a single nested level too (e.g. "channels.telegram.enabled")
-            || path.starts_with(pfx) && {
-                let rest = &path[pfx.len()..];
-                rest.split('.').count() == 2
-            }
+        if !path.starts_with(pfx) {
+            return false;
+        }
+        let rest = &path[pfx.len()..];
+        if rest.is_empty() {
+            return false;
+        }
+        let segments = rest.split('.').count();
+        if DEPTH_2_ONLY_PREFIXES.contains(pfx) {
+            segments == 2
+        } else {
+            // Single leaf (e.g. "web.search_provider") or one nested level
+            // (e.g. "default_model.provider") — not deeper.
+            segments == 1 || segments == 2
+        }
     });
     if !in_section {
         return false;
@@ -2355,6 +2883,23 @@ fn is_writable_config_path(path: &str) -> bool {
         ".bypass",
         ".admin",
         ".owner",
+        // Round-4 review of #4678: env-var-name redirects. Codebase
+        // pervasively uses `*_token_env`, `*_password_env`,
+        // `*_secret_env`, `*_client_secret_env`, `*_api_key_env`,
+        // `bot_token_env`, `access_token_env`, `cdp_auth_token_env`.
+        // The original SCRUB only blocked literal `.api_key` etc., so
+        // an attacker could repoint `<section>.api_key_env` at any env
+        // var the daemon has access to and force a credential rotation
+        // through a logged channel. The blanket `_env` suffix catches
+        // every variant the workspace currently uses (verified by grep
+        // against librefang-types/src/config/types.rs).
+        "_env",
+        // OAuth public identity that's safe to *display* but not safe
+        // to mutate (issuer redirect / consent skipping). External
+        // auth sections are mostly off the prefix list now, but defense
+        // in depth in case anything slips through a writable section.
+        ".client_id",
+        ".client_secret",
     ];
     if SCRUB_SUFFIXES.iter().any(|s| path.ends_with(s)) {
         return false;
@@ -2849,6 +3394,87 @@ url = "https://search.example.com"
         assert!(!super::is_writable_config_path("network.shared_secret"));
         assert!(!super::is_writable_config_path("migration_state"));
         assert!(!super::is_writable_config_path("nonsense.key"));
+
+        // ── Round-4 review of #4678 ──────────────────────────────────
+        // Sections that are intentionally NOT in SECTION_PREFIXES
+        // because their fields control auth redirect / observability
+        // export / outbound traffic interception. Owner-role still
+        // edits these on disk; the API write path stays closed.
+        assert!(!super::is_writable_config_path("external_auth.issuer_url"));
+        assert!(!super::is_writable_config_path(
+            "external_auth.allowed_domains"
+        ));
+        assert!(!super::is_writable_config_path(
+            "external_auth.redirect_url"
+        ));
+        assert!(!super::is_writable_config_path(
+            "external_auth.require_email_verified"
+        ));
+        assert!(!super::is_writable_config_path("oauth.google_client_id"));
+        assert!(!super::is_writable_config_path("audit.anchor_path"));
+        assert!(!super::is_writable_config_path("audit.retention_days"));
+        assert!(!super::is_writable_config_path("telemetry.otlp_endpoint"));
+        assert!(!super::is_writable_config_path("telemetry.sample_rate"));
+        assert!(!super::is_writable_config_path("proxy.http_proxy"));
+        assert!(!super::is_writable_config_path("proxy.https_proxy"));
+
+        // ── _env / client_id / client_secret SCRUB ────────────────────
+        // The original SCRUB only blocked `.api_key` etc. literally;
+        // the codebase pervasively names env-var-name fields with the
+        // `_env` suffix (bot_token_env, client_secret_env, …). All of
+        // those now reject regardless of which section they're in.
+        assert!(!super::is_writable_config_path(
+            "channels.telegram.bot_token_env"
+        ));
+        assert!(!super::is_writable_config_path("default_model.api_key_env"));
+        assert!(!super::is_writable_config_path(
+            "channels.slack.access_token_env"
+        ));
+        assert!(!super::is_writable_config_path("default_model.client_id"));
+        assert!(!super::is_writable_config_path(
+            "default_model.client_secret"
+        ));
+
+        // ── Collection paths: primitive maps allowed, Vec<Struct> rejected ──
+        // BTreeMap<String, String|u64> sections accept whole-blob writes
+        // because their value type is primitive — no nested credential
+        // surface. Vec<Struct> sections (sidecar_channels,
+        // fallback_providers, taint_rules) reject whole-blob writes:
+        // their items have nested fields (env maps, api_key_env) that
+        // SCRUB can't police inside a wholesale JSON payload.
+        assert!(super::is_writable_config_path("provider_urls"));
+        assert!(super::is_writable_config_path("provider_regions"));
+        assert!(super::is_writable_config_path(
+            "provider_request_timeout_secs"
+        ));
+        assert!(super::is_writable_config_path("tool_timeouts"));
+        assert!(!super::is_writable_config_path("sidecar_channels"));
+        assert!(!super::is_writable_config_path("fallback_providers"));
+        assert!(!super::is_writable_config_path("taint_rules"));
+
+        // ── Round-5 review of #4678 ──────────────────────────────────
+        // `channels.<vendor>` (depth-1 wholesale-replace) MUST reject;
+        // depth-2 leaves under the same vendor stay open (per-field
+        // toggles via the dashboard).
+        assert!(!super::is_writable_config_path("channels.telegram"));
+        assert!(!super::is_writable_config_path("channels.discord"));
+        assert!(!super::is_writable_config_path("channels.slack"));
+        assert!(!super::is_writable_config_path("channels.whatsapp"));
+        assert!(!super::is_writable_config_path("channels.matrix"));
+        assert!(!super::is_writable_config_path("channels.email"));
+        assert!(super::is_writable_config_path("channels.telegram.enabled"));
+        assert!(super::is_writable_config_path("channels.discord.enabled"));
+
+        // `network.bootstrap_peers` MUST reject (DHT MITM via post-auth
+        // peer redirect, threat model parallel to the round-4 removal
+        // of `proxy.http_proxy`). Display knobs stay open via EXACT.
+        assert!(!super::is_writable_config_path("network.bootstrap_peers"));
+        assert!(!super::is_writable_config_path("network.listen_addresses"));
+        assert!(super::is_writable_config_path("network.mdns_enabled"));
+        assert!(super::is_writable_config_path("network.max_peers"));
+        assert!(super::is_writable_config_path(
+            "network.max_messages_per_peer_per_minute"
+        ));
     }
 
     #[test]

@@ -424,6 +424,14 @@ pub struct MessageRequest {
     /// agent with 400 Bad Request.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// When true, this turn runs in **incognito mode**: session messages and
+    /// proactive-memory writes are suppressed while memory reads remain
+    /// fully operational. Useful for sensitive queries that should leave no
+    /// trace in the conversation history.
+    ///
+    /// Defaults to `false` (normal persistent turn).
+    #[serde(default)]
+    pub incognito: bool,
 }
 
 /// Response from sending a message.

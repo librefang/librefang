@@ -6736,3 +6736,598 @@ async fn budget_config_concurrent_writers_no_lost_update() {
 
     kernel.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// cron_compute_keep_count (#3693 Gap 4)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cron_compute_keep_count_message_cap_only() {
+    use librefang_types::message::Message;
+
+    // 10 messages, message cap = 4 → keep the newest 4.
+    let messages: Vec<Message> = (0..10).map(|i| Message::user(format!("msg {i}"))).collect();
+    let keep = cron_compute_keep_count(&messages, Some(4), None);
+    assert_eq!(keep, 4, "message cap should keep newest 4");
+
+    // Verify which messages survive: indices 6..10 (msg 6 through msg 9).
+    let kept: Vec<_> = messages[messages.len() - keep..].to_vec();
+    assert_eq!(kept[0].content.text_content(), "msg 6");
+    assert_eq!(kept[3].content.text_content(), "msg 9");
+}
+
+#[test]
+fn cron_compute_keep_count_token_cap_trims_front() {
+    use librefang_runtime::compactor::estimate_token_count;
+    use librefang_types::message::Message;
+
+    // 20 short messages; token estimate of the full set determines the budget.
+    let messages: Vec<Message> = (0..20)
+        .map(|i| Message::user(format!("message content number {:04}", i)))
+        .collect();
+
+    let total_est = estimate_token_count(&messages, None, None);
+    assert!(total_est > 0);
+
+    // Budget = ~half → should keep fewer than 20 messages.
+    let half_budget = (total_est / 2) as u64;
+    let keep = cron_compute_keep_count(&messages, None, Some(half_budget));
+    assert!(
+        keep < 20,
+        "token cap should drop some messages, keep={keep}"
+    );
+    assert!(keep > 0, "must keep at least 1 message");
+
+    // The kept tail must fit within budget.
+    let start = messages.len() - keep;
+    let tail_est = estimate_token_count(&messages[start..], None, None);
+    assert!(
+        tail_est <= half_budget as usize,
+        "kept tail ({tail_est}) must fit within budget ({half_budget})"
+    );
+}
+
+#[test]
+fn cron_compute_keep_count_message_cap_applied_before_token_cap() {
+    use librefang_runtime::compactor::estimate_token_count;
+    use librefang_types::message::Message;
+
+    // 10 messages; message cap = 5 narrows to 5 first, then token cap is
+    // applied to those 5. The result must be ≤ 5.
+    let messages: Vec<Message> = (0..10)
+        .map(|i| Message::user("x".repeat(200 + i * 10)))
+        .collect();
+
+    let after_msg = 5usize;
+    let tail_after_msg = &messages[messages.len() - after_msg..];
+    let est_5 = estimate_token_count(tail_after_msg, None, None);
+    // Set token budget to 70% of the 5-message estimate → must trim further.
+    let budget = (est_5 as f64 * 0.7) as u64;
+
+    let keep = cron_compute_keep_count(&messages, Some(after_msg), Some(budget));
+    assert!(
+        keep <= after_msg,
+        "keep ({keep}) should be ≤ message cap ({after_msg})"
+    );
+}
+
+#[test]
+fn cron_compute_keep_count_no_caps_returns_all() {
+    use librefang_types::message::Message;
+    let messages: Vec<Message> = (0..8).map(|i| Message::user(format!("m{i}"))).collect();
+    let keep = cron_compute_keep_count(&messages, None, None);
+    assert_eq!(keep, 8, "no caps → keep all");
+}
+
+#[test]
+fn cron_compute_keep_count_empty_messages() {
+    use librefang_types::message::Message;
+    let messages: Vec<Message> = vec![];
+    let keep = cron_compute_keep_count(&messages, Some(4), Some(1000));
+    assert_eq!(keep, 0, "empty slice → keep 0");
+}
+
+// L9 — boundary / degenerate edge cases for cron_compute_keep_count
+
+#[test]
+fn cron_compute_keep_count_max_messages_zero_treated_as_none() {
+    use librefang_types::message::Message;
+    // Some(0) is coerced to None by resolve_cron_max_messages → keep all.
+    // cron_compute_keep_count itself receives None in that case; test both.
+    let messages: Vec<Message> = (0..5).map(|i| Message::user(format!("m{i}"))).collect();
+    // Passing None directly (resolve_cron_max_messages(Some(0)) == None).
+    let keep = cron_compute_keep_count(&messages, None, None);
+    assert_eq!(keep, 5, "None caps → keep all");
+}
+
+#[test]
+fn cron_compute_keep_count_max_tokens_zero_treated_as_none() {
+    use librefang_types::message::Message;
+    // resolve_cron_max_tokens(Some(0)) == None; passing None directly.
+    let messages: Vec<Message> = (0..5).map(|i| Message::user(format!("m{i}"))).collect();
+    let keep = cron_compute_keep_count(&messages, None, None);
+    assert_eq!(keep, 5, "None token cap → keep all");
+}
+
+#[test]
+fn cron_compute_keep_count_max_tokens_u64_max_keeps_all() {
+    use librefang_types::message::Message;
+    // An absurdly large token cap should keep all messages.
+    let messages: Vec<Message> = (0..8).map(|i| Message::user(format!("m{i}"))).collect();
+    let keep = cron_compute_keep_count(&messages, None, Some(u64::MAX));
+    assert_eq!(keep, 8, "u64::MAX token cap → keep all");
+}
+
+#[test]
+fn cron_compute_keep_count_single_giant_message_returns_one_or_zero() {
+    use librefang_runtime::compactor::estimate_token_count;
+    use librefang_types::message::Message;
+    // A single very large message whose estimated token count exceeds the cap.
+    // The loop exits with keep=0 because even 1 message is over budget.
+    let big = Message::user("x".repeat(50_000));
+    let messages = vec![big];
+    let est = estimate_token_count(&messages, None, None) as u64;
+    assert!(est > 0, "sanity: large message has non-zero token estimate");
+
+    // Budget smaller than the single message → keep = 0.
+    let keep = cron_compute_keep_count(&messages, None, Some(est / 2));
+    assert_eq!(
+        keep, 0,
+        "single oversized message with tight budget → keep 0"
+    );
+
+    // Budget equal to or larger → keep = 1.
+    let keep2 = cron_compute_keep_count(&messages, None, Some(est));
+    assert_eq!(
+        keep2, 1,
+        "single message fitting the budget exactly → keep 1"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// cron_clamp_keep_recent (#3693 PR #4683 review feedback)
+//
+// Regression coverage for the cap-violation bug where SummarizeTrim used the
+// raw cron_session_compaction_keep_recent without considering the active size
+// cap. The clamp guarantees [summary] + tail ≤ keep_count.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cron_clamp_keep_recent_respects_cap() {
+    // keep_count = 5 ⇒ tail ≤ 4 (one slot reserved for the summary).
+    assert_eq!(cron_clamp_keep_recent(8, 5), 4);
+    assert_eq!(cron_clamp_keep_recent(4, 5), 4);
+    assert_eq!(cron_clamp_keep_recent(3, 5), 3);
+}
+
+#[test]
+fn cron_clamp_keep_recent_preserves_user_value_when_under_cap() {
+    // keep_count = 100, user wants 8 → 8 (no clamp needed).
+    assert_eq!(cron_clamp_keep_recent(8, 100), 8);
+}
+
+#[test]
+fn cron_clamp_keep_recent_floor_is_one() {
+    // keep_count = 1 → cap permits a single message; clamp floors at 1.
+    // try_summarize_trim will then short-circuit because tail_start ==
+    // messages.len() once keep_recent ≥ n; the kernel falls back to plain
+    // prune in that case — exercising the floor here is just defensive.
+    assert_eq!(cron_clamp_keep_recent(8, 1), 1);
+    assert_eq!(cron_clamp_keep_recent(0, 1), 1);
+}
+
+#[test]
+fn cron_clamp_keep_recent_keep_count_zero_floors_to_one() {
+    // keep_count = 0 (cap would empty the session) — saturating_sub stays
+    // at 0, the .max(1) floor pulls the result back to 1. The caller is
+    // responsible for noticing keep_count == 0 separately; this only
+    // guarantees we never return 0 to try_summarize_trim, which would
+    // make tail_start == messages.len() and skip summarization entirely.
+    assert_eq!(cron_clamp_keep_recent(8, 0), 1);
+}
+
+#[test]
+fn cron_clamp_keep_recent_zero_cfg_floors_to_one() {
+    // Defensive: even though resolve_cron_max_* coerce 0 to None upstream,
+    // the helper itself must never return 0 because try_summarize_trim
+    // treats tail_start == messages.len() as "nothing to summarize".
+    assert_eq!(cron_clamp_keep_recent(0, 5), 1);
+}
+
+#[test]
+fn cron_clamp_combined_with_compute_keep_count_invariant() {
+    // End-to-end invariant for the SummarizeTrim path: across realistic
+    // (n, max_messages, keep_recent_cfg) combos, the post-compaction size
+    // (1 summary + clamped tail) must always satisfy the cap that
+    // cron_compute_keep_count would have produced.
+    use librefang_types::message::Message;
+
+    // Only cases where the kernel actually enters SummarizeTrim
+    // (i.e. keep_count < n, so `mutated == true`) and the cap allows
+    // at least the [summary] + 1-msg-tail minimum (keep_count >= 2).
+    let cases = [
+        // (n, max_messages, keep_recent_cfg)
+        (20, Some(5), 8),  // user wants 8, cap allows 5 → tail = 4 → result = 5
+        (20, Some(10), 8), // user wants 8, cap allows 10 → tail = 8 → result = 9
+        (20, Some(2), 8),  // tight cap → tail = 1 → result = 2
+    ];
+
+    for (n, max_msgs, keep_recent_cfg) in cases {
+        let messages: Vec<Message> = (0..n).map(|i| Message::user(format!("m{i}"))).collect();
+        let keep_count = cron_compute_keep_count(&messages, max_msgs, None);
+        // Sanity: this case should be one that triggers compaction.
+        assert!(
+            keep_count < n && keep_count >= 2,
+            "test case precondition: keep_count={keep_count} must be in [2, n) for n={n}"
+        );
+
+        let tail = cron_clamp_keep_recent(keep_recent_cfg, keep_count);
+        let post_size = 1 + tail; // [summary] + tail
+
+        assert!(
+            post_size <= keep_count,
+            "case (n={n}, max_messages={max_msgs:?}, keep_recent_cfg={keep_recent_cfg}): \
+             post_size={post_size} must fit within keep_count={keep_count}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// cron_resolve_compaction_mode (#4683 review M1)
+//
+// Routing layer that protects SummarizeTrim from being run against caps so
+// tight that `[summary] + 1-msg-tail` would still violate them, which would
+// loop forever burning aux LLM calls without converging the session.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cron_resolve_compaction_mode_summarize_trim_with_keep_count_zero_routes_to_prune() {
+    use librefang_types::config::CronCompactionMode;
+    // keep_count = 0 happens when even the single newest message exceeds
+    // cron_session_max_tokens — Prune empties the session, which is the
+    // only meaningful action here.
+    assert_eq!(
+        cron_resolve_compaction_mode(CronCompactionMode::SummarizeTrim, 0),
+        CronCompactionMode::Prune,
+    );
+}
+
+#[test]
+fn cron_resolve_compaction_mode_summarize_trim_with_keep_count_one_routes_to_prune() {
+    use librefang_types::config::CronCompactionMode;
+    // keep_count = 1 means cap permits exactly 1 message. SummarizeTrim
+    // would write [summary, tail_msg] = 2, violating the cap and
+    // triggering the same compaction on the next fire — the loop the
+    // bug describes.
+    assert_eq!(
+        cron_resolve_compaction_mode(CronCompactionMode::SummarizeTrim, 1),
+        CronCompactionMode::Prune,
+    );
+}
+
+#[test]
+fn cron_resolve_compaction_mode_summarize_trim_at_threshold_keeps_summarize() {
+    use librefang_types::config::CronCompactionMode;
+    // keep_count = 2 is the smallest value that fits [summary] + 1-tail
+    // exactly. SummarizeTrim is allowed.
+    assert_eq!(
+        cron_resolve_compaction_mode(CronCompactionMode::SummarizeTrim, 2),
+        CronCompactionMode::SummarizeTrim,
+    );
+}
+
+#[test]
+fn cron_resolve_compaction_mode_summarize_trim_with_normal_keep_count_unchanged() {
+    use librefang_types::config::CronCompactionMode;
+    // Typical case: cap allows plenty of room. No re-routing.
+    assert_eq!(
+        cron_resolve_compaction_mode(CronCompactionMode::SummarizeTrim, 50),
+        CronCompactionMode::SummarizeTrim,
+    );
+}
+
+#[test]
+fn cron_resolve_compaction_mode_prune_is_never_re_routed() {
+    use librefang_types::config::CronCompactionMode;
+    // The router only re-routes SummarizeTrim → Prune. Configured Prune
+    // passes through unchanged at every keep_count (including 0).
+    for keep_count in [0usize, 1, 2, 8, 100] {
+        assert_eq!(
+            cron_resolve_compaction_mode(CronCompactionMode::Prune, keep_count),
+            CronCompactionMode::Prune,
+            "Prune must pass through unchanged at keep_count={keep_count}"
+        );
+    }
+}
+
+#[test]
+fn cron_resolve_compaction_mode_combined_with_compute_keep_count_tight_cap() {
+    // L2 / integration-shaped invariant: for caps so tight that the
+    // helper would compute keep_count < 2, SummarizeTrim must resolve
+    // to Prune so the kernel dispatches to apply_cron_prune (which
+    // shrinks deterministically) and not to try_summarize_trim (which
+    // would write 2 messages back and loop).
+    use librefang_types::config::CronCompactionMode;
+    use librefang_types::message::Message;
+
+    // 10 plain messages; max_messages = 1 → keep_count = 1.
+    let messages: Vec<Message> = (0..10).map(|i| Message::user(format!("m{i}"))).collect();
+    let keep_count = cron_compute_keep_count(&messages, Some(1), None);
+    assert_eq!(keep_count, 1, "max_messages=1 must produce keep_count=1");
+
+    let resolved = cron_resolve_compaction_mode(CronCompactionMode::SummarizeTrim, keep_count);
+    assert_eq!(
+        resolved,
+        CronCompactionMode::Prune,
+        "tight cap (keep_count=1) must downgrade SummarizeTrim → Prune"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// try_summarize_trim direct unit tests (#3693 / PR #4683 review M1)
+//
+// `try_summarize_trim` is the file-private async helper that the cron tick
+// calls when SummarizeTrim mode is active. It is reachable from this child
+// test module because Rust gives child modules access to their parent's
+// private items, and we exploit that to test the helper's branches directly
+// rather than reconstruct them via `compact_messages` (the integration suite
+// in `tests/cron_compaction_test.rs` already covers that).
+//
+// What these tests pin down:
+//   - L2 fast-fail: empty model name returns None *without* calling the LLM
+//     driver (verified via a counting mock).
+//   - keep_recent ≥ messages.len() short-circuit returns None instead of
+//     handing an empty / consume-everything prefix to compact_messages.
+//   - Successful path produces `[summary_msg, …kept_tail]` with the kernel's
+//     wrapper format (`[Cron session summary — N messages compacted]\n\n…`).
+//   - LLM-failure path (used_fallback=true via a failing driver) is rejected
+//     by the `!used_fallback && !empty` guard inside try_summarize_trim and
+//     returns None — so the caller drops to plain prune.
+//   - adjust_split_for_tool_pair is reused so a ToolUse / ToolResult pair is
+//     never split across the summary / tail boundary.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod try_summarize_trim_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use librefang_runtime::llm_driver::{
+        CompletionRequest, CompletionResponse, LlmDriver, LlmError,
+    };
+    use librefang_types::message::{
+        ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
+    };
+
+    /// Returns a canned non-empty summary string. `calls` counts how many
+    /// times `complete` is invoked so tests can assert the L2 fast-fail
+    /// short-circuits before reaching the driver.
+    struct CountingFakeDriver {
+        summary: String,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LlmDriver for CountingFakeDriver {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: self.summary.clone(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage {
+                    input_tokens: 50,
+                    output_tokens: 10,
+                    ..Default::default()
+                },
+            })
+        }
+    }
+
+    /// Always errors. Forces `compact_messages` through stage-1 → stage-2 →
+    /// stage-3 placeholder so it returns Ok with `used_fallback=true`.
+    struct AlwaysFailingDriver;
+
+    #[async_trait]
+    impl LlmDriver for AlwaysFailingDriver {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::Http("connection refused".to_string()))
+        }
+    }
+
+    /// L2 fast-fail: empty model name must skip the LLM call entirely.
+    /// Holding the per-session mutex / cron_lane slot across a guaranteed-fail
+    /// LLM round-trip is exactly what the L2 patch was added to prevent, so
+    /// the regression check is "driver was never called".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn try_summarize_trim_empty_model_short_circuits_without_calling_driver() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let driver: Arc<dyn LlmDriver> = Arc::new(CountingFakeDriver {
+            summary: "should never appear".to_string(),
+            calls: calls.clone(),
+        });
+        let messages: Vec<Message> = (0..10)
+            .map(|i| Message::user(format!("turn {i}")))
+            .collect();
+
+        let out = super::try_summarize_trim(&messages, 4, driver, "").await;
+
+        assert!(out.is_none(), "empty model name must short-circuit to None");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "L2 fast-fail must not invoke the LLM driver"
+        );
+    }
+
+    /// `keep_recent >= messages.len()` makes `tail_start == messages.len()`,
+    /// which means there is nothing to summarise. The function must return
+    /// None so the caller can decide whether to plain-prune or skip.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn try_summarize_trim_keep_recent_covers_everything_returns_none() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let driver: Arc<dyn LlmDriver> = Arc::new(CountingFakeDriver {
+            summary: "should never appear".to_string(),
+            calls: calls.clone(),
+        });
+        let messages: Vec<Message> = (0..3).map(|i| Message::user(format!("turn {i}"))).collect();
+
+        // keep_recent = 5 > 3 messages → raw_tail_start = 0 (saturating_sub),
+        // adjust_split_for_tool_pair leaves it at 0, so we hit the
+        // "tail_start == 0" short-circuit branch.
+        let out = super::try_summarize_trim(&messages, 5, driver, "test-model").await;
+
+        assert!(
+            out.is_none(),
+            "keep_recent >= len must short-circuit to None"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "no summary needed → driver must not be called"
+        );
+    }
+
+    /// Happy path: a working LLM produces a real summary and
+    /// try_summarize_trim returns `Some([summary_msg] + tail)` where the
+    /// summary message has the kernel's expected wrapper format.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn try_summarize_trim_successful_returns_summary_plus_tail() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let driver: Arc<dyn LlmDriver> = Arc::new(CountingFakeDriver {
+            summary: "Older turns covered tasks A and B.".to_string(),
+            calls: calls.clone(),
+        });
+        let messages: Vec<Message> = (0..10)
+            .map(|i| Message::user(format!("turn {i}")))
+            .collect();
+        let keep_recent = 3usize;
+
+        let out = super::try_summarize_trim(&messages, keep_recent, driver, "test-model")
+            .await
+            .expect("a working driver with non-empty content must yield Some(_)");
+
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "driver must be called at least once"
+        );
+        assert_eq!(
+            out.len(),
+            1 + keep_recent,
+            "output must be [summary] + kept tail"
+        );
+
+        // First message is the synthetic summary with the kernel's wrapper.
+        let head_text = out[0].content.text_content();
+        assert!(
+            head_text.contains("[Cron session summary"),
+            "summary message must use the kernel's '[Cron session summary — N messages compacted]' wrapper, got: {head_text}",
+        );
+        assert!(
+            head_text.contains("Older turns covered tasks A and B."),
+            "summary message must embed the LLM-produced summary text, got: {head_text}",
+        );
+        // The wrapper must report the count of messages that were compacted
+        // (10 - 3 = 7 here), not the kept-tail count.
+        assert!(
+            head_text.contains("7 messages compacted"),
+            "summary wrapper must count compacted messages (10 - keep_recent=3 = 7), got: {head_text}",
+        );
+
+        // Tail must be the verbatim newest 3 messages, in order.
+        assert_eq!(out[1].content.text_content(), "turn 7");
+        assert_eq!(out[2].content.text_content(), "turn 8");
+        assert_eq!(out[3].content.text_content(), "turn 9");
+    }
+
+    /// LLM failure path: when every stage of `compact_messages` fails, it
+    /// returns `Ok(result)` with `used_fallback = true` and a non-empty
+    /// placeholder summary string. The kernel's M4 guard
+    /// (`!summary.is_empty() && !used_fallback`) must reject that result so
+    /// `try_summarize_trim` returns None and the caller drops to plain prune.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn try_summarize_trim_llm_failure_via_used_fallback_returns_none() {
+        let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysFailingDriver);
+        let messages: Vec<Message> = (0..10)
+            .map(|i| Message::user(format!("turn {i}")))
+            .collect();
+
+        let out = super::try_summarize_trim(&messages, 3, driver, "test-model").await;
+
+        assert!(
+            out.is_none(),
+            "used_fallback=true result must be rejected so the caller can plain-prune"
+        );
+    }
+
+    /// Tool-pair edge case: with an Assistant{ToolUse} / User{ToolResult}
+    /// pair sitting at the would-be summary/tail boundary, the helper must
+    /// shift the split (via adjust_split_for_tool_pair) so the pair stays on
+    /// the same side. Concretely: the kept tail in the returned vec must not
+    /// contain a dangling ToolResult whose ToolUse was summarised away.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn try_summarize_trim_does_not_split_tool_pair_across_summary_boundary() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let driver: Arc<dyn LlmDriver> = Arc::new(CountingFakeDriver {
+            summary: "summarised older turns including the tool call.".to_string(),
+            calls: calls.clone(),
+        });
+
+        let tool_use_id = "tool-xyz-789".to_string();
+
+        // 6 plain messages, then ToolUse @6 / ToolResult @7, then 2 plain follow-ups.
+        let mut messages: Vec<Message> =
+            (0..6).map(|i| Message::user(format!("pre {i}"))).collect();
+        messages.push(Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: tool_use_id.clone(),
+                name: "shell_exec".to_string(),
+                input: serde_json::json!({"cmd": "echo hi"}),
+                provider_metadata: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        });
+        messages.push(Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                tool_name: String::new(),
+                content: "hi".to_string(),
+                is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::default(),
+                approval_request_id: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        });
+        messages.push(Message::user("post 0".to_string()));
+        messages.push(Message::user("post 1".to_string()));
+
+        // Total: 10 messages. keep_recent = 3 → raw split = 7 (between
+        // ToolUse @6 and ToolResult @7). adjust_split_for_tool_pair must
+        // shift the split forward so the pair stays together; the ToolResult
+        // therefore must NOT appear in the kept tail.
+        let out = super::try_summarize_trim(&messages, 3, driver, "test-model")
+            .await
+            .expect("working driver must yield Some(_)");
+
+        // out[0] is the summary message; out[1..] is the kept tail.
+        let tail = &out[1..];
+        let tail_has_orphan_tool_result = tail.iter().any(|m| {
+            matches!(&m.content, MessageContent::Blocks(blocks)
+            if blocks.iter().any(|b|
+                matches!(b, ContentBlock::ToolResult { tool_use_id: id, .. } if id == &tool_use_id)
+            ))
+        });
+        assert!(
+            !tail_has_orphan_tool_result,
+            "tool-pair must not be split across summary/tail: ToolUse was summarised away but ToolResult landed in the tail",
+        );
+    }
+}

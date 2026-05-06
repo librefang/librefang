@@ -107,10 +107,99 @@ endpoints; no separate metrics route is needed.
 | You want a soft early-warning before any cap is reached                     | Leave `cron_session_warn_fraction` at default; watch for the WARN.   |
 | Hard isolation between fires for safety / audit                             | `session_mode = "new"`; pruning knobs do not apply.                  |
 
-## Out of scope (tracked under #3693)
+## Compaction mode: `cron_session_compaction_mode` *(introduced in #3693 Gap 4)*
 
-The current prune path is "drop oldest in front" — purely lossy. A gentler
-*summarize-and-trim* compaction (synthesize a short summary, replace the
-dropped tail with it) would preserve more semantic state at the cost of a
-synthetic LLM round-trip per fire. That work is intentionally deferred from
-this PR; tracked under the umbrella issue #3693.
+Controls **how** messages are removed when `cron_session_max_tokens` or
+`cron_session_max_messages` is triggered.
+
+### `"prune"` (default)
+
+Drop the oldest messages from the front of the session in a loop until the
+budget is satisfied. Fast and deterministic; identical to the pre-#3693
+behaviour. No LLM call is involved.
+
+### `"summarize_trim"`
+
+Instead of silently discarding the messages that would be dropped, call the
+configured compression LLM (the same auxiliary chain used by
+`/compact` — `[llm.auxiliary] compression` if set, otherwise the default
+driver) to produce a short summary. The summary is prepended as a synthetic
+`assistant` message, followed by the most recent
+`cron_session_compaction_keep_recent` messages verbatim.
+
+```
+[Cron session summary — <N> messages compacted]
+
+<LLM-generated summary text>
+```
+
+If the LLM call fails (network error, empty response, provider 5xx), the
+kernel **falls back to `prune`** and emits a `tracing::warn!`:
+
+```
+WARN cron SummarizeTrim: LLM summarization failed or returned empty; falling back to Prune
+agent_id=<uuid> session_id=<sid> job=<name>
+```
+
+The fire is never blocked by a summarization failure.
+
+### `cron_session_compaction_keep_recent`
+
+Number of messages preserved verbatim **after** the summary (the "tail").
+Only meaningful when `cron_session_compaction_mode = "summarize_trim"`.
+
+- Default: `8`
+- Minimum: `1` (values below are clamped at runtime to `1` via `.max(1)` in
+  cron fire dispatch, before `SummarizeTrim` splits the session)
+- Effective maximum: bounded by the size cap. The post-compaction session is
+  `[1 summary] + tail`, so the runtime clamps `keep_recent` to `keep_count - 1`
+  where `keep_count` is the number of messages the cap would allow on its own.
+  Concretely: with `cron_session_max_messages = 5` and
+  `cron_session_compaction_keep_recent = 8`, the runtime uses `keep_recent = 4`
+  (= `5 - 1`) so the result is exactly 5 messages. Without this clamp the next
+  fire would still violate the cap (1 summary + 8 tail = 9) and the loop would
+  re-summarize 1 message into 1 summary forever, burning aux LLM calls without
+  making progress.
+
+**Example config.toml:**
+
+```toml
+cron_session_max_tokens        = 80000
+cron_session_compaction_mode   = "summarize_trim"
+cron_session_compaction_keep_recent = 10
+```
+
+## Picking a strategy (updated)
+
+| Scenario                                                                       | Recommendation                                                                |
+| ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| Long chain of unrelated prompts (the cron job is "stateless per fire")         | `session_mode = "new"` on the job. Each fire gets a fresh session.            |
+| Continuous state machine (the agent must remember prior fires)                 | `Persistent` + set `cron_session_max_tokens` (e.g. `100_000`).               |
+| Continuous state machine, context continuity matters                           | `Persistent` + `cron_session_compaction_mode = "summarize_trim"`.             |
+| You want a soft early-warning before any cap is reached                        | Leave `cron_session_warn_fraction` at default; watch for the WARN.            |
+| Hard isolation between fires for safety / audit                                | `session_mode = "new"`; pruning knobs do not apply.                           |
+
+## Concurrency caveat
+
+When an agent has **multiple cron jobs** and all of them use
+`session_mode = "persistent"` (the default), every fire maps to the same shared
+`(agent, "cron")` session.
+
+Compaction is serialized through a **per-session mutex** (see the `prune_lock`
+path in `kernel/mod.rs`), so two fires that both need to prune cannot race each
+other's read-modify-write. However, the global `cron_lane` semaphore that caps
+total in-flight cron fires is **not scoped per session** — it only limits how
+many fires execute concurrently across the whole daemon.
+
+`SummarizeTrim` holds the per-session mutex **across the entire LLM summary
+call** (which may take several seconds). This is intentional: it serialises
+`SummarizeTrim` runs on the same session so two concurrent fires cannot each
+start a summary against the same un-compacted snapshot. The side effect is that
+a second fire for the same agent that also needs to prune will **block** at the
+mutex until the first fire's summary + apply completes, and it holds one slot of
+the `cron_lane` semaphore for the full duration of the LLM call.
+
+**Mitigation**: if an agent has multiple cron jobs that need independent context
+or if missing a fire's output is unacceptable, configure those jobs (or the
+agent) with `session_mode = "new"`. Each fire then gets its own deterministic,
+isolated session and the shared `(agent, "cron")` session is never touched.
