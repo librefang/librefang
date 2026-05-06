@@ -363,8 +363,9 @@ impl SessionStore {
 
         // Wrap session upsert + FTS update in a single transaction so a crash
         // between the three statements cannot leave session and FTS data
-        // inconsistent. `unchecked_transaction` is safe here because we hold
-        // the Mutex exclusively (no other thread can access this Connection).
+        // inconsistent. `unchecked_transaction` is safe here because we own
+        // the `PooledConnection` for the duration of the transaction; no
+        // other thread can access this `Connection`.
         let tx = conn
             .unchecked_transaction()
             .map_err(LibreFangError::memory)?;

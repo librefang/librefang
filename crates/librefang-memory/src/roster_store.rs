@@ -6,6 +6,7 @@
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use tracing;
 
 /// Persistent roster of group chat members, backed by SQLite.
 pub struct RosterStore {
@@ -38,7 +39,14 @@ impl RosterStore {
         if chat_id.is_empty() || user_id.is_empty() {
             return;
         }
-        let c = self.pool.get().expect("roster pool get");
+        let Ok(c) = self.pool.get() else {
+            tracing::warn!(
+                "roster pool exhausted; skipping upsert for {}/{}",
+                channel,
+                chat_id
+            );
+            return;
+        };
         let _ = c.execute(
             "INSERT INTO group_roster (channel_type, chat_id, user_id, display_name, username, first_seen, last_seen)
              VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s','now'), strftime('%s','now'))
@@ -52,7 +60,14 @@ impl RosterStore {
 
     /// List all members of a group chat, ordered by display name.
     pub fn members(&self, channel: &str, chat_id: &str) -> Vec<(String, String, Option<String>)> {
-        let c = self.pool.get().expect("roster pool get");
+        let Ok(c) = self.pool.get() else {
+            tracing::warn!(
+                "roster pool exhausted; returning empty members for {}/{}",
+                channel,
+                chat_id
+            );
+            return Vec::new();
+        };
         let mut stmt = c
             .prepare(
                 "SELECT user_id, display_name, username FROM group_roster
@@ -74,7 +89,14 @@ impl RosterStore {
 
     /// Remove a single member from the roster.
     pub fn remove_member(&self, channel: &str, chat_id: &str, user_id: &str) {
-        let c = self.pool.get().expect("roster pool get");
+        let Ok(c) = self.pool.get() else {
+            tracing::warn!(
+                "roster pool exhausted; skipping remove_member for {}/{}",
+                channel,
+                chat_id
+            );
+            return;
+        };
         let _ = c.execute(
             "DELETE FROM group_roster WHERE channel_type = ?1 AND chat_id = ?2 AND user_id = ?3",
             rusqlite::params![channel, chat_id, user_id],
@@ -83,7 +105,14 @@ impl RosterStore {
 
     /// Count the members in a group chat.
     pub fn member_count(&self, channel: &str, chat_id: &str) -> usize {
-        let c = self.pool.get().expect("roster pool get");
+        let Ok(c) = self.pool.get() else {
+            tracing::warn!(
+                "roster pool exhausted; returning 0 for member_count {}/{}",
+                channel,
+                chat_id
+            );
+            return 0;
+        };
         c.query_row(
             "SELECT COUNT(*) FROM group_roster WHERE channel_type = ?1 AND chat_id = ?2",
             rusqlite::params![channel, chat_id],

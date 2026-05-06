@@ -59,12 +59,14 @@ pub trait IdempotencyStore: Send + Sync {
 #[derive(Debug)]
 pub enum IdempotencyError {
     Sqlite(rusqlite::Error),
+    Pool(r2d2::Error),
 }
 
 impl std::fmt::Display for IdempotencyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IdempotencyError::Sqlite(e) => write!(f, "sqlite: {}", e),
+            IdempotencyError::Pool(e) => write!(f, "pool: {}", e),
         }
     }
 }
@@ -73,6 +75,7 @@ impl std::error::Error for IdempotencyError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             IdempotencyError::Sqlite(e) => Some(e),
+            IdempotencyError::Pool(e) => Some(e),
         }
     }
 }
@@ -83,10 +86,16 @@ impl From<rusqlite::Error> for IdempotencyError {
     }
 }
 
+impl From<r2d2::Error> for IdempotencyError {
+    fn from(e: r2d2::Error) -> Self {
+        IdempotencyError::Pool(e)
+    }
+}
+
 /// SQLite-backed idempotency store reusing the substrate connection.
 ///
-/// Sharing the connection pool (handed out via
-/// `MemorySubstrate::usage_conn`) keeps every persisted byte under one
+/// Sharing the substrate connection pool (handed out via
+/// `MemorySubstrate::pool()`) keeps every persisted byte under one
 /// WAL pool — no separate file, no second open call.
 #[derive(Clone)]
 pub struct SqliteIdempotencyStore {
@@ -108,7 +117,7 @@ fn now_unix() -> i64 {
 
 impl IdempotencyStore for SqliteIdempotencyStore {
     fn lookup(&self, key: &str) -> Result<Option<StoredRecord>, IdempotencyError> {
-        let conn = self.pool.get().expect("idempotency pool get");
+        let conn = self.pool.get()?;
         let now = now_unix();
         // Drop the row if it's expired so the lookup behaves like a
         // fresh miss; the write path will then re-INSERT cleanly.
@@ -143,7 +152,7 @@ impl IdempotencyStore for SqliteIdempotencyStore {
         body_hash: &str,
         response: &CachedResponse,
     ) -> Result<(), IdempotencyError> {
-        let conn = self.pool.get().expect("idempotency pool get");
+        let conn = self.pool.get()?;
         let now = now_unix();
         let expires = now + TTL_SECONDS;
         conn.execute(
@@ -163,7 +172,7 @@ impl IdempotencyStore for SqliteIdempotencyStore {
     }
 
     fn prune_expired(&self) -> Result<(), IdempotencyError> {
-        let conn = self.pool.get().expect("idempotency pool get");
+        let conn = self.pool.get()?;
         let now = now_unix();
         conn.execute(
             "DELETE FROM idempotency_keys WHERE expires_at <= ?1",

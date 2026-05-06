@@ -1334,8 +1334,8 @@ impl MemorySubstrate {
 /// `*_agent` methods on the individual stores so a new agent-scoped table
 /// only has to be added in one place.
 ///
-/// Caller is responsible for taking the connection mutex; this function
-/// only owns the transaction lifecycle.
+/// The caller passes in an already-acquired `PooledConnection`; this
+/// function only owns the transaction lifecycle.
 fn remove_agent_inner(conn: &Connection, agent_id: AgentId) -> LibreFangResult<()> {
     let id = agent_id.0.to_string();
     let tx = conn
@@ -1352,7 +1352,7 @@ fn remove_agent_inner(conn: &Connection, agent_id: AgentId) -> LibreFangResult<(
 /// failed VACUUM is not fatal.
 ///
 /// Caller is responsible for the `pruned_count == 0` short-circuit and
-/// for taking the connection mutex.
+/// for passing an already-acquired `PooledConnection`.
 fn vacuum_inner(conn: &Connection, pruned_count: usize) {
     // Flush WAL frames to the main DB file first so VACUUM has less work.
     if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
@@ -2078,17 +2078,19 @@ mod tests {
     /// pool connections simultaneously, each holding the connection for a
     /// fixed 50 ms window. If the pool serialised callers (old
     /// Mutex<Connection> behaviour), the batch would take ≥ 200 ms;
-    /// with a pool size of 8 and WAL readers don't block each other and
-    /// the batch completes in well under 160 ms.
+    /// with a pool size of 8 and WAL readers don't block each other, so
+    /// multiple tasks can hold pooled connections simultaneously.
     #[tokio::test]
     async fn pool_enables_concurrent_reads() {
-        use std::time::{Duration, Instant};
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        use std::sync::Arc as StdArc;
+        use std::time::Duration;
 
         // File-backed DB so WAL journal_mode is active; in-memory pools
         // are max_size=1 and cannot exercise multi-reader concurrency.
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("concurrent_reads.db");
-        let substrate = Arc::new(MemorySubstrate::open(&db_path, 0.1).unwrap());
+        let substrate = StdArc::new(MemorySubstrate::open(&db_path, 0.1).unwrap());
 
         // Seed one agent so reads hit real SQL rows.
         let entry = AgentEntry {
@@ -2099,37 +2101,52 @@ mod tests {
         };
         substrate.save_agent_async(&entry).await.unwrap();
 
-        // Each task: acquire a pooled connection, do a real SELECT, hold
-        // the connection open for 50 ms (simulating sustained read I/O),
-        // then release. Serialised = 4 × 50 ms = 200 ms; concurrent ≤ ~60 ms.
+        // Ordering-based proof: track how many tasks hold a pooled
+        // connection simultaneously. If the pool serialises (old
+        // Mutex<Connection> behaviour), max_concurrent stays at 1.
+        // With a real pool and WAL readers, multiple tasks overlap and
+        // max_concurrent reaches >= 2.
+        let in_flight = StdArc::new(AtomicUsize::new(0));
+        let max_concurrent = StdArc::new(AtomicUsize::new(0));
+
         let hold = Duration::from_millis(50);
         let pool = substrate.pool();
-        let t = Instant::now();
         let handles: Vec<_> = (0..4)
             .map(|_| {
                 let p = pool.clone();
+                let in_flight = StdArc::clone(&in_flight);
+                let max_concurrent = StdArc::clone(&max_concurrent);
                 tokio::task::spawn_blocking(move || {
                     let conn = p.get().expect("pool get");
+                    // Record entry into the concurrent hold window.
+                    let current = in_flight.fetch_add(1, SeqCst) + 1;
+                    // Update the observed maximum atomically.
+                    let mut prev = max_concurrent.load(SeqCst);
+                    while current > prev {
+                        match max_concurrent.compare_exchange_weak(prev, current, SeqCst, SeqCst) {
+                            Ok(_) => break,
+                            Err(actual) => prev = actual,
+                        }
+                    }
                     // Real read inside the held connection.
                     let _count: i64 = conn
                         .query_row("SELECT COUNT(*) FROM agents", [], |r| r.get(0))
                         .unwrap_or(0);
                     std::thread::sleep(hold);
+                    in_flight.fetch_sub(1, SeqCst);
                 })
             })
             .collect();
         for h in handles {
             h.await.unwrap();
         }
-        let elapsed = t.elapsed();
 
-        // 4 concurrent 50 ms tasks should finish well under 4 × 50 ms = 200 ms.
-        // Allow 160 ms for scheduler jitter on slow CI machines.
+        let observed = max_concurrent.load(SeqCst);
         assert!(
-            elapsed < Duration::from_millis(160),
-            "4 concurrent 50 ms readers took {:?}; expected < 160 ms. \
-             Pool concurrency or WAL may be broken (#3378)",
-            elapsed,
+            observed >= 2,
+            "expected >= 2 tasks to hold pooled connections concurrently, \
+             but max_concurrent = {}. Pool concurrency or WAL may be broken (#3378)",
+            observed,
         );
     }
 
