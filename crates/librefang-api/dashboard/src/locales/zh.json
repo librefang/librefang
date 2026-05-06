@@ -739,7 +739,13 @@
     "provider_models": "模型",
     "no_models_for_provider": "暂无注册模型",
     "remove_key_confirm_title": "移除 API Key",
-    "remove_key_confirm_message": "这将移除已存储的 API Key，并将该供应商标记为未配置。"
+    "remove_key_confirm_message": "这将移除已存储的 API Key，并将该供应商标记为未配置。",
+    "all_configured": "全部供应商均已配置",
+    "empty_title": "尚未配置供应商",
+    "empty_body": "接入 OpenAI、Anthropic、Gemini、Groq 或其他 LLM 供应商，让 agent 可以路由提示词并使用模型。",
+    "connect_first": "添加一个供应商",
+    "picker_title": "添加供应商",
+    "create_custom": "创建自定义供应商"
   },
   "channels": {
     "title": "通道",

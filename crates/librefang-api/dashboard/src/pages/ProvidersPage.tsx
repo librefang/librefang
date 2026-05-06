@@ -3,8 +3,6 @@ import { formatTime, formatDateTime } from "../lib/datetime";
 import { useMemo, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { AnimatePresence, motion } from "motion/react";
-import { tabContent } from "../lib/motion";
 import type { ApiActionResponse, ProviderItem } from "../api";
 import { isProviderAvailable } from "../lib/status";
 import { useProviders, useProviderStatus } from "../lib/queries/providers";
@@ -187,8 +185,6 @@ function useProviderConfig(
   setUrlMutation: ReturnType<typeof useMutation<unknown, unknown, { id: string; baseUrl: string; proxyUrl?: string }>>,
   addToast: (msg: string, type?: "success" | "error" | "info") => void,
   t: TFunction,
-  activeTab: string,
-  setActiveTab: (tab: "configured" | "unconfigured") => void,
 ) {
   const [state, setState] = useState<ProviderConfigState>({
     provider: null, keyInput: "", urlInput: "", proxyInput: "", hasStoredKey: false,
@@ -229,14 +225,13 @@ function useProviderConfig(
         });
       }
       setState(s => ({ ...s, provider: null }));
-      if (activeTab === "unconfigured") setActiveTab("configured");
       addToast(t("providers.key_saved"), "success");
     } catch (e: unknown) {
       setState(s => ({ ...s, error: getErrorMessage(e) }));
     } finally {
       setState(s => ({ ...s, saving: false }));
     }
-  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, setKeyMutation, setUrlMutation, addToast, t, activeTab, setActiveTab]);
+  }, [state.provider, state.keyInput, state.urlInput, state.proxyInput, setKeyMutation, setUrlMutation, addToast, t]);
 
   const removeKey = useCallback(async () => {
     if (!state.provider) return;
@@ -1047,13 +1042,10 @@ function CreateProviderWizard({
 
 // ── Main Page ────────────────────────────────────────────────────
 
-type TabType = "configured" | "unconfigured";
-
 export function ProvidersPage() {
   const { t } = useTranslation();
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set());
-  const [activeTab, setActiveTab] = useState<TabType>("configured");
   const [search, setSearch] = useState("");
   const [sortField, setSortField] = useState<SortField>("name");
   const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
@@ -1062,7 +1054,13 @@ export function ProvidersPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [detailsProvider, setDetailsProvider] = useState<ProviderItem | null>(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
-  useCreateShortcut(() => setShowCreateForm(true));
+  // The picker drawer holds the catalog of unconfigured providers, mirroring
+  // ChannelsPage. Default view shows only configured providers so the page
+  // stays focused on what's actually wired up; the configure-flow surface
+  // for new providers lives behind the Add picker.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerSearch, setPickerSearch] = useState("");
+  useCreateShortcut(() => { setPickerSearch(""); setPickerOpen(true); });
   const [deleteConfirmProvider, setDeleteConfirmProvider] = useState<ProviderItem | null>(null);
   const addToast = useUIStore((s) => s.addToast);
 
@@ -1082,8 +1080,6 @@ export function ProvidersPage() {
     setUrlMutation,
     addToast,
     t,
-    activeTab,
-    setActiveTab,
   );
 
   const providers = providersQuery.data ?? [];
@@ -1091,15 +1087,17 @@ export function ProvidersPage() {
   const configuredCount = useMemo(() => providers.filter(p => isProviderAvailable(p.auth_status)).length, [providers]);
   const unconfiguredCount = useMemo(() => providers.filter(p => !isProviderAvailable(p.auth_status)).length, [providers]);
 
+  // Configured providers are the main page content. Filter/sort applies
+  // to those only; the unconfigured catalog lives behind the Add picker.
   const filteredProviders = useMemo(
     () => [...providers]
       .filter(p => {
-        const tabMatch = activeTab === "configured" ? isProviderAvailable(p.auth_status) : !isProviderAvailable(p.auth_status);
+        if (!isProviderAvailable(p.auth_status)) return false;
         const searchMatch = !search || (p.display_name || p.id).toLowerCase().includes(search.toLowerCase()) || p.id.toLowerCase().includes(search.toLowerCase());
         let statusMatch = true;
         if (filterStatus === "reachable") statusMatch = p.reachable === true;
         else if (filterStatus === "unreachable") statusMatch = p.reachable === false;
-        return tabMatch && searchMatch && statusMatch;
+        return searchMatch && statusMatch;
       })
       .sort((a, b) => {
         const aCli = isCliProvider(a) ? 1 : 0;
@@ -1111,10 +1109,26 @@ export function ProvidersPage() {
         else if (sortField === "latency") cmp = (a.latency_ms ?? 0) - (b.latency_ms ?? 0);
         return sortOrder === "asc" ? cmp : -cmp;
       }),
-    [providers, activeTab, search, filterStatus, sortField, sortOrder],
+    [providers, search, filterStatus, sortField, sortOrder],
   );
 
-  const handleTabChange = (tab: TabType) => { setActiveTab(tab); setSelectedIds(new Set()); setFilterStatus("all"); };
+  // Catalog of unconfigured providers, surfaced in the Add picker.
+  const pickerProviders = useMemo(
+    () => [...providers]
+      .filter(p => !isProviderAvailable(p.auth_status))
+      .filter(p => !pickerSearch
+        || (p.display_name || p.id).toLowerCase().includes(pickerSearch.toLowerCase())
+        || p.id.toLowerCase().includes(pickerSearch.toLowerCase()))
+      .sort((a, b) => (a.display_name || a.id).localeCompare(b.display_name || b.id)),
+    [providers, pickerSearch],
+  );
+
+  const openPicker = () => { setPickerSearch(""); setPickerOpen(true); };
+  const handlePick = (p: ProviderItem) => {
+    setPickerOpen(false);
+    config.open(p);
+  };
+
   const handleSearch = (value: string) => { setSearch(value); setSelectedIds(new Set()); };
   const handleFilterChange = (filter: FilterStatus) => { setFilterStatus(filter); setSelectedIds(new Set()); };
 
@@ -1208,7 +1222,16 @@ export function ProvidersPage() {
         helpText={t("providers.help")}
         actions={
           <div className="flex items-center gap-2">
-            <Button variant="primary" size="sm" onClick={() => setShowCreateForm(true)} leftIcon={<Plus className="w-3.5 h-3.5" />} title={t("providers.add") + " (n)"}>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={openPicker}
+              leftIcon={<Plus className="w-3.5 h-3.5" />}
+              disabled={unconfiguredCount === 0}
+              title={unconfiguredCount === 0
+                ? t("providers.all_configured", { defaultValue: "All providers configured" })
+                : t("providers.add") + " (n)"}
+            >
               <span>{t("providers.add")}</span>
               <kbd className="hidden sm:inline-flex h-4 min-w-[16px] items-center justify-center rounded border border-white/30 bg-white/10 px-1 text-[8px] font-mono font-semibold ml-1.5">n</kbd>
             </Button>
@@ -1253,36 +1276,9 @@ export function ProvidersPage() {
         </div>
       </div>
 
-      {/* Tabs & Filter */}
+      {/* Filter & batch */}
       <div className="flex items-center justify-between gap-3 flex-wrap overflow-x-auto">
-        <div role="tablist" aria-label={t("providers.title", { defaultValue: "Providers" })} className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit">
-          <button
-            id="providers-tab-configured"
-            role="tab"
-            aria-selected={activeTab === "configured"}
-            aria-controls="providers-panel"
-            tabIndex={activeTab === "configured" ? 0 : -1}
-            onClick={() => handleTabChange("configured")}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${activeTab === "configured" ? "bg-surface text-success shadow-sm" : "text-text-dim hover:text-text-main"}`}>
-            <CheckCircle2 className="w-4 h-4" />
-            {t("providers.configured")}
-            <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] ${activeTab === "configured" ? "bg-success/20 text-success" : "bg-border-subtle text-text-dim"}`}>{configuredCount}</span>
-          </button>
-          <button
-            id="providers-tab-unconfigured"
-            role="tab"
-            aria-selected={activeTab === "unconfigured"}
-            aria-controls="providers-panel"
-            tabIndex={activeTab === "unconfigured" ? 0 : -1}
-            onClick={() => handleTabChange("unconfigured")}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${activeTab === "unconfigured" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"}`}>
-            <XCircle className="w-4 h-4" />
-            {t("providers.unconfigured")}
-            <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] ${activeTab === "unconfigured" ? "bg-brand/20 text-brand" : "bg-border-subtle text-text-dim"}`}>{unconfiguredCount}</span>
-          </button>
-        </div>
-
-        {activeTab === "configured" && <FilterChips activeFilter={filterStatus} onChange={handleFilterChange} t={t} />}
+        <FilterChips activeFilter={filterStatus} onChange={handleFilterChange} t={t} />
 
         {selectedIds.size > 0 && (
           <div className="flex items-center gap-2">
@@ -1294,17 +1290,38 @@ export function ProvidersPage() {
         )}
       </div>
 
-      <AnimatePresence mode="wait">
-      <motion.div key={activeTab} id="providers-panel" role="tabpanel" aria-labelledby={`providers-tab-${activeTab}`} variants={tabContent} initial="initial" animate="animate" exit="exit" className="flex flex-col gap-4">
+      <div className="flex flex-col gap-4">
       {providersQuery.isLoading ? (
         <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
           {[1, 2, 3, 4, 5, 6].map((i) => <CardSkeleton key={i} />)}
         </div>
       ) : providers.length === 0 ? (
         <EmptyState title={t("common.no_data")} icon={<Server className="h-6 w-6" />} />
+      ) : configuredCount === 0 ? (
+        // No providers configured yet — surface the picker as a primary
+        // CTA instead of an empty list. Mirrors the ChannelsPage empty
+        // state introduced when its tabs were retired.
+        <Card padding="lg" className="flex flex-col items-center text-center gap-4 py-10">
+          <div className="w-12 h-12 rounded-xl bg-brand/10 border border-brand/30 grid place-items-center text-brand">
+            <Server className="h-6 w-6" />
+          </div>
+          <div className="max-w-md space-y-2">
+            <h2 className="text-base font-bold text-text-main">
+              {t("providers.empty_title", { defaultValue: "No providers configured yet" })}
+            </h2>
+            <p className="text-sm text-text-dim leading-relaxed">
+              {t("providers.empty_body", {
+                defaultValue: "Connect OpenAI, Anthropic, Gemini, Groq, or any other LLM provider so agents can route prompts and consume models.",
+              })}
+            </p>
+          </div>
+          <Button variant="primary" size="md" onClick={openPicker} leftIcon={<Plus className="h-4 w-4" />}>
+            {t("providers.connect_first", { defaultValue: "Connect a provider" })}
+          </Button>
+        </Card>
       ) : filteredProviders.length === 0 ? (
         <EmptyState
-          title={search || filterStatus !== "all" ? t("providers.no_results") : (activeTab === "configured" ? t("providers.no_configured") : t("providers.no_unconfigured"))}
+          title={search || filterStatus !== "all" ? t("providers.no_results") : t("providers.no_configured")}
           icon={<Search className="h-6 w-6" />}
         />
       ) : (
@@ -1339,8 +1356,7 @@ export function ProvidersPage() {
           </div>
         </>
       )}
-      </motion.div>
-      </AnimatePresence>
+      </div>
 
       {/* Details Modal */}
       {detailsProvider && (
@@ -1478,17 +1494,85 @@ export function ProvidersPage() {
         <CreateProviderWizard
           onSubmit={async (values) => {
             // Hook invalidates providerKeys.all + modelKeys.lists() on
-            // success, so the configured tab refetches without an explicit
-            // refetch() call here.
+            // success, so the page refetches without an explicit refetch()
+            // call here.
             await createRegistryContentMutation.mutateAsync({
               contentType: "provider",
               values,
             });
             setShowCreateForm(false);
-            setActiveTab("configured");
           }}
           onCancel={() => setShowCreateForm(false)}
         />
+      </DrawerPanel>
+
+      {/* Add-provider picker — shows the catalog of unconfigured providers.
+          Click one to open the configure drawer; the "Create custom provider"
+          footer button drops back to the existing wizard. */}
+      <DrawerPanel
+        isOpen={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        title={t("providers.picker_title", { defaultValue: "Add provider" })}
+        size="lg"
+      >
+        <div className="flex flex-col gap-4 p-5">
+          <Input
+            value={pickerSearch}
+            onChange={(e) => setPickerSearch(e.target.value)}
+            placeholder={t("common.search")}
+            leftIcon={<Search className="w-4 h-4" />}
+            rightIcon={pickerSearch && (
+              <button
+                onClick={() => setPickerSearch("")}
+                className="hover:text-text-main"
+                aria-label={t("common.clear_search", { defaultValue: "Clear search" })}
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          />
+          {pickerProviders.length === 0 ? (
+            <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+              {pickerSearch
+                ? t("providers.no_results")
+                : t("providers.all_configured", { defaultValue: "All available providers are already configured." })}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {pickerProviders.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => handlePick(p)}
+                  className="flex items-center gap-3 px-3 py-2.5 rounded-lg border border-border-subtle bg-main/40 hover:border-brand/40 hover:bg-main/60 transition-colors text-left"
+                >
+                  <div className="w-9 h-9 rounded-lg bg-brand/10 border border-brand/20 grid place-items-center text-brand shrink-0">
+                    {getProviderIcon(p.id)}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="font-mono text-[13px] font-medium text-text-main truncate">
+                      {p.display_name || p.id}
+                    </div>
+                    <div className="font-mono text-[10.5px] text-text-dim/80 truncate">
+                      {p.id}
+                    </div>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-text-dim shrink-0" />
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="border-t border-border-subtle pt-3 mt-1">
+            <Button
+              variant="secondary"
+              className="w-full"
+              onClick={() => { setPickerOpen(false); setShowCreateForm(true); }}
+              leftIcon={<Plus className="w-3.5 h-3.5" />}
+            >
+              {t("providers.create_custom", { defaultValue: "Create custom provider" })}
+            </Button>
+          </div>
+        </div>
       </DrawerPanel>
     </div>
   );

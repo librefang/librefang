@@ -739,7 +739,13 @@
     "provider_models": "Models",
     "no_models_for_provider": "No models registered",
     "remove_key_confirm_title": "Remove API Key",
-    "remove_key_confirm_message": "This will remove the stored API key and move the provider back to unconfigured."
+    "remove_key_confirm_message": "This will remove the stored API key and move the provider back to unconfigured.",
+    "all_configured": "All providers configured",
+    "empty_title": "No providers configured yet",
+    "empty_body": "Connect OpenAI, Anthropic, Gemini, Groq, or any other LLM provider so agents can route prompts and consume models.",
+    "connect_first": "Connect a provider",
+    "picker_title": "Add provider",
+    "create_custom": "Create custom provider"
   },
   "channels": {
     "title": "Channels",
