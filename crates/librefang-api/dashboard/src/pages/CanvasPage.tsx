@@ -1571,7 +1571,7 @@ function CanvasPageInner() {
 
   // Add node
   const addNode = useCallback((type: string) => {
-    const DEFAULT_NODE_TYPE = NODE_TYPES.find(n => n.type === "agent")!;
+    const DEFAULT_NODE_TYPE = NODE_TYPES.find(n => n.type === "agent") || NODE_TYPES[0];
     const config = NODE_TYPES.find(n => n.type === type) || DEFAULT_NODE_TYPE;
     const defaultMode = NODE_MODE_MAP[type];
     // Use functional update to read latest nodes, avoiding stale closures.
@@ -2350,7 +2350,7 @@ function CanvasPageInner() {
 
           {/* Right-click context menu */}
           {contextMenu && (
-            <div role="menu" aria-label={t("canvas.ctx_menu_label", { defaultValue: "Context menu" })}
+            <div role="menu" tabIndex={-1} autoFocus aria-label={t("canvas.ctx_menu_label", { defaultValue: "Context menu" })}
               className="fixed z-50 rounded-xl border border-border-subtle bg-surface shadow-2xl py-1 min-w-[160px]"
               style={{ left: contextMenu.x, top: contextMenu.y }}
               onKeyDown={e => { if (e.key === "Escape") setContextMenu(null); }}>

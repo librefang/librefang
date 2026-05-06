@@ -6,7 +6,7 @@
 // `useUpdateUserPolicy`. Validation mirrors the daemon's checks so the
 // user sees errors inline before a round-trip.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams, Link } from "@tanstack/react-router";
 import {
@@ -846,7 +846,8 @@ interface TextareaProps {
 }
 
 function Textarea({ label, hint, value, onChange }: TextareaProps) {
-  const id = useMemo(() => label.toLowerCase().replace(/\s+/g, "-"), [label]);
+  const reactId = useId();
+  const id = `${reactId}-${label.toLowerCase().replace(/\s+/g, "-")}`;
   return (
     <div className="flex flex-col gap-1.5">
       <label htmlFor={id} className="text-[10px] font-black uppercase tracking-widest text-text-dim">
