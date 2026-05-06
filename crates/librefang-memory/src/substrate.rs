@@ -69,7 +69,7 @@ impl MemorySubstrate {
         // Run migrations with a dedicated connection before any concurrent requests.
         {
             let migration_conn = pool.get().map_err(LibreFangError::memory)?;
-            run_migrations(&*migration_conn).map_err(LibreFangError::memory)?;
+            run_migrations(&migration_conn).map_err(LibreFangError::memory)?;
         }
 
         let sessions = SessionStore::new(pool.clone());
@@ -109,7 +109,7 @@ impl MemorySubstrate {
             .map_err(LibreFangError::memory)?;
         {
             let migration_conn = pool.get().map_err(LibreFangError::memory)?;
-            run_migrations(&*migration_conn).map_err(LibreFangError::memory)?;
+            run_migrations(&migration_conn).map_err(LibreFangError::memory)?;
         }
 
         Ok(Self {

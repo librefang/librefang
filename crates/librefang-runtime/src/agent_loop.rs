@@ -6686,7 +6686,7 @@ mod tests {
     use librefang_memory::session::SessionStore;
     use librefang_types::tool::ToolCall;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     #[test]
     fn test_max_iterations_constant() {
@@ -8233,7 +8233,7 @@ mod tests {
         let pool = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
         {
             let conn = pool.get().unwrap();
-            librefang_memory::migration::run_migrations(&*conn).unwrap();
+            librefang_memory::migration::run_migrations(&conn).unwrap();
         }
         let store = SessionStore::new(pool);
         store
