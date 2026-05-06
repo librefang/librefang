@@ -1194,8 +1194,13 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
           </div>
         )}
 
-        {/* Tool calls are surfaced in the fixed ToolCallsPanel at the
-            bottom of the chat column, not inline in the bubble. */}
+        {/* Tool calls — one pill per message bubble that opens a Modal
+            listing every call in this turn (input/result for each). */}
+        {!isUser && message.tools && message.tools.length > 0 && (
+          <div className="w-full mb-1.5">
+            <ToolCallsPanel tools={message.tools} />
+          </div>
+        )}
 
         {/* Image attachments — rendered above the text bubble. Backend
             stores all uploaded files (image/audio/text/pdf) under the
@@ -2695,20 +2700,6 @@ export function ChatPage() {
   // can compose the next message immediately.
   const isStreaming = messages.some(m => m.role === "assistant" && m.isStreaming);
 
-  // Flattened list of every tool call in the current conversation, in
-  // chronological order. Surfaced via the fixed ToolCallsPanel at the
-  // bottom of the chat column so individual cards no longer clutter the
-  // message stream.
-  const allToolCalls = useMemo(() => {
-    const out: ChatToolCall[] = [];
-    for (const m of messages) {
-      if (m.tools && m.tools.length > 0) {
-        out.push(...m.tools);
-      }
-    }
-    return out;
-  }, [messages]);
-
   // Bug #3849: Track message count changes to announce new messages to screen
   // readers via the aria-live region.
   const [msgAriaAnnouncement, setMsgAriaAnnouncement] = useState("");
@@ -3207,12 +3198,6 @@ export function ChatPage() {
             )}
             </div>
           </div>
-
-          {/* Tool calls panel — collapsed bar above the input. Replaces
-              the per-message inline ToolCallCard rendering so the chat
-              stream stays focused on text while the user can drill into
-              tool inputs/results on demand. */}
-          {selectedAgentId && <ToolCallsPanel tools={allToolCalls} />}
 
           {/* Input area — sticks to the bottom of the chat column. The
               app-shell's <main> already keeps this row above the

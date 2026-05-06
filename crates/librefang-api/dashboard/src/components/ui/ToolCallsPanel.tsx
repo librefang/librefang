@@ -29,6 +29,7 @@ export const ToolCallsPanel = React.memo(function ToolCallsPanel({ tools }: Tool
   if (tools.length === 0) return null;
 
   const lastTool = tools[tools.length - 1];
+  const titleText = t("chat.tool_calls", { count: stats.total, defaultValue: "{{count}} tool calls" });
 
   return (
     <>
@@ -36,36 +37,37 @@ export const ToolCallsPanel = React.memo(function ToolCallsPanel({ tools }: Tool
         type="button"
         onClick={() => setOpen(true)}
         aria-haspopup="dialog"
-        className="shrink-0 w-full flex items-center gap-2 px-3 py-2 text-left border-t border-border-subtle bg-surface hover:bg-surface-hover transition-colors"
+        aria-expanded={open}
+        className="inline-flex items-center gap-1.5 max-w-full px-2 py-1 rounded-md border border-border-subtle bg-surface text-[10px] font-medium text-text-dim hover:text-text hover:border-border transition-colors"
       >
-        <Wrench className="w-3.5 h-3.5 text-brand shrink-0" aria-hidden="true" />
-        <span className="text-[11px] font-bold uppercase tracking-wider text-text-dim shrink-0">
-          {t("chat.tool_calls", { count: stats.total, defaultValue: "{{count}} tool calls" })}
+        <Wrench className="w-3 h-3 text-brand shrink-0" aria-hidden="true" />
+        <span className="shrink-0 font-bold uppercase tracking-wider">
+          {titleText}
         </span>
         {stats.running > 0 && (
-          <span className="inline-flex items-center gap-1 text-[10px] font-medium text-brand shrink-0" title={t("chat.tool_running", { defaultValue: "Running…" })}>
+          <span className="inline-flex items-center gap-0.5 text-brand shrink-0" title={t("chat.tool_running", { defaultValue: "Running…" })}>
             <Loader2 className="w-3 h-3 animate-spin" aria-hidden="true" />
             {stats.running}
           </span>
         )}
         {stats.errors > 0 && (
-          <span className="inline-flex items-center gap-1 text-[10px] font-medium text-error shrink-0" title={t("chat.tool_error", { defaultValue: "Error" })}>
+          <span className="inline-flex items-center gap-0.5 text-error shrink-0" title={t("chat.tool_error", { defaultValue: "Error" })}>
             <AlertCircle className="w-3 h-3" aria-hidden="true" />
             {stats.errors}
           </span>
         )}
         {lastTool && (
-          <span className="text-[10px] text-text-dim/70 truncate min-w-0">
-            {prettifyToolName(lastTool.name)}
+          <span className="truncate text-text-dim/70 min-w-0">
+            · {prettifyToolName(lastTool.name)}
           </span>
         )}
-        <ChevronRight className="ml-auto shrink-0 w-3.5 h-3.5 text-text-dim/60" aria-hidden="true" />
+        <ChevronRight className="shrink-0 w-3 h-3 text-text-dim/60" aria-hidden="true" />
       </button>
 
       <Modal
         isOpen={open}
         onClose={() => setOpen(false)}
-        title={t("chat.tool_calls", { count: stats.total, defaultValue: "{{count}} tool calls" })}
+        title={titleText}
         size="2xl"
       >
         <div className="px-4 py-3">
