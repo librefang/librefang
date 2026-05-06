@@ -17,12 +17,14 @@ import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { Database, Search, Trash2, Plus, X, Sparkles, Zap, Clock, Edit2, Loader2, Settings } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
 
 // Add Memory Dialog
 function AddMemoryDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
   const [content, setContent] = useState("");
   const [agentId, setAgentId] = useState("");
   const [level, setLevel] = useState("session");
@@ -32,7 +34,10 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
   const handleAdd = () => {
     addMutation.mutate(
       { content, level, agentId: agentId || undefined },
-      { onSuccess: () => onClose() }
+      {
+        onSuccess: () => onClose(),
+        onError: (err) => addToast(err instanceof Error ? err.message : t("common.error"), "error"),
+      }
     );
   };
 
@@ -91,6 +96,7 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
 // Edit Memory Dialog
 function EditMemoryDialog({ memory, onClose }: { memory: { id: string; content?: string }; onClose: () => void }) {
   const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
   const [content, setContent] = useState(memory.content || "");
 
   const editMutation = useUpdateMemory();
@@ -98,7 +104,10 @@ function EditMemoryDialog({ memory, onClose }: { memory: { id: string; content?:
   const handleSave = () => {
     editMutation.mutate(
       { id: memory.id, content },
-      { onSuccess: () => onClose() }
+      {
+        onSuccess: () => onClose(),
+        onError: (err) => addToast(err instanceof Error ? err.message : t("common.error"), "error"),
+      }
     );
   };
 
@@ -272,7 +281,7 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
               ].map(opt => (
                 <label key={opt.key} className="flex items-center justify-between rounded-lg bg-main/50 px-3 py-2">
                   <span className="text-xs font-medium">{opt.label}</span>
-                  <button onClick={() => setForm({ ...form, [opt.key]: !form[opt.key as keyof MemoryConfigForm] })}
+                  <button role="switch" aria-checked={!!form[opt.key as keyof MemoryConfigForm]} aria-label={opt.label} onClick={() => setForm({ ...form, [opt.key]: !form[opt.key as keyof MemoryConfigForm] })}
                     className={`w-10 h-5 rounded-full transition-colors ${form[opt.key as keyof MemoryConfigForm] ? "bg-brand" : "bg-border-subtle"}`}>
                     <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${form[opt.key as keyof MemoryConfigForm] ? "translate-x-5" : "translate-x-0.5"}`} />
                   </button>
@@ -330,6 +339,9 @@ const KV_VALUE_TRUNCATE = 200;
 // inflating page memory for what's only meant to be a quick peek.
 const KV_TITLE_TRUNCATE = 2000;
 
+// TODO(perf): N+1 queries — each AgentKvRows issues its own useAgentKvMemory(agentId).
+// Replace with useQueries (tanstack-query v5) in AgentKvSection to batch all agent
+// KV lookups into a single observer array and pass data as props.
 function AgentKvRows({ agentId }: { agentId: string }) {
   const { t } = useTranslation();
   const kvQuery = useAgentKvMemory(agentId);
@@ -446,7 +458,7 @@ export function MemoryPage() {
   const [showConfigDialog, setShowConfigDialog] = useState(false);
   useCreateShortcut(() => setShowAddDialog(true));
   const [editingMemory, setEditingMemory] = useState<{ id: string; content?: string } | null>(null);
-
+  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string } | null>(null);
 
   const memoryConfigQuery = useMemoryConfig();
   // Server-side liveness probe — distinct from "provider is configured".
@@ -672,10 +684,7 @@ export function MemoryPage() {
                       <Button variant="ghost" size="sm" onClick={() => setEditingMemory(m)}>
                         <Edit2 className="h-3.5 w-3.5" />
                       </Button>
-                      <Button variant="ghost" size="sm" className="text-error! hover:bg-error/10!" onClick={() => deleteMutation.mutate(m.id, {
-                        onSuccess: () => addToast(t("memory.delete_success", { defaultValue: "Memory deleted" }), "success"),
-                        onError: (err) => addToast(err instanceof Error ? err.message : t("common.error"), "error"),
-                      })}>
+                      <Button variant="ghost" size="sm" className="text-error! hover:bg-error/10!" onClick={() => setDeleteConfirm({ id: m.id })}>
                         <Trash2 className="h-3.5 w-3.5" />
                       </Button>
                     </div>
@@ -715,6 +724,24 @@ export function MemoryPage() {
       {showAddDialog && <AddMemoryDialog onClose={() => setShowAddDialog(false)} />}
       {editingMemory && <EditMemoryDialog memory={editingMemory} onClose={() => setEditingMemory(null)} />}
       {showConfigDialog && <MemoryConfigDialog onClose={() => setShowConfigDialog(false)} />}
+
+      <ConfirmDialog
+        isOpen={deleteConfirm !== null}
+        title={t("memory.delete_confirm_title", { defaultValue: "Delete Memory" })}
+        message={t("memory.delete_confirm_message", { defaultValue: "This memory will be permanently deleted." })}
+        tone="destructive"
+        confirmLabel={t("common.delete", { defaultValue: "Delete" })}
+        onConfirm={() => {
+          if (deleteConfirm) {
+            deleteMutation.mutate(deleteConfirm.id, {
+              onSuccess: () => addToast(t("memory.delete_success", { defaultValue: "Memory deleted" }), "success"),
+              onError: (err) => addToast(err instanceof Error ? err.message : t("common.error"), "error"),
+            });
+          }
+          setDeleteConfirm(null);
+        }}
+        onClose={() => setDeleteConfirm(null)}
+      />
     </div>
   );
 }

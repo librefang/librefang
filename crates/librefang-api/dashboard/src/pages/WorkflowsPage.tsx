@@ -156,6 +156,31 @@ const getErrorMessage = (error: unknown): string =>
 
 const isRunState = (state: WorkflowRunItem["state"]): state is string => typeof state === "string";
 
+function StepAccordion<T>({
+  steps,
+  getKey,
+  renderHeader,
+  renderContent,
+}: {
+  steps: T[];
+  getKey: (step: T, index: number) => string | number;
+  renderHeader: (step: T, index: number, isExpanded: boolean, toggle: () => void) => React.ReactNode;
+  renderContent: (step: T, index: number) => React.ReactNode;
+}) {
+  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
+
+  return (
+    <>
+      {steps.map((step, i) => (
+        <div key={getKey(step, i)} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
+          {renderHeader(step, i, expandedIdx === i, () => setExpandedIdx(expandedIdx === i ? null : i))}
+          {expandedIdx === i && renderContent(step, i)}
+        </div>
+      ))}
+    </>
+  );
+}
+
 export function WorkflowsPage() {
   const { t, i18n } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -167,7 +192,6 @@ export function WorkflowsPage() {
   const [activeTab, setActiveTab] = useState<"workflows" | "templates">("workflows");
   const [scheduleWorkflowId, setScheduleWorkflowId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-  const [expandedStepIdx, setExpandedStepIdx] = useState<number | null>(null);
   const [dryRunResult, setDryRunResult] = useState<DryRunResult | null>(null);
 
   const workflowsQuery = useWorkflows();
@@ -368,6 +392,37 @@ export function WorkflowsPage() {
 
   const getStepResultKey = (step: StepResultLike, index: number) =>
     step.id ?? step.step_id ?? step.step_name ?? step.name ?? ([step.agent_name, step.duration_ms, step.input_tokens, step.output_tokens].filter(Boolean).join(":") || index);
+
+  const stepResultHeader = (step: WorkflowStepResult, _idx: number, isExpanded: boolean, toggle: () => void) => (
+    <button
+      className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
+      onClick={toggle}>
+      <CheckCircle2 className="w-3 h-3 text-success shrink-0" />
+      <span className="text-[10px] font-bold truncate flex-1">{step.step_name}</span>
+      <span className="text-[9px] text-text-dim/50 shrink-0">{step.duration_ms}ms</span>
+      <ChevronDown className={`w-3 h-3 text-text-dim/30 shrink-0 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
+    </button>
+  );
+
+  const stepResultContent = (step: WorkflowStepResult, _idx: number) => (
+    <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
+      <div>
+        <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
+        <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
+          {step.prompt || "(empty)"}
+        </pre>
+      </div>
+      <div>
+        <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.output", { defaultValue: "Output:" })}</p>
+        <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
+          {step.output || "(empty)"}
+        </pre>
+      </div>
+      <p className="text-[9px] text-text-dim/40">
+        {step.agent_name} · {step.input_tokens} in / {step.output_tokens} out tokens
+      </p>
+    </div>
+  );
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -726,11 +781,13 @@ export function WorkflowsPage() {
                       </p>
                     </div>
                     <div className="space-y-2">
-                      {dryRunResult.steps.map((step, i) => (
-                        <div key={getStepResultKey(step, i)} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
+                      <StepAccordion
+                        steps={dryRunResult.steps}
+                        getKey={getStepResultKey}
+                        renderHeader={(step, _i, isExpanded, toggle) => (
                           <button
                             className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
-                            onClick={() => setExpandedStepIdx(expandedStepIdx === i ? null : i)}>
+                            onClick={toggle}>
                             {step.skipped
                               ? <SkipForward className="w-3 h-3 text-text-dim/40 shrink-0" />
                               : step.agent_found
@@ -743,24 +800,24 @@ export function WorkflowsPage() {
                             {step.skipped && (
                               <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main border border-border-subtle text-text-dim/50 shrink-0">{t("workflows.skip", { defaultValue: "skip" })}</span>
                             )}
-                            <ChevronDown className={`w-3 h-3 text-text-dim/30 shrink-0 transition-transform ${expandedStepIdx === i ? "rotate-180" : ""}`} />
+                            <ChevronDown className={`w-3 h-3 text-text-dim/30 shrink-0 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
                           </button>
-                          {expandedStepIdx === i && (
-                            <div className="px-3 pb-3 space-y-1.5 border-t border-border-subtle">
-                              {!step.agent_found && (
-                                <p className="text-[10px] text-warning mt-2">{t("workflows.agent_not_found", { defaultValue: "Agent not found" })}</p>
-                              )}
-                              {step.skip_reason && (
-                                <p className="text-[10px] text-text-dim mt-2">{step.skip_reason}</p>
-                              )}
-                              <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.resolved_prompt", { defaultValue: "Resolved prompt:" })}</p>
-                              <pre className="text-[10px] text-text whitespace-pre-wrap max-h-28 overflow-y-auto bg-surface rounded-lg p-2">
-                                {step.resolved_prompt || "(empty)"}
-                              </pre>
-                            </div>
-                          )}
-                        </div>
-                      ))}
+                        )}
+                        renderContent={(step) => (
+                          <div className="px-3 pb-3 space-y-1.5 border-t border-border-subtle">
+                            {!step.agent_found && (
+                              <p className="text-[10px] text-warning mt-2">{t("workflows.agent_not_found", { defaultValue: "Agent not found" })}</p>
+                            )}
+                            {step.skip_reason && (
+                              <p className="text-[10px] text-text-dim mt-2">{step.skip_reason}</p>
+                            )}
+                            <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.resolved_prompt", { defaultValue: "Resolved prompt:" })}</p>
+                            <pre className="text-[10px] text-text whitespace-pre-wrap max-h-28 overflow-y-auto bg-surface rounded-lg p-2">
+                              {step.resolved_prompt || "(empty)"}
+                            </pre>
+                          </div>
+                        )}
+                      />
                     </div>
                   </div>
                 )}
@@ -776,37 +833,12 @@ export function WorkflowsPage() {
                     {getRunStepResults(runMutation.data).length > 0 && (
                       <div className="space-y-1.5 border-t border-success/20 pt-2">
                         <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.step_details", { defaultValue: "Step details" })}</p>
-                        {getRunStepResults(runMutation.data).map((s, i) => (
-                          <div key={getStepResultKey(s, i)} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
-                            <button
-                              className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
-                              onClick={() => setExpandedStepIdx(expandedStepIdx === i + 1000 ? null : i + 1000)}>
-                              <CheckCircle2 className="w-3 h-3 text-success shrink-0" />
-                              <span className="text-[10px] font-bold truncate flex-1">{s.step_name}</span>
-                              <span className="text-[9px] text-text-dim/50 shrink-0">{s.duration_ms}ms</span>
-                              <ChevronDown className={`w-3 h-3 text-text-dim/30 shrink-0 transition-transform ${expandedStepIdx === i + 1000 ? "rotate-180" : ""}`} />
-                            </button>
-                            {expandedStepIdx === i + 1000 && (
-                              <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
-                                <div>
-                                  <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
-                                  <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
-                                    {s.prompt || "(empty)"}
-                                  </pre>
-                                </div>
-                                <div>
-                                  <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.output", { defaultValue: "Output:" })}</p>
-                                  <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
-                                    {s.output || "(empty)"}
-                                  </pre>
-                                </div>
-                                <p className="text-[9px] text-text-dim/40">
-                                  {s.agent_name} · {s.input_tokens} in / {s.output_tokens} out tokens
-                                </p>
-                              </div>
-                            )}
-                          </div>
-                        ))}
+                        <StepAccordion
+                          steps={getRunStepResults(runMutation.data)}
+                          getKey={getStepResultKey}
+                          renderHeader={stepResultHeader}
+                          renderContent={stepResultContent}
+                        />
                       </div>
                     )}
                   </div>
@@ -850,7 +882,6 @@ export function WorkflowsPage() {
                             }`}
                             onClick={() => {
                               setSelectedRunId(isSelected ? null : (runId ?? null));
-                              setExpandedStepIdx(null);
                             }}>
                             <div className={`w-2 h-2 rounded-full shrink-0 ${
                               state === "completed" ? "bg-success" :
@@ -876,37 +907,12 @@ export function WorkflowsPage() {
                                   <p className="text-[10px] text-error">{runDetailQuery.data.error}</p>
                                 </div>
                               )}
-                              {runDetailQuery.data.step_results.map((step, si) => (
-                                <div key={getStepResultKey(step, si)} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
-                                  <button
-                                    className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-surface transition-colors"
-                                    onClick={() => setExpandedStepIdx(expandedStepIdx === si + 2000 ? null : si + 2000)}>
-                                    <CheckCircle2 className="w-3 h-3 text-success shrink-0" />
-                                    <span className="text-[10px] font-bold truncate flex-1">{step.step_name}</span>
-                                    <span className="text-[9px] text-text-dim/50 shrink-0">{step.duration_ms}ms</span>
-                                    <ChevronDown className={`w-3 h-3 text-text-dim/30 shrink-0 transition-transform ${expandedStepIdx === si + 2000 ? "rotate-180" : ""}`} />
-                                  </button>
-                                  {expandedStepIdx === si + 2000 && (
-                                    <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
-                                      <div>
-                                  <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
-                                        <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
-                                          {step.prompt || "(empty)"}
-                                        </pre>
-                                      </div>
-                                      <div>
-                                  <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.output", { defaultValue: "Output:" })}</p>
-                                        <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
-                                          {step.output || "(empty)"}
-                                        </pre>
-                                      </div>
-                                      <p className="text-[9px] text-text-dim/40">
-                                        {step.agent_name} · {step.input_tokens} in / {step.output_tokens} out tokens
-                                      </p>
-                                    </div>
-                                  )}
-                                </div>
-                              ))}
+                              <StepAccordion
+                                steps={runDetailQuery.data.step_results}
+                                getKey={getStepResultKey}
+                                renderHeader={stepResultHeader}
+                                renderContent={stepResultContent}
+                              />
                             </div>
                           )}
                           {isSelected && runDetailQuery.isLoading && (
