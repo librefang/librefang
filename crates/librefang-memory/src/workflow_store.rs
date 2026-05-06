@@ -56,17 +56,17 @@ impl WorkflowStore {
         Self { conn }
     }
 
-    /// Insert or replace a workflow run row.
+    /// Insert or update a workflow run row.
     ///
-    /// Uses `INSERT OR REPLACE` so callers do not need to distinguish
-    /// between initial insert and subsequent updates. When the run
-    /// reaches a terminal state (Completed / Failed / Paused), the
-    /// caller should follow up with [`Self::wal_checkpoint`] to ensure
-    /// the WAL is flushed for important state changes.
+    /// Uses `ON CONFLICT DO UPDATE` (not `INSERT OR REPLACE`) to avoid
+    /// the implicit DELETE+INSERT that would reset ROWID and break
+    /// future foreign keys. When the run reaches a terminal state
+    /// (Completed / Failed / Paused), the caller should follow up with
+    /// [`Self::wal_checkpoint`] to flush the WAL.
     pub fn upsert_run(&self, row: &WorkflowRunRow) -> Result<(), String> {
         let c = self.conn.lock().unwrap();
         c.execute(
-            "INSERT OR REPLACE INTO workflow_runs (
+            "INSERT INTO workflow_runs (
                 id, workflow_id, workflow_name, state, input, output, error,
                 resume_token, pause_reason, paused_at, paused_step_index,
                 paused_variables, paused_current_input,
@@ -76,7 +76,19 @@ impl WorkflowStore {
                 ?8, ?9, ?10, ?11,
                 ?12, ?13,
                 ?14, ?15, ?16, ?17
-            )",
+            ) ON CONFLICT(id) DO UPDATE SET
+                state = excluded.state,
+                input = excluded.input,
+                output = excluded.output,
+                error = excluded.error,
+                resume_token = excluded.resume_token,
+                pause_reason = excluded.pause_reason,
+                paused_at = excluded.paused_at,
+                paused_step_index = excluded.paused_step_index,
+                paused_variables = excluded.paused_variables,
+                paused_current_input = excluded.paused_current_input,
+                step_results = excluded.step_results,
+                completed_at = excluded.completed_at",
             rusqlite::params![
                 row.id,
                 row.workflow_id,
@@ -186,6 +198,61 @@ impl WorkflowStore {
             .query_row("SELECT COUNT(*) FROM workflow_runs", [], |row| row.get(0))
             .map_err(|e| format!("workflow count_runs failed: {e}"))?;
         Ok(count as usize)
+    }
+
+    /// Bulk-insert rows inside a single transaction (all-or-nothing).
+    /// Used by the JSON-to-SQLite migration so a crash mid-import
+    /// leaves the table empty rather than partially populated.
+    pub fn bulk_upsert_runs(&self, rows: &[WorkflowRunRow]) -> Result<usize, String> {
+        let mut c = self.conn.lock().unwrap();
+        let tx = c
+            .transaction()
+            .map_err(|e| format!("workflow bulk_upsert begin failed: {e}"))?;
+        let mut count = 0usize;
+        for row in rows {
+            tx.execute(
+                "INSERT INTO workflow_runs (
+                    id, workflow_id, workflow_name, state, input, output, error,
+                    resume_token, pause_reason, paused_at, paused_step_index,
+                    paused_variables, paused_current_input,
+                    step_results, started_at, completed_at, created_at
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                    ?8, ?9, ?10, ?11,
+                    ?12, ?13,
+                    ?14, ?15, ?16, ?17
+                ) ON CONFLICT(id) DO UPDATE SET
+                    state = excluded.state,
+                    output = excluded.output,
+                    error = excluded.error,
+                    step_results = excluded.step_results,
+                    completed_at = excluded.completed_at",
+                rusqlite::params![
+                    row.id,
+                    row.workflow_id,
+                    row.workflow_name,
+                    row.state,
+                    row.input,
+                    row.output,
+                    row.error,
+                    row.resume_token,
+                    row.pause_reason,
+                    row.paused_at,
+                    row.paused_step_index,
+                    row.paused_variables,
+                    row.paused_current_input,
+                    row.step_results,
+                    row.started_at,
+                    row.completed_at,
+                    row.created_at,
+                ],
+            )
+            .map_err(|e| format!("workflow bulk_upsert row failed: {e}"))?;
+            count += 1;
+        }
+        tx.commit()
+            .map_err(|e| format!("workflow bulk_upsert commit failed: {e}"))?;
+        Ok(count)
     }
 
     /// Force a WAL checkpoint to flush writes to the main database file.

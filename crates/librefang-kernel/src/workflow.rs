@@ -1366,6 +1366,9 @@ impl WorkflowEngine {
                 .await
         };
         self.cleanup_terminal_pause_state(run_id).await;
+        if let Some(r) = self.runs.get(&run_id) {
+            self.upsert_run_to_store(&r);
+        }
         // If persistence panicked, surface it instead of returning a fake Ok.
         if let Err(persist_err) = self.persist_runs_async().await {
             return Err(match result {
@@ -1399,10 +1402,12 @@ impl WorkflowEngine {
         // async workflow lookup.
         let (workflow_id, input) = {
             let mut run = self.runs.get_mut(&run_id).ok_or("Workflow run not found")?;
-            // Mutate via DerefMut — `mut` on the binding required to invoke it.
             run.state = WorkflowRunState::Running;
-            (run.workflow_id, run.input.clone())
-            // `run` (DashMap RefMut shard guard) is dropped here
+            let snapshot = run.clone();
+            let ids = (run.workflow_id, run.input.clone());
+            drop(run);
+            self.upsert_run_to_store(&snapshot);
+            ids
         };
         let workflow = self
             .workflows
@@ -1429,6 +1434,9 @@ impl WorkflowEngine {
                 .await
         };
         self.cleanup_terminal_pause_state(run_id).await;
+        if let Some(r) = self.runs.get(&run_id) {
+            self.upsert_run_to_store(&r);
+        }
         // Surface persist panics instead of swallowing them (#3753).
         if let Err(persist_err) = self.persist_runs_async().await {
             return Err(match result {
@@ -1537,6 +1545,9 @@ impl WorkflowEngine {
                 None
             };
             if let Some(pause) = pending_pause {
+                if let Some(r) = self.runs.get(&run_id) {
+                    self.upsert_run_to_store(&r);
+                }
                 info!(
                     run_id = %run_id,
                     resume_step = i,
@@ -2429,24 +2440,11 @@ impl WorkflowEngine {
         let raw_rows: Vec<serde_json::Value> = serde_json::from_str(&data)
             .map_err(|e| format!("Failed to parse JSON workflow runs: {e}"))?;
 
-        let mut imported: usize = 0;
+        let mut rows = Vec::new();
         let mut skipped: usize = 0;
         for (idx, raw) in raw_rows.into_iter().enumerate() {
             match serde_json::from_value::<WorkflowRun>(raw) {
-                Ok(run) => {
-                    let row = workflow_run_to_row(&run);
-                    if let Err(e) = store.upsert_run(&row) {
-                        warn!(
-                            index = idx,
-                            run_id = %run.id,
-                            error = %e,
-                            "Failed to import workflow run to SQLite"
-                        );
-                        skipped += 1;
-                    } else {
-                        imported += 1;
-                    }
-                }
+                Ok(run) => rows.push(workflow_run_to_row(&run)),
                 Err(e) => {
                     skipped += 1;
                     warn!(
@@ -2458,7 +2456,10 @@ impl WorkflowEngine {
             }
         }
 
-        // Checkpoint after bulk import.
+        let imported = store
+            .bulk_upsert_runs(&rows)
+            .map_err(|e| format!("JSON-to-SQLite migration transaction failed: {e}"))?;
+
         if imported > 0 {
             if let Err(e) = store.wal_checkpoint() {
                 warn!("WAL checkpoint after JSON migration failed: {e}");
