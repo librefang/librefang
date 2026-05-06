@@ -305,6 +305,13 @@ impl ToolExecBackend for LocalBackend {
         };
 
         crate::subprocess_sandbox::sandbox_command(&mut cmd, &self.allowed_env);
+        // Ensure a timed-out child doesn't survive as an orphan. Without
+        // this, dropping the `Child` (which `tokio::time::timeout` does
+        // when it cancels the read+wait future) leaves the process
+        // running until it exits on its own. With `kill_on_drop(true)`
+        // tokio sends SIGKILL on drop, closing the gap that the legacy
+        // `cmd.output()` path also had.
+        cmd.kill_on_drop(true);
 
         // Layer caller-supplied env on top of the sandboxed allowlist,
         // dropping anything in RESERVED_ENV_KEYS. Behaviour is uniform
@@ -441,6 +448,27 @@ impl ToolExecBackend for LocalBackend {
 /// Case-sensitive — POSIX env names are case-sensitive in practice.
 pub(crate) fn is_reserved_env_key(key: &str) -> bool {
     RESERVED_ENV_KEYS.contains(&key)
+}
+
+/// POSIX single-quote a value safely for `cd` / env-prefix / shell
+/// composition. Identifiers from a fixed allowlist
+/// (`A-Za-z0-9_/-.:+`) round-trip unchanged; everything else is
+/// wrapped in single quotes with embedded `'` rewritten as `'\''`.
+///
+/// Shared by SSH and Daytona, which both build a remote shell line
+/// of the form `cd <wd> && K=V <cmd>`. Centralised here so the two
+/// backends cannot drift on what counts as "safe to leave bare".
+pub(crate) fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '-' | '.' | ':' | '+'))
+    {
+        value.to_string()
+    } else {
+        // Replace ' with '\'' inside single-quoted regions.
+        let escaped = value.replace('\'', r"'\''");
+        format!("'{escaped}'")
+    }
 }
 
 /// Truncate a string to `cap` bytes, appending a marker noting the
@@ -654,6 +682,25 @@ mod tests {
         // regressions in the helper.
         let out = truncate_to_cap("hi".to_string(), 0);
         assert_eq!(out, "... [truncated, 2 total bytes]");
+    }
+
+    #[test]
+    fn shell_quote_alphanumeric_unchanged() {
+        assert_eq!(shell_quote("foo"), "foo");
+        assert_eq!(shell_quote("hello"), "hello");
+        assert_eq!(shell_quote("/usr/local/bin"), "/usr/local/bin");
+        assert_eq!(shell_quote("name_v1.2:ok+more"), "name_v1.2:ok+more");
+    }
+
+    #[test]
+    fn shell_quote_wraps_with_spaces() {
+        assert_eq!(shell_quote("hello world"), "'hello world'");
+    }
+
+    #[test]
+    fn shell_quote_escapes_inner_single_quote() {
+        // POSIX trick: close, escape, reopen.
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 
     #[tokio::test]

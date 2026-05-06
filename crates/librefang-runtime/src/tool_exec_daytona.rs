@@ -100,6 +100,18 @@ impl DaytonaBackend {
     /// Ensure a Daytona workspace exists for this agent; return its id.
     /// Cached for the lifetime of this backend instance unless cleanup
     /// clears it (or fails and re-stores it).
+    ///
+    /// Concurrency profile:
+    /// - **After init** — concurrent callers take the read lock and
+    ///   return immediately (no contention, no HTTP).
+    /// - **During init** — the very first caller holds the *write*
+    ///   lock across the create-workspace HTTP round-trip; any
+    ///   parallel callers entering ensure_workspace at this moment
+    ///   block on the write lock until create returns. This serial
+    ///   warmup is intentional (prevents duplicate creates) and
+    ///   bounded by `cfg.timeout_secs`. Operators should not raise
+    ///   `max_concurrent_invocations` expecting zero warmup latency
+    ///   on the first burst.
     async fn ensure_workspace(&self) -> Result<String, ExecError> {
         // Fast path: read lock — no allocation, no contention with
         // other concurrent `ensure_workspace` calls once initialised.
@@ -108,7 +120,8 @@ impl DaytonaBackend {
         }
 
         // Slow path: take write lock and re-check. Another task may
-        // have raced ahead while we were waiting.
+        // have raced ahead while we were waiting. The lock is held
+        // across the HTTP create — see the docstring above.
         let mut guard = self.workspace_id.write().await;
         if let Some(id) = guard.as_ref() {
             return Ok(id.clone());
@@ -202,7 +215,10 @@ impl ToolExecBackend for DaytonaBackend {
             // Daytona's exec endpoint takes a single shell string; we
             // prefix `KEY=value` assignments and let the remote shell
             // export them for the duration of `command`.
-            full_cmd.push_str(&format!("{k}={} ", shell_quote(v)));
+            full_cmd.push_str(&format!(
+                "{k}={} ",
+                crate::tool_exec_backend::shell_quote(v)
+            ));
         }
         full_cmd.push_str(&spec.command);
 
@@ -375,18 +391,9 @@ fn sanitize_id(agent_id: &str) -> String {
     }
 }
 
-/// POSIX single-quote a value safely for env-prefix / `cd` use.
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '-' | '.' | ':' | '+'))
-    {
-        value.to_string()
-    } else {
-        let escaped = value.replace('\'', r"'\''");
-        format!("'{escaped}'")
-    }
-}
+// `shell_quote` lives in `tool_exec_backend` — shared with the SSH
+// backend so the two cannot drift on what counts as "safe to leave
+// bare". See `tool_exec_backend::shell_quote` for the allowlist.
 
 /// Truncate a body for `tracing::debug!` use. Doesn't strip Bearer
 /// tokens — debug logs are operator-controlled and the operator owns
@@ -490,15 +497,7 @@ mod tests {
         assert_eq!(sanitize_id("---"), "agent");
     }
 
-    #[test]
-    fn shell_quote_no_special_chars_unchanged() {
-        assert_eq!(shell_quote("hello"), "hello");
-    }
-
-    #[test]
-    fn shell_quote_wraps_with_spaces() {
-        assert_eq!(shell_quote("hello world"), "'hello world'");
-    }
+    // shell_quote tests live alongside the helper in `tool_exec_backend`.
 
     #[test]
     fn truncate_for_log_under_cap_unchanged() {

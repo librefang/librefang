@@ -190,7 +190,11 @@ mod transport {
     use russh::client;
     use russh::client::Handler;
     use russh_keys::key::PublicKey;
-    use russh_keys::PublicKeyBase64;
+    // Imported anonymously: brings `public_key_bytes()` into scope on
+    // `russh_keys::key::PublicKey` for the host-key fingerprint hash
+    // below. `as _` signals to future maintainers that the symbol is
+    // not referenced by name and shouldn't be "cleaned up" as unused.
+    use russh_keys::PublicKeyBase64 as _;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Mutex;
@@ -378,6 +382,7 @@ mod transport {
         // Compose the remote command line. Honour `workdir` by
         // prepending `cd <dir> &&` — `russh` exec doesn't have a
         // separate cwd parameter.
+        use crate::tool_exec_backend::shell_quote;
         let mut full_cmd = String::new();
         if !cfg.workdir.is_empty() {
             full_cmd.push_str(&format!("cd {} && ", shell_quote(&cfg.workdir)));
@@ -446,10 +451,16 @@ mod transport {
             }
         }
 
-        // Append the signal annotation BEFORE truncation so the marker
-        // survives the cap (matters for very chatty commands).
+        // Prepend the signal annotation so it survives truncation:
+        // `truncate_to_cap` keeps the prefix and drops the suffix, so
+        // an append to a stderr already at `cap` would lose the
+        // annotation entirely (matters for chatty commands killed by
+        // SIGTERM/SIGKILL — operators need the signal name visible).
         if let Some(note) = &signal_note {
-            stderr.extend_from_slice(note.as_bytes());
+            let mut prefixed = Vec::with_capacity(note.len() + stderr.len());
+            prefixed.extend_from_slice(note.as_bytes());
+            prefixed.extend_from_slice(&stderr);
+            stderr = prefixed;
         }
 
         let stdout_s = String::from_utf8_lossy(&stdout).into_owned();
@@ -508,40 +519,14 @@ mod transport {
         }
     }
 
-    /// POSIX single-quote a value safely for `cd` / env assignment.
-    pub(super) fn shell_quote(value: &str) -> String {
-        if value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '-' | '.' | ':' | '+'))
-        {
-            value.to_string()
-        } else {
-            // Replace ' with '\'' inside single-quoted regions.
-            let escaped = value.replace('\'', r"'\''");
-            format!("'{escaped}'")
-        }
-    }
+    // `shell_quote` lives in `tool_exec_backend` — shared with
+    // Daytona so the two backends cannot drift on what counts as
+    // "safe to leave bare". See `tool_exec_backend::shell_quote`
+    // for the allowlist and tests.
 
     #[cfg(test)]
     mod tests {
         use super::*;
-
-        #[test]
-        fn shell_quote_alphanumeric_unchanged() {
-            assert_eq!(shell_quote("foo"), "foo");
-            assert_eq!(shell_quote("/usr/local/bin"), "/usr/local/bin");
-        }
-
-        #[test]
-        fn shell_quote_wraps_with_spaces() {
-            assert_eq!(shell_quote("hello world"), "'hello world'");
-        }
-
-        #[test]
-        fn shell_quote_escapes_inner_single_quote() {
-            // POSIX trick: close, escape, reopen.
-            assert_eq!(shell_quote("it's"), r"'it'\''s'");
-        }
 
         #[test]
         fn hex_encode_round_trip() {
