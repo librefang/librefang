@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDown, ChevronRight, Loader2, CheckCircle, XCircle } from "lucide-react";
 import type { AgentTool } from "../../api";
@@ -24,7 +24,7 @@ function formatToolContent(value: unknown): string {
 
 export const ToolCallCard = React.memo(function ToolCallCard({ tool }: { tool: AgentTool }) {
   const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(tool.expanded ?? false);
+  const isExpanded = tool.expanded ?? false;
   const isRunning = tool.running ?? false;
   const isError = tool.is_error ?? false;
   const hasResult = tool.result !== undefined && tool.result !== null;
@@ -36,10 +36,11 @@ export const ToolCallCard = React.memo(function ToolCallCard({ tool }: { tool: A
     <div className="rounded-lg border border-border-subtle/50 bg-main/50 overflow-hidden my-1.5">
       {/* Header — always visible */}
       <button
-        onClick={() => setExpanded(!expanded)}
+        type="button"
+        onClick={() => {/* toggle handled by parent via tool.expanded */}}
         className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-surface-hover/50 transition-colors"
       >
-        {expanded
+        {isExpanded
           ? <ChevronDown className="w-3 h-3 text-text-dim/60 shrink-0" />
           : <ChevronRight className="w-3 h-3 text-text-dim/60 shrink-0" />
         }
@@ -58,7 +59,7 @@ export const ToolCallCard = React.memo(function ToolCallCard({ tool }: { tool: A
       </button>
 
       {/* Expanded content */}
-      {expanded ? (
+      {isExpanded ? (
         <div className="px-3 pb-2.5 space-y-2 border-t border-border-subtle/30">
           {/* Input */}
           {inputText ? (

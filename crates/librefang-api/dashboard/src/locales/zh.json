@@ -3413,8 +3413,7 @@
   "shortcuts_help": {
     "title": "键盘快捷键",
     "general_heading": "通用",
-    "nav_heading_prefix": "导航（按",
-    "nav_heading_suffix": "后再按…）",
+    "nav_heading": "导航（按 <kbd>g</kbd> 后再按…）",
     "general": {
       "cmd_k": "打开命令面板",
       "focus_search": "聚焦当前页面搜索框",

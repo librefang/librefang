@@ -11,6 +11,8 @@ import { MarkdownContent } from "./MarkdownContent";
 /// convention into actual Markdown so the renderer below can produce
 /// proper `<h2>` / `<ul>` / `<ol>` instead of one wall of `<p>`.
 function toHelpMarkdown(s: string): string {
+  const codeSlots: string[] = [];
+
   return (
     s
       // `· Foo` (any indent) → standard markdown unordered list item.
@@ -20,17 +22,25 @@ function toHelpMarkdown(s: string): string {
       // ASCII `:` and the Chinese full-width colon `：`. The trailing
       // colon is dropped — the heading visual replaces it.
       .replace(/^([^\s:：0-9·\-#][^:：\n]*)[:：]\s*$/gm, "## $1")
+      // Extract fenced code blocks (```…```) and inline code spans (`…`)
+      // into placeholders so the URL linker below never touches their
+      // contents — URLs inside code must render verbatim.
+      .replace(/```[\s\S]*?```|`[^`\n]*`/g, (m) => `\uFFFECODE${codeSlots.push(m) - 1}\uFFFE`)
       // Bare http(s) URL → `[url](url)` so it renders as a clickable
       // link. Skips URLs already wrapped in markdown link syntax (`[..](..)`)
       // by checking the preceding char isn't `[` or `(`. Stops at
-      // whitespace, ASCII `)` / `(`, Chinese `）` / `（`, quotes, `<`, `>`,
+      // whitespace, unbalanced `)` / `(`, Chinese `）` / `（`, quotes, `<`, `>`,
       // and trailing punctuation like `,` / `.` / `;` / `:` so a sentence-
       // ending dot or full-width close-paren after the URL doesn't get
-      // swallowed into the link.
+      // swallowed into the link. Balanced parens inside the URL (e.g.
+      // `?q=(foo)`) are included. Code placeholders are excluded by the
+      // \uFFFE boundary characters.
       .replace(
-        /(?<![[(])\bhttps?:\/\/[^\s()（）<>"'`,。，；：]+/g,
+        /(?<![[(])\bhttps?:\/\/(?:[^\s()（）<>"'`,。，；：\uFFFE]|\([^\s()]*\))*/g,
         (m) => `[${m}](${m})`,
       )
+      // Restore extracted code spans back into place.
+      .replace(/\uFFFECODE(\d+)\uFFFE/g, (_, i) => codeSlots[Number(i)])
   );
 }
 

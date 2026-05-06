@@ -2,13 +2,37 @@ import { Children, isValidElement, type ReactNode } from "react";
 import { motion, type HTMLMotionProps } from "motion/react";
 import { staggerContainer, staggerItem } from "../../lib/motion";
 
+const motionComponentCache = new Map<string, ReturnType<typeof motion.create>>();
+
+function getMotionComponent(tag: string) {
+  let component = motionComponentCache.get(tag);
+  if (!component) {
+    component = motion.create(tag);
+    motionComponentCache.set(tag, component);
+  }
+  return component;
+}
+
+type StaggerItemElement = "div" | "li" | "span" | "article" | "section";
+type ContainerElement = "div" | "ul" | "ol" | "section" | "article";
+
+const CONTAINER_DEFAULTS: Record<StaggerItemElement, ContainerElement> = {
+  li: "ul",
+  div: "div",
+  span: "div",
+  article: "div",
+  section: "div",
+};
+
 interface StaggerListProps extends Omit<HTMLMotionProps<"div">, "variants" | "initial" | "animate" | "children"> {
   children: ReactNode;
+  as?: StaggerItemElement;
+  containerAs?: ContainerElement;
 }
 
 /// Drop-in replacement for the legacy `.stagger-children` className.
 ///
-/// Wraps each direct child in a `motion.div` that inherits the
+/// Wraps each direct child in a motion element that inherits the
 /// `staggerItem` variant from the container, producing the same 40ms
 /// cascade the CSS implementation produced.
 ///
@@ -25,9 +49,22 @@ interface StaggerListProps extends Omit<HTMLMotionProps<"div">, "variants" | "in
 ///   <StaggerList className="grid grid-cols-3 gap-4">
 ///     {items.map(item => <Card key={item.id}>…</Card>)}
 ///   </StaggerList>
-export function StaggerList({ children, ...rest }: StaggerListProps) {
+///
+/// List semantics — set `as` to match the child element type;
+/// container auto-derives (e.g. as="li" → container is "ul"):
+///   <StaggerList as="li">
+///     {items.map(item => <li key={item.id}>…</li>)}
+///   </StaggerList>
+///
+/// Override the container explicitly with `containerAs`:
+///   <StaggerList as="li" containerAs="ol">
+export function StaggerList({ children, as: elementType = "div", containerAs, ...rest }: StaggerListProps) {
+  const MotionItem = getMotionComponent(elementType);
+  const containerTag = containerAs ?? CONTAINER_DEFAULTS[elementType];
+  const MotionContainer = getMotionComponent(containerTag);
+
   return (
-    <motion.div
+    <MotionContainer
       variants={staggerContainer}
       initial="initial"
       animate="animate"
@@ -35,13 +72,13 @@ export function StaggerList({ children, ...rest }: StaggerListProps) {
     >
       {Children.map(children, (child, idx) => {
         if (!isValidElement(child)) return child;
-        const key = (child as { key?: string | number | null }).key ?? idx;
+        const key = child.key ?? idx;
         return (
-          <motion.div key={key} variants={staggerItem}>
+          <MotionItem key={key} variants={staggerItem}>
             {child}
-          </motion.div>
+          </MotionItem>
         );
       })}
-    </motion.div>
+    </MotionContainer>
   );
 }

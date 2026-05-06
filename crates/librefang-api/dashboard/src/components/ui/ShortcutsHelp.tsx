@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { useTranslation } from "react-i18next";
+import { Trans, useTranslation } from "react-i18next";
 import { Keyboard, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { G_NAV_SHORTCUTS } from "../../lib/useKeyboardShortcuts";
@@ -44,7 +44,7 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
   return (
     <AnimatePresence>
       {isOpen && (
-        <div className="fixed inset-0 z-100 flex items-end sm:items-start justify-center sm:pt-[10vh] p-0 sm:p-4">
+        <div className="fixed inset-0 z-[100] flex items-end sm:items-start justify-center sm:pt-[10vh] p-0 sm:p-4">
           <motion.div
             className="fixed inset-0 bg-black/60 backdrop-blur-sm"
             aria-hidden="true"
@@ -89,8 +89,8 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
                 <div key={s.labelKey} className="flex items-center justify-between py-1">
                   <span className="text-xs text-text-dim">{t(`shortcuts_help.general.${s.labelKey}`)}</span>
                   <div className="flex items-center gap-1">
-                    {s.keys.map((k, i) => (
-                      <kbd key={i} className={KBD_CLASS}>
+                    {s.keys.map((k) => (
+                      <kbd key={k} className={KBD_CLASS}>
                         {k}
                       </kbd>
                     ))}
@@ -102,7 +102,12 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
 
           <section>
             <h3 className="text-[10px] font-bold uppercase tracking-widest text-text-dim/60 mb-3">
-              {t("shortcuts_help.nav_heading_prefix")} <kbd className="inline-flex h-5 items-center rounded border border-border-subtle bg-main px-1 font-mono text-[9px]">g</kbd> {t("shortcuts_help.nav_heading_suffix")}
+              <Trans
+                i18nKey="shortcuts_help.nav_heading"
+                components={{
+                  kbd: <kbd className="inline-flex h-5 items-center rounded border border-border-subtle bg-main px-1 font-mono text-[9px]" />,
+                }}
+              />
             </h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2">
               {NAV_ENTRIES.map(([key, { labelKey }]) => (

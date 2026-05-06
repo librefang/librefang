@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { animate, motion, useMotionValue, useTransform } from "motion/react";
 
 const NON_NUMERIC_RE = /[^0-9.-]/g;
@@ -32,10 +32,16 @@ export function AnimatedNumber({
 }: AnimatedNumberProps) {
   const target = parseValue(value);
   const isNumeric = !isNaN(target);
-  const motionValue = useMotionValue(isNumeric ? target : 0);
+  const motionValue = useMotionValue(0);
+  const wasNumericRef = useRef(isNumeric);
   const display = useTransform(motionValue, (latest) =>
     `${prefix}${latest.toFixed(decimals)}${suffix}`,
   );
+
+  if (isNumeric && !wasNumericRef.current) {
+    motionValue.set(target);
+  }
+  wasNumericRef.current = isNumeric;
 
   useEffect(() => {
     if (!isNumeric) return;
@@ -46,6 +52,6 @@ export function AnimatedNumber({
     return () => controls.stop();
   }, [target, duration, motionValue, isNumeric]);
 
-  if (!isNumeric) return <span className={className}>{String(value)}</span>;
-  return <motion.span className={className}>{display}</motion.span>;
+  if (!isNumeric) return <motion.span className={className} aria-live="polite">{String(value)}</motion.span>;
+  return <motion.span className={className} aria-live="polite">{display}</motion.span>;
 }

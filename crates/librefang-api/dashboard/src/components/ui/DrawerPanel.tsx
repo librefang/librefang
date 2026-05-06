@@ -47,6 +47,11 @@ export function DrawerPanel({
     onCloseRef.current = onClose;
   }, [onClose]);
 
+  const isOpenRef = useRef(isOpen);
+  useEffect(() => {
+    isOpenRef.current = isOpen;
+  }, [isOpen]);
+
   // Push children into the slot whenever we're open. Re-runs on every
   // re-render that changes any of the deps — including `children`, which
   // gets a fresh identity each render. That's intended: the body should
@@ -102,7 +107,7 @@ export function DrawerPanel({
   // Cleanup on unmount.
   useEffect(
     () => () => {
-      if (isOpen) close();
+      if (isOpenRef.current) close();
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useId, useRef } from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
@@ -37,6 +37,8 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
   const isConfirming = useRef(false);
   const onCloseRef = useRef(onClose);
   const onConfirmRef = useRef(onConfirm);
+  const titleId = useId();
+  const messageId = useId();
   onCloseRef.current = onClose;
   onConfirmRef.current = onConfirm;
   useFocusTrap(isOpen, dialogRef, true);
@@ -45,6 +47,15 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
     if (isOpen) {
       isConfirming.current = false;
     }
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
   }, [isOpen]);
 
   useEffect(() => {
@@ -64,6 +75,7 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
       // Enter confirms — safer on non-destructive dialogs; for destructive
       // we still require a click so users can't accidentally nuke data.
       if (e.key === "Enter" && tone !== "destructive" && !isEditableTarget(e.target)) {
+        e.preventDefault();
         onConfirmRef.current();
       }
     };
@@ -91,8 +103,8 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-labelledby="confirm-dialog-title"
-        aria-describedby="confirm-dialog-message"
+        aria-labelledby={titleId}
+        aria-describedby={messageId}
         className="relative w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl"
         onClick={(e) => e.stopPropagation()}
         variants={fadeInScale}
@@ -116,8 +128,8 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
             <AlertTriangle className="h-5 w-5" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 id="confirm-dialog-title" className="text-sm font-black tracking-tight">{title}</h3>
-            <p id="confirm-dialog-message" className="mt-1.5 text-xs text-text-dim leading-relaxed">{message}</p>
+            <h3 id={titleId} className="text-sm font-black tracking-tight">{title}</h3>
+            <p id={messageId} className="mt-1.5 text-xs text-text-dim leading-relaxed">{message}</p>
           </div>
         </div>
         <div className="flex gap-2 border-t border-border-subtle/50 px-5 py-3">
@@ -125,7 +137,7 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
             onClick={onClose}
             className="flex-1 rounded-xl border border-border-subtle bg-surface py-2.5 text-xs font-bold text-text-dim hover:bg-surface-hover transition-colors"
           >
-            {cancelLabel ?? t("common.cancel")}
+            {cancelLabel ?? t("common.cancel", { defaultValue: "Cancel" })}
           </button>
           <button
             onClick={() => {

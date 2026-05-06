@@ -3413,8 +3413,7 @@
   "shortcuts_help": {
     "title": "Keyboard shortcuts",
     "general_heading": "General",
-    "nav_heading_prefix": "Navigate (press",
-    "nav_heading_suffix": "then…)",
+    "nav_heading": "Navigate (press <kbd>g</kbd> then…)",
     "general": {
       "cmd_k": "Open command palette",
       "focus_search": "Focus search on current page",

@@ -4,8 +4,8 @@ import { Plus, Trash2, X, AlertCircle, Send, Globe, FileText, Mail, MessageSquar
 import { Button } from "./Button";
 import type { CronDeliveryTarget, CronDeliveryTargetType } from "../../lib/http/client";
 
-// 业务说明: cron 多目标投递编辑器,UI 完全独立于具体页面,负责
-// 列出现有 targets / 新增 / 删除。保存动作由父组件控制。
+// Cron multi-target delivery editor. UI is fully decoupled from the host
+// page — lists existing targets, adds, removes. Save is delegated to the parent.
 // Stripping empty optional fields keeps the payload aligned with the
 // Rust `Option<String>` shape — sending "" would deserialize as Some("").
 
@@ -79,23 +79,41 @@ const EMPTY_DRAFT: DraftState = {
 // instant feedback in the form instead of a round-trip + toast.
 const SSRF_BLOCKED_HOSTS = new Set([
   "localhost",
+  "0.0.0.0",
   "metadata",
   "metadata.google.internal",
   "metadata.aws.amazon.com",
 ]);
 
+const SSRF_BLOCKED_PATTERNS: RegExp[] = [
+  /^127\./,                             // loopback IPv4 127.0.0.0/8
+  /^169\.254\./,                         // link-local / cloud-metadata 169.254.0.0/16
+  /^0x[0-9a-f]+$/i,                     // hex IP e.g. 0x7f000001
+  /^\d{8,10}$/,                          // decimal IP e.g. 2130706433
+];
+
 function isBlockedWebhookHost(host: string): boolean {
   const lower = host.toLowerCase();
   if (SSRF_BLOCKED_HOSTS.has(lower)) return true;
-  // Loopback IPv4 (127.0.0.0/8) and link-local (169.254.0.0/16, the
-  // cloud-metadata range). String-only check — full CIDR parsing isn't
-  // needed for an instant-feedback UX layer; the backend has the real
-  // enforcement.
-  if (/^127\./.test(host)) return true;
-  if (/^169\.254\./.test(host)) return true;
-  // IPv6 loopback / link-local.
-  if (lower === "::1" || lower.startsWith("[::1]")) return true;
+  if (SSRF_BLOCKED_PATTERNS.some((re) => re.test(host))) return true;
+  // IPv6 loopback / link-local / unspecified.
+  if (lower === "::1" || lower === "::" || lower.startsWith("[::1]") || lower.startsWith("[::]")) return true;
   if (lower.startsWith("fe80:") || lower.startsWith("[fe80:")) return true;
+  // IPv4-mapped IPv6 bypass: ::ffff:127.0.0.1, ::ffff:7f00:1, ::ffff:localhost
+  if (lower.startsWith("::ffff:") || lower.startsWith("[::ffff:")) {
+    const stripped = lower.replace(/^\[?::ffff:/, "").replace(/\]$/, "");
+    if (SSRF_BLOCKED_HOSTS.has(stripped)) return true;
+    if (SSRF_BLOCKED_PATTERNS.some((re) => re.test(stripped))) return true;
+    // IPv6 hex form like 7f00:1 → normalize to dotted-decimal and recheck.
+    const hexMatch = stripped.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+    if (hexMatch) {
+      const w1 = parseInt(hexMatch[1], 16);
+      const w2 = parseInt(hexMatch[2], 16);
+      const dotted = `${(w1 >> 8) & 0xff}.${w1 & 0xff}.${(w2 >> 8) & 0xff}.${w2 & 0xff}`;
+      if (SSRF_BLOCKED_HOSTS.has(dotted)) return true;
+      if (SSRF_BLOCKED_PATTERNS.some((re) => re.test(dotted))) return true;
+    }
+  }
   return false;
 }
 
@@ -111,8 +129,8 @@ export function buildTarget(d: DraftState): [CronDeliveryTarget | null, string |
       channel_type: d.channel_type.trim(),
       recipient: d.recipient.trim(),
     };
-    // 业务说明: 与 auth_header 一致 — 仅在用户填写时才下发,
-    // 空字符串视为 `Option::None`,保持与 Rust 端 wire shape 对齐。
+    // Consistent with auth_header — only sent when the user fills it in.
+    // Empty string maps to Rust Option::None, keeping the wire shape aligned.
     if (d.thread_id.trim()) target.thread_id = d.thread_id.trim();
     if (d.account_id.trim()) target.account_id = d.account_id.trim();
     return [target, null];
@@ -205,6 +223,19 @@ function targetBadgeClass(t: CronDeliveryTarget): string {
   }
 }
 
+const ERROR_DEFAULTS: Record<string, string> = {
+  "scheduler.delivery.err_channel_type_required": "Channel type is required",
+  "scheduler.delivery.err_recipient_required": "Recipient is required",
+  "scheduler.delivery.err_url_required": "URL is required",
+  "scheduler.delivery.err_url_scheme": "URL must start with http:// or https://",
+  "scheduler.delivery.err_url_blocked_host": "This host is blocked for security reasons",
+  "scheduler.delivery.err_path_required": "File path is required",
+  "scheduler.delivery.err_path_absolute": "Path must be relative, not absolute",
+  "scheduler.delivery.err_path_traversal": "Path must not contain '..' segments",
+  "scheduler.delivery.err_email_required": "Email recipient is required",
+  "scheduler.delivery.err_pick_type": "Please select a target type",
+};
+
 export function DeliveryTargetsEditor({ value, onChange, disabled }: DeliveryTargetsEditorProps) {
   const { t } = useTranslation();
   const [showPicker, setShowPicker] = useState(false);
@@ -268,7 +299,7 @@ export function DeliveryTargetsEditor({ value, onChange, disabled }: DeliveryTar
         <div className="space-y-1.5">
           {value.map((target, idx) => (
             <div
-              key={idx}
+              key={`${target.type}-${targetSummary(target)}-${idx}`}
               className="flex items-center gap-2 rounded-xl border border-border-subtle bg-surface px-3 py-2"
             >
               <span
@@ -467,7 +498,7 @@ export function DeliveryTargetsEditor({ value, onChange, disabled }: DeliveryTar
                 <input
                   value={draft.path}
                   onChange={(e) => setDraft({ ...draft, path: e.target.value })}
-                  placeholder="/var/log/cron-output.log"
+                  placeholder="logs/cron-output.log"
                   className={`${INPUT_CLASS} font-mono text-xs`}
                 />
               </div>
@@ -518,7 +549,7 @@ export function DeliveryTargetsEditor({ value, onChange, disabled }: DeliveryTar
           {error && (
             <div className="flex items-center gap-1.5 text-error text-[11px]">
               <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-              <span>{t(error, { defaultValue: error })}</span>
+              <span>{t(error, { defaultValue: ERROR_DEFAULTS[error] ?? "Validation error" })}</span>
             </div>
           )}
 

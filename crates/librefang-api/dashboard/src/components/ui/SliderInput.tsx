@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useId, useState, useCallback, useEffect } from "react";
 
 interface SliderInputProps {
   label: string;
@@ -28,7 +28,30 @@ export function SliderInput({
   ticks,
 }: SliderInputProps) {
   const id = useId();
-  const pct = max === min ? 0 : ((value - min) / (max - min)) * 100;
+  const safeMin = Math.min(min, max);
+  const safeMax = Math.max(min, max);
+  const pct = safeMax === safeMin ? 0 : ((value - safeMin) / (safeMax - safeMin)) * 100;
+
+  const [textValue, setTextValue] = useState<string>(String(value));
+  useEffect(() => {
+    const parsed = parseFloat(textValue);
+    if (isNaN(parsed) || parsed !== value) {
+      setTextValue(String(value));
+    }
+  }, [value]);
+  const commitTextValue = useCallback(
+    (raw: string) => {
+      const v = parseFloat(raw);
+      if (!isNaN(v)) {
+        const clamped = Math.min(safeMax, Math.max(safeMin, v));
+        onChange(clamped);
+        setTextValue(String(clamped));
+      } else {
+        setTextValue(String(value));
+      }
+    },
+    [safeMin, safeMax, onChange, value],
+  );
 
   return (
     <div className={`space-y-1.5 ${!enabled ? "opacity-40" : ""}`}>
@@ -38,15 +61,14 @@ export function SliderInput({
         </label>
         <div className="flex items-center gap-2">
           <input
-            type="number"
-            value={value}
-            onChange={(e) => {
-              const v = parseFloat(e.target.value);
-              if (!isNaN(v)) onChange(Math.min(max, Math.max(min, v)));
+            type="text"
+            inputMode="decimal"
+            value={textValue}
+            onChange={(e) => setTextValue(e.target.value)}
+            onBlur={() => commitTextValue(textValue)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitTextValue(textValue);
             }}
-            min={min}
-            max={max}
-            step={step}
             disabled={!enabled}
             className="w-20 rounded-lg border border-border-subtle bg-main px-2 py-1 text-xs text-right font-mono outline-none focus:border-brand disabled:cursor-not-allowed"
           />
@@ -82,7 +104,7 @@ export function SliderInput({
         className="w-full h-1.5 rounded-full appearance-none cursor-pointer disabled:cursor-not-allowed accent-brand"
         style={{
           background: enabled
-            ? `linear-gradient(to right, var(--color-brand) ${pct}%, var(--color-border-subtle) ${pct}%)`
+            ? `linear-gradient(to right, var(--color-brand, #6366f1) ${pct}%, var(--color-border-subtle, #d1d5db) ${pct}%)`
             : undefined,
         }}
       />

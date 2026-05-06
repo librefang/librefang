@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useReducer, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "./Button";
 import { DrawerPanel } from "./DrawerPanel";
@@ -58,7 +58,7 @@ function parseCronType(cron: string): { type: ScheduleType; min?: number; hour?:
   if (m.startsWith("*/") && h === "*") return { type: "interval_min", interval: parseInt(m.slice(2)) || 5 };
   if (m === "0" && h.startsWith("*/")) return { type: "interval_hour", interval: parseInt(h.slice(2)) || 1 };
   if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && RE_DIGITS.test(dom) && dow === "*") return { type: "monthly", hour: +h, min: +m, day: +dom };
-  if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && RE_SINGLE_DIGIT.test(dow)) return { type: "weekly", hour: +h, min: +m, weekday: +dow };
+  if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && RE_SINGLE_DIGIT.test(dow)) return { type: "weekly", hour: +h, min: +m, weekday: +dow === 0 ? 7 : +dow };
   if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && dow === "1-5") return { type: "weekday", hour: +h, min: +m };
   if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && dow === "*") return { type: "daily", hour: +h, min: +m };
   return { type: "custom" };
@@ -89,38 +89,91 @@ function buildCronFrom(
     case "interval_hour": return `0 */${intervalHour} * * *`;
     case "daily": return `${minute} ${hour} * * *`;
     case "weekday": return `${minute} ${hour} * * 1-5`;
-    case "weekly": return `${minute} ${hour} * * ${weekday}`;
+    case "weekly": return `${minute} ${hour} * * ${weekday === 7 ? 0 : weekday}`;
     case "monthly": return `${minute} ${hour} ${monthDay} * *`;
     case "custom": return customCron;
   }
 }
 
+interface ScheduleState {
+  scheduleType: ScheduleType;
+  intervalMin: number;
+  intervalHour: number;
+  hour: number;
+  minute: number;
+  weekday: number;
+  monthDay: number;
+  customCron: string;
+}
+
+type ScheduleAction =
+  | { type: "SET_SCHEDULE_TYPE"; payload: ScheduleType }
+  | { type: "SET_INTERVAL_MIN"; payload: number }
+  | { type: "SET_INTERVAL_HOUR"; payload: number }
+  | { type: "SET_HOUR"; payload: number }
+  | { type: "SET_MINUTE"; payload: number }
+  | { type: "SET_WEEKDAY"; payload: number }
+  | { type: "SET_MONTH_DAY"; payload: number }
+  | { type: "SET_CUSTOM_CRON"; payload: string }
+  | { type: "RESET"; payload: ScheduleState };
+
+function scheduleReducer(state: ScheduleState, action: ScheduleAction): ScheduleState {
+  switch (action.type) {
+    case "SET_SCHEDULE_TYPE": return { ...state, scheduleType: action.payload };
+    case "SET_INTERVAL_MIN": return { ...state, intervalMin: action.payload };
+    case "SET_INTERVAL_HOUR": return { ...state, intervalHour: action.payload };
+    case "SET_HOUR": return { ...state, hour: action.payload };
+    case "SET_MINUTE": return { ...state, minute: action.payload };
+    case "SET_WEEKDAY": return { ...state, weekday: action.payload };
+    case "SET_MONTH_DAY": return { ...state, monthDay: action.payload };
+    case "SET_CUSTOM_CRON": return { ...state, customCron: action.payload };
+    case "RESET": return action.payload;
+  }
+}
+
+function buildInitialState(cron: string | undefined): ScheduleState {
+  const parsed = parseCronType(cron || "0 9 * * *");
+  return {
+    scheduleType: parsed.type,
+    intervalMin: parsed.type === "interval_min" ? (parsed.interval ?? 5) : 5,
+    intervalHour: parsed.type === "interval_hour" ? (parsed.interval ?? 1) : 1,
+    hour: parsed.hour ?? 9,
+    minute: parsed.min ?? 0,
+    weekday: parsed.weekday ?? 1,
+    monthDay: parsed.day ?? 1,
+    customCron: cron || "0 9 * * *",
+  };
+}
+
+function validateCron(cron: string): boolean {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return false;
+  return parts.every(p => RE_CRON_FIELD.test(p));
+}
+
 export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz, onSave, onClose }: ScheduleModalProps) {
   const { t } = useTranslation();
 
-  const parsed = parseCronType(initialCron || "0 9 * * *");
   const detectedTz = initialTz || detectBrowserTimezone();
   const [timezone, setTimezone] = useState(detectedTz);
+  const [state, dispatch] = useReducer(scheduleReducer, initialCron, buildInitialState);
+
+  const prevInitialCron = useRef(initialCron);
+  useEffect(() => {
+    if (prevInitialCron.current !== initialCron) {
+      prevInitialCron.current = initialCron;
+      dispatch({ type: "RESET", payload: buildInitialState(initialCron) });
+    }
+  }, [initialCron]);
+
+  useEffect(() => {
+    setTimezone(initialTz || detectBrowserTimezone());
+  }, [initialTz]);
 
   const timezoneOptions = useMemo(
     () => (COMMON_TIMEZONES.includes(detectedTz) ? COMMON_TIMEZONES : [detectedTz, ...COMMON_TIMEZONES]),
     [detectedTz],
   );
-
-  const [scheduleType, setScheduleType] = useState<ScheduleType>(parsed.type);
-  const [intervalMin, setIntervalMin] = useState(parsed.type === "interval_min" ? (parsed.interval ?? 5) : 5);
-  const [intervalHour, setIntervalHour] = useState(parsed.type === "interval_hour" ? (parsed.interval ?? 1) : 1);
-  const [hour, setHour] = useState(parsed.hour ?? 9);
-  const [minute, setMinute] = useState(parsed.min ?? 0);
-  const [weekday, setWeekday] = useState(parsed.weekday ?? 1);
-  const [monthDay, setMonthDay] = useState(parsed.day ?? 1);
-  const [customCron, setCustomCron] = useState(initialCron || "0 9 * * *");
-
-  const validateCron = (cron: string): boolean => {
-    const parts = cron.trim().split(/\s+/);
-    if (parts.length !== 5) return false;
-    return parts.every(p => RE_CRON_FIELD.test(p));
-  };
 
   const describeCron = (cron: string): string => {
     const parts = cron.trim().split(/\s+/);
@@ -136,13 +189,13 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
     if (m.startsWith("*/") && h === "*") return t("scheduler.cron_every_n_min", { n: m.slice(2) });
     if (m === "0" && h.startsWith("*/")) return t("scheduler.cron_every_n_hour", { n: h.slice(2) });
     if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && RE_DIGITS.test(dom) && dow === "*") return t("scheduler.cron_monthly", { dom, time });
-    if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && RE_SINGLE_DIGIT.test(dow)) return t("scheduler.cron_weekly", { day: weekdays[+dow], time });
+    if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && RE_SINGLE_DIGIT.test(dow)) return t("scheduler.cron_weekly", { day: weekdays[+dow === 0 ? 0 : +dow === 7 ? 0 : +dow], time });
     if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && dow === "1-5") return t("scheduler.cron_weekdays", { time });
     if (RE_DIGITS.test(m) && RE_DIGITS.test(h) && dom === "*" && dow === "*") return t("scheduler.cron_daily", { time });
     return cron;
   };
 
-  const previewCron = buildCronFrom(scheduleType, intervalMin, intervalHour, hour, minute, weekday, monthDay, customCron);
+  const previewCron = buildCronFrom(state.scheduleType, state.intervalMin, state.intervalHour, state.hour, state.minute, state.weekday, state.monthDay, state.customCron);
   const cronValid = validateCron(previewCron);
 
   const types = useMemo<{ key: ScheduleType; label: string }[]>(
@@ -163,11 +216,11 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
 
   const timeSelect = (
     <div className="flex items-center gap-0.5">
-      <select value={hour} onChange={e => setHour(+e.target.value)} className={sel}>
+      <select value={state.hour} onChange={e => dispatch({ type: "SET_HOUR", payload: +e.target.value })} className={sel}>
         {HOURS.map(h => <option key={h} value={h}>{String(h).padStart(2, "0")}</option>)}
       </select>
       <span className="text-text-dim font-bold">:</span>
-      <select value={minute} onChange={e => setMinute(+e.target.value)} className={sel}>
+      <select value={state.minute} onChange={e => dispatch({ type: "SET_MINUTE", payload: +e.target.value })} className={sel}>
         {MINUTES.map(m => <option key={m} value={m}>{String(m).padStart(2, "0")}</option>)}
       </select>
     </div>
@@ -205,9 +258,9 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
         <div className="px-5 pb-4">
           <div className="flex rounded-xl bg-main p-0.5">
             {types.map(tp => (
-              <button key={tp.key} onClick={() => setScheduleType(tp.key)}
+              <button key={tp.key} onClick={() => dispatch({ type: "SET_SCHEDULE_TYPE", payload: tp.key })}
                 className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-colors duration-200 ${
-                  scheduleType === tp.key
+                  state.scheduleType === tp.key
                     ? "bg-surface text-brand shadow-sm"
                     : "text-text-dim/60 hover:text-text-dim"
                 }`}>
@@ -219,35 +272,35 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
 
         {/* Config area - fixed height */}
         <div className="px-5 h-[88px] flex items-center">
-          {scheduleType === "interval_min" && (
+          {state.scheduleType === "interval_min" && (
             <div className="flex items-center gap-2 text-sm">
               <span className="text-text-dim">{t("scheduler.every")}</span>
-              <input type="number" min={1} max={59} value={intervalMin}
-                onChange={e => setIntervalMin(Math.max(1, Math.min(59, +e.target.value)))} className={num} />
+              <input type="number" min={1} max={59} value={state.intervalMin}
+                onChange={e => dispatch({ type: "SET_INTERVAL_MIN", payload: Math.max(1, Math.min(59, +e.target.value)) })} className={num} />
               <span className="text-text-dim">{t("scheduler.minutes")}</span>
             </div>
           )}
-          {scheduleType === "interval_hour" && (
+          {state.scheduleType === "interval_hour" && (
             <div className="flex items-center gap-2 text-sm">
               <span className="text-text-dim">{t("scheduler.every")}</span>
-              <input type="number" min={1} max={23} value={intervalHour}
-                onChange={e => setIntervalHour(Math.max(1, Math.min(23, +e.target.value)))} className={num} />
+              <input type="number" min={1} max={23} value={state.intervalHour}
+                onChange={e => dispatch({ type: "SET_INTERVAL_HOUR", payload: Math.max(1, Math.min(23, +e.target.value)) })} className={num} />
               <span className="text-text-dim">{t("scheduler.hours")}</span>
             </div>
           )}
-          {(scheduleType === "daily" || scheduleType === "weekday") && (
+          {(state.scheduleType === "daily" || state.scheduleType === "weekday") && (
             <div className="flex items-center gap-2 text-sm">
-              <span className="text-text-dim">{scheduleType === "weekday" ? t("scheduler.weekdays_at") : t("scheduler.daily_at")}</span>
+              <span className="text-text-dim">{state.scheduleType === "weekday" ? t("scheduler.weekdays_at") : t("scheduler.daily_at")}</span>
               {timeSelect}
             </div>
           )}
-          {scheduleType === "weekly" && (
+          {state.scheduleType === "weekly" && (
             <div className="flex flex-col gap-3 w-full">
               <div className="flex justify-between">
                 {wdShort.map((d, i) => (
-                  <button key={i} onClick={() => setWeekday(i + 1)}
+                  <button key={i} onClick={() => dispatch({ type: "SET_WEEKDAY", payload: i + 1 })}
                     className={`w-8 h-8 rounded-full text-[11px] font-bold transition-colors ${
-                      weekday === i + 1 ? "bg-brand text-white" : "text-text-dim hover:bg-main"
+                      state.weekday === i + 1 ? "bg-brand text-white" : "text-text-dim hover:bg-main"
                     }`}>{d}</button>
                 ))}
               </div>
@@ -257,21 +310,22 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
               </div>
             </div>
           )}
-          {scheduleType === "monthly" && (
+          {state.scheduleType === "monthly" && (
             <div className="flex items-center gap-2 text-sm">
               <span className="text-text-dim">{t("scheduler.every_month_on")}</span>
-              <input type="number" min={1} max={28} value={monthDay}
-                onChange={e => setMonthDay(Math.max(1, Math.min(28, +e.target.value)))} className={num} />
+              {/* Cap at 28 so the schedule fires every month including February */}
+              <input type="number" min={1} max={28} value={state.monthDay}
+                onChange={e => dispatch({ type: "SET_MONTH_DAY", payload: Math.max(1, Math.min(28, +e.target.value)) })} className={num} />
               <span className="text-text-dim">{t("scheduler.day_suffix")}</span>
               {timeSelect}
             </div>
           )}
-          {scheduleType === "custom" && (() => {
-            const fields = customCron.split(/\s+/);
+          {state.scheduleType === "custom" && (() => {
+            const fields = state.customCron.split(/\s+/);
             while (fields.length < 5) fields.push("*");
             const updateField = (idx: number, v: string) => {
               const f = [...fields]; f[idx] = v;
-              setCustomCron(f.slice(0, 5).join(" "));
+              dispatch({ type: "SET_CUSTOM_CRON", payload: f.slice(0, 5).join(" ") });
             };
             return (
               <div className="grid grid-cols-5 gap-2 w-full">

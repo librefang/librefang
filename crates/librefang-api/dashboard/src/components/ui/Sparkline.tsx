@@ -21,9 +21,25 @@ export function Sparkline({
 }: SparklineProps) {
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
   if (!data || data.length === 0) return null;
-  const max = Math.max(...data);
-  const min = Math.min(...data);
+  const max = data.reduce((a, b) => Math.max(a, b), -Infinity);
+  const min = data.reduce((a, b) => Math.min(a, b), Infinity);
   const range = max - min || 1;
+  const titleId = `sg-title-${uid}`;
+  if (data.length === 1) {
+    const cy = height / 2;
+    return (
+      <svg
+        width={width}
+        height={height}
+        className={`block overflow-visible ${className}`}
+        role="img"
+        aria-labelledby={titleId}
+      >
+        <title id={titleId}>{`Sparkline: ${min} to ${max}`}</title>
+        <circle cx={width / 2} cy={cy} r={3} fill={color} />
+      </svg>
+    );
+  }
   const stepX = width / (data.length - 1);
   const pts = data.map((v, i) => {
     const x = i * stepX;
@@ -33,7 +49,14 @@ export function Sparkline({
   const path = pts.map(([x, y], i) => (i === 0 ? `M${x},${y}` : `L${x},${y}`)).join(" ");
   const fill = `${path} L${width},${height} L0,${height} Z`;
   return (
-    <svg width={width} height={height} className={`block overflow-visible ${className}`} aria-hidden="true">
+    <svg
+      width={width}
+      height={height}
+      className={`block overflow-visible ${className}`}
+      role="img"
+      aria-labelledby={titleId}
+    >
+      <title id={titleId}>{`Sparkline: ${min} to ${max}`}</title>
       <defs>
         <linearGradient id={`sg-${uid}`} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={color} stopOpacity="0.32" />

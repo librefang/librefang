@@ -28,17 +28,28 @@ export function Card({
   // mislead users into clicking cards that have nothing wired up
   // (e.g. FangHub skill cards in browse view, plain stat cards).
   const isClickable = typeof props.onClick === "function";
+  const handleKeyDown = isClickable
+    ? (e: React.KeyboardEvent<HTMLDivElement>) => {
+        if (e.key === " ") e.preventDefault();
+        if (e.key === "Enter" || e.key === " ") {
+          props.onClick?.();
+        }
+      }
+    : undefined;
   return (
     <div
+      role={isClickable ? "button" : undefined}
+      tabIndex={isClickable ? 0 : undefined}
       className={`
         rounded-xl sm:rounded-2xl border border-border-subtle bg-surface shadow-sm
         ${paddingStyles[padding]}
-        ${hover ? "hover:border-brand/30 hover:shadow-md transition-shadow" : ""}
+        ${hover ? "hover:border-brand/30 hover:shadow-md transition-[shadow,border-color]" : ""}
         ${isClickable ? "cursor-pointer" : ""}
         ${glow ? "card-glow" : ""}
         ${className}
       `}
       {...props}
+      onKeyDown={handleKeyDown}
     >
       {children}
     </div>

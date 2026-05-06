@@ -15,7 +15,7 @@ export function EmptyState({ icon, title, description, action }: EmptyStateProps
           <div className="h-16 w-16 rounded-2xl bg-brand/5 flex items-center justify-center text-brand">
             {icon}
           </div>
-          <span className="absolute inset-0 rounded-2xl bg-brand/5 animate-pulse duration-[3000ms]" />
+          <span className="absolute inset-0 rounded-2xl bg-brand/5" />
         </div>
       ) : null}
       <h3 className="text-lg font-black tracking-tight">{title}</h3>

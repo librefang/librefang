@@ -24,9 +24,10 @@ export function CardSkeleton() {
 }
 
 export function ListSkeleton({ rows = 3 }: { rows?: number }) {
+  const safeRows = Math.min(rows, 20);
   return (
     <div className="space-y-3" role="status" aria-busy="true">
-      {Array.from({ length: rows }).map((_, i) => (
+      {Array.from({ length: safeRows }).map((_, i) => (
         <div
           key={i}
           className="rounded-2xl border border-border-subtle bg-surface p-5 shadow-sm"

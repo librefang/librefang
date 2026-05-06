@@ -69,12 +69,16 @@ export const Button = memo(forwardRef<HTMLButtonElement, ButtonProps>(
         {...props}
       >
         {isLoading ? (
-          <Loader2 className="h-4 w-4 animate-spin" />
+          <Loader2
+            className={`animate-spin ${
+              size === "sm" ? "h-3 w-3" : size === "lg" ? "h-5 w-5" : "h-4 w-4"
+            }`}
+          />
         ) : (
           leftIcon
         )}
         {children}
-        {rightIcon}
+        {!isLoading && rightIcon}
       </button>
     );
   }
