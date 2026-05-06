@@ -36,6 +36,16 @@ interface ServerMessage {
 
 const RECONNECT_DELAY_MS = 2000;
 const MAX_RECONNECT_ATTEMPTS = 10;
+// #4675: a "fast exit" is the shell process dying within 3 s of `started`.
+// That window is set well above any realistic legitimate `exit 0` from the
+// user (e.g. typing `exit` immediately after connecting still takes a few
+// hundred ms of human latency) but well below tmux's failure mode where it
+// errors out and exits within ~10 ms.
+const FAST_EXIT_WINDOW_MS = 3000;
+// #4675: stop the reconnect loop after this many consecutive fast-failed
+// connections. One fast-fail could be a transient race; two in a row means
+// the daemon is in a state where retrying won't recover it.
+const MAX_CONSECUTIVE_FAST_FAILS = 2;
 
 // Must match the server-side MAX_COLS / MAX_ROWS constants in routes/terminal.rs.
 const TERM_MIN_COLS = 1;
@@ -100,6 +110,14 @@ export function TerminalPage() {
   const connectRef = useRef<() => void>(() => {});
   const attemptRef = useRef(0);
   const desiredWindowIdRef = useRef<string | null>(null);
+  // #4675: fast-fail tracking — `startedAtRef` is set when the server emits
+  // `started` for the current WS, `connectionFastFailRef` flips true if
+  // `exit` arrives within FAST_EXIT_WINDOW_MS with a non-zero code, and
+  // `consecutiveFastFailRef` counts how many connections in a row hit that
+  // pattern. The reconnect loop bails once it crosses MAX_CONSECUTIVE_FAST_FAILS.
+  const startedAtRef = useRef<number | null>(null);
+  const connectionFastFailRef = useRef(false);
+  const consecutiveFastFailRef = useRef(0);
 
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -156,6 +174,11 @@ export function TerminalPage() {
     setError(null);
     setIsConnecting(true);
     setIsRoot(false);
+    // #4675: reset per-connection fast-fail trackers; cross-connection
+    // counter (`consecutiveFastFailRef`) is left alone so the close handler
+    // can compare this connection's outcome against the previous run.
+    startedAtRef.current = null;
+    connectionFastFailRef.current = false;
     const { url: wsUrl, protocols: wsProtocols } =
       buildAuthenticatedWebSocket("/api/terminal/ws");
     const url = new URL(wsUrl);
@@ -219,6 +242,11 @@ export function TerminalPage() {
       switch (msg.type) {
         case "started":
           setIsRoot(msg.isRoot ?? false);
+          // #4675: anchor the fast-exit window from the moment the server
+          // tells us the shell is up. Output that arrives between this and
+          // `exit` is the shell's own stderr, e.g. tmux's "open terminal
+          // failed: terminal does not support clear" message.
+          startedAtRef.current = Date.now();
           terminalRef.current?.write(
             t("terminal.started", { shell: msg.shell, pid: msg.pid }) + "\r\n"
           );
@@ -241,6 +269,18 @@ export function TerminalPage() {
           terminalRef.current?.write(
             "\r\n" + t("terminal.exited", { code: msg.code }) + "\r\n"
           );
+          // #4675: classify this connection as a fast-fail when the shell
+          // exits with a non-zero code within the FAST_EXIT_WINDOW_MS slot
+          // that opened on `started`. The close handler reads this flag to
+          // decide whether to keep reconnecting.
+          if (
+            typeof msg.code === "number" &&
+            msg.code !== 0 &&
+            startedAtRef.current !== null &&
+            Date.now() - startedAtRef.current < FAST_EXIT_WINDOW_MS
+          ) {
+            connectionFastFailRef.current = true;
+          }
           break;
         case "error":
           setError(typeof msg.content === "string" && msg.content
@@ -280,6 +320,22 @@ export function TerminalPage() {
         return;
       }
 
+      // #4675: a connection that opened, got `started`, and then exited
+      // fast with a non-zero code is almost always a host-side
+      // configuration problem (TERM/terminfo, missing tmux binary, broken
+      // shell startup) — reconnecting won't fix it. Track consecutive
+      // occurrences and bail out of the retry loop after a small ceiling
+      // so the user gets a clear error instead of a forever-spinning page.
+      if (connectionFastFailRef.current) {
+        consecutiveFastFailRef.current += 1;
+        if (consecutiveFastFailRef.current >= MAX_CONSECUTIVE_FAST_FAILS) {
+          setError(t("terminal.fast_exit_giveup"));
+          return;
+        }
+      } else {
+        consecutiveFastFailRef.current = 0;
+      }
+
       if (attemptRef.current >= MAX_RECONNECT_ATTEMPTS) {
         setError(t("terminal.max_reconnect_exceeded"));
         return;
@@ -297,6 +353,16 @@ export function TerminalPage() {
   }, [t, terminalEnabled, queryClient, addToast]);
 
   connectRef.current = connect;
+
+  // #4675: explicit user-initiated connect resets both ceilings
+  // (auto-reconnect attempts and consecutive fast-fail count) so the user
+  // can recover after fixing host config without reloading the page.
+  const manualConnect = useCallback(() => {
+    attemptRef.current = 0;
+    consecutiveFastFailRef.current = 0;
+    setReconnectAttempt(0);
+    connect();
+  }, [connect]);
 
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
@@ -536,7 +602,7 @@ export function TerminalPage() {
         </Button>
       ) : (
         <Button
-          onClick={connect}
+          onClick={manualConnect}
           isLoading={isConnecting}
           disabled={isConnecting}
           size="sm"

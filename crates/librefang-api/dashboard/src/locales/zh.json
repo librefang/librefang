@@ -2636,6 +2636,7 @@
     "websocket_error": "WebSocket 连接错误",
     "connection_closed_non_recoverable": "由于不可恢复的错误，连接已关闭",
     "max_reconnect_exceeded": "已达到最大重连次数，请手动连接。",
+    "fast_exit_giveup": "终端启动失败 — Shell 启动后立刻退出。请检查守护进程主机的 TERM / terminfo（例如安装 ncurses-term）以及 tmux 配置；底层错误未修复前重连无效。",
     "root_warning": "警告：守护进程以 root 身份运行。终端命令将以完整权限执行。",
     "enter_fullscreen": "全屏",
     "exit_fullscreen": "退出全屏（Esc）",
