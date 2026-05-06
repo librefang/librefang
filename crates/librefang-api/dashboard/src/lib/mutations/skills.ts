@@ -14,17 +14,35 @@ import {
   evolveWriteFile,
   evolveRemoveFile,
 } from "../http/client";
-import { skillKeys, fanghubKeys } from "../queries/keys";
+import {
+  skillKeys,
+  fanghubKeys,
+  clawhubKeys,
+  clawhubCnKeys,
+  skillhubKeys,
+} from "../queries/keys";
+
+// Install/uninstall flips `is_installed` on every hub's browse / search /
+// detail responses (the daemon computes it from the local skills directory),
+// so any successful mutation must invalidate _all_ hub query domains in
+// addition to the installed-skills list. Otherwise the source-of-skill grid
+// keeps showing stale "Install" buttons until the next refetchInterval — see
+// #4689 (FangHub Installed-tab gap, SkillHub / ClawHub / ClawHub-CN button
+// not flipping post-install).
+function invalidateAllSkillSurfaces(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: skillKeys.all });
+  qc.invalidateQueries({ queryKey: fanghubKeys.all });
+  qc.invalidateQueries({ queryKey: clawhubKeys.all });
+  qc.invalidateQueries({ queryKey: clawhubCnKeys.all });
+  qc.invalidateQueries({ queryKey: skillhubKeys.all });
+}
 
 export function useInstallSkill() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ name, hand }: { name: string; hand?: string }) =>
       installSkill(name, hand),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: skillKeys.all });
-      qc.invalidateQueries({ queryKey: fanghubKeys.all });
-    },
+    onSuccess: () => invalidateAllSkillSurfaces(qc),
   });
 }
 
@@ -32,7 +50,7 @@ export function useUninstallSkill() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: uninstallSkill,
-    onSuccess: () => qc.invalidateQueries({ queryKey: skillKeys.all }),
+    onSuccess: () => invalidateAllSkillSurfaces(qc),
   });
 }
 
@@ -41,7 +59,7 @@ export function useClawHubInstall() {
   return useMutation({
     mutationFn: ({ slug, version, hand }: { slug: string; version?: string; hand?: string }) =>
       clawhubInstall(slug, version, hand),
-    onSuccess: () => qc.invalidateQueries({ queryKey: skillKeys.all }),
+    onSuccess: () => invalidateAllSkillSurfaces(qc),
   });
 }
 
@@ -50,7 +68,7 @@ export function useClawHubCnInstall() {
   return useMutation({
     mutationFn: ({ slug, version, hand }: { slug: string; version?: string; hand?: string }) =>
       clawhubCnInstall(slug, version, hand),
-    onSuccess: () => qc.invalidateQueries({ queryKey: skillKeys.all }),
+    onSuccess: () => invalidateAllSkillSurfaces(qc),
   });
 }
 
@@ -59,7 +77,7 @@ export function useSkillHubInstall() {
   return useMutation({
     mutationFn: ({ slug, hand }: { slug: string; hand?: string }) =>
       skillhubInstall(slug, hand),
-    onSuccess: () => qc.invalidateQueries({ queryKey: skillKeys.all }),
+    onSuccess: () => invalidateAllSkillSurfaces(qc),
   });
 }
 
@@ -68,10 +86,7 @@ export function useFangHubInstall() {
   return useMutation({
     mutationFn: ({ name, hand }: { name: string; hand?: string }) =>
       installSkill(name, hand),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: skillKeys.all });
-      qc.invalidateQueries({ queryKey: fanghubKeys.all });
-    },
+    onSuccess: () => invalidateAllSkillSurfaces(qc),
   });
 }
 
@@ -97,7 +112,9 @@ export function useReloadSkills() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: reloadSkills,
-    onSuccess: () => qc.invalidateQueries({ queryKey: skillKeys.all }),
+    // Reload re-reads every skill manifest from disk; any hub's browse cache
+    // could now show a different `is_installed`, so invalidate every surface.
+    onSuccess: () => invalidateAllSkillSurfaces(qc),
   });
 }
 
