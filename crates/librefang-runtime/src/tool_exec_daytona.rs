@@ -182,6 +182,23 @@ impl ToolExecBackend for DaytonaBackend {
                 );
                 continue;
             }
+            // #4677 review (refs #3823): refuse to forward the env var
+            // that holds the daemon's Daytona auth token. The token
+            // never *intentionally* lands on `ExecSpec::env` — Daytona
+            // is an HTTP backend, the bearer goes in the
+            // `Authorization` header, not in the remote shell — but if
+            // an agent puts `cfg.api_key_env` on its env map (either
+            // by accident or by design), prefixing it to the remote
+            // command line would let a `printenv` / `echo $VAR` tool
+            // call exfiltrate it. Drop it explicitly with a warning.
+            if k == &self.cfg.api_key_env {
+                tracing::warn!(
+                    key = %k,
+                    "tool_exec/daytona: refusing to forward daytona auth env var \
+                     to remote command (would leak bearer token via remote shell)"
+                );
+                continue;
+            }
             // Daytona's exec endpoint takes a single shell string; we
             // prefix `KEY=value` assignments and let the remote shell
             // export them for the duration of `command`.
