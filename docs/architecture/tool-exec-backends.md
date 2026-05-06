@@ -4,6 +4,24 @@ How agents dispatch shell commands and process spawns to the right
 host — local subprocess, Docker container, remote SSH host, or a
 managed sandbox like Daytona. Issue #3332.
 
+## Status
+
+This PR (#3332) lands the **trait + concrete backend implementations
++ config plumbing**. It does **NOT** yet route the existing
+`tool_runner.rs` shell / `docker_exec` / process-spawn call sites
+through the trait — that migration is a deliberate follow-up because
+the call-site refactor is large enough to deserve its own review.
+
+Concretely: configuring `tool_exec.kind = "ssh"` (or `"daytona"`) in
+`config.toml` resolves correctly through `resolve_backend_kind` and
+materialises the corresponding `ToolExecBackend` impl, but tool calls
+emitted by an LLM still flow through the legacy local / docker
+helpers. **The kernel emits a `WARN` at boot when `kind != "local"`**
+to make this visible. Operators experimenting with the SSH or Daytona
+backend should expect the override to take effect only after the
+follow-up PR migrates the call sites; until then, set `kind` to
+preview the resolver and feature-flag plumbing.
+
 ## Why a trait
 
 Historically the runtime ran every shell / `docker_exec` / process
@@ -126,12 +144,21 @@ was built without the relevant cargo feature.
   `password_env` for password auth from the named env var; neither
   set tries SSH none-auth (rare, mostly useless — surfaces a clear
   error otherwise).
-- **Host-key pinning:** `host_key_sha256` is the hex SHA-256 of the
-  server's wire-form public-key blob. When set, the backend hard-
-  rejects connections whose key differs (TOFU pinning). When empty,
-  the backend logs the key at INFO and accepts on first connect —
-  fine for trusted LAN, but **production deployments should set the
-  pin** to defeat an active MITM.
+- **Host-key verification:** `host_key_sha256` is the hex SHA-256 of
+  the server's wire-form public-key blob. Three modes:
+  1. **Pinned (recommended).** When set, the backend hard-rejects
+     connections whose key differs.
+  2. **TOFU on disk.** When empty AND
+     `~/.librefang/ssh_known_hosts.toml` already records this host,
+     the entry there is required to match. A mismatch raises
+     `ExecError::AuthFailure`.
+  3. **First connect.** When neither pin nor known-hosts entry exists,
+     the backend logs the fingerprint at INFO, writes it to the
+     known-hosts file, and accepts. Subsequent connects use mode 2.
+
+  Mode 3 is the only branch open to MITM on first contact — operators
+  should copy the logged fingerprint into the explicit pin once
+  verified out-of-band.
 - **File I/O:** `upload` / `download` return
   `ExecError::UnsupportedForBackend` in this landing. SFTP via
   `russh-sftp` is a deliberate follow-up (see "Out of scope" below).
@@ -141,7 +168,12 @@ was built without the relevant cargo feature.
 - **What:** one workspace per agent (created lazily on first
   `run_command`), reused across calls. Commands POST to the
   workspace's `/exec` endpoint over the workspace `reqwest`
-  client. `cleanup()` deletes the workspace.
+  client. `cleanup()` deletes the workspace; on a non-2xx or
+  transport error the workspace id is restored to the cache and a
+  WARN is logged so a later cleanup retries (avoids leaking
+  workspaces on transient network blips). Public error messages are
+  truncated to 256 chars and have `Bearer <token>` substrings
+  redacted; the full body lands in `tracing::debug!` only.
 - **Auth:** bearer token from the env var named in
   `tool_exec.daytona.api_key_env`. The daemon never persists the
   token.
