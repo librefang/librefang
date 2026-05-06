@@ -977,7 +977,7 @@ async fn handle_text_message(
                     if !image_blocks.is_empty() {
                         has_images = true;
                         crate::routes::inject_attachments_into_session(
-                            &state.kernel,
+                            state.kernel.as_ref(),
                             agent_id,
                             image_blocks,
                         );

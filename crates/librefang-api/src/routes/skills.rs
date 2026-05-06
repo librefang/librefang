@@ -3235,7 +3235,11 @@ pub async fn hand_send_message(
     if !req.attachments.is_empty() {
         let image_blocks = super::agents::resolve_attachments(&state, &req.attachments);
         if !image_blocks.is_empty() {
-            super::agents::inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
+            super::agents::inject_attachments_into_session(
+                state.kernel.as_ref(),
+                agent_id,
+                image_blocks,
+            );
         }
     }
 
