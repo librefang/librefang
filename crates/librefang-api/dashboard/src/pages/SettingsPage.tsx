@@ -6,7 +6,8 @@ import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import {
   Globe, Sun, Moon, Settings, PanelLeftClose, PanelLeft, Languages, LayoutDashboard,
-  Shield, CheckCircle, XCircle, Download, Play, Square, Eye, EyeOff,} from "lucide-react";
+  Shield, CheckCircle, XCircle, Download, Play, Square, Eye, EyeOff,
+  Database, ArrowRight, Loader2, Link, Unlink,} from "lucide-react";
 import { useUIStore } from "../lib/store";
 import { useAutoDreamStatus } from "../lib/queries/autoDream";
 import { useTotpStatus } from "../lib/queries/approvals";
