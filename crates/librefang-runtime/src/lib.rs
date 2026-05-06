@@ -76,6 +76,11 @@ pub mod str_utils;
 pub mod subprocess_sandbox;
 pub mod tool_budget;
 pub mod tool_classifier;
+pub mod tool_exec_backend;
+#[cfg(feature = "daytona-backend")]
+pub mod tool_exec_daytona;
+#[cfg(feature = "ssh-backend")]
+pub mod tool_exec_ssh;
 pub mod tool_policy;
 pub mod tool_runner;
 pub mod trace_store;
