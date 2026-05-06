@@ -381,8 +381,24 @@ enum Mode {
         encoding_aes_key: Option<String>,
         /// Bot webhook key for proactive messages (extracted from first response_url).
         webhook_key: Arc<RwLock<Option<String>>>,
+        /// per-user `response_url` cache so reply paths can quote
+        /// the exact one-time URL the platform delivered with the inbound
+        /// message instead of falling back to the webhook key for every
+        /// outbound. WeCom invalidates the URL after ~5 min, so we evict on
+        /// read using `RESPONSE_URL_TTL`. Keyed by `ChannelUser.platform_id`
+        /// (= the WeCom `from.userid`) so the lookup at send time has the
+        /// info `ChannelUser` actually carries.
+        response_urls:
+            Arc<RwLock<std::collections::BTreeMap<String, (String, std::time::Instant)>>>,
     },
 }
+
+/// TTL for cached `response_url` entries. WeCom documents the
+/// URL as one-shot per inbound; in practice the platform tolerates the
+/// reply for a few minutes. Five minutes is conservative — outside that
+/// window we drop back to the webhook key (which always works for proactive
+/// messages and is what the code did before the cache existed).
+const RESPONSE_URL_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// WeCom intelligent bot adapter.
 pub struct WeComAdapter {
@@ -436,6 +452,7 @@ impl WeComAdapter {
                 token,
                 encoding_aes_key,
                 webhook_key: Arc::new(RwLock::new(None)),
+                response_urls: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             },
             webhook_base: None,
         }
@@ -1077,6 +1094,7 @@ impl ChannelAdapter for WeComAdapter {
             token,
             encoding_aes_key,
             webhook_key,
+            response_urls,
             ..
         } = &self.mode
         else {
@@ -1088,6 +1106,7 @@ impl ChannelAdapter for WeComAdapter {
 
         let token = Arc::new(token.clone());
         let encoding_aes_key = Arc::new(encoding_aes_key.clone());
+        let response_urls_for_route = Arc::clone(response_urls);
         let tx = Arc::new(tx);
         let webhook_key = Arc::clone(webhook_key);
 
@@ -1163,6 +1182,7 @@ impl ChannelAdapter for WeComAdapter {
                 let encoding_aes_key = Arc::clone(&encoding_aes_key);
                 let tx = Arc::clone(&tx);
                 let webhook_key = Arc::clone(&webhook_key);
+                let response_urls = Arc::clone(&response_urls_for_route);
                 move |axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
                       body: String| {
                     let token = Arc::clone(&token);
@@ -1170,6 +1190,7 @@ impl ChannelAdapter for WeComAdapter {
                     let tx = Arc::clone(&tx);
                     let account_id = Arc::clone(&account_id);
                     let webhook_key = Arc::clone(&webhook_key);
+                    let response_urls = Arc::clone(&response_urls);
                     async move {
                         // Parse JSON body: {"encrypt": "BASE64_ENCRYPTED"}
                         let body_json: serde_json::Value = match serde_json::from_str(&body) {
@@ -1295,6 +1316,15 @@ impl ChannelAdapter for WeComAdapter {
                                     channel_msg.metadata.insert(
                                         "wecom_response_url".to_string(),
                                         serde_json::json!(response_url),
+                                    );
+                                    // cache the per-user response_url so
+                                    // the `send()` path (which only sees `&ChannelUser`,
+                                    // not the originating `ChannelMessage`) can quote
+                                    // the exact one-time URL the platform delivered.
+                                    let mut guard = response_urls.write().await;
+                                    guard.insert(
+                                        user_id.clone(),
+                                        (response_url.clone(), std::time::Instant::now()),
                                     );
                                 }
 
@@ -1438,10 +1468,26 @@ impl ChannelAdapter for WeComAdapter {
             Mode::Callback {
                 client,
                 webhook_key,
+                response_urls,
                 ..
             } => {
-                // Try response_url from user metadata first, fall back to webhook key
-                let response_url: Option<String> = None; // TODO: response_url is per-message, not available on ChannelUser
+                // look up the cached `response_url` for this
+                // user. The cache is populated by the inbound POST handler
+                // when the platform delivers a `response_url` alongside the
+                // message. Entries older than `RESPONSE_URL_TTL` are evicted
+                // here (read-side eviction keeps the map size bounded
+                // without a separate sweep).
+                // Single `remove` covers both branches: live-and-fresh →
+                // return URL (one-shot semantics, the URL is burned by
+                // the platform after reply), expired or missing → None
+                // and the stale entry is gone either way.
+                let response_url: Option<String> = response_urls
+                    .write()
+                    .await
+                    .remove(&user.platform_id)
+                    .and_then(|(url, captured_at)| {
+                        (captured_at.elapsed() < RESPONSE_URL_TTL).then_some(url)
+                    });
 
                 if let Some(url) = response_url {
                     info!(url = %url, "WeCom bot replying via response_url");
@@ -1789,6 +1835,30 @@ mod tests {
         }
     }
 
+    async fn seed_response_url(
+        adapter: &WeComAdapter,
+        user_id: &str,
+        url: &str,
+        captured_at: std::time::Instant,
+    ) {
+        if let Mode::Callback { response_urls, .. } = &adapter.mode {
+            response_urls
+                .write()
+                .await
+                .insert(user_id.to_string(), (url.to_string(), captured_at));
+        } else {
+            panic!("seed_response_url requires Callback mode");
+        }
+    }
+
+    async fn response_url_cache_size(adapter: &WeComAdapter) -> usize {
+        if let Mode::Callback { response_urls, .. } = &adapter.mode {
+            response_urls.read().await.len()
+        } else {
+            panic!("response_url_cache_size requires Callback mode");
+        }
+    }
+
     #[tokio::test]
     async fn wecom_callback_send_posts_webhook_with_key_query_and_text_payload() {
         let server = MockServer::start().await;
@@ -1885,6 +1955,108 @@ mod tests {
         assert!(
             err.to_string().contains("500"),
             "error should mention status code, got: {err}"
+        );
+    }
+
+    // ----- response_url cache (#27 / TTL semantics) -----
+
+    #[tokio::test]
+    async fn cached_response_url_is_used_then_evicted_on_send() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/wecom-respond"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = WeComAdapter::new_callback(
+            "bot-id".to_string(),
+            "secret".to_string(),
+            8455,
+            None,
+            None,
+        );
+        // Seed the cache with a fresh URL pointing at the mock server.
+        let url = format!("{}/wecom-respond", server.uri());
+        seed_response_url(&adapter, "user-A", &url, std::time::Instant::now()).await;
+
+        adapter
+            .send(&wecom_user("user-A"), ChannelContent::Text("hi".into()))
+            .await
+            .expect("send should hit cached response_url and return Ok");
+
+        // One-shot: cache must be empty after the send consumed the entry.
+        assert_eq!(
+            response_url_cache_size(&adapter).await,
+            0,
+            "cache must be drained after one-shot consume"
+        );
+    }
+
+    #[tokio::test]
+    async fn second_send_falls_back_to_webhook_when_cache_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = WeComAdapter::new_callback(
+            "bot-id".to_string(),
+            "secret".to_string(),
+            8456,
+            None,
+            None,
+        )
+        .with_webhook_base(server.uri());
+        seed_webhook_key(&adapter, "WEBHOOK-KEY-2").await;
+        // No cache seed → second-send-style scenario.
+        adapter
+            .send(&wecom_user("user-B"), ChannelContent::Text("hi".into()))
+            .await
+            .expect("empty cache must fall back to webhook key path");
+    }
+
+    #[tokio::test]
+    async fn expired_cached_response_url_is_evicted_and_falls_back() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = WeComAdapter::new_callback(
+            "bot-id".to_string(),
+            "secret".to_string(),
+            8457,
+            None,
+            None,
+        )
+        .with_webhook_base(server.uri());
+        seed_webhook_key(&adapter, "WEBHOOK-KEY-3").await;
+
+        // Seed with a captured_at older than the TTL: the entry must be
+        // evicted on read and the send must fall back to the webhook key.
+        let stale = std::time::Instant::now()
+            .checked_sub(RESPONSE_URL_TTL + std::time::Duration::from_secs(1))
+            .expect("clock skew");
+        seed_response_url(&adapter, "user-C", "http://stale-url.invalid/", stale).await;
+
+        adapter
+            .send(&wecom_user("user-C"), ChannelContent::Text("hi".into()))
+            .await
+            .expect("expired entry must not block the fallback path");
+
+        // Cache must be drained even on expiry — otherwise it would
+        // accumulate stale entries forever for users who never get fresh
+        // inbounds.
+        assert_eq!(
+            response_url_cache_size(&adapter).await,
+            0,
+            "expired entry must be removed on read"
         );
     }
 }
