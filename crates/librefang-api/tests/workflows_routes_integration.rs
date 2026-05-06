@@ -143,7 +143,11 @@ async fn workflow_get_unknown_uuid_returns_404() {
     let (status, body) = get(&h, "/api/workflows/00000000-0000-0000-0000-000000000000").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("not found"),
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("not found"),
         "{body:?}"
     );
 }
@@ -156,6 +160,7 @@ async fn workflow_get_invalid_id_returns_400() {
     assert!(
         body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .contains("Invalid workflow ID"),
         "{body:?}"
@@ -227,7 +232,11 @@ async fn workflow_create_rejects_missing_steps() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("'steps'"),
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("'steps'"),
         "{body:?}"
     );
 }
@@ -247,7 +256,11 @@ async fn workflow_create_rejects_step_without_agent() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("agent_id"),
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("agent_id"),
         "{body:?}"
     );
 }
@@ -291,6 +304,7 @@ async fn workflow_run_get_invalid_id_returns_400() {
     assert!(
         body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .contains("Invalid run ID"),
         "{body:?}"
@@ -349,7 +363,11 @@ async fn trigger_create_rejects_missing_agent_id() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("agent_id"),
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("agent_id"),
         "{body:?}"
     );
 }
@@ -368,6 +386,7 @@ async fn trigger_create_rejects_invalid_agent_id() {
     assert!(
         body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .contains("Invalid agent_id"),
         "{body:?}"
@@ -386,7 +405,11 @@ async fn trigger_create_rejects_missing_pattern() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("pattern"),
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("pattern"),
         "{body:?}"
     );
 }
@@ -415,6 +438,7 @@ async fn schedule_get_invalid_id_returns_400() {
     assert!(
         body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .contains("Invalid schedule ID"),
         "{body:?}"
@@ -440,7 +464,11 @@ async fn schedule_create_rejects_missing_name() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("'name'"),
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("'name'"),
         "{body:?}"
     );
 }
@@ -457,7 +485,11 @@ async fn schedule_create_rejects_missing_cron() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("'cron'"),
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("'cron'"),
         "{body:?}"
     );
 }
@@ -483,6 +515,7 @@ async fn cron_jobs_list_rejects_invalid_agent_id_filter() {
     assert!(
         body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .contains("Invalid agent_id"),
         "{body:?}"
@@ -618,7 +651,11 @@ async fn workflow_template_get_unknown_returns_404() {
     let (status, body) = get(&h, "/api/workflow-templates/no-such-template").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("not found"),
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("not found"),
         "{body:?}"
     );
 }
@@ -645,4 +682,131 @@ async fn workflow_templates_list_supports_query_filters() {
     assert_eq!(status, StatusCode::OK, "{body:?}");
     let arr = body["templates"].as_array().expect("array");
     assert!(arr.is_empty(), "filters should winnow to zero: {body:?}");
+}
+
+// ---------------------------------------------------------------------------
+// #3693 — cron job status response must expose session_message_count /
+// session_token_count so operators can graph persistent-cron-session growth
+// before the provider returns a hard context-window 400.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_job_get_response_has_session_size_fields() {
+    use chrono::Utc;
+    use librefang_memory::session::Session;
+    use librefang_types::agent::{AgentId, SessionId};
+    use librefang_types::message::Message;
+    use librefang_types::scheduler::{CronAction, CronDelivery, CronJob, CronJobId, CronSchedule};
+
+    let h = boot().await;
+    let kernel = &h._state.kernel;
+
+    // Build a synthetic agent — add_job does not validate against the
+    // registry, so any AgentId works.
+    let agent_id = AgentId::new();
+    let job = CronJob {
+        id: CronJobId::new(),
+        agent_id,
+        name: "session-size-probe".to_string(),
+        enabled: true,
+        schedule: CronSchedule::Every { every_secs: 3600 },
+        action: CronAction::SystemEvent {
+            text: "ping".to_string(),
+        },
+        delivery: CronDelivery::None,
+        delivery_targets: Vec::new(),
+        peer_id: None,
+        session_mode: None,
+        created_at: Utc::now(),
+        last_run: None,
+        next_run: None,
+    };
+    let job_id = kernel
+        .cron()
+        .add_job(job, false)
+        .expect("cron add_job should succeed for unregistered agent");
+
+    // Seed the persistent (agent, "cron") session with a few messages so
+    // the metric helpers have something to report.
+    let cron_sid = SessionId::for_channel(agent_id, "cron");
+    let session = Session {
+        id: cron_sid,
+        agent_id,
+        messages: vec![
+            Message::user("first user turn"),
+            Message::assistant("first assistant turn"),
+            Message::user("second user turn"),
+        ],
+        context_window_tokens: 0,
+        label: None,
+        messages_generation: 1,
+        last_repaired_generation: None,
+    };
+    kernel
+        .memory_substrate()
+        .save_session(&session)
+        .expect("save_session must succeed");
+
+    // GET /api/cron/jobs/{id} carries the new fields.
+    let (status, body) = get(&h, &format!("/api/cron/jobs/{}", job_id.0)).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let msg_count = body["session_message_count"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("session_message_count missing/non-numeric: {body:?}"));
+    assert_eq!(
+        msg_count, 3,
+        "expected the 3 seeded messages, got {msg_count} body={body:?}"
+    );
+    let tok_count = body["session_token_count"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("session_token_count missing/non-numeric: {body:?}"));
+    assert!(
+        tok_count > 0,
+        "token estimate should be non-zero for non-empty session: {body:?}"
+    );
+
+    // GET /api/cron/jobs/{id}/status carries the same fields.
+    let (status, body) = get(&h, &format!("/api/cron/jobs/{}/status", job_id.0)).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["session_message_count"].as_u64(), Some(3), "{body:?}");
+    let tok = body["session_token_count"].as_u64();
+    assert!(
+        tok.is_some() && tok.unwrap() > 0,
+        "status response missing token estimate: {body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_job_get_response_session_fields_default_zero_when_no_session() {
+    // No persistent cron session yet → both counters must be 0, not absent.
+    use chrono::Utc;
+    use librefang_types::agent::AgentId;
+    use librefang_types::scheduler::{CronAction, CronDelivery, CronJob, CronJobId, CronSchedule};
+
+    let h = boot().await;
+    let kernel = &h._state.kernel;
+    let agent_id = AgentId::new();
+    let job = CronJob {
+        id: CronJobId::new(),
+        agent_id,
+        name: "no-session-yet".to_string(),
+        enabled: true,
+        schedule: CronSchedule::Every { every_secs: 3600 },
+        action: CronAction::SystemEvent {
+            text: "ping".to_string(),
+        },
+        delivery: CronDelivery::None,
+        delivery_targets: Vec::new(),
+        peer_id: None,
+        session_mode: None,
+        created_at: Utc::now(),
+        last_run: None,
+        next_run: None,
+    };
+    let job_id = kernel.cron().add_job(job, false).unwrap();
+
+    let (status, body) = get(&h, &format!("/api/cron/jobs/{}", job_id.0)).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["session_message_count"].as_u64(), Some(0), "{body:?}");
+    assert_eq!(body["session_token_count"].as_u64(), Some(0), "{body:?}");
 }

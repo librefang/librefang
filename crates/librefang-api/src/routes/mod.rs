@@ -129,8 +129,10 @@ pub(crate) fn resolve_lang(lang: Option<&axum::Extension<RequestLanguage>>) -> &
 pub struct AppState {
     pub kernel: Arc<LibreFangKernel>,
     pub started_at: Instant,
-    /// Channel bridge manager — held behind a Mutex so it can be swapped on hot-reload.
-    pub bridge_manager: tokio::sync::Mutex<Option<librefang_channels::bridge::BridgeManager>>,
+    /// Channel bridge manager — held in an `ArcSwap` for lock-free reads and atomic
+    /// swap on hot-reload. Write sites use `store(Arc::new(new_value))`; the stop
+    /// path uses `swap` + `Arc::try_unwrap` to obtain ownership for `stop()`.
+    pub bridge_manager: arc_swap::ArcSwap<Option<librefang_channels::bridge::BridgeManager>>,
     /// Live channel config — updated on every hot-reload so list_channels() reflects reality.
     pub channels_config: tokio::sync::RwLock<librefang_types::config::ChannelsConfig>,
     /// Notify handle to trigger graceful HTTP server shutdown from the API.
@@ -144,7 +146,7 @@ pub struct AppState {
     /// Probe cache for local provider health checks (ollama/vllm/lmstudio).
     /// Avoids blocking the `/api/providers` endpoint on TCP timeouts to
     /// unreachable local services. 60-second TTL.
-    pub provider_probe_cache: librefang_runtime::provider_health::ProbeCache,
+    pub provider_probe_cache: librefang_kernel::provider_health::ProbeCache,
     /// Cache for manual provider test results (latency, timestamp, reachable).
     /// Populated by POST /api/providers/{name}/test, consumed by GET /api/providers.
     pub provider_test_cache: DashMap<String, (Instant, u128, String, bool)>,
@@ -163,7 +165,7 @@ pub struct AppState {
     /// next request without a daemon restart.
     pub user_api_keys: Arc<tokio::sync::RwLock<Vec<crate::middleware::ApiUserAuth>>>,
     /// Media generation driver cache for image/TTS/video/music.
-    pub media_drivers: librefang_runtime::media::MediaDriverCache,
+    pub media_drivers: librefang_kernel::media::MediaDriverCache,
     /// Dynamic webhook router for channel webhook endpoints.
     /// Mounted under `/channels` on the main server. Updated on hot-reload.
     pub webhook_router: Arc<tokio::sync::RwLock<Arc<axum::Router>>>,
@@ -174,7 +176,7 @@ pub struct AppState {
     /// Maps discovery URL → AgentCard. Agents here are NOT trusted yet and
     /// cannot receive tasks. Use POST /api/a2a/agents/{url}/approve to promote
     /// them into the kernel's trusted external-agent list.
-    pub pending_a2a_agents: DashMap<String, librefang_runtime::a2a::AgentCard>,
+    pub pending_a2a_agents: DashMap<String, librefang_kernel::a2a::AgentCard>,
     /// Per-IP brute-force limiter for authentication endpoints.
     /// Shared between the auth-endpoint middleware layer and the background
     /// prune task so stale entries are reclaimed every 5 minutes.
@@ -194,4 +196,8 @@ pub struct AppState {
     /// boot alongside `trusted_proxies` so WS handlers don't have to hold a
     /// `config_ref()` guard just to read this single bool.
     pub trust_forwarded_for: bool,
+    /// Persistent Idempotency-Key replay cache (#3637). Reuses the
+    /// substrate's SQLite connection so replays survive daemon
+    /// restarts within the 24h TTL window.
+    pub idempotency_store: Arc<dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync>,
 }

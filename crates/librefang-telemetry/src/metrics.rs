@@ -117,6 +117,46 @@ pub fn record_http_request(path: &str, method: &str, status: u16, duration: Dura
     .record(duration.as_secs_f64());
 }
 
+/// Describe LibreFang's observability metrics so the Prometheus exporter
+/// emits `# HELP` / `# TYPE` lines for them.
+///
+/// Should be called once after the metrics recorder is installed (see
+/// `librefang-api::telemetry::init_prometheus`). Idempotent — calling
+/// twice just re-registers the same description, which the recorder
+/// dedupes.
+///
+/// Covers the four metrics added in #3495 plus the existing HTTP pair.
+pub fn describe_observability_metrics() {
+    metrics::describe_counter!(
+        "librefang_http_requests_total",
+        "Total HTTP requests handled by the LibreFang API server, labeled by method/path/status."
+    );
+    metrics::describe_histogram!(
+        "librefang_http_request_duration_seconds",
+        metrics::Unit::Seconds,
+        "Wall-clock time spent serving an HTTP request, labeled by method/path."
+    );
+    metrics::describe_histogram!(
+        "librefang_queue_wait_seconds",
+        metrics::Unit::Seconds,
+        "Time spent waiting for a CommandQueue lane permit before work starts (#3495)."
+    );
+    metrics::describe_counter!(
+        "librefang_mcp_reconnect_total",
+        "MCP server reconnect attempts, labeled by server id and outcome (success|failure) (#3495)."
+    );
+    metrics::describe_counter!(
+        "librefang_llm_provider_errors_total",
+        "LLM provider error responses recorded by the rate-limit guard, \
+         labeled by provider and HTTP status (#3495)."
+    );
+    metrics::describe_counter!(
+        "librefang_tool_call_total",
+        "Tool invocations executed by the agent loop, labeled by tool name \
+         and outcome (success|failure) (#3495)."
+    );
+}
+
 /// Render an HTTP metrics summary.
 ///
 /// Delegates to the global `PrometheusHandle` installed by

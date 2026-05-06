@@ -104,7 +104,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_runtime::kernel_handle::prelude::*;
+use librefang_kernel::kernel_handle::prelude::*;
 use librefang_types::agent::AgentId;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -721,7 +721,7 @@ pub async fn delete_workflow(
 }
 
 /// POST /api/workflows/:id/run — Execute a workflow.
-#[utoipa::path(post, path = "/api/workflows/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "Workflow run started", body = crate::types::JsonObject)))]
+#[utoipa::path(post, path = "/api/workflows/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), request_body(content = crate::types::JsonObject, description = "Workflow input variables (free-form key/value object)"), responses((status = 200, description = "Workflow run started", body = crate::types::JsonObject)))]
 pub async fn run_workflow(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1249,7 +1249,7 @@ pub async fn delete_trigger(
 // Trigger update endpoint
 // ---------------------------------------------------------------------------
 
-#[utoipa::path(patch, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Updated trigger", body = crate::types::JsonObject), (status = 404, description = "Not found")))]
+#[utoipa::path(patch, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), request_body(content = crate::types::JsonObject, description = "Partial trigger fields: pattern, prompt_template, enabled, max_fires, cooldown_secs, session_mode, target_agent_id"), responses((status = 200, description = "Updated trigger", body = crate::types::JsonObject), (status = 404, description = "Not found")))]
 /// PATCH /api/triggers/:id — Partially update a trigger.
 ///
 /// All body fields are optional. Only provided fields are changed.
@@ -1956,7 +1956,12 @@ pub async fn create_cron_job(
                 serde_json::from_str(&result).unwrap_or(serde_json::json!({"id": result}));
             (StatusCode::CREATED, Json(parsed))
         }
-        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple(),
+        // #3541: route structured KernelOpError through the centralized
+        // From impl so the status-code contract is consistent across all
+        // routes. The earlier inline match mapped `Unavailable` to 500
+        // (should be 503) and `Other` to 400 (should be 500), both fixed
+        // here because the From impl is the single source of truth.
+        Err(e) => ApiErrorResponse::from(e).into_json_tuple(),
     }
 }
 
@@ -2101,7 +2106,67 @@ fn cron_persist_failed_response(
     )
 }
 
+/// Look up the persistent cron session for `agent_id` and return
+/// `(message_count, estimated_tokens)`. Returns `(0, 0)` when no
+/// session exists yet (job has never fired in `Persistent` mode).
+///
+/// #3693: surfaces session-size growth to operators via the cron
+/// status / detail endpoints so the trend is visible in the
+/// dashboard before the provider returns a hard context-window
+/// 400. Estimation matches the kernel's prune path (system prompt
+/// and tools are excluded) — under-counts slightly but is
+/// consistent across calls.
+fn cron_session_metrics(
+    state: &AppState,
+    agent_id: librefang_types::agent::AgentId,
+) -> (usize, u64) {
+    use librefang_kernel::compactor::estimate_token_count;
+    use librefang_types::agent::SessionId;
+
+    let cron_sid = SessionId::for_channel(agent_id, "cron");
+    match state.kernel.memory_substrate().get_session(cron_sid) {
+        Ok(Some(session)) => {
+            let count = session.messages.len();
+            let tokens = estimate_token_count(&session.messages, None, None) as u64;
+            (count, tokens)
+        }
+        _ => (0, 0),
+    }
+}
+
+/// Merge a cron `JobMeta` with `session_message_count` /
+/// `session_token_count` into a JSON object response (#3693).
+/// Falls back to the bare `meta` JSON if it does not serialize
+/// to an object — the existing schema is forward-compatible
+/// because both fields are additive.
+fn cron_job_response_with_metrics(
+    state: &AppState,
+    meta: &librefang_kernel::cron::JobMeta,
+) -> serde_json::Value {
+    let mut value = serde_json::to_value(meta).unwrap_or(serde_json::Value::Null);
+    let (msg_count, tok_count) = cron_session_metrics(state, meta.job.agent_id);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "session_message_count".to_string(),
+            serde_json::Value::from(msg_count),
+        );
+        obj.insert(
+            "session_token_count".to_string(),
+            serde_json::Value::from(tok_count),
+        );
+    }
+    value
+}
+
 /// GET /api/cron/jobs/{id} — Get a single cron job by ID.
+///
+/// Response carries the cron `JobMeta` plus two #3693 observability
+/// fields:
+/// - `session_message_count` (`usize`): messages in the persistent
+///   `(agent, "cron")` session.
+/// - `session_token_count` (`u64`): kernel-estimated tokens for those
+///   messages (system prompt and tools excluded — same accounting as
+///   the prune path).
 #[utoipa::path(get, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job details", body = crate::types::JsonObject), (status = 404, description = "Job not found")))]
 pub async fn get_cron_job(
     State(state): State<Arc<AppState>>,
@@ -2113,7 +2178,7 @@ pub async fn get_cron_job(
             match state.kernel.cron().get_meta(job_id) {
                 Some(meta) => (
                     StatusCode::OK,
-                    Json(serde_json::to_value(&meta).unwrap_or_default()),
+                    Json(cron_job_response_with_metrics(&state, &meta)),
                 ),
                 None => ApiErrorResponse::not_found("Job not found").into_json_tuple(),
             }
@@ -2123,6 +2188,9 @@ pub async fn get_cron_job(
 }
 
 /// GET /api/cron/jobs/{id}/status — Get status of a specific cron job.
+///
+/// Same response shape as `GET /api/cron/jobs/{id}`, including the
+/// #3693 `session_message_count` / `session_token_count` fields.
 #[utoipa::path(get, path = "/api/cron/jobs/{id}/status", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job status", body = crate::types::JsonObject)))]
 pub async fn cron_job_status(
     State(state): State<Arc<AppState>>,
@@ -2134,7 +2202,7 @@ pub async fn cron_job_status(
             match state.kernel.cron().get_meta(job_id) {
                 Some(meta) => (
                     StatusCode::OK,
-                    Json(serde_json::to_value(&meta).unwrap_or_default()),
+                    Json(cron_job_response_with_metrics(&state, &meta)),
                 ),
                 None => ApiErrorResponse::not_found("Job not found").into_json_tuple(),
             }

@@ -80,7 +80,7 @@ pub struct AuthenticatedApiUser {
     pub role: UserRole,
     /// Same id stored on [`ApiUserAuth`]; downstream handlers read this
     /// from request extensions to pass the caller through to kernel
-    /// `authorize()` calls and into [`librefang_runtime::audit::AuditEntry`].
+    /// `authorize()` calls and into [`librefang_kernel::audit::AuditEntry`].
     pub user_id: UserId,
 }
 
@@ -237,6 +237,16 @@ pub const REQUEST_ID_HEADER: &str = "x-request-id";
 #[derive(Clone, Debug)]
 pub struct RequestLanguage(pub &'static str);
 
+/// Per-request correlation id (#3639).
+///
+/// Inserted into [`Request::extensions_mut`] by [`request_logging`] **before**
+/// the handler runs, so handlers can read the same id that ends up in the
+/// `x-request-id` response header and the structured access-log line. Use
+/// the [`crate::extractors::RequestId`] axum extractor on the handler side
+/// — direct extension access is also supported.
+#[derive(Clone, Debug)]
+pub struct RequestIdExt(pub String);
+
 /// Middleware: parse `Accept-Language` header and store the resolved language
 /// in request extensions for downstream handlers.
 ///
@@ -272,11 +282,19 @@ pub async fn accept_language(mut request: Request<Body>, next: Next) -> Response
 /// field automatically, so a single grep on `request_id=<uuid>` lights up
 /// the full execution path (HTTP → kernel → LLM provider).  This closes
 /// the propagation gap reported in #3775.
-pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Body> {
+pub async fn request_logging(mut request: Request<Body>, next: Next) -> Response<Body> {
     let request_id = uuid::Uuid::new_v4().to_string();
     let method = request.method().clone();
     let uri = request.uri().path().to_string();
     let start = Instant::now();
+
+    // #3639: stash the id in request extensions BEFORE the handler runs so
+    // the [`crate::extractors::RequestId`] extractor (and any handler that
+    // reads the extension directly) sees the same value that surfaces on
+    // the response header and access-log span.
+    request
+        .extensions_mut()
+        .insert(RequestIdExt(request_id.clone()));
 
     // Span wraps the entire downstream future so any `tracing::instrument`
     // (or manual span) opened inside the handler chain becomes a child of
@@ -296,17 +314,22 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
     let elapsed = start.elapsed();
     let status = response.status().as_u16();
 
-    // Lift handler-resolved identifiers (currently `agent_id`) out of the
-    // response extensions and onto the structured access-log line. Closes
-    // #3511 — without this, tracing all requests for a specific agent
-    // across the kernel boundary requires `RUST_LOG=debug` and string
-    // matching on raw URI paths. `session_id` will land in a follow-up PR
-    // once `KernelHandle::send_message` surfaces the resolved `SessionId`.
+    // Lift handler-resolved identifiers out of the response extensions and
+    // onto the structured access-log line. Closes #3511 — without this,
+    // tracing all requests for a specific agent/session across the kernel
+    // boundary requires `RUST_LOG=debug` and string matching on raw URI
+    // paths.
     let agent_id = response
         .extensions()
         .get::<crate::extensions::AgentIdField>()
         .map(|f| f.0.to_string());
     let agent_id_field = agent_id.as_deref().unwrap_or("");
+
+    let session_id = response
+        .extensions()
+        .get::<crate::extensions::SessionIdField>()
+        .map(|f| f.0.to_string());
+    let session_id_field = session_id.as_deref().unwrap_or("");
 
     // 4xx/5xx elevated so auth storms and server faults surface; GET successes suppressed to avoid poll noise.
     if status >= 500 {
@@ -317,6 +340,7 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
             status = status,
             latency_ms = elapsed.as_millis() as u64,
             agent_id = %agent_id_field,
+            session_id = %session_id_field,
             "API request"
         );
     } else if status >= 400 {
@@ -327,6 +351,7 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
             status = status,
             latency_ms = elapsed.as_millis() as u64,
             agent_id = %agent_id_field,
+            session_id = %session_id_field,
             "API request"
         );
     } else if method == axum::http::Method::GET {
@@ -337,6 +362,7 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
             status = status,
             latency_ms = elapsed.as_millis() as u64,
             agent_id = %agent_id_field,
+            session_id = %session_id_field,
             "API request"
         );
     } else {
@@ -347,18 +373,166 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
             status = status,
             latency_ms = elapsed.as_millis() as u64,
             agent_id = %agent_id_field,
+            session_id = %session_id_field,
             "API request"
         );
     }
 
     metrics::record_http_request(&uri, method.as_str(), status, elapsed);
 
-    // Inject the request ID into the response
+    // Inject the request ID into the response header (always).
     if let Ok(header_val) = request_id.parse() {
         response.headers_mut().insert(REQUEST_ID_HEADER, header_val);
     }
 
+    // #3639: stamp `request_id` (and a default `code` when missing) onto
+    // every JSON 4xx/5xx response body so clients can correlate errors
+    // with logs / support tickets without parsing the response header.
+    // No-op for non-error responses, non-JSON bodies, and bodies that the
+    // handler already populated with a `request_id`.
+    if status >= 400 {
+        response = normalize_json_error_body(response, &request_id).await;
+    }
+
     response
+}
+
+/// Treat any `application/json` 4xx/5xx response with a `{"error": ...}`
+/// body as the canonical error envelope and stamp `request_id` (#3639) plus
+/// a default machine-readable `code` derived from the HTTP status when the
+/// handler didn't already supply one. This centralises the contract so the
+/// dozens of remaining `Json(json!({"error": "..."}))` sites in route
+/// modules surface a uniform shape without per-site edits.
+///
+/// Bodies that fail to parse as a JSON object, or that are not JSON at all,
+/// pass through untouched.
+async fn normalize_json_error_body(response: Response<Body>, request_id: &str) -> Response<Body> {
+    // Only touch JSON responses — leaving binary, HTML, plain-text, and
+    // streaming bodies (SSE) alone is essential.
+    let is_json = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("application/json"));
+    if !is_json {
+        return response;
+    }
+
+    let status_code = response.status();
+    let (mut parts, body) = response.into_parts();
+
+    // Cap how much of the body we'll buffer to avoid OOM if a handler
+    // somehow produced a multi-megabyte error response. 256 KiB is far above
+    // any realistic error envelope. `axum::body::to_bytes` enforces the cap
+    // for us — anything larger is left untouched.
+    const MAX_ERROR_BODY_BYTES: usize = 256 * 1024;
+    let bytes = match axum::body::to_bytes(body, MAX_ERROR_BODY_BYTES).await {
+        Ok(b) => b,
+        // Body too large or transport error — emit empty body to avoid
+        // sending a half-buffered payload, but keep the original headers
+        // so callers still see status + request_id header.
+        Err(_) => return Response::from_parts(parts, Body::empty()),
+    };
+
+    // Try parsing as a JSON object. Anything else (top-level array,
+    // primitive, or invalid JSON) is left untouched.
+    let mut value: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+        _ => return Response::from_parts(parts, Body::from(bytes)),
+    };
+    let Some(obj) = value.as_object_mut() else {
+        return Response::from_parts(parts, Body::from(bytes));
+    };
+
+    // Only stamp on bodies that look like our error envelope (have an
+    // `"error"` key). Non-error JSON 4xx/5xx (rare but possible — e.g.
+    // structured 422 with a custom shape) is passed through as-is.
+    if !obj.contains_key("error") {
+        return Response::from_parts(parts, Body::from(bytes));
+    }
+
+    let mut mutated = false;
+    let default_code = default_error_code_for_status(status_code);
+
+    if !obj.contains_key("request_id") {
+        obj.insert(
+            "request_id".to_string(),
+            serde_json::Value::String(request_id.to_string()),
+        );
+        mutated = true;
+    }
+    if !obj.contains_key("code") {
+        obj.insert(
+            "code".to_string(),
+            serde_json::Value::String(default_code.to_string()),
+        );
+        // Mirror onto the legacy `type` alias so old clients see the same token.
+        obj.entry("type")
+            .or_insert(serde_json::Value::String(default_code.to_string()));
+        mutated = true;
+    }
+
+    // #3639 deferred — also stamp into the nested `error` object when the
+    // handler emitted the new envelope shape (`error: {code, message,
+    // request_id}`). Ad-hoc `Json(json!({"error": "msg"}))` sites still
+    // emit `error` as a string and are left untouched here; the flat
+    // top-level fields above cover them.
+    if let Some(err_obj) = obj.get_mut("error").and_then(|v| v.as_object_mut()) {
+        if !err_obj.contains_key("request_id") {
+            err_obj.insert(
+                "request_id".to_string(),
+                serde_json::Value::String(request_id.to_string()),
+            );
+            mutated = true;
+        }
+        if !err_obj.contains_key("code") {
+            err_obj.insert(
+                "code".to_string(),
+                serde_json::Value::String(default_code.to_string()),
+            );
+            mutated = true;
+        }
+    }
+
+    if !mutated {
+        return Response::from_parts(parts, Body::from(bytes));
+    }
+
+    // Re-serialize. Failure here is essentially impossible (we just parsed
+    // it), but fall back to the original bytes if it ever does.
+    let new_bytes = match serde_json::to_vec(&value) {
+        Ok(v) => v,
+        Err(_) => return Response::from_parts(parts, Body::from(bytes)),
+    };
+    // Update Content-Length so the framing stays correct.
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    if let Ok(len_val) = new_bytes.len().to_string().parse() {
+        parts
+            .headers
+            .insert(axum::http::header::CONTENT_LENGTH, len_val);
+    }
+    Response::from_parts(parts, Body::from(new_bytes))
+}
+
+/// Map HTTP status code → default stable error code (#3639).
+///
+/// Only used when the handler didn't already supply a `code`. Values come
+/// from [`librefang_types::error_code::ErrorCode`] so the alphabet stays in
+/// one place.
+fn default_error_code_for_status(status: StatusCode) -> &'static str {
+    use librefang_types::error_code::ErrorCode;
+    match status.as_u16() {
+        400 => ErrorCode::BadRequest.as_str(),
+        401 => ErrorCode::Unauthorized.as_str(),
+        403 => ErrorCode::Forbidden.as_str(),
+        404 => ErrorCode::NotFound.as_str(),
+        409 => ErrorCode::Conflict.as_str(),
+        422 => ErrorCode::InvalidInput.as_str(),
+        429 => ErrorCode::RateLimited.as_str(),
+        503 => ErrorCode::ServiceUnavailable.as_str(),
+        s if s >= 500 => ErrorCode::InternalError.as_str(),
+        _ => ErrorCode::BadRequest.as_str(),
+    }
 }
 
 /// API version headers middleware.
@@ -719,7 +893,7 @@ pub async fn auth(
                         if let Some(ref audit) = auth_state.audit_log {
                             audit.record_with_context(
                                 "system",
-                                librefang_runtime::audit::AuditAction::PermissionDenied,
+                                librefang_kernel::audit::AuditAction::PermissionDenied,
                                 &format!("{} {}", method, path),
                                 &format!("role={}", user.role),
                                 Some(user.user_id),
@@ -1033,7 +1207,7 @@ pub async fn auth(
                 if let Some(ref audit) = auth_state.audit_log {
                     audit.record_with_context(
                         "system",
-                        librefang_runtime::audit::AuditAction::PermissionDenied,
+                        librefang_kernel::audit::AuditAction::PermissionDenied,
                         &format!("{} {}", method, path),
                         &format!("role={}", user.role),
                         Some(user.user_id),

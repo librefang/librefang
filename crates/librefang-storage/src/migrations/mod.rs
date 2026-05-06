@@ -143,4 +143,9 @@ pub const OPERATIONAL_MIGRATIONS: &[Migration] = &[
         name: "sessions_search_analyzer_v1",
         sql: include_str!("sql/023_sessions_search_analyzer.surql"),
     },
+    Migration {
+        version: 24,
+        name: "idempotency_keys_v1",
+        sql: include_str!("sql/024_idempotency_keys.surql"),
+    },
 ];

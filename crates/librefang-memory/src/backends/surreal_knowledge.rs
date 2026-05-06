@@ -82,7 +82,7 @@ impl KnowledgeBackend for SurrealKnowledgeBackend {
             .upsert::<Option<serde_json::Value>>(("kg_entities", id.clone()))
             .content(row)
             .await
-            .map_err(|e| LibreFangError::Memory(format!("SurrealDB kg add_entity: {e}")))?;
+            .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB kg add_entity: {e}")))?;
         Ok(id)
     }
 
@@ -105,7 +105,7 @@ impl KnowledgeBackend for SurrealKnowledgeBackend {
             .create::<Option<serde_json::Value>>(("kg_relations", id.clone()))
             .content(row)
             .await
-            .map_err(|e| LibreFangError::Memory(format!("SurrealDB kg add_relation: {e}")))?;
+            .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB kg add_relation: {e}")))?;
         Ok(id)
     }
 
@@ -148,10 +148,10 @@ impl KnowledgeBackend for SurrealKnowledgeBackend {
 
         let mut res = q
             .await
-            .map_err(|e| LibreFangError::Memory(format!("SurrealDB kg query_graph: {e}")))?;
+            .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB kg query_graph: {e}")))?;
         let rows: Vec<serde_json::Value> = res
             .take(0)
-            .map_err(|e| LibreFangError::Memory(format!("SurrealDB kg query_graph result: {e}")))?;
+            .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB kg query_graph result: {e}")))?;
 
         let matches = rows
             .into_iter()
@@ -280,20 +280,20 @@ impl KnowledgeBackend for SurrealKnowledgeBackend {
             .query("DELETE kg_relations WHERE agent_id = $agent_id RETURN BEFORE")
             .bind(("agent_id", agent.clone()))
             .await
-            .map_err(|e| LibreFangError::Memory(format!("SurrealDB kg delete_relations: {e}")))?;
+            .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB kg delete_relations: {e}")))?;
         let rel_deleted: Vec<serde_json::Value> = res_r
             .take(0)
-            .map_err(|e| LibreFangError::Memory(format!("SurrealDB kg delete_relations: {e}")))?;
+            .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB kg delete_relations: {e}")))?;
 
         let mut res_e = self
             .db
             .query("DELETE kg_entities WHERE agent_id = $agent_id RETURN BEFORE")
             .bind(("agent_id", agent))
             .await
-            .map_err(|e| LibreFangError::Memory(format!("SurrealDB kg delete_entities: {e}")))?;
+            .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB kg delete_entities: {e}")))?;
         let ent_deleted: Vec<serde_json::Value> = res_e
             .take(0)
-            .map_err(|e| LibreFangError::Memory(format!("SurrealDB kg delete_entities: {e}")))?;
+            .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB kg delete_entities: {e}")))?;
 
         Ok((rel_deleted.len() + ent_deleted.len()) as u64)
     }

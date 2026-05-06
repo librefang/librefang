@@ -213,7 +213,7 @@ async fn get_approval_invalid_uuid_is_bad_request() {
     let h = boot();
     let (status, body) = get(&h, "/api/approvals/not-a-uuid").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body}");
-    assert!(body["error"].is_string());
+    assert!(body["error"].is_object());
 }
 
 /// A well-formed UUID that doesn't exist is 404, distinct from 400 — the

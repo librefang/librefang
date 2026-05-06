@@ -12,6 +12,7 @@ schemars = { version = "0.8", features = ["chrono", "uuid1"] }
 librefang-kernel = { path = "../librefang-kernel" }
 librefang-uar-spec = { path = "../librefang-uar-spec" }
 librefang-runtime = { path = "../librefang-runtime" }
+librefang-kernel-handle = { path = "../librefang-kernel-handle" }
 librefang-llm-drivers = { path = "../librefang-llm-drivers" }
 librefang-memory = { path = "../librefang-memory" }
 librefang-channels = { path = "../librefang-channels", default-features = false }
@@ -24,6 +25,7 @@ librefang-storage = { path = "../librefang-storage", optional = true, default-fe
 librefang-telemetry = { path = "../librefang-telemetry" }
 librefang-http = { path = "../librefang-http" }
 anyhow = { workspace = true }
+arc-swap = { workspace = true }
 dashmap = { workspace = true }
 portable-pty = { workspace = true }
 tokio = { workspace = true }

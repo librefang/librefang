@@ -5,8 +5,30 @@
 //! - Spinner with label
 //! - OSC 9;4 terminal progress protocol (ConEmu/Windows Terminal/iTerm2)
 //! - Delay suppression for fast operations
+//! - Trait-based facade (`ProgressReporter`) so call sites can stay agnostic
+//!   of TTY vs. non-TTY environments
+//!
+//! # Choosing a reporter
+//!
+//! Most callers should use [`auto`], which picks a sensible default based on
+//! whether stderr is a TTY:
+//!
+//! ```no_run
+//! use librefang_cli::progress::{auto, ProgressReporter};
+//!
+//! let mut p = auto("Indexing", Some(100));
+//! for i in 0..100 {
+//!     p.tick(1);
+//!     # let _ = i;
+//! }
+//! p.finish("Indexed 100 items");
+//! ```
+//!
+//! On a TTY this renders an animated unicode bar; over a pipe or dumb
+//! terminal it falls back to plain `[n/total] msg` lines on stderr so logs
+//! stay grep-friendly.
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 /// Default progress bar width (in characters).
@@ -273,6 +295,147 @@ impl Drop for Spinner {
 }
 
 // ---------------------------------------------------------------------------
+// ProgressReporter trait + dynamic dispatch facade
+// ---------------------------------------------------------------------------
+
+/// Unified facade for CLI progress output.
+///
+/// Implementations are expected to be cheap to construct and to honour delay
+/// suppression / TTY detection internally — call sites should never need to
+/// branch on environment.
+pub trait ProgressReporter {
+    /// Advance progress by `delta`. For indeterminate reporters the delta is
+    /// treated as a single step.
+    fn tick(&mut self, delta: u64);
+    /// Update the label / message displayed alongside progress.
+    fn set_message(&mut self, msg: &str);
+    /// Mark progress as complete and emit a final success message.
+    fn finish(&mut self, msg: &str);
+    /// Mark progress as failed and emit a final failure message.
+    ///
+    /// Unlike `finish`, this uses a failure glyph (`✗` on TTY, `[FAIL]` on
+    /// non-TTY) so the rendered line visually signals an error rather than
+    /// a success.
+    fn finish_with_failure(&mut self, msg: &str);
+}
+
+impl ProgressReporter for ProgressBar {
+    fn tick(&mut self, delta: u64) {
+        self.inc(delta);
+    }
+    fn set_message(&mut self, msg: &str) {
+        self.label = msg.to_string();
+    }
+    fn finish(&mut self, msg: &str) {
+        self.finish_with_message(msg);
+    }
+    fn finish_with_failure(&mut self, msg: &str) {
+        self.finish_with_message(&format!("\x1b[31m✗\x1b[0m {msg}"));
+    }
+}
+
+impl ProgressReporter for Spinner {
+    fn tick(&mut self, _delta: u64) {
+        Spinner::tick(self);
+    }
+    fn set_message(&mut self, msg: &str) {
+        self.set_label(msg);
+    }
+    fn finish(&mut self, msg: &str) {
+        Spinner::finish_with_message(self, msg);
+    }
+    fn finish_with_failure(&mut self, msg: &str) {
+        Spinner::finish_with_message(self, &format!("\x1b[31m✗\x1b[0m {msg}"));
+    }
+}
+
+/// Plain-text fallback reporter for non-TTY environments (CI logs, pipes,
+/// dumb terminals).
+///
+/// Emits one line per `tick` to stderr in the form `[current/total] label`,
+/// or `[current] label` when the total is unknown. Output is line-buffered
+/// so it interleaves cleanly with surrounding tracing logs.
+pub struct LogReporter {
+    label: String,
+    total: Option<u64>,
+    current: u64,
+}
+
+impl LogReporter {
+    /// Create a log-style reporter. `total = None` means indeterminate.
+    pub fn new(label: &str, total: Option<u64>) -> Self {
+        Self {
+            label: label.to_string(),
+            total,
+            current: 0,
+        }
+    }
+}
+
+impl ProgressReporter for LogReporter {
+    fn tick(&mut self, delta: u64) {
+        self.current = self.current.saturating_add(delta);
+        match self.total {
+            Some(t) => eprintln!("[{}/{}] {}", self.current.min(t), t, self.label),
+            None => eprintln!("[{}] {}", self.current, self.label),
+        }
+    }
+    fn set_message(&mut self, msg: &str) {
+        self.label = msg.to_string();
+    }
+    fn finish(&mut self, msg: &str) {
+        eprintln!("{msg}");
+    }
+    fn finish_with_failure(&mut self, msg: &str) {
+        eprintln!("[FAIL] {msg}");
+    }
+}
+
+/// The kind of reporter that `auto` will select.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReporterKind {
+    /// Animated percentage bar (TTY + known total).
+    Bar,
+    /// Animated spinner (TTY + unknown total).
+    Spinner,
+    /// Plain log lines (non-TTY).
+    Log,
+}
+
+/// Pure selection logic for `auto()`, separated for testability.
+///
+/// `is_stderr_tty` should be `io::stderr().is_terminal()` in production.
+pub fn pick_reporter_kind(is_stderr_tty: bool, total: Option<u64>) -> ReporterKind {
+    if is_stderr_tty {
+        match total {
+            Some(_) => ReporterKind::Bar,
+            None => ReporterKind::Spinner,
+        }
+    } else {
+        ReporterKind::Log
+    }
+}
+
+/// Pick a reporter based on whether stderr is a TTY.
+///
+/// On a TTY: animated [`ProgressBar`] when `total` is known, [`Spinner`]
+/// otherwise. Off a TTY (pipe, redirect, CI): [`LogReporter`].
+///
+/// Specifically, the choice is based on whether `stderr` is a TTY —
+/// `stdout`-piped sessions still get the animated reporter as long as
+/// `stderr` is interactive.
+///
+/// The returned trait object has dynamic dispatch — fine for CLI call sites
+/// where we issue a handful of ticks per second, not millions.
+pub fn auto(label: &str, total: Option<u64>) -> Box<dyn ProgressReporter> {
+    match pick_reporter_kind(io::stderr().is_terminal(), total) {
+        ReporterKind::Bar => Box::new(ProgressBar::new(label, total.unwrap())),
+        ReporterKind::Spinner => Box::new(Spinner::new(label)),
+        ReporterKind::Log => Box::new(LogReporter::new(label, total)),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -318,5 +481,121 @@ mod tests {
         let mut pb = ProgressBar::new("Quick", 10).no_osc();
         pb.set(1);
         assert!(!pb.visible);
+    }
+
+    #[test]
+    fn log_reporter_tick_finish_round_trip() {
+        // LogReporter is the canonical fallback path; verify the trait
+        // contract (tick advances, finish doesn't panic, set_message
+        // mutates the label) without inspecting stderr output.
+        let mut r = LogReporter::new("Sync", Some(3));
+        ProgressReporter::tick(&mut r, 1);
+        ProgressReporter::tick(&mut r, 1);
+        assert_eq!(r.current, 2);
+        ProgressReporter::set_message(&mut r, "Sync (final)");
+        assert_eq!(r.label, "Sync (final)");
+        ProgressReporter::tick(&mut r, 1);
+        assert_eq!(r.current, 3);
+        ProgressReporter::finish(&mut r, "done");
+    }
+
+    #[test]
+    fn log_reporter_indeterminate_does_not_overflow() {
+        // total = None branch shouldn't gate on any total comparison.
+        let mut r = LogReporter::new("Loading", None);
+        ProgressReporter::tick(&mut r, u64::MAX / 2);
+        ProgressReporter::tick(&mut r, u64::MAX / 2);
+        // saturating_add prevents wraparound.
+        assert_eq!(r.current, u64::MAX - 1);
+        ProgressReporter::tick(&mut r, 100);
+        assert_eq!(r.current, u64::MAX);
+    }
+
+    #[test]
+    fn progress_bar_implements_reporter() {
+        // Compile-time check that ProgressBar / Spinner satisfy the trait
+        // (so `auto()` can box them) and that dispatching through &mut dyn
+        // forwards to inc / set_label correctly.
+        let mut pb = ProgressBar::new("T", 5).no_delay().no_osc();
+        let r: &mut dyn ProgressReporter = &mut pb;
+        r.tick(2);
+        r.set_message("renamed");
+        // Reach into the concrete type to verify side effects.
+        assert_eq!(pb.current, 2);
+        assert_eq!(pb.label, "renamed");
+    }
+
+    /// In CI / pipe environments stderr is not a TTY. Verify that the
+    /// `auto()` path falls back to `LogReporter` by constructing one directly
+    /// and asserting the same observable behaviour — tick advances current,
+    /// finish emits without panic, and the None-total branch prints without
+    /// dividing by zero or overflowing.
+    #[test]
+    fn log_reporter_contract_with_known_total() {
+        // Construct a LogReporter directly (same type auto() would pick on a
+        // non-TTY stderr) and drive it through the full ProgressReporter API.
+        let mut r = LogReporter::new("Installing skill", Some(3));
+        r.tick(1);
+        assert_eq!(r.current, 1);
+        r.set_message("Downloading");
+        assert_eq!(r.label, "Downloading");
+        r.tick(2);
+        assert_eq!(r.current, 3);
+        r.finish("Done");
+    }
+
+    #[test]
+    fn log_reporter_contract_indeterminate() {
+        // None-total variant — covers the spinner-equivalent branch in LogReporter.
+        let mut r = LogReporter::new("Migrating", None);
+        r.tick(1);
+        r.tick(1);
+        assert_eq!(r.current, 2);
+        r.finish("Migration complete");
+    }
+
+    // ------------------------------------------------------------------
+    // pick_reporter_kind selection logic
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn pick_reporter_kind_non_tty_always_log() {
+        assert_eq!(pick_reporter_kind(false, None), ReporterKind::Log);
+        assert_eq!(pick_reporter_kind(false, Some(10)), ReporterKind::Log);
+    }
+
+    #[test]
+    fn pick_reporter_kind_tty_with_total_is_bar() {
+        assert_eq!(pick_reporter_kind(true, Some(10)), ReporterKind::Bar);
+    }
+
+    #[test]
+    fn pick_reporter_kind_tty_no_total_is_spinner() {
+        assert_eq!(pick_reporter_kind(true, None), ReporterKind::Spinner);
+    }
+
+    // ------------------------------------------------------------------
+    // finish_with_failure
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn log_reporter_finish_with_failure_does_not_panic() {
+        let mut r = LogReporter::new("Migrating", None);
+        r.tick(1);
+        r.finish_with_failure("Migration failed: some error");
+    }
+
+    #[test]
+    fn progress_bar_finish_with_failure_does_not_panic() {
+        let mut pb = ProgressBar::new("Installing", 5).no_delay().no_osc();
+        pb.inc(2);
+        pb.finish_with_failure("Install failed");
+    }
+
+    #[test]
+    fn spinner_finish_with_failure_does_not_panic() {
+        let mut sp = Spinner::new("Publishing").no_delay().no_osc();
+        sp.tick();
+        sp.finish_with_failure("Publish failed");
     }
 }

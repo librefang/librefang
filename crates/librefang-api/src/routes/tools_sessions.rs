@@ -14,8 +14,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_runtime::kernel_handle::prelude::*;
-use librefang_runtime::tool_runner::{builtin_tool_definitions, execute_tool};
+use librefang_kernel::kernel_handle::prelude::*;
+use librefang_kernel::tool_runner::{builtin_tool_definitions, execute_tool};
 use librefang_types::i18n::ErrorTranslator;
 use std::sync::Arc;
 
@@ -287,7 +287,7 @@ pub async fn invoke_tool(
     };
     state.kernel.audit().record(
         audit_caller,
-        librefang_runtime::audit::AuditAction::ToolInvoke,
+        librefang_kernel::audit::AuditAction::ToolInvoke,
         &name,
         &audit_outcome,
     );

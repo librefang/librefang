@@ -303,6 +303,66 @@ describe("PluginsPage", () => {
     });
   });
 
+  // Regression: when a registry plugin ships a localized `display_name` (e.g.
+  // a Chinese label resolved by the backend from `[i18n.zh]`), the card must
+  // RENDER the localized label but INSTALL with the canonical `name`. The
+  // previous behavior wrote the localized string into `name`, and the install
+  // request hit GitHub at /contents/plugins/上下文衰减 → 404.
+  it("renders display_name on the card but installs with the canonical name", async () => {
+    const user = userEvent.setup();
+    const installMutate = vi.fn();
+    useInstallPluginMock.mockReturnValue({
+      mutate: installMutate,
+      isPending: false,
+      error: null,
+    });
+    usePluginsMock.mockReturnValue(makeQuery([]));
+    usePluginRegistriesMock.mockReturnValue(
+      makeQuery({
+        registries: [
+          {
+            name: "official",
+            github_repo: "librefang/registry",
+            plugins: [
+              {
+                name: "context_decay",
+                display_name: "上下文衰减",
+                installed: false,
+                version: "1.0.0",
+                description: "上下文衰减描述",
+                hooks: ["ingest"],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    renderPage();
+    await user.click(screen.getByText("plugins.registry_tab"));
+
+    // Localized label is what the user sees.
+    const displayHeading = await screen.findByText("上下文衰减");
+    expect(displayHeading).toBeInTheDocument();
+    // Canonical id is *not* shown anywhere on the card body.
+    expect(screen.queryByText("context_decay")).not.toBeInTheDocument();
+
+    // Click install — the payload must use the canonical `name`, not the label.
+    const card = displayHeading.closest("div[class*='cursor-pointer']");
+    const installButton = within(card as HTMLElement).getByText(
+      "plugins.install",
+    );
+    await user.click(installButton);
+
+    expect(installMutate).toHaveBeenCalledTimes(1);
+    const [payload] = installMutate.mock.calls[0];
+    expect(payload).toEqual({
+      source: "registry",
+      name: "context_decay",
+      github_repo: "librefang/registry",
+    });
+  });
+
   it("opens the scaffold drawer and disables Create when name is empty", async () => {
     const user = userEvent.setup();
     usePluginsMock.mockReturnValue(makeQuery(samplePlugins()));

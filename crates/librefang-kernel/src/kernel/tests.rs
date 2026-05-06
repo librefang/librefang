@@ -2487,9 +2487,10 @@ async fn send_to_agent_as_tolerates_unregistered_parent_uuid() {
     .expect_err("non-existent child must fail");
 
     assert!(
-        err.to_lowercase()
+        err.to_string()
+            .to_lowercase()
             .contains(&child_id.to_string().to_lowercase())
-            || err.to_lowercase().contains("not found"),
+            || err.to_string().to_lowercase().contains("not found"),
         "error must reference the missing child, not the missing parent: {err}"
     );
 
@@ -2514,7 +2515,7 @@ async fn send_to_agent_as_rejects_unparseable_parent_id() {
     .expect_err("garbage parent id must surface an error");
     // Either the resolver's "Agent not found" wording or the fallback
     // parse error is acceptable — the important thing is we don't panic.
-    assert!(!err.is_empty());
+    assert!(!err.to_string().is_empty());
 
     kernel.shutdown();
 }
@@ -3270,7 +3271,7 @@ fn deactivate_hand_removes_hand_agent_rows_from_sqlite() {
     for id in &agent_ids {
         assert!(
             kernel
-                .agent_store
+                .memory
                 .load_agent(*id)
                 .expect("load_agent before deactivate")
                 .is_some(),
@@ -3295,7 +3296,7 @@ fn deactivate_hand_removes_hand_agent_rows_from_sqlite() {
     for id in &agent_ids {
         assert!(
             kernel
-                .agent_store
+                .memory
                 .load_agent(*id)
                 .expect("load_agent after deactivate")
                 .is_none(),
@@ -3362,12 +3363,12 @@ fn boot_gc_removes_orphaned_hand_agent_rows() {
             ..Default::default()
         };
         kernel
-            .agent_store
+            .memory
             .save_agent(&entry)
             .expect("seed orphan row");
         assert!(
             kernel
-                .agent_store
+                .memory
                 .load_agent(orphan_id)
                 .expect("load_agent after seed")
                 .is_some(),
@@ -3397,7 +3398,7 @@ fn boot_gc_removes_orphaned_hand_agent_rows() {
 
     assert!(
         kernel
-            .agent_store
+            .memory
             .load_agent(orphan_id)
             .expect("load_agent after GC")
             .is_none(),
@@ -3455,7 +3456,7 @@ fn boot_gc_skips_orphan_cleanup_when_hand_state_is_corrupt() {
             ..Default::default()
         };
         kernel
-            .agent_store
+            .memory
             .save_agent(&entry)
             .expect("seed orphan row");
         kernel.shutdown();
@@ -3482,7 +3483,7 @@ fn boot_gc_skips_orphan_cleanup_when_hand_state_is_corrupt() {
 
     assert!(
         kernel
-            .agent_store
+            .memory
             .load_agent(orphan_id)
             .expect("load_agent after skipped GC")
             .is_some(),
@@ -6117,6 +6118,104 @@ fn resolve_cron_max_tokens_nonzero_passthrough() {
     assert_eq!(resolve_cron_max_tokens(Some(1)), Some(1));
 }
 
+// -----------------------------------------------------------------------
+// #3693 — cron session warn-threshold resolver
+// -----------------------------------------------------------------------
+
+#[test]
+fn resolve_cron_warn_threshold_disabled_when_no_fraction() {
+    // No fraction → no warn even if budget is set.
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(100_000), Some(200_000), None),
+        None
+    );
+}
+
+#[test]
+fn resolve_cron_warn_threshold_disabled_when_no_budget() {
+    // No max_tokens, no fallback → no budget → skip warn.
+    assert_eq!(resolve_cron_warn_threshold(None, None, Some(0.8)), None);
+}
+
+#[test]
+fn resolve_cron_warn_threshold_uses_max_tokens_when_set() {
+    // Explicit cap wins over fallback.
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(10_000), Some(200_000), Some(0.8)),
+        Some(8_000)
+    );
+}
+
+#[test]
+fn resolve_cron_warn_threshold_falls_back_to_total_tokens() {
+    // No explicit cap → fall back to warn_total_tokens.
+    assert_eq!(
+        resolve_cron_warn_threshold(None, Some(200_000), Some(0.5)),
+        Some(100_000)
+    );
+}
+
+#[test]
+fn resolve_cron_warn_threshold_rejects_out_of_range_fraction() {
+    // Negative, zero, > 1.0, NaN, Inf must all disable warn (silent).
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(10_000), None, Some(-0.1)),
+        None
+    );
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(10_000), None, Some(0.0)),
+        None
+    );
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(10_000), None, Some(1.5)),
+        None
+    );
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(10_000), None, Some(f64::NAN)),
+        None
+    );
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(10_000), None, Some(f64::INFINITY)),
+        None
+    );
+}
+
+#[test]
+fn resolve_cron_warn_threshold_at_full_fraction() {
+    // 1.0 = warn at budget; threshold equals budget exactly.
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(50_000), None, Some(1.0)),
+        Some(50_000)
+    );
+}
+
+#[test]
+fn resolve_cron_warn_threshold_ceils_partial_token() {
+    // 12345 * 0.8 = 9876.0 — exact, no rounding involved.
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(12_345), None, Some(0.8)),
+        Some(9_876)
+    );
+    // 100 * 0.83 = 83.0 → ceils to 83.
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(100), None, Some(0.83)),
+        Some(83)
+    );
+    // 10 * 0.85 = 8.5 → ceils to 9 so the warn trips before the cap.
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(10), None, Some(0.85)),
+        Some(9)
+    );
+}
+
+#[test]
+fn resolve_cron_warn_threshold_zero_budget_disabled() {
+    // budget=0 must not produce a warn (would warn on every fire).
+    assert_eq!(resolve_cron_warn_threshold(Some(0), None, Some(0.8)), None);
+    // Same with fallback explicitly zero (operator override).
+    assert_eq!(resolve_cron_warn_threshold(None, Some(0), Some(0.8)), None);
+}
+
 /// Regression for #3533: `spawn_agent` must reject manifests whose
 /// `module` string escapes the LibreFang home dir. The pure-function
 /// `validate_module_string` is unit-tested in librefang-runtime, but
@@ -6520,5 +6619,120 @@ fn list_agent_sessions_canonical_and_active_can_coexist_on_same_row() {
 
     let _ = kernel.stop_session_run(agent_id, s.id);
     drop(rt);
+    kernel.shutdown();
+}
+
+/// Verify the ArcSwap-backed `budget_config` (see #3579) is safe under
+/// heavy concurrent reads racing a single writer: every reader observes
+/// either the pre-update value or the post-update value (never a torn
+/// state), and the final stored value reflects the writer's mutation.
+///
+/// This pins the contract for the LLM hot path, which calls
+/// `kernel.budget_config()` on every turn for budget enforcement and
+/// must never park a tokio worker on a blocking lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn budget_config_arcswap_concurrent_reads_consistent_with_writer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-budget-arcswap-test");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    // Distinct sentinel so the "before" snapshot is identifiable.
+    config.budget.max_hourly_usd = 1.5;
+
+    let kernel =
+        std::sync::Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+
+    let mut readers = Vec::with_capacity(64);
+    for _ in 0..64 {
+        let k = kernel.clone();
+        readers.push(tokio::spawn(async move {
+            for _ in 0..50 {
+                let snap = k.budget_config();
+                // Only ever the pre-update or post-update sentinel, never
+                // a torn / partial value.
+                let v = snap.max_hourly_usd;
+                assert!(v == 1.5 || v == 9.0, "torn read: max_hourly_usd = {v}");
+                tokio::task::yield_now().await;
+            }
+        }));
+    }
+
+    // Single writer: flip max_hourly_usd to a new sentinel.
+    kernel.update_budget_config(|b| b.max_hourly_usd = 9.0);
+
+    for h in readers {
+        h.await.expect("reader task panicked");
+    }
+
+    // After the writer completes, every subsequent read must see 9.0.
+    assert_eq!(kernel.budget_config().max_hourly_usd, 9.0);
+
+    kernel.shutdown();
+}
+
+/// Two concurrent writers mutating *different* fields of `BudgetConfig`
+/// must both land — neither edit may be silently lost. With a
+/// load-clone-store implementation, the late writer would clobber the
+/// early writer's field with the pre-update snapshot. The `rcu()`-based
+/// implementation must retry on CAS failure so both fields converge to
+/// their writer's value (regardless of arrival order).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn budget_config_concurrent_writers_no_lost_update() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-budget-rcu-writers-test");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.budget.max_hourly_usd = 1.0;
+    config.budget.max_daily_usd = 2.0;
+
+    let kernel =
+        std::sync::Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+
+    // Spawn many pairs of writers racing on disjoint fields.
+    let mut writers = Vec::with_capacity(64);
+    for i in 0..32 {
+        let hourly_target = 100.0 + i as f64;
+        let daily_target = 200.0 + i as f64;
+        let k1 = kernel.clone();
+        let k2 = kernel.clone();
+        writers.push(tokio::spawn(async move {
+            k1.update_budget_config(move |b| b.max_hourly_usd = hourly_target);
+        }));
+        writers.push(tokio::spawn(async move {
+            k2.update_budget_config(move |b| b.max_daily_usd = daily_target);
+        }));
+    }
+
+    for h in writers {
+        h.await.expect("writer task panicked");
+    }
+
+    let final_cfg = kernel.budget_config();
+    // Final values must each be from *some* writer (in their respective
+    // hourly_target / daily_target ranges) — proves the rcu retry kept
+    // each field converging to a writer-supplied value rather than
+    // collapsing back to the original 1.0 / 2.0 baseline (which would
+    // happen on lost-update).
+    assert!(
+        final_cfg.max_hourly_usd >= 100.0 && final_cfg.max_hourly_usd < 132.0,
+        "max_hourly_usd lost-update: got {}",
+        final_cfg.max_hourly_usd
+    );
+    assert!(
+        final_cfg.max_daily_usd >= 200.0 && final_cfg.max_daily_usd < 232.0,
+        "max_daily_usd lost-update: got {}",
+        final_cfg.max_daily_usd
+    );
+
     kernel.shutdown();
 }

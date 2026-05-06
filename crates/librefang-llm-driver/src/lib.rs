@@ -248,7 +248,31 @@ pub struct CompletionRequest {
     /// agent's workspace, tool allowlist, and skill allowlist from the
     /// registry. `None` for out-of-band callers (compaction, routing
     /// probes, tests) that have no agent identity to propagate.
+    ///
+    /// Drivers that talk to OpenAI-compatible HTTP endpoints additionally
+    /// surface this value on the wire as `x-librefang-agent-id`, so any
+    /// observability sidecar in front of the upstream provider can attach
+    /// the value to its own log records without parsing the request body.
     pub agent_id: Option<String>,
+    /// Caller session identity.
+    ///
+    /// Identifies the conversation/session the request belongs to. Combined
+    /// with [`Self::agent_id`] this gives a stable correlation key for
+    /// downstream tracing and observability. Drivers that talk to
+    /// OpenAI-compatible HTTP endpoints surface this on the wire as
+    /// `x-librefang-session-id`. `None` for out-of-band callers that have
+    /// no session identity to propagate.
+    pub session_id: Option<String>,
+    /// Caller step identity.
+    ///
+    /// Identifies the iteration / turn within a session that produced this
+    /// request. Useful when a single session issues multiple sequential
+    /// LLM calls (e.g. tool-use loops), since `agent_id` + `session_id`
+    /// alone collapse all of them onto a single correlation key. Drivers
+    /// that talk to OpenAI-compatible HTTP endpoints surface this on the
+    /// wire as `x-librefang-step-id`. `None` for callers that don't
+    /// distinguish between steps.
+    pub step_id: Option<String>,
 }
 
 /// A response from an LLM completion.
@@ -469,6 +493,18 @@ pub struct DriverConfig {
     /// instead; this field only applies to HTTP API drivers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<u64>,
+    /// Emit `x-librefang-{agent,session,step}-id` trace headers on outbound
+    /// LLM requests. Mirrors `KernelConfig.telemetry.emit_caller_trace_headers`;
+    /// the kernel populates this field per-driver. Default `true`.
+    ///
+    /// Operators with strict zero-egress policies (regulated tenants, EU
+    /// healthcare) can flip the toml-side flag to `false` to suppress all
+    /// three headers wire-side regardless of whether `CompletionRequest`'s
+    /// caller-id fields are populated. Currently only honoured by the
+    /// OpenAI-compatible driver; other drivers do not emit these headers
+    /// today and so are unaffected by this flag.
+    #[serde(default = "default_emit_caller_trace_headers")]
+    pub emit_caller_trace_headers: bool,
 }
 
 /// Configuration for bridging LibreFang tools into a CLI-based driver via MCP.
@@ -499,6 +535,7 @@ impl Default for DriverConfig {
             mcp_bridge: None,
             proxy_url: None,
             request_timeout_secs: None,
+            emit_caller_trace_headers: default_emit_caller_trace_headers(),
         }
     }
 }
@@ -509,6 +546,10 @@ fn default_skip_permissions() -> bool {
 
 fn default_message_timeout_secs() -> u64 {
     300
+}
+
+fn default_emit_caller_trace_headers() -> bool {
+    true
 }
 
 /// SECURITY: Custom Debug impl redacts the API key.
@@ -536,6 +577,7 @@ impl std::fmt::Debug for DriverConfig {
             .field("mcp_bridge", &self.mcp_bridge.as_ref().map(|b| &b.base_url))
             .field("proxy_url", &self.proxy_url.as_ref().map(|_| "<redacted>"))
             .field("request_timeout_secs", &self.request_timeout_secs)
+            .field("emit_caller_trace_headers", &self.emit_caller_trace_headers)
             .finish()
     }
 }
@@ -771,6 +813,8 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
 
         let response = driver.stream(request, tx).await.unwrap();
@@ -833,6 +877,8 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
         let err = driver.stream(request, tx).await.unwrap_err();
         assert!(

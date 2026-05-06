@@ -73,7 +73,7 @@ impl SurrealUsageStore {
             .create::<Option<serde_json::Value>>(("usage_events", Uuid::new_v4().to_string()))
             .content(row)
             .await
-            .map_err(|e| LibreFangError::Memory(format!("SurrealDB insert usage: {e}")))?;
+            .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB insert usage: {e}")))?;
         Ok(())
     }
 
@@ -89,10 +89,10 @@ impl SurrealUsageStore {
         }
         let mut res = q
             .await
-            .map_err(|e| LibreFangError::Memory(format!("SurrealDB usage query: {e}")))?;
+            .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB usage query: {e}")))?;
         let rows: Vec<serde_json::Value> = res
             .take(0)
-            .map_err(|e| LibreFangError::Memory(format!("SurrealDB usage result: {e}")))?;
+            .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB usage result: {e}")))?;
         Ok(rows
             .into_iter()
             .next()
@@ -112,10 +112,10 @@ impl SurrealUsageStore {
         }
         let mut res = q
             .await
-            .map_err(|e| LibreFangError::Memory(format!("SurrealDB usage query: {e}")))?;
+            .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB usage query: {e}")))?;
         let rows: Vec<serde_json::Value> = res
             .take(0)
-            .map_err(|e| LibreFangError::Memory(format!("SurrealDB usage result: {e}")))?;
+            .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB usage result: {e}")))?;
         Ok(rows
             .into_iter()
             .next()
@@ -225,7 +225,7 @@ impl UsageBackend for SurrealUsageStore {
                     )
                     .bind(("agent_id", aid.0.to_string()))
                     .await
-                    .map_err(|e| LibreFangError::Memory(format!("SurrealDB usage summary: {e}")))?
+                    .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB usage summary: {e}")))?
             } else {
                 self.db
                     .query(
@@ -237,11 +237,11 @@ impl UsageBackend for SurrealUsageStore {
                          FROM usage_events",
                     )
                     .await
-                    .map_err(|e| LibreFangError::Memory(format!("SurrealDB usage summary: {e}")))?
+                    .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB usage summary: {e}")))?
             };
             let rows: Vec<serde_json::Value> = res
                 .take(0)
-                .map_err(|e| LibreFangError::Memory(format!("SurrealDB usage summary: {e}")))?;
+                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB usage summary: {e}")))?;
             Ok::<_, LibreFangError>(rows)
         })?;
 
@@ -280,10 +280,10 @@ impl UsageBackend for SurrealUsageStore {
                      FROM usage_events GROUP BY model",
                 )
                 .await
-                .map_err(|e| LibreFangError::Memory(format!("SurrealDB model usage: {e}")))?;
+                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB model usage: {e}")))?;
             let rows: Vec<serde_json::Value> = res
                 .take(0)
-                .map_err(|e| LibreFangError::Memory(format!("SurrealDB model usage: {e}")))?;
+                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB model usage: {e}")))?;
             Ok::<_, LibreFangError>(rows)
         })?;
 
@@ -522,10 +522,10 @@ impl UsageBackend for SurrealUsageStore {
                 .query("DELETE FROM usage_events WHERE timestamp < $cutoff RETURN BEFORE")
                 .bind(("cutoff", cutoff))
                 .await
-                .map_err(|e| LibreFangError::Memory(format!("SurrealDB cleanup_old: {e}")))?;
+                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB cleanup_old: {e}")))?;
             let deleted: Vec<serde_json::Value> = res
                 .take(0)
-                .map_err(|e| LibreFangError::Memory(format!("SurrealDB cleanup_old: {e}")))?;
+                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB cleanup_old: {e}")))?;
             Ok::<_, LibreFangError>(deleted.len())
         })
     }

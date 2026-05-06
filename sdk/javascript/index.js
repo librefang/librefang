@@ -161,12 +161,20 @@ class AgentsResource {
     return this._c._request("POST", "/api/agents/bulk/stop", data, undefined);
   }
 
+  async listAgentIdentities() {
+    return this._c._request("GET", "/api/agents/identities");
+  }
+
+  async resetAgentIdentity(name, query) {
+    return this._c._request("POST", `/api/agents/identities/${name}/reset`, undefined, query);
+  }
+
   async getAgent(id) {
     return this._c._request("GET", `/api/agents/${id}`);
   }
 
-  async killAgent(id) {
-    return this._c._request("DELETE", `/api/agents/${id}`);
+  async killAgent(id, query) {
+    return this._c._request("DELETE", `/api/agents/${id}`, undefined, query);
   }
 
   async patchAgent(id, data) {
@@ -831,8 +839,8 @@ class NetworkResource {
     return this._c._request("GET", "/api/network/status");
   }
 
-  async listPeers() {
-    return this._c._request("GET", "/api/peers");
+  async listPeers(query) {
+    return this._c._request("GET", "/api/peers", undefined, query);
   }
 
   async getPeer(id) {

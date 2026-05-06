@@ -11,6 +11,7 @@ pub mod a2a;
 pub mod agent_context;
 pub mod agent_loop;
 pub mod apply_patch;
+pub mod artifact_store;
 pub mod audit;
 pub mod auth_cooldown;
 pub mod aux_client;

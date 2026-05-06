@@ -157,7 +157,7 @@ async fn test_spawn_agent_checked_rejects_capability_escalation() {
     );
 
     let error = result.unwrap_err();
-    let error_lower = error.to_lowercase();
+    let error_lower = error.to_string().to_lowercase();
     assert!(
         error_lower.contains("escalation")
             || error_lower.contains("denied")

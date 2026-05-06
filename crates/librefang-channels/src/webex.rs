@@ -47,6 +47,9 @@ pub struct WebexAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Cached bot identity (ID and display name).
     bot_info: Arc<RwLock<Option<(String, String)>>>,
+    /// REST base URL. Defaults to `WEBEX_API_BASE`; tests override via
+    /// `with_base_url` so the adapter talks to a local wiremock instead.
+    api_base: String,
 }
 
 impl WebexAdapter {
@@ -65,11 +68,20 @@ impl WebexAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             bot_info: Arc::new(RwLock::new(None)),
+            api_base: WEBEX_API_BASE.to_string(),
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the REST base URL. `#[cfg(test)]`-only — used by wiremock-driven
+    /// tests to point the adapter at a local mock server.
+    #[cfg(test)]
+    pub fn with_base_url(mut self, url: String) -> Self {
+        self.api_base = url;
         self
     }
 
@@ -161,7 +173,7 @@ impl WebexAdapter {
         room_id: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/messages", WEBEX_API_BASE);
+        let url = format!("{}/messages", self.api_base);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
         for chunk in chunks {
@@ -538,5 +550,72 @@ mod tests {
     fn test_webex_constants() {
         assert!(WEBEX_API_BASE.starts_with("https://"));
         assert!(WEBEX_WS_URL.starts_with("wss://"));
+    }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // The `WEBEX_API_BASE` const is now backed by an `api_base` field
+    // (see struct definition); a `#[cfg(test)] with_base_url` setter
+    // points the adapter at a local `wiremock::MockServer`. Asserts the
+    // `POST /messages` request shape, the bearer header, and the JSON
+    // body schema for a text message.
+
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn webex_user(room_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: room_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn webex_send_posts_to_messages_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .and(header("authorization", "Bearer bot-tok"))
+            .and(body_json(serde_json::json!({
+                "roomId": "ROOM1",
+                "text": "hello webex",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "MSG1"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = WebexAdapter::new("bot-tok".to_string(), vec![]).with_base_url(server.uri());
+        adapter
+            .send(
+                &webex_user("ROOM1"),
+                ChannelContent::Text("hello webex".into()),
+            )
+            .await
+            .expect("webex send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn webex_send_returns_err_on_non_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = WebexAdapter::new("bad-tok".to_string(), vec![]).with_base_url(server.uri());
+        let err = adapter
+            .send(&webex_user("ROOM_X"), ChannelContent::Text("nope".into()))
+            .await
+            .expect_err("webex send must propagate non-2xx as Err");
+        assert!(
+            err.to_string().contains("401"),
+            "error should mention status code, got: {err}"
+        );
     }
 }

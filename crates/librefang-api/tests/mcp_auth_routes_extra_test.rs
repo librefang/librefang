@@ -29,7 +29,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use librefang_api::routes::{self, AppState};
-use librefang_runtime::mcp_oauth::McpAuthState;
+use librefang_kernel::mcp_oauth::McpAuthState;
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use librefang_types::config::{McpServerConfigEntry, McpTransportEntry};
 use std::sync::Arc;

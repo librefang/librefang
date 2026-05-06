@@ -416,6 +416,8 @@ impl MemoryExtractor for LlmMemoryExtractor {
             timeout_secs: Some(30),
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
 
         let response = self.driver.complete(request).await.map_err(|e| {
@@ -571,6 +573,8 @@ impl MemoryExtractor for LlmMemoryExtractor {
             timeout_secs: Some(15),
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
 
         match self.driver.complete(request).await {

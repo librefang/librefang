@@ -287,7 +287,7 @@ impl ProactiveMemoryStore {
                  FROM memories
                  WHERE deleted = 0 AND accessed_at < ?1",
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let rows: Vec<(String, f64, String, i64)> = stmt
             .query_map(rusqlite::params![one_day_ago.to_rfc3339()], |row| {
@@ -298,7 +298,7 @@ impl ProactiveMemoryStore {
                     row.get::<_, i64>(3)?,
                 ))
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?
+            .map_err(LibreFangError::memory)?
             .filter_map(|r| match r {
                 Ok(row) => Some(row),
                 Err(e) => {
@@ -339,7 +339,7 @@ impl ProactiveMemoryStore {
                 "UPDATE memories SET confidence = ?1 WHERE id = ?2",
                 rusqlite::params![new_confidence, id],
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         }
 
         if !rows.is_empty() {
@@ -411,13 +411,13 @@ impl ProactiveMemoryStore {
                     "SELECT DISTINCT agent_id FROM memories \
                      WHERE scope = ?1 AND created_at < ?2 AND deleted = 0",
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             let ids = stmt
                 .query_map(
                     rusqlite::params![scopes::SESSION, cutoff.to_rfc3339()],
                     |row| row.get::<_, String>(0),
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?
+                .map_err(LibreFangError::memory)?
                 .filter_map(|r| r.ok())
                 .collect();
             ids

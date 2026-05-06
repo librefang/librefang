@@ -1137,11 +1137,44 @@ enum AgentCommands {
     },
     /// Kill an agent.
     #[command(
-        long_about = "Terminate a running agent by its UUID.\n\nExamples:\n  librefang agent kill 550e8400-e29b-41d4-a716-446655440000"
+        long_about = "Terminate a running agent by its UUID.\n\nThis is a destructive operation: the agent's canonical UUID binding is\npurged, orphaning any prior sessions / memories under the old UUID. The\nnext spawn under the same name lands on a fresh UUID. Use\n`librefang agent delete <name> --yes` for the explicit-by-name variant\n(refs #4614).\n\nExamples:\n  librefang agent kill 550e8400-e29b-41d4-a716-446655440000"
     )]
     Kill {
         /// Agent ID (UUID).
         agent_id: String,
+    },
+    /// Delete an agent by name with a confirmation prompt (refs #4614).
+    #[command(
+        long_about = "Permanently delete an agent and purge its canonical UUID binding.\n\nResolves <name> to its canonical UUID via the agent_identities registry,\nprompts for confirmation (or `--yes` to bypass), and issues\n`DELETE /api/agents/{id}?confirm=true`. The next spawn under the same\nname will land on a fresh UUID; prior sessions / memories are orphaned.\n\nExamples:\n  librefang agent delete coder\n  librefang agent delete coder --yes"
+    )]
+    Delete {
+        /// Agent name (looked up in agent_identities.toml).
+        name: String,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Reset an agent's canonical UUID without killing it (refs #4614).
+    #[command(
+        long_about = "Drop the canonical UUID binding for <name> from the\nagent_identities registry without killing the agent. The next spawn\nwill re-derive a fresh UUID. Prior sessions / memories tied to the\nold UUID are orphaned. Prompts for confirmation; pass `--yes` to skip.\n\nExamples:\n  librefang agent reset-uuid coder\n  librefang agent reset-uuid coder --yes"
+    )]
+    ResetUuid {
+        /// Agent name.
+        name: String,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Reassign sessions / memories from an old UUID to the canonical one (refs #4614, deferred).
+    #[command(
+        long_about = "Migrate orphaned data from <old-uuid> to the canonical UUID for <name>.\n\nNOT YET IMPLEMENTED — this command is reserved by issue #4614 but the\nactual cross-table reassignment requires deep memory-substrate surgery\n(sessions, events, kv_store, memories, entities, relations,\nusage_events, canonical_sessions, prompt_experiments, audit_entries,\napproval_audit, plus the proactive memory store) under a single\ntransaction with rollback semantics. Tracked as a follow-up.\n\nFor now this command prints a friendly message pointing to the issue.\n\nExamples:\n  librefang agent merge-history coder --from 0123abcd-...-..."
+    )]
+    MergeHistory {
+        /// Agent name (canonical UUID destination).
+        name: String,
+        /// Old UUID whose sessions / memories should be reassigned.
+        #[arg(long)]
+        from: String,
     },
     /// Set an agent property (e.g., model).
     #[command(
@@ -2183,6 +2216,9 @@ fn main() {
             AgentCommands::List { json } => cmd_agent_list(cli.config, json),
             AgentCommands::Chat { agent_id } => cmd_agent_chat(cli.config, &agent_id),
             AgentCommands::Kill { agent_id } => cmd_agent_kill(cli.config, &agent_id),
+            AgentCommands::Delete { name, yes } => cmd_agent_delete(cli.config, &name, yes),
+            AgentCommands::ResetUuid { name, yes } => cmd_agent_reset_uuid(cli.config, &name, yes),
+            AgentCommands::MergeHistory { name, from } => cmd_agent_merge_history(&name, &from),
             AgentCommands::Set {
                 agent_id,
                 field,
@@ -2698,31 +2734,39 @@ fn cmd_init_upgrade() {
     ui::blank();
     ui::section("Upgrading BossFang installation");
 
+    // Four upgrade steps: backup, registry sync, vault/git, config merge.
+    let mut p = progress::auto("Upgrading", Some(4));
+
     // 2. Backup existing config under backups/ (keep last 3)
+    p.set_message("Backing up config");
     let backups_dir = librefang_dir.join("backups");
     if let Err(e) = std::fs::create_dir_all(&backups_dir) {
-        ui::error(&format!("Failed to create backups dir: {e}"));
+        p.finish_with_failure(&format!("Failed to create backups dir: {e}"));
         std::process::exit(1);
     }
     let backup_name = format!("config-{}.toml", format_local_timestamp());
     let backup_path = backups_dir.join(&backup_name);
     if let Err(e) = std::fs::copy(&config_path, &backup_path) {
-        ui::error(&format!("Failed to backup config: {e}"));
+        p.finish_with_failure(&format!("Failed to backup config: {e}"));
         std::process::exit(1);
     }
     restrict_file_permissions(&backup_path);
     prune_old_config_backups(&backups_dir, 3);
+    p.tick(1);
     ui::success(&format!("Backed up config to backups/{backup_name}"));
 
     // 3. Sync registry (TTL=0 forces refresh regardless of last sync time)
-    ui::hint("Syncing registry...");
+    p.set_message("Syncing registry");
     if librefang_runtime::registry_sync::sync_registry(&librefang_dir, 0, "") {
+        p.tick(1);
         ui::success("Registry synced");
     } else {
+        p.tick(1);
         ui::hint("Registry sync failed (network issue?) — continuing with cached content");
     }
 
     // 4. Ensure data dir, vault, and git exist
+    p.set_message("Initialising vault/git");
     let data_dir = librefang_dir.join("data");
     if !data_dir.exists() {
         let _ = std::fs::create_dir_all(&data_dir);
@@ -2739,12 +2783,14 @@ fn cmd_init_upgrade() {
             }
         }
     }
+    p.tick(1);
 
     // 5. Merge new default config fields
+    p.set_message("Merging config fields");
     let existing_raw = match std::fs::read_to_string(&config_path) {
         Ok(s) => s,
         Err(e) => {
-            ui::error(&format!("Failed to read config.toml: {e}"));
+            p.finish_with_failure(&format!("Upgrade aborted: failed to read config.toml: {e}"));
             std::process::exit(1);
         }
     };
@@ -2752,7 +2798,9 @@ fn cmd_init_upgrade() {
     let existing: toml::Value = match toml::from_str(&existing_raw) {
         Ok(v) => v,
         Err(e) => {
-            ui::error(&format!("Failed to parse config.toml: {e}"));
+            p.finish_with_failure(&format!(
+                "Upgrade aborted: failed to parse config.toml: {e}"
+            ));
             ui::hint(&format!(
                 "Your original config was saved to backups/{backup_name}"
             ));
@@ -2765,7 +2813,9 @@ fn cmd_init_upgrade() {
     let defaults: toml::Value = match toml::from_str(&default_config_str) {
         Ok(v) => v,
         Err(e) => {
-            ui::error(&format!("Failed to parse default config template: {e}"));
+            p.finish_with_failure(&format!(
+                "Upgrade aborted: failed to parse default config template: {e}"
+            ));
             std::process::exit(1);
         }
     };
@@ -2826,7 +2876,7 @@ fn cmd_init_upgrade() {
         }
 
         if let Err(e) = std::fs::write(&config_path, &content) {
-            ui::error(&format!("Failed to write config: {e}"));
+            p.finish_with_failure(&format!("Upgrade aborted: failed to write config: {e}"));
             ui::hint(&format!(
                 "Your original config was saved to backups/{backup_name}"
             ));
@@ -2838,6 +2888,8 @@ fn cmd_init_upgrade() {
             ui::kv("  +", key);
         }
     }
+    p.tick(1);
+    p.finish("Upgrade steps complete");
 
     // 6. Check for legacy ~/.openclaw installation
     if let Some(home) = dirs::home_dir() {
@@ -3772,11 +3824,7 @@ fn cmd_start(
         let provider = cfg.default_model.provider.clone();
         let model = cfg.default_model.model.clone();
         let agent_count = kernel.agent_registry().count();
-        let model_count = kernel
-            .model_catalog_ref()
-            .read()
-            .map(|c| c.list_models().len())
-            .unwrap_or(0);
+        let model_count = kernel.model_catalog_ref().load().list_models().len();
 
         ui::success(&i18n::t_args(
             "kernel-booted",
@@ -4186,21 +4234,21 @@ fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
         match agents {
             Some(agents) if agents.is_empty() => println!("{}", i18n::t("agent-no-agents")),
             Some(agents) => {
-                println!(
-                    "{:<38} {:<16} {:<10} {:<12} MODEL",
-                    "ID", "NAME", "STATE", "PROVIDER"
-                );
-                println!("{}", "-".repeat(95));
+                // Render via the shared Table builder so column widths
+                // self-size to the actual content (instead of hard-coded
+                // {:<38} which truncates / over-pads), and so piped output
+                // automatically falls back to ASCII (#3306).
+                let mut t = crate::table::Table::new(&["ID", "NAME", "STATE", "PROVIDER", "MODEL"]);
                 for a in agents {
-                    println!(
-                        "{:<38} {:<16} {:<10} {:<12} {}",
+                    t.add_row(&[
                         a["id"].as_str().unwrap_or("?"),
                         a["name"].as_str().unwrap_or("?"),
                         a["state"].as_str().unwrap_or("?"),
                         a["model_provider"].as_str().unwrap_or("?"),
                         a["model_name"].as_str().unwrap_or("?"),
-                    );
+                    ]);
                 }
+                t.print();
             }
             None => println!("{}", i18n::t("agent-no-agents")),
         }
@@ -4232,17 +4280,19 @@ fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
             return;
         }
 
-        println!("{:<38} {:<20} {:<12} CREATED", "ID", "NAME", "STATE");
-        println!("{}", "-".repeat(85));
+        let mut t = crate::table::Table::new(&["ID", "NAME", "STATE", "CREATED"]);
         for entry in agents {
-            println!(
-                "{:<38} {:<20} {:<12} {}",
-                entry.id,
-                entry.name,
-                format!("{:?}", entry.state),
-                entry.created_at.format("%Y-%m-%d %H:%M")
-            );
+            let id = entry.id.to_string();
+            let state = format!("{:?}", entry.state);
+            let created = entry.created_at.format("%Y-%m-%d %H:%M").to_string();
+            t.add_row(&[
+                id.as_str(),
+                entry.name.as_str(),
+                state.as_str(),
+                created.as_str(),
+            ]);
         }
+        t.print();
     }
 }
 
@@ -4255,9 +4305,14 @@ fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
     if let Some(base) = find_daemon() {
         let agent_id = resolve_agent_id(&base, agent_id_str);
         let client = daemon_client();
+        // Refs #4614: explicit `librefang agent kill <id>` IS the user's
+        // confirmation. The API requires `?confirm=true` on DELETE so the
+        // canonical UUID is purged on the kill (matching the issue's
+        // "explicit delete" semantics). Internal lifecycle resets call
+        // `kernel.kill_agent` directly and skip this path.
         let body = daemon_json(
             client
-                .delete(format!("{base}/api/agents/{agent_id}"))
+                .delete(format!("{base}/api/agents/{agent_id}?confirm=true"))
                 .send(),
         );
         if body.get("status").is_some() {
@@ -4281,7 +4336,9 @@ fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
             std::process::exit(1);
         });
         let kernel = boot_kernel(config);
-        match kernel.kill_agent(agent_id) {
+        // Direct-kernel path (no daemon): mirror the API's confirmed-delete
+        // semantics so behavior matches whether the daemon is running or not.
+        match kernel.kill_agent_with_purge(agent_id, true) {
             Ok(()) => println!(
                 "{}",
                 i18n::t_args("agent-killed", &[("id", &agent_id.to_string())])
@@ -4295,6 +4352,192 @@ fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
             }
         }
     }
+}
+
+/// Refs #4614 — `librefang agent delete <name>` with confirmation prompt.
+///
+/// Looks up the canonical UUID for `name` via `GET /api/agents/identities`
+/// (or directly from the kernel registry when no daemon is running),
+/// prints the destructive-action warning, and either prompts `[y/N]` or
+/// proceeds immediately when `--yes` is set. Then issues the confirmed
+/// DELETE. This is the long-form companion to `librefang agent kill <id>`
+/// — useful when the operator only knows the agent's name.
+fn cmd_agent_delete(config: Option<PathBuf>, name: &str, yes: bool) {
+    eprintln!("WARNING: Deleting agent \"{name}\" will permanently remove its canonical UUID");
+    eprintln!("    and all associated memories and sessions.");
+    eprintln!("    This action cannot be undone.");
+    if !yes && !prompt_yes_no("Confirm?", false) {
+        eprintln!("Aborted.");
+        std::process::exit(1);
+    }
+
+    if let Some(base) = find_daemon() {
+        let client = daemon_client();
+        // Resolve name → UUID via the identity registry endpoint.
+        let canonical_uuid = match lookup_canonical_uuid(&base, name) {
+            Some(id) => id,
+            None => {
+                eprintln!(
+                    "No canonical UUID recorded for agent name '{name}' — nothing to delete."
+                );
+                std::process::exit(1);
+            }
+        };
+        let body = daemon_json(
+            client
+                .delete(format!("{base}/api/agents/{canonical_uuid}?confirm=true"))
+                .send(),
+        );
+        if body.get("status").is_some() {
+            println!("Agent \"{name}\" deleted (canonical UUID purged).");
+        } else {
+            eprintln!(
+                "Failed to delete agent: {}",
+                body["error"].as_str().unwrap_or("Unknown error")
+            );
+            std::process::exit(1);
+        }
+    } else {
+        let kernel = boot_kernel(config);
+        let canonical_uuid = match kernel.agent_identities().get(name) {
+            Some(id) => id,
+            None => {
+                eprintln!(
+                    "No canonical UUID recorded for agent name '{name}' — nothing to delete."
+                );
+                std::process::exit(1);
+            }
+        };
+        match kernel.kill_agent_with_purge(canonical_uuid, true) {
+            Ok(()) => println!("Agent \"{name}\" deleted (canonical UUID purged)."),
+            Err(e) => {
+                eprintln!("Failed to delete agent: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+/// Refs #4614 — `librefang agent reset-uuid <name>` with confirmation.
+///
+/// Drops the canonical UUID binding without killing a running agent. The
+/// next spawn under `name` re-derives a fresh UUID and registers it as
+/// the new canonical binding; prior sessions / memories tied to the old
+/// UUID are orphaned. `--yes` skips the prompt.
+fn cmd_agent_reset_uuid(config: Option<PathBuf>, name: &str, yes: bool) {
+    eprintln!("WARNING: Resetting the canonical UUID for \"{name}\" will orphan all sessions");
+    eprintln!("    and memories tied to its current UUID. The next spawn under this");
+    eprintln!("    name will start with a fresh UUID. This action cannot be undone.");
+    if !yes && !prompt_yes_no("Confirm?", false) {
+        eprintln!("Aborted.");
+        std::process::exit(1);
+    }
+
+    if let Some(base) = find_daemon() {
+        let client = daemon_client();
+        let body = daemon_json(
+            client
+                .post(format!(
+                    "{base}/api/agents/identities/{}/reset",
+                    percent_encode_path_segment(name)
+                ))
+                .query(&[("confirm", "true")])
+                .send(),
+        );
+        if body.get("status").is_some() {
+            println!(
+                "Canonical UUID for \"{name}\" reset (was {}).",
+                body["previous_canonical_uuid"]
+                    .as_str()
+                    .unwrap_or("<unknown>")
+            );
+        } else {
+            eprintln!(
+                "Failed to reset canonical UUID: {}",
+                body["error"].as_str().unwrap_or("Unknown error")
+            );
+            std::process::exit(1);
+        }
+    } else {
+        let kernel = boot_kernel(config);
+        match kernel.agent_identities().purge(name) {
+            Some(prev) => println!("Canonical UUID for \"{name}\" reset (was {prev})."),
+            None => {
+                eprintln!("No canonical UUID recorded for agent name '{name}'.");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+/// Refs #4614 — `librefang agent merge-history` placeholder.
+///
+/// The cross-table reassignment is not yet implemented — see the
+/// long_about on `AgentCommands::MergeHistory` for the rationale (deep
+/// memory-substrate surgery across 10+ tables under one transaction).
+fn cmd_agent_merge_history(name: &str, from: &str) {
+    eprintln!("merge-history is not yet implemented (refs #4614 follow-up).");
+    eprintln!("Reassignment of sessions / memories from {from} to the canonical UUID");
+    eprintln!("for agent \"{name}\" requires cross-table SQL surgery in the memory");
+    eprintln!("substrate that is being tracked separately.");
+    std::process::exit(2);
+}
+
+/// Look up the canonical UUID for `name` via the identity-registry
+/// endpoint. Returns `None` if no entry exists (or on any HTTP error —
+/// the caller surfaces a friendly message).
+fn lookup_canonical_uuid(base: &str, name: &str) -> Option<String> {
+    let client = daemon_client();
+    let resp = client
+        .get(format!("{base}/api/agents/identities"))
+        .send()
+        .ok()?;
+    let entries: serde_json::Value = resp.json().ok()?;
+    let arr = entries.as_array()?;
+    for entry in arr {
+        if entry["name"].as_str() == Some(name) {
+            return entry["canonical_uuid"].as_str().map(String::from);
+        }
+    }
+    None
+}
+
+/// Minimal percent-encoder for a single URL path segment. Encodes
+/// everything outside the `unreserved` set (RFC 3986 §2.3) plus `/` so
+/// the segment can't escape into a parent path. Avoids pulling a new
+/// dependency for the one-off use here.
+fn percent_encode_path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.as_bytes() {
+        let b = *byte;
+        let unreserved =
+            b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~';
+        if unreserved {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Minimal `[y/N]` prompt for destructive operations. Reads a single
+/// line from stdin; treats anything other than `y` / `Y` / `yes` /
+/// `YES` as "no" (per the issue's `[y/N]` default).
+fn prompt_yes_no(prompt: &str, default_yes: bool) -> bool {
+    use std::io::Write as _;
+    let suffix = if default_yes { "[Y/n]" } else { "[y/N]" };
+    eprint!("{prompt} {suffix} ");
+    let _ = std::io::stderr().flush();
+    let mut buf = String::new();
+    if std::io::stdin().read_line(&mut buf).is_err() {
+        return false;
+    }
+    let trimmed = buf.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return default_yes;
+    }
+    matches!(trimmed.as_str(), "y" | "yes")
 }
 
 fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
@@ -5005,64 +5248,36 @@ fn render_detail_section(body: &serde_json::Value) {
 /// Render the agent list as a column-aligned table. Empty input is a no-op
 /// so the caller can unconditionally call this after a non-empty check.
 fn render_agents_table(agents: &[serde_json::Value]) {
-    // Compute per-column widths so names and ids line up even when one entry
-    // is much longer than the others. Keep a minimum width so a single-row
-    // table doesn't look squashed against the header.
-    let mut rows: Vec<[String; 4]> = Vec::with_capacity(agents.len());
+    // Cap ID column at 12 so we don't push the model column off the screen
+    // — users rarely need more than a handful of id bytes for correlation.
+    const ID_TRIM: usize = 12;
+    let id_trim = |s: &str| -> String {
+        if s.len() <= ID_TRIM {
+            s.to_string()
+        } else {
+            s.chars().take(ID_TRIM).collect()
+        }
+    };
+
+    // Migrated to crate::table::Table (#3306) — keeps content layout stable
+    // while removing 30+ lines of manual width math and giving us automatic
+    // ASCII fallback when stdout is piped.
+    let mut t = crate::table::Table::new(&["NAME", "ID", "STATE", "MODEL"]);
     for a in agents {
-        let name = a["name"].as_str().unwrap_or("?").to_string();
-        let id = a["id"].as_str().unwrap_or("?").to_string();
-        let state = a["state"].as_str().unwrap_or("?").to_string();
+        let id = id_trim(a["id"].as_str().unwrap_or("?"));
         let model = format!(
             "{}:{}",
             a["model_provider"].as_str().unwrap_or("?"),
             a["model_name"].as_str().unwrap_or("?"),
         );
-        rows.push([name, id, state, model]);
+        t.add_row(&[
+            a["name"].as_str().unwrap_or("?"),
+            id.as_str(),
+            a["state"].as_str().unwrap_or("?"),
+            model.as_str(),
+        ]);
     }
-    let headers = ["NAME", "ID", "STATE", "MODEL"];
-    let mut widths = [0usize; 4];
-    for (i, h) in headers.iter().enumerate() {
-        widths[i] = h.len();
-    }
-    for row in &rows {
-        for (i, cell) in row.iter().enumerate() {
-            widths[i] = widths[i].max(cell.len());
-        }
-    }
-    // Cap ID column at 12 so we don't push the model column off the screen
-    // — users rarely need more than a handful of id bytes for correlation.
-    widths[1] = widths[1].min(12);
-    let id_trim = |s: &str| -> String {
-        if s.len() <= widths[1] {
-            s.to_string()
-        } else {
-            s.chars().take(widths[1]).collect()
-        }
-    };
-    let header_line = format!(
-        "    {:<w0$}  {:<w1$}  {:<w2$}  {}",
-        headers[0],
-        headers[1],
-        headers[2],
-        headers[3],
-        w0 = widths[0],
-        w1 = widths[1],
-        w2 = widths[2],
-    );
-    println!("{}", header_line.dimmed());
-    for row in &rows {
-        println!(
-            "    {:<w0$}  {:<w1$}  {:<w2$}  {}",
-            row[0],
-            id_trim(&row[1]),
-            row[2],
-            row[3],
-            w0 = widths[0],
-            w1 = widths[1],
-            w2 = widths[2],
-        );
-    }
+    t.print();
 }
 
 fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> i32 {
@@ -6580,17 +6795,16 @@ fn cmd_workflow_list() {
     match body.as_array() {
         Some(workflows) if workflows.is_empty() => println!("No workflows registered."),
         Some(workflows) => {
-            println!("{:<38} {:<20} {:<6} CREATED", "ID", "NAME", "STEPS");
-            println!("{}", "-".repeat(80));
+            let mut t = crate::table::Table::new(&["ID", "NAME", "STEPS", "CREATED"]);
             for w in workflows {
-                println!(
-                    "{:<38} {:<20} {:<6} {}",
+                t.add_row(&[
                     w["id"].as_str().unwrap_or("?"),
                     w["name"].as_str().unwrap_or("?"),
-                    w["steps"].as_u64().unwrap_or(0),
+                    &w["steps"].as_u64().unwrap_or(0).to_string(),
                     w["created_at"].as_str().unwrap_or("?"),
-                );
+                ]);
             }
+            t.print();
         }
         None => println!("No workflows registered."),
     }
@@ -6672,21 +6886,23 @@ fn cmd_trigger_list(agent_id: Option<&str>) {
     match arr {
         Some(triggers) if triggers.is_empty() => println!("No triggers registered."),
         Some(triggers) => {
-            println!(
-                "{:<38} {:<38} {:<8} {:<6} PATTERN",
-                "TRIGGER ID", "AGENT ID", "ENABLED", "FIRES"
-            );
-            println!("{}", "-".repeat(110));
+            let mut tbl = crate::table::Table::new(&[
+                "TRIGGER ID",
+                "AGENT ID",
+                "ENABLED",
+                "FIRES",
+                "PATTERN",
+            ]);
             for t in triggers {
-                println!(
-                    "{:<38} {:<38} {:<8} {:<6} {}",
+                tbl.add_row(&[
                     t["id"].as_str().unwrap_or("?"),
                     t["agent_id"].as_str().unwrap_or("?"),
-                    t["enabled"].as_bool().unwrap_or(false),
-                    t["fire_count"].as_u64().unwrap_or(0),
-                    t["pattern"],
-                );
+                    &t["enabled"].as_bool().unwrap_or(false).to_string(),
+                    &t["fire_count"].as_u64().unwrap_or(0).to_string(),
+                    t["pattern"].as_str().unwrap_or("?"),
+                ]);
             }
+            tbl.print();
         }
         None => println!("No triggers registered."),
     }
@@ -6983,8 +7199,10 @@ fn cmd_migrate(args: MigrateArgs) {
         dry_run: args.dry_run,
     };
 
+    let mut sp = progress::auto("Running migration", None);
     match librefang_migrate::run_migration(&options) {
         Ok(report) => {
+            sp.finish("Migration complete");
             report.print_summary();
 
             // Save migration report
@@ -6998,7 +7216,7 @@ fn cmd_migrate(args: MigrateArgs) {
             }
         }
         Err(e) => {
-            eprintln!("Migration failed: {e}");
+            sp.finish_with_failure(&format!("Migration failed: {e}"));
             std::process::exit(1);
         }
     }
@@ -7096,7 +7314,8 @@ fn cmd_skill_install(source: &str, hand: Option<&str>) {
         }
     } else {
         // Remote install from FangHub
-        println!("Installing {source} from FangHub...");
+        let mut sp = progress::auto(&format!("Installing {source}"), None);
+        sp.tick(1);
         let rt = tokio::runtime::Runtime::new().unwrap();
         let client = librefang_skills::marketplace::MarketplaceClient::new(
             librefang_skills::marketplace::MarketplaceConfig::default(),
@@ -7104,13 +7323,13 @@ fn cmd_skill_install(source: &str, hand: Option<&str>) {
         match rt.block_on(client.install(source, &skills_dir)) {
             Ok(version) => {
                 if let Some(h) = hand {
-                    println!("Installed {source} {version} to hand '{h}'");
+                    sp.finish(&format!("Installed {source} {version} to hand '{h}'"));
                 } else {
-                    println!("Installed {source} {version}");
+                    sp.finish(&format!("Installed {source} {version}"));
                 }
             }
             Err(e) => {
-                eprintln!("Failed to install skill: {e}");
+                sp.finish_with_failure(&format!("Failed to install skill: {e}"));
                 std::process::exit(1);
             }
         }
@@ -7135,20 +7354,16 @@ fn cmd_skill_list(hand: Option<&str>) {
             } else {
                 println!("{count} skill(s) installed:\n");
             }
-            println!(
-                "{:<20} {:<10} {:<8} DESCRIPTION",
-                "NAME", "VERSION", "TOOLS"
-            );
-            println!("{}", "-".repeat(70));
+            let mut t = crate::table::Table::new(&["NAME", "VERSION", "TOOLS", "DESCRIPTION"]);
             for skill in registry.list() {
-                println!(
-                    "{:<20} {:<10} {:<8} {}",
-                    skill.manifest.skill.name,
-                    skill.manifest.skill.version,
-                    skill.manifest.tools.provided.len(),
-                    skill.manifest.skill.description,
-                );
+                t.add_row(&[
+                    &skill.manifest.skill.name,
+                    &skill.manifest.skill.version,
+                    &skill.manifest.tools.provided.len().to_string(),
+                    &skill.manifest.skill.description,
+                ]);
             }
+            t.print();
         }
         Err(e) => {
             eprintln!("Error loading skills: {e}");
@@ -7356,6 +7571,11 @@ fn cmd_skill_publish(
         packaged.manifest.skill.name, packaged.manifest.skill.version
     );
 
+    let mut sp = progress::auto(
+        &format!("Publishing {}@{tag}", packaged.manifest.skill.name),
+        None,
+    );
+    sp.tick(1);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let client = librefang_skills::marketplace::MarketplaceClient::new(
         librefang_skills::marketplace::MarketplaceConfig::default(),
@@ -7372,14 +7592,14 @@ fn cmd_skill_publish(
             }),
         )
         .unwrap_or_else(|e| {
-            eprintln!("Publish failed: {e}");
+            sp.finish_with_failure(&format!("Publish failed: {e}"));
             std::process::exit(1);
         });
 
-    println!(
+    sp.finish(&format!(
         "Published {} to {}@{}",
         published.asset_name, published.repo, published.tag
-    );
+    ));
     if !published.html_url.is_empty() {
         println!("Release: {}", published.html_url);
     }
@@ -7737,11 +7957,12 @@ fn cmd_skill_evolve(sub: EvolveCommands) {
                 println!("\nNo version history recorded.");
                 return;
             }
-            println!("\n{:<10} {:<25} CHANGELOG", "VERSION", "TIMESTAMP");
-            println!("{}", "-".repeat(70));
+            println!();
+            let mut t = crate::table::Table::new(&["VERSION", "TIMESTAMP", "CHANGELOG"]);
             for v in meta.versions.iter().rev() {
-                println!("{:<10} {:<25} {}", v.version, v.timestamp, v.changelog);
+                t.add_row(&[&v.version, &v.timestamp, &v.changelog]);
             }
+            t.print();
         }
     }
 }
@@ -7762,8 +7983,6 @@ fn cmd_channel_list() {
     let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
 
     println!("Channel Integrations:\n");
-    println!("{:<12} {:<10} STATUS", "CHANNEL", "ENV VAR");
-    println!("{}", "-".repeat(50));
 
     let channels: Vec<(&str, &str)> = vec![
         ("webchat", ""),
@@ -7776,6 +7995,7 @@ fn cmd_channel_list() {
         ("email", "EMAIL_PASSWORD"),
     ];
 
+    let mut t = crate::table::Table::new(&["CHANNEL", "ENV VAR", "STATUS"]);
     for (name, env_var) in channels {
         let configured = config_str.contains(&format!("[channels.{name}]"));
         let env_set = if env_var.is_empty() {
@@ -7783,20 +8003,22 @@ fn cmd_channel_list() {
         } else {
             std::env::var(env_var).is_ok()
         };
-
         let status = match (configured, env_set) {
             (true, true) => "Ready",
             (true, false) => "Missing env",
             (false, _) => "Not configured",
         };
-
-        println!(
-            "{:<12} {:<10} {}",
+        t.add_row(&[
             name,
-            if env_var.is_empty() { "—" } else { env_var },
+            if env_var.is_empty() {
+                "\u{2014}"
+            } else {
+                env_var
+            },
             status,
-        );
+        ]);
     }
+    t.print();
 
     println!("\nUse `librefang channel setup <channel>` to configure a channel.");
 }
@@ -8254,22 +8476,21 @@ fn cmd_hand_list() {
             println!("No hands available.");
             return;
         }
-        println!("{:<14} {:<20} {:<10} DESCRIPTION", "ID", "NAME", "CATEGORY");
-        println!("{}", "-".repeat(72));
+        let mut t = crate::table::Table::new(&["ID", "NAME", "CATEGORY", "DESCRIPTION"]);
         for h in arr {
-            println!(
-                "{:<14} {:<20} {:<10} {}",
+            t.add_row(&[
                 h["id"].as_str().unwrap_or("?"),
                 h["name"].as_str().unwrap_or("?"),
                 h["category"].as_str().unwrap_or("?"),
-                h["description"]
+                &h["description"]
                     .as_str()
                     .unwrap_or("")
                     .chars()
                     .take(40)
                     .collect::<String>(),
-            );
+            ]);
         }
+        t.print();
         println!("\nUse `librefang hand activate <id>` to activate a hand.");
     }
 }
@@ -8282,17 +8503,16 @@ fn cmd_hand_active() {
         println!("No active hands.");
         return;
     }
-    println!("{:<38} {:<14} {:<10} AGENT", "INSTANCE", "HAND", "STATUS");
-    println!("{}", "-".repeat(72));
+    let mut t = crate::table::Table::new(&["INSTANCE", "HAND", "STATUS", "AGENT"]);
     for i in &arr {
-        println!(
-            "{:<38} {:<14} {:<10} {}",
+        t.add_row(&[
             i["instance_id"].as_str().unwrap_or("?"),
             i["hand_id"].as_str().unwrap_or("?"),
             i["status"].as_str().unwrap_or("?"),
             i["agent_name"].as_str().unwrap_or("?"),
-        );
+        ]);
     }
+    t.print();
 }
 
 fn cmd_hand_status(id: Option<&str>) {
@@ -10207,17 +10427,16 @@ fn cmd_models_list(provider_filter: Option<&str>, json: bool) {
                 println!("No models found.");
                 return;
             }
-            println!("{:<40} {:<16} {:<8} CONTEXT", "MODEL", "PROVIDER", "TIER");
-            println!("{}", "-".repeat(80));
+            let mut t = crate::table::Table::new(&["MODEL", "PROVIDER", "TIER", "CONTEXT"]);
             for m in arr {
-                println!(
-                    "{:<40} {:<16} {:<8} {}",
+                t.add_row(&[
                     m["id"].as_str().unwrap_or("?"),
                     m["provider"].as_str().unwrap_or("?"),
                     m["tier"].as_str().unwrap_or("?"),
-                    m["context_window"].as_u64().unwrap_or(0),
-                );
+                    &m["context_window"].as_u64().unwrap_or(0).to_string(),
+                ]);
             }
+            t.print();
         } else {
             println!(
                 "{}",
@@ -10248,22 +10467,21 @@ fn cmd_models_list(provider_filter: Option<&str>, json: bool) {
             println!("No models in catalog.");
             return;
         }
-        println!("{:<40} {:<16} {:<8} CONTEXT", "MODEL", "PROVIDER", "TIER");
-        println!("{}", "-".repeat(80));
+        let mut t = crate::table::Table::new(&["MODEL", "PROVIDER", "TIER", "CONTEXT"]);
         for m in models {
             if let Some(p) = provider_filter {
                 if m.provider != p {
                     continue;
                 }
             }
-            println!(
-                "{:<40} {:<16} {:<8} {}",
-                m.id,
-                m.provider,
-                format!("{:?}", m.tier),
-                m.context_window,
-            );
+            t.add_row(&[
+                &m.id,
+                &m.provider,
+                &format!("{:?}", m.tier),
+                &m.context_window.to_string(),
+            ]);
         }
+        t.print();
     }
 }
 
@@ -10279,22 +10497,21 @@ fn cmd_models_aliases(json: bool) {
             return;
         }
         if let Some(arr) = body.get("aliases").and_then(|v| v.as_array()) {
-            println!("{:<30} RESOLVES TO", "ALIAS");
-            println!("{}", "-".repeat(60));
+            let mut t = crate::table::Table::new(&["ALIAS", "RESOLVES TO"]);
             for entry in arr {
-                println!(
-                    "{:<30} {}",
+                t.add_row(&[
                     entry["alias"].as_str().unwrap_or("?"),
                     entry["model_id"].as_str().unwrap_or("?"),
-                );
+                ]);
             }
+            t.print();
         } else if let Some(obj) = body.as_object() {
             // Fallback for plain {alias: model_id} format
-            println!("{:<30} RESOLVES TO", "ALIAS");
-            println!("{}", "-".repeat(60));
+            let mut t = crate::table::Table::new(&["ALIAS", "RESOLVES TO"]);
             for (alias, target) in obj {
-                println!("{:<30} {}", alias, target.as_str().unwrap_or("?"));
+                t.add_row(&[alias.as_str(), target.as_str().unwrap_or("?")]);
             }
+            t.print();
         } else {
             println!(
                 "{}",
@@ -10312,11 +10529,11 @@ fn cmd_models_aliases(json: bool) {
             println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
             return;
         }
-        println!("{:<30} RESOLVES TO", "ALIAS");
-        println!("{}", "-".repeat(60));
+        let mut t = crate::table::Table::new(&["ALIAS", "RESOLVES TO"]);
         for (alias, target) in aliases {
-            println!("{:<30} {}", alias, target);
+            t.add_row(&[alias, target]);
         }
+        t.print();
     }
 }
 
@@ -10336,20 +10553,16 @@ fn cmd_models_providers(json: bool) {
             .and_then(|v| v.as_array())
             .or_else(|| body.as_array())
         {
-            println!(
-                "{:<20} {:<12} {:<10} BASE URL",
-                "PROVIDER", "AUTH", "MODELS"
-            );
-            println!("{}", "-".repeat(70));
+            let mut t = crate::table::Table::new(&["PROVIDER", "AUTH", "MODELS", "BASE URL"]);
             for p in arr {
-                println!(
-                    "{:<20} {:<12} {:<10} {}",
+                t.add_row(&[
                     p["id"].as_str().unwrap_or("?"),
                     p["auth_status"].as_str().unwrap_or("?"),
-                    p["model_count"].as_u64().unwrap_or(0),
+                    &p["model_count"].as_u64().unwrap_or(0).to_string(),
                     p["base_url"].as_str().unwrap_or(""),
-                );
+                ]);
             }
+            t.print();
         } else {
             println!(
                 "{}",
@@ -10374,20 +10587,16 @@ fn cmd_models_providers(json: bool) {
             println!("{}", serde_json::to_string_pretty(&arr).unwrap_or_default());
             return;
         }
-        println!(
-            "{:<20} {:<12} {:<10} BASE URL",
-            "PROVIDER", "AUTH", "MODELS"
-        );
-        println!("{}", "-".repeat(70));
+        let mut t = crate::table::Table::new(&["PROVIDER", "AUTH", "MODELS", "BASE URL"]);
         for p in providers {
-            println!(
-                "{:<20} {:<12} {:<10} {}",
-                p.id,
-                format!("{:?}", p.auth_status),
-                p.model_count,
-                p.base_url,
-            );
+            t.add_row(&[
+                &p.id,
+                &format!("{:?}", p.auth_status),
+                &p.model_count.to_string(),
+                &p.base_url,
+            ]);
         }
+        t.print();
     }
 }
 
@@ -10498,17 +10707,16 @@ fn cmd_approvals_list(json: bool) {
             println!("No pending approvals.");
             return;
         }
-        println!("{:<38} {:<16} {:<12} REQUEST", "ID", "AGENT", "TYPE");
-        println!("{}", "-".repeat(80));
+        let mut t = crate::table::Table::new(&["ID", "AGENT", "TYPE", "REQUEST"]);
         for a in arr {
-            println!(
-                "{:<38} {:<16} {:<12} {}",
+            t.add_row(&[
                 a["id"].as_str().unwrap_or("?"),
                 a["agent_name"].as_str().unwrap_or("?"),
                 a["approval_type"].as_str().unwrap_or("?"),
                 a["description"].as_str().unwrap_or(""),
-            );
+            ]);
         }
+        t.print();
     } else {
         println!(
             "{}",
@@ -10562,14 +10770,9 @@ fn cmd_cron_list(json: bool) {
             println!("No scheduled jobs.");
             return;
         }
-        println!(
-            "{:<38} {:<16} {:<20} {:<8} PROMPT",
-            "ID", "AGENT", "SCHEDULE", "ENABLED"
-        );
-        println!("{}", "-".repeat(100));
+        let mut t = crate::table::Table::new(&["ID", "AGENT", "SCHEDULE", "ENABLED", "PROMPT"]);
         for j in arr {
-            println!(
-                "{:<38} {:<16} {:<20} {:<8} {}",
+            t.add_row(&[
                 j["id"].as_str().unwrap_or("?"),
                 j["agent_id"].as_str().unwrap_or("?"),
                 j["schedule"]["expr"]
@@ -10581,15 +10784,16 @@ fn cmd_cron_list(json: bool) {
                 } else {
                     "no"
                 },
-                j["action"]["message"]
+                &j["action"]["message"]
                     .as_str()
                     .or_else(|| j["prompt"].as_str())
                     .unwrap_or("")
                     .chars()
                     .take(40)
                     .collect::<String>(),
-            );
+            ]);
         }
+        t.print();
     } else {
         println!(
             "{}",
@@ -10786,31 +10990,32 @@ fn cmd_sessions(agent: Option<&str>, json: bool, active_only: bool) {
             }
             return;
         }
-        println!(
-            "{:<38} {:<16} {:<8} {:<8} LAST ACTIVE",
-            "ID", "AGENT", "MSGS", "STATE"
-        );
-        println!("{}", "-".repeat(90));
+        let mut t = crate::table::Table::new(&["ID", "AGENT", "MSGS", "STATE", "LAST ACTIVE"]);
         for s in filtered {
             let state = if is_running(s) { "running" } else { "idle" };
-            println!(
-                "{:<38} {:<16} {:<8} {:<8} {}",
+            let agent_id = s["agent_id"].as_str().unwrap_or("");
+            let agent_col = if agent_id.len() > 16 {
+                &agent_id[..16]
+            } else if agent_id.is_empty() {
+                s["agent_name"].as_str().unwrap_or("?")
+            } else {
+                agent_id
+            };
+            t.add_row(&[
                 s["session_id"]
                     .as_str()
                     .or_else(|| s["id"].as_str())
                     .unwrap_or("?"),
-                s["agent_id"]
-                    .as_str()
-                    .map(|id| if id.len() > 16 { &id[..16] } else { id })
-                    .unwrap_or(s["agent_name"].as_str().unwrap_or("?")),
-                s["message_count"].as_u64().unwrap_or(0),
+                agent_col,
+                &s["message_count"].as_u64().unwrap_or(0).to_string(),
                 state,
                 s["created_at"]
                     .as_str()
                     .or_else(|| s["last_active"].as_str())
                     .unwrap_or("?"),
-            );
+            ]);
         }
+        t.print();
     } else {
         println!(
             "{}",
@@ -10992,16 +11197,19 @@ fn cmd_security_audit(limit: usize, json: bool) {
             println!("No audit entries.");
             return;
         }
-        println!("{:<24} {:<16} {:<12} EVENT", "TIMESTAMP", "AGENT", "TYPE");
-        println!("{}", "-".repeat(80));
+        let mut t = crate::table::Table::new(&["TIMESTAMP", "AGENT", "TYPE", "EVENT"]);
         for entry in arr {
-            println!(
-                "{:<24} {:<16} {:<12} {}",
+            let agent_id = entry["agent_id"].as_str().unwrap_or("");
+            let agent_col = if agent_id.len() > 16 {
+                &agent_id[..16]
+            } else if agent_id.is_empty() {
+                entry["agent_name"].as_str().unwrap_or("?")
+            } else {
+                agent_id
+            };
+            t.add_row(&[
                 entry["timestamp"].as_str().unwrap_or("?"),
-                entry["agent_id"]
-                    .as_str()
-                    .map(|id| if id.len() > 16 { &id[..16] } else { id })
-                    .unwrap_or(entry["agent_name"].as_str().unwrap_or("?")),
+                agent_col,
                 entry["action"]
                     .as_str()
                     .or_else(|| entry["event_type"].as_str())
@@ -11010,8 +11218,9 @@ fn cmd_security_audit(limit: usize, json: bool) {
                     .as_str()
                     .or_else(|| entry["description"].as_str())
                     .unwrap_or(""),
-            );
+            ]);
         }
+        t.print();
     } else {
         println!(
             "{}",
@@ -11674,20 +11883,19 @@ fn cmd_memory_list(agent: &str, json: bool) {
             println!("No memory entries for agent '{agent}'.");
             return;
         }
-        println!("{:<30} VALUE", "KEY");
-        println!("{}", "-".repeat(60));
+        let mut t = crate::table::Table::new(&["KEY", "VALUE"]);
         for kv in arr {
-            println!(
-                "{:<30} {}",
+            t.add_row(&[
                 kv["key"].as_str().unwrap_or("?"),
-                kv["value"]
+                &kv["value"]
                     .as_str()
                     .unwrap_or("")
                     .chars()
                     .take(50)
                     .collect::<String>(),
-            );
+            ]);
         }
+        t.print();
     } else {
         println!(
             "{}",
@@ -11783,16 +11991,15 @@ fn cmd_devices_list(json: bool) {
             println!("No paired devices.");
             return;
         }
-        println!("{:<38} {:<20} LAST SEEN", "ID", "NAME");
-        println!("{}", "-".repeat(70));
+        let mut t = crate::table::Table::new(&["ID", "NAME", "LAST SEEN"]);
         for d in arr {
-            println!(
-                "{:<38} {:<20} {}",
+            t.add_row(&[
                 d["id"].as_str().unwrap_or("?"),
                 d["name"].as_str().unwrap_or("?"),
                 d["last_seen"].as_str().unwrap_or("?"),
-            );
+            ]);
         }
+        t.print();
     } else {
         println!(
             "{}",
@@ -11865,11 +12072,9 @@ fn cmd_webhooks_list(json: bool) {
             println!("No webhooks configured.");
             return;
         }
-        println!("{:<38} {:<20} {:<10} URL", "ID", "NAME", "ENABLED");
-        println!("{}", "-".repeat(90));
+        let mut t = crate::table::Table::new(&["ID", "NAME", "ENABLED", "URL"]);
         for w in arr {
-            println!(
-                "{:<38} {:<20} {:<10} {}",
+            t.add_row(&[
                 w["id"].as_str().unwrap_or("?"),
                 w["name"].as_str().unwrap_or("?"),
                 if w["enabled"].as_bool().unwrap_or(false) {
@@ -11878,8 +12083,9 @@ fn cmd_webhooks_list(json: bool) {
                     "no"
                 },
                 w["url"].as_str().unwrap_or(""),
-            );
+            ]);
         }
+        t.print();
     } else {
         println!(
             "{}",

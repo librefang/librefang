@@ -19,10 +19,10 @@
 //!   env vars (`std::env::set_var`), which would race with parallel tests.
 //! - `DELETE /api/channels/{name}/configure` — 404 unknown channel.
 //! - `POST /api/channels/{name}/test` — 404 unknown channel; for a known
-//!   channel with no env credentials, returns 200 with
-//!   `status="error"` + a "Missing required env vars" message (the
-//!   handler intentionally returns 200 so dashboards can render the
-//!   diagnostic without an HTTP error path).
+//!   channel with no env credentials, returns 412 Precondition Failed
+//!   with the unified `ApiErrorResponse` envelope (`{"error": "Missing
+//!   required env vars: …"}`). Migrated from the legacy
+//!   `{"status": "error", "message": …}` shape in #3505.
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -181,7 +181,7 @@ async fn channels_get_unknown_returns_404_with_unified_error() {
     let h = boot().await;
     let (status, body) = json_request(&h, Method::GET, "/api/channels/nope-not-real", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
-    let err = body["error"].as_str().unwrap_or("");
+    let err = body["error"]["message"].as_str().unwrap_or("");
     assert!(
         err.contains("Unknown channel"),
         "error must mention 'Unknown channel': {body:?}"
@@ -222,7 +222,7 @@ async fn channels_configure_unknown_channel_returns_404() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .contains("Unknown channel"),
@@ -243,7 +243,10 @@ async fn channels_configure_missing_fields_object_returns_400() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("fields"),
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("fields"),
         "error must mention 'fields': {body:?}"
     );
 }
@@ -264,7 +267,7 @@ async fn channels_remove_unknown_channel_returns_404() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
     assert!(
-        body["error"]
+        body["error"]["message"]
             .as_str()
             .unwrap_or("")
             .contains("Unknown channel"),
@@ -287,17 +290,25 @@ async fn channels_test_unknown_channel_returns_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["message"], "Unknown channel");
+    // Post-#3505: error responses use the canonical `ApiErrorResponse`
+    // envelope (`{"error": …}`). The pre-migration `{"status": "error",
+    // "message": …}` shape no longer appears.
+    // Post-#3639: `error` is a nested object with a `message` field.
+    assert_eq!(body["error"]["message"], "Unknown channel");
+    assert!(
+        body.get("status").is_none(),
+        "legacy `status` field must be gone post-#3505: {body}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_test_known_channel_with_no_creds_reports_missing_env() {
     // #3507 reshaped this handler so the HTTP status reflects the actual
-    // outcome — `412 Precondition Failed` for missing credentials, while
-    // the JSON body shape is unchanged so dashboards branching on
-    // `body.status` keep working. Previously this returned 200 + body
-    // diagnostic, which made `fetch().ok` lie to clients.
+    // outcome — `412 Precondition Failed` for missing credentials.
+    // Previously this returned 200 + body diagnostic, which made
+    // `fetch().ok` lie to clients. #3505 then migrated the body shape
+    // from the ad-hoc `{"status": "error", "message": …}` form to the
+    // canonical `ApiErrorResponse` envelope (`{"error": …}`).
     //
     // We deliberately do not assert on a specific env var name to avoid
     // coupling the test to the registry; we only require the handler to
@@ -319,13 +330,13 @@ async fn channels_test_known_channel_with_no_creds_reports_missing_env() {
     let h = boot().await;
     let (status, body) = json_request(&h, Method::POST, "/api/channels/telegram/test", None).await;
     assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body:?}");
-    assert_eq!(
-        body["status"], "error",
-        "missing creds must surface as status=error: {body}"
-    );
-    let msg = body["message"].as_str().unwrap_or("");
+    let msg = body["error"]["message"].as_str().unwrap_or("");
     assert!(
         msg.contains("Missing required env vars"),
-        "message must call out missing env vars: {body}"
+        "error must call out missing env vars: {body}"
+    );
+    assert!(
+        body.get("status").is_none(),
+        "legacy `status` field must be gone post-#3505: {body}"
     );
 }

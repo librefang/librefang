@@ -143,10 +143,10 @@ async fn run_embedded_server(
         error!("Embedded server error: {e}");
     }
 
-    // Clean up channel bridges
+    // Clean up channel bridges. Swap out atomically then stop with owned access.
     {
-        let mut guard = state.bridge_manager.lock().await;
-        if let Some(ref mut b) = *guard {
+        let old = state.bridge_manager.swap(std::sync::Arc::new(None));
+        if let Ok(Some(ref mut b)) = std::sync::Arc::try_unwrap(old) {
             b.stop().await;
         }
     }

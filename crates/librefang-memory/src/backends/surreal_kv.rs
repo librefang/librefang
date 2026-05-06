@@ -72,7 +72,7 @@ impl KvBackend for SurrealKvBackend {
         let row: Option<JsonValue> = self.block_on(async move {
             db.select(("kv_store", rid.as_str()))
                 .await
-                .map_err(|e| LibreFangError::Memory(e.to_string()))
+                .map_err(|e| LibreFangError::memory_msg(e.to_string()))
         })?;
         // Return the `value` sub-field (or `null` if missing).
         Ok(row.map(|v| v["value"].clone()))
@@ -92,7 +92,7 @@ impl KvBackend for SurrealKvBackend {
             let existing: Option<JsonValue> = db
                 .select(("kv_store", rid.as_str()))
                 .await
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
             let version = existing
                 .as_ref()
                 .and_then(|v| v["version"].as_i64())
@@ -110,7 +110,7 @@ impl KvBackend for SurrealKvBackend {
                 .upsert(("kv_store", rid.as_str()))
                 .content(payload)
                 .await
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
             Ok(())
         })
     }
@@ -122,7 +122,7 @@ impl KvBackend for SurrealKvBackend {
             let _: Option<JsonValue> = db
                 .delete(("kv_store", rid.as_str()))
                 .await
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
             Ok(())
         })
     }

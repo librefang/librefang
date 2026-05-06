@@ -174,7 +174,7 @@ memory_write = ["self.*"]
 #[tokio::test(flavor = "multi_thread")]
 async fn load_concurrent_agent_spawns() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = librefang_kernel::http_client::new_client();
     let n = 20; // 20 concurrent spawns
 
     let start = Instant::now();
@@ -244,7 +244,7 @@ async fn load_concurrent_agent_spawns() {
 #[tokio::test(flavor = "multi_thread")]
 async fn load_endpoint_latency() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = librefang_kernel::http_client::new_client();
 
     // Spawn a few agents for the list endpoint to return
     for i in 0..5 {
@@ -327,7 +327,7 @@ async fn load_endpoint_latency() {
 #[tokio::test(flavor = "multi_thread")]
 async fn load_concurrent_reads() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = librefang_kernel::http_client::new_client();
 
     // Spawn some agents first
     for i in 0..3 {
@@ -385,7 +385,7 @@ async fn load_concurrent_reads() {
 #[tokio::test(flavor = "multi_thread")]
 async fn load_session_management() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = librefang_kernel::http_client::new_client();
 
     // Spawn an agent
     let res: serde_json::Value = client
@@ -486,7 +486,7 @@ async fn load_session_management() {
 #[tokio::test(flavor = "multi_thread")]
 async fn load_workflow_operations() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = librefang_kernel::http_client::new_client();
 
     let n = 15;
     let start = Instant::now();
@@ -552,7 +552,7 @@ async fn load_workflow_operations() {
 #[tokio::test(flavor = "multi_thread")]
 async fn load_spawn_kill_cycle() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = librefang_kernel::http_client::new_client();
 
     let cycles = 10;
     let start = Instant::now();
@@ -575,10 +575,13 @@ async fn load_spawn_kill_cycle() {
         }
     }
 
-    // Kill
+    // Kill (refs #4614: confirm required)
     for id in &ids {
         client
-            .delete(format!("{}/api/agents/{}", server.base_url, id))
+            .delete(format!(
+                "{}/api/agents/{}?confirm=true",
+                server.base_url, id
+            ))
             .send()
             .await
             .unwrap();
@@ -622,7 +625,7 @@ async fn load_spawn_kill_cycle() {
 #[tokio::test(flavor = "multi_thread")]
 async fn load_metrics_sustained() {
     let server = start_test_server().await;
-    let client = librefang_runtime::http_client::new_client();
+    let client = librefang_kernel::http_client::new_client();
 
     // Spawn a few agents first so metrics have data
     for i in 0..3 {

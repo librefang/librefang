@@ -39,6 +39,7 @@ pub mod chunker;
 pub mod consolidation;
 pub mod decay;
 pub mod http_vector_store;
+pub mod idempotency;
 pub mod knowledge;
 pub mod migration;
 pub mod namespace_acl;

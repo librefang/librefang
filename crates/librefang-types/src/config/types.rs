@@ -1688,6 +1688,26 @@ pub struct TelemetryConfig {
     ///
     /// Issue #3136.
     pub auto_start_observability_stack: bool,
+    /// Emit `x-librefang-{agent,session,step}-id` HTTP headers on outbound
+    /// OpenAI-compatible LLM requests so observability sidecars (logging
+    /// gateways, audit proxies, OTel collectors that shape spans from request
+    /// metadata) can correlate request log records to the originating agent /
+    /// session / agent-loop iteration without parsing the JSON body.
+    /// Default: `true`.
+    ///
+    /// Set to `false` to suppress all three headers wire-side regardless of
+    /// whether the kernel populated `CompletionRequest`'s caller-id fields.
+    /// Useful for operators with strict zero-egress policies (regulated
+    /// tenants, EU healthcare) who want no LibreFang-internal identifiers
+    /// crossing the upstream-provider boundary, even though the IDs are
+    /// opaque UUIDs / integers and carry no PII.
+    ///
+    /// Currently consulted only by the OpenAI-compatible driver. Other
+    /// drivers (Anthropic, Gemini, Bedrock, Vertex, ChatGPT, Copilot,
+    /// Claude Code, Codex, Gemini CLI, Qwen Code) do not emit these headers
+    /// today; when they grow per-driver header-emission support, they will
+    /// honour the same flag.
+    pub emit_caller_trace_headers: bool,
 }
 
 impl TelemetryConfig {
@@ -1725,6 +1745,7 @@ impl Default for TelemetryConfig {
             sample_rate: 1.0,
             prometheus_enabled: true,
             auto_start_observability_stack: false,
+            emit_caller_trace_headers: true,
         }
     }
 }
@@ -2837,6 +2858,34 @@ pub struct KernelConfig {
     /// `None` (default) disables message-count pruning.
     #[serde(default)]
     pub cron_session_max_messages: Option<usize>,
+    /// Fraction of the effective token budget (post-prune) at which the
+    /// kernel emits a `tracing::warn!` for a Persistent cron session
+    /// approaching the provider context window. Closes the operator-
+    /// visibility gap from #3693: pruning prevents the hard 400 from
+    /// the provider, but without this warn the trend is invisible until
+    /// a fire actually fails.
+    ///
+    /// Applied against the effective limit:
+    ///   1. `cron_session_max_tokens` if set, else
+    ///   2. [`Self::cron_session_warn_total_tokens`] as a fallback ceiling.
+    ///
+    /// Skipped entirely when both are `None`, or when this value is
+    /// `None` / `<= 0.0` / `> 1.0`.
+    ///
+    /// Default: `Some(0.8)` — warn at 80% of the budget.
+    #[serde(default = "default_cron_session_warn_fraction")]
+    pub cron_session_warn_fraction: Option<f64>,
+    /// Fallback context-window ceiling used by
+    /// [`Self::cron_session_warn_fraction`] when
+    /// `cron_session_max_tokens` is unset. Lets operators get growth
+    /// warnings even on agents that have not opted into pruning.
+    ///
+    /// Default: `Some(200_000)` — matches the typical Claude / GPT-4
+    /// long-context window. Set to `None` to disable the fallback
+    /// (warn only fires when `cron_session_max_tokens` is explicitly
+    /// configured).
+    #[serde(default = "default_cron_session_warn_total_tokens")]
+    pub cron_session_warn_total_tokens: Option<u64>,
     /// Config include files — loaded and deep-merged before the root config.
     /// Paths are relative to the root config file's directory.
     /// Security: absolute paths and `..` components are rejected.
@@ -3108,6 +3157,14 @@ pub struct KernelConfig {
     /// integration lands in PR-4. See [`ParallelToolsConfig`].
     #[serde(default)]
     pub parallel_tools: ParallelToolsConfig,
+    /// Tool-result context budget and artifact spill configuration.
+    /// See [`ToolResultsConfig`] for knob descriptions.  The primary active
+    /// mechanism is artifact spill (responses > `spill_threshold_bytes` are
+    /// written to disk and replaced with a stub + `read_artifact` handle).
+    /// The cumulative budget and history fold knobs are wired but deferred
+    /// — see #3347 2/N and 3/N.
+    #[serde(default)]
+    pub tool_results: ToolResultsConfig,
     /// How long (in minutes) a workflow run may remain in the `Running` or
     /// `Pending` state before it is considered stale after a daemon restart.
     ///
@@ -4081,6 +4138,19 @@ fn default_max_cron_jobs() -> usize {
     500
 }
 
+/// Default warn fraction for cron session size (#3693): 80% of the
+/// effective token budget.
+fn default_cron_session_warn_fraction() -> Option<f64> {
+    Some(0.8)
+}
+
+/// Default fallback ceiling for cron session warn (#3693): 200k tokens
+/// — matches typical long-context provider windows so operators get a
+/// signal even without an explicit `cron_session_max_tokens` cap.
+fn default_cron_session_warn_total_tokens() -> Option<u64> {
+    Some(200_000)
+}
+
 /// Default stale workflow run timeout in minutes (60 minutes = 1 hour).
 fn default_workflow_stale_timeout_minutes() -> u64 {
     60
@@ -4909,6 +4979,8 @@ impl Default for KernelConfig {
             max_cron_jobs: default_max_cron_jobs(),
             cron_session_max_tokens: None,
             cron_session_max_messages: None,
+            cron_session_warn_fraction: default_cron_session_warn_fraction(),
+            cron_session_warn_total_tokens: default_cron_session_warn_total_tokens(),
             include: Vec::new(),
             exec_policy: ExecPolicy::default(),
             bindings: Vec::new(),
@@ -4972,6 +5044,7 @@ impl Default for KernelConfig {
             storage: StorageConfig::default(),
             tool_invoke: ToolInvokeConfig::default(),
             parallel_tools: ParallelToolsConfig::default(),
+            tool_results: ToolResultsConfig::default(),
             workflow_stale_timeout_minutes: default_workflow_stale_timeout_minutes(),
         }
     }
@@ -7630,6 +7703,77 @@ impl Default for ParallelToolsConfig {
             max_concurrent: 4,
             mcp_default_safety: "write_shared".to_string(),
             mcp_readonly_allowlist: Vec::new(),
+        }
+    }
+}
+
+/// Tool-result context budget and artifact spill configuration.
+///
+/// Controls what happens when a tool returns a very large payload.  The primary
+/// mechanism shipped in #3347 1/N is **artifact spill**: responses larger than
+/// `spill_threshold_bytes` are written to `~/.librefang/data/artifacts/` and
+/// the agent receives a compact stub with a handle it can pass to
+/// `read_artifact` to retrieve the content in chunks.
+///
+/// `max_bytes_per_turn` and `history_fold_after_turns` are wired into the
+/// config schema for forward-compatibility but are **not yet active** — their
+/// enforcement mechanisms depend on the aux-LLM channel (#3314) and are
+/// tracked as follow-up work in #3347 2/N and 3/N.
+///
+/// ```toml
+/// [tool_results]
+/// spill_threshold_bytes   = 16384         # 16 KB — spill to artifact store above this
+/// max_artifact_bytes      = 67108864      # 64 MiB — per-artifact write cap
+/// max_bytes_per_turn      = 50000         # deferred: cumulative budget (unused)
+/// history_fold_after_turns = 8            # deferred: fold old results (unused)
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ToolResultsConfig {
+    /// Spill threshold in bytes.  Tool results larger than this are written to
+    /// the artifact store; the agent receives a stub with a `read_artifact`
+    /// handle instead of the raw payload.  Default: 16 384 bytes (16 KB).
+    #[serde(default = "default_spill_threshold_bytes")]
+    pub spill_threshold_bytes: u64,
+    /// Maximum bytes for a single artifact write.  Spill is skipped (falling
+    /// back to truncation) when a tool result exceeds this cap, preventing a
+    /// single oversized response from filling the artifact store.
+    /// Default: 67 108 864 bytes (64 MiB).
+    #[serde(default = "default_max_artifact_bytes")]
+    pub max_artifact_bytes: u64,
+    /// **Deferred (#3347 2/N)** — cumulative byte cap across all tool results
+    /// in a single LLM turn.  Not yet enforced.  Default: 50 000 bytes.
+    #[serde(default = "default_max_bytes_per_turn")]
+    pub max_bytes_per_turn: u64,
+    /// **Deferred (#3347 3/N)** — fold (summarise via aux-LLM) tool-result
+    /// history after this many turns.  Not yet enforced.  Default: 8 turns.
+    #[serde(default = "default_history_fold_after_turns")]
+    pub history_fold_after_turns: u32,
+}
+
+fn default_spill_threshold_bytes() -> u64 {
+    16_384
+}
+
+fn default_max_artifact_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+
+fn default_max_bytes_per_turn() -> u64 {
+    50_000
+}
+
+fn default_history_fold_after_turns() -> u32 {
+    8
+}
+
+impl Default for ToolResultsConfig {
+    fn default() -> Self {
+        Self {
+            spill_threshold_bytes: default_spill_threshold_bytes(),
+            max_artifact_bytes: default_max_artifact_bytes(),
+            max_bytes_per_turn: default_max_bytes_per_turn(),
+            history_fold_after_turns: default_history_fold_after_turns(),
         }
     }
 }

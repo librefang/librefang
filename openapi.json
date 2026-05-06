@@ -237,6 +237,7 @@
           "a2a"
         ],
         "summary": "POST /api/a2a/send — Send a task to an external A2A agent.",
+        "description": "Honours `Idempotency-Key` (#3637): when set, a duplicate request\nwith the same key + same body replays the cached response instead\nof re-dispatching the outbound A2A task. A different body under\nthe same key is rejected with 409 Conflict.",
         "operationId": "a2a_send_external",
         "requestBody": {
           "content": {
@@ -258,6 +259,9 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Idempotency-Key was reused with a different request body"
           }
         }
       }
@@ -380,6 +384,7 @@
           "agents"
         ],
         "summary": "POST /api/agents — Spawn a new agent.",
+        "description": "Honours `Idempotency-Key` (#3637): when set, a duplicate request\nwith the same key + same body replays the cached response instead\nof spawning a second agent. A different body under the same key is\nrejected with 409 Conflict.",
         "operationId": "spawn_agent",
         "requestBody": {
           "content": {
@@ -404,6 +409,9 @@
           },
           "400": {
             "description": "Invalid manifest"
+          },
+          "409": {
+            "description": "Idempotency-Key was reused with a different request body"
           }
         }
       }
@@ -534,6 +542,72 @@
         }
       }
     },
+    "/api/agents/identities": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/identities — List the canonical UUID registry (refs #4614).",
+        "description": "Returns all `name → canonical_uuid` mappings persisted at\n`<home_dir>/agent_identities.toml`. Order is stable (sorted by name) so\ncallers can rely on the result for diagnostics / golden tests.",
+        "operationId": "list_agent_identities",
+        "responses": {
+          "200": {
+            "description": "Canonical UUID registry contents",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AgentIdentityRow"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/identities/{name}/reset": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/identities/{name}/reset — Drop the canonical UUID\nbinding for `name` (refs #4614).",
+        "description": "Requires `confirm=true` (query string or JSON body) — without it the\nrequest is rejected with `409 Conflict` and the data-loss warning. The\nnext spawn under the same name re-derives a fresh UUID via\n`AgentId::from_name` and registers it as the new canonical binding.\nThe agent is **not** killed — operators can call `DELETE /api/agents/{id}`\n(or `kill_agent`) separately if a runtime restart is also desired.\n\nReturns `404` if no entry exists for `name`.",
+        "operationId": "reset_agent_identity",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "confirm",
+            "in": "query",
+            "description": "Required: confirms canonical UUID reset.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Canonical UUID purged"
+          },
+          "404": {
+            "description": "No canonical UUID recorded for this name"
+          },
+          "409": {
+            "description": "Confirmation required"
+          }
+        }
+      }
+    },
     "/api/agents/{id}": {
       "get": {
         "tags": [
@@ -572,8 +646,8 @@
         "tags": [
           "agents"
         ],
-        "summary": "DELETE /api/agents/:id — Kill an agent.",
-        "description": "Idempotent (RFC 9110 §9.2.2 / §9.3.5): deleting an agent that is already\ngone returns `200 OK` with `{\"status\": \"already-deleted\"}` instead of\n`404`. `404` is reserved for the malformed-UUID case alone, so retried\nor replayed DELETEs by clients (network blips, dashboard double-clicks)\nno longer surface a phantom error. Refs #3509.",
+        "summary": "DELETE /api/agents/:id — Kill an agent (refs #4614).",
+        "description": "Idempotent (RFC 9110 §9.2.2 / §9.3.5): deleting an agent that is already\ngone returns `200 OK` with `{\"status\": \"already-deleted\"}` instead of\n`404`. `404` is reserved for the malformed-UUID case alone, so retried\nor replayed DELETEs by clients (network blips, dashboard double-clicks)\nno longer surface a phantom error. Refs #3509.\n\nRefs #4614 — canonical agent UUID registry. Explicit deletes via this\nendpoint require `confirm=true` (as a query param or JSON body field).\nWithout it the request is rejected with `409 Conflict` and the\ndata-loss warning text. With confirmation, the kernel kills the agent\nAND purges its canonical UUID binding so the next spawn under the\nsame name lands on a fresh UUID. Internal lifecycle resets (hot\nreload, panic restart) call `kill_agent` directly and preserve the\nbinding — the destructive purge only happens when an operator\nexplicitly asks for it.",
         "operationId": "kill_agent",
         "parameters": [
           {
@@ -584,17 +658,26 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "confirm",
+            "in": "query",
+            "description": "Required: confirms canonical UUID purge. Refs #4614.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Agent killed (or was already absent — idempotent)"
+            "description": "Agent killed and canonical UUID purged"
           },
           "400": {
             "description": "Malformed agent ID"
           },
           "409": {
-            "description": "Agent is hand-owned and cannot be deleted directly"
+            "description": "Confirmation required, or agent is hand-owned"
           }
         }
       },
@@ -618,7 +701,9 @@
           "description": "Partial agent fields to update",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -1304,7 +1389,9 @@
             "description": "Recent agent execution log entries",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -1369,7 +1456,9 @@
           "description": "Array of MCP server names",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonArray"
+              }
             }
           },
           "required": true
@@ -1576,7 +1665,9 @@
             "description": "Aggregated agent metrics",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -1653,7 +1744,9 @@
           "description": "Model name and optional provider",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -1706,7 +1799,9 @@
             "description": "Message pushed to channel",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -2001,7 +2096,9 @@
           "description": "Optional label for the new session",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -2083,7 +2180,9 @@
           "description": "Exported session JSON",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -2376,7 +2475,9 @@
           "description": "Array of skill names",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonArray"
+              }
             }
           },
           "required": true
@@ -3117,7 +3218,9 @@
             "description": "Credentials updated and existing sessions invalidated",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -3142,7 +3245,9 @@
             "description": "Auth mode for the dashboard SPA — one of `none`, `api_key`, `credentials`, or `hybrid`",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3159,7 +3264,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -3169,7 +3276,9 @@
             "description": "Login outcome — returns session token on success or `requires_totp` when 2FA is needed",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -3263,7 +3372,9 @@
             "description": "Session invalidated and cookie cleared",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3664,9 +3775,12 @@
         "summary": "PUT /api/budget — Update global budget limits (in-memory only, not persisted to config.toml).",
         "operationId": "update_budget",
         "requestBody": {
+          "description": "Partial budget config (max_hourly_usd / max_daily_usd / max_monthly_usd / alert_threshold / default_max_llm_tokens_per_hour)",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -3756,9 +3870,12 @@
           }
         ],
         "requestBody": {
+          "description": "Partial ResourceQuota (max_cost_per_hour_usd / max_cost_per_day_usd / max_cost_per_month_usd / max_llm_tokens_per_hour)",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4167,7 +4284,7 @@
           "channels"
         ],
         "summary": "POST /api/channels/{name}/test — Connectivity check + optional live test message.",
-        "description": "Accepts an optional JSON body with `channel_id` (for Discord/Slack) or `chat_id`\n(for Telegram). When provided, sends a real test message to verify the bot can\npost to that channel.\n\nStatus code semantics (#3507):\n- `200 OK` — credentials present (and, when a target was given, message sent)\n- `404 Not Found` — unknown channel name\n- `412 Precondition Failed` — required env vars / credentials are missing\n- `502 Bad Gateway` — credentials valid but downstream send failed\n\nThe JSON body shape (`{\"status\": \"ok\"|\"error\", \"message\": …}`) is preserved so\ncallers that branch on the body still work, but the HTTP status now matches the\nreal outcome — `fetch().ok` is the source of truth.",
+        "description": "Accepts an optional JSON body with `channel_id` (for Discord/Slack) or `chat_id`\n(for Telegram). When provided, sends a real test message to verify the bot can\npost to that channel.\n\nStatus code semantics (#3507, #3505):\n- `200 OK` — credentials present (and, when a target was given, message sent);\n  body uses the legacy `{\"status\": \"ok\", \"message\": …}` shape.\n- `404 Not Found` — unknown channel name; body uses `ApiErrorResponse`\n  (`{\"error\": \"Unknown channel\"}`).\n- `412 Precondition Failed` — required env vars / credentials are missing;\n  body uses `ApiErrorResponse` (`{\"error\": \"Missing required env vars: …\"}`).\n- `502 Bad Gateway` — credentials valid but downstream send failed;\n  body uses `ApiErrorResponse`.\n\n`fetch().ok` is the source of truth. Error bodies were migrated from the\nad-hoc `{\"status\": \"error\", \"message\": …}` shape to the canonical\n`ApiErrorResponse` envelope as part of #3505 so clients have a single\nparsing strategy across the API surface.",
         "operationId": "test_channel",
         "parameters": [
           {
@@ -4181,9 +4298,19 @@
           }
         ],
         "requestBody": {
+          "description": "Optional target — `{ \"channel_id\": \"...\" }` for Discord/Slack or `{ \"chat_id\": \"...\" }` for Telegram",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/JsonObject"
+                  }
+                ]
+              }
             }
           }
         },
@@ -4472,7 +4599,9 @@
             "description": "Recent inter-agent communication events",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4657,9 +4786,12 @@
         "description": "Accepts JSON `{ \"path\": \"section.key\", \"value\": \"...\" }`.\nWrites the value to the TOML config file and triggers a reload.",
         "operationId": "config_set",
         "requestBody": {
+          "description": "`{ \"path\": \"section.key\", \"value\": ... }`",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4857,6 +4989,7 @@
           "workflows"
         ],
         "summary": "GET /api/cron/jobs/{id}/status — Get status of a specific cron job.",
+        "description": "Same response shape as `GET /api/cron/jobs/{id}`, including the\n#3693 `session_message_count` / `session_token_count` fields.",
         "operationId": "cron_job_status",
         "parameters": [
           {
@@ -7233,6 +7366,28 @@
         ],
         "summary": "GET /api/peers — List known OFP peers.",
         "operationId": "list_peers",
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Skip N items",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max items to return; server-capped at 100",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "List known OFP peers",
@@ -7469,9 +7624,19 @@
           }
         ],
         "requestBody": {
+          "description": "Optional `{ \"model\": \"model-id\" }` to override the auto-selected default",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/JsonObject"
+                  }
+                ]
+              }
             }
           }
         },
@@ -8520,9 +8685,12 @@
           }
         ],
         "requestBody": {
+          "description": "Partial trigger fields: pattern, prompt_template, enabled, max_fires, cooldown_secs, session_mode, target_agent_id",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -9077,9 +9245,12 @@
           }
         ],
         "requestBody": {
+          "description": "Workflow input variables (free-form key/value object)",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -9313,6 +9484,26 @@
             "items": {
               "$ref": "#/components/schemas/AgentEventRowView"
             }
+          }
+        }
+      },
+      "AgentIdentityRow": {
+        "type": "object",
+        "description": "One row in the response of `GET /api/agents/identities`.\n\n`created_at` is RFC 3339 UTC (string form rather than\n`chrono::DateTime<Utc>` so the type implements `utoipa::ToSchema`\nwithout pulling in chrono's optional `schemars` feature).",
+        "required": [
+          "name",
+          "canonical_uuid",
+          "created_at"
+        ],
+        "properties": {
+          "canonical_uuid": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
           }
         }
       },

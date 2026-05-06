@@ -1,6 +1,6 @@
 //! Integration tests for the prompts router (#3571 — prompts slice).
 //!
-//! Mounts `routes::prompts::routes()` directly under `/api` against a
+//! Mounts `routes::prompts::router()` directly under `/api` against a
 //! `TestAppState` + `MockKernelBuilder`-built `LibreFangKernel`. The kernel
 //! has a real prompt store wired in, so mutating endpoints persist data
 //! that subsequent reads can observe. Tests cover happy-path round trips
@@ -25,7 +25,7 @@ async fn boot() -> Harness {
     let test = TestAppState::with_builder(MockKernelBuilder::new());
     let state = test.state.clone();
     let app = Router::new()
-        .nest("/api", routes::prompts::routes())
+        .nest("/api", routes::prompts::router())
         .with_state(state.clone());
     Harness {
         app,
@@ -111,7 +111,8 @@ async fn create_prompt_version_round_trips_through_get_and_list() {
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    // Issue #3832: POST /versions creates a resource — must be 201 Created.
+    assert_eq!(status, StatusCode::CREATED, "body={body:?}");
     assert_eq!(body["agent_id"], AGENT_UUID);
     assert_eq!(body["system_prompt"], "You are a helpful assistant.");
     // Server must compute a sha256 content_hash from system_prompt and

@@ -463,9 +463,9 @@ async fn run_dream(
         },
     );
     kernel.audit().record(
-        &target.to_string(),
+        target.to_string(),
         librefang_runtime::audit::AuditAction::DreamConsolidation,
-        &format!("phase=start task_id={task_id}"),
+        format!("phase=start task_id={task_id}"),
         "ok",
     );
 
@@ -623,9 +623,9 @@ async fn run_dream(
                 "auto_dream: consolidation completed",
             );
             kernel.audit().record(
-                &target.to_string(),
+                target.to_string(),
                 librefang_runtime::audit::AuditAction::DreamConsolidation,
-                &format!(
+                format!(
                     "phase=complete task_id={task_id} memories_touched={memories_touched_count} \
                      input_tokens={input} output_tokens={output} cache_read={cache_read} \
                      cost_usd={cost}",
@@ -688,9 +688,9 @@ async fn finalize_failure(
         p.error = Some(reason.clone());
     });
     kernel.audit().record(
-        &target.to_string(),
+        target.to_string(),
         librefang_runtime::audit::AuditAction::DreamConsolidation,
-        &format!("phase=fail task_id={task_id} reason={reason}"),
+        format!("phase=fail task_id={task_id} reason={reason}"),
         "fail",
     );
     let lock = lock_for_agent(kernel, target);
@@ -710,9 +710,9 @@ async fn finalize_abort(kernel: &LibreFangKernel, target: AgentId, prior_mtime: 
         p.error.get_or_insert_with(|| "aborted by user".to_string());
     });
     kernel.audit().record(
-        &target.to_string(),
+        target.to_string(),
         librefang_runtime::audit::AuditAction::DreamConsolidation,
-        &format!("phase=abort task_id={task_id}"),
+        format!("phase=abort task_id={task_id}"),
         "aborted",
     );
     let lock = lock_for_agent(kernel, target);
@@ -758,9 +758,9 @@ pub fn set_agent_enabled(
         .agent_registry()
         .update_auto_dream_enabled(agent_id, enabled)?;
     kernel.audit().record(
-        &agent_id.to_string(),
+        agent_id.to_string(),
         librefang_runtime::audit::AuditAction::ConfigChange,
-        &format!("auto_dream_enabled={enabled}"),
+        format!("auto_dream_enabled={enabled}"),
         "ok",
     );
     Ok(())

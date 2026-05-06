@@ -272,6 +272,7 @@ async fn skills_detail_unknown_returns_404() {
     assert!(
         body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .to_lowercase()
             .contains("not found"),
@@ -386,7 +387,11 @@ async fn skills_install_unknown_skill_returns_404() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
     assert!(
-        body["error"].as_str().unwrap_or("").contains("not found"),
+        body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("")
+            .contains("not found"),
         "error must mention not-found: {body:?}"
     );
 }
@@ -405,6 +410,7 @@ async fn skills_install_unknown_hand_returns_404() {
     assert!(
         body["error"]
             .as_str()
+            .or_else(|| body["error"]["message"].as_str())
             .unwrap_or("")
             .to_lowercase()
             .contains("hand"),

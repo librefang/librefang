@@ -41,7 +41,7 @@ pub fn run_decay(
 
     let db = conn
         .lock()
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
 
     let now = Utc::now();
     let now_unix = now.timestamp();
@@ -59,7 +59,7 @@ pub fn run_decay(
                    AND datetime(accessed_at) < datetime(?2)",
                 rusqlite::params!["session_memory", cutoff_str, now_unix],
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         if deleted > 0 {
             debug!(scope = "SESSION", deleted, cutoff = %cutoff_str, "Soft-deleted stale memories");
         }
@@ -78,7 +78,7 @@ pub fn run_decay(
                    AND datetime(accessed_at) < datetime(?2)",
                 rusqlite::params!["agent_memory", cutoff_str, now_unix],
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         if deleted > 0 {
             debug!(scope = "AGENT", deleted, cutoff = %cutoff_str, "Soft-deleted stale memories");
         }
@@ -110,7 +110,7 @@ pub fn prune_soft_deleted_memories(
     }
     let db = conn
         .lock()
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
     let cutoff = Utc::now().timestamp() - (older_than_days as i64) * 86_400;
     let pruned = db
         .execute(
@@ -118,7 +118,7 @@ pub fn prune_soft_deleted_memories(
              WHERE deleted = 1 AND deleted_at IS NOT NULL AND deleted_at < ?1",
             rusqlite::params![cutoff],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
     if pruned > 0 {
         info!(
             pruned,

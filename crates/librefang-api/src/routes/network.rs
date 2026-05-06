@@ -66,8 +66,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_runtime::kernel_handle::prelude::*;
-use librefang_runtime::tool_runner::builtin_tool_definitions;
+use librefang_kernel::kernel_handle::prelude::*;
+use librefang_kernel::tool_runner::builtin_tool_definitions;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -82,47 +82,54 @@ use crate::types::ApiErrorResponse;
     get,
     path = "/api/peers",
     tag = "network",
+    params(
+        ("offset" = Option<usize>, Query, description = "Skip N items"),
+        ("limit" = Option<usize>, Query, description = "Max items to return; server-capped at 100"),
+    ),
     responses(
         (status = 200, description = "List known OFP peers", body = crate::types::JsonObject)
     )
 )]
-pub async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_peers(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(pagination): axum::extract::Query<crate::types::PaginationQuery>,
+) -> impl IntoResponse {
     // Peers are tracked in the wire module's PeerRegistry, owned by the kernel
     // and lazily initialized when the OFP peer node starts. Read it live on every
     // request — caching at boot would return a stale (or empty) snapshot if the
     // OFP node initialized after AppState was constructed (#3644).
-    //
-    // All peers are returned in a single page — the registry is in-memory
-    // and small — so `offset=0` and `limit=None` always.
-    let items: Vec<serde_json::Value> =
-        if let Some(peer_registry) = state.kernel.peer_registry_ref() {
-            peer_registry
-                .all_peers()
-                .iter()
-                .map(|p| {
-                    serde_json::json!({
-                        "node_id": p.node_id,
-                        "node_name": p.node_name,
-                        "address": p.address.to_string(),
-                        "state": format!("{:?}", p.state),
-                        "agents": p.agents.iter().map(|a| serde_json::json!({
-                            "id": a.id,
-                            "name": a.name,
-                        })).collect::<Vec<_>>(),
-                        "connected_at": p.connected_at.to_rfc3339(),
-                        "protocol_version": p.protocol_version,
-                    })
+    let all: Vec<serde_json::Value> = if let Some(peer_registry) = state.kernel.peer_registry_ref()
+    {
+        peer_registry
+            .all_peers()
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "node_id": p.node_id,
+                    "node_name": p.node_name,
+                    "address": p.address.to_string(),
+                    "state": format!("{:?}", p.state),
+                    "agents": p.agents.iter().map(|a| serde_json::json!({
+                        "id": a.id,
+                        "name": a.name,
+                    })).collect::<Vec<_>>(),
+                    "connected_at": p.connected_at.to_rfc3339(),
+                    "protocol_version": p.protocol_version,
                 })
-                .collect()
-        } else {
-            Vec::new()
-        };
-    let total = items.len();
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // Pagination (#3639): apply `?offset=&limit=` with a server-side cap of
+    // PAGINATION_MAX_LIMIT. Backward-compatible — when both query params are
+    // absent the full list is still returned.
+    let (items, total, offset, limit) = pagination.paginate(all);
     Json(crate::types::PaginatedResponse {
         items,
         total,
-        offset: 0,
-        limit: None,
+        offset,
+        limit,
     })
 }
 
@@ -262,7 +269,8 @@ pub async fn network_trusted_peers(State(state): State<Arc<AppState>>) -> impl I
     )
 )]
 pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agents = state.kernel.agent_registry().list();
+    // Read-only aggregation; cheap Arc clones over full manifest deep-copy (#3569).
+    let agents = state.kernel.agent_registry().list_arcs();
     let cfg = state.kernel.config_ref();
     let base_url = format!("http://{}", cfg.api_listen);
 
@@ -280,19 +288,19 @@ pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResp
     drop(cfg);
 
     // Aggregate skills from ALL agents.
-    let skills: Vec<librefang_runtime::a2a::AgentSkill> = agents
+    let skills: Vec<librefang_kernel::a2a::AgentSkill> = agents
         .iter()
         .flat_map(|entry| {
-            librefang_runtime::a2a::build_agent_card(&entry.manifest, &base_url).skills
+            librefang_kernel::a2a::build_agent_card(&entry.manifest, &base_url).skills
         })
         .collect();
 
-    let card = librefang_runtime::a2a::AgentCard {
+    let card = librefang_kernel::a2a::AgentCard {
         name: service_name,
         description: service_description,
         url: format!("{base_url}/a2a"),
         version: librefang_types::VERSION.to_string(),
-        capabilities: librefang_runtime::a2a::AgentCapabilities {
+        capabilities: librefang_kernel::a2a::AgentCapabilities {
             streaming: true,
             push_notifications: false,
             state_transition_history: true,
@@ -318,13 +326,14 @@ pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResp
     )
 )]
 pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agents = state.kernel.agent_registry().list();
+    // Read-only iteration; cheap Arc clones over full manifest deep-copy (#3569).
+    let agents = state.kernel.agent_registry().list_arcs();
     let base_url = format!("http://{}", state.kernel.config_ref().api_listen);
 
     let items: Vec<serde_json::Value> = agents
         .iter()
         .map(|entry| {
-            let card = librefang_runtime::a2a::build_agent_card(&entry.manifest, &base_url);
+            let card = librefang_kernel::a2a::build_agent_card(&entry.manifest, &base_url);
             serde_json::to_value(&card).unwrap_or_default()
         })
         .collect();
@@ -426,13 +435,13 @@ pub async fn a2a_send_task(
     let session_id = request["params"]["sessionId"].as_str().map(String::from);
 
     // Create the task in the store as Working, recording dispatch target and caller.
-    let task = librefang_runtime::a2a::A2aTask {
+    let task = librefang_kernel::a2a::A2aTask {
         id: task_id.clone(),
         session_id: session_id.clone(),
-        status: librefang_runtime::a2a::A2aTaskStatus::Working.into(),
-        messages: vec![librefang_runtime::a2a::A2aMessage {
+        status: librefang_kernel::a2a::A2aTaskStatus::Working.into(),
+        messages: vec![librefang_kernel::a2a::A2aMessage {
             role: "user".to_string(),
-            parts: vec![librefang_runtime::a2a::A2aPart::Text {
+            parts: vec![librefang_kernel::a2a::A2aPart::Text {
                 text: message_text.clone(),
             }],
         }],
@@ -449,9 +458,9 @@ pub async fn a2a_send_task(
         .await
     {
         Ok(result) => {
-            let response_msg = librefang_runtime::a2a::A2aMessage {
+            let response_msg = librefang_kernel::a2a::A2aMessage {
                 role: "agent".to_string(),
-                parts: vec![librefang_runtime::a2a::A2aPart::Text {
+                parts: vec![librefang_kernel::a2a::A2aPart::Text {
                     text: result.response,
                 }],
             };
@@ -469,9 +478,9 @@ pub async fn a2a_send_task(
             }
         }
         Err(e) => {
-            let error_msg = librefang_runtime::a2a::A2aMessage {
+            let error_msg = librefang_kernel::a2a::A2aMessage {
                 role: "agent".to_string(),
-                parts: vec![librefang_runtime::a2a::A2aPart::Text {
+                parts: vec![librefang_kernel::a2a::A2aPart::Text {
                     text: format!("Error: {e}"),
                 }],
             };
@@ -805,7 +814,7 @@ pub async fn a2a_get_external_agent(
         .lock()
         .unwrap_or_else(|e| e.into_inner());
 
-    let make_response = |(_, card): &(String, librefang_runtime::a2a::AgentCard)| {
+    let make_response = |(_, card): &(String, librefang_kernel::a2a::AgentCard)| {
         serde_json::json!({
             "name": card.name,
             "url": card.url,
@@ -858,7 +867,7 @@ pub async fn a2a_discover_external(
     // share the same string. Otherwise `https://x.com/` and `https://x.com`
     // would split into two pending entries and the gate at /api/a2a/send
     // would reject whichever variant the caller didn't approve. (#3786)
-    let url = match librefang_runtime::a2a::canonicalize_a2a_url(&raw_url) {
+    let url = match librefang_kernel::a2a::canonicalize_a2a_url(&raw_url) {
         Some(u) => u,
         None => {
             return ApiErrorResponse::bad_request("URL is not a valid http(s) URL with a host")
@@ -879,7 +888,7 @@ pub async fn a2a_discover_external(
     }
 
     // Thread allowlist into client so redirects are re-validated against the same SSRF policy (#3782).
-    let client = librefang_runtime::a2a::A2aClient::new_with_allowlist(ssrf_allowed);
+    let client = librefang_kernel::a2a::A2aClient::new_with_allowlist(ssrf_allowed);
     match client.discover(&url).await {
         Ok(card) => {
             // SECURITY (Bug #3786): Warn that we have no cryptographic proof
@@ -963,11 +972,10 @@ pub async fn a2a_discover_external(
             state.pending_a2a_agents.insert(url.clone(), card);
 
             // Bug #3786: audit every discovery so silent agent enumeration is detectable.
-            let audit_detail = format!("url={url} name={card_name}");
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::A2aDiscovered,
-                &audit_detail,
+                librefang_kernel::audit::AuditAction::A2aDiscovered,
+                format!("url={url} name={card_name}"),
                 "pending",
                 None,
                 Some("api".to_string()),
@@ -993,45 +1001,94 @@ pub async fn a2a_discover_external(
 }
 
 /// POST /api/a2a/send — Send a task to an external A2A agent.
+///
+/// Honours `Idempotency-Key` (#3637): when set, a duplicate request
+/// with the same key + same body replays the cached response instead
+/// of re-dispatching the outbound A2A task. A different body under
+/// the same key is rejected with 409 Conflict.
 #[utoipa::path(
     post,
     path = "/api/a2a/send",
     tag = "a2a",
     request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Send a task to an external A2A agent", body = crate::types::JsonObject)
+        (status = 200, description = "Send a task to an external A2A agent", body = crate::types::JsonObject),
+        (status = 409, description = "Idempotency-Key was reused with a different request body")
     )
 )]
 pub async fn a2a_send_external(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let key = crate::idempotency::extract_key(&headers);
+    let body_bytes: Vec<u8> = body.to_vec();
+    let store = Arc::clone(&state.idempotency_store);
+    let inner_body = body_bytes.clone();
+
+    crate::idempotency::run_idempotent(
+        store.as_ref(),
+        key.as_deref(),
+        &body_bytes,
+        move || async move { a2a_send_external_inner(state, &inner_body).await },
+    )
+    .await
+}
+
+async fn a2a_send_external_inner(state: Arc<AppState>, body_bytes: &[u8]) -> (StatusCode, Vec<u8>) {
+    let body: serde_json::Value = match serde_json::from_slice(body_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            return json_error_tuple(
+                StatusCode::BAD_REQUEST,
+                "a2a_invalid_json",
+                format!("Invalid JSON body: {e}"),
+            );
+        }
+    };
+
     let raw_url = match body["url"].as_str() {
         Some(u) => u.to_string(),
-        None => return ApiErrorResponse::bad_request("Missing 'url' field").into_json_tuple(),
+        None => {
+            return json_error_tuple(
+                StatusCode::BAD_REQUEST,
+                "a2a_missing_url",
+                "Missing 'url' field",
+            )
+        }
     };
     // Canonicalize before any trust-list comparison so case / port /
     // trailing-slash variants all match the form stored at approve time.
-    let url = match librefang_runtime::a2a::canonicalize_a2a_url(&raw_url) {
+    let url = match librefang_kernel::a2a::canonicalize_a2a_url(&raw_url) {
         Some(u) => u,
         None => {
-            return ApiErrorResponse::bad_request("URL is not a valid http(s) URL with a host")
-                .into_json_tuple();
+            return json_error_tuple(
+                StatusCode::BAD_REQUEST,
+                "a2a_invalid_url",
+                "URL is not a valid http(s) URL with a host",
+            );
         }
     };
     let message = match body["message"].as_str() {
         Some(m) => m.to_string(),
-        None => return ApiErrorResponse::bad_request("Missing 'message' field").into_json_tuple(),
+        None => {
+            return json_error_tuple(
+                StatusCode::BAD_REQUEST,
+                "a2a_missing_message",
+                "Missing 'message' field",
+            )
+        }
     };
     let session_id = body["session_id"].as_str();
 
     // SECURITY (Bug #3786): Reject sends to agents that are still pending approval.
     if state.pending_a2a_agents.contains_key(&url) {
-        return ApiErrorResponse::bad_request(
+        return json_error_tuple(
+            StatusCode::BAD_REQUEST,
+            "a2a_agent_pending_approval",
             "This agent is pending operator approval and cannot receive tasks. \
              Use POST /api/a2a/agents/{url}/approve to trust it first.",
-        )
-        .into_json_tuple();
+        );
     }
 
     // SECURITY (Bug #3786): Operator-approved trust gate. Without this check
@@ -1046,12 +1103,13 @@ pub async fn a2a_send_external(
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if !trusted.iter().any(|(u, _)| u == &url) {
-            return ApiErrorResponse::bad_request(
+            return json_error_tuple(
+                StatusCode::BAD_REQUEST,
+                "a2a_agent_not_trusted",
                 "Target URL is not a trusted A2A agent. \
                  Discover and approve it first via POST /api/a2a/discover \
                  followed by POST /api/a2a/agents/{url}/approve.",
-            )
-            .into_json_tuple();
+            );
         }
     }
 
@@ -1064,21 +1122,34 @@ pub async fn a2a_send_external(
         .ssrf_allowed_hosts
         .clone();
     if let Err(reason) = is_url_safe_for_ssrf(&url, &ssrf_allowed) {
-        return ApiErrorResponse::bad_request(reason).into_json_tuple();
+        return json_error_tuple(StatusCode::BAD_REQUEST, "a2a_ssrf_blocked", reason);
     }
 
     // Thread allowlist into client so redirects are re-validated against the same SSRF policy (#3782).
-    let client = librefang_runtime::a2a::A2aClient::new_with_allowlist(ssrf_allowed);
+    let client = librefang_kernel::a2a::A2aClient::new_with_allowlist(ssrf_allowed);
     match client.send_task(&url, &message, session_id).await {
-        Ok(task) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(&task).unwrap_or_default()),
-        ),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": e})),
-        ),
+        Ok(task) => {
+            let body = serde_json::to_vec(&task).unwrap_or_else(|_| b"{}".to_vec());
+            (StatusCode::OK, body)
+        }
+        Err(e) => json_error_tuple(StatusCode::BAD_GATEWAY, "a2a_upstream_error", e),
     }
+}
+
+/// Mirror `ApiErrorResponse::into_json_tuple` shape (`{ error, code, type }`)
+/// so a2a_send error responses match the post-#3505 standardized envelope.
+/// `type` mirrors `code` per the convention used in `agents.rs::json_error`.
+fn json_error_tuple(
+    status: StatusCode,
+    code: &str,
+    msg: impl Into<String>,
+) -> (StatusCode, Vec<u8>) {
+    let body = serde_json::json!({
+        "error": msg.into(),
+        "code": code,
+        "type": code,
+    });
+    (status, serde_json::to_vec(&body).unwrap_or_default())
 }
 
 /// GET /api/a2a/tasks/{id}/status — Get task status from an external A2A agent.
@@ -1107,7 +1178,7 @@ pub async fn a2a_external_task_status(
     };
     // Canonicalize before the trust gate so cosmetic variants on the query
     // string don't split the comparison from the form stored at approve.
-    let url = match librefang_runtime::a2a::canonicalize_a2a_url(&raw_url) {
+    let url = match librefang_kernel::a2a::canonicalize_a2a_url(&raw_url) {
         Some(u) => u,
         None => {
             return ApiErrorResponse::bad_request("URL is not a valid http(s) URL with a host")
@@ -1146,7 +1217,7 @@ pub async fn a2a_external_task_status(
     }
 
     // Thread allowlist into client so redirects are re-validated against the same SSRF policy (#3782).
-    let client = librefang_runtime::a2a::A2aClient::new_with_allowlist(ssrf_allowed);
+    let client = librefang_kernel::a2a::A2aClient::new_with_allowlist(ssrf_allowed);
     match client.get_task(&url, &task_id).await {
         Ok(task) => (
             StatusCode::OK,
@@ -1191,7 +1262,7 @@ pub async fn a2a_approve_external(
     // handler used as the storage key. Without this, an operator who
     // approves `https://x.com/` after discover stored `https://x.com`
     // (or vice versa) would 404.
-    let url = librefang_runtime::a2a::canonicalize_a2a_url(&decoded).unwrap_or(decoded);
+    let url = librefang_kernel::a2a::canonicalize_a2a_url(&decoded).unwrap_or(decoded);
 
     match state.pending_a2a_agents.remove(&url) {
         Some((_, card)) => {
@@ -1219,11 +1290,10 @@ pub async fn a2a_approve_external(
             // Bug #3786: audit the trust promotion — this is the moment the
             // agent gains the ability to receive tasks, so it must be in the
             // operator's audit trail.
-            let audit_detail = format!("url={url} name={card_name}");
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::A2aTrusted,
-                &audit_detail,
+                librefang_kernel::audit::AuditAction::A2aTrusted,
+                format!("url={url} name={card_name}"),
                 "ok",
                 None,
                 Some("api".to_string()),
@@ -1387,8 +1457,8 @@ pub async fn mcp_http(
             .and_then(|v| serde_json::from_value(v.clone()).ok());
 
         // Execute the tool via the kernel's tool runner
-        let kernel_handle: Arc<dyn librefang_runtime::kernel_handle::KernelHandle> =
-            state.kernel.clone() as Arc<dyn librefang_runtime::kernel_handle::KernelHandle>;
+        let kernel_handle: Arc<dyn librefang_kernel::kernel_handle::KernelHandle> =
+            state.kernel.clone() as Arc<dyn librefang_kernel::kernel_handle::KernelHandle>;
         // Snapshot config before async call — Guard is !Send and cannot cross .await
         let cfg = state.kernel.config_snapshot();
         let tts_opt = if cfg.tts.enabled {
@@ -1401,7 +1471,7 @@ pub async fn mcp_http(
         } else {
             None
         };
-        let result = librefang_runtime::tool_runner::execute_tool(
+        let result = librefang_kernel::tool_runner::execute_tool(
             "mcp-http",
             tool_name,
             &arguments,
@@ -1443,7 +1513,7 @@ pub async fn mcp_http(
     }
 
     // For non-tools/call methods (initialize, tools/list, etc.), delegate to the handler
-    let response = librefang_runtime::mcp_server::handle_mcp_request(&request, &tools).await;
+    let response = librefang_kernel::mcp_server::handle_mcp_request(&request, &tools).await;
     Json(response)
 }
 
@@ -1465,7 +1535,8 @@ pub async fn mcp_http(
 pub async fn comms_topology(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     use librefang_types::comms::{EdgeKind, TopoEdge, TopoNode, Topology};
 
-    let agents = state.kernel.agent_registry().list();
+    // Read-only projection; cheap Arc clones over full manifest deep-copy (#3569).
+    let agents = state.kernel.agent_registry().list_arcs();
 
     let nodes: Vec<TopoNode> = agents
         .iter()
@@ -1491,7 +1562,7 @@ pub async fn comms_topology(State(state): State<Arc<AppState>>) -> impl IntoResp
     }
 
     // Peer message edges from event bus history
-    let events = state.kernel.event_bus_ref().history(500).await;
+    let events = state.kernel.event_bus_ref().history(500);
     let mut peer_pairs = std::collections::HashSet::new();
     for event in &events {
         if let librefang_types::event::EventPayload::Message(_) = &event.payload {
@@ -1638,7 +1709,7 @@ fn filter_to_comms_event(
 
 /// Convert an audit entry into a CommsEvent if it represents inter-agent activity.
 fn audit_to_comms_event(
-    entry: &librefang_runtime::audit::AuditEntry,
+    entry: &librefang_kernel::audit::AuditEntry,
     agents: &[librefang_types::agent::AgentEntry],
 ) -> Option<librefang_types::comms::CommsEvent> {
     use librefang_types::comms::{CommsEvent, CommsEventKind};
@@ -1747,7 +1818,7 @@ fn audit_to_comms_event(
         ("limit" = Option<usize>, Query, description = "Maximum number of results"),
     ),
     responses(
-        (status = 200, description = "Recent inter-agent communication events", body = serde_json::Value)
+        (status = 200, description = "Recent inter-agent communication events", body = crate::types::JsonObject)
     )
 )]
 pub async fn comms_events(
@@ -1763,7 +1834,7 @@ pub async fn comms_events(
     let agents = state.kernel.agent_registry().list();
 
     // Primary source: event bus (has full source/target context)
-    let bus_events = state.kernel.event_bus_ref().history(500).await;
+    let bus_events = state.kernel.event_bus_ref().history(500);
     let mut comms_events: Vec<librefang_types::comms::CommsEvent> = bus_events
         .iter()
         .filter_map(|e| filter_to_comms_event(e, &agents))
@@ -2042,21 +2113,26 @@ mod tests {
         // No OFP node => registry is None at AppState-build time.
         assert!(kernel.peer_registry_ref().is_none());
 
+        let idempotency_store: Arc<
+            dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync,
+        > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
+            kernel.memory_substrate().usage_conn(),
+        ));
         let state = Arc::new(AppState {
             kernel: kernel.clone(),
             started_at: std::time::Instant::now(),
-            bridge_manager: tokio::sync::Mutex::new(None),
+            bridge_manager: arc_swap::ArcSwap::new(std::sync::Arc::new(None)),
             channels_config: tokio::sync::RwLock::new(Default::default()),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             clawhub_cache: dashmap::DashMap::new(),
             skillhub_cache: dashmap::DashMap::new(),
-            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_probe_cache: librefang_kernel::provider_health::ProbeCache::new(),
             provider_test_cache: dashmap::DashMap::new(),
             webhook_store: crate::webhook_store::WebhookStore::load(
                 home_dir.join("data").join("webhooks.json"),
             ),
             active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            media_drivers: librefang_kernel::media::MediaDriverCache::new(),
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -2066,6 +2142,7 @@ mod tests {
             gcra_limiter: crate::rate_limiter::create_rate_limiter(0),
             trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
             trust_forwarded_for: false,
+            idempotency_store,
         });
 
         // Simulate OFP startup happening AFTER AppState construction.
@@ -2085,7 +2162,12 @@ mod tests {
             protocol_version: 1,
         });
 
-        let resp = super::list_peers(State(state)).await.into_response();
+        let resp = super::list_peers(
+            State(state),
+            axum::extract::Query(crate::types::PaginationQuery::default()),
+        )
+        .await
+        .into_response();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();

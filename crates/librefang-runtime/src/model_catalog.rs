@@ -11,6 +11,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use tracing::warn;
 
 /// The model catalog — registry of all known models and providers.
+///
+/// `Clone` is required by the kernel's `ArcSwap<ModelCatalog>` storage
+/// (#3384): writes use the RCU pattern (clone snapshot → mutate → store)
+/// so the structurally-large catalog (130+ models × 28 providers + per-model
+/// overrides) is duplicated only on the rare `&mut self` paths
+/// (`set_provider_auth_status`, `merge_discovered_models`, …) and never on
+/// the hot read paths.
+#[derive(Clone)]
 pub struct ModelCatalog {
     models: Vec<ModelCatalogEntry>,
     aliases: HashMap<String, String>,

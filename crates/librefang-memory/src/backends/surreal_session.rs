@@ -56,19 +56,19 @@ impl SurrealSessionBackend {
     fn row_to_session(row: &JsonValue) -> LibreFangResult<Session> {
         let id_raw = row["id"]
             .as_str()
-            .ok_or_else(|| LibreFangError::Memory("session row missing id".into()))?;
+            .ok_or_else(|| LibreFangError::memory_msg("session row missing id"))?;
         // SurrealDB returns record IDs as "sessions:UUID" — strip the table prefix.
         let id_str = id_raw.strip_prefix("sessions:").unwrap_or(id_raw);
         let session_id: SessionId = id_str
             .parse()
-            .map_err(|_| LibreFangError::Memory(format!("invalid session id: {id_str}")))?;
+            .map_err(|_| LibreFangError::memory_msg(format!("invalid session id: {id_str}")))?;
 
         let agent_raw = row["agent_id"]
             .as_str()
-            .ok_or_else(|| LibreFangError::Memory("session row missing agent_id".into()))?;
+            .ok_or_else(|| LibreFangError::memory_msg("session row missing agent_id"))?;
         let agent_id: AgentId = agent_raw
             .parse()
-            .map_err(|_| LibreFangError::Memory(format!("invalid agent id: {agent_raw}")))?;
+            .map_err(|_| LibreFangError::memory_msg(format!("invalid agent id: {agent_raw}")))?;
 
         let messages: Vec<Message> =
             serde_json::from_value(row["messages"].clone()).unwrap_or_default();
@@ -97,7 +97,7 @@ impl SessionBackend for SurrealSessionBackend {
         let row: Option<JsonValue> = self.block_on(async move {
             db.select(("sessions", id.as_str()))
                 .await
-                .map_err(|e| LibreFangError::Memory(e.to_string()))
+                .map_err(|e| LibreFangError::memory_msg(e.to_string()))
         })?;
         row.as_ref().map(Self::row_to_session).transpose()
     }
@@ -106,7 +106,7 @@ impl SessionBackend for SurrealSessionBackend {
         let id = session.id.to_string();
         let agent_id = session.agent_id.to_string();
         let messages = serde_json::to_value(&session.messages)
-            .map_err(|e| LibreFangError::Memory(format!("serialise messages: {e}")))?;
+            .map_err(|e| LibreFangError::memory_msg(format!("serialise messages: {e}")))?;
         let label = session.label.clone();
         let context_window_tokens = session.context_window_tokens;
         let message_count = session.messages.len() as i64;
@@ -117,7 +117,7 @@ impl SessionBackend for SurrealSessionBackend {
             let existing: Option<JsonValue> = db
                 .select(("sessions", id.as_str()))
                 .await
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
             let created_at = existing
                 .as_ref()
                 .and_then(|v| v["created_at"].as_str())
@@ -137,7 +137,7 @@ impl SessionBackend for SurrealSessionBackend {
                 .upsert(("sessions", id.as_str()))
                 .content(payload)
                 .await
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
             Ok(())
         })
     }
@@ -150,9 +150,9 @@ impl SessionBackend for SurrealSessionBackend {
                 .query("SELECT id FROM sessions WHERE agent_id = $agent_id")
                 .bind(("agent_id", agent))
                 .await
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?
+                .map_err(|e| LibreFangError::memory_msg(e.to_string()))?
                 .take(0)
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
 
             let mut ids = Vec::new();
             for row in rows {
@@ -174,7 +174,7 @@ impl SessionBackend for SurrealSessionBackend {
             db.query("DELETE sessions WHERE agent_id = $agent_id")
                 .bind(("agent_id", agent))
                 .await
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
             Ok(())
         })
     }
@@ -193,7 +193,7 @@ impl SessionBackend for SurrealSessionBackend {
             let existing: Option<JsonValue> = db
                 .select(("canonical_sessions", agent.as_str()))
                 .await
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
 
             let mut all_msgs: Vec<Message> = existing
                 .as_ref()
@@ -214,7 +214,7 @@ impl SessionBackend for SurrealSessionBackend {
             all_msgs.extend(new_msgs);
 
             let msgs_value = serde_json::to_value(&all_msgs)
-                .map_err(|e| LibreFangError::Memory(format!("serialise: {e}")))?;
+                .map_err(|e| LibreFangError::memory_msg(format!("serialise: {e}")))?;
 
             let payload = serde_json::json!({
                 "agent_id": agent,
@@ -228,7 +228,7 @@ impl SessionBackend for SurrealSessionBackend {
                 .upsert(("canonical_sessions", agent.as_str()))
                 .content(payload)
                 .await
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
             Ok(())
         })
     }
@@ -240,7 +240,7 @@ impl SessionBackend for SurrealSessionBackend {
             let _: Option<JsonValue> = db
                 .delete(("canonical_sessions", agent.as_str()))
                 .await
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
             Ok(())
         })
     }

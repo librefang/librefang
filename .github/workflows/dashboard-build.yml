@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to upload dashboard asset to (e.g. v2026.4.5-beta14)'
+        description: 'Release tag to upload dashboard asset to (e.g. v2026.4.5-beta.14)'
         required: true
         type: string
 

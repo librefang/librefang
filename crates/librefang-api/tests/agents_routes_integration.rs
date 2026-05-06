@@ -44,9 +44,9 @@ async fn boot(api_key: &str) -> Harness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     // Populate the registry cache so the kernel boots without network access.
-    librefang_runtime::registry_sync::sync_registry(
+    librefang_kernel::registry_sync::sync_registry(
         tmp.path(),
-        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
     );
 
@@ -345,6 +345,16 @@ fn delete(path: &str, bearer: Option<&str>) -> Request<Body> {
     b.body(Body::empty()).unwrap()
 }
 
+/// Refs #4614 — DELETE /api/agents/{id} requires `?confirm=true` (or a
+/// `{"confirm": true}` body) to gate the destructive canonical-UUID
+/// purge. This helper appends the query param so tests don't have to
+/// open-code the URL in every call site.
+fn delete_confirmed(path: &str, bearer: Option<&str>) -> Request<Body> {
+    let glue = if path.contains('?') { '&' } else { '?' };
+    let with_confirm = format!("{path}{glue}confirm=true");
+    delete(&with_confirm, bearer)
+}
+
 /// Refs #3509: DELETE is idempotent (RFC 9110 §9.2.2). Killing the same
 /// agent twice MUST succeed both times — the second call returns
 /// `200 OK` with `status: already-deleted` instead of `404 Not Found`,
@@ -356,10 +366,11 @@ async fn test_delete_agent_twice_both_succeed_idempotent() {
     let h = boot(TEST_TOKEN).await;
     let id = spawn_named(&h.state, "kill-target");
 
-    // First call — agent exists, normal kill path.
+    // First call — agent exists, normal kill path. Refs #4614: confirm
+    // required to gate canonical-UUID purge.
     let (status1, body1) = send(
         h.app.clone(),
-        delete(&format!("/api/agents/{}", id), Some(TEST_TOKEN)),
+        delete_confirmed(&format!("/api/agents/{}", id), Some(TEST_TOKEN)),
     )
     .await;
     assert_eq!(
@@ -372,7 +383,7 @@ async fn test_delete_agent_twice_both_succeed_idempotent() {
     // Second call — agent already gone. MUST still be 200, not 404.
     let (status2, body2) = send(
         h.app.clone(),
-        delete(&format!("/api/agents/{}", id), Some(TEST_TOKEN)),
+        delete_confirmed(&format!("/api/agents/{}", id), Some(TEST_TOKEN)),
     )
     .await;
     assert_eq!(
@@ -392,6 +403,9 @@ async fn test_delete_agent_twice_both_succeed_idempotent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_delete_agent_invalid_id_still_returns_400() {
     let h = boot(TEST_TOKEN).await;
+    // Bare DELETE — malformed UUID short-circuits with 400 before the
+    // confirmation check fires, so the response stays the same shape
+    // post-#4614.
     let (status, body) = send(
         h.app.clone(),
         delete("/api/agents/not-a-uuid", Some(TEST_TOKEN)),
@@ -409,11 +423,224 @@ async fn test_delete_agent_invalid_id_still_returns_400() {
 async fn test_delete_agent_unknown_uuid_is_idempotent_200() {
     let h = boot(TEST_TOKEN).await;
     let unknown = AgentId::new();
+    // Refs #4614: confirm required even on the idempotent-already-gone
+    // path so the contract is consistent across all DELETEs.
     let (status, body) = send(
         h.app.clone(),
-        delete(&format!("/api/agents/{}", unknown), Some(TEST_TOKEN)),
+        delete_confirmed(&format!("/api/agents/{}", unknown), Some(TEST_TOKEN)),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body={body:?}");
     assert_eq!(body["status"], "already-deleted", "body={body:?}");
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/agents/{id}/session — thinking blocks reach the dashboard
+// ---------------------------------------------------------------------------
+
+/// Persisted `ContentBlock::Thinking` blocks must be surfaced on the
+/// agent-scoped session endpoint so the dashboard can render the
+/// collapsible reasoning drawer on history reload — same UX as live
+/// streaming, where `thinking_delta` events accumulate into the message.
+///
+/// Before this fix the endpoint flattened blocks into a string and silently
+/// swallowed Thinking via the catch-all match arm, so reload showed an
+/// assistant turn with no reasoning even though the session JSON had it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_agent_session_endpoint_surfaces_thinking_blocks() {
+    use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "thinking-target");
+
+    // Seed a session with an assistant turn that has interleaved thinking
+    // and text blocks. Two thinking blocks exercise the multi-block join.
+    let mut session = h
+        .state
+        .kernel
+        .memory_substrate()
+        .create_session(id)
+        .expect("create_session");
+    session.push_message(Message {
+        role: Role::User,
+        content: MessageContent::Text("hi".to_string()),
+        pinned: false,
+        timestamp: None,
+    });
+    session.push_message(Message {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![
+            ContentBlock::Thinking {
+                thinking: "first reasoning step".to_string(),
+                provider_metadata: None,
+            },
+            ContentBlock::Text {
+                text: "visible answer".to_string(),
+                provider_metadata: None,
+            },
+            ContentBlock::Thinking {
+                thinking: "follow-up reasoning".to_string(),
+                provider_metadata: None,
+            },
+        ]),
+        pinned: false,
+        timestamp: None,
+    });
+    let session_id = session.id.0;
+    h.state
+        .kernel
+        .memory_substrate()
+        .save_session(&session)
+        .expect("save_session");
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!(
+            "/api/agents/{}/session?session_id={}",
+            id, session_id
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    let messages = body["messages"].as_array().expect("messages array").clone();
+    let assistant = messages
+        .iter()
+        .find(|m| m["role"] == "Assistant")
+        .expect("assistant message");
+    // Visible text still flattens — same shape the dashboard already
+    // rendered before this change.
+    assert_eq!(assistant["content"], "visible answer");
+    // Thinking now surfaces as a flat string with multi-block join. The
+    // dashboard's history mapper reads this directly into
+    // `ChatMessage.thinking`, mirroring the live-streaming flat-string
+    // accumulation from `thinking_delta` events.
+    assert_eq!(
+        assistant["thinking"], "first reasoning step\n\nfollow-up reasoning",
+        "thinking field missing or wrong join — body={body:?}",
+    );
+}
+
+/// Sessions without thinking blocks must NOT include a `thinking` field
+/// on assistant messages. Omitting (vs. emitting `""`) keeps the response
+/// shape unchanged for non-thinking models and avoids triggering the
+/// dashboard's empty-drawer render gate.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_agent_session_endpoint_omits_thinking_when_none_present() {
+    use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "no-thinking-target");
+
+    let mut session = h
+        .state
+        .kernel
+        .memory_substrate()
+        .create_session(id)
+        .expect("create_session");
+    session.push_message(Message {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![ContentBlock::Text {
+            text: "plain answer".to_string(),
+            provider_metadata: None,
+        }]),
+        pinned: false,
+        timestamp: None,
+    });
+    let session_id = session.id.0;
+    h.state
+        .kernel
+        .memory_substrate()
+        .save_session(&session)
+        .expect("save_session");
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!(
+            "/api/agents/{}/session?session_id={}",
+            id, session_id
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    let messages = body["messages"].as_array().expect("messages array");
+    let assistant = messages
+        .iter()
+        .find(|m| m["role"] == "Assistant")
+        .expect("assistant message");
+    assert_eq!(assistant["content"], "plain answer");
+    assert!(
+        assistant.get("thinking").is_none(),
+        "thinking field should be absent — body={body:?}",
+    );
+}
+
+/// A turn whose `MessageContent::Blocks` contains ONLY `Thinking`
+/// (e.g. an aborted/cancelled response, or a server filter that
+/// stripped the visible text) MUST still surface to the dashboard so
+/// the collapsible thinking drawer renders. Pre-fix the route's
+/// `if content.is_empty() && tools.is_empty()` early-skip dropped the
+/// turn before the `thinking` field was attached, contradicting the
+/// dashboard's `hasThinking` render branch which is explicitly
+/// designed for thinking-only turns.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_agent_session_endpoint_surfaces_thinking_only_turns() {
+    use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "thinking-only-target");
+
+    let mut session = h
+        .state
+        .kernel
+        .memory_substrate()
+        .create_session(id)
+        .expect("create_session");
+    // Seed a user prompt followed by an assistant turn with NO text /
+    // tool_use — only Thinking. Mirrors a cancelled-mid-stream
+    // response that produced reasoning before the visible answer
+    // started.
+    session.push_message(Message {
+        role: Role::User,
+        content: MessageContent::Text("hi".to_string()),
+        pinned: false,
+        timestamp: None,
+    });
+    session.push_message(Message {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![ContentBlock::Thinking {
+            thinking: "reasoning that never reached an answer".to_string(),
+            provider_metadata: None,
+        }]),
+        pinned: false,
+        timestamp: None,
+    });
+    let session_id = session.id.0;
+    h.state
+        .kernel
+        .memory_substrate()
+        .save_session(&session)
+        .expect("save_session");
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!(
+            "/api/agents/{}/session?session_id={}",
+            id, session_id
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    let messages = body["messages"].as_array().expect("messages array").clone();
+    let assistant = messages
+        .iter()
+        .find(|m| m["role"] == "Assistant")
+        .expect("thinking-only assistant turn must NOT be dropped — body={body:?}");
+    assert_eq!(
+        assistant["content"], "",
+        "thinking-only turn has no visible text — body={body:?}",
+    );
+    assert_eq!(
+        assistant["thinking"], "reasoning that never reached an answer",
+        "thinking field must surface so the dashboard's hasThinking branch can render — body={body:?}",
+    );
 }

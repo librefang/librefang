@@ -4,6 +4,7 @@
 //! Each skill is a GitHub repo with releases containing the skill bundle.
 
 use crate::openclaw_compat;
+use crate::supply_chain;
 use crate::SkillError;
 use reqwest::StatusCode;
 use serde_json::json;
@@ -194,6 +195,22 @@ impl MarketplaceClient {
 
         extract_bundle_zip_bytes(&bundle_bytes, &skill_dir)?;
         ensure_skill_manifest(&skill_dir)?;
+
+        // Supply-chain audit — refuse install if any critical violation is found.
+        // Override with LIBREFANG_SKIP_SUPPLY_CHAIN_AUDIT=1 for dev-mode only.
+        if let Err(violations) = supply_chain::scan(&skill_dir) {
+            // Clean up the partially-extracted directory so a failed install
+            // does not leave a malicious bundle on disk.
+            let _ = std::fs::remove_dir_all(&skill_dir);
+            let summary = violations
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(SkillError::SecurityBlocked(format!(
+                "supply-chain audit failed for '{skill_name}': {summary}"
+            )));
+        }
 
         let meta = serde_json::json!({
             "name": skill_name,

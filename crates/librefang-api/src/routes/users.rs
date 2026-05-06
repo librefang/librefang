@@ -800,8 +800,8 @@ pub async fn rotate_user_key(
     let actor_user_id = caller.as_ref().map(|c| c.0.user_id);
     state.kernel.audit().record_with_context(
         "system",
-        librefang_runtime::audit::AuditAction::RoleChange,
-        &format!("api_key rotated by {actor} for user {name} (old: {old_fp})"),
+        librefang_kernel::audit::AuditAction::RoleChange,
+        format!("api_key rotated by {actor} for user {name} (old: {old_fp})"),
         "completed",
         actor_user_id,
         Some("api".to_string()),
@@ -1032,8 +1032,8 @@ where
 
     state.kernel.audit().record(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
-        "users updated",
+        librefang_kernel::audit::AuditAction::ConfigChange,
+        "users updated".to_string(),
         "completed",
     );
 

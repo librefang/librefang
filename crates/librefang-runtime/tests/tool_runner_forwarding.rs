@@ -41,16 +41,24 @@ impl CapturingKernel {
 
 #[async_trait]
 impl AgentControl for CapturingKernel {
-    async fn spawn_agent(&self, _: &str, _: Option<&str>) -> Result<(String, String), String> {
+    async fn spawn_agent(
+        &self,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn send_to_agent(&self, _: &str, _: &str) -> Result<String, String> {
+    async fn send_to_agent(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
     fn list_agents(&self) -> Vec<AgentInfo> {
         vec![]
     }
-    fn kill_agent(&self, _: &str) -> Result<(), String> {
+    fn kill_agent(&self, _: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
     fn find_agents(&self, _: &str) -> Vec<AgentInfo> {
@@ -64,7 +72,7 @@ impl MemoryAccess for CapturingKernel {
         _key: &str,
         _value: serde_json::Value,
         peer_id: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         self.memory_store_calls
             .lock()
             .unwrap()
@@ -75,14 +83,17 @@ impl MemoryAccess for CapturingKernel {
         &self,
         _key: &str,
         peer_id: Option<&str>,
-    ) -> Result<Option<serde_json::Value>, String> {
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         self.memory_recall_calls
             .lock()
             .unwrap()
             .push(peer_id.map(|s| s.to_string()));
         Ok(None)
     }
-    fn memory_list(&self, peer_id: Option<&str>) -> Result<Vec<String>, String> {
+    fn memory_list(
+        &self,
+        peer_id: Option<&str>,
+    ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         self.memory_list_calls
             .lock()
             .unwrap()
@@ -99,35 +110,57 @@ impl TaskQueue for CapturingKernel {
         _: &str,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_claim(&self, _: &str) -> Result<Option<serde_json::Value>, String> {
+    async fn task_claim(
+        &self,
+        _: &str,
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_complete(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+    async fn task_complete(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_list(&self, _: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    async fn task_list(
+        &self,
+        _: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_delete(&self, _: &str) -> Result<bool, String> {
+    async fn task_delete(&self, _: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_retry(&self, _: &str) -> Result<bool, String> {
+    async fn task_retry(&self, _: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_get(&self, _: &str) -> Result<Option<serde_json::Value>, String> {
+    async fn task_get(
+        &self,
+        _: &str,
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_update_status(&self, _: &str, _: &str) -> Result<bool, String> {
+    async fn task_update_status(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 }
 
 #[async_trait]
 impl EventBus for CapturingKernel {
-    async fn publish_event(&self, _: &str, _: serde_json::Value) -> Result<(), String> {
+    async fn publish_event(
+        &self,
+        _: &str,
+        _: serde_json::Value,
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 }
@@ -137,19 +170,20 @@ impl KnowledgeGraph for CapturingKernel {
     async fn knowledge_add_entity(
         &self,
         _: &librefang_types::memory::Entity,
-    ) -> Result<String, String> {
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
     async fn knowledge_add_relation(
         &self,
         _: &librefang_types::memory::Relation,
-    ) -> Result<String, String> {
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
     async fn knowledge_query(
         &self,
         _: librefang_types::memory::GraphPattern,
-    ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+    ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError>
+    {
         Err("not implemented".into())
     }
 }
@@ -189,6 +223,8 @@ fn make_ctx<'a>(
         process_registry: None,
         sender_id,
         channel: None,
+        spill_threshold_bytes: 0,
+        max_artifact_bytes: 0,
         checkpoint_manager: None,
         interrupt: None,
         dangerous_command_checker: None,

@@ -1,5 +1,6 @@
 use crate::common::repo_root;
 use clap::Parser;
+use std::fs::File;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -23,6 +24,21 @@ pub struct IntegrationTestArgs {
     /// Path to the librefang binary
     #[arg(long)]
     pub binary: Option<String>,
+
+    /// Capture daemon stdout+stderr to this file. Without this flag the
+    /// daemon's output is dropped, which means a startup failure surfaces
+    /// as nothing more than "Health check timed out". CI callers should set
+    /// this and `cat` the file in an `if: failure()` step. The file is
+    /// truncated on each run; rotate yourself if you need historical logs.
+    #[arg(long)]
+    pub daemon_log: Option<PathBuf>,
+
+    /// Seconds to wait for `/api/health` to return 200. Default 30: cold
+    /// debug-build startup on a CI runner (binary just compiled, no OS file
+    /// cache, SQLite migration on a fresh DB) routinely needs more than the
+    /// historical 10s, producing flake.
+    #[arg(long, default_value = "30")]
+    pub health_timeout_secs: u64,
 }
 
 fn default_binary(root: &Path) -> PathBuf {
@@ -68,6 +84,22 @@ fn cleanup_daemon(daemon: &mut Child, port: u16) {
     let _ = daemon.kill();
     let _ = daemon.wait();
     kill_process_on_port(port);
+}
+
+/// Dump captured daemon log to stderr when present. No-op if `--daemon-log`
+/// wasn't passed (we never captured anything in that case). Called from every
+/// failure path so a CI step / local user always gets the root cause without
+/// having to know the file location.
+fn dump_daemon_log(args: &IntegrationTestArgs) {
+    let Some(path) = &args.daemon_log else {
+        return;
+    };
+    eprintln!("--- daemon log ({}) ---", path.display());
+    match std::fs::read_to_string(path) {
+        Ok(contents) => eprintln!("{contents}"),
+        Err(read_err) => eprintln!("(failed to read daemon log: {read_err})"),
+    }
+    eprintln!("--- end daemon log ---");
 }
 
 fn wait_for_health(port: u16, timeout: Duration) -> Result<(), Box<dyn std::error::Error>> {
@@ -192,10 +224,22 @@ pub fn run(args: IntegrationTestArgs) -> Result<(), Box<dyn std::error::Error>> 
     println!("Starting daemon: {} start", binary.display());
     let mut daemon = {
         let mut cmd = Command::new(&binary);
-        cmd.arg("start")
-            .current_dir(&root)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        cmd.arg("start").current_dir(&root);
+        match &args.daemon_log {
+            Some(path) => {
+                let stdout_file = File::create(path)
+                    .map_err(|e| format!("create daemon log {}: {e}", path.display()))?;
+                let stderr_file = stdout_file
+                    .try_clone()
+                    .map_err(|e| format!("clone daemon log handle: {e}"))?;
+                cmd.stdout(Stdio::from(stdout_file))
+                    .stderr(Stdio::from(stderr_file));
+                println!("  Capturing daemon output to {}", path.display());
+            }
+            None => {
+                cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+        }
         if let Some(ref key) = args.api_key {
             cmd.env("GROQ_API_KEY", key);
         }
@@ -205,9 +249,13 @@ pub fn run(args: IntegrationTestArgs) -> Result<(), Box<dyn std::error::Error>> 
     println!("  Daemon started (PID: {})", daemon.id());
 
     // Wait for health
-    println!("Waiting for health endpoint (up to 10s)...");
-    if let Err(e) = wait_for_health(port, Duration::from_secs(10)) {
+    println!(
+        "Waiting for health endpoint (up to {}s)...",
+        args.health_timeout_secs
+    );
+    if let Err(e) = wait_for_health(port, Duration::from_secs(args.health_timeout_secs)) {
         cleanup_daemon(&mut daemon, port);
+        dump_daemon_log(&args);
         return Err(format!("Daemon failed to start: {}", e).into());
     }
     println!("  Daemon is healthy");
@@ -337,6 +385,10 @@ pub fn run(args: IntegrationTestArgs) -> Result<(), Box<dyn std::error::Error>> 
         for err in &results.errors {
             println!("  - {}", err);
         }
+        // Endpoint test failures usually mean the daemon hit an error path
+        // (5xx, panic, deserialize error, etc.) — daemon log is the root
+        // cause source. Symmetric with the wait_for_health failure path.
+        dump_daemon_log(&args);
         Err(format!("{} test(s) failed", results.failed).into())
     } else {
         println!("All integration tests passed!");

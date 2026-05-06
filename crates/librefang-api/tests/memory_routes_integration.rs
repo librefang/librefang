@@ -69,9 +69,9 @@ async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     // Populate the registry cache so the kernel boots without network access.
-    librefang_runtime::registry_sync::sync_registry(
+    librefang_kernel::registry_sync::sync_registry(
         tmp.path(),
-        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
     );
 
@@ -328,7 +328,10 @@ async fn delete_clear_level_rejects_unknown_level_with_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
     let body = read_json(resp).await;
-    let err = body["error"].as_str().unwrap_or("");
+    let err = body["error"]
+        .as_str()
+        .or_else(|| body["error"]["message"].as_str())
+        .unwrap_or("");
     assert!(
         err.contains("Invalid memory level") && err.contains("bogus"),
         "expected validation error mentioning 'bogus', got: {err}"
@@ -391,7 +394,10 @@ async fn post_bulk_delete_missing_ids_returns_400() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body = read_json(resp).await;
-    let err = body["error"].as_str().unwrap_or("");
+    let err = body["error"]
+        .as_str()
+        .or_else(|| body["error"]["message"].as_str())
+        .unwrap_or("");
     assert!(
         err.contains("ids"),
         "expected validation error mentioning 'ids', got: {err}"
@@ -480,7 +486,10 @@ async fn put_memory_update_rejects_empty_content_with_400() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body = read_json(resp).await;
-    let err = body["error"].as_str().unwrap_or("");
+    let err = body["error"]
+        .as_str()
+        .or_else(|| body["error"]["message"].as_str())
+        .unwrap_or("");
     assert!(
         err.to_lowercase().contains("content"),
         "expected validation error mentioning 'content', got: {err}"

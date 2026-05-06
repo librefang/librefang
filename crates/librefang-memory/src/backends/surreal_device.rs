@@ -51,10 +51,10 @@ impl DeviceBackend for SurrealDeviceStore {
                 .db
                 .query("SELECT * FROM paired_devices")
                 .await
-                .map_err(|e| LibreFangError::Memory(format!("SurrealDB load_devices: {e}")))?;
+                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB load_devices: {e}")))?;
             let rows: Vec<serde_json::Value> = res
                 .take(0)
-                .map_err(|e| LibreFangError::Memory(format!("SurrealDB load_devices: {e}")))?;
+                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB load_devices: {e}")))?;
             // Normalize the SurrealDB rows to plain JSON objects matching the
             // SQLite column layout expected by the kernel.
             Ok(rows
@@ -133,7 +133,7 @@ impl DeviceBackend for SurrealDeviceStore {
                 .upsert::<Option<serde_json::Value>>(("paired_devices", safe_id))
                 .content(row)
                 .await
-                .map_err(|e| LibreFangError::Memory(format!("SurrealDB save_device: {e}")))?;
+                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB save_device: {e}")))?;
             Ok(())
         })
     }
@@ -144,7 +144,7 @@ impl DeviceBackend for SurrealDeviceStore {
             self.db
                 .delete::<Option<serde_json::Value>>(("paired_devices", safe_id))
                 .await
-                .map_err(|e| LibreFangError::Memory(format!("SurrealDB remove_device: {e}")))?;
+                .map_err(|e| LibreFangError::memory_msg(format!("SurrealDB remove_device: {e}")))?;
             Ok(())
         })
     }

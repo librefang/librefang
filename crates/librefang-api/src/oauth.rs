@@ -1670,7 +1670,7 @@ async fn discover_oidc(issuer_url: &str) -> Result<OidcDiscovery, String> {
         "{}/.well-known/openid-configuration",
         issuer_url.trim_end_matches('/')
     );
-    let resp = librefang_runtime::http_client::new_client()
+    let resp = librefang_kernel::http_client::new_client()
         .get(&url)
         .send()
         .await
@@ -1694,7 +1694,7 @@ async fn exchange_code(
     client_secret: &str,
     redirect_uri: &str,
 ) -> Result<TokenResponse, String> {
-    let client = librefang_runtime::http_client::new_client();
+    let client = librefang_kernel::http_client::new_client();
     let resp = client
         .post(token_endpoint)
         .form(&[
@@ -1729,7 +1729,7 @@ async fn exchange_refresh_token(
     client_id: &str,
     client_secret: &str,
 ) -> Result<TokenResponse, String> {
-    let client = librefang_runtime::http_client::new_client();
+    let client = librefang_kernel::http_client::new_client();
     let resp = client
         .post(token_endpoint)
         .form(&[
@@ -1770,7 +1770,7 @@ async fn fetch_jwks_cached(jwks_uri: &str) -> Result<Vec<JwksKey>, String> {
 
     // Fetch fresh keys.
     debug!(jwks_uri, "Fetching JWKS keys");
-    let resp = librefang_runtime::http_client::new_client()
+    let resp = librefang_kernel::http_client::new_client()
         .get(jwks_uri)
         .send()
         .await
@@ -1867,7 +1867,7 @@ async fn fetch_userinfo(
     userinfo_url: &str,
     access_token: &str,
 ) -> Result<serde_json::Value, String> {
-    let client = librefang_runtime::http_client::new_client();
+    let client = librefang_kernel::http_client::new_client();
     let resp = client
         .get(userinfo_url)
         .bearer_auth(access_token)

@@ -66,7 +66,7 @@ impl SurrealMemoryBackend {
         ";
         db.query(bootstrap)
             .await
-            .map_err(|e| LibreFangError::Memory(format!("agents bootstrap: {e}")))?;
+            .map_err(|e| LibreFangError::memory_msg(format!("agents bootstrap: {e}")))?;
         Ok(Self {
             session,
             db,
@@ -135,7 +135,7 @@ impl SurrealMemoryBackend {
 /// (`created_at` / `last_active`).
 fn row_for(entry: &AgentEntry) -> LibreFangResult<JsonValue> {
     let entry_json =
-        serde_json::to_value(entry).map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        serde_json::to_value(entry).map_err(|e| LibreFangError::serialization_msg(e.to_string()))?;
     let updated_at_ms = chrono::Utc::now().timestamp_millis();
     Ok(serde_json::json!({
         "id": entry.id.0.to_string(),
@@ -148,8 +148,8 @@ fn row_for(entry: &AgentEntry) -> LibreFangResult<JsonValue> {
 fn entry_from_row(row: &JsonValue) -> LibreFangResult<AgentEntry> {
     let inner = row
         .get("entry")
-        .ok_or_else(|| LibreFangError::Serialization("missing entry field".into()))?;
-    serde_json::from_value(inner.clone()).map_err(|e| LibreFangError::Serialization(e.to_string()))
+        .ok_or_else(|| LibreFangError::serialization_msg("missing entry field"))?;
+    serde_json::from_value(inner.clone()).map_err(|e| LibreFangError::serialization_msg(e.to_string()))
 }
 
 #[async_trait]
@@ -163,7 +163,7 @@ impl MemoryBackend for SurrealMemoryBackend {
                 .upsert(("agents", id.as_str()))
                 .content(row)
                 .await
-                .map_err(|e| LibreFangError::Memory(format!("save_agent: {e}")))?;
+                .map_err(|e| LibreFangError::memory_msg(format!("save_agent: {e}")))?;
             Ok::<_, LibreFangError>(())
         })
     }
@@ -174,7 +174,7 @@ impl MemoryBackend for SurrealMemoryBackend {
         let row: Option<JsonValue> = self.block_on(async move {
             db.select(("agents", id.as_str()))
                 .await
-                .map_err(|e| LibreFangError::Memory(format!("load_agent: {e}")))
+                .map_err(|e| LibreFangError::memory_msg(format!("load_agent: {e}")))
         })?;
         row.as_ref().map(entry_from_row).transpose()
     }
@@ -186,7 +186,7 @@ impl MemoryBackend for SurrealMemoryBackend {
             let _: Option<JsonValue> = db
                 .delete(("agents", id.as_str()))
                 .await
-                .map_err(|e| LibreFangError::Memory(format!("remove_agent: {e}")))?;
+                .map_err(|e| LibreFangError::memory_msg(format!("remove_agent: {e}")))?;
             Ok::<_, LibreFangError>(())
         })
     }
@@ -196,7 +196,7 @@ impl MemoryBackend for SurrealMemoryBackend {
         let rows: Vec<JsonValue> = self.block_on(async move {
             db.select("agents")
                 .await
-                .map_err(|e| LibreFangError::Memory(format!("load_all_agents: {e}")))
+                .map_err(|e| LibreFangError::memory_msg(format!("load_all_agents: {e}")))
         })?;
         rows.iter().map(entry_from_row).collect()
     }

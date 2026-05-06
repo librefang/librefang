@@ -40,6 +40,11 @@ pub struct TwitchAdapter {
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
+    /// IRC endpoint host. Defaults to `TWITCH_IRC_HOST`; tests override
+    /// via `with_irc_endpoint` to point at a local TCP listener.
+    irc_host: String,
+    /// IRC endpoint port. Defaults to `TWITCH_IRC_PORT`.
+    irc_port: u16,
 }
 
 impl TwitchAdapter {
@@ -58,11 +63,22 @@ impl TwitchAdapter {
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
+            irc_host: TWITCH_IRC_HOST.to_string(),
+            irc_port: TWITCH_IRC_PORT,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the Twitch IRC endpoint. `#[cfg(test)]`-only — used by
+    /// integration tests to point the adapter at a local TCP listener.
+    #[cfg(test)]
+    pub fn with_irc_endpoint(mut self, host: String, port: u16) -> Self {
+        self.irc_host = host;
+        self.irc_port = port;
         self
     }
 
@@ -306,7 +322,7 @@ impl ChannelAdapter for TwitchAdapter {
 
         // Connect briefly to send the message
         // In production, a persistent write connection would be maintained.
-        let stream = TcpStream::connect((TWITCH_IRC_HOST, TWITCH_IRC_PORT)).await?;
+        let stream = TcpStream::connect((self.irc_host.as_str(), self.irc_port)).await?;
         let (_reader, mut writer) = stream.into_split();
 
         writer.write_all(self.pass_string().as_bytes()).await?;
@@ -398,5 +414,97 @@ mod tests {
     fn test_parse_privmsg_empty_prefix() {
         let line = "PING :tmi.twitch.tv";
         assert!(parse_privmsg(line).is_none());
+    }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Twitch's `send()` opens a fresh TCP connection per call and writes
+    // raw IRC frames (PASS / NICK / PRIVMSG / QUIT). Wiremock is HTTP-only,
+    // so the fixture is a plain `tokio::net::TcpListener`: it accepts one
+    // connection, drains the byte stream until the client closes (`QUIT`
+    // + drop), and we assert the captured bytes contain the expected
+    // wire-format frames in order.
+    //
+    // The hard-coded `(TWITCH_IRC_HOST, TWITCH_IRC_PORT)` connect target
+    // is now overridable via `with_irc_endpoint` (test-only).
+
+    use tokio::io::AsyncReadExt as _;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    fn twitch_user(channel: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: channel.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    /// Bind a local TCP listener; spawn a task that reads to EOF and
+    /// returns the captured bytes via a oneshot. Returns `(host, port,
+    /// rx)`.
+    async fn capture_irc_listener() -> (String, u16, oneshot::Receiver<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = oneshot::channel::<Vec<u8>>();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let _ = stream.read_to_end(&mut buf).await;
+            let _ = tx.send(buf);
+        });
+        (addr.ip().to_string(), addr.port(), rx)
+    }
+
+    #[tokio::test]
+    async fn twitch_send_writes_pass_nick_privmsg_quit_in_order() {
+        let (host, port, captured) = capture_irc_listener().await;
+        let adapter = TwitchAdapter::new(
+            "oauth:abc123".to_string(),
+            vec![],
+            "librefang_bot".to_string(),
+        )
+        .with_irc_endpoint(host, port);
+
+        adapter
+            .send(
+                &twitch_user("#librefang"),
+                ChannelContent::Text("hi twitch".into()),
+            )
+            .await
+            .expect("twitch send must succeed against capturing listener");
+
+        let bytes = tokio::time::timeout(Duration::from_secs(5), captured)
+            .await
+            .expect("listener must capture frames within 5s")
+            .expect("oneshot must not be dropped");
+        let text =
+            String::from_utf8(bytes).expect("captured bytes must be valid utf-8 (IRC is ASCII)");
+
+        let pass_idx = text
+            .find("PASS oauth:abc123\r\n")
+            .expect("expected PASS frame with the configured oauth token, got: \n---\n{text}\n---");
+        let nick_idx = text
+            .find("NICK librefang_bot\r\n")
+            .expect("expected NICK frame with the configured nick");
+        let privmsg_idx = text
+            .find("PRIVMSG #librefang :hi twitch\r\n")
+            .expect("expected PRIVMSG frame to the channel with the text body");
+        let quit_idx = text
+            .find("QUIT\r\n")
+            .expect("expected QUIT frame to terminate the session");
+
+        assert!(
+            pass_idx < nick_idx,
+            "PASS must precede NICK (text was: {text})"
+        );
+        assert!(
+            nick_idx < privmsg_idx,
+            "NICK must precede PRIVMSG (text was: {text})"
+        );
+        assert!(
+            privmsg_idx < quit_idx,
+            "PRIVMSG must precede QUIT (text was: {text})"
+        );
     }
 }

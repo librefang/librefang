@@ -363,7 +363,7 @@ pub async fn update_goal_by_id(
 pub async fn delete_goal(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let shared_id = goals_shared_agent_id();
     let mut goals: Vec<serde_json::Value> = match state
         .kernel
@@ -400,7 +400,9 @@ pub async fn delete_goal(
     });
 
     if goals.len() == before {
-        return ApiErrorResponse::not_found("Goal not found").into_json_tuple();
+        return ApiErrorResponse::not_found("Goal not found")
+            .into_json_tuple()
+            .into_response();
     }
 
     if let Err(e) = state.kernel.memory_substrate().structured_set(
@@ -408,10 +410,14 @@ pub async fn delete_goal(
         GOALS_KEY,
         serde_json::Value::Array(goals),
     ) {
-        return ApiErrorResponse::internal(format!("Failed to delete goal: {e}")).into_json_tuple();
+        return ApiErrorResponse::internal(format!("Failed to delete goal: {e}"))
+            .into_json_tuple()
+            .into_response();
     }
 
-    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
+    // Issue #3832: 204 No Content per RFC 9110 §15.3.5 — no body. The previous
+    // `Json(null)` body violated the spec and tripped strict HTTP clients.
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// GET /api/goals/templates — List built-in goal templates.

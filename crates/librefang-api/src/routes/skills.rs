@@ -230,6 +230,17 @@ use std::time::Instant;
 // Skills endpoints
 // ---------------------------------------------------------------------------
 
+/// Query parameters for `GET /api/skills`. Combines the existing
+/// `?category=` filter with the canonical `?offset=&limit=` pagination
+/// from `PaginationQuery` (#3639). Server caps `limit` at
+/// `PAGINATION_MAX_LIMIT` (= 100).
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ListSkillsQuery {
+    pub category: Option<String>,
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
+}
+
 /// GET /api/skills — List installed skills.
 ///
 /// `categories` always reflects all skills regardless of the `?category=` filter.
@@ -243,7 +254,7 @@ use std::time::Instant;
 )]
 pub async fn list_skills(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    Query(params): Query<ListSkillsQuery>,
 ) -> impl IntoResponse {
     // Use the kernel's LIVE registry so `skills.disabled` and
     // `skills.extra_dirs` from config.toml take effect on this
@@ -257,7 +268,7 @@ pub async fn list_skills(
         .read()
         .unwrap_or_else(|e| e.into_inner());
 
-    let category_filter = params.get("category").map(|s| s.as_str());
+    let category_filter = params.category.as_deref();
 
     // Collect all categories first (unaffected by the filter), then apply filter.
     // Category derivation lives in `librefang_skills::registry::derive_category`
@@ -312,14 +323,23 @@ pub async fn list_skills(
         })
         .collect();
 
+    // Pagination (#3639): apply `?offset=&limit=` after the category filter
+    // and category-set computation, so `categories` always reflects the
+    // unfiltered registry while `items`/`total` reflect the filtered + paged
+    // view. Capped server-side at PAGINATION_MAX_LIMIT.
+    let pagination = crate::types::PaginationQuery {
+        offset: params.offset,
+        limit: params.limit,
+    };
+    let (items, total, offset, limit) = pagination.paginate(skills);
     let categories_vec: Vec<String> = categories.into_iter().collect();
-    let total = skills.len();
-    // Untyped JSON so `categories` can be added alongside PaginatedResponse fields without a new struct.
+    // Untyped JSON so `categories` can ride alongside the canonical
+    // PaginatedResponse fields without a new struct.
     Json(serde_json::json!({
-        "items": skills,
+        "items": items,
         "total": total,
-        "offset": 0,
-        "limit": serde_json::Value::Null,
+        "offset": offset,
+        "limit": limit,
         "categories": categories_vec,
     }))
 }
@@ -1037,13 +1057,6 @@ pub async fn clawhub_install(
             let msg = format!("{e}");
             let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
                 StatusCode::FORBIDDEN
-            } else if matches!(
-                e,
-                librefang_skills::SkillError::InvalidManifest(_)
-                    | librefang_skills::SkillError::YamlParse(_)
-                    | librefang_skills::SkillError::TomlParse(_)
-            ) {
-                StatusCode::BAD_REQUEST
             } else if is_clawhub_rate_limit(&e) {
                 StatusCode::TOO_MANY_REQUESTS
             } else if matches!(e, librefang_skills::SkillError::Network(_)) {
@@ -1411,13 +1424,6 @@ pub async fn clawhub_cn_install(
             let msg = format!("{e}");
             let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
                 StatusCode::FORBIDDEN
-            } else if matches!(
-                e,
-                librefang_skills::SkillError::InvalidManifest(_)
-                    | librefang_skills::SkillError::YamlParse(_)
-                    | librefang_skills::SkillError::TomlParse(_)
-            ) {
-                StatusCode::BAD_REQUEST
             } else if is_clawhub_rate_limit(&e) {
                 StatusCode::TOO_MANY_REQUESTS
             } else if matches!(e, librefang_skills::SkillError::Network(_)) {
@@ -1716,13 +1722,6 @@ pub async fn skillhub_install(
             let msg = format!("{e}");
             let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
                 StatusCode::FORBIDDEN
-            } else if matches!(
-                e,
-                librefang_skills::SkillError::InvalidManifest(_)
-                    | librefang_skills::SkillError::YamlParse(_)
-                    | librefang_skills::SkillError::TomlParse(_)
-            ) {
-                StatusCode::BAD_REQUEST
             } else if is_clawhub_rate_limit(&e) {
                 StatusCode::TOO_MANY_REQUESTS
             } else if matches!(e, librefang_skills::SkillError::Network(_)) {
@@ -2619,6 +2618,11 @@ fn hand_instance_to_json(instance: &librefang_hands::HandInstance) -> serde_json
 }
 
 /// POST /api/hands/{hand_id}/activate — Activate a hand (spawns agent).
+///
+/// Honours `Idempotency-Key` (#3637): when set, a duplicate request
+/// with the same key + same body replays the cached response instead
+/// of activating a second hand instance. A different body under the
+/// same key is rejected with 409 Conflict.
 #[utoipa::path(
     post,
     path = "/api/hands/{hand_id}/activate",
@@ -2628,15 +2632,45 @@ fn hand_instance_to_json(instance: &librefang_hands::HandInstance) -> serde_json
     ),
     request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Activate a hand (spawns agent)", body = crate::types::JsonObject)
+        (status = 200, description = "Activate a hand (spawns agent)", body = crate::types::JsonObject),
+        (status = 409, description = "Idempotency-Key was reused with a different request body")
     )
 )]
 pub async fn activate_hand(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
-    body: Option<Json<librefang_hands::ActivateHandRequest>>,
-) -> impl IntoResponse {
-    let config = body.map(|b| b.0.config).unwrap_or_default();
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let key = crate::idempotency::extract_key(&headers);
+    let body_bytes: Vec<u8> = body.to_vec();
+    let store = Arc::clone(&state.idempotency_store);
+    let inner_body = body_bytes.clone();
+
+    crate::idempotency::run_idempotent(
+        store.as_ref(),
+        key.as_deref(),
+        &body_bytes,
+        move || async move { activate_hand_inner(state, hand_id, &inner_body).await },
+    )
+    .await
+}
+
+/// Inner handler — produces a `(StatusCode, Vec<u8>)` snapshot suitable
+/// for caching by the Idempotency-Key middleware.
+async fn activate_hand_inner(
+    state: Arc<AppState>,
+    hand_id: String,
+    body_bytes: &[u8],
+) -> (StatusCode, Vec<u8>) {
+    let config = if body_bytes.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        match serde_json::from_slice::<librefang_hands::ActivateHandRequest>(body_bytes) {
+            Ok(req) => req.config,
+            Err(_) => std::collections::HashMap::new(),
+        }
+    };
 
     match state.kernel.activate_hand(&hand_id, config) {
         Ok(instance) => {
@@ -2662,9 +2696,17 @@ pub async fn activate_hand(
                     }
                 }
             }
-            (StatusCode::OK, Json(hand_instance_to_json(&instance)))
+            let body = serde_json::to_vec(&hand_instance_to_json(&instance))
+                .unwrap_or_else(|_| b"{}".to_vec());
+            (StatusCode::OK, body)
         }
-        Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
+        Err(e) => {
+            let payload = serde_json::json!({"error": format!("{e}"), "code": "activate_hand_failed", "type": "activate_hand_failed"});
+            (
+                StatusCode::BAD_REQUEST,
+                serde_json::to_vec(&payload).unwrap_or_default(),
+            )
+        }
     }
 }
 
@@ -3080,7 +3122,7 @@ pub async fn hand_instance_browser(
         .browser()
         .send_command(
             &agent_id_str,
-            librefang_runtime::browser::BrowserCommand::ReadPage,
+            librefang_kernel::browser::BrowserCommand::ReadPage,
         )
         .await
     {
@@ -3110,7 +3152,7 @@ pub async fn hand_instance_browser(
         .browser()
         .send_command(
             &agent_id_str,
-            librefang_runtime::browser::BrowserCommand::Screenshot,
+            librefang_kernel::browser::BrowserCommand::Screenshot,
         )
         .await
     {
@@ -3212,8 +3254,8 @@ pub async fn hand_send_message(
             .send_message_ephemeral(agent_id, &effective_message)
             .await
     } else {
-        let kernel_handle: Arc<dyn librefang_runtime::kernel_handle::KernelHandle> =
-            state.kernel.clone() as Arc<dyn librefang_runtime::kernel_handle::KernelHandle>;
+        let kernel_handle: Arc<dyn librefang_kernel::kernel_handle::KernelHandle> =
+            state.kernel.clone() as Arc<dyn librefang_kernel::kernel_handle::KernelHandle>;
         state
             .kernel
             .send_message_with_handle(agent_id, &effective_message, Some(kernel_handle))
@@ -3750,11 +3792,7 @@ pub async fn add_mcp_server(
             })
             .unwrap_or_default();
 
-        let catalog = state
-            .kernel
-            .mcp_catalog()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = state.kernel.mcp_catalog_load();
         let entry = match catalog.get(&tid) {
             Some(e) => e.clone(),
             None => {
@@ -3880,8 +3918,8 @@ pub async fn add_mcp_server(
 
     state.kernel.audit().record(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
-        &format!("mcp_server added: {name}"),
+        librefang_kernel::audit::AuditAction::ConfigChange,
+        format!("mcp_server added: {name}"),
         "completed",
     );
 
@@ -3986,8 +4024,8 @@ pub async fn update_mcp_server(
 
     state.kernel.audit().record(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
-        &format!("mcp_server updated: {name}"),
+        librefang_kernel::audit::AuditAction::ConfigChange,
+        format!("mcp_server updated: {name}"),
         "completed",
     );
 
@@ -4103,8 +4141,8 @@ pub async fn patch_mcp_server_taint(
 
     state.kernel.audit().record(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
-        &format!("mcp_server taint updated: {name}"),
+        librefang_kernel::audit::AuditAction::ConfigChange,
+        format!("mcp_server taint updated: {name}"),
         "completed",
     );
 
@@ -4232,8 +4270,8 @@ pub async fn delete_mcp_server(
 
     state.kernel.audit().record(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
-        &format!("mcp_server removed: {name}"),
+        librefang_kernel::audit::AuditAction::ConfigChange,
+        format!("mcp_server removed: {name}"),
         "completed",
     );
 
@@ -4697,10 +4735,10 @@ fn audit_evolve(state: &Arc<AppState>, action: &str, skill_name: &str, detail: &
     state.kernel.audit().record(
         // Dashboard calls don't have an agent_id — use a distinctive
         // actor so audit readers can tell user actions from agent ones.
-        "dashboard",
-        librefang_runtime::audit::AuditAction::AgentMessage,
-        &format!("skill_evolve:{action}:{skill_name}"),
-        detail,
+        "dashboard".to_string(),
+        librefang_kernel::audit::AuditAction::AgentMessage,
+        format!("skill_evolve:{action}:{skill_name}"),
+        detail.to_string(),
     );
 }
 
@@ -5306,11 +5344,7 @@ pub async fn list_mcp_catalog(
     let lang = super::resolve_lang(lang.as_ref());
     let installed_ids = collect_installed_catalog_ids(&state);
 
-    let catalog = state
-        .kernel
-        .mcp_catalog()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let catalog = state.kernel.mcp_catalog_load();
     let entries: Vec<serde_json::Value> = catalog
         .list()
         .iter()
@@ -5341,11 +5375,7 @@ pub async fn get_mcp_catalog_entry(
     let lang = super::resolve_lang(lang.as_ref());
     let installed_ids = collect_installed_catalog_ids(&state);
 
-    let catalog = state
-        .kernel
-        .mcp_catalog()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let catalog = state.kernel.mcp_catalog_load();
     match catalog.get(&id) {
         Some(entry) => (
             StatusCode::OK,
@@ -5517,11 +5547,7 @@ pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoRes
     let installed_map = installed_servers_by_template(&cfg.mcp_servers);
     let health = state.kernel.mcp_health();
 
-    let catalog = state
-        .kernel
-        .mcp_catalog()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let catalog = state.kernel.mcp_catalog_load();
 
     let mut extensions = Vec::new();
     for entry in catalog.list() {
@@ -5569,11 +5595,7 @@ pub async fn get_extension(
 ) -> impl IntoResponse {
     let cfg = state.kernel.config_snapshot();
     let installed_map = installed_servers_by_template(&cfg.mcp_servers);
-    let catalog = state
-        .kernel
-        .mcp_catalog()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let catalog = state.kernel.mcp_catalog_load();
 
     let entry = match catalog.get(&name) {
         Some(t) => t.clone(),

@@ -377,8 +377,8 @@ fn auth_denied(
     };
     state.kernel.audit().record_with_context(
         "system",
-        librefang_runtime::audit::AuditAction::PermissionDenied,
-        &detail,
+        librefang_kernel::audit::AuditAction::PermissionDenied,
+        detail,
         "denied",
         user_id,
         Some("api".to_string()),
@@ -1592,21 +1592,26 @@ pub async fn get_agent_kv(
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
-        return resp;
+        // #3511: tag the ACL-denial response with the resolved agent_id.
+        return crate::extensions::with_agent_id(agent_id, resp);
     }
-    match state.kernel.memory_substrate().list_kv(agent_id) {
+    let body = match state.kernel.memory_substrate().list_kv(agent_id) {
         Ok(pairs) => {
             let kv: Vec<serde_json::Value> = pairs
                 .into_iter()
                 .map(|(k, v)| serde_json::json!({"key": k, "value": v}))
                 .collect();
-            (StatusCode::OK, Json(serde_json::json!({"kv_pairs": kv})))
+            (StatusCode::OK, Json(serde_json::json!({"kv_pairs": kv}))).into_response()
         }
         Err(e) => {
             tracing::warn!("Memory list_kv failed: {e}");
-            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed")).into_json_tuple()
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed"))
+                .into_json_tuple()
+                .into_response()
         }
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 /// GET /api/memory/agents/:id/kv/:key — Get a specific KV value.
@@ -1616,19 +1621,20 @@ pub async fn get_agent_kv_key(
     Path((id, key)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
             return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
     if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
-        return resp;
+        return crate::extensions::with_agent_id(agent_id, resp);
     }
-    match state
+    let body = match state
         .kernel
         .memory_substrate()
         .structured_get(agent_id, &key)
@@ -1636,15 +1642,20 @@ pub async fn get_agent_kv_key(
         Ok(Some(val)) => (
             StatusCode::OK,
             Json(serde_json::json!({"key": key, "value": val})),
-        ),
-        Ok(None) => {
-            ApiErrorResponse::not_found(t.t("api-error-kv-key-not-found")).into_json_tuple()
-        }
+        )
+            .into_response(),
+        Ok(None) => ApiErrorResponse::not_found(t.t("api-error-kv-key-not-found"))
+            .into_json_tuple()
+            .into_response(),
         Err(e) => {
             tracing::warn!("Memory get failed for key '{key}': {e}");
-            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed")).into_json_tuple()
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed"))
+                .into_json_tuple()
+                .into_response()
         }
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 /// PUT /api/memory/agents/:id/kv/:key — Set a KV value.
@@ -1655,21 +1666,22 @@ pub async fn set_agent_kv_key(
     lang: Option<axum::Extension<RequestLanguage>>,
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
             return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
     if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
-        return resp;
+        return crate::extensions::with_agent_id(agent_id, resp);
     }
     let value = body.get("value").cloned().unwrap_or(body);
 
-    match state
+    let body = match state
         .kernel
         .memory_substrate()
         .structured_set(agent_id, &key, value)
@@ -1677,12 +1689,17 @@ pub async fn set_agent_kv_key(
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "stored", "key": key})),
-        ),
+        )
+            .into_response(),
         Err(e) => {
             tracing::warn!("Memory set failed for key '{key}': {e}");
-            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed")).into_json_tuple()
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed"))
+                .into_json_tuple()
+                .into_response()
         }
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 /// DELETE /api/memory/agents/:id/kv/:key — Delete a KV value.
@@ -1703,9 +1720,9 @@ pub async fn delete_agent_kv_key(
         }
     };
     if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
-        return resp.into_response();
+        return crate::extensions::with_agent_id(agent_id, resp);
     }
-    match state
+    let body = match state
         .kernel
         .memory_substrate()
         .structured_delete(agent_id, &key)
@@ -1717,7 +1734,9 @@ pub async fn delete_agent_kv_key(
                 .into_json_tuple()
                 .into_response()
         }
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 /// GET /api/agents/:id/memory/export — Export all KV memory for an agent as JSON.
@@ -1736,13 +1755,16 @@ pub async fn export_agent_memory(
     // clean 404 instead of falling through to a `list_kv` against a
     // non-existent id.
     if state.kernel.agent_registry().get(agent_id).is_none() {
-        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
+        return crate::extensions::with_agent_id(
+            agent_id,
+            ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple(),
+        );
     }
     if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
-        return resp;
+        return crate::extensions::with_agent_id(agent_id, resp);
     }
 
-    match state.kernel.memory_substrate().list_kv(agent_id) {
+    let body = match state.kernel.memory_substrate().list_kv(agent_id) {
         Ok(pairs) => {
             let kv_map: serde_json::Map<String, serde_json::Value> = pairs.into_iter().collect();
             (
@@ -1753,12 +1775,17 @@ pub async fn export_agent_memory(
                     "kv": kv_map,
                 })),
             )
+                .into_response()
         }
         Err(e) => {
             tracing::warn!("Memory export failed for agent {agent_id}: {e}");
-            ApiErrorResponse::internal(t.t("api-error-kv-export-failed")).into_json_tuple()
+            ApiErrorResponse::internal(t.t("api-error-kv-export-failed"))
+                .into_json_tuple()
+                .into_response()
         }
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 /// POST /api/agents/:id/memory/import — Import KV memory from JSON into an agent.
@@ -1802,17 +1829,23 @@ pub async fn import_agent_memory(
     // Verify agent exists (admins skip the owner check below, so we still
     // need this branch for them — see `export_agent_memory`).
     if state.kernel.agent_registry().get(agent_id).is_none() {
-        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
+        return crate::extensions::with_agent_id(
+            agent_id,
+            ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple(),
+        );
     }
     if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
-        return resp;
+        return crate::extensions::with_agent_id(agent_id, resp);
     }
 
     let kv = match body.get("kv").and_then(|v| v.as_object()) {
         Some(obj) => obj.clone(),
         None => {
-            return ApiErrorResponse::bad_request(t.t("api-error-kv-missing-kv-object"))
-                .into_json_tuple();
+            return crate::extensions::with_agent_id(
+                agent_id,
+                ApiErrorResponse::bad_request(t.t("api-error-kv-missing-kv-object"))
+                    .into_json_tuple(),
+            );
         }
     };
 
@@ -1837,8 +1870,11 @@ pub async fn import_agent_memory(
             }
             Err(e) => {
                 tracing::warn!("Failed to list existing KV during import clear: {e}");
-                return ApiErrorResponse::internal(t.t("api-error-kv-import-clear-failed"))
-                    .into_json_tuple();
+                return crate::extensions::with_agent_id(
+                    agent_id,
+                    ApiErrorResponse::internal(t.t("api-error-kv-import-clear-failed"))
+                        .into_json_tuple(),
+                );
             }
         }
     }
@@ -1860,7 +1896,7 @@ pub async fn import_agent_memory(
         }
     }
 
-    if errors.is_empty() {
+    let body = if errors.is_empty() {
         (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1877,7 +1913,9 @@ pub async fn import_agent_memory(
                 "failed_keys": errors,
             })),
         )
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 #[cfg(test)]
@@ -1899,8 +1937,8 @@ mod tests {
     //! kernel; `auth_denied_*` tests do boot a kernel because we need to
     //! observe the audit chain.
     use super::*;
+    use librefang_kernel::audit::AuditAction;
     use librefang_memory::namespace_acl::{MemoryNamespaceGuard, NamespaceGate};
-    use librefang_runtime::audit::AuditAction;
     use librefang_types::config::KernelConfig;
 
     #[test]
@@ -2034,21 +2072,26 @@ mod tests {
         };
 
         let kernel = Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).unwrap());
+        let idempotency_store: Arc<
+            dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync,
+        > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
+            kernel.memory_substrate().usage_conn(),
+        ));
         let state = Arc::new(AppState {
             kernel,
             started_at: std::time::Instant::now(),
-            bridge_manager: tokio::sync::Mutex::new(None),
+            bridge_manager: arc_swap::ArcSwap::new(std::sync::Arc::new(None)),
             channels_config: tokio::sync::RwLock::new(Default::default()),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             clawhub_cache: dashmap::DashMap::new(),
             skillhub_cache: dashmap::DashMap::new(),
-            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_probe_cache: librefang_kernel::provider_health::ProbeCache::new(),
             provider_test_cache: dashmap::DashMap::new(),
             webhook_store: crate::webhook_store::WebhookStore::load(
                 home_dir.join("data").join("webhooks.json"),
             ),
             active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            media_drivers: librefang_kernel::media::MediaDriverCache::new(),
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -2058,6 +2101,7 @@ mod tests {
             gcra_limiter: crate::rate_limiter::create_rate_limiter(0),
             trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
             trust_forwarded_for: false,
+            idempotency_store,
         });
         (state, tmp)
     }

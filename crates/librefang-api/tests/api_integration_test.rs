@@ -14,8 +14,8 @@ use librefang_api::middleware;
 use librefang_api::routes::{self, AppState};
 use librefang_api::server;
 use librefang_api::ws;
+use librefang_kernel::audit::AuditAction;
 use librefang_kernel::LibreFangKernel;
-use librefang_runtime::audit::AuditAction;
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use librefang_types::agent::WebSearchAugmentationMode;
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
@@ -175,9 +175,9 @@ async fn start_full_router(api_key: &str) -> FullRouterHarness {
 
     // Sync registry content into the temp home_dir so the kernel boots
     // with a populated model catalog.
-    librefang_runtime::registry_sync::sync_registry(
+    librefang_kernel::registry_sync::sync_registry(
         tmp.path(),
-        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
     );
 
@@ -631,8 +631,13 @@ async fn test_spawn_list_kill_agent() {
     assert_eq!(test_agent["model_provider"], "ollama");
 
     // --- Kill ---
+    // Refs #4614: DELETE requires `?confirm=true` so canonical UUID
+    // purge is gated behind explicit operator intent.
     let resp = client
-        .delete(format!("{}/api/agents/{}", server.base_url, agent_id))
+        .delete(format!(
+            "{}/api/agents/{}?confirm=true",
+            server.base_url, agent_id
+        ))
         .send()
         .await
         .unwrap();
@@ -1193,7 +1198,10 @@ async fn test_invalid_agent_id_returns_400() {
         .unwrap();
     assert_eq!(resp.status(), 400);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["error"].as_str().unwrap().contains("Invalid"));
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Invalid"));
 
     // Kill invalid ID
     let resp = client
@@ -1223,8 +1231,13 @@ async fn test_kill_nonexistent_agent_is_idempotent() {
     let client = reqwest::Client::new();
 
     let fake_id = uuid::Uuid::new_v4();
+    // Refs #4614: confirm required, but the idempotent-already-gone
+    // shortcut still applies and yields 200 OK.
     let resp = client
-        .delete(format!("{}/api/agents/{}", server.base_url, fake_id))
+        .delete(format!(
+            "{}/api/agents/{}?confirm=true",
+            server.base_url, fake_id
+        ))
         .send()
         .await
         .unwrap();
@@ -1329,9 +1342,12 @@ memory_write = ["self.*"]
     let status: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(status["agent_count"], 4);
 
-    // Kill one
+    // Kill one (refs #4614: confirm required)
     let resp = client
-        .delete(format!("{}/api/agents/{}", server.base_url, ids[1]))
+        .delete(format!(
+            "{}/api/agents/{}?confirm=true",
+            server.base_url, ids[1]
+        ))
         .send()
         .await
         .unwrap();
@@ -1347,10 +1363,13 @@ memory_write = ["self.*"]
     let agents = body["items"].as_array().unwrap();
     assert_eq!(agents.len(), 3);
 
-    // Kill the rest
+    // Kill the rest (refs #4614: confirm required)
     for id in [&ids[0], &ids[2]] {
         client
-            .delete(format!("{}/api/agents/{}", server.base_url, id))
+            .delete(format!(
+                "{}/api/agents/{}?confirm=true",
+                server.base_url, id
+            ))
             .send()
             .await
             .unwrap();
@@ -1820,7 +1839,10 @@ async fn test_get_tool_not_found() {
     assert_eq!(resp.status(), 404);
 
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["error"].as_str().unwrap().contains("not found"));
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not found"));
 }
 
 // ---------------------------------------------------------------------------
@@ -2352,7 +2374,7 @@ async fn test_attach_session_stream_404_for_unknown_agent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_attach_session_stream_fans_out_to_multiple_clients() {
     use futures::StreamExt as _;
-    use librefang_runtime::llm_driver::StreamEvent;
+    use librefang_kernel::llm_driver::StreamEvent;
     use std::time::Duration;
 
     let server = start_test_server().await;
@@ -2463,9 +2485,9 @@ async fn test_attach_session_stream_fans_out_to_multiple_clients() {
 async fn start_full_router_with_proactive(enabled: bool) -> FullRouterHarness {
     let tmp = tempfile::tempdir().expect("Failed to create temp dir");
 
-    librefang_runtime::registry_sync::sync_registry(
+    librefang_kernel::registry_sync::sync_registry(
         tmp.path(),
-        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
     );
 
@@ -3592,6 +3614,23 @@ async fn test_user_budget_put_get_delete_round_trip() {
         .await
         .unwrap();
     assert_eq!(put_resp.status(), 200, "PUT should accept the upsert");
+
+    // Issue #3832: the success body is the canonical UserBudgetConfig — no
+    // `{"status":"ok","budget":...}` ack envelope. Dashboard mutations rely on
+    // this to `setQueryData` without a follow-up GET.
+    let put_body: serde_json::Value = put_resp.json().await.unwrap();
+    assert!(
+        put_body.get("status").is_none(),
+        "PUT body must not carry the legacy ack envelope: {put_body:?}"
+    );
+    assert!(
+        put_body.get("budget").is_none(),
+        "PUT body must be the bare UserBudgetConfig, not nested under `budget`: {put_body:?}"
+    );
+    assert_eq!(put_body["max_hourly_usd"], serde_json::json!(1.5));
+    assert_eq!(put_body["max_daily_usd"], serde_json::json!(12.0));
+    assert_eq!(put_body["max_monthly_usd"], serde_json::json!(100.0));
+    assert_eq!(put_body["alert_threshold"], serde_json::json!(0.75));
 
     // GET should reflect the new caps.
     let after_put: serde_json::Value = client

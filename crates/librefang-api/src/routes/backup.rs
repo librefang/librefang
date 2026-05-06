@@ -243,8 +243,8 @@ pub async fn create_backup(
     );
     state.kernel.audit().record(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
-        &format!("Backup created: {filename}"),
+        librefang_kernel::audit::AuditAction::ConfigChange,
+        format!("Backup created: {filename}"),
         "completed",
     );
 
@@ -550,8 +550,8 @@ pub async fn restore_backup(
     );
     state.kernel.audit().record(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
-        &format!("Backup restored: {filename} ({total_restored} files)"),
+        librefang_kernel::audit::AuditAction::ConfigChange,
+        format!("Backup restored: {filename} ({total_restored} files)"),
         "completed",
     );
 

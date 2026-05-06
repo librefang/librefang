@@ -467,4 +467,84 @@ mod tests {
         assert_eq!(request.headers().get("X-Auth-Token").unwrap(), "my-token");
         assert_eq!(request.headers().get("X-User-Id").unwrap(), "user-42");
     }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Stand up a `wiremock::MockServer` as the Rocket.Chat server. The
+    // existing public `new()` constructor already accepts a custom
+    // `server_url`, so no test-only hook is required. Asserts the
+    // `POST {server_url}/api/v1/chat.sendMessage` call, both auth headers
+    // (`X-Auth-Token`, `X-User-Id`), and the JSON body schema.
+
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn rc_user(room_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: room_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn rocketchat_send_posts_chat_send_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/chat.sendMessage"))
+            .and(header("X-Auth-Token", "rc-tok"))
+            .and(header("X-User-Id", "U42"))
+            .and(body_json(serde_json::json!({
+                "message": {
+                    "rid": "ROOM1",
+                    "msg": "hi from librefang",
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = RocketChatAdapter::new(
+            server.uri(),
+            "rc-tok".to_string(),
+            "U42".to_string(),
+            vec![],
+        );
+        adapter
+            .send(
+                &rc_user("ROOM1"),
+                ChannelContent::Text("hi from librefang".into()),
+            )
+            .await
+            .expect("rocketchat send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn rocketchat_send_returns_err_on_non_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/chat.sendMessage"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = RocketChatAdapter::new(
+            server.uri(),
+            "bad-tok".to_string(),
+            "U42".to_string(),
+            vec![],
+        );
+        let err = adapter
+            .send(&rc_user("ROOM_X"), ChannelContent::Text("hi".into()))
+            .await
+            .expect_err("rocketchat send must propagate non-2xx as Err");
+        assert!(
+            err.to_string().contains("401"),
+            "error should mention status code, got: {err}"
+        );
+    }
 }

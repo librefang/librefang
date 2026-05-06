@@ -75,6 +75,8 @@ pub fn simple_request(model: &str) -> CompletionRequest {
         timeout_secs: None,
         extra_body: None,
         agent_id: None,
+        session_id: None,
+        step_id: None,
     }
 }
 
@@ -103,6 +105,8 @@ pub fn request_with_tools(model: &str) -> CompletionRequest {
         timeout_secs: None,
         extra_body: None,
         agent_id: None,
+        session_id: None,
+        step_id: None,
     }
 }
 
@@ -121,6 +125,8 @@ pub fn request_with_temperature(model: &str, temp: f32) -> CompletionRequest {
         timeout_secs: None,
         extra_body: None,
         agent_id: None,
+        session_id: None,
+        step_id: None,
     }
 }
 
@@ -139,6 +145,8 @@ pub fn o_series_request() -> CompletionRequest {
         timeout_secs: None,
         extra_body: None,
         agent_id: None,
+        session_id: None,
+        step_id: None,
     }
 }
 

@@ -73,6 +73,10 @@ REPLACEMENTS: list[tuple[str, str]] = [
     ("#0ea5e9",  "#FF6A3D"),   # Sky 500 → Bright Ember
     # Upstream dark background
     ("#020617",  "#0B0F14"),   # Slate 950 → Deep Charcoal
+    # Upstream purple avatar gradient → BossFang ember avatar gradient
+    # linear-gradient(135deg,#a78bfa,#7c3aed) is used for user avatar circles
+    # in App.tsx and must be replaced with the ember equivalent.
+    ("linear-gradient(135deg,#a78bfa,#7c3aed)",  "linear-gradient(135deg,#FF6A3D,#E04E28)"),
 ]
 
 # ── Fix rgba(2, 132, 199) closing paren issue ─────────────────────────────────

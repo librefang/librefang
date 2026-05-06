@@ -135,14 +135,12 @@ impl SemanticStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let id = MemoryId::new();
         let now = Utc::now().to_rfc3339();
-        let source_str = serde_json::to_string(&source)
-            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
-        let meta_str = serde_json::to_string(&metadata)
-            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        let source_str = serde_json::to_string(&source).map_err(LibreFangError::serialization)?;
+        let meta_str = serde_json::to_string(&metadata).map_err(LibreFangError::serialization)?;
         let embedding_bytes: Option<Vec<u8>> = embedding.map(embedding_to_bytes);
         let image_embedding_bytes: Option<Vec<u8>> = image_embedding.map(embedding_to_bytes);
-        let modality_str = serde_json::to_string(&modality)
-            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        let modality_str =
+            serde_json::to_string(&modality).map_err(LibreFangError::serialization)?;
         // Strip the surrounding quotes from the JSON string (e.g. "\"text\"" -> "text")
         let modality_str = modality_str.trim_matches('"');
 
@@ -164,7 +162,7 @@ impl SemanticStore {
                 peer_id,
             ],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
         Ok(id)
     }
 
@@ -242,8 +240,8 @@ impl SemanticStore {
                 param_idx += 1;
             }
             if let Some(ref source) = f.source {
-                let source_str = serde_json::to_string(source)
-                    .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+                let source_str =
+                    serde_json::to_string(source).map_err(LibreFangError::serialization)?;
                 sql.push_str(&format!(" AND source = ?{param_idx}"));
                 params.push(Box::new(source_str));
                 param_idx += 1;
@@ -283,9 +281,7 @@ impl SemanticStore {
         sql.push_str(" ORDER BY confidence DESC, accessed_at DESC, access_count DESC");
         sql.push_str(&format!(" LIMIT {fetch_limit}"));
 
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
 
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
@@ -322,7 +318,7 @@ impl SemanticStore {
                     modality_str,
                 ))
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let mut fragments = Vec::new();
         for row_result in rows {
@@ -341,14 +337,14 @@ impl SemanticStore {
                 image_url,
                 image_embedding_bytes,
                 modality_str,
-            ) = row_result.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            ) = row_result.map_err(LibreFangError::memory)?;
 
             let id = uuid::Uuid::parse_str(&id_str)
                 .map(MemoryId)
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             let agent_id = uuid::Uuid::parse_str(&agent_str)
                 .map(librefang_types::agent::AgentId)
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             let source: MemorySource =
                 serde_json::from_str(&source_str).unwrap_or(MemorySource::System);
             let metadata: HashMap<String, serde_json::Value> =
@@ -461,7 +457,7 @@ impl SemanticStore {
         for r in &results {
             let mem_id = uuid::Uuid::parse_str(&r.id)
                 .map(MemoryId)
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             if let Some(frag) = self.get_by_id(mem_id, false)? {
                 fragments.push(frag);
             }
@@ -506,9 +502,7 @@ impl SemanticStore {
              FROM memories WHERE id = ?1{deleted_clause}",
         );
 
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
 
         let result = stmt.query_row(rusqlite::params![id.0.to_string()], |row| {
             let id_str: String = row.get(0)?;
@@ -562,10 +556,10 @@ impl SemanticStore {
             )) => {
                 let id = uuid::Uuid::parse_str(&id_str)
                     .map(MemoryId)
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                    .map_err(LibreFangError::memory)?;
                 let agent_id = uuid::Uuid::parse_str(&agent_str)
                     .map(librefang_types::agent::AgentId)
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                    .map_err(LibreFangError::memory)?;
                 let source: MemorySource =
                     serde_json::from_str(&source_str).unwrap_or(MemorySource::System);
                 let metadata: HashMap<String, serde_json::Value> =
@@ -601,7 +595,7 @@ impl SemanticStore {
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(LibreFangError::Memory(e.to_string())),
+            Err(e) => Err(LibreFangError::memory(e)),
         }
     }
 
@@ -615,7 +609,7 @@ impl SemanticStore {
             "UPDATE memories SET deleted = 1 WHERE id = ?1",
             rusqlite::params![id.0.to_string()],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -662,7 +656,7 @@ impl SemanticStore {
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
         let count: i64 = conn
             .query_row(&sql, param_refs.as_slice(), |row| row.get(0))
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
         Ok(count as u64)
     }
 
@@ -677,7 +671,7 @@ impl SemanticStore {
             "UPDATE memories SET accessed_at = ?1, access_count = access_count + 1 WHERE id = ?2 AND deleted = 0",
             rusqlite::params![now, id.0.to_string()],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
         Ok(())
     }
 
@@ -697,19 +691,18 @@ impl SemanticStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let now = Utc::now().to_rfc3339();
         if let Some(meta) = new_metadata {
-            let meta_str = serde_json::to_string(&meta)
-                .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+            let meta_str = serde_json::to_string(&meta).map_err(LibreFangError::serialization)?;
             conn.execute(
                 "UPDATE memories SET content = ?1, metadata = ?2, accessed_at = ?3 WHERE id = ?4 AND deleted = 0",
                 rusqlite::params![new_content, meta_str, now, id.0.to_string()],
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         } else {
             conn.execute(
                 "UPDATE memories SET content = ?1, accessed_at = ?2 WHERE id = ?3 AND deleted = 0",
                 rusqlite::params![new_content, now, id.0.to_string()],
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         }
         Ok(())
     }
@@ -725,7 +718,7 @@ impl SemanticStore {
             "UPDATE memories SET embedding = ?1 WHERE id = ?2",
             rusqlite::params![bytes, id.0.to_string()],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -747,7 +740,7 @@ impl SemanticStore {
         let mut map = HashMap::new();
         let mut stmt = conn
             .prepare("SELECT embedding FROM memories WHERE id = ?1 AND deleted = 0")
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         for id in ids {
             if let Ok(Some(b)) = stmt.query_row(rusqlite::params![*id], |row| {
                 let b: Option<Vec<u8>> = row.get(0)?;
@@ -772,7 +765,7 @@ impl SemanticStore {
                 "UPDATE memories SET deleted = 1 WHERE agent_id = ?1 AND deleted = 0",
                 rusqlite::params![agent_id.0.to_string()],
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(count as u64)
     }
 
@@ -787,7 +780,7 @@ impl SemanticStore {
                 "UPDATE memories SET deleted = 1 WHERE agent_id = ?1 AND scope = ?2 AND deleted = 0",
                 rusqlite::params![agent_id.0.to_string(), scope],
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(count as u64)
     }
 
@@ -807,7 +800,7 @@ impl SemanticStore {
                 "UPDATE memories SET deleted = 1 WHERE agent_id = ?1 AND scope = ?2 AND created_at < ?3 AND deleted = 0",
                 rusqlite::params![agent_id.0.to_string(), scope, before.to_rfc3339()],
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(count as u64)
     }
 
@@ -829,7 +822,7 @@ impl SemanticStore {
                 "UPDATE memories SET deleted = 1 WHERE scope = ?1 AND created_at < ?2 AND deleted = 0",
                 rusqlite::params![scope, before.to_rfc3339()],
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(count as u64)
     }
 
@@ -852,7 +845,7 @@ impl SemanticStore {
                 |row| row.get(0),
             )
         }
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
         Ok(count as u64)
     }
 
@@ -873,7 +866,7 @@ impl SemanticStore {
                 "SELECT id FROM memories WHERE agent_id = ?1 AND deleted = 0 \
                  ORDER BY confidence ASC, created_at ASC LIMIT ?2",
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let rows = stmt
             .query_map(
                 rusqlite::params![agent_id.0.to_string(), limit as i64],
@@ -882,12 +875,11 @@ impl SemanticStore {
                     Ok(id_str)
                 },
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let mut ids = Vec::new();
         for row in rows {
-            let id_str = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
-            let uuid = uuid::Uuid::parse_str(&id_str)
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let id_str = row.map_err(LibreFangError::memory)?;
+            let uuid = uuid::Uuid::parse_str(&id_str).map_err(LibreFangError::memory)?;
             ids.push(MemoryId(uuid));
         }
         Ok(ids)
@@ -912,7 +904,7 @@ impl SemanticStore {
                 |row| row.get(0),
             )
         }
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
         Ok(count as u64)
     }
 
@@ -952,20 +944,18 @@ impl SemanticStore {
 
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
         let rows = stmt
             .query_map(param_refs.as_slice(), |row| {
                 let cat: String = row.get(0)?;
                 let count: i64 = row.get(1)?;
                 Ok((cat, count as usize))
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let mut map = HashMap::new();
         for row in rows {
-            let (cat, count) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let (cat, count) = row.map_err(LibreFangError::memory)?;
             map.insert(cat, count);
         }
         Ok(map)
@@ -1041,7 +1031,7 @@ impl VectorStore for SqliteVectorStore {
             "UPDATE memories SET embedding = ?1 WHERE id = ?2",
             rusqlite::params![bytes, id],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -1079,9 +1069,7 @@ impl VectorStore for SqliteVectorStore {
 
         sql.push_str(&format!(" LIMIT {fetch_limit}"));
 
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
 
@@ -1093,13 +1081,12 @@ impl VectorStore for SqliteVectorStore {
                 let emb_bytes: Vec<u8> = row.get(3)?;
                 Ok((id, content, meta_str, emb_bytes))
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let mut results = Vec::new();
         let mut skipped_non_comparable: u64 = 0;
         for row_result in rows {
-            let (id, content, meta_str, emb_bytes) =
-                row_result.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let (id, content, meta_str, emb_bytes) = row_result.map_err(LibreFangError::memory)?;
             let emb = embedding_from_bytes(&emb_bytes);
             // Skip non-comparable rows (dim mismatch from re-embedding,
             // zero vector). Including them with score=0.0 would let them
@@ -1151,7 +1138,7 @@ impl VectorStore for SqliteVectorStore {
             "UPDATE memories SET embedding = NULL WHERE id = ?1",
             rusqlite::params![id],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -1166,7 +1153,7 @@ impl VectorStore for SqliteVectorStore {
         let mut map = HashMap::new();
         let mut stmt = conn
             .prepare("SELECT embedding FROM memories WHERE id = ?1 AND deleted = 0")
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         for id in ids {
             if let Ok(Some(b)) = stmt.query_row(rusqlite::params![*id], |row| {
                 let b: Option<Vec<u8>> = row.get(0)?;

@@ -128,6 +128,28 @@ export default defineConfig({
           if (id.includes("@tanstack/react-router") || id.includes("@tanstack/react-query")) return "router";
           if (id.includes("recharts")) return "charts";
           if (id.includes("@xyflow/react")) return "flow";
+          // Order matters: more specific rules must come before broader ones
+          // (katex/remark-math/rehype-katex must match before the generic
+          // remark-/rehype- catch-all in the markdown chunk). See issue #3381.
+          if (
+            id.includes("node_modules/katex") ||
+            id.includes("node_modules/remark-math") ||
+            id.includes("node_modules/rehype-katex")
+          ) return "katex";
+          if (
+            id.includes("node_modules/react-markdown") ||
+            /[\\/]node_modules[\\/]remark-/.test(id) ||
+            /[\\/]node_modules[\\/]rehype-/.test(id)
+          ) return "markdown";
+          if (id.includes("node_modules/@xterm")) return "xterm";
+          if (
+            id.includes("node_modules/motion") ||
+            id.includes("node_modules/framer-motion")
+          ) return "motion";
+          if (
+            id.includes("node_modules/i18next") ||
+            id.includes("node_modules/react-i18next")
+          ) return "i18n";
           // Isolate lucide-react named imports into their own chunk so adding
           // a single icon to a route doesn't bloat its first-load bundle.
           // See issue #3768.

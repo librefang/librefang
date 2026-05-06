@@ -221,7 +221,7 @@ async fn test_invoke_writes_audit_entry() {
     assert!(
         matches!(
             entry.action,
-            librefang_runtime::audit::AuditAction::ToolInvoke
+            librefang_kernel::audit::AuditAction::ToolInvoke
         ),
         "expected ToolInvoke action, got {:?}",
         entry.action

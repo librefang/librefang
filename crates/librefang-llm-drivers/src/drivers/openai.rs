@@ -34,6 +34,12 @@ pub struct OpenAIDriver {
     /// Per-provider HTTP request timeout in seconds.
     /// Overrides the HTTP client's default read timeout when set.
     request_timeout_secs: Option<u64>,
+    /// Whether to emit the three `x-librefang-{agent,session,step}-id` trace
+    /// headers on outbound requests. Mirrors
+    /// `KernelConfig.telemetry.emit_caller_trace_headers`; when `false`, no
+    /// trace headers are emitted regardless of whether `CompletionRequest`'s
+    /// caller-id fields are populated.
+    emit_caller_trace_headers: bool,
 }
 
 impl OpenAIDriver {
@@ -74,6 +80,7 @@ impl OpenAIDriver {
             url_query: None,
             moonshot_file_cache: Default::default(),
             request_timeout_secs,
+            emit_caller_trace_headers: true,
         }
     }
 
@@ -118,6 +125,7 @@ impl OpenAIDriver {
             url_query: Some(format!("api-version={}", api_version)),
             moonshot_file_cache: Default::default(),
             request_timeout_secs: None,
+            emit_caller_trace_headers: true,
         }
     }
 
@@ -332,6 +340,34 @@ impl OpenAIDriver {
         self.extra_headers = headers;
         self
     }
+
+    /// Override the trace-header emission flag (mirrors
+    /// `KernelConfig.telemetry.emit_caller_trace_headers`). Default is `true`,
+    /// which preserves the OpenAI driver's behaviour from PR #4548 onward;
+    /// operators with strict zero-egress policies can flip the toml-side flag
+    /// to `false` and the kernel passes that through here at driver-creation
+    /// time. When `false`, the three `x-librefang-{agent,session,step}-id`
+    /// headers are skipped wire-side regardless of whether the per-request
+    /// caller-id fields on `CompletionRequest` are populated. Other
+    /// (non-trace) `extra_headers` are unaffected by this flag.
+    pub fn with_emit_caller_trace_headers(mut self, emit: bool) -> Self {
+        self.emit_caller_trace_headers = emit;
+        self
+    }
+}
+
+/// Build the merged custom-header map for an outbound OpenAI-driver request.
+///
+/// Thin wrapper around [`super::trace_headers::build_trace_header_map`] kept
+/// here so the call sites below read naturally in context. See the shared
+/// module for the full doc-comment covering naming conventions, proxy
+/// behaviour notes, precedence rules, and validation rationale.
+fn build_custom_header_map(
+    extra_headers: &[(String, String)],
+    request: &CompletionRequest,
+    emit_caller_trace_headers: bool,
+) -> reqwest::header::HeaderMap {
+    super::trace_headers::build_trace_header_map(extra_headers, request, emit_caller_trace_headers)
 }
 
 /// Map a MIME type to a file extension for Moonshot file uploads.
@@ -1007,9 +1043,17 @@ impl LlmDriver for OpenAIDriver {
                         .header("authorization", format!("Bearer {}", self.api_key.as_str()));
                 }
             }
-            for (k, v) in &self.extra_headers {
-                req_builder = req_builder.header(k, v);
-            }
+            // Merge driver-level extra_headers with per-request caller-identity
+            // (`x-librefang-*`) trace headers into a single HeaderMap. The
+            // helper enforces validation (\r/\n/NUL → warn+skip) and gives
+            // trace headers `insert` precedence so they replace any
+            // same-named entries from `extra_headers` instead of duplicating
+            // on the wire. See `build_custom_header_map` doc-comment.
+            req_builder = req_builder.headers(build_custom_header_map(
+                &self.extra_headers,
+                &request,
+                self.emit_caller_trace_headers,
+            ));
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.
             let timeout_secs = request
@@ -1422,9 +1466,15 @@ impl LlmDriver for OpenAIDriver {
                         .header("authorization", format!("Bearer {}", self.api_key.as_str()));
                 }
             }
-            for (k, v) in &self.extra_headers {
-                req_builder = req_builder.header(k, v);
-            }
+            // Merge driver-level extra_headers with per-request caller-identity
+            // (`x-librefang-*`) trace headers into a single HeaderMap. Mirror
+            // of the non-streaming path; see `build_custom_header_map` for
+            // validation and precedence semantics.
+            req_builder = req_builder.headers(build_custom_header_map(
+                &self.extra_headers,
+                &request,
+                self.emit_caller_trace_headers,
+            ));
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.
             let timeout_secs = request
@@ -2420,6 +2470,8 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
         let oai = driver.build_request(&request).expect("build request");
         let extra = oai.extra_body.as_ref().expect("extra_body present");
@@ -2448,6 +2500,8 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
         let oai = driver.build_request(&request).expect("build request");
         let extra = oai.extra_body.as_ref().expect("extra_body present");
@@ -2476,6 +2530,8 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
         let oai = driver.build_request(&request).expect("build request");
         // Non-ollama: extra_body should mirror the (None) request.extra_body.

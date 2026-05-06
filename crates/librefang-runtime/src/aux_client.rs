@@ -224,6 +224,7 @@ impl AuxClient {
                 .provider_request_timeout_secs
                 .get(provider)
                 .copied(),
+            emit_caller_trace_headers: self.kernel_config.telemetry.emit_caller_trace_headers,
         };
 
         create_driver(&driver_cfg).map_err(|e| e.to_string())
@@ -379,6 +380,8 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
         resolution.driver.complete(req).await.unwrap();
         assert_eq!(primary_calls.1.load(Ordering::SeqCst), 1);

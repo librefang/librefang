@@ -40,27 +40,127 @@ pub struct JsonArray(pub Vec<serde_json::Value>);
 // Unified API error response
 // ---------------------------------------------------------------------------
 
+/// Nested error body used by the #3639 envelope migration.
+///
+/// Serializes as `{"code": "...", "message": "...", "request_id": "..."}`.
+/// Lives at the top-level `error` key alongside the flat compatibility
+/// fields (`code`, `type`, `request_id`) so old and new clients can both
+/// parse a single response.
+#[derive(Debug, Serialize)]
+pub struct ApiErrorBody {
+    /// Stable machine-readable code (mirrors the flat top-level `code`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// Human-readable error message (mirrors the legacy flat `error` string).
+    pub message: String,
+    /// Per-request correlation id (mirrors the flat top-level `request_id`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+}
+
 /// A unified error response type for all API endpoints.
 ///
 /// Every error returned by the API uses this shape, ensuring clients can rely
 /// on a single parsing strategy.  The `code` and `details` fields are optional
 /// and only serialized when present.
-#[derive(Debug, Serialize)]
+///
+/// `request_id` (#3639) is populated automatically by the
+/// [`crate::middleware::request_logging`] post-response hook on every JSON
+/// 4xx/5xx response, so handlers do not need to set it manually.
+///
+/// Wire shape (#3639 deferred — coexists for one minor):
+///
+/// ```json
+/// {
+///   "error": { "code": "not_found", "message": "...", "request_id": "..." },
+///   "message": "...",
+///   "code": "not_found",
+///   "type": "not_found",
+///   "request_id": "..."
+/// }
+/// ```
+///
+/// The nested `error` object is the long-term shape; the flat `code` /
+/// `type` / `request_id` fields are kept for one minor for backward
+/// compatibility with the dashboard and external callers that still
+/// parse the flat form. New consumers should prefer
+/// `response.error.code` over `response.code`.
+#[derive(Debug)]
 pub struct ApiErrorResponse {
-    pub error: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub code: Option<String>,
-    /// Backward-compatible alias for `code`.
+    /// Human-readable error message.
     ///
-    /// Old clients may parse `"type"` instead of `"code"`.  When both are
-    /// set they carry the same value.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Serialized as a top-level `message` field and mirrored inside the
+    /// nested `error.message`.
+    pub error: String,
+    /// Stable machine-readable error code (e.g. `"not_found"`).
+    ///
+    /// **Deprecated**: Removed in next minor; use nested `error.code` instead.
+    pub code: Option<String>,
+    /// Backward-compatible alias for `code` (legacy clients).
+    ///
+    /// **Deprecated**: Removed in next minor; use nested `error.code` instead.
     pub r#type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Optional structured details payload.
     pub details: Option<serde_json::Value>,
+    /// Per-request correlation id (matches the `x-request-id` header).
+    ///
+    /// **Deprecated**: Removed in next minor; use nested `error.request_id`
+    /// instead.
+    pub request_id: Option<String>,
     /// HTTP status code — not serialized into the JSON body.
-    #[serde(skip)]
     pub status: StatusCode,
+}
+
+/// Custom serializer emits BOTH the legacy flat fields AND the new nested
+/// `error: ApiErrorBody` envelope (#3639 deferred). The flat fields are
+/// kept for one minor so the dashboard and external callers that still
+/// parse `response.code` / `response.request_id` keep working while new
+/// code migrates to `response.error.code` / `response.error.request_id`.
+impl Serialize for ApiErrorResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        // Field count: nested `error` + `message` always present; the rest
+        // are serialized only when populated.
+        let mut field_count = 2;
+        if self.code.is_some() {
+            field_count += 1;
+        }
+        if self.r#type.is_some() {
+            field_count += 1;
+        }
+        if self.details.is_some() {
+            field_count += 1;
+        }
+        if self.request_id.is_some() {
+            field_count += 1;
+        }
+
+        let mut map = serializer.serialize_map(Some(field_count))?;
+
+        // New nested envelope (#3639 — preferred shape).
+        let nested = ApiErrorBody {
+            code: self.code.clone(),
+            message: self.error.clone(),
+            request_id: self.request_id.clone(),
+        };
+        map.serialize_entry("error", &nested)?;
+
+        // Flat compatibility fields (deprecated, removed next minor).
+        map.serialize_entry("message", &self.error)?;
+        if let Some(code) = &self.code {
+            map.serialize_entry("code", code)?;
+        }
+        if let Some(t) = &self.r#type {
+            map.serialize_entry("type", t)?;
+        }
+        if let Some(details) = &self.details {
+            map.serialize_entry("details", details)?;
+        }
+        if let Some(request_id) = &self.request_id {
+            map.serialize_entry("request_id", request_id)?;
+        }
+        map.end()
+    }
 }
 
 impl IntoResponse for ApiErrorResponse {
@@ -92,6 +192,7 @@ pub fn api_error(
         code: Some(code.to_string()),
         r#type: Some(code.to_string()),
         details: None,
+        request_id: None,
         status,
     }
     .into_response()
@@ -105,6 +206,7 @@ impl ApiErrorResponse {
             code: None,
             r#type: None,
             details: None,
+            request_id: None,
             status: StatusCode::BAD_REQUEST,
         }
     }
@@ -116,6 +218,7 @@ impl ApiErrorResponse {
             code: None,
             r#type: None,
             details: None,
+            request_id: None,
             status: StatusCode::NOT_FOUND,
         }
     }
@@ -127,6 +230,7 @@ impl ApiErrorResponse {
             code: None,
             r#type: None,
             details: None,
+            request_id: None,
             status: StatusCode::FORBIDDEN,
         }
     }
@@ -138,6 +242,7 @@ impl ApiErrorResponse {
             code: None,
             r#type: None,
             details: None,
+            request_id: None,
             status: StatusCode::CONFLICT,
         }
     }
@@ -149,14 +254,26 @@ impl ApiErrorResponse {
             code: None,
             r#type: None,
             details: None,
+            request_id: None,
             status: StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
     /// Attach an error code (e.g. `"not_supported"`, `"rate_limited"`).
     pub fn with_code(mut self, code: impl Into<String>) -> Self {
-        self.code = Some(code.into());
+        let code = code.into();
+        self.r#type = Some(code.clone());
+        self.code = Some(code);
         self
+    }
+
+    /// Attach a typed [`librefang_types::error_code::ErrorCode`] (#3639).
+    ///
+    /// Preferred over [`Self::with_code`] for new code paths because the
+    /// stable wire token is enforced by the type system. Sets both `code`
+    /// and the legacy `type` alias.
+    pub fn with_error_code(self, code: librefang_types::error_code::ErrorCode) -> Self {
+        self.with_code(code.as_str())
     }
 
     /// Attach arbitrary detail payload.
@@ -168,6 +285,16 @@ impl ApiErrorResponse {
     /// Build with a custom status code.
     pub fn with_status(mut self, status: StatusCode) -> Self {
         self.status = status;
+        self
+    }
+
+    /// Stamp a `request_id` correlation token onto the body (#3639).
+    ///
+    /// Consumed by the request-logging middleware after `next.run()` so
+    /// every JSON error response carries the same id that appears in the
+    /// `x-request-id` response header and the structured access-log line.
+    pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
+        self.request_id = Some(request_id.into());
         self
     }
 
@@ -505,6 +632,52 @@ pub struct PaginatedResponse<T: Serialize> {
     pub limit: Option<usize>,
 }
 
+/// Hard server-side cap on page size (#3639). A client requesting `?limit=N`
+/// with N greater than this is silently clamped — protects the wire from
+/// pathological "fetch everything" calls on growing catalogs.
+pub const PAGINATION_MAX_LIMIT: usize = 100;
+
+/// Generic pagination query parameters: `?offset=&limit=`.
+///
+/// Used by list endpoints that previously returned the full collection
+/// regardless of query params (#3639). When neither `offset` nor `limit`
+/// is supplied, the handler returns the full collection — preserves
+/// backward compatibility for callers that depended on the unbounded
+/// shape. When *either* is supplied, both default to sane values
+/// (`offset=0`, `limit=PAGINATION_MAX_LIMIT`) and `limit` is server-capped.
+#[derive(Debug, Default, Deserialize)]
+pub struct PaginationQuery {
+    /// Number of items to skip from the start of the result set.
+    pub offset: Option<usize>,
+    /// Maximum number of items to return; server-capped at `PAGINATION_MAX_LIMIT`.
+    pub limit: Option<usize>,
+}
+
+impl PaginationQuery {
+    /// Slice a collection according to the query, returning
+    /// `(items, total, effective_offset, effective_limit)`.
+    ///
+    /// `effective_limit` is `None` when the query left both fields blank
+    /// (full collection returned); otherwise it's the clamped value the
+    /// server actually applied, so clients can tell from the response
+    /// envelope whether the cap kicked in.
+    pub fn paginate<T>(&self, items: Vec<T>) -> (Vec<T>, usize, usize, Option<usize>) {
+        let total = items.len();
+        // Both unset → full collection, preserve old behaviour.
+        if self.offset.is_none() && self.limit.is_none() {
+            return (items, total, 0, None);
+        }
+        let offset = self.offset.unwrap_or(0).min(total);
+        let limit = self
+            .limit
+            .unwrap_or(PAGINATION_MAX_LIMIT)
+            .min(PAGINATION_MAX_LIMIT);
+        let end = (offset + limit).min(total);
+        let page: Vec<T> = items.into_iter().skip(offset).take(end - offset).collect();
+        (page, total, offset, Some(limit))
+    }
+}
+
 /// Request to push a proactive outbound message from an agent to a channel.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct PushMessageRequest {
@@ -711,6 +884,67 @@ mod tests {
         assert_eq!(q.offset, Some(5));
         assert_eq!(q.sort.as_deref(), Some("name"));
         assert_eq!(q.order.as_deref(), Some("desc"));
+    }
+
+    #[test]
+    fn pagination_unspecified_returns_full_collection() {
+        let q = PaginationQuery::default();
+        let (items, total, offset, limit) = q.paginate((0..10).collect::<Vec<_>>());
+        assert_eq!(items.len(), 10);
+        assert_eq!(total, 10);
+        assert_eq!(offset, 0);
+        assert_eq!(limit, None, "no params → no server cap reported");
+    }
+
+    #[test]
+    fn pagination_explicit_offset_only_uses_default_limit() {
+        let q = PaginationQuery {
+            offset: Some(5),
+            limit: None,
+        };
+        let (items, total, offset, limit) = q.paginate((0..1000).collect::<Vec<_>>());
+        assert_eq!(total, 1000);
+        assert_eq!(offset, 5);
+        assert_eq!(limit, Some(PAGINATION_MAX_LIMIT));
+        assert_eq!(items.len(), PAGINATION_MAX_LIMIT);
+        assert_eq!(items.first(), Some(&5));
+    }
+
+    #[test]
+    fn pagination_clamps_oversized_limit_to_max() {
+        let q = PaginationQuery {
+            offset: Some(0),
+            limit: Some(9999),
+        };
+        let (items, _, _, limit) = q.paginate((0..200).collect::<Vec<_>>());
+        assert_eq!(items.len(), PAGINATION_MAX_LIMIT);
+        assert_eq!(limit, Some(PAGINATION_MAX_LIMIT));
+    }
+
+    #[test]
+    fn pagination_offset_past_total_yields_empty_page() {
+        let q = PaginationQuery {
+            offset: Some(50),
+            limit: Some(10),
+        };
+        let (items, total, offset, limit) = q.paginate((0..30).collect::<Vec<_>>());
+        assert_eq!(items.len(), 0);
+        assert_eq!(total, 30);
+        assert_eq!(offset, 30, "clamped to total");
+        assert_eq!(limit, Some(10));
+    }
+
+    #[test]
+    fn pagination_returns_partial_last_page() {
+        let q = PaginationQuery {
+            offset: Some(95),
+            limit: Some(10),
+        };
+        let (items, total, offset, limit) = q.paginate((0..100).collect::<Vec<_>>());
+        assert_eq!(items.len(), 5);
+        assert_eq!(total, 100);
+        assert_eq!(offset, 95);
+        assert_eq!(limit, Some(10));
     }
 
     #[test]

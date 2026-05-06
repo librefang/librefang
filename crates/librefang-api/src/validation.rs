@@ -46,6 +46,7 @@ impl axum::response::IntoResponse for ValidationError {
             code: Some("validation_error".to_string()),
             r#type: Some("validation_error".to_string()),
             details: None,
+            request_id: None,
             status: self.status,
         }
         .into_response()

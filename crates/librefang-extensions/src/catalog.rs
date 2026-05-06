@@ -14,6 +14,7 @@ use tracing::{debug, warn};
 
 /// The MCP catalog — in-memory view of all template files under
 /// `~/.librefang/mcp/catalog/`.
+#[derive(Clone)]
 pub struct McpCatalog {
     /// All known templates, keyed by id.
     entries: HashMap<String, McpCatalogEntry>,

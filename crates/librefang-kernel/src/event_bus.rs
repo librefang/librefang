@@ -3,10 +3,11 @@
 use dashmap::DashMap;
 use librefang_types::agent::AgentId;
 use librefang_types::event::{Event, EventPayload, EventTarget};
+use parking_lot::Mutex as PlMutex;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 use tracing::{debug, error, warn};
 
 /// Maximum events retained in the history ring buffer.
@@ -23,7 +24,19 @@ pub struct EventBus {
     /// Per-agent event channels.
     agent_channels: DashMap<AgentId, broadcast::Sender<Arc<Event>>>,
     /// Event history ring buffer.
-    history: Arc<RwLock<VecDeque<Event>>>,
+    ///
+    /// Uses `parking_lot::Mutex` (sync, ~ns acquisition) instead of
+    /// `tokio::sync::RwLock` so that `publish` does not yield on the hot
+    /// path. The previous `RwLock<VecDeque<Event>>` serialised every
+    /// publisher behind a single async writer even though readers
+    /// (dashboard / network graph) hit this map at most a few times per
+    /// second; busy agents firing 50+ events/sec saturated that lock.
+    /// See issue #3385.
+    ///
+    /// Storing `Arc<Event>` lets the bounded history and broadcast
+    /// subscribers share the same heap allocation — the broadcast clone
+    /// becomes a refcount bump rather than a deep payload copy.
+    history: PlMutex<VecDeque<Arc<Event>>>,
     /// Count of events dropped because the per-agent channel had no active receiver.
     dropped_count: AtomicU64,
     /// Timestamp of the last drop warning log (for rate-limiting).
@@ -65,7 +78,7 @@ impl EventBus {
         Self {
             sender,
             agent_channels: DashMap::new(),
-            history: Arc::new(RwLock::new(VecDeque::with_capacity(HISTORY_SIZE))),
+            history: PlMutex::new(VecDeque::with_capacity(HISTORY_SIZE)),
             dropped_count: AtomicU64::new(0),
             last_drop_warn: std::sync::Mutex::new(warmup),
         }
@@ -75,7 +88,8 @@ impl EventBus {
     ///
     /// The event is wrapped in `Arc<Event>` so dispatching to N subscribers
     /// performs N cheap atomic ref-count bumps instead of N deep clones of
-    /// the payload (#3380).
+    /// the payload (#3380). The bounded history ring stores the same
+    /// `Arc<Event>`, so retention is also a refcount bump (#3385).
     pub async fn publish(&self, event: Event) {
         debug!(
             event_id = %event.id,
@@ -84,18 +98,21 @@ impl EventBus {
             "Publishing event"
         );
 
-        // Store in history (history needs an owned copy — we keep this clone
-        // only at the boundary; the broadcast hot path uses Arc throughout).
+        // Wrap once, share via Arc clones — no payload deep-clone per subscriber
+        // and no deep-clone for the history ring either.
+        let event = Arc::new(event);
+
+        // Store in history. parking_lot::Mutex is a sync, spinning-then-parking
+        // lock acquired in nanoseconds; no `.await` is held across the critical
+        // section — that would deadlock since parking_lot guards are not
+        // Send-safe across yield points. See #3385.
         {
-            let mut history = self.history.write().await;
+            let mut history = self.history.lock();
             if history.len() >= HISTORY_SIZE {
                 history.pop_front();
             }
-            history.push_back(event.clone());
+            history.push_back(Arc::clone(&event));
         }
-
-        // Wrap once, share via Arc clones — no payload deep-clone per subscriber.
-        let event = Arc::new(event);
 
         // Route to target
         match &event.target {
@@ -192,9 +209,20 @@ impl EventBus {
     }
 
     /// Get recent event history.
-    pub async fn history(&self, limit: usize) -> Vec<Event> {
-        let history = self.history.read().await;
-        history.iter().rev().take(limit).cloned().collect()
+    ///
+    /// Returns owned `Event` clones in newest-first order. Internally the
+    /// ring stores `Arc<Event>` so this is a single deep clone per yielded
+    /// element — readers (dashboard / network graph) call this at most a
+    /// few times per second, so the per-clone cost is negligible compared
+    /// to the publisher contention savings (#3385).
+    pub fn history(&self, limit: usize) -> Vec<Event> {
+        let history = self.history.lock();
+        history
+            .iter()
+            .rev()
+            .take(limit)
+            .map(|arc| (**arc).clone())
+            .collect()
     }
 
     /// Return the total number of events dropped due to no active receivers
@@ -293,7 +321,7 @@ mod tests {
             EventPayload::System(SystemEvent::KernelStarted),
         );
         bus.publish(event).await;
-        let history = bus.history(10).await;
+        let history = bus.history(10);
         assert_eq!(history.len(), 1);
     }
 
@@ -342,5 +370,68 @@ mod tests {
             }
             other => panic!("Expected HealthCheck payload, got {:?}", other),
         }
+    }
+
+    /// Burst-publish regression guard for #3385: many concurrent publishers
+    /// must not deadlock or corrupt the bounded ring, the history must
+    /// stay capped at `HISTORY_SIZE`, and a passive subscriber must
+    /// observe at least one event (i.e. broadcast still fires after the
+    /// new sync history lock).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_publishers_respect_history_bound_and_broadcast() {
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe_all();
+
+        // Publish far more events than HISTORY_SIZE to force eviction.
+        const PUBLISHERS: usize = 16;
+        const PER_TASK: usize = 200; // 16 * 200 = 3200 > HISTORY_SIZE (1000)
+
+        let mut tasks = Vec::with_capacity(PUBLISHERS);
+        for _ in 0..PUBLISHERS {
+            let bus = Arc::clone(&bus);
+            tasks.push(tokio::spawn(async move {
+                for _ in 0..PER_TASK {
+                    let ev = Event::new(
+                        AgentId::new(),
+                        EventTarget::System,
+                        EventPayload::System(SystemEvent::KernelStarted),
+                    );
+                    bus.publish(ev).await;
+                }
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+
+        // Bounded ring must not exceed HISTORY_SIZE under concurrent push.
+        let hist = bus.history(usize::MAX);
+        assert!(
+            hist.len() <= HISTORY_SIZE,
+            "history exceeded bound: {} > {}",
+            hist.len(),
+            HISTORY_SIZE,
+        );
+        // And under saturating burst it should be exactly full.
+        assert_eq!(hist.len(), HISTORY_SIZE, "history not saturated");
+
+        // Broadcast subscriber must have received at least one event —
+        // proves publish still wires Arc<Event> into the broadcast channel
+        // after the history-lock change. (We don't assert on Lagged because
+        // 3 200 events into a 4 096-slot channel with a passive consumer
+        // is by design noisy — we only need to confirm broadcast fired.)
+        let mut got_any = false;
+        if let Ok(_ev) = rx.try_recv() {
+            got_any = true;
+        }
+        if !got_any {
+            // If the channel hasn't drained yet, do one bounded await.
+            match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await {
+                Ok(Ok(_)) => got_any = true,
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => got_any = true,
+                _ => {}
+            }
+        }
+        assert!(got_any, "broadcast subscriber received nothing after burst");
     }
 }

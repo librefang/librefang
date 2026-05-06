@@ -376,14 +376,95 @@ export interface AgentFileUploadResult {
   transcription?: string;
 }
 
+/** Mirrors `ContentBlock` in `crates/librefang-types/src/message.rs` —
+ *  serde-tagged on `type`. Keep variants in sync with the Rust enum;
+ *  unknown server-side variants land in `ContentBlockUnknown` so the
+ *  client never throws on a forward-compatible payload. */
+export interface ContentBlockText {
+  type: "text";
+  text: string;
+  provider_metadata?: unknown;
+}
+
+export interface ContentBlockThinking {
+  type: "thinking";
+  thinking: string;
+  provider_metadata?: unknown;
+}
+
+export interface ContentBlockToolUse {
+  type: "tool_use";
+  id: string;
+  name: string;
+  input: unknown;
+  provider_metadata?: unknown;
+}
+
+export interface ContentBlockToolResult {
+  type: "tool_result";
+  tool_use_id: string;
+  tool_name?: string;
+  content: string;
+  is_error: boolean;
+  status?: unknown;
+  approval_request_id?: string;
+}
+
+export interface ContentBlockImage {
+  type: "image";
+  media_type: string;
+  data: string;
+}
+
+export interface ContentBlockImageFile {
+  type: "image_file";
+  media_type: string;
+  path: string;
+}
+
+/** Forward-compat fallback for variants the Rust enum may add later.
+ *  Intentionally NOT part of the `ContentBlock` discriminated union below:
+ *  if `type: string` were a member, TypeScript could not narrow
+ *  `block.type === "text"` to `ContentBlockText` (the `string` literal
+ *  overlap collapses every variant). Walkers that need to tolerate
+ *  unknown shapes do so at runtime via `"type" in block`, which keeps
+ *  forward-compat without losing narrowing in the typed branches. */
+export interface ContentBlockUnknown {
+  type: string;
+  [key: string]: unknown;
+}
+
+export type ContentBlock =
+  | ContentBlockText
+  | ContentBlockThinking
+  | ContentBlockToolUse
+  | ContentBlockToolResult
+  | ContentBlockImage
+  | ContentBlockImageFile;
+
 export interface AgentSessionMessage {
   role?: string;
-  content?: unknown;
+  /** Either a plain string (legacy `MessageContent::Text`) or an array
+   *  of structured blocks (`MessageContent::Blocks`) — the Rust enum is
+   *  `#[serde(untagged)]` so both shapes appear on the wire.
+   *
+   *  The agent-scoped session endpoint (`/api/agents/{id}/session`) flattens
+   *  blocks server-side and returns a string here; the raw-blocks endpoint
+   *  (`/api/sessions/{id}`) returns the full `ContentBlock[]`. The mapper
+   *  handles both shapes via `extractAssistantHistoryParts`. */
+  content?: string | ContentBlock[];
   tools?: AgentTool[];
   images?: AgentSessionImage[];
   /** RFC 3339 timestamp from the server; may be absent for messages
    * persisted before the field was introduced. */
   timestamp?: string;
+  /** Flat reasoning trace surfaced by the agent-scoped session endpoint
+   *  for assistant messages that contained `ContentBlock::Thinking`. The
+   *  server joins multiple thinking blocks with a blank line, mirroring
+   *  the live-streaming `thinking_delta` accumulation. Absent when the
+   *  message had no thinking blocks (preserves response shape for
+   *  non-thinking models). */
+  thinking?: string;
 }
 
 export interface AgentSessionResponse {
@@ -962,11 +1043,31 @@ async function parseError(response: Response): Promise<ApiError> {
   let code = `HTTP_${response.status}`;
   try {
     const json = JSON.parse(text) as Json;
-    // Prefer the human-readable `detail` field over the machine-code `error` field
-    if (typeof json.detail === "string") {
+    // #3639 deferred: prefer the nested `error: {code, message, request_id}`
+    // envelope; fall back to the legacy flat shape (`error` as string,
+    // top-level `code`, `detail`) so we keep parsing responses produced by
+    // ad-hoc `Json(json!({"error": "..."}))` route sites during rollout.
+    const nested =
+      typeof json.error === "object" && json.error !== null
+        ? (json.error as Record<string, unknown>)
+        : null;
+
+    if (nested && typeof nested.message === "string") {
+      message = nested.message;
+    } else if (typeof json.detail === "string") {
       message = json.detail;
+    } else if (typeof json.message === "string") {
+      message = json.message as string;
     } else if (typeof json.error === "string") {
       message = json.error;
+    }
+
+    if (nested && typeof nested.code === "string") {
+      code = nested.code;
+    } else if (typeof json.code === "string") {
+      code = json.code as string;
+    } else if (typeof json.error === "string") {
+      // Legacy: flat `error` doubled as both message and code token.
       code = json.error;
     }
   } catch {
@@ -1351,7 +1452,13 @@ export async function getAgentTemplateToml(name: string): Promise<string> {
 }
 
 export async function deleteAgent(agentId: string): Promise<ApiActionResponse> {
-  return del<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`);
+  // Refs #4614 — DELETE requires explicit confirmation. The dashboard
+  // already wraps this call in a confirmation modal, so we send the
+  // confirm flag here. Without it the API returns 409 with the
+  // canonical-UUID data-loss warning.
+  return del<ApiActionResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}?confirm=true`,
+  );
 }
 
 export async function cloneAgent(agentId: string): Promise<ApiActionResponse> {
@@ -3135,7 +3242,13 @@ export async function getMetricsText(): Promise<string> {
 // ── Plugins ──────────────────────────────────────────
 
 export interface PluginItem {
+  // Canonical identifier — used as the path segment for
+  // /plugins/{name}/{enable,disable,reload,install-deps,uninstall}.
+  // Must NOT be the localized label.
   name: string;
+  // Localized display label resolved from `[i18n.<lang>]` on the
+  // plugin manifest. Falls back to `name` when no override is set.
+  display_name?: string;
   version: string;
   description?: string;
   author?: string;
@@ -3146,7 +3259,11 @@ export interface PluginItem {
 }
 
 export interface RegistryPluginListing {
+  // Canonical identifier sent back to POST /api/plugins/install — must
+  // match the directory name on the GitHub registry. Localized labels
+  // go on `display_name`.
   name: string;
+  display_name?: string;
   installed: boolean;
   version?: string | null;
   description?: string | null;
@@ -4081,7 +4198,7 @@ export async function getUserBudget(name: string): Promise<UserBudgetResponse> {
 export async function updateUserBudget(
   name: string,
   payload: UserBudgetPayload,
-): Promise<{ status: string; budget: UserBudgetPayload }> {
+): Promise<UserBudgetPayload> {
   return put(
     `/api/budget/users/${encodeURIComponent(name)}`,
     payload,

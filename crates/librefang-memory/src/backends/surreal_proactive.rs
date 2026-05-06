@@ -109,7 +109,7 @@ impl ProactiveMemoryBackend for SurrealProactiveMemoryBackend {
             let expired = storage
                 .expire_stale_memories()
                 .await
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
             return Ok(ConsolidationReport {
                 memories_merged: 0,
                 memories_decayed: expired,
@@ -137,8 +137,8 @@ async fn do_decay(db: Arc<Surreal<Any>>, now: String) -> LibreFangResult<usize> 
         .query("DELETE memories WHERE expires_at != NONE AND expires_at < $now RETURN id")
         .bind(("now", now))
         .await
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?
+        .map_err(|e| LibreFangError::memory_msg(e.to_string()))?
         .take(0)
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
     Ok(rows.len())
 }

@@ -41,6 +41,9 @@ pub struct LinkedInAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Last seen message timestamp for incremental polling (epoch millis).
     last_seen_ts: Arc<RwLock<i64>>,
+    /// REST base URL. Defaults to `LINKEDIN_API_BASE`; tests override via
+    /// `with_base_url` so the adapter talks to a local wiremock instead.
+    api_base: String,
 }
 
 impl LinkedInAdapter {
@@ -65,11 +68,20 @@ impl LinkedInAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             last_seen_ts: Arc::new(RwLock::new(0)),
+            api_base: LINKEDIN_API_BASE.to_string(),
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the REST base URL. `#[cfg(test)]`-only — used by wiremock-driven
+    /// tests to point the adapter at a local mock server.
+    #[cfg(test)]
+    pub fn with_base_url(mut self, url: String) -> Self {
+        self.api_base = url;
         self
     }
 
@@ -155,7 +167,7 @@ impl LinkedInAdapter {
         recipient_urn: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/organizationMessages", LINKEDIN_API_BASE);
+        let url = format!("{}/organizationMessages", self.api_base);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
         let num_chunks = chunks.len();
 
@@ -499,5 +511,80 @@ mod tests {
         let (_, _, from, name, _) = result.unwrap();
         assert_eq!(from, "unknown");
         assert_eq!(name, "LinkedIn User");
+    }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // The `LINKEDIN_API_BASE` const is now backed by an `api_base` field
+    // (see struct definition); a `#[cfg(test)] with_base_url` setter
+    // points the adapter at a local `wiremock::MockServer` so we can
+    // assert the actual `POST /organizationMessages` request shape.
+
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn linkedin_user(recipient_urn: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: recipient_urn.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn linkedin_send_posts_organization_messages() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/organizationMessages"))
+            .and(header("authorization", "Bearer access-tok"))
+            .and(header("X-Restli-Protocol-Version", "2.0.0"))
+            .and(header("LinkedIn-Version", "202401"))
+            .and(body_json(serde_json::json!({
+                "recipients": ["urn:li:person:abc"],
+                "organization": "urn:li:organization:42",
+                "body": { "text": "hello linkedin" },
+                "messageType": "MEMBER_TO_MEMBER",
+            })))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": "msg-1"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = LinkedInAdapter::new("access-tok".to_string(), "42".to_string())
+            .with_base_url(server.uri());
+        adapter
+            .send(
+                &linkedin_user("urn:li:person:abc"),
+                ChannelContent::Text("hello linkedin".into()),
+            )
+            .await
+            .expect("linkedin send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn linkedin_send_returns_err_on_non_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/organizationMessages"))
+            .respond_with(ResponseTemplate::new(403))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = LinkedInAdapter::new("access-tok".to_string(), "42".to_string())
+            .with_base_url(server.uri());
+        let err = adapter
+            .send(
+                &linkedin_user("urn:li:person:xyz"),
+                ChannelContent::Text("nope".into()),
+            )
+            .await
+            .expect_err("linkedin send must propagate non-2xx as Err");
+        assert!(
+            err.to_string().contains("403"),
+            "error should mention status code, got: {err}"
+        );
     }
 }

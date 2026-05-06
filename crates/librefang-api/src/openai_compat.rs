@@ -12,8 +12,8 @@ use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_runtime::kernel_handle::prelude::*;
-use librefang_runtime::llm_driver::StreamEvent;
+use librefang_kernel::kernel_handle::prelude::*;
+use librefang_kernel::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role, StopReason};
 use serde::{Deserialize, Serialize};
@@ -549,7 +549,8 @@ async fn stream_response(
 /// GET /v1/models — List available agents as OpenAI model objects.
 #[utoipa::path(get, path = "/v1/models", tag = "openai", operation_id = "list_openai_models", responses((status = 200, description = "OpenAI-compatible model list", body = crate::types::JsonObject)))]
 pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agents = state.kernel.agent_registry().list();
+    // Read-only iteration: prefer cheap Arc clones over full manifest deep-copy (#3569).
+    let agents = state.kernel.agent_registry().list_arcs();
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

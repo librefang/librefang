@@ -294,12 +294,20 @@ func (r *AgentsResource) BulkStopAgents(data map[string]interface{}) (interface{
 	return r.client.request("POST", "/api/agents/bulk/stop", data, nil)
 }
 
+func (r *AgentsResource) ListAgentIdentities() (interface{}, error) {
+	return r.client.request("GET", "/api/agents/identities", nil, nil)
+}
+
+func (r *AgentsResource) ResetAgentIdentity(name string, query map[string]string) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/agents/identities/%s/reset", name), nil, query)
+}
+
 func (r *AgentsResource) GetAgent(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s", id), nil, nil)
 }
 
-func (r *AgentsResource) KillAgent(id string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s", id), nil, nil)
+func (r *AgentsResource) KillAgent(id string, query map[string]string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/agents/%s", id), nil, query)
 }
 
 func (r *AgentsResource) PatchAgent(id string, data map[string]interface{}) (interface{}, error) {
@@ -942,8 +950,8 @@ func (r *NetworkResource) NetworkStatus() (interface{}, error) {
 	return r.client.request("GET", "/api/network/status", nil, nil)
 }
 
-func (r *NetworkResource) ListPeers() (interface{}, error) {
-	return r.client.request("GET", "/api/peers", nil, nil)
+func (r *NetworkResource) ListPeers(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/peers", nil, query)
 }
 
 func (r *NetworkResource) GetPeer(id string) (interface{}, error) {

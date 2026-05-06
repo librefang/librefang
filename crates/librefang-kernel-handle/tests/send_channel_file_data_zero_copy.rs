@@ -40,11 +40,15 @@ impl AgentControl for CapturingFileKernel {
         &self,
         _manifest_toml: &str,
         _parent_id: Option<&str>,
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
-    async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+    async fn send_to_agent(
+        &self,
+        _agent_id: &str,
+        _message: &str,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
@@ -52,7 +56,7 @@ impl AgentControl for CapturingFileKernel {
         vec![]
     }
 
-    fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+    fn kill_agent(&self, _agent_id: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
@@ -67,7 +71,7 @@ impl MemoryAccess for CapturingFileKernel {
         _key: &str,
         _value: serde_json::Value,
         _peer_id: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
@@ -75,11 +79,14 @@ impl MemoryAccess for CapturingFileKernel {
         &self,
         _key: &str,
         _peer_id: Option<&str>,
-    ) -> Result<Option<serde_json::Value>, String> {
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
-    fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
+    fn memory_list(
+        &self,
+        _peer_id: Option<&str>,
+    ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 }
@@ -92,11 +99,14 @@ impl TaskQueue for CapturingFileKernel {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
-    async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
+    async fn task_claim(
+        &self,
+        _agent_id: &str,
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
@@ -105,27 +115,43 @@ impl TaskQueue for CapturingFileKernel {
         _agent_id: &str,
         _task_id: &str,
         _result: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
-    async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    async fn task_list(
+        &self,
+        _status: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
-    async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
+    async fn task_delete(
+        &self,
+        _task_id: &str,
+    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
-    async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
+    async fn task_retry(
+        &self,
+        _task_id: &str,
+    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
-    async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
+    async fn task_get(
+        &self,
+        _task_id: &str,
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
-    async fn task_update_status(&self, _task_id: &str, _new_status: &str) -> Result<bool, String> {
+    async fn task_update_status(
+        &self,
+        _task_id: &str,
+        _new_status: &str,
+    ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 }
@@ -136,22 +162,31 @@ impl EventBus for CapturingFileKernel {
         &self,
         _event_type: &str,
         _payload: serde_json::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 }
 
 #[async_trait]
 impl KnowledgeGraph for CapturingFileKernel {
-    async fn knowledge_add_entity(&self, _entity: &Entity) -> Result<String, String> {
+    async fn knowledge_add_entity(
+        &self,
+        _entity: &Entity,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
-    async fn knowledge_add_relation(&self, _relation: &Relation) -> Result<String, String> {
+    async fn knowledge_add_relation(
+        &self,
+        _relation: &Relation,
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
-    async fn knowledge_query(&self, _pattern: GraphPattern) -> Result<Vec<GraphMatch>, String> {
+    async fn knowledge_query(
+        &self,
+        _pattern: GraphPattern,
+    ) -> Result<Vec<GraphMatch>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 }
@@ -175,7 +210,7 @@ impl ChannelSender for CapturingFileKernel {
         _mime_type: &str,
         _thread_id: Option<&str>,
         _account_id: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         *self.last_seen_addr.lock().unwrap() = Some(data.as_ptr() as usize);
         *self.last_seen_len.lock().unwrap() = data.len();
         Ok("captured".into())

@@ -47,9 +47,9 @@ impl TaskBackend for SurrealTaskBackend {
             )
             .bind(("cutoff", cutoff))
             .await
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?
+            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?
             .take(0)
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
 
         let ids: Vec<String> = rows
             .into_iter()

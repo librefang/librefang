@@ -327,8 +327,11 @@ use librefang_channels::wechat::WeChatAdapter;
 use librefang_channels::wecom::WeComAdapter;
 
 use async_trait::async_trait;
+use librefang_kernel::auth::Action as KernelAction;
+use librefang_kernel::config::load_config as kernel_load_config;
+use librefang_kernel::llm_driver::StreamEvent;
+use librefang_kernel::DeliveryTracker;
 use librefang_kernel::LibreFangKernel;
-use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
 use std::sync::Arc;
 #[cfg(feature = "channel-telegram")]
@@ -337,7 +340,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use librefang_runtime::str_utils::safe_truncate_str;
+use librefang_kernel::str_utils::safe_truncate_str;
 
 /// Convert a snake_case / kebab-case / dotted tool ID into a human-readable
 /// display name. Used in progress lines so users see "Web Search" instead of
@@ -375,7 +378,7 @@ fn tr_progress_failed(language: &str) -> &'static str {
 fn start_stream_text_bridge<E>(
     event_rx: mpsc::Receiver<StreamEvent>,
     kernel_handle: tokio::task::JoinHandle<
-        Result<librefang_runtime::agent_loop::AgentLoopResult, E>,
+        Result<librefang_kernel::agent_loop::AgentLoopResult, E>,
     >,
     is_group: bool,
     show_progress: bool,
@@ -408,7 +411,7 @@ where
 fn start_stream_text_bridge_with_status<E>(
     mut event_rx: mpsc::Receiver<StreamEvent>,
     kernel_handle: tokio::task::JoinHandle<
-        Result<librefang_runtime::agent_loop::AgentLoopResult, E>,
+        Result<librefang_kernel::agent_loop::AgentLoopResult, E>,
     >,
     is_group: bool,
     show_progress: bool,
@@ -459,8 +462,7 @@ where
                             debug!("Streaming bridge: filtered tool-use-adjacent text");
                         } else if looks_like_tool_call(&iter_buf) {
                             warn!("Streaming bridge: filtered leaked tool call text at ContentComplete (len={})", iter_buf.len());
-                        } else if librefang_runtime::silent_response::is_silent_response(&iter_buf)
-                        {
+                        } else if librefang_kernel::silent_response::is_silent_response(&iter_buf) {
                             debug!(
                                 "Streaming bridge: suppressed NO_REPLY sentinel at ContentComplete"
                             );
@@ -535,7 +537,7 @@ where
                     "Streaming bridge: filtered leaked tool call text in final flush (len={})",
                     iter_buf.len()
                 );
-            } else if librefang_runtime::silent_response::is_silent_response(&iter_buf) {
+            } else if librefang_kernel::silent_response::is_silent_response(&iter_buf) {
                 debug!("Streaming bridge: suppressed NO_REPLY sentinel in final flush");
             } else {
                 let _ = tx.send(iter_buf).await;
@@ -559,7 +561,7 @@ where
                 let err_str = e.to_string();
                 error!("Streaming kernel task returned error: {err_str}");
                 let is_timeout =
-                    err_str.contains(librefang_runtime::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER);
+                    err_str.contains(librefang_kernel::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER);
                 let user_msg = if is_timeout {
                     Some(
                         "\n\n---\n[Task timed out. The output above may be incomplete.]"
@@ -944,11 +946,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_models_text(&self) -> String {
-        let catalog = self
-            .kernel
-            .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = self.kernel.model_catalog_ref().load();
         let available = catalog.available_models();
         if available.is_empty() {
             return "No models available. Configure API keys to enable providers.".to_string();
@@ -986,11 +984,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_providers_interactive(&self) -> Vec<(String, String, bool)> {
-        let catalog = self
-            .kernel
-            .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = self.kernel.model_catalog_ref().load();
         catalog
             .list_providers()
             .iter()
@@ -1000,11 +994,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_models_by_provider(&self, provider_id: &str) -> Vec<(String, String)> {
-        let catalog = self
-            .kernel
-            .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = self.kernel.model_catalog_ref().load();
         catalog
             .models_by_provider(provider_id)
             .into_iter()
@@ -1013,11 +1003,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_providers_text(&self) -> String {
-        let catalog = self
-            .kernel
-            .model_catalog_ref()
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let catalog = self.kernel.model_catalog_ref().load();
         let mut msg = "Providers:\n".to_string();
         for p in catalog.list_providers() {
             let status = match p.auth_status {
@@ -2004,11 +1990,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .ok_or_else(|| "Unrecognized user. Contact an admin to get access.".to_string())?;
 
         let auth_action = match action {
-            "chat" => librefang_kernel::auth::Action::ChatWithAgent,
-            "spawn" => librefang_kernel::auth::Action::SpawnAgent,
-            "kill" => librefang_kernel::auth::Action::KillAgent,
-            "install_skill" => librefang_kernel::auth::Action::InstallSkill,
-            _ => librefang_kernel::auth::Action::ChatWithAgent,
+            "chat" => KernelAction::ChatWithAgent,
+            "spawn" => KernelAction::SpawnAgent,
+            "kill" => KernelAction::KillAgent,
+            "install_skill" => KernelAction::InstallSkill,
+            _ => KernelAction::ChatWithAgent,
         };
 
         self.kernel
@@ -2027,13 +2013,9 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         thread_id: Option<&str>,
     ) {
         let receipt = if success {
-            librefang_kernel::DeliveryTracker::sent_receipt(channel, recipient)
+            DeliveryTracker::sent_receipt(channel, recipient)
         } else {
-            librefang_kernel::DeliveryTracker::failed_receipt(
-                channel,
-                recipient,
-                error.unwrap_or("Unknown error"),
-            )
+            DeliveryTracker::failed_receipt(channel, recipient, error.unwrap_or("Unknown error"))
         };
         self.kernel.delivery().record(agent_id, receipt);
 
@@ -2170,10 +2152,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         message: &str,
         thread_id: Option<&str>,
     ) -> Result<String, String> {
-        use librefang_runtime::kernel_handle::prelude::*;
+        use librefang_kernel::kernel_handle::prelude::*;
         self.kernel
             .send_channel_message(channel_type, recipient, message, thread_id, None)
             .await
+            .map_err(|e| e.to_string())
     }
 
     fn channels_download_dir(&self) -> Option<std::path::PathBuf> {
@@ -3454,8 +3437,9 @@ pub async fn start_channel_bridge_with_config(
     // Load bindings and broadcast config from kernel
     let bindings = kernel.list_bindings();
     if !bindings.is_empty() {
-        // Register all known agents in the router's name cache for binding resolution
-        for entry in kernel.agent_registry().list() {
+        // Register all known agents in the router's name cache for binding
+        // resolution. Read-only iteration; cheap Arc clones (#3569).
+        for entry in kernel.agent_registry().list_arcs() {
             router.register_agent(entry.name.clone(), entry.id);
         }
         router.load_bindings(&bindings);
@@ -3682,13 +3666,13 @@ pub async fn start_channel_bridge_with_config(
 pub async fn reload_channels_from_disk(
     state: &crate::routes::AppState,
 ) -> Result<Vec<String>, String> {
-    // Stop existing bridge
+    // Stop existing bridge. Swap it out atomically so concurrent readers see
+    // None immediately, then unwrap the Arc to get owned access for stop().
     {
-        let mut guard = state.bridge_manager.lock().await;
-        if let Some(ref mut bridge) = *guard {
-            bridge.stop().await;
+        let old = state.bridge_manager.swap(std::sync::Arc::new(None));
+        if let Ok(Some(ref mut b)) = std::sync::Arc::try_unwrap(old) {
+            b.stop().await;
         }
-        *guard = None;
     }
 
     // Re-read secrets.env so new API tokens are available in std::env.
@@ -3739,7 +3723,7 @@ pub async fn reload_channels_from_disk(
 
     // Re-read config from disk
     let config_path = state.kernel.home_dir().join("config.toml");
-    let fresh_config = librefang_kernel::config::load_config(Some(&config_path));
+    let fresh_config = kernel_load_config(Some(&config_path));
 
     // Update the live channels config so list_channels() reflects reality
     *state.channels_config.write().await = fresh_config.channels.clone();
@@ -3748,8 +3732,8 @@ pub async fn reload_channels_from_disk(
     let (new_bridge, started, webhook_router) =
         start_channel_bridge_with_config(state.kernel.clone(), &fresh_config.channels).await;
 
-    // Store the new bridge
-    *state.bridge_manager.lock().await = new_bridge;
+    // Store the new bridge atomically.
+    state.bridge_manager.store(std::sync::Arc::new(new_bridge));
 
     // Swap the webhook router so new routes take effect on the shared server
     *state.webhook_router.write().await = Arc::new(webhook_router);
@@ -3766,6 +3750,7 @@ pub async fn reload_channels_from_disk(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use librefang_kernel::event_bus::EventBus;
 
     #[test]
     fn test_looks_like_tool_call_detects_markdown_tool_call_with_preamble() {
@@ -3868,7 +3853,7 @@ mod tests {
     /// filtered at ContentComplete, not forwarded to the channel (#2379).
     #[tokio::test]
     async fn test_stream_bridge_filters_agent_send_tool_call_at_content_complete() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
@@ -3907,7 +3892,7 @@ mod tests {
     /// behavior of hermes-agent's commentary stream).
     #[tokio::test]
     async fn test_stream_bridge_surfaces_tool_use_progress() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
@@ -3970,7 +3955,7 @@ mod tests {
     /// user knows the agent's plan hit a snag.
     #[tokio::test]
     async fn test_stream_bridge_surfaces_tool_failure() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
@@ -4012,7 +3997,7 @@ mod tests {
     /// noisy fast for agents that chain many tools.
     #[tokio::test]
     async fn test_stream_bridge_quiet_on_tool_success() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
@@ -4077,7 +4062,7 @@ mod tests {
     /// scenarios.
     #[tokio::test]
     async fn test_stream_bridge_show_progress_false_suppresses_all_markers() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
@@ -4148,7 +4133,7 @@ mod tests {
     /// should produce only one progress line — some drivers double-fire.
     #[tokio::test]
     async fn test_stream_bridge_dedupes_consecutive_tool_progress() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
@@ -4184,7 +4169,7 @@ mod tests {
     /// `record_delivery(success=true)`.
     #[tokio::test]
     async fn test_stream_bridge_status_success() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
@@ -4227,7 +4212,7 @@ mod tests {
 
         let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async {
-            Err::<librefang_runtime::agent_loop::AgentLoopResult, LibreFangError>(
+            Err::<librefang_kernel::agent_loop::AgentLoopResult, LibreFangError>(
                 LibreFangError::Internal("rate limit hit".to_string()),
             )
         });
@@ -4270,7 +4255,7 @@ mod tests {
 
         let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async {
-            Err::<librefang_runtime::agent_loop::AgentLoopResult, LibreFangError>(
+            Err::<librefang_kernel::agent_loop::AgentLoopResult, LibreFangError>(
                 LibreFangError::Internal("some internal failure".to_string()),
             )
         });
@@ -4318,9 +4303,9 @@ mod tests {
             // the timeout marker constant.
             let err = format!(
                 "agent loop timed out: {}",
-                librefang_runtime::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER
+                librefang_kernel::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER
             );
-            Err::<librefang_runtime::agent_loop::AgentLoopResult, LibreFangError>(
+            Err::<librefang_kernel::agent_loop::AgentLoopResult, LibreFangError>(
                 LibreFangError::Internal(err),
             )
         });
@@ -4493,7 +4478,7 @@ mod tests {
     /// the assertion in `event_bus::tests::record_consumer_lag_increments_dropped_count`.
     #[test]
     fn test_event_bus_record_consumer_lag_increments_dropped_count() {
-        let bus = librefang_kernel::event_bus::EventBus::new();
+        let bus = EventBus::new();
         assert_eq!(bus.dropped_count(), 0);
         bus.record_consumer_lag(5, "test-context");
         assert_eq!(bus.dropped_count(), 5);

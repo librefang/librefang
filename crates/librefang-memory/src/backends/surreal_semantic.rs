@@ -308,7 +308,7 @@ impl SemanticBackend for SurrealSemanticBackend {
         self.storage
             .add_memory(mem)
             .await
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
         Ok(lf_id)
     }
 
@@ -347,7 +347,7 @@ impl SemanticBackend for SurrealSemanticBackend {
                 limit,
             )
             .await
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
 
         Ok(results.into_iter().map(memory_to_fragment).collect())
     }
@@ -366,16 +366,16 @@ impl SemanticBackend for SurrealSemanticBackend {
             )
             .bind(("lf_id", id_str))
             .await
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?
+            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?
             .take(0)
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
 
         if let Some(row) = rows.into_iter().next() {
             if let Some(surreal_id) = row.get("id").and_then(|v| v.as_str()) {
                 self.storage
                     .delete_memory(surreal_id)
                     .await
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                    .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
                 return Ok(true);
             }
         }
@@ -399,9 +399,9 @@ impl SemanticBackend for SurrealSemanticBackend {
             .bind(("agent_id", agent_id_str))
             .bind(("peer_id", peer_id_str))
             .await
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?
+            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?
             .take(0)
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
 
         let count = rows
             .first()
@@ -424,7 +424,7 @@ impl SemanticBackend for SurrealSemanticBackend {
         )
         .bind(("lf_id", id_str))
         .await
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
         Ok(())
     }
 
@@ -475,7 +475,7 @@ impl VectorStore for SurrealSemanticBackend {
         self.storage
             .add_memory(mem)
             .await
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
         Ok(())
     }
 
@@ -513,7 +513,7 @@ impl VectorStore for SurrealSemanticBackend {
         db.query("DELETE memory WHERE meta::value(metadata.librefang.lf_id) = $lf_id")
             .bind(("lf_id", id_str))
             .await
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
         Ok(())
     }
 
@@ -532,9 +532,9 @@ impl VectorStore for SurrealSemanticBackend {
             )
             .bind(("ids", ids_json))
             .await
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?
+            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?
             .take(0)
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(|e| LibreFangError::memory_msg(e.to_string()))?;
 
         let mut map = HashMap::new();
         for row in rows {
@@ -594,9 +594,9 @@ impl SurrealSemanticBackend {
             .bind(("agent_id", agent_id.map(str::to_string)))
             .bind(("peer_id", peer_id.map(str::to_string)))
             .await
-            .map_err(|e| LibreFangError::Memory(format!("knn_recall query: {e}")))?
+            .map_err(|e| LibreFangError::memory_msg(format!("knn_recall query: {e}")))?
             .take(0)
-            .map_err(|e| LibreFangError::Memory(format!("knn_recall take: {e}")))?;
+            .map_err(|e| LibreFangError::memory_msg(format!("knn_recall take: {e}")))?;
 
         let mut fragments = Vec::with_capacity(rows.len());
         for row in rows {
