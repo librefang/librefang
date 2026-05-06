@@ -254,11 +254,9 @@ async fn try_summarize_trim(
     keep_recent: usize,
     driver: std::sync::Arc<dyn librefang_runtime::llm_driver::LlmDriver>,
     model: &str,
-    session_id: librefang_types::agent::SessionId,
-    agent_id: librefang_types::agent::AgentId,
 ) -> Option<Vec<librefang_types::message::Message>> {
     use librefang_runtime::compactor::{
-        adjust_split_for_tool_pair, compact_session, CompactionConfig,
+        adjust_split_for_tool_pair, compact_messages, CompactionConfig,
     };
     use librefang_types::message::{Message, MessageContent, Role};
 
@@ -275,25 +273,18 @@ async fn try_summarize_trim(
     let to_summarize = &messages[..tail_start];
     let kept_tail = messages[tail_start..].to_vec();
 
+    // We've already split off the kept tail above; tell `compact_messages` to
+    // summarise the entire input it receives by setting `keep_recent = 0`.
     let compact_cfg = CompactionConfig {
         threshold: 0,
         keep_recent: 0,
         ..CompactionConfig::default()
     };
-    let tmp_session = librefang_memory::session::Session {
-        id: session_id,
-        agent_id,
-        messages: to_summarize.to_vec(),
-        context_window_tokens: 0,
-        label: None,
-        messages_generation: 0,
-        last_repaired_generation: None,
-    };
 
     // Only accept a real LLM summary — reject empty summaries and fallback
     // placeholders (used_fallback = true means the LLM was unavailable and
-    // compact_session substituted a synthetic "[Session compacted: ...]" stub).
-    match compact_session(driver, model, &tmp_session, &compact_cfg).await {
+    // compact_messages substituted a synthetic "[Session compacted: ...]" stub).
+    match compact_messages(driver, model, to_summarize, &compact_cfg).await {
         Ok(result) if !result.summary.is_empty() && !result.used_fallback => {
             let summary_msg = Message {
                 role: Role::Assistant,
@@ -14646,8 +14637,6 @@ system_prompt = "You are a helpful assistant."
                                                                 effective_keep_recent,
                                                                 driver,
                                                                 &model,
-                                                                cron_sid,
-                                                                agent_id,
                                                             )
                                                             .await
                                                             {
