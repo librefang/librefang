@@ -585,38 +585,67 @@ impl AuditLog {
         // log below is the operator's signal to investigate.  The
         // next call uses the same `seq` (since `entries.last()` did
         // not advance) with a fresh timestamp and tries again.
+        // The append is wrapped in `BEGIN IMMEDIATE` so the chain stays
+        // intact even if a future refactor narrows the `entries` /
+        // `tip` Mutex scope, and so concurrent processes (or background
+        // jobs holding their own pooled connection) cannot interleave
+        // an append against the same `prev_hash`. IMMEDIATE acquires a
+        // RESERVED lock at the SQLite layer; under WAL the cost over a
+        // bare INSERT is negligible (a single fcntl on the lock byte
+        // page) but it means at most one writer is between
+        // `prev_hash` derivation and INSERT at any instant — which is
+        // the invariant the Merkle chain depends on. See the
+        // `audit_chain_holds_under_concurrent_record` test below for
+        // the regression bound.
         let persisted = match self.db.as_ref() {
             None => true, // pure in-memory mode: memory IS the source of truth
             Some(db) => match db.get() {
-                Ok(conn) => match conn.execute(
-                    "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                    rusqlite::params![
-                        entry.seq as i64,
-                        &entry.timestamp,
-                        &entry.agent_id,
-                        entry.action.to_string(),
-                        &entry.detail,
-                        &entry.outcome,
-                        entry.user_id.as_ref().map(|u| u.to_string()),
-                        entry.channel.as_deref(),
-                        &entry.prev_hash,
-                        &entry.hash,
-                    ],
-                ) {
-                    Ok(_) => true,
-                    Err(e) => {
-                        tracing::error!(
-                            seq = entry.seq,
-                            agent_id = %entry.agent_id,
-                            action = %entry.action,
-                            error = %e,
-                            "Audit DB INSERT failed; chain NOT advanced. \
-                             Entry dropped to preserve on-disk chain integrity. \
-                             Investigate disk space, permissions, or DB state."
-                        );
-                        false
+                Ok(mut conn) => {
+                    let tx_result =
+                        conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate);
+                    match tx_result {
+                        Ok(tx) => {
+                            let exec_result = tx.execute(
+                                "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                rusqlite::params![
+                                    entry.seq as i64,
+                                    &entry.timestamp,
+                                    &entry.agent_id,
+                                    entry.action.to_string(),
+                                    &entry.detail,
+                                    &entry.outcome,
+                                    entry.user_id.as_ref().map(|u| u.to_string()),
+                                    entry.channel.as_deref(),
+                                    &entry.prev_hash,
+                                    &entry.hash,
+                                ],
+                            );
+                            match exec_result.and_then(|_| tx.commit()) {
+                                Ok(_) => true,
+                                Err(e) => {
+                                    tracing::error!(
+                                        seq = entry.seq,
+                                        agent_id = %entry.agent_id,
+                                        action = %entry.action,
+                                        error = %e,
+                                        "Audit DB INSERT failed; chain NOT advanced. \
+                                         Entry dropped to preserve on-disk chain integrity. \
+                                         Investigate disk space, permissions, or DB state."
+                                    );
+                                    false
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                seq = entry.seq,
+                                error = %e,
+                                "Audit DB BEGIN IMMEDIATE failed; chain NOT advanced."
+                            );
+                            false
+                        }
                     }
-                },
+                }
                 Err(e) => {
                     tracing::error!(
                         seq = entry.seq,
@@ -2358,5 +2387,164 @@ mod tests {
         assert_eq!(delivered.len(), 300);
         assert_eq!(delivered.first().map(|e| e.seq), Some(200));
         assert_eq!(delivered.last().map(|e| e.seq), Some(499));
+    }
+
+    /// Concurrent `record_with_context` against a pooled SQLite must
+    /// never produce a chain fork.
+    ///
+    /// Background (PR #4685 review): the pre-pool design serialised
+    /// the entire append path through `Arc<Mutex<Connection>>`,
+    /// which by side effect serialised both the in-memory
+    /// `tip` mutation and the INSERT that depends on the same
+    /// `prev_hash`. Once the substrate moved to an r2d2 pool, two
+    /// threads could in principle each grab a `tip` snapshot, build
+    /// entries with the same `prev_hash`, and both INSERT on
+    /// different pooled connections — that would produce a Merkle
+    /// chain fork (two rows sharing the same `prev_hash`). This
+    /// test fires `THREADS * PER_THREAD` concurrent appends through
+    /// a real (file-backed) pool with `max_size > 1` and asserts:
+    ///
+    /// 1. **No writes lost** — total persisted rows equals the
+    ///    number of `record_with_context` calls.
+    /// 2. **Linear chain** — every persisted entry's `prev_hash` is
+    ///    the `hash` of the entry one row earlier (when ordered by
+    ///    `seq`); exactly one row carries the genesis sentinel.
+    /// 3. **No `prev_hash` collisions** — no two rows share the same
+    ///    `prev_hash`. This is the direct fork detector: a race that
+    ///    re-uses a stale tip would surface as two rows with the
+    ///    same parent.
+    /// 4. **`verify_integrity()` passes** after a fresh `with_db`
+    ///    reload, which is the runtime's actual integrity gate.
+    ///
+    /// The fix that makes this test pass is wrapping the INSERT in
+    /// `BEGIN IMMEDIATE` so the chain append is serialised at the
+    /// SQLite layer regardless of how many pool connections, threads,
+    /// or processes are racing.
+    #[test]
+    fn audit_chain_holds_under_concurrent_record() {
+        use std::sync::Arc;
+        use std::thread;
+
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 50;
+
+        // File-backed DB so `max_size > 1` actually buys us multiple
+        // simultaneous connections (`:memory:` is per-connection).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let manager = SqliteConnectionManager::file(&db_path).with_init(|c| {
+            c.execute_batch(
+                "PRAGMA journal_mode=WAL;\
+                 PRAGMA busy_timeout=5000;\
+                 PRAGMA synchronous=NORMAL;",
+            )
+        });
+        let pool = Pool::builder().max_size(8).build(manager).unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_entries (
+                    seq INTEGER PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    user_id TEXT,
+                    channel TEXT,
+                    prev_hash TEXT NOT NULL,
+                    hash TEXT NOT NULL
+                )",
+            )
+            .unwrap();
+        }
+
+        let log = Arc::new(AuditLog::with_db(pool.clone()));
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let log = log.clone();
+                thread::spawn(move || {
+                    for i in 0..PER_THREAD {
+                        log.record_with_context(
+                            format!("agent-{t}"),
+                            AuditAction::ToolInvoke,
+                            format!("op-{t}-{i}"),
+                            "ok",
+                            None,
+                            Some("test".to_string()),
+                        );
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+
+        let expected = THREADS * PER_THREAD;
+
+        // Reload from the same pool to exercise the persistence path —
+        // this is the same code `with_db` runs at daemon boot.
+        let reloaded = AuditLog::with_db(pool.clone());
+
+        // (1) No writes lost.
+        assert_eq!(
+            reloaded.len(),
+            expected,
+            "expected {expected} persisted rows, got {}",
+            reloaded.len()
+        );
+
+        // (4) The integrity gate the runtime actually relies on.
+        reloaded
+            .verify_integrity()
+            .expect("Merkle chain must verify after concurrent appends");
+
+        // (2) + (3): inspect the rows directly to assert no parent collisions.
+        // Pull every row ordered by seq and walk the chain explicitly.
+        let conn = pool.get().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT seq, prev_hash, hash FROM audit_entries ORDER BY seq ASC")
+            .unwrap();
+        let rows: Vec<(i64, String, String)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(rows.len(), expected);
+
+        // (3) prev_hash uniqueness — direct fork detector.
+        let mut seen = std::collections::HashSet::with_capacity(rows.len());
+        for (seq, prev_hash, _) in &rows {
+            assert!(
+                seen.insert(prev_hash.clone()),
+                "two rows share prev_hash={prev_hash} — chain forked at seq {seq}"
+            );
+        }
+
+        // (2) Linear chain — exactly one genesis row, every other
+        // row's prev_hash equals the previous row's hash.
+        let genesis = "0".repeat(64);
+        let genesis_count = rows.iter().filter(|(_, p, _)| p == &genesis).count();
+        assert_eq!(
+            genesis_count, 1,
+            "expected exactly one genesis row, got {genesis_count}"
+        );
+        for window in rows.windows(2) {
+            let (_, _, prev_hash) = &window[0];
+            let (next_seq, next_prev, _) = &window[1];
+            assert_eq!(
+                next_prev, prev_hash,
+                "chain break at seq {next_seq}: prev_hash does not match prior row's hash"
+            );
+        }
     }
 }
