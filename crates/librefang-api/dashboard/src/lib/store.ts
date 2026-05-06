@@ -130,11 +130,14 @@ export const useUIStore = create<UIState>()(
     }),
     {
       name: "librefang-ui-storage",
+      version: 1,
+      migrate: (persisted) => persisted,
       partialize: (state) => ({
         theme: state.theme,
         language: state.language,
         isSidebarCollapsed: state.isSidebarCollapsed,
         navLayout: state.navLayout,
+        collapsedNavGroups: state.collapsedNavGroups,
         hiddenModelKeys: state.hiddenModelKeys,
         modelsAvailableOnly: state.modelsAvailableOnly,
         deepThinking: state.deepThinking,
