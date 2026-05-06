@@ -7289,3 +7289,87 @@ mod try_summarize_trim_tests {
         );
     }
 }
+
+/// Regression for #4664: when `~/.librefang/config.toml` becomes syntactically
+/// invalid (e.g. a duplicate `[web.searxng]` key as in the bug report), the
+/// hot-reload watcher used to silently reset the live in-memory config to
+/// `KernelConfig::default()` because `crate::config::load_config` is tolerant
+/// and falls back to defaults on parse errors. The reload would then diff the
+/// live config against the defaults and apply the diff, blowing away
+/// `default_model`, `provider_api_keys`, channels, etc. — which surfaced to
+/// the user as "the dashboard stops loading".
+///
+/// `reload_config` must now strict-parse the file *before* doing anything
+/// destructive and return `Err` on TOML syntax errors so the watcher logs the
+/// failure and the live config stays intact.
+#[tokio::test(flavor = "multi_thread")]
+async fn reload_config_with_invalid_toml_preserves_live_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    // Write a valid baseline config.toml that round-trips through KernelConfig
+    // serialization — this is what the kernel will load at boot AND what
+    // `reload_config` will read on the next tick if we leave it untouched.
+    let baseline = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig {
+            provider: "anthropic".to_string(),
+            model: "user-picked-model".to_string(),
+            api_key_env: "ANTHROPIC_API_KEY".to_string(),
+            base_url: None,
+            message_timeout_secs: 300,
+            extra_params: HashMap::new(),
+            cli_profile_dirs: Vec::new(),
+        },
+        ..KernelConfig::default()
+    };
+    let baseline_toml = toml::to_string_pretty(&baseline).expect("serialize baseline config");
+    let config_path = home_dir.join("config.toml");
+    std::fs::write(&config_path, &baseline_toml).expect("write baseline config.toml");
+
+    let kernel =
+        LibreFangKernel::boot_with_config(baseline.clone()).expect("kernel boot with baseline");
+
+    // Sanity: live config has the user-picked model.
+    assert_eq!(
+        kernel.config_ref().default_model.model,
+        "user-picked-model",
+        "boot must seed the live config with the baseline model"
+    );
+
+    // Now corrupt config.toml the way the bug report did: append a duplicate
+    // `[web.searxng]` key that already appears earlier in the file (or in this
+    // case, two consecutive `[web.searxng]` sections — same TOML parse error).
+    let bad_toml = format!(
+        "{baseline_toml}\n\n[web.searxng]\nurl = \"http://first\"\n\n[web.searxng]\nurl = \"http://second\"\n"
+    );
+    std::fs::write(&config_path, &bad_toml).expect("write bad config.toml");
+
+    // Reload must fail loudly and refuse to touch the live config.
+    let err = kernel
+        .reload_config()
+        .await
+        .expect_err("reload must reject invalid TOML, not swallow it into defaults");
+    assert!(
+        err.contains("invalid TOML") && err.contains("live config unchanged"),
+        "error must clearly attribute the failure and reassure the operator that \
+         live config is intact; got: {err}"
+    );
+
+    // Live config must still hold the operator's chosen model — proves the
+    // watcher's reload tick won't silently revert their settings.
+    assert_eq!(
+        kernel.config_ref().default_model.model,
+        "user-picked-model",
+        "live default_model must be preserved when the on-disk file is unparseable"
+    );
+    assert_eq!(
+        kernel.config_ref().default_model.provider,
+        "anthropic",
+        "live default_model.provider must be preserved when the on-disk file is unparseable"
+    );
+
+    kernel.shutdown();
+}

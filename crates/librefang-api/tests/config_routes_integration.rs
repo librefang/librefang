@@ -592,6 +592,80 @@ async fn config_reload_requires_auth_when_key_set() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
+/// Regression for #4664: a syntactically-broken `config.toml` (the bug report
+/// hit a duplicate `[web.searxng]` key) used to silently reset the live config
+/// to defaults on the next hot-reload tick because `crate::config::load_config`
+/// is tolerant. From the operator's POV the dashboard "stopped loading" because
+/// `default_model`, `provider_api_keys`, channels, etc. all reverted to
+/// defaults. The fix makes `reload_config` strict-parse the file first and
+/// surface the error so the live config stays intact.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_reload_with_invalid_toml_returns_error_and_preserves_live_config() {
+    let h = boot_router_with_api_key(API_KEY).await;
+
+    // Capture the live `default_model` BEFORE the bad reload so we can prove
+    // it survived. The harness boots with `model = "test-model"`.
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let before: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    let before_model = before
+        .get("default_model")
+        .and_then(|m| m.get("model"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
+    assert_eq!(
+        before_model, "test-model",
+        "harness must seed default_model.model = test-model"
+    );
+
+    // Write a config.toml with a TOML duplicate-key error. This mirrors the
+    // exact failure shape from the user's report: two `[web.searxng]` sections.
+    let bad_toml =
+        "[web.searxng]\nurl = \"http://first\"\n\n[web.searxng]\nurl = \"http://second\"\n";
+    std::fs::write(h.home.join("config.toml"), bad_toml).expect("write bad config.toml");
+
+    // Reload must report a parse error (400) — NOT silently apply defaults (200).
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/config/reload")
+        .header(header::AUTHORIZATION, format!("Bearer {API_KEY}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = send(h.app.clone(), req).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "bad TOML must produce a 400 with an explicit error, not a 200 + silent defaults; body={}",
+        String::from_utf8_lossy(&body)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    let err_str = json
+        .get("error")
+        .and_then(|e| e.as_str())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        err_str.contains("invalid TOML") && err_str.contains("live config unchanged"),
+        "error must be operator-actionable; got: {err_str}"
+    );
+
+    // Live config must be unchanged — the failed reload did not blow away
+    // `default_model.model` (which is the symptom that broke the dashboard).
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let after: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    let after_model = after
+        .get("default_model")
+        .and_then(|m| m.get("model"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    assert_eq!(
+        after_model, before_model,
+        "live default_model.model must be preserved after a failed reload"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/health/detail (#3776)
 //
