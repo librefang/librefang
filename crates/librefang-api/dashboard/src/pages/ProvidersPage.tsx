@@ -1275,19 +1275,23 @@ export function ProvidersPage() {
         </div>
       </div>
 
-      {/* Filter & batch */}
-      <div className="flex items-center justify-between gap-3 flex-wrap overflow-x-auto">
-        <FilterChips activeFilter={filterStatus} onChange={handleFilterChange} t={t} />
+      {/* Filter & batch — hidden when there's nothing to filter, so the
+          empty-state CTA below isn't crowded by reachable/unreachable
+          chips that have no targets. */}
+      {configuredCount > 0 && (
+        <div className="flex items-center justify-between gap-3 flex-wrap overflow-x-auto">
+          <FilterChips activeFilter={filterStatus} onChange={handleFilterChange} t={t} />
 
-        {selectedIds.size > 0 && (
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-bold text-text-dim">{selectedIds.size} selected</span>
-            <Button variant="secondary" size="sm" onClick={handleBatchTest} leftIcon={<Zap className="w-3 h-3" />}>
-              {t("providers.batch_test")}
-            </Button>
-          </div>
-        )}
-      </div>
+          {selectedIds.size > 0 && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-text-dim">{selectedIds.size} selected</span>
+              <Button variant="secondary" size="sm" onClick={handleBatchTest} leftIcon={<Zap className="w-3 h-3" />}>
+                {t("providers.batch_test")}
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="flex flex-col gap-4">
       {providersQuery.isLoading ? (
