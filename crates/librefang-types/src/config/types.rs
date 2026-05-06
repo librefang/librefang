@@ -2831,6 +2831,29 @@ pub struct KernelConfig {
     /// configured).
     #[serde(default = "default_cron_session_warn_total_tokens")]
     pub cron_session_warn_total_tokens: Option<u64>,
+    /// Compaction strategy applied when the cron session exceeds
+    /// `cron_session_max_tokens` or `cron_session_max_messages` (#3693).
+    ///
+    /// - `"prune"` (default) — drop oldest messages from the front until the
+    ///   budget is satisfied. Identical to the pre-#3693 behaviour.
+    /// - `"summarize_trim"` — summarize the messages that would be dropped with
+    ///   a lightweight LLM call, replace them with a single synthetic summary
+    ///   message, then keep the most recent
+    ///   `cron_session_compaction_keep_recent` messages verbatim. Falls back to
+    ///   `prune` (with a `tracing::warn!`) when the LLM call fails.
+    ///
+    /// Only takes effect when at least one size cap (`cron_session_max_tokens`
+    /// or `cron_session_max_messages`) is configured. The field is ignored and
+    /// session-mode-`new` jobs always skip this path entirely.
+    #[serde(default)]
+    pub cron_session_compaction_mode: CronCompactionMode,
+    /// Number of recent messages to preserve verbatim after summarization when
+    /// `cron_session_compaction_mode = "summarize_trim"` is active.
+    ///
+    /// The LLM summary replaces everything older than the kept tail. Must be at
+    /// least 1; values below `1` are treated as `1`. Default: `8`.
+    #[serde(default = "default_cron_session_compaction_keep_recent")]
+    pub cron_session_compaction_keep_recent: usize,
     /// Config include files — loaded and deep-merged before the root config.
     /// Paths are relative to the root config file's directory.
     /// Security: absolute paths and `..` components are rejected.
@@ -4051,6 +4074,41 @@ fn default_max_cron_jobs() -> usize {
     500
 }
 
+/// Compaction strategy for Persistent cron sessions (#3693).
+///
+/// Controls what happens when the session exceeds `cron_session_max_tokens`
+/// or `cron_session_max_messages` before a cron fire.
+///
+/// Configure in config.toml:
+/// ```toml
+/// cron_session_compaction_mode = "summarize_trim"
+/// cron_session_compaction_keep_recent = 8
+/// ```
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CronCompactionMode {
+    /// Drop oldest messages from the front of the session until the budget is
+    /// satisfied. Fast and deterministic, but lossy — dropped context is gone.
+    /// This is the historical behaviour and remains the default.
+    #[default]
+    Prune,
+    /// Summarize messages that would be dropped using an LLM call, then keep
+    /// the summary as a synthetic assistant message followed by the most recent
+    /// `cron_session_compaction_keep_recent` messages. Preserves semantic
+    /// continuity at the cost of a lightweight LLM round-trip per fire when the
+    /// session exceeds the budget. Falls back to `Prune` on LLM failure with a
+    /// `tracing::warn!`.
+    SummarizeTrim,
+}
+
+/// Default number of recent messages kept verbatim when
+/// `cron_session_compaction_mode = "summarize_trim"` runs (#3693).
+fn default_cron_session_compaction_keep_recent() -> usize {
+    8
+}
+
 /// Default warn fraction for cron session size (#3693): 80% of the
 /// effective token budget.
 fn default_cron_session_warn_fraction() -> Option<f64> {
@@ -4894,6 +4952,8 @@ impl Default for KernelConfig {
             cron_session_max_messages: None,
             cron_session_warn_fraction: default_cron_session_warn_fraction(),
             cron_session_warn_total_tokens: default_cron_session_warn_total_tokens(),
+            cron_session_compaction_mode: CronCompactionMode::default(),
+            cron_session_compaction_keep_recent: default_cron_session_compaction_keep_recent(),
             include: Vec::new(),
             exec_policy: ExecPolicy::default(),
             bindings: Vec::new(),

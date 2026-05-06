@@ -6694,3 +6694,93 @@ async fn budget_config_concurrent_writers_no_lost_update() {
 
     kernel.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// cron_compute_keep_count (#3693 Gap 4)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cron_compute_keep_count_message_cap_only() {
+    use librefang_types::message::Message;
+
+    // 10 messages, message cap = 4 → keep the newest 4.
+    let messages: Vec<Message> = (0..10).map(|i| Message::user(format!("msg {i}"))).collect();
+    let keep = cron_compute_keep_count(&messages, Some(4), None);
+    assert_eq!(keep, 4, "message cap should keep newest 4");
+
+    // Verify which messages survive: indices 6..10 (msg 6 through msg 9).
+    let kept: Vec<_> = messages[messages.len() - keep..].to_vec();
+    assert_eq!(kept[0].content.text_content(), "msg 6");
+    assert_eq!(kept[3].content.text_content(), "msg 9");
+}
+
+#[test]
+fn cron_compute_keep_count_token_cap_trims_front() {
+    use librefang_runtime::compactor::estimate_token_count;
+    use librefang_types::message::Message;
+
+    // 20 short messages; token estimate of the full set determines the budget.
+    let messages: Vec<Message> = (0..20)
+        .map(|i| Message::user(format!("message content number {:04}", i)))
+        .collect();
+
+    let total_est = estimate_token_count(&messages, None, None);
+    assert!(total_est > 0);
+
+    // Budget = ~half → should keep fewer than 20 messages.
+    let half_budget = (total_est / 2) as u64;
+    let keep = cron_compute_keep_count(&messages, None, Some(half_budget));
+    assert!(
+        keep < 20,
+        "token cap should drop some messages, keep={keep}"
+    );
+    assert!(keep > 0, "must keep at least 1 message");
+
+    // The kept tail must fit within budget.
+    let start = messages.len() - keep;
+    let tail_est = estimate_token_count(&messages[start..], None, None);
+    assert!(
+        tail_est <= half_budget as usize,
+        "kept tail ({tail_est}) must fit within budget ({half_budget})"
+    );
+}
+
+#[test]
+fn cron_compute_keep_count_message_cap_applied_before_token_cap() {
+    use librefang_runtime::compactor::estimate_token_count;
+    use librefang_types::message::Message;
+
+    // 10 messages; message cap = 5 narrows to 5 first, then token cap is
+    // applied to those 5. The result must be ≤ 5.
+    let messages: Vec<Message> = (0..10)
+        .map(|i| Message::user("x".repeat(200 + i * 10)))
+        .collect();
+
+    let after_msg = 5usize;
+    let tail_after_msg = &messages[messages.len() - after_msg..];
+    let est_5 = estimate_token_count(tail_after_msg, None, None);
+    // Set token budget to 70% of the 5-message estimate → must trim further.
+    let budget = (est_5 as f64 * 0.7) as u64;
+
+    let keep = cron_compute_keep_count(&messages, Some(after_msg), Some(budget));
+    assert!(
+        keep <= after_msg,
+        "keep ({keep}) should be ≤ message cap ({after_msg})"
+    );
+}
+
+#[test]
+fn cron_compute_keep_count_no_caps_returns_all() {
+    use librefang_types::message::Message;
+    let messages: Vec<Message> = (0..8).map(|i| Message::user(format!("m{i}"))).collect();
+    let keep = cron_compute_keep_count(&messages, None, None);
+    assert_eq!(keep, 8, "no caps → keep all");
+}
+
+#[test]
+fn cron_compute_keep_count_empty_messages() {
+    use librefang_types::message::Message;
+    let messages: Vec<Message> = vec![];
+    let keep = cron_compute_keep_count(&messages, Some(4), Some(1000));
+    assert_eq!(keep, 0, "empty slice → keep 0");
+}
