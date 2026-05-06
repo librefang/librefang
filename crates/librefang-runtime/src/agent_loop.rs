@@ -11424,4 +11424,165 @@ mod tests {
             "outcome=success counter must be recorded for successful tool calls"
         );
     }
+
+    // ── Incognito persistence guards (refs #4073) ──────────────────────────
+    //
+    // These two tests prove the `LoopOptions::incognito` guard at the
+    // `finalize_successful_end_turn` save site actually skips the SQLite
+    // write. Replaces the earlier `test_incognito_message_does_not_persist_session`
+    // integration test which never reached the save site (it used a
+    // misconfigured provider so the LLM call failed before any save was
+    // attempted, making the assertion vacuously true regardless of whether
+    // the guard was wired in).
+
+    /// Control: a normal end-turn with `incognito: false` MUST persist the
+    /// session via `finalize_successful_end_turn`. If this fails, the
+    /// incognito test below loses its meaning (it might be passing because
+    /// the save path is broken, not because the guard worked).
+    #[tokio::test]
+    async fn test_normal_turn_persists_session_as_incognito_control() {
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let session_id = librefang_types::agent::SessionId::new();
+        let mut session = librefang_memory::session::Session {
+            id: session_id,
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+        };
+        let manifest = test_manifest();
+        let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
+
+        run_agent_loop(
+            &manifest,
+            "Say hello",
+            &mut session,
+            &memory,
+            driver,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &LoopOptions::default(),
+        )
+        .await
+        .expect("loop should complete");
+
+        let persisted = memory
+            .get_session(session_id)
+            .expect("get_session must not error");
+        assert!(
+            persisted.is_some(),
+            "control: normal (non-incognito) end-turn MUST persist session — \
+             if this fails, the incognito test below tests nothing",
+        );
+        let persisted = persisted.unwrap();
+        assert!(
+            persisted.messages.len() >= 2,
+            "control: normal end-turn must persist user msg + assistant reply, got {} msgs",
+            persisted.messages.len(),
+        );
+    }
+
+    /// `LoopOptions::incognito = true` MUST suppress the SQLite write at
+    /// `finalize_successful_end_turn` even on a clean end-turn.
+    #[tokio::test]
+    async fn test_incognito_skips_session_save_on_end_turn() {
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let session_id = librefang_types::agent::SessionId::new();
+        let mut session = librefang_memory::session::Session {
+            id: session_id,
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+        };
+        let manifest = test_manifest();
+        let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
+        let opts = LoopOptions {
+            incognito: true,
+            ..LoopOptions::default()
+        };
+
+        let result = run_agent_loop(
+            &manifest,
+            "Say hello",
+            &mut session,
+            &memory,
+            driver,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &opts,
+        )
+        .await
+        .expect("loop should complete");
+
+        // The LLM must still have produced a normal response — incognito
+        // only suppresses persistence, not the turn itself.
+        assert_eq!(result.response, "Hello from the agent!");
+
+        // Session row must NOT exist in SQLite — `save_session_async` is
+        // skipped at every site under the `incognito` guard.
+        let persisted = memory
+            .get_session(session_id)
+            .expect("get_session must not error");
+        assert!(
+            persisted.is_none(),
+            "incognito turn MUST NOT persist session to SQLite, got: {persisted:?}",
+        );
+
+        // The in-memory `session` object held by the caller still reflects
+        // the turn — the LLM saw full context and the assistant reply was
+        // appended in-process. Only the disk write was suppressed.
+        assert!(
+            session.messages.len() >= 2,
+            "in-memory session must still contain user msg + assistant reply (only the \
+             SQLite write is suppressed) — got {} msgs",
+            session.messages.len(),
+        );
+    }
 }
