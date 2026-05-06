@@ -95,9 +95,6 @@ fn agent_manifest_tool_exec_backend_field_round_trips() {
         module = "builtin:chat"
         tool_exec_backend = "ssh"
 
-        [schedule]
-        kind = "manual"
-
         [model]
         provider = "ollama"
         model = "test-model"
@@ -235,7 +232,8 @@ async fn end_to_end_resolution_local_runs_command() {
 
     // 5. Run a benign command. POSIX-only — the test runners we ship
     //    (Ubuntu CI + macOS CI) all have `sh`.
-    if cfg!(unix) {
+    #[cfg(unix)]
+    {
         let outcome = backend
             .run_command(librefang_runtime::tool_exec_backend::ExecSpec::new(
                 "echo end-to-end",
@@ -249,4 +247,9 @@ async fn end_to_end_resolution_local_runs_command() {
             outcome.stdout
         );
     }
+    // Silence unused-variable warning on non-unix platforms — we
+    // still want the build phases (resolver + factory) to be
+    // exercised on Windows CI even when the dispatch step is gated.
+    #[cfg(not(unix))]
+    let _ = backend;
 }

@@ -121,10 +121,8 @@ fn build_backend_daytona_without_subtable_or_feature_errors() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn end_to_end_local_dispatch_runs_command() {
-    if !cfg!(unix) {
-        return; // POSIX-only smoke
-    }
     // 1. Operator's config.toml — empty / no [tool_exec] section.
     let cfg: KernelConfig = toml::from_str("").unwrap();
     assert_eq!(cfg.tool_exec.kind, BackendKind::Local);
