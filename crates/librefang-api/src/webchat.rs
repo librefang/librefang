@@ -82,6 +82,24 @@ pub async fn logo_png() -> impl IntoResponse {
     )
 }
 
+/// GET /boss-libre.png — Serve the BossFang mascot logo embedded from the
+/// Vite build output. `App.tsx` references `/boss-libre.png` directly (not
+/// under `/dashboard/`), so it needs its own top-level route.
+pub async fn boss_libre_png() -> impl IntoResponse {
+    match REACT_DIST.get_file("boss-libre.png") {
+        Some(f) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "public, max-age=86400, immutable"),
+            ],
+            f.contents().to_vec(),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "boss-libre.png not found").into_response(),
+    }
+}
+
 /// GET /favicon.ico — Serve the BossFang favicon.
 pub async fn favicon_ico() -> impl IntoResponse {
     (
