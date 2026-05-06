@@ -15044,6 +15044,11 @@ system_prompt = "You are a helpful assistant."
             );
         }
 
+        let drained = self.workflows.drain_on_shutdown();
+        if drained > 0 {
+            info!(drained, "Paused in-flight workflow runs for shutdown");
+        }
+
         info!(
             "LibreFang kernel shut down ({} agents preserved)",
             self.registry.list().len()

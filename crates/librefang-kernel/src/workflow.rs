@@ -885,6 +885,45 @@ impl WorkflowEngine {
         recovered
     }
 
+    /// Drain in-flight workflow runs on graceful shutdown.
+    ///
+    /// Transitions every `Running` / `Pending` run to `Paused` so they
+    /// survive the restart and can be resumed on next boot. This is safe
+    /// because a graceful shutdown IS a clean boundary — unlike a crash,
+    /// we know the process reached this point without mid-write corruption.
+    ///
+    /// At next boot, `recover_stale_running_runs` will find these (now
+    /// loaded from the persisted JSON) and either auto-resume or mark
+    /// them failed depending on the configured stale timeout.
+    pub fn drain_on_shutdown(&self) -> usize {
+        let now = Utc::now();
+        let mut drained = 0usize;
+        for mut entry in self.runs.iter_mut() {
+            let run = entry.value_mut();
+            if !matches!(
+                run.state,
+                WorkflowRunState::Running | WorkflowRunState::Pending
+            ) {
+                continue;
+            }
+            info!(
+                run_id = %run.id,
+                state = ?run.state,
+                "Pausing in-flight workflow run for shutdown"
+            );
+            run.state = WorkflowRunState::Paused {
+                resume_token: Uuid::new_v4(),
+                reason: "Interrupted by daemon shutdown".to_string(),
+                paused_at: now,
+            };
+            drained += 1;
+        }
+        if drained > 0 || !self.runs.is_empty() {
+            self.persist_runs();
+        }
+        drained
+    }
+
     /// List all workflow runs (optionally filtered by state).
     pub async fn list_runs(&self, state_filter: Option<&str>) -> Vec<WorkflowRun> {
         self.runs
@@ -4342,6 +4381,78 @@ prompt_template = "do {{x}}"
 
             assert!(engine.runs.contains_key(&completed_id));
             assert!(!engine.runs.contains_key(&running_id));
+        }
+    }
+
+    #[test]
+    fn test_drain_on_shutdown_pauses_running_and_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let completed = make_terminal_run(WorkflowRunState::Completed);
+        let completed_id = completed.id;
+        let running = WorkflowRun {
+            id: WorkflowRunId::new(),
+            workflow_id: WorkflowId::new(),
+            workflow_name: "in-progress".to_string(),
+            input: "data".to_string(),
+            state: WorkflowRunState::Running,
+            step_results: vec![],
+            output: None,
+            error: None,
+            started_at: Utc::now(),
+            completed_at: None,
+            pause_request: None,
+            paused_step_index: None,
+            paused_variables: BTreeMap::new(),
+            paused_current_input: None,
+        };
+        let running_id = running.id;
+        let pending = WorkflowRun {
+            id: WorkflowRunId::new(),
+            workflow_id: WorkflowId::new(),
+            workflow_name: "queued".to_string(),
+            input: "data".to_string(),
+            state: WorkflowRunState::Pending,
+            step_results: vec![],
+            output: None,
+            error: None,
+            started_at: Utc::now(),
+            completed_at: None,
+            pause_request: None,
+            paused_step_index: None,
+            paused_variables: BTreeMap::new(),
+            paused_current_input: None,
+        };
+        let pending_id = pending.id;
+
+        {
+            let engine = WorkflowEngine::new_with_persistence(tmp.path());
+            engine.runs.insert(completed.id, completed);
+            engine.runs.insert(running.id, running);
+            engine.runs.insert(pending.id, pending);
+            let drained = engine.drain_on_shutdown();
+            assert_eq!(drained, 2);
+        }
+
+        // Reload and verify all 3 runs survived (completed + 2 paused).
+        {
+            let engine = WorkflowEngine::new_with_persistence(tmp.path());
+            let count = engine.load_runs().unwrap();
+            assert_eq!(count, 3);
+
+            assert!(matches!(
+                engine.runs.get(&completed_id).unwrap().state,
+                WorkflowRunState::Completed
+            ));
+
+            let r = engine.runs.get(&running_id).unwrap();
+            assert!(
+                matches!(r.state, WorkflowRunState::Paused { ref reason, .. } if reason == "Interrupted by daemon shutdown")
+            );
+
+            let p = engine.runs.get(&pending_id).unwrap();
+            assert!(
+                matches!(p.state, WorkflowRunState::Paused { ref reason, .. } if reason == "Interrupted by daemon shutdown")
+            );
         }
     }
 
