@@ -666,6 +666,126 @@ async fn config_reload_with_invalid_toml_returns_error_and_preserves_live_config
     );
 }
 
+/// Internal helper: drop a `config.toml` into the harness's home dir,
+/// POST `/api/config/reload`, and assert that it returns 400 *and* that
+/// `GET /api/config` still reports the seeded `default_model.model`.
+///
+/// Used by the next two regressions to cover the two non-syntax failure
+/// modes that `try_load_config` (introduced in #4664) refuses: a
+/// deserialize-shape mismatch and a broken `include = [...]` chain. The
+/// duplicate-key TOML-syntax case has its own dedicated test above
+/// (preserved with its own assertion text so a regression on the syntax
+/// path stays distinguishable in test output).
+async fn assert_reload_rejects_and_preserves_default_model(
+    h: &RouterHarness,
+    bad_toml_filename: &str,
+    bad_toml_contents: &str,
+    extra_files: &[(&str, &str)],
+    failure_label: &str,
+) {
+    // Capture pre-reload `default_model.model`.
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let before: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    let before_model = before
+        .get("default_model")
+        .and_then(|m| m.get("model"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
+    assert_eq!(before_model, "test-model");
+
+    for (name, contents) in extra_files {
+        std::fs::write(h.home.join(name), contents)
+            .unwrap_or_else(|e| panic!("write helper file {name}: {e}"));
+    }
+    std::fs::write(h.home.join(bad_toml_filename), bad_toml_contents)
+        .expect("write bad config.toml");
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/config/reload")
+        .header(header::AUTHORIZATION, format!("Bearer {API_KEY}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = send(h.app.clone(), req).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "{failure_label} must produce a 400, not silent defaults; body={}",
+        String::from_utf8_lossy(&body)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    let err_str = json
+        .get("error")
+        .and_then(|e| e.as_str())
+        .unwrap_or("")
+        .to_string();
+    // Every reload-time rejection MUST go through the strict loader's
+    // `try_load_config` and be wrapped with the "live config unchanged"
+    // pledge, so future failure modes can be asserted with the same
+    // substring without needing to know which inner branch tripped.
+    assert!(
+        err_str.contains("live config unchanged"),
+        "{failure_label} error must carry the reload-boundary pledge; got: {err_str}"
+    );
+
+    let (status, body) = send(h.app.clone(), auth_get("/api/config")).await;
+    assert_eq!(status, StatusCode::OK);
+    let after: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    let after_model = after
+        .get("default_model")
+        .and_then(|m| m.get("model"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    assert_eq!(
+        after_model, before_model,
+        "{failure_label}: live default_model.model must be preserved after a failed reload"
+    );
+}
+
+/// End-to-end regression for the second silent-defaults path that
+/// `try_load_config` (#4664) closes: TOML parses cleanly but a field
+/// has the wrong shape (`default_model = "string"` where a table is
+/// expected). Pre-fix, `load_config` would warn and return defaults
+/// and the reload would silently overwrite the live config; post-fix,
+/// `POST /api/config/reload` must return 400.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_reload_with_deserialize_shape_mismatch_returns_error_and_preserves_live_config() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    assert_reload_rejects_and_preserves_default_model(
+        &h,
+        "config.toml",
+        // TOML parses fine; deserialize fails because `default_model` is a struct.
+        "default_model = \"not-a-table\"\n",
+        &[],
+        "deserialize-shape mismatch",
+    )
+    .await;
+}
+
+/// End-to-end regression for the third silent-defaults path: root
+/// config is well-formed but `include = ["bad.toml"]` points at a
+/// file that fails TOML parsing. Pre-fix, `resolve_config_includes`'s
+/// error was swallowed by `load_config` and the reload proceeded with
+/// the root only; post-fix, the reload must refuse.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_reload_with_broken_include_returns_error_and_preserves_live_config() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    assert_reload_rejects_and_preserves_default_model(
+        &h,
+        "config.toml",
+        "include = [\"bad.toml\"]\nlog_level = \"debug\"\n",
+        &[(
+            "bad.toml",
+            // Same duplicate-key shape as #4664, just inside the include.
+            "[memory]\ndecay_rate = 0.1\n[memory]\ndecay_rate = 0.2\n",
+        )],
+        "broken include chain",
+    )
+    .await;
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/health/detail (#3776)
 //
