@@ -458,6 +458,11 @@ pub(crate) fn is_reserved_env_key(key: &str) -> bool {
 /// Shared by SSH and Daytona, which both build a remote shell line
 /// of the form `cd <wd> && K=V <cmd>`. Centralised here so the two
 /// backends cannot drift on what counts as "safe to leave bare".
+///
+/// Only the `ssh-backend` and `daytona-backend` features build a
+/// consumer; under default features the helper would be dead code,
+/// so it (and its tests) are gated to those configurations.
+#[cfg(any(feature = "ssh-backend", feature = "daytona-backend", test))]
 pub(crate) fn shell_quote(value: &str) -> String {
     if value
         .chars()
