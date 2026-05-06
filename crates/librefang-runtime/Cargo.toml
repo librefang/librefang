@@ -56,6 +56,14 @@ surrealdb = { workspace = true, optional = true }
 landlock = { version = "0.4", optional = true }
 seccompiler = { version = "0.5", optional = true }
 pdf-extract = "0.10"
+# SSH transport for the optional remote-exec backend (#3332).
+# Locked behind the `ssh-backend` feature so the dependency tree stays
+# trim for users who only need the local / Docker backends.
+# 0.45 is the last release that targets `rand 0.8`; later releases pull
+# `internal-russh-forked-ssh-key` which conflicts with the workspace's
+# `rand = "0.10"` direct dep on the rand_core trait surface.
+russh = { version = "0.45", optional = true }
+russh-keys = { version = "0.45", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -64,6 +72,11 @@ libc = "0.2"
 serial_test = "3"
 proptest = "1"
 metrics-util = { version = "0.20", features = ["debugging"] }
+# Used by the Daytona backend wire-shape tests (#4677 review). Same
+# version that `librefang-channels`, `librefang-llm-drivers`, and
+# `librefang-runtime-mcp` already pin in this workspace, so no new
+# transitive deps land in `Cargo.lock`.
+wiremock = "0.6"
 
 [features]
 default = ["surreal-backend"]
@@ -77,6 +90,11 @@ uar-driver = ["librefang-llm-drivers/uar-driver"]
 ## Storage backend selection (Phase 4 of `surrealdb-storage-swap`).
 surreal-backend = ["librefang-storage/surreal-backend", "librefang-memory/surreal-backend", "dep:surrealdb"]
 sqlite-backend = ["librefang-storage/sqlite-backend", "librefang-memory/sqlite-backend"]
+# Remote SSH tool-execution backend (#3332).
+ssh-backend = ["dep:russh", "dep:russh-keys"]
+# Daytona managed-sandbox tool-execution backend (#3332).
+# Uses the existing reqwest stack — no new top-level deps needed.
+daytona-backend = []
 
 
 [lints]

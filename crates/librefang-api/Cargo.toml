@@ -205,6 +205,8 @@ tempfile = { workspace = true }
 uuid = { workspace = true }
 http-body-util = "0.1"
 librefang-testing = { path = "../librefang-testing" }
+# tool-exec backend integration test (#3332)
+librefang-runtime = { path = "../librefang-runtime" }
 totp-rs = { workspace = true }
 
 [lints]

@@ -9,8 +9,6 @@
 # tracked under #3744.
 #
 # Excluded from the count:
-#   * The `LibreFangKernel` root re-export — that's the kernel's public
-#     entry-point used to construct `AppState` and is by design.
 #   * Comments and doc-comments — match `://` and `://!` after the line
 #     number prefix.
 #
@@ -19,6 +17,19 @@
 #     mcp_oauth,trajectory,triggers,workflow}.rs`. Those are the
 #     centralised facades; they show up in the count once each so the
 #     facade boundary itself is auditable from this script's output.
+#
+# Section 2 (hard gate, #3744): tracks direct `LibreFangKernel` type
+# references in production (non-test) source.  Allowlisted sites:
+#   - server.rs    — build_router / run_daemon take the concrete type because
+#                    channel_bridge::start_channel_bridge still requires it.
+#   - channel_bridge.rs — KernelBridgeAdapter + start_channel_bridge/
+#                    start_channel_bridge_with_config need ~30 additional
+#                    trait methods before they can be widened (tracked 2/N).
+#   - routes/mod.rs — AppState.kernel field, same blocker as channel_bridge.
+#   - routes/providers.rs — attach_probe_result needs model_catalog_update,
+#                    not yet on the trait.
+# Any file NOT in the allowlist that introduces a new direct LibreFangKernel
+# reference will fail CI.
 #
 # Usage:
 #   scripts/check-api-kernel-imports.sh
@@ -34,20 +45,22 @@ if [[ ! -d "${SRC_DIR}" ]]; then
     exit 2
 fi
 
+echo "=== Section 1: librefang_kernel::<internal> import surface ==="
 echo "Scanning: ${SRC_DIR}"
 echo
 
 # Prefer ripgrep when available; fall back to grep -R.
 if command -v rg >/dev/null 2>&1; then
     SCAN=(rg -n 'librefang_kernel::' "${SRC_DIR}")
+    SCAN_LFK=(rg -n 'LibreFangKernel' "${SRC_DIR}")
 else
     SCAN=(grep -RIn 'librefang_kernel::' "${SRC_DIR}")
+    SCAN_LFK=(grep -RIn 'LibreFangKernel' "${SRC_DIR}" --include='*.rs')
 fi
 
 # Strip comments and the LibreFangKernel root re-export.
 "${SCAN[@]}" \
     | grep -v ':[0-9]*://' \
-    | grep -v 'librefang_kernel::LibreFangKernel' \
     | sort \
     | tee /tmp/api-kernel-imports.txt
 
@@ -56,3 +69,73 @@ count=$(wc -l < /tmp/api-kernel-imports.txt | tr -d '[:space:]')
 echo
 echo "Total: ${count} non-comment refs to librefang_kernel::<internal> in librefang-api/src"
 echo "(See issue #3744 for the migration plan.)"
+echo
+
+# ---------------------------------------------------------------------------
+# Section 2 (hard gate): direct LibreFangKernel type references (#3744).
+# Allowlisted files may retain the concrete type while widening is in progress.
+# Any NEW file with a direct reference fails CI.
+# ---------------------------------------------------------------------------
+echo "=== Section 2: direct LibreFangKernel type references (hard gate #3744) ==="
+echo
+
+# Files explicitly allowlisted while widening is in progress (2/N).
+ALLOWLIST=(
+    "server.rs"
+    "channel_bridge.rs"
+    "routes/mod.rs"
+    "routes/providers.rs"
+)
+
+fail=0
+
+# Collect all non-comment lines referencing LibreFangKernel, skip test modules.
+#
+# Stripping comments via `sed 's|//.*$||'` rather than `grep -v '//.*LibreFangKernel'`:
+# the latter would also drop legitimate production lines that happen to carry
+# a trailing `// ...LibreFangKernel...` comment (e.g.
+# `pub fn boot_app(k: LibreFangKernel) -> AppState  // wraps LibreFangKernel`),
+# silently letting concrete-type leaks bypass the gate.  Stripping the
+# `//` tail first then re-grepping for the bare identifier catches both
+# leading and trailing comment forms while keeping production code in the
+# scan.  Standard caveat: `//` inside string literals would be stripped
+# too, but no such literal currently mentions `LibreFangKernel` and
+# adding one would deserve a code review anyway.
+"${SCAN_LFK[@]}" \
+    | sed 's|//.*$||' \
+    | grep 'LibreFangKernel' \
+    | grep -v '#\[cfg(test' \
+    | grep -v 'boot_with_config' \
+    > /tmp/api-lfk-refs.txt 2>/dev/null || true
+
+while IFS= read -r line; do
+    # Extract filename relative to SRC_DIR.
+    filepath="${line%%:*}"
+    relpath="${filepath#${SRC_DIR}/}"
+
+    # Check if this file is in the allowlist.
+    allowed=0
+    for allowed_file in "${ALLOWLIST[@]}"; do
+        if [[ "${relpath}" == "${allowed_file}" ]]; then
+            allowed=1
+            break
+        fi
+    done
+
+    if [[ "${allowed}" -eq 0 ]]; then
+        echo "::error::Unexpected direct LibreFangKernel reference in ${relpath} (#3744 regression):"
+        echo "  ${line}"
+        fail=1
+    fi
+done < /tmp/api-lfk-refs.txt
+
+if [[ "${fail}" -eq 1 ]]; then
+    echo
+    echo "LibreFangKernel concrete-type leak detected outside allowlist." >&2
+    echo "Narrow the call site to a trait method or add it to the allowlist" >&2
+    echo "in scripts/check-api-kernel-imports.sh with a comment explaining why." >&2
+    exit 1
+fi
+
+echo "OK — all direct LibreFangKernel references are in the allowlisted files."
+echo "(Allowlist: ${ALLOWLIST[*]})"

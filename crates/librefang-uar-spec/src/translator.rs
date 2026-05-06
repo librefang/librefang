@@ -176,6 +176,7 @@ pub fn artifact_to_manifest(artifact: &AgentArtifact) -> Result<AgentManifest> {
         max_history_messages: None,
         max_concurrent_invocations: None,
         cache_context: false,
+        tool_exec_backend: None,
     })
 }
 

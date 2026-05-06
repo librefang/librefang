@@ -179,10 +179,10 @@ impl AuxClient {
     /// list. Provider drivers expand the alias before sending the request.
     fn default_chain(&self, task: AuxTask) -> Vec<String> {
         match task {
-            // Compression is a high-volume side task. Cheap haiku-class
+            // Compression and fold are high-volume side tasks. Cheap haiku-class
             // models are good enough; OpenRouter is preferred because most
             // adopters of "auxiliary cheap tier" already have a key there.
-            AuxTask::Compression | AuxTask::Title | AuxTask::Search => vec![
+            AuxTask::Compression | AuxTask::Title | AuxTask::Search | AuxTask::Fold => vec![
                 "openrouter:anthropic/claude-3-5-haiku".to_string(),
                 "anthropic:haiku".to_string(),
                 "openai:gpt-4o-mini".to_string(),

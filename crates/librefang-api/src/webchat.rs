@@ -1,21 +1,84 @@
 //! Dashboard pages and static assets served by the API daemon.
 //!
-//! Assets are compiled into the binary at build time via `include_dir!`.
-//! `crates/librefang-api/build.rs` runs `pnpm run build` in the
-//! `dashboard/` sub-crate and the Vite output lands in `static/react/`,
-//! which is then embedded here.
+//! Assets are resolved in order:
+//! 1. Runtime directory: `~/.librefang/dashboard/` (downloaded/updated at startup)
+//! 2. Compile-time embedded: `static/react/` via `include_dir!` (fallback)
 //!
-//! There is no runtime download or sync step — the binary is self-contained.
+//! This allows the dashboard to be updated without recompiling, while still
+//! providing a working dashboard in single-binary distributions.
+//!
+//! ## Opt-out: embedded-only mode
+//!
+//! Setting `LIBREFANG_DASHBOARD_EMBEDDED_ONLY=1` pins the resolver to the
+//! compile-time-embedded assets and short-circuits [`sync_dashboard`]. This is
+//! the right setting when you want the dashboard served by the daemon to
+//! exactly match the binary you built, e.g.:
+//!
+//! - Iterating on the dashboard locally against your own `cargo build`.
+//! - Running in a packaged environment where the dashboard is intentionally
+//!   frozen to the build artifact and must not mutate at runtime.
+//!
+//! Accepted truthy values: `1`, `true`, `yes`, `on` (case-insensitive). Any
+//! other value — or the absence of the variable — leaves the default
+//! runtime-sync behavior intact.
 
-use axum::extract::Path;
+use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use include_dir::{include_dir, Dir};
+use std::sync::Arc;
 
 /// Compile-time ETag based on the crate version.
 const ETAG: &str = concat!("\"librefang-", env!("CARGO_PKG_VERSION"), "\"");
 
-/// Compile-time embedded dashboard built by `pnpm run build`.
+/// Loading page shown while dashboard assets are being downloaded.
+const LOADING_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta http-equiv="refresh" content="3">
+<title>BossFang</title>
+<style>
+  body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f8f9fa;color:#333}
+  .c{text-align:center}
+  .spinner{width:32px;height:32px;border:3px solid #e0e0e0;border-top-color:#E04E28;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="c">
+  <div class="spinner"></div>
+  <p>Downloading dashboard assets…</p>
+</div>
+</body>
+</html>"#;
+
+/// Error page shown when dashboard sync failed and no embedded fallback exists.
+const DASHBOARD_UNAVAILABLE_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>BossFang</title>
+<style>
+  body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f8f9fa;color:#333}
+  .c{max-width:520px;padding:24px;text-align:center}
+  h1{font-size:20px;margin:0 0 12px}
+  p{line-height:1.5;margin:0 0 12px}
+  code{background:#eee;padding:2px 6px;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="c">
+  <h1>Dashboard assets unavailable</h1>
+  <p>BossFang could not load the dashboard assets from disk, and the runtime download did not complete.</p>
+  <p>Restart the app after network access is available, or build the desktop app with embedded dashboard assets.</p>
+</div>
+</body>
+</html>"#;
+
+/// Compile-time embedded dashboard (fallback).
 static REACT_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/static/react");
 
 /// Embedded logo PNG for single-binary deployment.
@@ -31,13 +94,22 @@ const DASHBOARD_SYNC_ERROR_FILE: &str = ".sync-error";
 
 /// Environment variable that, when set to a truthy value, forces the dashboard
 /// resolver to serve the compile-time-embedded assets and skips the release
-/// sync entirely.
+/// sync entirely. See the module-level docs for details.
 const EMBEDDED_ONLY_ENV: &str = "LIBREFANG_DASHBOARD_EMBEDDED_ONLY";
 
+fn embedded_dashboard_available() -> bool {
+    REACT_DIST.get_file("index.html").is_some()
+}
+
+/// Returns `true` when the operator has opted into embedded-only dashboard
+/// mode via [`EMBEDDED_ONLY_ENV`]. Any of `1`, `true`, `yes`, `on` (case
+/// insensitive) counts as truthy.
 fn embedded_only_mode() -> bool {
     is_embedded_only_value(std::env::var(EMBEDDED_ONLY_ENV).ok().as_deref())
 }
 
+/// Pure parser split out so tests can exercise the value grammar without
+/// touching process-global environment state.
 fn is_embedded_only_value(raw: Option<&str>) -> bool {
     match raw {
         Some(v) => {
@@ -52,12 +124,29 @@ fn dashboard_sync_error_path(home_dir: &std::path::Path) -> std::path::PathBuf {
     home_dir.join("dashboard").join(DASHBOARD_SYNC_ERROR_FILE)
 }
 
-#[cfg(test)]
+/// Resolve a dashboard file: try runtime dir first, then embedded fallback.
+///
+/// In embedded-only mode (see [`embedded_only_mode`]) the runtime directory
+/// is skipped entirely so the compile-time assets win regardless of whatever
+/// stale copy may still be sitting in `$LIBREFANG_HOME/dashboard/` from a
+/// previous sync.
+fn resolve_dashboard_file(
+    home_dir: Option<&std::path::Path>,
+    relative_path: &str,
+) -> Option<Vec<u8>> {
+    resolve_dashboard_file_with_mode(home_dir, relative_path, embedded_only_mode())
+}
+
+/// Testable variant of [`resolve_dashboard_file`] that takes the
+/// embedded-only decision as a parameter instead of reading it from the
+/// environment. Keeps the public entry point ergonomic while letting unit
+/// tests exercise both branches deterministically.
 fn resolve_dashboard_file_with_mode(
     home_dir: Option<&std::path::Path>,
     relative_path: &str,
     embedded_only: bool,
 ) -> Option<Vec<u8>> {
+    // 1. Try runtime directory (skipped when embedded-only mode is on).
     if !embedded_only {
         if let Some(home) = home_dir {
             let runtime_path = home.join("dashboard").join(relative_path);
@@ -66,6 +155,8 @@ fn resolve_dashboard_file_with_mode(
             }
         }
     }
+
+    // 2. Fall back to embedded
     REACT_DIST
         .get_file(relative_path)
         .map(|f| f.contents().to_vec())
@@ -142,9 +233,10 @@ pub async fn locale_ja() -> impl IntoResponse {
 }
 
 /// GET / — Serve the React dashboard shell.
-pub async fn webchat_page() -> impl IntoResponse {
-    match REACT_DIST.get_file("index.html") {
-        Some(f) => (
+pub async fn webchat_page(State(state): State<Arc<crate::routes::AppState>>) -> impl IntoResponse {
+    let home_dir = Some(state.kernel.home_dir().to_path_buf());
+    match resolve_dashboard_file(home_dir.as_deref(), "index.html") {
+        Some(data) => (
             [
                 (header::CONTENT_TYPE, "text/html; charset=utf-8"),
                 (header::ETAG, ETAG),
@@ -153,31 +245,51 @@ pub async fn webchat_page() -> impl IntoResponse {
                     "public, max-age=300, must-revalidate",
                 ),
             ],
-            f.contents().to_vec(),
+            data,
         )
             .into_response(),
-        None => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "dashboard not built — run pnpm build in crates/librefang-api/dashboard",
-        )
-            .into_response(),
+        None => {
+            let body = if embedded_dashboard_available() {
+                LOADING_HTML
+            } else if let Some(home) = home_dir.as_deref() {
+                if dashboard_sync_error_path(home).exists() {
+                    DASHBOARD_UNAVAILABLE_HTML
+                } else {
+                    LOADING_HTML
+                }
+            } else {
+                LOADING_HTML
+            };
+            (
+                [
+                    (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ],
+                body,
+            )
+                .into_response()
+        }
     }
 }
 
 /// GET /dashboard/{*path} — Serve React build assets.
-pub async fn react_asset(Path(path): Path<String>) -> Response {
+pub async fn react_asset(
+    State(state): State<Arc<crate::routes::AppState>>,
+    Path(path): Path<String>,
+) -> Response {
     if path.contains("..") {
         return (StatusCode::BAD_REQUEST, "invalid asset path").into_response();
     }
 
     let asset_path = path.trim_start_matches('/');
-    match REACT_DIST.get_file(asset_path) {
-        Some(f) => (
+    let home_dir = Some(state.kernel.home_dir().to_path_buf());
+    match resolve_dashboard_file(home_dir.as_deref(), asset_path) {
+        Some(data) => (
             [
                 (header::CONTENT_TYPE, content_type_for(asset_path)),
                 (header::CACHE_CONTROL, "public, max-age=86400, immutable"),
             ],
-            f.contents().to_vec(),
+            data,
         )
             .into_response(),
         None => {
@@ -188,11 +300,8 @@ pub async fn react_asset(Path(path): Path<String>) -> Response {
                 .next()
                 .is_some_and(|s| s.contains('.'));
             if !has_ext {
-                if let Some(index) = REACT_DIST.get_file("index.html") {
-                    return (
-                        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                        index.contents().to_vec(),
-                    )
+                if let Some(index) = resolve_dashboard_file(home_dir.as_deref(), "index.html") {
+                    return ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], index)
                         .into_response();
                 }
             }

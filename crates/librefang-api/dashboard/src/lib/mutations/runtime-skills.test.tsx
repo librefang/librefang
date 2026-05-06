@@ -13,9 +13,20 @@ import {
   useFangHubInstall,
   useUninstallSkill,
   useClawHubInstall,
+  useClawHubCnInstall,
   useSkillHubInstall,
+  useReloadSkills,
 } from "./skills";
-import { runtimeKeys, overviewKeys, skillKeys, fanghubKeys, sessionKeys } from "../queries/keys";
+import {
+  runtimeKeys,
+  overviewKeys,
+  skillKeys,
+  fanghubKeys,
+  clawhubKeys,
+  clawhubCnKeys,
+  skillhubKeys,
+  sessionKeys,
+} from "../queries/keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../../api", () => ({
@@ -31,9 +42,35 @@ vi.mock("../../api", () => ({
 vi.mock("../http/client", () => ({
   installSkill: vi.fn().mockResolvedValue({ status: "ok" }),
   clawhubInstall: vi.fn().mockResolvedValue({ status: "ok" }),
+  clawhubCnInstall: vi.fn().mockResolvedValue({ status: "ok" }),
   skillhubInstall: vi.fn().mockResolvedValue({ status: "ok" }),
   uninstallSkill: vi.fn().mockResolvedValue({ status: "ok" }),
+  reloadSkills: vi.fn().mockResolvedValue({ status: "ok" }),
+  createSkill: vi.fn().mockResolvedValue({ status: "ok" }),
+  evolveUpdateSkill: vi.fn().mockResolvedValue({ status: "ok" }),
+  evolvePatchSkill: vi.fn().mockResolvedValue({ status: "ok" }),
+  evolveRollbackSkill: vi.fn().mockResolvedValue({ status: "ok" }),
+  evolveDeleteSkill: vi.fn().mockResolvedValue({ status: "ok" }),
+  evolveWriteFile: vi.fn().mockResolvedValue({ status: "ok" }),
+  evolveRemoveFile: vi.fn().mockResolvedValue({ status: "ok" }),
 }));
+
+// Every install / uninstall / reload mutation must invalidate every hub
+// surface — see #4689. Keep this list in sync with
+// `invalidateAllSkillSurfaces` in mutations/skills.ts.
+const ALL_SKILL_SURFACE_KEYS = [
+  skillKeys.all,
+  fanghubKeys.all,
+  clawhubKeys.all,
+  clawhubCnKeys.all,
+  skillhubKeys.all,
+] as const;
+
+function expectAllSurfacesInvalidated(spy: ReturnType<typeof vi.spyOn>) {
+  for (const key of ALL_SKILL_SURFACE_KEYS) {
+    expect(spy).toHaveBeenCalledWith({ queryKey: key });
+  }
+}
 
 describe("useRestoreBackup", () => {
   it("invalidates runtimeKeys.backups() and overviewKeys.snapshot()", async () => {
@@ -57,7 +94,7 @@ describe("useRestoreBackup", () => {
 });
 
 describe("useFangHubInstall", () => {
-  it("invalidates skillKeys.all and fanghubKeys.all", async () => {
+  it("invalidates every skill surface (#4689)", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -68,15 +105,10 @@ describe("useFangHubInstall", () => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
 
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: skillKeys.all,
-    });
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: fanghubKeys.all,
-    });
+    expectAllSurfacesInvalidated(invalidateSpy);
   });
 
-  it("invalidates skillKeys.all and fanghubKeys.all with hand parameter", async () => {
+  it("invalidates every skill surface with hand parameter", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -87,12 +119,7 @@ describe("useFangHubInstall", () => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
 
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: skillKeys.all,
-    });
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: fanghubKeys.all,
-    });
+    expectAllSurfacesInvalidated(invalidateSpy);
   });
 });
 
@@ -194,7 +221,7 @@ describe("useShutdownServer", () => {
 });
 
 describe("useUninstallSkill", () => {
-  it("invalidates skillKeys.all", async () => {
+  it("invalidates every skill surface (#4689)", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -205,14 +232,12 @@ describe("useUninstallSkill", () => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
 
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: skillKeys.all,
-    });
+    expectAllSurfacesInvalidated(invalidateSpy);
   });
 });
 
 describe("useClawHubInstall", () => {
-  it("invalidates skillKeys.all", async () => {
+  it("invalidates every skill surface (#4689)", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -223,14 +248,28 @@ describe("useClawHubInstall", () => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
 
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: skillKeys.all,
+    expectAllSurfacesInvalidated(invalidateSpy);
+  });
+});
+
+describe("useClawHubCnInstall", () => {
+  it("invalidates every skill surface (#4689)", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => useClawHubCnInstall(), { wrapper });
+
+    result.current.mutate({ slug: "test-skill", version: "1.0.0" });
+    await vi.waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalled();
     });
+
+    expectAllSurfacesInvalidated(invalidateSpy);
   });
 });
 
 describe("useSkillHubInstall", () => {
-  it("invalidates skillKeys.all", async () => {
+  it("invalidates every skill surface (#4689)", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -241,8 +280,22 @@ describe("useSkillHubInstall", () => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
 
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: skillKeys.all,
+    expectAllSurfacesInvalidated(invalidateSpy);
+  });
+});
+
+describe("useReloadSkills", () => {
+  it("invalidates every skill surface (#4689)", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => useReloadSkills(), { wrapper });
+
+    result.current.mutate();
+    await vi.waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalled();
     });
+
+    expectAllSurfacesInvalidated(invalidateSpy);
   });
 });

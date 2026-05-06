@@ -7,7 +7,7 @@
       "name": "MIT",
       "url": "https://opensource.org/licenses/MIT"
     },
-    "version": "2026.5.2-beta8"
+    "version": "2026.5.6-beta.9"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -5423,6 +5423,7 @@
           "hands"
         ],
         "summary": "POST /api/hands/{hand_id}/activate — Activate a hand (spawns agent).",
+        "description": "Honours `Idempotency-Key` (#3637): when set, a duplicate request\nwith the same key + same body replays the cached response instead\nof activating a second hand instance. A different body under the\nsame key is rejected with 409 Conflict.",
         "operationId": "activate_hand",
         "parameters": [
           {
@@ -5455,6 +5456,9 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Idempotency-Key was reused with a different request body"
           }
         }
       }
@@ -9946,6 +9950,10 @@
               "$ref": "#/components/schemas/ParticipantRefSchema"
             },
             "description": "Optional group participant roster (Phase 2 §C addressee guard).\n\nForwarded by the WhatsApp gateway for group messages so the kernel's\naddressee guard (`is_addressed_to_other_participant`) can detect when\na turn is addressed to a named participant other than the agent.\n\n`#[serde(default)]` ensures backward compatibility for callers (Telegram,\ndirect API) that don't populate this field."
+          },
+          "incognito": {
+            "type": "boolean",
+            "description": "When true, this turn runs in **incognito mode**: session messages and\nproactive-memory writes are suppressed while memory reads remain\nfully operational. Useful for sensitive queries that should leave no\ntrace in the conversation history.\n\nDefaults to `false` (normal persistent turn)."
           },
           "is_group": {
             "type": "boolean",

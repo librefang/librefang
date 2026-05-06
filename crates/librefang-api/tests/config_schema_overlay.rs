@@ -177,3 +177,117 @@ fn every_root_level_field_exists_on_kernel_config() {
         missing.join("\n  ")
     );
 }
+
+#[test]
+fn every_kernel_config_struct_field_is_exposed_via_overlay() {
+    // The forward checks above guarantee that whatever the overlay
+    // references actually exists on KernelConfig. This is the reverse:
+    // every non-scalar KernelConfig top-level property (struct, map, vec)
+    // should either have a section descriptor in `x-sections` or appear in
+    // the curated exclusion list below.
+    //
+    // Why: closes #4678. The dashboard ConfigPage is fully schema-driven —
+    // a struct field added to KernelConfig that is never registered in
+    // `ui_sections_overlay()` is invisible in the dashboard, so the user
+    // can't reach it without editing config.toml on disk. This test makes
+    // that omission a build break.
+    //
+    // Excluded fields: those with dedicated dashboard pages (mcp_servers,
+    // users, etc.) and structural fields that have no UI representation
+    // (definitions/$schema metadata, taint_rules being authored via the
+    // dedicated TaintPolicyEditor, …). Add to this list with a comment
+    // when you intentionally leave a field out of ConfigPage.
+    const EXCLUDED: &[&str] = &[
+        // Dedicated pages render these directly.
+        "mcp_servers",          // /mcp-servers
+        "users",                // /users
+        "bindings",             // /agents
+        "provider_api_keys",    // /providers (sensitive too)
+        "auth_profiles",        // /users (sensitive structure)
+        "channel_role_mapping", // /users (channel→role auth derivation)
+        // Identity / flat scalars that ARE represented but as root_level
+        // entries on the synthetic "general" section, not as their own
+        // section descriptor. The `every_root_level_field_exists` test
+        // above guards their existence.
+        "config_version",
+        "home_dir",
+        "data_dir",
+        "log_dir",
+        "log_level",
+        "api_listen",
+        "api_key",
+        "cors_origin",
+        "trusted_hosts",
+        "trusted_proxies",
+        "trust_forwarded_for",
+        "allowed_mount_roots",
+        "network_enabled",
+        "agent_max_iterations",
+        "max_history_messages",
+        "default_routing",
+        "require_auth_for_reads",
+        "trusted_manifest_signers",
+        "dashboard_user",
+        "dashboard_pass",
+        "dashboard_pass_hash",
+        "mode",
+        "language",
+        "usage_footer",
+        "stable_prefix_mode",
+        "prompt_caching",
+        "workspaces_dir",
+        "max_cron_jobs",
+        "cron_session_max_tokens",
+        "cron_session_max_messages",
+        "cron_session_warn_fraction",
+        "cron_session_warn_total_tokens",
+        "include",
+        "strict_config",
+        "qwen_code_path",
+        "update_channel",
+        "tool_timeout_secs",
+        "max_upload_size_bytes",
+        "max_concurrent_bg_llm",
+        "max_agent_call_depth",
+        "max_request_body_bytes",
+        "workflow_stale_timeout_minutes",
+        "local_probe_interval_secs",
+    ];
+
+    let root = schema_root();
+    let top_properties = root
+        .get("properties")
+        .and_then(|v| v.as_object())
+        .expect("KernelConfig properties block");
+
+    let sections = cfg_routes::ui_sections_overlay();
+    let sections_arr = sections.as_array().unwrap();
+
+    let registered: std::collections::HashSet<&str> = sections_arr
+        .iter()
+        .filter_map(|d| d.get("struct_field").and_then(|v| v.as_str()))
+        .collect();
+
+    let mut unregistered: Vec<&str> = Vec::new();
+    for field in top_properties.keys() {
+        let f = field.as_str();
+        if registered.contains(f) {
+            continue;
+        }
+        if EXCLUDED.contains(&f) {
+            continue;
+        }
+        unregistered.push(f);
+    }
+    unregistered.sort();
+
+    assert!(
+        unregistered.is_empty(),
+        "KernelConfig fields with no `x-sections` descriptor and no entry in EXCLUDED:\n  {}\n\n\
+         These fields are invisible in the dashboard ConfigPage. Either:\n  \
+         1. Add a section descriptor to `ui_sections_overlay()` in routes/config.rs, or\n  \
+         2. Add the field name to EXCLUDED in this test with a comment naming the dedicated\n     \
+            page that handles it.",
+        unregistered.join("\n  ")
+    );
+}

@@ -1023,6 +1023,64 @@ pub async fn clawhub_install(
 
     match client.install(&req.slug, &skills_dir).await {
         Ok(result) => {
+            // #4689 — patch source provenance to ClawHub. Without this, the
+            // installed skill's manifest.source stays None and `listSkills()`
+            // surfaces it as `source.type = "local"`, which makes the
+            // dashboard's per-hub `isInstalledFromMarketplace("clawhub", slug)`
+            // check miss the freshly installed skill — the hub's "Install"
+            // button keeps showing as clickable until the user reloads. The
+            // ClawHubCn handler already does this; bringing ClawHub in line.
+            let skill_dir = skills_dir.join(&req.slug);
+            let manifest_path = skill_dir.join("skill.toml");
+            if manifest_path.exists() {
+                match std::fs::read_to_string(&manifest_path) {
+                    Ok(toml_str) => {
+                        match toml::from_str::<librefang_skills::SkillManifest>(&toml_str) {
+                            Ok(mut manifest) => {
+                                manifest.source = Some(librefang_skills::SkillSource::ClawHub {
+                                    slug: req.slug.clone(),
+                                    version: result.version.clone(),
+                                });
+                                match toml::to_string_pretty(&manifest) {
+                                    Ok(updated) => {
+                                        if let Err(e) = std::fs::write(&manifest_path, updated) {
+                                            tracing::warn!(
+                                                slug = %req.slug,
+                                                path = %manifest_path.display(),
+                                                "Failed to write provenance to skill.toml: {e}"
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            slug = %req.slug,
+                                            "Failed to serialize skill manifest for provenance patch: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    slug = %req.slug,
+                                    "Failed to parse skill.toml for provenance patch: {e}"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            slug = %req.slug,
+                            path = %manifest_path.display(),
+                            "Failed to read skill.toml for provenance patch: {e}"
+                        );
+                    }
+                }
+            }
+
+            // Reload so the kernel sees the patched provenance immediately —
+            // mirrors what reload_skills() does for the FangHub install path.
+            state.kernel.reload_skills();
+
             let warnings: Vec<serde_json::Value> = result
                 .warnings
                 .iter()
@@ -3235,7 +3293,11 @@ pub async fn hand_send_message(
     if !req.attachments.is_empty() {
         let image_blocks = super::agents::resolve_attachments(&state, &req.attachments);
         if !image_blocks.is_empty() {
-            super::agents::inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
+            super::agents::inject_attachments_into_session(
+                state.kernel.as_ref(),
+                agent_id,
+                image_blocks,
+            );
         }
     }
 
