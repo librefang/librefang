@@ -2697,6 +2697,31 @@ impl LibreFangKernel {
             warn!("Config: {}", w);
         }
 
+        // Tool-exec backend (#3332): validate the active subtable is
+        // present and well-formed. A misconfigured `kind = "ssh"` /
+        // `kind = "daytona"` aborts boot here rather than failing on
+        // the first tool call.
+        if let Err(e) = config.tool_exec.validate() {
+            return Err(KernelError::BootFailed(format!(
+                "tool_exec config invalid: {e}"
+            )));
+        }
+        // Honesty banner: trait-route dispatch is staged behind the
+        // existing tool_runner.rs call sites. Operators who set
+        // `kind != "local"` should know they're configuring a backend
+        // that will become active in a follow-up PR.
+        if config.tool_exec.kind != librefang_types::tool_exec::BackendKind::Local {
+            warn!(
+                kind = %config.tool_exec.kind.as_str(),
+                "tool_exec.kind = '{}' configured, but tool dispatch via the new \
+                 ToolExecBackend trait is not yet wired into tool_runner.rs \
+                 (tracked as a follow-up). Tool calls will continue to use the \
+                 legacy local/docker path until that lands. \
+                 See docs/architecture/tool-exec-backends.md.",
+                config.tool_exec.kind.as_str()
+            );
+        }
+
         // Check TOTP configuration consistency
         if config.approval.second_factor == librefang_types::approval::SecondFactor::Totp {
             let vault_path = config.home_dir.join("vault.enc");
@@ -4614,6 +4639,27 @@ system_prompt = "You are a helpful assistant."
         // sibling enforcement points (boot restore, hot reload,
         // update_manifest).
         validate_manifest_module_path(&manifest, &name)?;
+
+        // tool_exec backend (#3332): if the manifest pins a backend
+        // override, the matching subtable must exist on the global
+        // config — otherwise the agent would fail at the first tool
+        // call, not at spawn. We do this before locking the registry so
+        // a misconfigured override never advances past spawn.
+        if let Some(override_kind) = manifest.tool_exec_backend {
+            if let Err(e) = self
+                .config
+                .load()
+                .tool_exec
+                .validate_override(override_kind)
+            {
+                return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                    format!(
+                        "agent {name:?} tool_exec_backend = {:?} but {e}",
+                        override_kind.as_str()
+                    ),
+                )));
+            }
+        }
 
         // Use a deterministic agent ID derived from the agent name so the
         // same agent gets the same UUID across daemon restarts. This preserves
@@ -20029,8 +20075,8 @@ impl kernel_handle::ToolPolicy for LibreFangKernel {
             return t;
         }
         // 2. Best glob match — longest pattern wins (most specific first).
-        // HashMap iteration is unordered; picking the longest matching pattern
-        // gives deterministic resolution when multiple globs match.
+        // BTreeMap iteration is sorted by key; picking the longest matching
+        // pattern gives deterministic resolution when multiple globs match.
         let best = cfg
             .tool_timeouts
             .iter()

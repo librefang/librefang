@@ -2857,6 +2857,13 @@ pub struct KernelConfig {
     /// Docker container sandbox configuration.
     #[serde(default)]
     pub docker: DockerSandboxConfig,
+    /// Pluggable tool-execution backend selection (#3332).
+    /// Default: `local` — keeps the long-standing subprocess-on-daemon
+    /// behavior. Set to `ssh` / `daytona` (with the matching subtable)
+    /// to route tool exec to a remote / managed host. Per-agent
+    /// override available via `agent.toml: tool_exec_backend`.
+    #[serde(default)]
+    pub tool_exec: crate::tool_exec::ToolExecConfig,
     /// Device pairing configuration.
     #[serde(default)]
     pub pairing: PairingConfig,
@@ -3040,7 +3047,7 @@ pub struct KernelConfig {
     /// shell_exec    = 300
     /// ```
     #[serde(default)]
-    pub tool_timeouts: std::collections::HashMap<String, u64>,
+    pub tool_timeouts: std::collections::BTreeMap<String, u64>,
     /// Maximum upload size in bytes (default: 10 MB).
     /// Enterprise deployments may need larger file uploads.
     #[serde(default = "default_max_upload_size_bytes")]
@@ -4902,6 +4909,7 @@ impl Default for KernelConfig {
             canvas: CanvasConfig::default(),
             tts: TtsConfig::default(),
             docker: DockerSandboxConfig::default(),
+            tool_exec: crate::tool_exec::ToolExecConfig::default(),
             pairing: PairingConfig::default(),
             auth_profiles: BTreeMap::new(),
             thinking: None,
@@ -4947,7 +4955,7 @@ impl Default for KernelConfig {
             update_channel: UpdateChannel::default(),
             rate_limit: RateLimitConfig::default(),
             tool_timeout_secs: default_tool_timeout_secs(),
-            tool_timeouts: std::collections::HashMap::new(),
+            tool_timeouts: std::collections::BTreeMap::new(),
             max_upload_size_bytes: default_max_upload_size_bytes(),
             max_concurrent_bg_llm: default_max_concurrent_bg_llm(),
             max_agent_call_depth: default_max_agent_call_depth(),
