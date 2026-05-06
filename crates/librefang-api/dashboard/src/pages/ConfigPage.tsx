@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
-import { useRouter } from "@tanstack/react-router";
+import { Link, useRouter } from "@tanstack/react-router";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import {
@@ -31,14 +31,42 @@ import { TomlViewer } from "../components/TomlViewer";
 /* ------------------------------------------------------------------ */
 
 const CATEGORY_SECTIONS: Record<string, string[]> = {
-  general: ["general", "default_model", "thinking", "budget", "reload"],
+  general: [
+    "general", "default_model", "thinking", "budget", "reload", "llm",
+    "fallback_providers", "provider_urls", "provider_regions",
+    "provider_proxy_urls", "provider_request_timeout_secs",
+    "vertex_ai", "azure_openai", "proxy",
+  ],
   memory: ["memory", "proactive_memory", "auto_dream"],
-  tools: ["web", "browser", "links", "media", "tts", "canvas"],
-  channels: ["channels", "broadcast", "auto_reply"],
-  security: ["approval", "exec_policy", "vault", "oauth", "external_auth", "terminal"],
+  tools: [
+    "web", "browser", "links", "media", "tts", "canvas",
+    "tool_invoke", "parallel_tools", "tool_results", "tool_policy",
+    "tool_timeouts", "skills", "plugins",
+  ],
+  channels: [
+    "channels", "broadcast", "auto_reply",
+    "sidecar_channels", "inbox", "webhook_triggers", "triggers",
+  ],
+  security: [
+    "approval", "exec_policy", "vault", "oauth", "external_auth", "terminal",
+    "sanitize", "privacy", "taint_rules", "audit",
+  ],
   network: ["network", "a2a", "pairing"],
-  infra: ["docker", "extensions", "session", "queue", "webhook_triggers", "vertex_ai"],
+  infra: [
+    "docker", "extensions", "session", "queue",
+    "compaction", "registry", "context_engine", "prompt_intelligence",
+    "task_board", "rate_limit", "health_check", "heartbeat",
+    "telemetry", "notification",
+  ],
 };
+
+// Top-level category navigation order. Drives the tab strip at the top of
+// ConfigPage so the user can move between categories without leaving the
+// page. Closes #4678 — sidebar previously had a single Config link landing
+// on /config/general with no way to reach Tools / Security / Memory / etc.
+const CATEGORIES_ORDER: ReadonlyArray<string> = [
+  "general", "memory", "tools", "channels", "security", "network", "infra",
+];
 
 // Explicit field ordering for sections where the server-side JSON schema
 // ordering is wrong for the user. `KernelConfig`'s `default_model` sub-struct
@@ -805,7 +833,33 @@ export function ConfigPage({ category }: { category: string }) {
         </div>
       </div>
 
-      {/* Row 2: tabs — always visible when >1 section; grayed/disabled during search */}
+      {/* Row 1.5: category tabs — all 7 categories reachable from any /config
+          page. Closes #4678: previously the sidebar only had a single Config
+          link landing on /config/general with no in-page way to reach Tools /
+          Security / Memory / etc. */}
+      <div className="flex items-center gap-0.5 -mx-6 px-6 overflow-x-auto border-b border-border-subtle">
+        {CATEGORIES_ORDER.map((cat) => {
+          const isActive = cat === category;
+          return (
+            <Link
+              key={cat}
+              // TanStack Router's typed `to` would require listing 7 literal
+              // routes; cast keeps the call-site driven by CATEGORIES_ORDER
+              // so adding a category is a one-line change.
+              to={`/config/${cat}` as never}
+              className={`px-3 py-2 text-xs font-semibold border-b-2 -mb-px transition-colors whitespace-nowrap ${
+                isActive
+                  ? "border-brand text-brand"
+                  : "border-transparent text-text-dim hover:text-text hover:border-border-subtle"
+              }`}
+            >
+              {t(`config.cat_${cat}`, sectionLabelFallback(cat))}
+            </Link>
+          );
+        })}
+      </div>
+
+      {/* Row 2: section tabs (within current category) — always visible when >1 section; grayed/disabled during search */}
       {sectionKeys.length > 1 && (
         <div className="flex items-center border-b border-border-subtle -mx-6 px-6">
           {sectionKeys.map((sKey) => {
