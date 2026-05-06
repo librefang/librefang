@@ -3117,7 +3117,7 @@ impl LibreFangKernel {
 
         // Initialize metering engine (shares the same SQLite connection as the memory substrate)
         let metering = Arc::new(MeteringEngine::new(Arc::new(
-            librefang_memory::usage::UsageStore::new(memory.usage_conn()),
+            librefang_memory::usage::UsageStore::new(memory.pool()),
         )));
 
         // Initialize prompt versioning and A/B experiment store with its own connection
@@ -3598,10 +3598,8 @@ impl LibreFangKernel {
         }
 
         // Initialize execution approval manager
-        let approval_manager = crate::approval::ApprovalManager::new_with_db(
-            config.approval.clone(),
-            memory.usage_conn(),
-        );
+        let approval_manager =
+            crate::approval::ApprovalManager::new_with_db(config.approval.clone(), memory.pool());
 
         // Validate notification config — warn (not error) on unrecognized values
         {
@@ -3749,10 +3747,7 @@ impl LibreFangKernel {
             template_registry: WorkflowTemplateRegistry::new(),
             triggers: trigger_engine,
             background,
-            audit_log: Arc::new(AuditLog::with_db_anchored(
-                memory.usage_conn(),
-                audit_anchor_path,
-            )),
+            audit_log: Arc::new(AuditLog::with_db_anchored(memory.pool(), audit_anchor_path)),
             metering,
             // ArcSwap lets config_reload rebuild on `[llm.auxiliary]` edits
             // without invalidating any long-lived `Arc<Kernel>` handle.

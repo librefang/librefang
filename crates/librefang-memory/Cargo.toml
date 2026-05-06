@@ -13,6 +13,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 rmp-serde = { workspace = true }
 rusqlite = { workspace = true }
+r2d2 = { workspace = true }
+r2d2_sqlite = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }

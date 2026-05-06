@@ -72,7 +72,7 @@ fn register_agent(state: &AppState, name: &str, quota: ResourceQuota) -> AgentId
 /// straight from `usage_events`, so a raw insert is sufficient and keeps
 /// the test independent of provider catalogs and pricing tables.
 fn record_usage(state: &AppState, agent_id: AgentId, cost_usd: f64) {
-    let store = UsageStore::new(state.kernel.memory_substrate().usage_conn());
+    let store = UsageStore::new(state.kernel.memory_substrate().pool());
     let mut rec = UsageRecord::anonymous(agent_id, "test", "test-model", 100, 200, cost_usd, 0, 10);
     rec.session_id = Some(SessionId::new());
     store.record(&rec).unwrap();

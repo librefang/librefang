@@ -8,9 +8,10 @@ use librefang_types::agent::{
     PromptVersion,
 };
 use librefang_types::error::{LibreFangError, LibreFangResult};
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, OptionalExtension, Row};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 fn row_to_prompt_version(row: &Row) -> rusqlite::Result<PromptVersion> {
@@ -95,37 +96,33 @@ fn load_variants_for_experiment(
 
 #[derive(Clone)]
 pub struct PromptStore {
-    conn: Arc<Mutex<Connection>>,
+    pool: Pool<SqliteConnectionManager>,
 }
 
 impl PromptStore {
-    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+    pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
+        Self { pool }
     }
 
     /// Create a new PromptStore with its own dedicated connection.
     /// This avoids sharing a connection with UsageStore, preventing potential
     /// conflicts during concurrent writes.
     pub fn new_with_path<P: AsRef<std::path::Path>>(db_path: P) -> LibreFangResult<Self> {
-        let conn =
-            Connection::open(db_path).map_err(|e| LibreFangError::Internal(e.to_string()))?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL; \
-             PRAGMA busy_timeout=5000; \
-             PRAGMA cache_size=-2000; \
-             PRAGMA mmap_size=0;",
-        )
-        .map_err(|e| LibreFangError::Internal(e.to_string()))?;
-        Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
-        })
+        let manager = r2d2_sqlite::SqliteConnectionManager::file(db_path.as_ref())
+            .with_init(|c| {
+                c.execute_batch(
+                    "PRAGMA journal_mode=WAL;                      PRAGMA busy_timeout=5000;                      PRAGMA cache_size=-2000;                      PRAGMA mmap_size=0;",
+                )
+            });
+        let pool = r2d2::Pool::builder()
+            .max_size(8)
+            .build(manager)
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        Ok(Self { pool })
     }
 
     pub fn create_version(&self, version: PromptVersion) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         conn.execute(
             "INSERT INTO prompt_versions (id, agent_id, version, content_hash, system_prompt, tools, variables, created_at, created_by, is_active, description)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -148,10 +145,7 @@ impl PromptStore {
     }
 
     pub fn list_versions(&self, agent_id: AgentId) -> LibreFangResult<Vec<PromptVersion>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare("SELECT id, agent_id, version, content_hash, system_prompt, tools, variables, created_at, created_by, is_active, description
                       FROM prompt_versions WHERE agent_id = ?1 ORDER BY version DESC")
@@ -169,10 +163,7 @@ impl PromptStore {
     }
 
     pub fn get_version(&self, id: Uuid) -> LibreFangResult<Option<PromptVersion>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare("SELECT id, agent_id, version, content_hash, system_prompt, tools, variables, created_at, created_by, is_active, description
                       FROM prompt_versions WHERE id = ?1")
@@ -187,10 +178,7 @@ impl PromptStore {
     }
 
     pub fn get_active_version(&self, agent_id: AgentId) -> LibreFangResult<Option<PromptVersion>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare("SELECT id, agent_id, version, content_hash, system_prompt, tools, variables, created_at, created_by, is_active, description
                       FROM prompt_versions WHERE agent_id = ?1 AND is_active = 1 LIMIT 1")
@@ -205,10 +193,7 @@ impl PromptStore {
     }
 
     pub fn set_active_version(&self, id: Uuid, agent_id: AgentId) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         let tx = conn
             .unchecked_transaction()
@@ -233,10 +218,7 @@ impl PromptStore {
     }
 
     pub fn delete_version(&self, id: Uuid) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         conn.execute(
             "DELETE FROM prompt_versions WHERE id = ?1",
             [id.to_string()],
@@ -247,10 +229,7 @@ impl PromptStore {
 
     /// Delete oldest inactive versions if the agent exceeds the max count.
     pub fn prune_old_versions(&self, agent_id: AgentId, max_versions: u32) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         // Get total count for this agent
         let count: u32 = conn
             .query_row(
@@ -321,10 +300,7 @@ impl PromptStore {
     }
 
     pub fn get_latest_version_number(&self, agent_id: AgentId) -> LibreFangResult<u32> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare("SELECT MAX(version) FROM prompt_versions WHERE agent_id = ?1")
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
@@ -338,10 +314,7 @@ impl PromptStore {
     }
 
     pub fn create_experiment(&self, experiment: PromptExperiment) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         conn.execute(
             "INSERT INTO prompt_experiments (id, name, agent_id, status, traffic_split, success_criteria, started_at, ended_at, created_at)
@@ -391,10 +364,7 @@ impl PromptStore {
     }
 
     pub fn list_experiments(&self, agent_id: AgentId) -> LibreFangResult<Vec<PromptExperiment>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare("SELECT id, name, agent_id, status, traffic_split, success_criteria, started_at, ended_at, created_at
                       FROM prompt_experiments WHERE agent_id = ?1 ORDER BY created_at DESC")
@@ -414,10 +384,7 @@ impl PromptStore {
     }
 
     pub fn get_experiment(&self, id: Uuid) -> LibreFangResult<Option<PromptExperiment>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare("SELECT id, name, agent_id, status, traffic_split, success_criteria, started_at, ended_at, created_at
                       FROM prompt_experiments WHERE id = ?1")
@@ -440,10 +407,7 @@ impl PromptStore {
         id: Uuid,
         status: ExperimentStatus,
     ) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         let now = Utc::now().to_rfc3339();
         let (started_at, ended_at) = match status {
@@ -475,10 +439,7 @@ impl PromptStore {
         &self,
         agent_id: AgentId,
     ) -> LibreFangResult<Option<PromptExperiment>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let status_running = serde_json::to_string(&ExperimentStatus::Running).unwrap_or_default();
 
         let mut stmt = conn
@@ -509,10 +470,7 @@ impl PromptStore {
         cost_usd: f64,
         success: bool,
     ) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         conn.execute(
             "UPDATE experiment_metrics SET 
@@ -542,10 +500,7 @@ impl PromptStore {
         &self,
         variant_id: Uuid,
     ) -> LibreFangResult<Option<ExperimentVariantMetrics>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         let mut stmt = conn
             .prepare("SELECT em.variant_id, ev.name, em.total_requests, em.successful_requests, em.failed_requests, em.total_latency_ms, em.total_cost_usd
@@ -602,10 +557,7 @@ impl PromptStore {
         &self,
         experiment_id: Uuid,
     ) -> LibreFangResult<Vec<ExperimentVariantMetrics>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         let mut stmt = conn
             .prepare(
@@ -668,9 +620,12 @@ mod tests {
     use librefang_types::agent::{ExperimentStatus, ExperimentVariant, SuccessCriteria};
 
     fn create_test_store() -> PromptStore {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS prompt_versions (
+        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+        let pool = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
+        pool.get()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS prompt_versions (
                 id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
                 version INTEGER NOT NULL,
@@ -712,9 +667,9 @@ mod tests {
                 total_cost_usd REAL NOT NULL DEFAULT 0,
                 last_updated TEXT NOT NULL
             );",
-        )
-        .unwrap();
-        PromptStore::new(Arc::new(Mutex::new(conn)))
+            )
+            .unwrap();
+        PromptStore::new(pool)
     }
 
     #[test]

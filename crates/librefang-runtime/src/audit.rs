@@ -10,11 +10,12 @@
 use chrono::Utc;
 use librefang_types::agent::UserId;
 use librefang_types::config::AuditRetentionConfig;
-use rusqlite::Connection;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 /// Hard cap on the number of audit entries kept in memory.
 ///
@@ -188,8 +189,8 @@ fn compute_entry_hash(
 pub struct AuditLog {
     entries: Mutex<Vec<AuditEntry>>,
     tip: Mutex<String>,
-    /// Optional database connection for persistent storage.
-    db: Option<Arc<Mutex<Connection>>>,
+    /// Optional connection pool for persistent storage.
+    db: Option<Pool<SqliteConnectionManager>>,
     /// Optional filesystem path where the latest `seq:hash` pair is
     /// atomically rewritten after every `record()`. Startup and
     /// `verify_integrity()` compare the in-DB tip against the anchor's
@@ -318,8 +319,11 @@ impl AuditLog {
     ///  4. If the DB has rows but no anchor exists yet, the anchor is
     ///     created from the current tip so future rewrites can be
     ///     detected even when upgrading an older deployment.
-    pub fn with_db_anchored(conn: Arc<Mutex<Connection>>, anchor_path: std::path::PathBuf) -> Self {
-        let mut log = Self::with_db(conn);
+    pub fn with_db_anchored(
+        pool: Pool<SqliteConnectionManager>,
+        anchor_path: std::path::PathBuf,
+    ) -> Self {
+        let mut log = Self::with_db(pool);
         log.anchor_path = Some(anchor_path.clone());
 
         // Compare against the anchor file (if any) and warn loudly on
@@ -379,7 +383,7 @@ impl AuditLog {
     /// On construction, loads all existing entries from the `audit_entries`
     /// table and verifies the Merkle chain integrity. New entries are written
     /// to both the in-memory chain and the database.
-    pub fn with_db(conn: Arc<Mutex<Connection>>) -> Self {
+    pub fn with_db(pool: Pool<SqliteConnectionManager>) -> Self {
         let mut entries = Vec::new();
         let mut tip = "0".repeat(64);
 
@@ -388,7 +392,7 @@ impl AuditLog {
         // migration return NULL for both, which deserialises to `None`
         // and keeps the original hash intact (the hash function omits
         // absent fields, see `compute_entry_hash`).
-        if let Ok(db) = conn.lock() {
+        if let Ok(db) = pool.get() {
             let result = db.prepare(
                 "SELECT seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash FROM audit_entries ORDER BY seq ASC",
             );
@@ -461,7 +465,7 @@ impl AuditLog {
         let log = Self {
             entries: Mutex::new(entries),
             tip: Mutex::new(tip),
-            db: Some(conn),
+            db: Some(pool),
             anchor_path: None,
             chain_anchor: Mutex::new(recovered_anchor),
         };
@@ -583,7 +587,7 @@ impl AuditLog {
         // not advance) with a fresh timestamp and tries again.
         let persisted = match self.db.as_ref() {
             None => true, // pure in-memory mode: memory IS the source of truth
-            Some(db) => match db.lock() {
+            Some(db) => match db.get() {
                 Ok(conn) => match conn.execute(
                     "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     rusqlite::params![
@@ -616,7 +620,7 @@ impl AuditLog {
                 Err(e) => {
                     tracing::error!(
                         seq = entry.seq,
-                        "Audit DB mutex poisoned ({e:?}); chain NOT advanced."
+                        "Audit DB pool get failed ({e:?}); chain NOT advanced."
                     );
                     false
                 }
@@ -929,7 +933,7 @@ impl AuditLog {
             entries[total - 1].seq + 1
         };
         if let Some(ref db) = self.db {
-            if let Ok(conn) = db.lock() {
+            if let Ok(conn) = db.get() {
                 let _ = conn.execute(
                     "DELETE FROM audit_entries WHERE seq < ?1",
                     rusqlite::params![first_survivor_seq as i64],
@@ -1028,7 +1032,7 @@ impl AuditLog {
             entries[total - 1].seq + 1
         };
         if let Some(ref db) = self.db {
-            if let Ok(conn) = db.lock() {
+            if let Ok(conn) = db.get() {
                 let _ = conn.execute(
                     "DELETE FROM audit_entries WHERE seq < ?1",
                     rusqlite::params![first_survivor_seq as i64],
@@ -1174,27 +1178,32 @@ mod tests {
 
     #[test]
     fn test_record_with_context_persists_user_and_channel() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE audit_entries (
-                seq INTEGER PRIMARY KEY,
-                timestamp TEXT NOT NULL,
-                agent_id TEXT NOT NULL,
-                action TEXT NOT NULL,
-                detail TEXT NOT NULL,
-                outcome TEXT NOT NULL,
-                user_id TEXT,
-                channel TEXT,
-                prev_hash TEXT NOT NULL,
-                hash TEXT NOT NULL
-            )",
-        )
-        .unwrap();
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_entries (
+                    seq INTEGER PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    user_id TEXT,
+                    channel TEXT,
+                    prev_hash TEXT NOT NULL,
+                    hash TEXT NOT NULL
+                )",
+            )
+            .unwrap();
+        }
 
-        let db = Arc::new(Mutex::new(conn));
         let bob = UserId::from_name("Bob");
 
-        let log = AuditLog::with_db(Arc::clone(&db));
+        let log = AuditLog::with_db(pool.clone());
         log.record("agent-1", AuditAction::AgentSpawn, "boot", "ok");
         log.record_with_context(
             "agent-1",
@@ -1206,7 +1215,7 @@ mod tests {
         );
 
         // Reopen — chain must verify and the contextual entry must round-trip.
-        let log2 = AuditLog::with_db(Arc::clone(&db));
+        let log2 = AuditLog::with_db(pool.clone());
         assert_eq!(log2.len(), 2);
         assert!(log2.verify_integrity().is_ok());
         let entries = log2.recent(2);
@@ -1300,41 +1309,46 @@ mod tests {
 
     #[test]
     fn test_audit_persists_to_db() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE audit_entries (
-                seq INTEGER PRIMARY KEY,
-                timestamp TEXT NOT NULL,
-                agent_id TEXT NOT NULL,
-                action TEXT NOT NULL,
-                detail TEXT NOT NULL,
-                outcome TEXT NOT NULL,
-                user_id TEXT,
-                channel TEXT,
-                prev_hash TEXT NOT NULL,
-                hash TEXT NOT NULL
-            )",
-        )
-        .unwrap();
-
-        let db = Arc::new(Mutex::new(conn));
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_entries (
+                    seq INTEGER PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    user_id TEXT,
+                    channel TEXT,
+                    prev_hash TEXT NOT NULL,
+                    hash TEXT NOT NULL
+                )",
+            )
+            .unwrap();
+        }
 
         // Record entries with DB
-        let log = AuditLog::with_db(Arc::clone(&db));
+        let log = AuditLog::with_db(pool.clone());
         log.record("agent-1", AuditAction::AgentSpawn, "spawn test", "ok");
         log.record("agent-1", AuditAction::ShellExec, "ls", "ok");
         assert_eq!(log.len(), 2);
 
         // Verify entries in database
-        let db_conn = db.lock().unwrap();
-        let count: i64 = db_conn
-            .query_row("SELECT COUNT(*) FROM audit_entries", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count, 2);
-        drop(db_conn);
+        {
+            let db_conn = pool.get().unwrap();
+            let count: i64 = db_conn
+                .query_row("SELECT COUNT(*) FROM audit_entries", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 2);
+        }
 
         // Simulate restart: create new AuditLog from same DB
-        let log2 = AuditLog::with_db(Arc::clone(&db));
+        let log2 = AuditLog::with_db(pool.clone());
         assert_eq!(log2.len(), 2);
         assert!(log2.verify_integrity().is_ok());
 
@@ -1357,24 +1371,29 @@ mod tests {
     // only proves internal consistency. The external anchor file is
     // what catches that rewrite.
 
-    fn setup_anchored_log() -> (AuditLog, Arc<Mutex<Connection>>, std::path::PathBuf) {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE audit_entries (
-                seq INTEGER PRIMARY KEY,
-                timestamp TEXT NOT NULL,
-                agent_id TEXT NOT NULL,
-                action TEXT NOT NULL,
-                detail TEXT NOT NULL,
-                outcome TEXT NOT NULL,
-                user_id TEXT,
-                channel TEXT,
-                prev_hash TEXT NOT NULL,
-                hash TEXT NOT NULL
-            )",
-        )
-        .unwrap();
-        let db = Arc::new(Mutex::new(conn));
+    fn setup_anchored_log() -> (AuditLog, Pool<SqliteConnectionManager>, std::path::PathBuf) {
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_entries (
+                    seq INTEGER PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    user_id TEXT,
+                    channel TEXT,
+                    prev_hash TEXT NOT NULL,
+                    hash TEXT NOT NULL
+                )",
+            )
+            .unwrap();
+        }
         let dir = tempfile::tempdir().unwrap();
         let anchor_path = dir.path().join("audit.anchor");
         // Leak the TempDir so the file survives for the duration of the
@@ -1382,8 +1401,8 @@ mod tests {
         // cleanup via process exit. Keeping it simple avoids plumbing
         // the TempDir through every test helper.
         std::mem::forget(dir);
-        let log = AuditLog::with_db_anchored(Arc::clone(&db), anchor_path.clone());
-        (log, db, anchor_path)
+        let log = AuditLog::with_db_anchored(pool.clone(), anchor_path.clone());
+        (log, pool, anchor_path)
     }
 
     #[test]
@@ -1419,7 +1438,7 @@ mod tests {
         // Mirror the logic the audit module uses so the in-DB chain
         // stays internally consistent and fools the linked-list check.
         {
-            let conn = db.lock().unwrap();
+            let conn = db.get().unwrap();
             conn.execute("DELETE FROM audit_entries", []).unwrap();
             let mut prev = "0".repeat(64);
             let fabricated: [(u64, &str, AuditAction, &str, &str); 2] = [
@@ -1463,7 +1482,7 @@ mod tests {
         // Reopen the log against the rewritten DB — the anchor file
         // still holds the pre-rewrite tip, so verify_integrity must
         // refuse the new chain.
-        let log2 = AuditLog::with_db_anchored(Arc::clone(&db), anchor_path.clone());
+        let log2 = AuditLog::with_db_anchored(db.clone(), anchor_path.clone());
         let result = log2.verify_integrity();
         assert!(
             result.is_err(),
@@ -1480,26 +1499,31 @@ mod tests {
     fn test_anchor_is_seeded_on_first_boot_if_missing() {
         // DB has rows but no anchor yet: `with_db_anchored` must create
         // the file so subsequent boots can detect tampering.
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE audit_entries (
-                seq INTEGER PRIMARY KEY,
-                timestamp TEXT NOT NULL,
-                agent_id TEXT NOT NULL,
-                action TEXT NOT NULL,
-                detail TEXT NOT NULL,
-                outcome TEXT NOT NULL,
-                user_id TEXT,
-                channel TEXT,
-                prev_hash TEXT NOT NULL,
-                hash TEXT NOT NULL
-            )",
-        )
-        .unwrap();
-        let db = Arc::new(Mutex::new(conn));
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_entries (
+                    seq INTEGER PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    user_id TEXT,
+                    channel TEXT,
+                    prev_hash TEXT NOT NULL,
+                    hash TEXT NOT NULL
+                )",
+            )
+            .unwrap();
+        }
 
         // First run — no anchor argument, build up some history.
-        let log = AuditLog::with_db(Arc::clone(&db));
+        let log = AuditLog::with_db(pool.clone());
         log.record("agent-1", AuditAction::ToolInvoke, "read_file", "ok");
         log.record("agent-1", AuditAction::ShellExec, "ls", "ok");
         let current_tip = log.tip_hash();
@@ -1509,7 +1533,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let anchor_path = dir.path().join("audit.anchor");
         assert!(!anchor_path.exists());
-        let log2 = AuditLog::with_db_anchored(Arc::clone(&db), anchor_path.clone());
+        let log2 = AuditLog::with_db_anchored(pool.clone(), anchor_path.clone());
         assert!(
             anchor_path.exists(),
             "anchor file should be seeded on first boot with an existing DB"
@@ -1796,28 +1820,33 @@ mod tests {
         // against the same DB, and check verify_integrity() passes
         // because with_db() recovered the anchor from the survivors'
         // first prev_hash.
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE audit_entries (
-                seq INTEGER PRIMARY KEY,
-                timestamp TEXT NOT NULL,
-                agent_id TEXT NOT NULL,
-                action TEXT NOT NULL,
-                detail TEXT NOT NULL,
-                outcome TEXT NOT NULL,
-                user_id TEXT,
-                channel TEXT,
-                prev_hash TEXT NOT NULL,
-                hash TEXT NOT NULL
-            )",
-        )
-        .unwrap();
-        let db = Arc::new(Mutex::new(conn));
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_entries (
+                    seq INTEGER PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    user_id TEXT,
+                    channel TEXT,
+                    prev_hash TEXT NOT NULL,
+                    hash TEXT NOT NULL
+                )",
+            )
+            .unwrap();
+        }
 
         let now = chrono::Utc::now();
         let old_ts = now - chrono::Duration::days(30);
 
-        let log = AuditLog::with_db(Arc::clone(&db));
+        let log = AuditLog::with_db(pool.clone());
         for i in 0..5 {
             push_aged_entry(
                 &log,
@@ -1832,7 +1861,7 @@ mod tests {
         // mutates in-memory only, so re-write the DB rows manually.
         {
             let entries = log.entries.lock().unwrap();
-            let conn = db.lock().unwrap();
+            let conn = pool.get().unwrap();
             conn.execute("DELETE FROM audit_entries", []).unwrap();
             for e in entries.iter() {
                 conn.execute(
@@ -1867,7 +1896,7 @@ mod tests {
 
         // Reopen — anchor must be reconstructed from the survivor's
         // prev_hash so verify_integrity() succeeds.
-        let log2 = AuditLog::with_db(Arc::clone(&db));
+        let log2 = AuditLog::with_db(pool.clone());
         assert_eq!(log2.len(), 1);
         let recovered = log2.chain_anchor.lock().unwrap().clone();
         assert_eq!(
@@ -1891,28 +1920,33 @@ mod tests {
         // dropped predecessor, breaking verify_integrity on the next
         // boot. The next record() (typically the self-audit
         // RetentionTrim row) re-anchors against chain_anchor.
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE audit_entries (
-                seq INTEGER PRIMARY KEY,
-                timestamp TEXT NOT NULL,
-                agent_id TEXT NOT NULL,
-                action TEXT NOT NULL,
-                detail TEXT NOT NULL,
-                outcome TEXT NOT NULL,
-                user_id TEXT,
-                channel TEXT,
-                prev_hash TEXT NOT NULL,
-                hash TEXT NOT NULL
-            )",
-        )
-        .unwrap();
-        let db = Arc::new(Mutex::new(conn));
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_entries (
+                    seq INTEGER PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    user_id TEXT,
+                    channel TEXT,
+                    prev_hash TEXT NOT NULL,
+                    hash TEXT NOT NULL
+                )",
+            )
+            .unwrap();
+        }
 
         let now = chrono::Utc::now();
         let old_ts = now - chrono::Duration::days(30);
 
-        let log = AuditLog::with_db(Arc::clone(&db));
+        let log = AuditLog::with_db(pool.clone());
         for i in 0..4 {
             push_aged_entry(
                 &log,
@@ -1927,7 +1961,7 @@ mod tests {
         // mutates in-memory only).
         {
             let entries = log.entries.lock().unwrap();
-            let conn = db.lock().unwrap();
+            let conn = pool.get().unwrap();
             conn.execute("DELETE FROM audit_entries", []).unwrap();
             for e in entries.iter() {
                 conn.execute(
@@ -1961,8 +1995,8 @@ mod tests {
         assert_eq!(log.len(), 0);
 
         // No orphan row left in the DB.
-        let db_count: i64 = db
-            .lock()
+        let db_count: i64 = pool
+            .get()
             .unwrap()
             .query_row("SELECT COUNT(*) FROM audit_entries", [], |row| row.get(0))
             .unwrap();
@@ -1980,7 +2014,7 @@ mod tests {
         // Restart: only the RetentionTrim row exists. Anchor must be
         // recovered from its prev_hash so verify_integrity walks
         // cleanly across the trim boundary.
-        let log2 = AuditLog::with_db(Arc::clone(&db));
+        let log2 = AuditLog::with_db(pool.clone());
         assert_eq!(log2.len(), 1);
         assert!(
             log2.verify_integrity().is_ok(),
@@ -2040,28 +2074,33 @@ mod tests {
         // too — otherwise an orphan row survives in SQLite while the
         // in-memory log is empty, and the next boot's
         // verify_integrity() trips at the orphan.
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE audit_entries (
-                seq INTEGER PRIMARY KEY,
-                timestamp TEXT NOT NULL,
-                agent_id TEXT NOT NULL,
-                action TEXT NOT NULL,
-                detail TEXT NOT NULL,
-                outcome TEXT NOT NULL,
-                user_id TEXT,
-                channel TEXT,
-                prev_hash TEXT NOT NULL,
-                hash TEXT NOT NULL
-            )",
-        )
-        .unwrap();
-        let db = Arc::new(Mutex::new(conn));
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_entries (
+                    seq INTEGER PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    user_id TEXT,
+                    channel TEXT,
+                    prev_hash TEXT NOT NULL,
+                    hash TEXT NOT NULL
+                )",
+            )
+            .unwrap();
+        }
 
         let now = chrono::Utc::now();
         let old_ts = now - chrono::Duration::days(120);
 
-        let log = AuditLog::with_db(Arc::clone(&db));
+        let log = AuditLog::with_db(pool.clone());
         for i in 0..3 {
             push_aged_entry(
                 &log,
@@ -2075,7 +2114,7 @@ mod tests {
         // Re-sync back-dated rows into the DB.
         {
             let entries = log.entries.lock().unwrap();
-            let conn = db.lock().unwrap();
+            let conn = pool.get().unwrap();
             conn.execute("DELETE FROM audit_entries", []).unwrap();
             for e in entries.iter() {
                 conn.execute(
@@ -2101,8 +2140,8 @@ mod tests {
         assert_eq!(pruned, 3);
         assert_eq!(log.len(), 0);
 
-        let db_count: i64 = db
-            .lock()
+        let db_count: i64 = pool
+            .get()
             .unwrap()
             .query_row("SELECT COUNT(*) FROM audit_entries", [], |row| row.get(0))
             .unwrap();
@@ -2115,7 +2154,7 @@ mod tests {
         assert!(log.verify_integrity().is_ok());
         drop(log);
 
-        let log2 = AuditLog::with_db(Arc::clone(&db));
+        let log2 = AuditLog::with_db(pool.clone());
         assert_eq!(log2.len(), 1);
         assert!(
             log2.verify_integrity().is_ok(),
@@ -2148,25 +2187,30 @@ mod tests {
     /// subsequent boot logged `chain break at seq N`.
     #[test]
     fn test_db_failure_does_not_advance_in_memory_chain() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE audit_entries (
-                seq INTEGER PRIMARY KEY,
-                timestamp TEXT NOT NULL,
-                agent_id TEXT NOT NULL,
-                action TEXT NOT NULL,
-                detail TEXT NOT NULL,
-                outcome TEXT NOT NULL,
-                user_id TEXT,
-                channel TEXT,
-                prev_hash TEXT NOT NULL,
-                hash TEXT NOT NULL
-            )",
-        )
-        .unwrap();
-        let db = Arc::new(Mutex::new(conn));
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_entries (
+                    seq INTEGER PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    user_id TEXT,
+                    channel TEXT,
+                    prev_hash TEXT NOT NULL,
+                    hash TEXT NOT NULL
+                )",
+            )
+            .unwrap();
+        }
 
-        let log = AuditLog::with_db(Arc::clone(&db));
+        let log = AuditLog::with_db(pool.clone());
         log.record("a", AuditAction::ToolInvoke, "first", "ok");
         assert_eq!(log.len(), 1);
         let tip_after_first = log.tip_hash();
@@ -2174,7 +2218,7 @@ mod tests {
         // Provoke a transient persistence failure by dropping the
         // table.  The next record() will hit `no such table:
         // audit_entries` from `conn.execute()`.
-        db.lock()
+        pool.get()
             .unwrap()
             .execute("DROP TABLE audit_entries", [])
             .unwrap();
@@ -2193,7 +2237,7 @@ mod tests {
         );
 
         // Recreate the table to simulate the operator fixing the DB.
-        db.lock()
+        pool.get()
             .unwrap()
             .execute_batch(
                 "CREATE TABLE audit_entries (
@@ -2227,7 +2271,7 @@ mod tests {
         // succeed because the chain anchor recovery from `prev_hash`
         // handles the dropped seq=0 prefix.
         drop(log);
-        let log2 = AuditLog::with_db(db);
+        let log2 = AuditLog::with_db(pool);
         assert_eq!(
             log2.len(),
             1,

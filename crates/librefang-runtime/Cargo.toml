@@ -39,6 +39,8 @@ zeroize = { workspace = true }
 dashmap = { workspace = true }
 regex-lite = { workspace = true }
 rusqlite = { workspace = true }
+r2d2 = { workspace = true }
+r2d2_sqlite = { workspace = true }
 tokio-tungstenite = { workspace = true }
 ureq = { workspace = true }
 flate2 = { workspace = true }

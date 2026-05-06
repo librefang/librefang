@@ -4,12 +4,12 @@
 //! daemon restarts. Agents query this via the `group_members` tool instead
 //! of having the roster injected into the system prompt (saving tokens).
 
-use rusqlite::Connection;
-use std::sync::{Arc, Mutex};
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 
 /// Persistent roster of group chat members, backed by SQLite.
 pub struct RosterStore {
-    conn: Arc<Mutex<Connection>>,
+    pool: Pool<SqliteConnectionManager>,
 }
 
 impl RosterStore {
@@ -22,8 +22,8 @@ impl RosterStore {
     /// constructing a `RosterStore` can never panic on a locked /
     /// read-only DB — the failure surfaces from `MemorySubstrate::open`
     /// at boot instead.
-    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+    pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
+        Self { pool }
     }
 
     /// Insert or update a member in the roster.
@@ -38,7 +38,7 @@ impl RosterStore {
         if chat_id.is_empty() || user_id.is_empty() {
             return;
         }
-        let c = self.conn.lock().unwrap();
+        let c = self.pool.get().expect("roster pool get");
         let _ = c.execute(
             "INSERT INTO group_roster (channel_type, chat_id, user_id, display_name, username, first_seen, last_seen)
              VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s','now'), strftime('%s','now'))
@@ -52,7 +52,7 @@ impl RosterStore {
 
     /// List all members of a group chat, ordered by display name.
     pub fn members(&self, channel: &str, chat_id: &str) -> Vec<(String, String, Option<String>)> {
-        let c = self.conn.lock().unwrap();
+        let c = self.pool.get().expect("roster pool get");
         let mut stmt = c
             .prepare(
                 "SELECT user_id, display_name, username FROM group_roster
@@ -74,7 +74,7 @@ impl RosterStore {
 
     /// Remove a single member from the roster.
     pub fn remove_member(&self, channel: &str, chat_id: &str, user_id: &str) {
-        let c = self.conn.lock().unwrap();
+        let c = self.pool.get().expect("roster pool get");
         let _ = c.execute(
             "DELETE FROM group_roster WHERE channel_type = ?1 AND chat_id = ?2 AND user_id = ?3",
             rusqlite::params![channel, chat_id, user_id],
@@ -83,7 +83,7 @@ impl RosterStore {
 
     /// Count the members in a group chat.
     pub fn member_count(&self, channel: &str, chat_id: &str) -> usize {
-        let c = self.conn.lock().unwrap();
+        let c = self.pool.get().expect("roster pool get");
         c.query_row(
             "SELECT COUNT(*) FROM group_roster WHERE channel_type = ?1 AND chat_id = ?2",
             rusqlite::params![channel, chat_id],
@@ -98,9 +98,12 @@ mod tests {
     use super::*;
 
     fn in_memory_store() -> RosterStore {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::migration::run_migrations(&conn).expect("migrations must apply");
-        RosterStore::new(Arc::new(Mutex::new(conn)))
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        crate::migration::run_migrations(&pool.get().unwrap()).expect("migrations must apply");
+        RosterStore::new(pool)
     }
 
     #[test]
