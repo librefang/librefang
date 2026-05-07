@@ -1275,8 +1275,10 @@ impl LibreFangKernel {
             auto_reply_engine,
             hooks: librefang_runtime::hooks::HookRegistry::new(),
             external_hooks: crate::hooks::ExternalHookSystem::load(hooks_dir),
-            process_manager: Arc::new(librefang_runtime::process_manager::ProcessManager::new(5)),
-            process_registry: Arc::new(librefang_runtime::process_registry::ProcessRegistry::new()),
+            processes: crate::kernel::subsystems::ProcessSubsystem::new(
+                Arc::new(librefang_runtime::process_manager::ProcessManager::new(5)),
+                Arc::new(librefang_runtime::process_registry::ProcessRegistry::new()),
+            ),
             peer_registry: OnceLock::new(),
             peer_node: OnceLock::new(),
             booted_at: std::time::Instant::now(),

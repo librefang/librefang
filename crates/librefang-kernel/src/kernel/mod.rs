@@ -802,11 +802,9 @@ pub struct LibreFangKernel {
     pub(crate) hooks: librefang_runtime::hooks::HookRegistry,
     /// External file-system lifecycle hook system (HOOK.yaml based, fire-and-forget).
     pub(crate) external_hooks: crate::hooks::ExternalHookSystem,
-    /// Persistent process manager for interactive sessions (REPLs, servers).
-    pub(crate) process_manager: Arc<librefang_runtime::process_manager::ProcessManager>,
-    /// Background process registry — tracks fire-and-forget processes spawned by
-    /// `shell_exec` with a rolling 200 KB output buffer per process.
-    pub(crate) process_registry: Arc<librefang_runtime::process_registry::ProcessRegistry>,
+    /// Persistent + background process registries. See
+    /// [`subsystems::ProcessSubsystem`].
+    pub(crate) processes: subsystems::ProcessSubsystem,
     /// OFP peer registry — tracks connected peers (set once during OFP startup).
     pub(crate) peer_registry: OnceLock<librefang_wire::PeerRegistry>,
     /// OFP peer node — the local networking node (set once during OFP startup).
@@ -1669,13 +1667,13 @@ impl LibreFangKernel {
             exec_policy: deferred.exec_policy.as_ref(),
             tts_engine: Some(&self.tts_engine),
             docker_config: None,
-            process_manager: Some(&self.process_manager),
+            process_manager: Some(&self.processes.manager),
             sender_id: deferred.sender_id.as_deref(),
             channel: deferred.channel.as_deref(),
             spill_threshold_bytes: cfg.tool_results.spill_threshold_bytes,
             max_artifact_bytes: cfg.tool_results.max_artifact_bytes,
             checkpoint_manager: self.checkpoint_manager.as_ref(),
-            process_registry: Some(&self.process_registry),
+            process_registry: Some(&self.processes.registry),
             // Deferred tool executions run after the originating session's turn
             // has already ended (approval flow), so no live session interrupt is
             // available.  We set None here; if a session interrupt is needed for

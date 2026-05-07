@@ -1197,13 +1197,13 @@ impl LibreFangKernel {
     /// Persistent process manager.
     #[inline]
     pub fn processes(&self) -> &Arc<librefang_runtime::process_manager::ProcessManager> {
-        &self.process_manager
+        &self.processes.manager
     }
 
     /// Background process registry for fire-and-forget shell_exec processes.
     #[inline]
     pub fn process_registry(&self) -> &Arc<librefang_runtime::process_registry::ProcessRegistry> {
-        &self.process_registry
+        &self.processes.registry
     }
 
     /// OFP peer registry (set once at startup).

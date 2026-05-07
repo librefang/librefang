@@ -10,5 +10,7 @@
 //! follow-ups — kept out of this PR so the diff stays reviewable.
 
 pub mod metering;
+pub mod processes;
 
 pub use metering::MeteringSubsystem;
+pub use processes::ProcessSubsystem;

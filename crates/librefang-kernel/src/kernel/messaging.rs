@@ -2317,9 +2317,9 @@ impl LibreFangKernel {
                 },
                 Some(&kernel_clone.hooks),
                 ctx_window,
-                Some(&kernel_clone.process_manager),
+                Some(&kernel_clone.processes.manager),
                 kernel_clone.checkpoint_manager.clone(),
-                Some(&kernel_clone.process_registry),
+                Some(&kernel_clone.processes.registry),
                 None, // content_blocks (streaming path uses text only for now)
                 kernel_clone.proactive_memory.get().cloned(),
                 kernel_clone.context_engine_for_agent(&manifest),
