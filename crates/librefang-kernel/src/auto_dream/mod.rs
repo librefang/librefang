@@ -28,6 +28,7 @@
 //! A failed, aborted, or timed-out dream rolls back the lock mtime so the
 //! time gate reopens on the next tick.
 
+use crate::MemorySubsystemApi;
 use crate::MeteringSubsystemApi;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -325,10 +326,11 @@ async fn check_agent_gates(
         // Exclude the synthetic dream session itself — otherwise the
         // previous dream's own turn registers as post-dream activity and
         // the gate re-opens with nothing new to consolidate.
-        match kernel
-            .memory_substrate()
-            .count_agent_sessions_touched_since(agent_id, last_at, Some(dream_session_id(agent_id)))
-        {
+        match kernel.substrate_ref().count_agent_sessions_touched_since(
+            agent_id,
+            last_at,
+            Some(dream_session_id(agent_id)),
+        ) {
             Ok(count) if count < effective_min_sessions => {
                 return AgentGateResult::NoActivity {
                     sessions_since: count,
@@ -479,7 +481,7 @@ async fn run_dream(
     const MAX_SESSION_IDS_IN_PROMPT: u32 = 50;
     let dream_sid = dream_session_id(target);
     let session_ids = kernel
-        .memory_substrate()
+        .substrate_ref()
         .list_agent_sessions_touched_since(
             target,
             prior_mtime,
@@ -488,7 +490,7 @@ async fn run_dream(
         )
         .unwrap_or_default();
     let total_sessions = kernel
-        .memory_substrate()
+        .substrate_ref()
         .count_agent_sessions_touched_since(target, prior_mtime, Some(dream_sid))
         .unwrap_or(session_ids.len() as u32);
 
@@ -1050,7 +1052,7 @@ pub async fn current_status(kernel: &LibreFangKernel) -> AutoDreamStatus {
             let lock = lock_for_agent(kernel, agent_id);
             let last = lock.read_last_consolidated_at().await.unwrap_or(0);
             let sessions_since = kernel
-                .memory_substrate()
+                .substrate_ref()
                 .count_agent_sessions_touched_since(
                     agent_id,
                     last,

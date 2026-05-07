@@ -2069,6 +2069,7 @@ pub(crate) fn remove_toml_section(content: &str, section: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{canonical_ip, is_cloud_metadata_ip, is_private_ip};
+    use librefang_kernel::MemorySubsystemApi;
     use std::net::{IpAddr, Ipv4Addr};
 
     // -----------------------------------------------------------------
@@ -2116,7 +2117,7 @@ mod tests {
         let idempotency_store: Arc<
             dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync,
         > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
-            kernel.memory_substrate().pool(),
+            kernel.substrate_ref().pool(),
         ));
         let state = Arc::new(AppState {
             kernel: kernel.clone(),

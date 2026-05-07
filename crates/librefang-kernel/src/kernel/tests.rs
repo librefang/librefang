@@ -1,6 +1,7 @@
 use super::*;
 use crate::registry::AgentRegistry;
 use crate::GovernanceSubsystemApi;
+use crate::MemorySubsystemApi;
 use crate::MeteringSubsystemApi;
 use futures::stream;
 use librefang_channels::types::{ChannelAdapter, ChannelContent, ChannelType, ChannelUser};
@@ -1640,7 +1641,7 @@ async fn test_task_board_sweep_resets_stuck_in_progress_task() {
     };
     let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
 
-    let mem = kernel.memory_substrate();
+    let mem = kernel.substrate_ref();
 
     // Post and claim a task so status = in_progress.
     let task_id = mem

@@ -21,7 +21,6 @@ use super::subsystems::{
 
 use tracing::{debug, info, warn};
 
-use librefang_memory::MemorySubstrate;
 use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::config::KernelConfig;
 use librefang_types::error::LibreFangError;
@@ -396,20 +395,6 @@ impl LibreFangKernel {
     #[inline]
     pub fn agent_identities(&self) -> &Arc<crate::agent_identity_registry::AgentIdentityRegistry> {
         self.agents.identities_ref()
-    }
-
-    /// Memory substrate. Delegates to
-    /// [`MemorySubsystem::substrate_ref`].
-    #[inline]
-    pub fn memory_substrate(&self) -> &Arc<MemorySubstrate> {
-        self.memory.substrate_ref()
-    }
-
-    /// Proactive memory store. Delegates to
-    /// [`MemorySubsystem::proactive_store`].
-    #[inline]
-    pub fn proactive_memory_store(&self) -> Option<&Arc<librefang_memory::ProactiveMemoryStore>> {
-        self.memory.proactive_store()
     }
 
     /// Agent scheduler. Delegates to [`AgentSubsystem::scheduler_ref`].
@@ -1465,7 +1450,7 @@ impl LibreFangKernel {
         {
             let live_ids: Vec<librefang_types::agent::AgentId> =
                 live_agents.iter().copied().collect();
-            match self.memory_substrate().cleanup_orphan_sessions(&live_ids) {
+            match self.substrate_ref().cleanup_orphan_sessions(&live_ids) {
                 Ok(n) if n > 0 => {
                     info!(deleted = n, "Cleaned up orphan sessions");
                     total_removed += n as usize;

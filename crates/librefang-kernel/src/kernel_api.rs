@@ -579,7 +579,7 @@ impl KernelApi for LibreFangKernel {
         Self::media_drivers(self)
     }
     fn memory_substrate(&self) -> &Arc<MemorySubstrate> {
-        Self::memory_substrate(self)
+        <Self as crate::MemorySubsystemApi>::substrate_ref(self)
     }
     fn metering_ref(&self) -> &Arc<MeteringEngine> {
         <Self as crate::MeteringSubsystemApi>::metering_engine(self)
@@ -588,7 +588,7 @@ impl KernelApi for LibreFangKernel {
         <Self as crate::SecuritySubsystemApi>::pairing_ref(self)
     }
     fn proactive_memory_store(&self) -> Option<&Arc<librefang_memory::ProactiveMemoryStore>> {
-        Self::proactive_memory_store(self)
+        <Self as crate::MemorySubsystemApi>::proactive_store(self)
     }
     fn processes(&self) -> &Arc<librefang_runtime::process_manager::ProcessManager> {
         <Self as crate::ProcessSubsystemApi>::process_manager_ref(self)
