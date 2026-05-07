@@ -186,7 +186,8 @@ impl AuxClient {
             | AuxTask::Title
             | AuxTask::Search
             | AuxTask::Fold
-            | AuxTask::SkillReview => vec![
+            | AuxTask::SkillReview
+            | AuxTask::SkillWorkshopReview => vec![
                 "openrouter:anthropic/claude-3-5-haiku".to_string(),
                 "anthropic:haiku".to_string(),
                 "openai:gpt-4o-mini".to_string(),
@@ -461,6 +462,7 @@ mod tests {
             AuxTask::BrowserVision,
             AuxTask::Fold,
             AuxTask::SkillReview,
+            AuxTask::SkillWorkshopReview,
         ] {
             let res = aux.resolve(task);
             assert!(

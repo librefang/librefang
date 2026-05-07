@@ -189,24 +189,6 @@ async fn capture_one(
                 hit
             }
         },
-        ReviewMode::Both => {
-            // `Both` accepts if either gate accepts, refines via the LLM
-            // when it spoke, and falls back to the heuristic on
-            // indeterminate. Reject only when the LLM explicitly
-            // rejects — heuristic alone has already accepted.
-            match run_llm_review(kernel, &hit).await {
-                ReviewDecision::Accept {
-                    refined_name,
-                    refined_description,
-                    ..
-                } => apply_refinements(hit, refined_name, refined_description),
-                ReviewDecision::Reject { reason } => {
-                    debug!(%agent_id, reason, "skill_workshop: LLM rejected candidate under Both");
-                    return;
-                }
-                ReviewDecision::Indeterminate { .. } => hit,
-            }
-        }
     };
     let now = chrono::Utc::now();
     let id = Uuid::new_v4().to_string();
@@ -287,12 +269,17 @@ fn apply_refinements(
     refined_description: Option<String>,
 ) -> HeuristicHit {
     if let Some(name) = refined_name {
-        // Defensive sanitisation: validate_name in evolution.rs is
-        // strict, and we'd rather drop a malformed refinement than
-        // poison the candidate. Letting the heuristic name win on
-        // garbage refinement is a graceful degradation.
+        // Defensive sanitisation: `librefang_skills::evolution::validate_name`
+        // is strict (lowercase ascii alphanumeric + `_` + `-`, length-bounded).
+        // We'd rather drop a malformed refinement than poison the candidate
+        // — at approval time it would fail validation, leave the pending
+        // file orphaned, and confuse the reviewer. Letting the heuristic
+        // name win on garbage refinement is a graceful degradation.
         let trimmed = name.trim();
-        if !trimmed.is_empty() && trimmed.len() <= 64 {
+        let charset_ok = trimmed
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+        if !trimmed.is_empty() && trimmed.len() <= 64 && charset_ok {
             hit.name = trimmed.to_string();
         }
     }
@@ -307,7 +294,12 @@ fn apply_refinements(
 
 async fn run_llm_review(kernel: &Arc<LibreFangKernel>, hit: &HeuristicHit) -> ReviewDecision {
     let aux: Arc<AuxClient> = kernel.aux_client();
-    let resolution = aux.resolve(AuxTask::SkillReview);
+    // Use the dedicated `SkillWorkshopReview` slot, NOT `SkillReview`
+    // — the latter is owned by `kernel::messaging::background_skill_review`,
+    // which already runs after every turn for `auto_evolve` agents.
+    // Sharing the slot would double-bill operators who enable both
+    // pipelines and confuse budget tooling. See #3328 review.
+    let resolution = aux.resolve(AuxTask::SkillWorkshopReview);
     if resolution.used_primary {
         // Primary fallback for SkillReview means the user has no aux
         // chain configured AND no default-chain providers credentialled.
@@ -360,9 +352,16 @@ fn read_workshop_config(
 /// Pull the most recently touched session for `agent_id` and walk it
 /// for the data the heuristic scanners need.
 fn load_recent_turn(kernel: &Arc<LibreFangKernel>, agent_id: AgentId) -> Option<RecentTurn> {
+    // Use the agent's currently-active session, NOT
+    // `memory.get_agent_session_ids().first()` — the latter orders by
+    // `created_at DESC`, which is the session-creation timestamp, not
+    // the most-recently-touched session. A long-lived agent that
+    // currently chats in an older session (e.g. channel-derived) but
+    // had a one-off newer session created (e.g. cron fire) would
+    // otherwise have the workshop scan the wrong session's last turn.
+    let entry = kernel.agent_registry().get(agent_id)?;
+    let session_id = entry.session_id;
     let memory = kernel.memory_substrate();
-    let session_ids = memory.get_agent_session_ids(agent_id).ok()?;
-    let session_id = *session_ids.first()?;
     let session = memory.get_session(session_id).ok().flatten()?;
 
     // Walk newest-last (the natural append order in librefang sessions).

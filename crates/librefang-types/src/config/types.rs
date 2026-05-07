@@ -1043,6 +1043,13 @@ pub enum AuxTask {
     /// its name / one-line summary if so. Cheap classification call,
     /// runs at most once per turn that produced a heuristic match.
     SkillReview,
+    /// Skill workshop (#3328) — separate aux slot from `SkillReview` so
+    /// the workshop's after-turn capture review can be costed and
+    /// configured independently of the existing `background_skill_review`
+    /// pipeline (which also resolves through `SkillReview`). Operators
+    /// can disable one without disabling the other; budget tooling sees
+    /// distinct line items.
+    SkillWorkshopReview,
 }
 
 impl AuxTask {
@@ -1056,6 +1063,7 @@ impl AuxTask {
             AuxTask::BrowserVision => "browser_vision",
             AuxTask::Fold => "fold",
             AuxTask::SkillReview => "skill_review",
+            AuxTask::SkillWorkshopReview => "skill_workshop_review",
         }
     }
 }

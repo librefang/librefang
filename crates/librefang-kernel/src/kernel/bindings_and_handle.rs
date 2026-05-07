@@ -56,6 +56,21 @@ impl LibreFangKernel {
                     Arc::downgrade(self),
                 )),
             );
+            // Best-effort cleanup of `.toml.tmp` orphans left over from
+            // crashes mid-write between previous daemon runs. Cheap; no
+            // need to spawn a task. Errors are logged inside the helper.
+            let pending_root = self.home_dir().join("skills");
+            match crate::skill_workshop::storage::prune_orphan_temp_files(&pending_root) {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(
+                    pruned = n,
+                    "skill_workshop: removed orphan .toml.tmp files left from a previous crash"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "skill_workshop: failed to scan pending dir for orphan tmp files"
+                ),
+            }
             // Install the kernel-handle weak ref on the proactive-memory
             // extractor so its `extract_memories_with_agent_id` path can
             // route through `run_forked_agent_oneshot` for cache alignment

@@ -1165,9 +1165,16 @@ pub struct SkillWorkshopConfig {
 
 impl Default for SkillWorkshopConfig {
     fn default() -> Self {
+        // Every dimension defaults to "no work performed" so a future
+        // refactor that materialises `SkillWorkshopConfig::default()`
+        // for an unconfigured agent (test fixture, hot-reload fallback,
+        // forgotten manifest field) cannot accidentally activate
+        // capture even if some other code path skipped the `enabled`
+        // gate. Operators that opt in via `agent.toml` set
+        // `auto_capture = true` explicitly alongside `enabled = true`.
         Self {
             enabled: false,
-            auto_capture: true,
+            auto_capture: false,
             approval_policy: ApprovalPolicy::Pending,
             review_mode: ReviewMode::Heuristic,
             max_pending: 20,
@@ -1199,15 +1206,23 @@ pub enum ReviewMode {
     #[default]
     Heuristic,
     /// Heuristic gate first; only candidates that pass the heuristic
-    /// are forwarded to a cheap auxiliary LLM (`AuxTask::SkillReview`)
-    /// for confirmation and refinement. The LLM may reject a candidate
-    /// that the heuristic accepted, but it cannot resurrect one the
-    /// heuristic dropped — keeps the LLM call rate bounded.
-    #[serde(alias = "threshold-llm", alias = "threshold_llm")]
+    /// are forwarded to a cheap auxiliary LLM
+    /// (`AuxTask::SkillWorkshopReview`) for confirmation and
+    /// refinement. The LLM may reject a candidate that the heuristic
+    /// accepted, but it cannot resurrect one the heuristic dropped —
+    /// keeps the LLM call rate bounded by the heuristic's hit rate.
+    /// `both` from openclaw's vocabulary is accepted as an alias and
+    /// is functionally identical: a parallel "run both gates
+    /// independently and union accepts" mode would require feeding
+    /// the LLM raw turn text without a heuristic seed and is
+    /// out-of-scope for the current pipeline.
+    #[serde(
+        alias = "threshold-llm",
+        alias = "threshold_llm",
+        alias = "both",
+        alias = "Both"
+    )]
     ThresholdLlm,
-    /// Run heuristic and LLM independently and union their accepts.
-    /// Higher recall, higher token cost.
-    Both,
     /// Disable automatic classification entirely. Manual capture (CLI)
     /// still works.
     None,

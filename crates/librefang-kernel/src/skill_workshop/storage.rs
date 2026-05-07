@@ -270,8 +270,21 @@ pub fn approve_candidate(
         Some(&candidate.agent_id),
     )?;
 
-    // Promotion succeeded — drop the pending file.
-    let _ = fs::remove_file(&path);
+    // Promotion succeeded — drop the pending file. We log instead of
+    // failing the whole approve when remove fails: the active skill
+    // already exists and the user's intent (promote) is satisfied.
+    // Surfacing the error keeps a phantom-pending row from going
+    // unnoticed (operator can `librefang skill pending reject <id>`
+    // manually if it lingers).
+    if let Err(e) = fs::remove_file(&path) {
+        tracing::warn!(
+            ?path,
+            error = %e,
+            skill = %result.skill_name,
+            "skill_workshop: pending file persisted after successful promotion; \
+             list_pending will keep showing it until manually rejected"
+        );
+    }
     Ok(result)
 }
 
