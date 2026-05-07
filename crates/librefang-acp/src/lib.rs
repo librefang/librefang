@@ -35,6 +35,7 @@
 
 pub mod error;
 pub mod events;
+pub mod fs;
 #[cfg(feature = "kernel-adapter")]
 pub mod kernel_adapter;
 pub mod permission;
@@ -46,6 +47,7 @@ pub mod session;
 pub use kernel_adapter::KernelAdapter;
 
 pub use error::{AcpError, AcpResult};
+pub use fs::{FsCapabilities, FsClientHandle};
 pub use server::{run, run_with_transport};
 
 use std::sync::Arc;
@@ -114,6 +116,14 @@ pub trait AcpKernel: Send + Sync + 'static {
     ) -> AcpResult<()> {
         Ok(())
     }
+
+    /// Hand the kernel a [`FsClientHandle`] so the runtime can route
+    /// `fs/read_text_file` / `fs/write_text_file` back through the
+    /// editor (#3313). Called once per connection right after
+    /// `initialize` lands, before any `session/prompt` arrives.
+    /// Default impl drops the handle on the floor — pure-protocol
+    /// consumers (integration tests) ignore it.
+    fn set_fs_client(&self, _handle: fs::FsClientHandle) {}
 }
 
 /// Convenience type alias for `Arc<dyn AcpKernel>`. Most call sites pass

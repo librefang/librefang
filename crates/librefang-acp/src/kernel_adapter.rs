@@ -7,6 +7,7 @@
 //! adapter against the same kernel.
 
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use async_trait::async_trait;
 use librefang_kernel::kernel_handle::KernelHandle;
@@ -17,6 +18,7 @@ use librefang_types::approval::{ApprovalDecision, ApprovalEvent};
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
+use crate::fs::FsClientHandle;
 use crate::{AcpError, AcpKernel, AcpResult};
 
 /// Wraps an `Arc<LibreFangKernel>` so it can serve ACP traffic.
@@ -33,6 +35,11 @@ use crate::{AcpError, AcpKernel, AcpResult};
 pub struct KernelAdapter {
     kernel: Arc<LibreFangKernel>,
     kernel_handle: Arc<dyn KernelHandle>,
+    /// Editor-bound `fs/*` reverse-RPC handle, populated at
+    /// `initialize` time by the ACP server. `None` for transports that
+    /// haven't completed the handshake yet (test harnesses,
+    /// pre-initialize tool calls — both Phase-2 niches).
+    fs_client: Arc<RwLock<Option<FsClientHandle>>>,
 }
 
 impl KernelAdapter {
@@ -44,6 +51,7 @@ impl KernelAdapter {
         Self {
             kernel,
             kernel_handle,
+            fs_client: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -52,6 +60,13 @@ impl KernelAdapter {
     /// adapter into [`crate::run`].
     pub fn kernel(&self) -> &Arc<LibreFangKernel> {
         &self.kernel
+    }
+
+    /// Snapshot of the `fs/*` client handle, if any. Cloned out so the
+    /// caller doesn't hold the lock across `await`. Returns `None`
+    /// before `initialize` has handed us a connection.
+    pub fn fs_client(&self) -> Option<FsClientHandle> {
+        self.fs_client.read().ok().and_then(|guard| guard.clone())
     }
 }
 
@@ -147,5 +162,17 @@ impl AcpKernel for KernelAdapter {
             .approvals()
             .remember(agent_id, tool_name, decision);
         Ok(())
+    }
+
+    fn set_fs_client(&self, handle: FsClientHandle) {
+        // The lock can only be poisoned by a panic in another writer,
+        // and we only ever overwrite the slot. Recover the inner
+        // value so a poisoned lock from a prior connection (defensive)
+        // doesn't strand the new handshake.
+        let mut guard = self
+            .fs_client
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(handle);
     }
 }

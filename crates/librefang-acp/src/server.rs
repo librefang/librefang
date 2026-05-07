@@ -22,6 +22,7 @@ use agent_client_protocol_tokio::Stdio;
 use librefang_types::agent::AgentId;
 use tracing::debug;
 
+use crate::fs::{FsCapabilities, FsClientHandle};
 use crate::permission;
 use crate::prompt;
 use crate::session::{SessionState, SessionStore};
@@ -54,6 +55,7 @@ where
 
     // Each builder method consumes the builder, so we clone the Arcs
     // we want each handler to own up front.
+    let kernel_for_init = Arc::clone(&kernel);
     let kernel_for_perm = Arc::clone(&kernel);
     let kernel_for_prompt = Arc::clone(&kernel);
     let sessions_for_new = Arc::clone(&sessions);
@@ -70,8 +72,17 @@ where
         .name("librefang")
         // initialize ----------------------------------------------------
         .on_receive_request(
-            async move |req: InitializeRequest, responder, _cx| {
+            async move |req: InitializeRequest, responder, cx: agent_client_protocol::ConnectionTo<Client>| {
                 debug!(client = ?req.client_info, "ACP initialize");
+                // Hand the kernel a `fs/*` reverse-RPC handle so any
+                // tool the runtime later runs can read / write through
+                // the editor instead of the local filesystem (#3313).
+                // The handle captures the editor's declared
+                // capabilities so the runtime can short-circuit when
+                // the editor doesn't support the operation, instead of
+                // round-tripping a `method_not_found`.
+                let fs_caps = FsCapabilities::from_client(&req.client_capabilities);
+                kernel_for_init.set_fs_client(FsClientHandle::new(cx.clone(), fs_caps));
                 let session_caps = SessionCapabilities::new()
                     .list(SessionListCapabilities::default())
                     .resume(SessionResumeCapabilities::default())
