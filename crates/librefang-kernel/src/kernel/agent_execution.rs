@@ -12,6 +12,7 @@
 //! visibility surgery.
 
 use super::*;
+use crate::MeteringSubsystemApi;
 
 impl LibreFangKernel {
     // -----------------------------------------------------------------------
@@ -1135,7 +1136,7 @@ impl LibreFangKernel {
         if let Err(e) = self.metering.engine.check_all_and_record(
             &usage_record,
             &manifest.resources,
-            &self.budget_config(),
+            &self.current_budget(),
         ) {
             // Quota exceeded after the LLM call — log but still return the
             // result (the tokens were already consumed by the provider).

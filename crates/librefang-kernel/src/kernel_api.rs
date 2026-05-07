@@ -549,7 +549,7 @@ impl KernelApi for LibreFangKernel {
         Self::approvals(self)
     }
     fn audit(&self) -> &Arc<AuditLog> {
-        Self::audit(self)
+        <Self as crate::MeteringSubsystemApi>::audit_log(self)
     }
     fn auth_manager(&self) -> &AuthManager {
         Self::auth_manager(self)
@@ -582,7 +582,7 @@ impl KernelApi for LibreFangKernel {
         Self::memory_substrate(self)
     }
     fn metering_ref(&self) -> &Arc<MeteringEngine> {
-        Self::metering_ref(self)
+        <Self as crate::MeteringSubsystemApi>::metering_engine(self)
     }
     fn pairing_ref(&self) -> &PairingManager {
         Self::pairing_ref(self)
@@ -668,7 +668,7 @@ impl KernelApi for LibreFangKernel {
 
     // -- Config / lifecycle --
     fn budget_config(&self) -> BudgetConfig {
-        Self::budget_config(self)
+        <Self as crate::MeteringSubsystemApi>::current_budget(self)
     }
     fn update_budget_config(&self, f: &dyn Fn(&mut BudgetConfig)) {
         Self::update_budget_config(self, f);

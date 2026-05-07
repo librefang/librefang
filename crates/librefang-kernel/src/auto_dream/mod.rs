@@ -28,6 +28,7 @@
 //! A failed, aborted, or timed-out dream rolls back the lock mtime so the
 //! time gate reopens on the next tick.
 
+use crate::MeteringSubsystemApi;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
@@ -462,7 +463,7 @@ async fn run_dream(
             usage: None,
         },
     );
-    kernel.audit().record(
+    kernel.audit_log().record(
         target.to_string(),
         librefang_runtime::audit::AuditAction::DreamConsolidation,
         format!("phase=start task_id={task_id}"),
@@ -622,7 +623,7 @@ async fn run_dream(
                 cost_usd = ?usage.cost_usd,
                 "auto_dream: consolidation completed",
             );
-            kernel.audit().record(
+            kernel.audit_log().record(
                 target.to_string(),
                 librefang_runtime::audit::AuditAction::DreamConsolidation,
                 format!(
@@ -687,7 +688,7 @@ async fn finalize_failure(
         p.phase = "failed".to_string();
         p.error = Some(reason.clone());
     });
-    kernel.audit().record(
+    kernel.audit_log().record(
         target.to_string(),
         librefang_runtime::audit::AuditAction::DreamConsolidation,
         format!("phase=fail task_id={task_id} reason={reason}"),
@@ -709,7 +710,7 @@ async fn finalize_abort(kernel: &LibreFangKernel, target: AgentId, prior_mtime: 
         p.phase = "aborted".to_string();
         p.error.get_or_insert_with(|| "aborted by user".to_string());
     });
-    kernel.audit().record(
+    kernel.audit_log().record(
         target.to_string(),
         librefang_runtime::audit::AuditAction::DreamConsolidation,
         format!("phase=abort task_id={task_id}"),
@@ -757,7 +758,7 @@ pub fn set_agent_enabled(
     kernel
         .agent_registry()
         .update_auto_dream_enabled(agent_id, enabled)?;
-    kernel.audit().record(
+    kernel.audit_log().record(
         agent_id.to_string(),
         librefang_runtime::audit::AuditAction::ConfigChange,
         format!("auto_dream_enabled={enabled}"),

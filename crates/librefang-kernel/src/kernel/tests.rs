@@ -1,5 +1,6 @@
 use super::*;
 use crate::registry::AgentRegistry;
+use crate::MeteringSubsystemApi;
 use futures::stream;
 use librefang_channels::types::{ChannelAdapter, ChannelContent, ChannelType, ChannelUser};
 use librefang_types::approval::{
@@ -6714,7 +6715,7 @@ fn list_agent_sessions_canonical_and_active_can_coexist_on_same_row() {
 /// state), and the final stored value reflects the writer's mutation.
 ///
 /// This pins the contract for the LLM hot path, which calls
-/// `kernel.budget_config()` on every turn for budget enforcement and
+/// `kernel.current_budget()` on every turn for budget enforcement and
 /// must never park a tokio worker on a blocking lock.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn budget_config_arcswap_concurrent_reads_consistent_with_writer() {
@@ -6738,7 +6739,7 @@ async fn budget_config_arcswap_concurrent_reads_consistent_with_writer() {
         let k = kernel.clone();
         readers.push(tokio::spawn(async move {
             for _ in 0..50 {
-                let snap = k.budget_config();
+                let snap = k.current_budget();
                 // Only ever the pre-update or post-update sentinel, never
                 // a torn / partial value.
                 let v = snap.max_hourly_usd;
@@ -6756,7 +6757,7 @@ async fn budget_config_arcswap_concurrent_reads_consistent_with_writer() {
     }
 
     // After the writer completes, every subsequent read must see 9.0.
-    assert_eq!(kernel.budget_config().max_hourly_usd, 9.0);
+    assert_eq!(kernel.current_budget().max_hourly_usd, 9.0);
 
     kernel.shutdown();
 }
@@ -6803,7 +6804,7 @@ async fn budget_config_concurrent_writers_no_lost_update() {
         h.await.expect("writer task panicked");
     }
 
-    let final_cfg = kernel.budget_config();
+    let final_cfg = kernel.current_budget();
     // Final values must each be from *some* writer (in their respective
     // hourly_target / daily_target ranges) — proves the rcu retry kept
     // each field converging to a writer-supplied value rather than

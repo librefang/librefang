@@ -16,14 +16,13 @@ use std::sync::Arc;
 
 use super::subsystems::{
     AgentSubsystemApi, EventSubsystemApi, GovernanceSubsystemApi, LlmSubsystemApi, McpSubsystemApi,
-    MediaSubsystemApi, MemorySubsystemApi, MeshSubsystemApi, MeteringSubsystemApi,
-    ProcessSubsystemApi, SecuritySubsystemApi, SkillsSubsystemApi, WorkflowSubsystemApi,
+    MediaSubsystemApi, MemorySubsystemApi, MeshSubsystemApi, ProcessSubsystemApi,
+    SecuritySubsystemApi, SkillsSubsystemApi, WorkflowSubsystemApi,
 };
 
 use tracing::{debug, info, warn};
 
 use librefang_memory::MemorySubstrate;
-use librefang_runtime::audit::AuditLog;
 use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::config::KernelConfig;
 use librefang_types::error::LibreFangError;
@@ -32,7 +31,6 @@ use librefang_types::tool::{AgentLoopSignal, ToolDefinition};
 use crate::auth::AuthManager;
 use crate::error::{KernelError, KernelResult};
 use crate::event_bus::EventBus;
-use crate::metering::MeteringEngine;
 use crate::registry::AgentRegistry;
 use crate::scheduler::AgentScheduler;
 use crate::supervisor::Supervisor;
@@ -54,14 +52,12 @@ impl LibreFangKernel {
         self.config.load_full()
     }
 
-    /// Return a snapshot of the current budget configuration. Delegates
-    /// to [`MeteringSubsystem::current_budget`].
-    pub fn budget_config(&self) -> librefang_types::config::BudgetConfig {
-        self.metering.current_budget()
-    }
-
     /// Safely mutate the runtime budget configuration. Delegates to
     /// [`MeteringSubsystem::update_budget`].
+    ///
+    /// Inherent (not on `MeteringSubsystemApi`) because trait methods
+    /// cannot accept `impl Fn` arguments — see the metering subsystem
+    /// docs.
     pub fn update_budget_config(&self, f: impl Fn(&mut librefang_types::config::BudgetConfig)) {
         self.metering.update_budget(f);
     }
@@ -417,19 +413,6 @@ impl LibreFangKernel {
     #[inline]
     pub fn proactive_memory_store(&self) -> Option<&Arc<librefang_memory::ProactiveMemoryStore>> {
         self.memory.proactive_store()
-    }
-
-    /// Merkle hash chain audit trail.
-    #[inline]
-    pub fn audit(&self) -> &Arc<AuditLog> {
-        self.metering.audit_log()
-    }
-
-    /// Cost metering engine. Delegates to
-    /// [`MeteringSubsystem::engine`].
-    #[inline]
-    pub fn metering_ref(&self) -> &Arc<MeteringEngine> {
-        self.metering.metering_engine()
     }
 
     /// Agent scheduler. Delegates to [`AgentSubsystem::scheduler_ref`].
