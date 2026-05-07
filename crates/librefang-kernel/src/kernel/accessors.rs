@@ -166,7 +166,7 @@ impl LibreFangKernel {
             policy = policy.with_workspace_root(ws);
         }
 
-        let exporter = TrajectoryExporter::new(self.memory.clone(), policy);
+        let exporter = TrajectoryExporter::new(self.memory.substrate.clone(), policy);
         let agent_ctx = AgentContext {
             name: entry.name.clone(),
             model: entry.manifest.model.model.clone(),
@@ -174,7 +174,7 @@ impl LibreFangKernel {
             system_prompt: entry.manifest.model.system_prompt.clone(),
         };
 
-        match self.memory.get_session(session_id) {
+        match self.memory.substrate.get_session(session_id) {
             Ok(None) if session_id == entry.session_id => {
                 Ok(exporter.empty_bundle(agent_id, session_id, agent_ctx))
             }
@@ -423,13 +423,13 @@ impl LibreFangKernel {
     /// Memory substrate (structured storage, vector search).
     #[inline]
     pub fn memory_substrate(&self) -> &Arc<MemorySubstrate> {
-        &self.memory
+        &self.memory.substrate
     }
 
     /// Proactive memory store (mem0-style auto-memorize/retrieve).
     #[inline]
     pub fn proactive_memory_store(&self) -> Option<&Arc<librefang_memory::ProactiveMemoryStore>> {
-        self.proactive_memory.get()
+        self.memory.proactive_memory.get()
     }
 
     /// Merkle hash chain audit trail.
@@ -666,7 +666,12 @@ impl LibreFangKernel {
                     continue;
                 }
 
-                match kernel.memory.task_reset_stuck(ttl_secs, max_retries).await {
+                match kernel
+                    .memory
+                    .substrate
+                    .task_reset_stuck(ttl_secs, max_retries)
+                    .await
+                {
                     Ok(reset) if !reset.is_empty() => {
                         warn!(
                             count = reset.len(),

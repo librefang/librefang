@@ -107,11 +107,14 @@ impl LibreFangKernel {
         agent_id: Option<AgentId>,
     ) -> Vec<(String, String, u8)> {
         let shared_id = shared_memory_agent_id();
-        let goals: Vec<serde_json::Value> =
-            match self.memory.structured_get(shared_id, "__librefang_goals") {
-                Ok(Some(serde_json::Value::Array(arr))) => arr,
-                _ => return Vec::new(),
-            };
+        let goals: Vec<serde_json::Value> = match self
+            .memory
+            .substrate
+            .structured_get(shared_id, "__librefang_goals")
+        {
+            Ok(Some(serde_json::Value::Array(arr))) => arr,
+            _ => return Vec::new(),
+        };
         goals
             .into_iter()
             .filter(|g| {

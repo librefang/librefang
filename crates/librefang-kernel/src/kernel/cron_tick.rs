@@ -281,7 +281,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                                     .clone();
                                 let _prune_guard = prune_lock.lock().await;
                                 if let Ok(Some(mut session)) =
-                                    kernel_job.memory.get_session(cron_sid)
+                                    kernel_job.memory.substrate.get_session(cron_sid)
                                 {
                                     use librefang_runtime::compactor::estimate_token_count;
                                     // Compute how many messages must be removed
@@ -477,8 +477,11 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                                         }
                                     }
                                     if needs_compaction {
-                                        let _ =
-                                            kernel_job.memory.save_session_async(&session).await;
+                                        let _ = kernel_job
+                                            .memory
+                                            .substrate
+                                            .save_session_async(&session)
+                                            .await;
                                     }
                                 }
                             }

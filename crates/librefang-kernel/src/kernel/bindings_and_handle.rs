@@ -51,7 +51,7 @@ impl LibreFangKernel {
             // doesn't need this; it short-circuits before touching the
             // kernel. Safe to no-op when the extractor wasn't configured
             // (OnceLock::get returns None).
-            if let Some(extractor) = self.proactive_memory_extractor.get() {
+            if let Some(extractor) = self.memory.proactive_memory_extractor.get() {
                 let weak: std::sync::Weak<dyn librefang_runtime::kernel_handle::KernelHandle> =
                     Arc::downgrade(self) as _;
                 extractor.install_kernel_handle(weak);

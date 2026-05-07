@@ -27,7 +27,7 @@ impl kernel_handle::SessionWriter for LibreFangKernel {
             }
         };
 
-        let mut session = match self.memory.get_session(entry.session_id) {
+        let mut session = match self.memory.substrate.get_session(entry.session_id) {
             Ok(Some(s)) => s,
             _ => librefang_memory::session::Session {
                 id: entry.session_id,
@@ -63,7 +63,7 @@ impl kernel_handle::SessionWriter for LibreFangKernel {
 
         let total_messages_after = session.messages.len();
 
-        if let Err(e) = self.memory.save_session(&session) {
+        if let Err(e) = self.memory.substrate.save_session(&session) {
             tracing::warn!(
                 agent_id = ?agent_id,
                 session_id = ?entry.session_id,

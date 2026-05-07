@@ -269,6 +269,7 @@ impl LibreFangKernel {
         let effective_session_id = if let Some(sid) = session_id_override {
             if let Some(existing) = self
                 .memory
+                .substrate
                 .get_session(sid)
                 .map_err(KernelError::LibreFang)?
             {
@@ -333,6 +334,7 @@ impl LibreFangKernel {
 
         let mut session = self
             .memory
+            .substrate
             .get_session(effective_session_id)
             .map_err(KernelError::LibreFang)?
             .unwrap_or_else(|| librefang_memory::session::Session {
@@ -390,7 +392,7 @@ impl LibreFangKernel {
                     // guard (which is skipped when there are no injections)
                     // would leave the storage copy untouched and the reset
                     // would be invisible to subsequent calls.
-                    if let Err(e) = self.memory.save_session_async(&session).await {
+                    if let Err(e) = self.memory.substrate.save_session_async(&session).await {
                         tracing::warn!(
                             agent_id = %agent_id,
                             error = %e,
@@ -402,7 +404,7 @@ impl LibreFangKernel {
                     // Other registry updates (update_skills, update_mcp_servers, etc.)
                     // follow the same pattern: update + save_agent.
                     if let Some(updated) = self.registry.get(agent_id) {
-                        if let Err(e) = self.memory.save_agent_async(&updated).await {
+                        if let Err(e) = self.memory.substrate.save_agent_async(&updated).await {
                             tracing::warn!(
                                 agent_id = %agent_id,
                                 error = %e,
@@ -499,6 +501,7 @@ impl LibreFangKernel {
             let stable_prefix_mode = cfg.stable_prefix_mode;
             let user_name = self
                 .memory
+                .substrate
                 .structured_get(shared_id, "user_name")
                 .ok()
                 .flatten()
@@ -587,6 +590,7 @@ impl LibreFangKernel {
                     None
                 } else {
                     self.memory
+                        .substrate
                         .canonical_context(agent_id, Some(effective_session_id), None)
                         .ok()
                         .and_then(|(s, _)| s)
@@ -866,7 +870,7 @@ impl LibreFangKernel {
             }
         }
 
-        let proactive_memory = self.proactive_memory.get().cloned();
+        let proactive_memory = self.memory.proactive_memory.get().cloned();
 
         // Set up mid-turn injection channel.
         let injection_rx = self.setup_injection_channel(agent_id, effective_session_id);
@@ -927,7 +931,7 @@ impl LibreFangKernel {
             &manifest,
             &message_with_links,
             &mut session,
-            &self.memory,
+            &self.memory.substrate,
             driver,
             &tools,
             Some(kernel_handle),
@@ -1036,7 +1040,7 @@ impl LibreFangKernel {
                 // Persist the stripped session. agent_loop already called
                 // save_session internally; this second save overwrites that
                 // with the version that has the assistant turn removed.
-                if let Err(e) = self.memory.save_session_async(&session).await {
+                if let Err(e) = self.memory.substrate.save_session_async(&session).await {
                     warn!("cron [SILENT]: failed to persist stripped session: {e}");
                 }
             }
@@ -1064,6 +1068,7 @@ impl LibreFangKernel {
                 let new_messages = session.messages[start..].to_vec();
                 if let Err(e) = self
                     .memory
+                    .substrate
                     .append_canonical_async(
                         agent_id,
                         &new_messages,
@@ -1081,6 +1086,7 @@ impl LibreFangKernel {
         if let Some(ref workspace) = manifest.workspace {
             if let Err(e) = self
                 .memory
+                .substrate
                 .write_jsonl_mirror(&session, &workspace.join("sessions"))
             {
                 warn!("Failed to write JSONL session mirror: {e}");

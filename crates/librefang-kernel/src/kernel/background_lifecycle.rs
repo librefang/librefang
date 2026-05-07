@@ -221,7 +221,7 @@ impl LibreFangKernel {
                 .iter()
                 .flat_map(|inst| inst.agent_ids.values().copied().collect::<Vec<_>>())
                 .collect();
-            match self.memory.load_all_agents_async().await {
+            match self.memory.substrate.load_all_agents_async().await {
                 Ok(all) => {
                     let mut removed = 0usize;
                     for entry in all {
@@ -231,7 +231,7 @@ impl LibreFangKernel {
                         if live_hand_agents.contains(&entry.id) {
                             continue;
                         }
-                        match self.memory.remove_agent_async(entry.id).await {
+                        match self.memory.substrate.remove_agent_async(entry.id).await {
                             Ok(()) => {
                                 removed += 1;
                                 info!(
@@ -499,7 +499,11 @@ impl LibreFangKernel {
                             break;
                         }
                         if memory_retention > 0 {
-                            match kernel.memory.prune_soft_deleted_memories(memory_retention) {
+                            match kernel
+                                .memory
+                                .substrate
+                                .prune_soft_deleted_memories(memory_retention)
+                            {
                                 Ok(n) if n > 0 => info!(
                                     "Memory retention: hard-deleted {n} soft-deleted memories \
                                      (older than {memory_retention} days)"
@@ -509,7 +513,12 @@ impl LibreFangKernel {
                             }
                         }
                         if queue_retention > 0 {
-                            match kernel.memory.task_prune_finished(queue_retention).await {
+                            match kernel
+                                .memory
+                                .substrate
+                                .task_prune_finished(queue_retention)
+                                .await
+                            {
                                 Ok(n) if n > 0 => info!(
                                     "Task queue retention: pruned {n} finished tasks \
                                      (older than {queue_retention} days)"
@@ -647,6 +656,7 @@ impl LibreFangKernel {
                         if session_cfg.retention_days > 0 {
                             match kernel
                                 .memory
+                                .substrate
                                 .cleanup_expired_sessions(session_cfg.retention_days)
                             {
                                 Ok(n) => total += n,
@@ -658,6 +668,7 @@ impl LibreFangKernel {
                         if session_cfg.max_sessions_per_agent > 0 {
                             match kernel
                                 .memory
+                                .substrate
                                 .cleanup_excess_sessions(session_cfg.max_sessions_per_agent)
                             {
                                 Ok(n) => total += n,
@@ -692,6 +703,7 @@ impl LibreFangKernel {
                 if session_cfg.retention_days > 0 {
                     match self
                         .memory
+                        .substrate
                         .cleanup_expired_sessions(session_cfg.retention_days)
                     {
                         Ok(n) => pruned_total += n,
@@ -701,6 +713,7 @@ impl LibreFangKernel {
                 if session_cfg.max_sessions_per_agent > 0 {
                     match self
                         .memory
+                        .substrate
                         .cleanup_excess_sessions(session_cfg.max_sessions_per_agent)
                     {
                         Ok(n) => pruned_total += n,
@@ -709,6 +722,7 @@ impl LibreFangKernel {
                 }
                 if let Err(e) = self
                     .memory
+                    .substrate
                     .vacuum_if_shrank_async(pruned_total as usize)
                     .await
                 {
@@ -768,7 +782,7 @@ impl LibreFangKernel {
                         if kernel.supervisor.is_shutting_down() {
                             break;
                         }
-                        match kernel.memory.consolidate().await {
+                        match kernel.memory.substrate.consolidate().await {
                             Ok(report) => {
                                 if report.memories_decayed > 0 || report.memories_merged > 0 {
                                     info!(
@@ -805,7 +819,7 @@ impl LibreFangKernel {
                         if kernel.supervisor.is_shutting_down() {
                             break;
                         }
-                        match kernel.memory.run_decay(&decay_config) {
+                        match kernel.memory.substrate.run_decay(&decay_config) {
                             Ok(n) => {
                                 if n > 0 {
                                     info!(deleted = n, "Memory decay sweep completed");
@@ -1293,7 +1307,7 @@ impl LibreFangKernel {
             }
             // Re-save with Suspended state for clean resume on next boot
             if let Some(updated) = self.registry.get(entry.id) {
-                if let Err(e) = self.memory.save_agent(&updated) {
+                if let Err(e) = self.memory.substrate.save_agent(&updated) {
                     save_failures += 1;
                     tracing::error!(agent_id = %entry.id, "failed to persist agent state on shutdown: {e}");
                 }

@@ -166,7 +166,7 @@ impl LibreFangKernel {
         // mutation and propagate the error so the API caller sees a 500 instead of
         // silently drifting registry vs. disk (#3499).
         if let Some(entry) = self.registry.get(agent_id) {
-            if let Err(e) = self.memory.save_agent(&entry) {
+            if let Err(e) = self.memory.substrate.save_agent(&entry) {
                 if let Some((p_model, p_provider, p_api_key_env, p_base_url)) = prev_model_state {
                     let _ = self.registry.update_model_provider_config(
                         agent_id,
@@ -184,7 +184,7 @@ impl LibreFangKernel {
         self.persist_manifest_to_disk(agent_id);
 
         // Clear canonical session to prevent memory poisoning from old model's responses
-        let _ = self.memory.delete_canonical_session(agent_id);
+        let _ = self.memory.substrate.delete_canonical_session(agent_id);
         debug!(agent_id = %agent_id, "Cleared canonical session after model switch");
 
         Ok(())
@@ -293,7 +293,7 @@ impl LibreFangKernel {
             // wipe the running window. Issue #2317.
             self.scheduler
                 .update_quota(agent_id, refreshed.manifest.resources.clone());
-            let _ = self.memory.save_agent(&refreshed);
+            let _ = self.memory.substrate.save_agent(&refreshed);
         }
 
         // Invalidate the per-agent tool cache so the new skill/MCP allowlist
@@ -346,7 +346,7 @@ impl LibreFangKernel {
             self.capabilities.grant(agent_id, caps);
             self.scheduler
                 .update_quota(agent_id, refreshed.manifest.resources.clone());
-            let _ = self.memory.save_agent(&refreshed);
+            let _ = self.memory.substrate.save_agent(&refreshed);
         }
 
         // Invalidate the per-agent tool cache so skill/MCP allowlist changes
@@ -395,7 +395,7 @@ impl LibreFangKernel {
             .map_err(KernelError::LibreFang)?;
 
         if let Some(entry) = self.registry.get(agent_id) {
-            if let Err(e) = self.memory.save_agent(&entry) {
+            if let Err(e) = self.memory.substrate.save_agent(&entry) {
                 if let Some((p_skills, p_disabled)) = prev_skills_state {
                     let _ = self
                         .registry
@@ -459,7 +459,7 @@ impl LibreFangKernel {
             .map_err(KernelError::LibreFang)?;
 
         if let Some(entry) = self.registry.get(agent_id) {
-            if let Err(e) = self.memory.save_agent(&entry) {
+            if let Err(e) = self.memory.substrate.save_agent(&entry) {
                 if let Some(p_servers) = prev_servers {
                     let _ = self.registry.update_mcp_servers(agent_id, p_servers);
                 }
@@ -513,7 +513,7 @@ impl LibreFangKernel {
             .map_err(KernelError::LibreFang)?;
 
         if let Some(entry) = self.registry.get(agent_id) {
-            if let Err(e) = self.memory.save_agent(&entry) {
+            if let Err(e) = self.memory.substrate.save_agent(&entry) {
                 if let Some((p_caps, p_allow, p_block, p_disabled)) = prev_tool_state {
                     let _ = self
                         .registry

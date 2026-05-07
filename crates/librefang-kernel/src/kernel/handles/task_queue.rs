@@ -21,6 +21,7 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
         use kernel_handle::KernelOpError;
         let task_id = self
             .memory
+            .substrate
             .task_post(title, description, assigned_to, created_by)
             .await
             .map_err(|e| KernelOpError::Internal(format!("Task post failed: {e}")))?;
@@ -66,6 +67,7 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
         };
         let result = self
             .memory
+            .substrate
             .task_claim(&resolved, resolved_name.as_deref())
             .await
             .map_err(|e| KernelOpError::Internal(format!("Task claim failed: {e}")))?;
@@ -105,6 +107,7 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
             },
         };
         self.memory
+            .substrate
             .task_complete(task_id, result)
             .await
             .map_err(|e| KernelOpError::Internal(format!("Task complete failed: {e}")))?;
@@ -130,6 +133,7 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
         status: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, kernel_handle::KernelOpError> {
         self.memory
+            .substrate
             .task_list(status)
             .await
             .map_err(|e| kernel_handle::KernelOpError::Internal(format!("Task list failed: {e}")))
@@ -137,6 +141,7 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
 
     async fn task_delete(&self, task_id: &str) -> Result<bool, kernel_handle::KernelOpError> {
         self.memory
+            .substrate
             .task_delete(task_id)
             .await
             .map_err(|e| kernel_handle::KernelOpError::Internal(format!("Task delete failed: {e}")))
@@ -144,6 +149,7 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
 
     async fn task_retry(&self, task_id: &str) -> Result<bool, kernel_handle::KernelOpError> {
         self.memory
+            .substrate
             .task_retry(task_id)
             .await
             .map_err(|e| kernel_handle::KernelOpError::Internal(format!("Task retry failed: {e}")))
@@ -154,6 +160,7 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
         task_id: &str,
     ) -> Result<Option<serde_json::Value>, kernel_handle::KernelOpError> {
         self.memory
+            .substrate
             .task_get(task_id)
             .await
             .map_err(|e| kernel_handle::KernelOpError::Internal(format!("Task get failed: {e}")))
@@ -165,6 +172,7 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
         new_status: &str,
     ) -> Result<bool, kernel_handle::KernelOpError> {
         self.memory
+            .substrate
             .task_update_status(task_id, new_status)
             .await
             .map_err(|e| {

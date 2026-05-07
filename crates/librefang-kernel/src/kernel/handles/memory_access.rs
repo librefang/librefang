@@ -21,11 +21,13 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         // Check whether key already exists to determine Created vs Updated
         let had_old = self
             .memory
+            .substrate
             .structured_get(agent_id, &scoped)
             .ok()
             .flatten()
             .is_some();
         self.memory
+            .substrate
             .structured_set(agent_id, &scoped, value)
             .map_err(|e| KernelOpError::Internal(format!("Memory store failed: {e}")))?;
 
@@ -72,6 +74,7 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         let agent_id = shared_memory_agent_id();
         let scoped = peer_scoped_key(key, peer_id);
         self.memory
+            .substrate
             .structured_get(agent_id, &scoped)
             .map_err(|e| KernelOpError::Internal(format!("Memory recall failed: {e}")))
     }
@@ -84,6 +87,7 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         let agent_id = shared_memory_agent_id();
         let all_keys = self
             .memory
+            .substrate
             .list_keys(agent_id)
             .map_err(|e| KernelOpError::Internal(format!("Memory list failed: {e}")))?;
         match peer_id {

@@ -424,6 +424,7 @@ impl LibreFangKernel {
             let shared_id = shared_memory_agent_id();
             let user_name = self
                 .memory
+                .substrate
                 .structured_get(shared_id, "user_name")
                 .ok()
                 .flatten()
@@ -562,7 +563,7 @@ impl LibreFangKernel {
             &manifest,
             message,
             &mut ephemeral_session,
-            &self.memory,
+            &self.memory.substrate,
             driver,
             &tools,
             None, // no kernel handle — keep side questions simple
@@ -1717,6 +1718,7 @@ impl LibreFangKernel {
         let effective_session_id = if let Some(sid) = session_id_override {
             if let Some(existing) = self
                 .memory
+                .substrate
                 .get_session(sid)
                 .map_err(KernelError::LibreFang)?
             {
@@ -1816,6 +1818,7 @@ impl LibreFangKernel {
 
         let existing_session = self
             .memory
+            .substrate
             .get_session(effective_session_id)
             .map_err(KernelError::LibreFang)?;
         let session_was_new = existing_session.is_none();
@@ -1918,6 +1921,7 @@ impl LibreFangKernel {
             let stable_prefix_mode = cfg.stable_prefix_mode;
             let user_name = self
                 .memory
+                .substrate
                 .structured_get(shared_id, "user_name")
                 .ok()
                 .flatten()
@@ -2004,6 +2008,7 @@ impl LibreFangKernel {
                     None
                 } else {
                     self.memory
+                        .substrate
                         .canonical_context(agent_id, Some(effective_session_id), None)
                         .ok()
                         .and_then(|(s, _)| s)
@@ -2086,7 +2091,7 @@ impl LibreFangKernel {
             }
         }
 
-        let memory = Arc::clone(&self.memory);
+        let memory = Arc::clone(&self.memory.substrate);
         // Build link context from user message (auto-extract URLs for the agent)
         let message_owned = if let Some(link_ctx) =
             librefang_runtime::link_understanding::build_link_context(message, &cfg.links)
@@ -2330,7 +2335,7 @@ impl LibreFangKernel {
                 kernel_clone.checkpoint_manager.clone(),
                 Some(&kernel_clone.processes.registry),
                 None, // content_blocks (streaming path uses text only for now)
-                kernel_clone.proactive_memory.get().cloned(),
+                kernel_clone.memory.proactive_memory.get().cloned(),
                 kernel_clone.context_engine_for_agent(&manifest),
                 injection_rx.as_deref(),
                 &loop_opts,

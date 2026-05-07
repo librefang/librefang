@@ -173,9 +173,9 @@ impl LibreFangKernel {
         // Auto-save session summaries for ALL sessions (default + per-channel)
         // before clearing, so no channel's conversation history is silently lost.
         // Also emit session:end for each active session before deletion.
-        if let Ok(session_ids) = self.memory.get_agent_session_ids(agent_id) {
+        if let Ok(session_ids) = self.memory.substrate.get_agent_session_ids(agent_id) {
             for sid in session_ids {
-                if let Ok(Some(old_session)) = self.memory.get_session(sid) {
+                if let Ok(Some(old_session)) = self.memory.substrate.get_session(sid) {
                     // Fire session:end before removing the old session.
                     self.governance.external_hooks.fire(
                         crate::hooks::ExternalHookEvent::SessionEnd,
@@ -197,12 +197,14 @@ impl LibreFangKernel {
         // (#3470). The deletion itself is transactional inside
         // `delete_agent_sessions`.
         self.memory
+            .substrate
             .delete_agent_sessions(agent_id)
             .map_err(KernelError::LibreFang)?;
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
             .memory
+            .substrate
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
         self.inject_reset_prompt(&mut new_session, agent_id);
@@ -247,7 +249,7 @@ impl LibreFangKernel {
         })?;
 
         // Emit session:end for each active session before deletion.
-        if let Ok(session_ids) = self.memory.get_agent_session_ids(agent_id) {
+        if let Ok(session_ids) = self.memory.substrate.get_agent_session_ids(agent_id) {
             for sid in session_ids {
                 self.governance.external_hooks.fire(
                     crate::hooks::ExternalHookEvent::SessionEnd,
@@ -263,12 +265,14 @@ impl LibreFangKernel {
         // Propagate so a failed reboot is visible instead of silently
         // leaving the old history in place (#3470).
         self.memory
+            .substrate
             .delete_agent_sessions(agent_id)
             .map_err(KernelError::LibreFang)?;
 
         // Create a fresh session
         let new_session = self
             .memory
+            .substrate
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
 
@@ -312,7 +316,7 @@ impl LibreFangKernel {
         })?;
 
         // Emit session:end for each active session before deletion.
-        if let Ok(session_ids) = self.memory.get_agent_session_ids(agent_id) {
+        if let Ok(session_ids) = self.memory.substrate.get_agent_session_ids(agent_id) {
             for sid in session_ids {
                 self.governance.external_hooks.fire(
                     crate::hooks::ExternalHookEvent::SessionEnd,
@@ -329,15 +333,18 @@ impl LibreFangKernel {
         // orphan rows in `sessions` / `sessions_fts` / `canonical_sessions`
         // and is the silent-data-loss vector behind #3470.
         self.memory
+            .substrate
             .delete_agent_sessions(agent_id)
             .map_err(KernelError::LibreFang)?;
         self.memory
+            .substrate
             .delete_canonical_session(agent_id)
             .map_err(KernelError::LibreFang)?;
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
             .memory
+            .substrate
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
         self.inject_reset_prompt(&mut new_session, agent_id);
@@ -381,6 +388,7 @@ impl LibreFangKernel {
 
         let mut sessions = self
             .memory
+            .substrate
             .list_agent_sessions(agent_id)
             .map_err(KernelError::LibreFang)?;
 
@@ -419,6 +427,7 @@ impl LibreFangKernel {
 
         let mut session = self
             .memory
+            .substrate
             .create_session_with_label(agent_id, label)
             .map_err(KernelError::LibreFang)?;
         self.inject_reset_prompt(&mut session, agent_id);
@@ -459,6 +468,7 @@ impl LibreFangKernel {
         // Verify session exists and belongs to this agent
         let session = self
             .memory
+            .substrate
             .get_session(session_id)
             .map_err(KernelError::LibreFang)?
             .ok_or_else(|| {
@@ -491,6 +501,7 @@ impl LibreFangKernel {
 
         let session = self
             .memory
+            .substrate
             .get_session(session_id)
             .map_err(KernelError::LibreFang)?
             .ok_or_else(|| {
@@ -565,6 +576,7 @@ impl LibreFangKernel {
         };
         // Sync save_session: caller `import_session` is a sync fn, no `.await` allowed.
         self.memory
+            .substrate
             .save_session(&new_session)
             .map_err(KernelError::LibreFang)?;
 
@@ -679,7 +691,7 @@ impl LibreFangKernel {
         // Persist if anything was injected.
         // Sync save_session: caller `inject_reset_prompt` is a sync fn, no `.await` allowed.
         if !session.messages.is_empty() {
-            if let Err(e) = self.memory.save_session(session) {
+            if let Err(e) = self.memory.substrate.save_session(session) {
                 // Persist failed — roll back the Phase 4 BeforeUser injections
                 // from the in-memory session so the next call does not
                 // re-inject the same items (which would cause duplicate
@@ -811,9 +823,11 @@ impl LibreFangKernel {
 
         // Save to structured memory store (key = "session_{date}_{slug}")
         let key = format!("session_{date}_{slug}");
-        let _ =
-            self.memory
-                .structured_set(agent_id, &key, serde_json::Value::String(summary.clone()));
+        let _ = self.memory.substrate.structured_set(
+            agent_id,
+            &key,
+            serde_json::Value::String(summary.clone()),
+        );
 
         // Also write to workspace memory/ dir if workspace exists
         if let Some(ref workspace) = entry.manifest.workspace {

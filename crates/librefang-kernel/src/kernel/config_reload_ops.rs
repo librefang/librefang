@@ -229,7 +229,7 @@ impl LibreFangKernel {
                 }
                 HotAction::UpdateProactiveMemory => {
                     info!("Hot-reload: updating proactive memory config");
-                    if let Some(pm) = self.proactive_memory.get() {
+                    if let Some(pm) = self.memory.proactive_memory.get() {
                         pm.update_config(new_config.proactive_memory.clone());
                     }
                 }

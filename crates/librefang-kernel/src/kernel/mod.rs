@@ -666,27 +666,9 @@ pub struct LibreFangKernel {
     pub(crate) events: subsystems::EventSubsystem,
     /// Agent scheduler.
     pub(crate) scheduler: AgentScheduler,
-    /// Memory substrate.
-    pub(crate) memory: Arc<MemorySubstrate>,
-    /// Memory wiki vault (#3329). `None` when `[memory_wiki] enabled =
-    /// false`, in which case the `WikiAccess` trait methods short-
-    /// circuit to `KernelOpError::unavailable("wiki_*")`. Field
-    /// declaration was lost during the kernel/mod split (#4713) along
-    /// with its boot-time initializer; restored alongside the wiki
-    /// trait method bodies in `handles/wiki_access.rs`.
-    pub(crate) wiki_vault: Option<Arc<librefang_memory_wiki::WikiVault>>,
-    /// Proactive memory store (mem0-style auto_retrieve/auto_memorize).
-    pub(crate) proactive_memory: OnceLock<Arc<librefang_memory::ProactiveMemoryStore>>,
-    /// Concrete handle to the LLM-backed memory extractor used by
-    /// `proactive_memory`. Held alongside the trait-object version
-    /// inside the store so `set_self_handle` can call
-    /// `install_kernel_handle` on it — the fork-based extraction path
-    /// needs `Weak<dyn KernelHandle>` which requires the kernel to be
-    /// Arc-wrapped first. `None` for rule-based extractor (no LLM).
-    pub(crate) proactive_memory_extractor:
-        OnceLock<Arc<librefang_runtime::proactive_memory::LlmMemoryExtractor>>,
-    /// Prompt versioning and A/B experiment store.
-    pub(crate) prompt_store: OnceLock<librefang_memory::PromptStore>,
+    /// Memory substrate + wiki vault + proactive memory + prompt store.
+    /// See [`subsystems::MemorySubsystem`].
+    pub(crate) memory: subsystems::MemorySubsystem,
     /// Process supervisor.
     pub(crate) supervisor: Supervisor,
     /// Workflow engine + triggers + background + cron + command queue.
@@ -1098,10 +1080,10 @@ impl LibreFangKernel {
                                 .entry(key.clone())
                                 .or_insert(value.clone());
                         }
-                        let _ = self.memory.save_agent(&e);
+                        let _ = self.memory.substrate.save_agent(&e);
                     }
                 } else if let Some(e) = self.registry.get(entry.id) {
-                    let _ = self.memory.save_agent(&e);
+                    let _ = self.memory.substrate.save_agent(&e);
                 }
             }
         }
@@ -1599,7 +1581,7 @@ impl LibreFangKernel {
             }
         };
 
-        let mut session = match self.memory.get_session_async(session_id).await {
+        let mut session = match self.memory.substrate.get_session_async(session_id).await {
             Ok(Some(s)) => s,
             Ok(None) => {
                 warn!(
@@ -1709,7 +1691,7 @@ impl LibreFangKernel {
             return;
         }
 
-        let persisted_session = match self.memory.get_session_async(session_id).await {
+        let persisted_session = match self.memory.substrate.get_session_async(session_id).await {
             Ok(Some(s)) => s,
             Ok(None) => {
                 warn!(
@@ -1730,7 +1712,7 @@ impl LibreFangKernel {
 
         session = persisted_session;
         if reconcile_tool_result(&mut session, tool_use_id, result) {
-            if let Err(e) = self.memory.save_session_async(&session).await {
+            if let Err(e) = self.memory.substrate.save_session_async(&session).await {
                 warn!(
                     agent_id = %agent_id,
                     error = %e,

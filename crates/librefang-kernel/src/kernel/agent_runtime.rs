@@ -31,6 +31,7 @@ impl LibreFangKernel {
 
         let session = self
             .memory
+            .substrate
             .get_session(entry.session_id)
             .map_err(KernelError::LibreFang)?;
 
@@ -288,6 +289,7 @@ impl LibreFangKernel {
         let target_session_id = session_id_override.unwrap_or(entry.session_id);
         let session = self
             .memory
+            .substrate
             .get_session(target_session_id)
             .map_err(KernelError::LibreFang)?
             .unwrap_or_else(|| librefang_memory::session::Session {
@@ -362,6 +364,7 @@ impl LibreFangKernel {
 
         // Store the LLM summary in the canonical session
         self.memory
+            .substrate
             .store_llm_summary(agent_id, &result.summary, result.kept_messages.clone())
             .map_err(KernelError::LibreFang)?;
 
@@ -375,6 +378,7 @@ impl LibreFangKernel {
         let mut updated_session = session;
         updated_session.set_messages(repaired_messages);
         self.memory
+            .substrate
             .save_session_async(&updated_session)
             .await
             .map_err(KernelError::LibreFang)?;
@@ -418,6 +422,7 @@ impl LibreFangKernel {
 
         let session = self
             .memory
+            .substrate
             .get_session(entry.session_id)
             .map_err(KernelError::LibreFang)?
             .unwrap_or_else(|| librefang_memory::session::Session {
@@ -534,10 +539,10 @@ impl LibreFangKernel {
         }
 
         // Remove from persistent storage
-        let _ = self.memory.remove_agent(agent_id);
+        let _ = self.memory.substrate.remove_agent(agent_id);
 
         // Clean up proactive memories for this agent
-        if let Some(pm) = self.proactive_memory.get() {
+        if let Some(pm) = self.memory.proactive_memory.get() {
             let aid = agent_id.0.to_string();
             if let Err(e) = pm.reset(&aid) {
                 warn!("Failed to clean up proactive memories for agent {agent_id}: {e}");

@@ -296,6 +296,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         username: Option<&str>,
     ) -> Result<(), kernel_handle::KernelOpError> {
         self.memory
+            .substrate
             .roster()
             .upsert(channel, chat_id, user_id, display_name, username);
         Ok(())
@@ -306,7 +307,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         channel: &str,
         chat_id: &str,
     ) -> Result<Vec<serde_json::Value>, kernel_handle::KernelOpError> {
-        let members = self.memory.roster().members(channel, chat_id);
+        let members = self.memory.substrate.roster().members(channel, chat_id);
         Ok(members
             .into_iter()
             .map(|(user_id, display_name, username)| {
@@ -326,6 +327,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         user_id: &str,
     ) -> Result<(), kernel_handle::KernelOpError> {
         self.memory
+            .substrate
             .roster()
             .remove_member(channel, chat_id, user_id);
         Ok(())

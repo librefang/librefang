@@ -132,6 +132,7 @@ impl LibreFangKernel {
         // database, so conversation history survives daemon restarts.
         let session_id = self
             .memory
+            .substrate
             .get_agent_session_ids(agent_id)
             .ok()
             .and_then(|ids| ids.into_iter().next())
@@ -188,6 +189,7 @@ impl LibreFangKernel {
         // registration so agent-scoped metadata is visible.
         let mut session = self
             .memory
+            .substrate
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
 
@@ -316,6 +318,7 @@ impl LibreFangKernel {
 
         // Persist agent to SQLite so it survives restarts
         self.memory
+            .substrate
             .save_agent(&entry)
             .map_err(KernelError::LibreFang)?;
 

@@ -597,7 +597,7 @@ impl LibreFangKernel {
         // `remove_agent` cascades to session rows, so we don't need a
         // separate `delete_agent_sessions` call here.
         for agent_id in &affected_agents {
-            if let Err(e) = self.memory.remove_agent(*agent_id) {
+            if let Err(e) = self.memory.substrate.remove_agent(*agent_id) {
                 warn!(
                     agent = %agent_id,
                     hand_id = %instance.hand_id,

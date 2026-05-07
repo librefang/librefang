@@ -27,7 +27,7 @@ impl LibreFangKernel {
     /// - the aux driver call fails or times out
     /// - the model returns empty / all-whitespace text
     pub fn spawn_session_label_generation(&self, agent_id: AgentId, session_id: SessionId) {
-        let memory = Arc::clone(&self.memory);
+        let memory = Arc::clone(&self.memory.substrate);
         let aux = self.llm.aux_client.load_full();
         tokio::spawn(async move {
             // Bail early if the label is already set — preserves user

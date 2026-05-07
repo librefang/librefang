@@ -1499,7 +1499,7 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
     let session_id = assistant.session_id;
 
     // Get session messages before ephemeral call
-    let session_before = kernel.memory.get_session(session_id).unwrap();
+    let session_before = kernel.memory.substrate.get_session(session_id).unwrap();
     let msg_count_before = session_before.map(|s| s.messages.len()).unwrap_or(0);
 
     // Send ephemeral message (will fail because no LLM provider, but that's OK —
@@ -1509,7 +1509,7 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
         .await;
 
     // Check session is unchanged
-    let session_after = kernel.memory.get_session(session_id).unwrap();
+    let session_after = kernel.memory.substrate.get_session(session_id).unwrap();
     let msg_count_after = session_after.map(|s| s.messages.len()).unwrap_or(0);
     assert_eq!(
         msg_count_before, msg_count_after,
@@ -3275,6 +3275,7 @@ fn deactivate_hand_removes_hand_agent_rows_from_sqlite() {
         assert!(
             kernel
                 .memory
+                .substrate
                 .load_agent(*id)
                 .expect("load_agent before deactivate")
                 .is_some(),
@@ -3300,6 +3301,7 @@ fn deactivate_hand_removes_hand_agent_rows_from_sqlite() {
         assert!(
             kernel
                 .memory
+                .substrate
                 .load_agent(*id)
                 .expect("load_agent after deactivate")
                 .is_none(),
@@ -3364,10 +3366,15 @@ fn boot_gc_removes_orphaned_hand_agent_rows() {
             is_hand: true,
             ..Default::default()
         };
-        kernel.memory.save_agent(&entry).expect("seed orphan row");
+        kernel
+            .memory
+            .substrate
+            .save_agent(&entry)
+            .expect("seed orphan row");
         assert!(
             kernel
                 .memory
+                .substrate
                 .load_agent(orphan_id)
                 .expect("load_agent after seed")
                 .is_some(),
@@ -3396,6 +3403,7 @@ fn boot_gc_removes_orphaned_hand_agent_rows() {
     assert!(
         kernel
             .memory
+            .substrate
             .load_agent(orphan_id)
             .expect("load_agent after GC")
             .is_none(),
@@ -3451,7 +3459,11 @@ fn boot_gc_skips_orphan_cleanup_when_hand_state_is_corrupt() {
             is_hand: true,
             ..Default::default()
         };
-        kernel.memory.save_agent(&entry).expect("seed orphan row");
+        kernel
+            .memory
+            .substrate
+            .save_agent(&entry)
+            .expect("seed orphan row");
         kernel.shutdown();
     }
 
@@ -3475,6 +3487,7 @@ fn boot_gc_skips_orphan_cleanup_when_hand_state_is_corrupt() {
     assert!(
         kernel
             .memory
+            .substrate
             .load_agent(orphan_id)
             .expect("load_agent after skipped GC")
             .is_some(),
@@ -6492,14 +6505,17 @@ fn list_agent_sessions_active_reflects_running_tasks_not_registry_pointer() {
     // Seed three persisted sessions for this agent.
     let s1 = kernel
         .memory
+        .substrate
         .create_session_with_label(agent_id, Some("one"))
         .unwrap();
     let s2 = kernel
         .memory
+        .substrate
         .create_session_with_label(agent_id, Some("two"))
         .unwrap();
     let s3 = kernel
         .memory
+        .substrate
         .create_session_with_label(agent_id, Some("three"))
         .unwrap();
 
@@ -6585,6 +6601,7 @@ fn list_agent_sessions_idle_agent_marks_all_inactive() {
     for label in ["a", "b", "c", "d", "e"] {
         kernel
             .memory
+            .substrate
             .create_session_with_label(agent_id, Some(label))
             .unwrap();
     }
@@ -6608,6 +6625,7 @@ fn list_agent_sessions_canonical_and_active_can_coexist_on_same_row() {
 
     let s = kernel
         .memory
+        .substrate
         .create_session_with_label(agent_id, Some("only"))
         .unwrap();
     kernel.registry.update_session_id(agent_id, s.id).unwrap();

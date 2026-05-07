@@ -1220,11 +1220,10 @@ impl LibreFangKernel {
             capabilities: CapabilityManager::new(),
             events: crate::kernel::subsystems::EventSubsystem::new(),
             scheduler: AgentScheduler::new(),
-            memory: memory.clone(),
-            wiki_vault: wiki_vault.clone(),
-            proactive_memory: OnceLock::new(),
-            proactive_memory_extractor: OnceLock::new(),
-            prompt_store: OnceLock::new(),
+            memory: crate::kernel::subsystems::MemorySubsystem::new(
+                memory.clone(),
+                wiki_vault.clone(),
+            ),
             supervisor,
             workflows: crate::kernel::subsystems::WorkflowSubsystem::new(
                 WorkflowEngine::new_with_persistence(&workflow_home_dir),
@@ -1349,22 +1348,22 @@ impl LibreFangKernel {
             let prompt_caching = cfg.prompt_caching;
             let result =
                 librefang_runtime::proactive_memory::init_proactive_memory_full_with_extractor(
-                    Arc::clone(&kernel.memory),
+                    Arc::clone(&kernel.memory.substrate),
                     pm_config,
                     llm,
                     embedding,
                     prompt_caching,
                 );
             if let Some((store, extractor)) = result {
-                let _ = kernel.proactive_memory.set(store);
+                let _ = kernel.memory.proactive_memory.set(store);
                 if let Some(ex) = extractor {
-                    let _ = kernel.proactive_memory_extractor.set(ex);
+                    let _ = kernel.memory.proactive_memory_extractor.set(ex);
                 }
             }
         }
 
         // Initialize prompt store
-        let _ = kernel.prompt_store.set(prompt_store);
+        let _ = kernel.memory.prompt_store.set(prompt_store);
 
         // Pre-load persisted hand instance configs so the per-agent drift
         // detection below can re-render the `## User Configuration` settings
@@ -1391,7 +1390,7 @@ impl LibreFangKernel {
         };
 
         // Restore persisted agents from SQLite
-        match kernel.memory.load_all_agents() {
+        match kernel.memory.substrate.load_all_agents() {
             Ok(agents) => {
                 let count = agents.len();
                 for entry in agents {
@@ -1426,7 +1425,7 @@ impl LibreFangKernel {
                     };
                     if source_path_changed {
                         entry.source_toml_path = Some(toml_path.clone());
-                        if let Err(e) = kernel.memory.save_agent(&entry) {
+                        if let Err(e) = kernel.memory.substrate.save_agent(&entry) {
                             warn!(
                                 agent = %name,
                                 "Failed to persist source_toml_path repoint: {e}"
@@ -1609,7 +1608,9 @@ impl LibreFangKernel {
                                             }
 
                                             // Persist the update back to DB
-                                            if let Err(e) = kernel.memory.save_agent(&entry) {
+                                            if let Err(e) =
+                                                kernel.memory.substrate.save_agent(&entry)
+                                            {
                                                 warn!(
                                                     agent = %name,
                                                     "Failed to persist TOML update: {e}"
@@ -1876,7 +1877,7 @@ impl LibreFangKernel {
                 if webui_session_id == canonical_session_id {
                     continue;
                 }
-                let webui_msgs = match kernel.memory.get_session(webui_session_id) {
+                let webui_msgs = match kernel.memory.substrate.get_session(webui_session_id) {
                     Ok(Some(s)) => s.messages.len(),
                     _ => continue,
                 };
@@ -1890,6 +1891,7 @@ impl LibreFangKernel {
                 // in `list_agent_sessions` and switch manually if desired.
                 let canonical_session = kernel
                     .memory
+                    .substrate
                     .get_session(canonical_session_id)
                     .ok()
                     .flatten();
@@ -1917,7 +1919,7 @@ impl LibreFangKernel {
                     continue;
                 }
                 if let Some(entry) = kernel.registry.get(agent_id) {
-                    if let Err(e) = kernel.memory.save_agent(&entry) {
+                    if let Err(e) = kernel.memory.substrate.save_agent(&entry) {
                         warn!(agent_id = %agent_id, "Failed to persist webui adoption: {e}");
                     }
                 }
