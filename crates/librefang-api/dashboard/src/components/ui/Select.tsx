@@ -13,9 +13,12 @@ interface SelectProps extends SelectHTMLAttributes<HTMLSelectElement> {
 }
 
 export const Select = forwardRef<HTMLSelectElement, SelectProps>(
-  ({ className = "", label, error, options, placeholder, ...props }, ref) => {
+  ({ className = "", label, error, options, placeholder, value, defaultValue, ...props }, ref) => {
     const id = useId();
     const errorId = error ? `${id}-error` : undefined;
+    const hasValue = value !== undefined;
+    const hasDefault = defaultValue !== undefined;
+    const showPlaceholderSelected = !hasValue && !hasDefault;
 
     return (
       <div className="flex flex-col gap-1.5">
@@ -39,9 +42,10 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
             ${className}
           `}
           {...props}
+          {...(hasValue ? { value } : hasDefault ? { defaultValue } : { value: "" })}
         >
           {placeholder && (
-            <option value="" disabled selected>
+            <option value="" disabled>
               {placeholder}
             </option>
           )}

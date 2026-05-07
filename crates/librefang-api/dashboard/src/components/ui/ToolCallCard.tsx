@@ -22,7 +22,7 @@ function formatToolContent(value: unknown): string {
   }
 }
 
-export const ToolCallCard = React.memo(function ToolCallCard({ tool }: { tool: AgentTool }) {
+export const ToolCallCard = React.memo(function ToolCallCard({ tool, onToggle }: { tool: AgentTool; onToggle?: () => void }) {
   const { t } = useTranslation();
   const isExpanded = tool.expanded ?? false;
   const isRunning = tool.running ?? false;
@@ -34,10 +34,9 @@ export const ToolCallCard = React.memo(function ToolCallCard({ tool }: { tool: A
 
   return (
     <div className="rounded-lg border border-border-subtle/50 bg-main/50 overflow-hidden my-1.5">
-      {/* Header — always visible */}
       <button
         type="button"
-        onClick={() => {/* toggle handled by parent via tool.expanded */}}
+        onClick={onToggle}
         className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-surface-hover/50 transition-colors"
       >
         {isExpanded

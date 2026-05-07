@@ -161,7 +161,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
             role="dialog"
             aria-modal="true"
             aria-label={t("command_palette.search_placeholder")}
-            className="relative w-full max-w-[90vw] rounded-2xl border border-border-subtle bg-surface shadow-2xl overflow-hidden"
+            className="relative w-full max-w-xl max-w-[90vw] rounded-2xl border border-border-subtle bg-surface shadow-2xl overflow-hidden"
             variants={fadeInScale}
             initial="initial"
             animate="animate"
