@@ -863,7 +863,10 @@ fn is_private_ip(ip: IpAddr) -> bool {
         IpAddr::V4(v4) => {
             // RFC 1918 (`10/8`, `172.16/12`, `192.168/16`) plus
             // `100.64.0.0/10` (CGNAT shared address space, RFC 6598).
-            v4.is_private() || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
+            // CGNAT range: second octet's top 2 bits must be `01` —
+            // i.e. `0x40` after the `0xC0` mask. Hex form is used here
+            // so the mask/value relationship is visually obvious.
+            v4.is_private() || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 0x40)
         }
         IpAddr::V6(v6) => {
             let segs = v6.segments();
