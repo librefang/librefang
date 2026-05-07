@@ -64,4 +64,51 @@ impl LlmSubsystem {
             default_model_override: RwLock::new(None),
         }
     }
+
+    /// Atomically swappable model-catalog handle.
+    #[inline]
+    pub fn catalog_swap(&self) -> &ArcSwap<ModelCatalog> {
+        &self.model_catalog
+    }
+
+    /// Cheap atomic snapshot of the model catalog.
+    #[inline]
+    pub fn catalog_load(&self) -> arc_swap::Guard<Arc<ModelCatalog>> {
+        self.model_catalog.load()
+    }
+
+    /// Atomically mutate the model catalog using the RCU pattern. The
+    /// closure may run more than once under contention; the last
+    /// return value is yielded to the caller.
+    pub fn catalog_update<F, R>(&self, mut f: F) -> R
+    where
+        F: FnMut(&mut ModelCatalog) -> R,
+    {
+        let mut result: Option<R> = None;
+        self.model_catalog.rcu(|cat| {
+            let mut next = (**cat).clone();
+            result = Some(f(&mut next));
+            Arc::new(next)
+        });
+        result.expect("rcu closure runs at least once")
+    }
+
+    /// Drop every cached driver client (forces lazy rebuild on next
+    /// turn).
+    #[inline]
+    pub fn clear_driver_cache(&self) {
+        self.driver_cache.clear();
+    }
+
+    /// Optional embedding driver handle.
+    #[inline]
+    pub fn embedding(&self) -> Option<&Arc<dyn EmbeddingDriver + Send + Sync>> {
+        self.embedding_driver.as_ref()
+    }
+
+    /// `RwLock` guarding the optional default-model override.
+    #[inline]
+    pub fn default_model_override_ref(&self) -> &RwLock<Option<DefaultModelConfig>> {
+        &self.default_model_override
+    }
 }

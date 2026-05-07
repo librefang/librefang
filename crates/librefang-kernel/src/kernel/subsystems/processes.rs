@@ -25,4 +25,16 @@ impl ProcessSubsystem {
     pub(crate) fn new(manager: Arc<ProcessManager>, registry: Arc<ProcessRegistry>) -> Self {
         Self { manager, registry }
     }
+
+    /// Persistent process manager.
+    #[inline]
+    pub fn manager(&self) -> &Arc<ProcessManager> {
+        &self.manager
+    }
+
+    /// Background process registry.
+    #[inline]
+    pub fn registry(&self) -> &Arc<ProcessRegistry> {
+        &self.registry
+    }
 }

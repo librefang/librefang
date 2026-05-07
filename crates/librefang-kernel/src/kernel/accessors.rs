@@ -48,34 +48,16 @@ impl LibreFangKernel {
         self.config.load_full()
     }
 
-    /// Return a snapshot of the current budget configuration.
-    ///
-    /// Backed by `ArcSwap`, so this is a lock-free atomic load: no reader
-    /// can ever block an LLM turn even if a config write is concurrent.
-    /// Returns an owned `BudgetConfig` for API compatibility.
+    /// Return a snapshot of the current budget configuration. Delegates
+    /// to [`MeteringSubsystem::current_budget`].
     pub fn budget_config(&self) -> librefang_types::config::BudgetConfig {
-        // `load_full()` returns `Arc<BudgetConfig>` cheaply; we then clone
-        // the inner value to keep the existing owned-return contract.
-        (*self.metering.budget_config.load_full()).clone()
+        self.metering.current_budget()
     }
 
-    /// Safely mutate the runtime budget configuration.
-    ///
-    /// The caller supplies a closure that receives `&mut BudgetConfig`.
-    /// Implementation: `rcu()` provides a CAS retry loop — if another
-    /// writer wins the race between load and store, we re-clone the new
-    /// snapshot and re-apply the closure. This is critical when the
-    /// closure does field-level mutation (e.g. `cfg.daily_cap_usd = x`)
-    /// because a plain load-clone-store would silently drop the other
-    /// writer's edits to unrelated fields. The closure must therefore be
-    /// idempotent and side-effect free; `Fn` rather than `FnOnce` enforces
-    /// that at the type level.
+    /// Safely mutate the runtime budget configuration. Delegates to
+    /// [`MeteringSubsystem::update_budget`].
     pub fn update_budget_config(&self, f: impl Fn(&mut librefang_types::config::BudgetConfig)) {
-        self.metering.budget_config.rcu(|current| {
-            let mut next = (**current).clone();
-            f(&mut next);
-            std::sync::Arc::new(next)
-        });
+        self.metering.update_budget(f);
     }
 
     /// LibreFang home directory path (boot-time immutable).
@@ -404,68 +386,68 @@ impl LibreFangKernel {
         self.config.load().default_model.clone()
     }
 
-    /// Agent registry (list, get, update agents).
+    /// Agent registry. Delegates to [`AgentSubsystem::registry_ref`].
     #[inline]
     pub fn agent_registry(&self) -> &AgentRegistry {
-        &self.agents.registry
+        self.agents.registry_ref()
     }
 
-    /// Canonical agent UUID registry (refs #4614). Persists
-    /// `agent_name → canonical_uuid` independently of agent lifecycle so
-    /// that respawns reuse the same `AgentId` instead of orphaning
-    /// history. Read-only handle exposed for tests, diagnostics, and
-    /// API surfaces.
+    /// Canonical agent UUID registry (refs #4614). Delegates to
+    /// [`AgentSubsystem::identities_ref`].
     #[inline]
     pub fn agent_identities(&self) -> &Arc<crate::agent_identity_registry::AgentIdentityRegistry> {
-        &self.agents.agent_identities
+        self.agents.identities_ref()
     }
 
-    /// Memory substrate (structured storage, vector search).
+    /// Memory substrate. Delegates to
+    /// [`MemorySubsystem::substrate_ref`].
     #[inline]
     pub fn memory_substrate(&self) -> &Arc<MemorySubstrate> {
-        &self.memory.substrate
+        self.memory.substrate_ref()
     }
 
-    /// Proactive memory store (mem0-style auto-memorize/retrieve).
+    /// Proactive memory store. Delegates to
+    /// [`MemorySubsystem::proactive_store`].
     #[inline]
     pub fn proactive_memory_store(&self) -> Option<&Arc<librefang_memory::ProactiveMemoryStore>> {
-        self.memory.proactive_memory.get()
+        self.memory.proactive_store()
     }
 
     /// Merkle hash chain audit trail.
     #[inline]
     pub fn audit(&self) -> &Arc<AuditLog> {
-        &self.metering.audit_log
+        self.metering.audit_log()
     }
 
-    /// Cost metering engine.
+    /// Cost metering engine. Delegates to
+    /// [`MeteringSubsystem::engine`].
     #[inline]
     pub fn metering_ref(&self) -> &Arc<MeteringEngine> {
-        &self.metering.engine
+        self.metering.engine()
     }
 
-    /// Agent scheduler.
+    /// Agent scheduler. Delegates to [`AgentSubsystem::scheduler_ref`].
     #[inline]
     pub fn scheduler_ref(&self) -> &AgentScheduler {
-        &self.agents.scheduler
+        self.agents.scheduler_ref()
     }
 
-    /// Model catalog (`ArcSwap` since #3384 — auth status refresh from API).
+    /// Model catalog (`ArcSwap` since #3384). Delegates to
+    /// [`LlmSubsystem::catalog_swap`].
     #[inline]
     pub fn model_catalog_ref(
         &self,
     ) -> &arc_swap::ArcSwap<librefang_runtime::model_catalog::ModelCatalog> {
-        &self.llm.model_catalog
+        self.llm.catalog_swap()
     }
 
-    /// Snapshot the current model catalog. Cheap (atomic load + Arc clone of
-    /// the guard's inner pointer) — call this in the hot path instead of
-    /// `model_catalog_ref().load()` for readability.
+    /// Snapshot the current model catalog. Delegates to
+    /// [`LlmSubsystem::catalog_load`].
     #[inline]
     pub fn model_catalog_load(
         &self,
     ) -> arc_swap::Guard<Arc<librefang_runtime::model_catalog::ModelCatalog>> {
-        self.llm.model_catalog.load()
+        self.llm.catalog_load()
     }
 
     /// Atomically mutate the model catalog using the RCU pattern: clone the
@@ -478,17 +460,12 @@ impl LibreFangKernel {
     /// idempotent on `cat`. The returned `R` reflects the **final** (winning)
     /// attempt — useful for surfacing booleans like
     /// `add_alias`/`remove_alias`/`add_custom_model` to the caller.
-    pub fn model_catalog_update<F, R>(&self, mut f: F) -> R
+    /// Delegates to [`LlmSubsystem::catalog_update`].
+    pub fn model_catalog_update<F, R>(&self, f: F) -> R
     where
         F: FnMut(&mut librefang_runtime::model_catalog::ModelCatalog) -> R,
     {
-        let mut result: Option<R> = None;
-        self.llm.model_catalog.rcu(|cat| {
-            let mut next = (**cat).clone();
-            result = Some(f(&mut next));
-            Arc::new(next)
-        });
-        result.expect("rcu closure runs at least once")
+        self.llm.catalog_update(f)
     }
 
     /// Spawn background tasks to validate API keys for every `Configured` provider.
@@ -555,10 +532,11 @@ impl LibreFangKernel {
     }
 
     /// Invalidate all cached LLM drivers so the next request rebuilds them
-    /// with current provider URLs / API keys.
+    /// with current provider URLs / API keys. Delegates to
+    /// [`LlmSubsystem::clear_driver_cache`].
     #[inline]
     pub fn clear_driver_cache(&self) {
-        self.llm.driver_cache.clear();
+        self.llm.clear_driver_cache();
     }
 
     /// Spawn the approval expiry sweep task.
@@ -750,13 +728,13 @@ impl LibreFangKernel {
     pub fn skill_registry_ref(
         &self,
     ) -> &std::sync::RwLock<librefang_skills::registry::SkillRegistry> {
-        &self.skills.skill_registry
+        self.skills.registry_ref()
     }
 
     /// Hand registry (curated autonomous capability packages).
     #[inline]
     pub fn hands(&self) -> &librefang_hands::registry::HandRegistry {
-        &self.skills.hand_registry
+        self.skills.hand_registry_ref()
     }
 
     /// MCP catalog — returns the `ArcSwap` for lock-free reads.
@@ -765,7 +743,7 @@ impl LibreFangKernel {
     /// use this accessor when you need the `ArcSwap` handle directly.
     #[inline]
     pub fn mcp_catalog(&self) -> &arc_swap::ArcSwap<librefang_extensions::catalog::McpCatalog> {
-        &self.mcp.mcp_catalog
+        self.mcp.catalog_swap()
     }
 
     /// Load a snapshot of the MCP catalog — lock-free, no blocking.
@@ -776,7 +754,7 @@ impl LibreFangKernel {
     pub fn mcp_catalog_load(
         &self,
     ) -> arc_swap::Guard<std::sync::Arc<librefang_extensions::catalog::McpCatalog>> {
-        self.mcp.mcp_catalog.load()
+        self.mcp.catalog_load()
     }
 
     /// Reload the MCP catalog from disk, replacing the current snapshot
@@ -792,19 +770,19 @@ impl LibreFangKernel {
     /// MCP server health monitor.
     #[inline]
     pub fn mcp_health(&self) -> &librefang_extensions::health::HealthMonitor {
-        &self.mcp.mcp_health
+        self.mcp.health()
     }
 
     /// Cron job scheduler.
     #[inline]
     pub fn cron(&self) -> &crate::cron::CronScheduler {
-        &self.workflows.cron_scheduler
+        self.workflows.cron_ref()
     }
 
     /// Execution approval manager.
     #[inline]
     pub fn approvals(&self) -> &crate::approval::ApprovalManager {
-        &self.governance.approval_manager
+        self.governance.approvals()
     }
 
     /// Lazily open and unlock the credential vault, caching the result for
@@ -947,13 +925,13 @@ impl LibreFangKernel {
     /// Workflow engine.
     #[inline]
     pub fn workflow_engine(&self) -> &WorkflowEngine {
-        &self.workflows.engine
+        self.workflows.engine_ref()
     }
 
     /// Workflow template registry.
     #[inline]
     pub fn templates(&self) -> &WorkflowTemplateRegistry {
-        &self.workflows.template_registry
+        self.workflows.templates_ref()
     }
 
     /// Convert a workflow into a reusable template.
@@ -972,55 +950,59 @@ impl LibreFangKernel {
     /// Event-driven trigger engine.
     #[inline]
     pub fn trigger_engine(&self) -> &TriggerEngine {
-        &self.workflows.triggers
+        self.workflows.triggers_ref()
     }
 
     /// Process supervisor.
     #[inline]
     pub fn supervisor_ref(&self) -> &Supervisor {
-        &self.agents.supervisor
+        self.agents.supervisor_ref()
     }
 
     /// RBAC authentication manager.
     #[inline]
     pub fn auth_manager(&self) -> &AuthManager {
-        &self.security.auth
+        self.security.auth_ref()
     }
 
     /// Device pairing manager.
     #[inline]
     pub fn pairing_ref(&self) -> &crate::pairing::PairingManager {
-        &self.security.pairing
+        self.security.pairing_ref()
     }
 
-    /// Web tools context (search + fetch).
+    /// Web tools context (search + fetch). Delegates to
+    /// [`MediaSubsystem::web_tools`].
     #[inline]
     pub fn web_tools(&self) -> &librefang_runtime::web_search::WebToolsContext {
-        &self.media.web_ctx
+        self.media.web_tools()
     }
 
-    /// Browser automation manager.
+    /// Browser automation manager. Delegates to
+    /// [`MediaSubsystem::browser`].
     #[inline]
     pub fn browser(&self) -> &librefang_runtime::browser::BrowserManager {
-        &self.media.browser_ctx
+        self.media.browser()
     }
 
-    /// Media understanding engine.
+    /// Media understanding engine. Delegates to
+    /// [`MediaSubsystem::engine`].
     #[inline]
     pub fn media(&self) -> &librefang_runtime::media_understanding::MediaEngine {
-        &self.media.media_engine
+        self.media.engine()
     }
 
-    /// Text-to-speech engine.
+    /// Text-to-speech engine. Delegates to [`MediaSubsystem::tts`].
     #[inline]
     pub fn tts(&self) -> &librefang_runtime::tts::TtsEngine {
-        &self.media.tts_engine
+        self.media.tts()
     }
 
-    /// Media generation driver cache (video, music, etc.).
+    /// Media generation driver cache (video, music, etc.). Delegates to
+    /// [`MediaSubsystem::drivers`].
     #[inline]
     pub fn media_drivers(&self) -> &librefang_runtime::media::MediaDriverCache {
-        &self.media.media_drivers
+        self.media.drivers()
     }
 
     /// MCP server connections (Mutex — lazily initialized).
@@ -1028,13 +1010,13 @@ impl LibreFangKernel {
     pub fn mcp_connections_ref(
         &self,
     ) -> &tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>> {
-        &self.mcp.mcp_connections
+        self.mcp.connections_ref()
     }
 
     /// Per-server MCP OAuth authentication states.
     #[inline]
     pub fn mcp_auth_states_ref(&self) -> &librefang_runtime::mcp_oauth::McpAuthStates {
-        &self.mcp.mcp_auth_states
+        self.mcp.auth_states_ref()
     }
 
     /// Pluggable OAuth provider for MCP server auth flows.
@@ -1042,13 +1024,13 @@ impl LibreFangKernel {
     pub fn oauth_provider_ref(
         &self,
     ) -> Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync> {
-        Arc::clone(&self.mcp.mcp_oauth_provider)
+        Arc::clone(self.mcp.oauth_provider_ref())
     }
 
     /// MCP tool definitions cache.
     #[inline]
     pub fn mcp_tools_ref(&self) -> &std::sync::Mutex<Vec<ToolDefinition>> {
-        &self.mcp.mcp_tools
+        self.mcp.tools_ref()
     }
 
     /// Effective MCP server list (config + extensions merged).
@@ -1056,13 +1038,13 @@ impl LibreFangKernel {
     pub fn effective_mcp_servers_ref(
         &self,
     ) -> &std::sync::RwLock<Vec<librefang_types::config::McpServerConfigEntry>> {
-        &self.mcp.effective_mcp_servers
+        self.mcp.effective_servers_ref()
     }
 
     /// A2A task store.
     #[inline]
     pub fn a2a_tasks(&self) -> &librefang_runtime::a2a::A2aTaskStore {
-        &self.mesh.a2a_task_store
+        self.mesh.a2a_tasks()
     }
 
     /// Discovered external A2A agent cards.
@@ -1070,13 +1052,13 @@ impl LibreFangKernel {
     pub fn a2a_agents(
         &self,
     ) -> &std::sync::Mutex<Vec<(String, librefang_runtime::a2a::AgentCard)>> {
-        &self.mesh.a2a_external_agents
+        self.mesh.a2a_agents()
     }
 
     /// Delivery receipt tracker.
     #[inline]
     pub fn delivery(&self) -> &DeliveryTracker {
-        &self.mesh.delivery_tracker
+        self.mesh.delivery()
     }
 
     /// First currently-active `SessionInterrupt` registered for `agent_id`,
@@ -1119,7 +1101,7 @@ impl LibreFangKernel {
     /// Per-agent decision traces.
     #[inline]
     pub fn traces(&self) -> &dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>> {
-        &self.agents.decision_traces
+        self.agents.traces()
     }
 
     /// Channel adapters map.
@@ -1127,19 +1109,19 @@ impl LibreFangKernel {
     pub fn channel_adapters_ref(
         &self,
     ) -> &dashmap::DashMap<String, Arc<dyn librefang_channels::types::ChannelAdapter>> {
-        &self.mesh.channel_adapters
+        self.mesh.channel_adapters_ref()
     }
 
     /// Agent bindings for multi-account routing.
     #[inline]
     pub fn bindings_ref(&self) -> &std::sync::Mutex<Vec<librefang_types::config::AgentBinding>> {
-        &self.mesh.bindings
+        self.mesh.bindings_ref()
     }
 
     /// Broadcast configuration.
     #[inline]
     pub fn broadcast_ref(&self) -> &librefang_types::config::BroadcastConfig {
-        &self.mesh.broadcast
+        self.mesh.broadcast_ref()
     }
 
     /// Uptime since kernel boot.
@@ -1153,13 +1135,13 @@ impl LibreFangKernel {
     pub fn embedding(
         &self,
     ) -> Option<&Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>> {
-        self.llm.embedding_driver.as_ref()
+        self.llm.embedding()
     }
 
     /// Command queue.
     #[inline]
     pub fn command_queue_ref(&self) -> &librefang_runtime::command_lane::CommandQueue {
-        &self.workflows.command_queue
+        self.workflows.command_queue_ref()
     }
 
     /// Resolve the per-agent concurrency semaphore, lazily creating it on
@@ -1221,22 +1203,24 @@ impl LibreFangKernel {
             .clone()
     }
 
-    /// Persistent process manager.
+    /// Persistent process manager. Delegates to
+    /// [`ProcessSubsystem::manager`].
     #[inline]
     pub fn processes(&self) -> &Arc<librefang_runtime::process_manager::ProcessManager> {
-        &self.processes.manager
+        self.processes.manager()
     }
 
-    /// Background process registry for fire-and-forget shell_exec processes.
+    /// Background process registry for fire-and-forget shell_exec
+    /// processes. Delegates to [`ProcessSubsystem::registry`].
     #[inline]
     pub fn process_registry(&self) -> &Arc<librefang_runtime::process_registry::ProcessRegistry> {
-        &self.processes.registry
+        self.processes.registry()
     }
 
     /// OFP peer registry (set once at startup).
     #[inline]
     pub fn peer_registry_ref(&self) -> Option<&librefang_wire::PeerRegistry> {
-        self.mesh.peer_registry.get()
+        self.mesh.peer_registry_ref()
     }
 
     /// Test-only: install a `PeerRegistry` without booting the OFP node.
@@ -1254,7 +1238,7 @@ impl LibreFangKernel {
     /// Hook registry.
     #[inline]
     pub fn hook_registry(&self) -> &librefang_runtime::hooks::HookRegistry {
-        &self.governance.hooks
+        self.governance.hook_registry()
     }
 
     /// Auto-reply engine.
@@ -1268,7 +1252,7 @@ impl LibreFangKernel {
     pub fn default_model_override_ref(
         &self,
     ) -> &std::sync::RwLock<Option<librefang_types::config::DefaultModelConfig>> {
-        &self.llm.default_model_override
+        self.llm.default_model_override_ref()
     }
 
     /// Tool policy override (hot-reloadable).
@@ -1290,7 +1274,7 @@ impl LibreFangKernel {
     pub fn injection_senders_ref(
         &self,
     ) -> &dashmap::DashMap<(AgentId, SessionId), tokio::sync::mpsc::Sender<AgentLoopSignal>> {
-        &self.events.injection_senders
+        self.events.injection_senders_ref()
     }
 
     /// Context engine (pluggable memory recall + assembly).
@@ -1304,20 +1288,20 @@ impl LibreFangKernel {
     /// Event bus.
     #[inline]
     pub fn event_bus_ref(&self) -> &EventBus {
-        &self.events.event_bus
+        self.events.event_bus_ref()
     }
 
     /// Session lifecycle event bus (clone-shared `Arc` so subscribers can hold
     /// it across tasks).
     #[inline]
     pub fn session_lifecycle_bus(&self) -> Arc<crate::session_lifecycle::SessionLifecycleBus> {
-        Arc::clone(&self.events.session_lifecycle_bus)
+        self.events.lifecycle_bus()
     }
 
     /// OFP peer node (set once at startup).
     #[inline]
     pub fn peer_node_ref(&self) -> Option<&Arc<librefang_wire::PeerNode>> {
-        self.mesh.peer_node.get()
+        self.mesh.peer_node_ref()
     }
 
     /// Provider unconfigured log flag (atomic).

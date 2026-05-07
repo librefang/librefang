@@ -84,4 +84,34 @@ impl AgentSubsystem {
             agent_watchers: DashMap::new(),
         }
     }
+
+    /// Agent registry handle.
+    #[inline]
+    pub fn registry_ref(&self) -> &AgentRegistry {
+        &self.registry
+    }
+
+    /// Canonical agent UUID registry (refs #4614).
+    #[inline]
+    pub fn identities_ref(&self) -> &Arc<AgentIdentityRegistry> {
+        &self.agent_identities
+    }
+
+    /// Agent scheduler handle.
+    #[inline]
+    pub fn scheduler_ref(&self) -> &AgentScheduler {
+        &self.scheduler
+    }
+
+    /// Process supervisor handle.
+    #[inline]
+    pub fn supervisor_ref(&self) -> &Supervisor {
+        &self.supervisor
+    }
+
+    /// Per-agent decision-trace storage.
+    #[inline]
+    pub fn traces(&self) -> &DashMap<AgentId, Vec<DecisionTrace>> {
+        &self.decision_traces
+    }
 }

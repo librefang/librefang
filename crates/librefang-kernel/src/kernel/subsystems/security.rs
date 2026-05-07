@@ -39,4 +39,16 @@ impl SecuritySubsystem {
             vault_cache: OnceLock::new(),
         }
     }
+
+    /// RBAC authentication manager.
+    #[inline]
+    pub fn auth_ref(&self) -> &AuthManager {
+        &self.auth
+    }
+
+    /// Device pairing manager.
+    #[inline]
+    pub fn pairing_ref(&self) -> &PairingManager {
+        &self.pairing
+    }
 }

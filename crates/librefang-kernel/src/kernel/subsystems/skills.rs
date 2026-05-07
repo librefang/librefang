@@ -46,4 +46,16 @@ impl SkillsSubsystem {
             skill_review_concurrency: Arc::new(Semaphore::new(max_inflight_skill_reviews)),
         }
     }
+
+    /// Plugin skill registry handle (RwLock for hot-reload).
+    #[inline]
+    pub fn registry_ref(&self) -> &std::sync::RwLock<SkillRegistry> {
+        &self.skill_registry
+    }
+
+    /// Curated hand registry.
+    #[inline]
+    pub fn hand_registry_ref(&self) -> &HandRegistry {
+        &self.hand_registry
+    }
 }

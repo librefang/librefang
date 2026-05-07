@@ -57,4 +57,24 @@ impl EventSubsystem {
             session_stream_hub_gc_started: AtomicBool::new(false),
         }
     }
+
+    /// Top-level event bus handle.
+    #[inline]
+    pub fn event_bus_ref(&self) -> &EventBus {
+        &self.event_bus
+    }
+
+    /// Session lifecycle event bus (Arc-cloneable).
+    #[inline]
+    pub fn lifecycle_bus(&self) -> Arc<SessionLifecycleBus> {
+        Arc::clone(&self.session_lifecycle_bus)
+    }
+
+    /// Per-(agent, session) injection senders map.
+    #[inline]
+    pub fn injection_senders_ref(
+        &self,
+    ) -> &DashMap<(AgentId, SessionId), tokio::sync::mpsc::Sender<AgentLoopSignal>> {
+        &self.injection_senders
+    }
 }

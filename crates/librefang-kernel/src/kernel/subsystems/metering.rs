@@ -41,4 +41,33 @@ impl MeteringSubsystem {
             budget_config: ArcSwap::from_pointee(initial_budget),
         }
     }
+
+    /// Audit log handle.
+    #[inline]
+    pub fn audit_log(&self) -> &Arc<AuditLog> {
+        &self.audit_log
+    }
+
+    /// Metering engine handle.
+    #[inline]
+    pub fn engine(&self) -> &Arc<MeteringEngine> {
+        &self.engine
+    }
+
+    /// Snapshot the current `BudgetConfig` (cheap clone of the
+    /// `ArcSwap`-loaded value).
+    #[inline]
+    pub fn current_budget(&self) -> BudgetConfig {
+        (*self.budget_config.load_full()).clone()
+    }
+
+    /// RCU-update the budget configuration. The closure receives a
+    /// mutable copy; the result is atomically swapped in.
+    pub fn update_budget(&self, f: impl Fn(&mut BudgetConfig)) {
+        self.budget_config.rcu(|current| {
+            let mut next = (**current).clone();
+            f(&mut next);
+            std::sync::Arc::new(next)
+        });
+    }
 }

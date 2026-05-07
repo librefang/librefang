@@ -44,4 +44,16 @@ impl GovernanceSubsystem {
             task_board_sweep_started: AtomicBool::new(false),
         }
     }
+
+    /// Approval enforcement manager.
+    #[inline]
+    pub fn approvals(&self) -> &ApprovalManager {
+        &self.approval_manager
+    }
+
+    /// In-process plugin lifecycle hook registry.
+    #[inline]
+    pub fn hook_registry(&self) -> &HookRegistry {
+        &self.hooks
+    }
 }

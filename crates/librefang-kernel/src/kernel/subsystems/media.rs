@@ -42,4 +42,34 @@ impl MediaSubsystem {
             media_drivers,
         }
     }
+
+    /// Web tools context (search + fetch).
+    #[inline]
+    pub fn web_tools(&self) -> &WebToolsContext {
+        &self.web_ctx
+    }
+
+    /// Browser automation manager.
+    #[inline]
+    pub fn browser(&self) -> &BrowserManager {
+        &self.browser_ctx
+    }
+
+    /// Media understanding engine.
+    #[inline]
+    pub fn engine(&self) -> &MediaEngine {
+        &self.media_engine
+    }
+
+    /// Text-to-speech engine.
+    #[inline]
+    pub fn tts(&self) -> &TtsEngine {
+        &self.tts_engine
+    }
+
+    /// Media generation driver cache (video, music, etc.).
+    #[inline]
+    pub fn drivers(&self) -> &MediaDriverCache {
+        &self.media_drivers
+    }
 }

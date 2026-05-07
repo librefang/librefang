@@ -66,4 +66,52 @@ impl McpSubsystem {
             mcp_generation: AtomicU64::new(0),
         }
     }
+
+    /// `ArcSwap`-backed MCP catalog handle.
+    #[inline]
+    pub fn catalog_swap(&self) -> &ArcSwap<McpCatalog> {
+        &self.mcp_catalog
+    }
+
+    /// Cheap atomic snapshot of the MCP catalog.
+    #[inline]
+    pub fn catalog_load(&self) -> arc_swap::Guard<Arc<McpCatalog>> {
+        self.mcp_catalog.load()
+    }
+
+    /// MCP server health monitor.
+    #[inline]
+    pub fn health(&self) -> &HealthMonitor {
+        &self.mcp_health
+    }
+
+    /// MCP connection pool (lazily initialised).
+    #[inline]
+    pub fn connections_ref(&self) -> &tokio::sync::Mutex<Vec<McpConnection>> {
+        &self.mcp_connections
+    }
+
+    /// Per-server OAuth authentication state.
+    #[inline]
+    pub fn auth_states_ref(&self) -> &McpAuthStates {
+        &self.mcp_auth_states
+    }
+
+    /// Pluggable OAuth provider for MCP server authorization flows.
+    #[inline]
+    pub fn oauth_provider_ref(&self) -> &Arc<dyn McpOAuthProvider + Send + Sync> {
+        &self.mcp_oauth_provider
+    }
+
+    /// MCP tool definitions cache.
+    #[inline]
+    pub fn tools_ref(&self) -> &std::sync::Mutex<Vec<ToolDefinition>> {
+        &self.mcp_tools
+    }
+
+    /// Effective MCP server list (mirrors `config.mcp_servers`).
+    #[inline]
+    pub fn effective_servers_ref(&self) -> &std::sync::RwLock<Vec<McpServerConfigEntry>> {
+        &self.effective_mcp_servers
+    }
 }

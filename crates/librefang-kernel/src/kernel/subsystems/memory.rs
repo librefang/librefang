@@ -40,4 +40,16 @@ impl MemorySubsystem {
             prompt_store: OnceLock::new(),
         }
     }
+
+    /// Primary memory substrate handle.
+    #[inline]
+    pub fn substrate_ref(&self) -> &Arc<MemorySubstrate> {
+        &self.substrate
+    }
+
+    /// Optional proactive memory store (initialised lazily).
+    #[inline]
+    pub fn proactive_store(&self) -> Option<&Arc<ProactiveMemoryStore>> {
+        self.proactive_memory.get()
+    }
 }

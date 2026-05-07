@@ -57,4 +57,52 @@ impl MeshSubsystem {
             channel_adapters: DashMap::new(),
         }
     }
+
+    /// A2A task lifecycle store.
+    #[inline]
+    pub fn a2a_tasks(&self) -> &A2aTaskStore {
+        &self.a2a_task_store
+    }
+
+    /// Discovered external A2A agent cards.
+    #[inline]
+    pub fn a2a_agents(&self) -> &Mutex<Vec<(String, AgentCard)>> {
+        &self.a2a_external_agents
+    }
+
+    /// Bridge-registered channel adapters.
+    #[inline]
+    pub fn channel_adapters_ref(&self) -> &DashMap<String, Arc<dyn ChannelAdapter>> {
+        &self.channel_adapters
+    }
+
+    /// Multi-account agent binding list.
+    #[inline]
+    pub fn bindings_ref(&self) -> &Mutex<Vec<AgentBinding>> {
+        &self.bindings
+    }
+
+    /// Broadcast configuration snapshot.
+    #[inline]
+    pub fn broadcast_ref(&self) -> &BroadcastConfig {
+        &self.broadcast
+    }
+
+    /// Delivery receipt tracker.
+    #[inline]
+    pub fn delivery(&self) -> &DeliveryTracker {
+        &self.delivery_tracker
+    }
+
+    /// OFP peer registry (set once at startup).
+    #[inline]
+    pub fn peer_registry_ref(&self) -> Option<&PeerRegistry> {
+        self.peer_registry.get()
+    }
+
+    /// OFP peer node (set once at startup).
+    #[inline]
+    pub fn peer_node_ref(&self) -> Option<&Arc<PeerNode>> {
+        self.peer_node.get()
+    }
 }

@@ -48,4 +48,34 @@ impl WorkflowSubsystem {
             command_queue,
         }
     }
+
+    /// Workflow execution engine handle.
+    #[inline]
+    pub fn engine_ref(&self) -> &WorkflowEngine {
+        &self.engine
+    }
+
+    /// Workflow template registry.
+    #[inline]
+    pub fn templates_ref(&self) -> &WorkflowTemplateRegistry {
+        &self.template_registry
+    }
+
+    /// Event-driven trigger engine.
+    #[inline]
+    pub fn triggers_ref(&self) -> &TriggerEngine {
+        &self.triggers
+    }
+
+    /// Cron scheduler.
+    #[inline]
+    pub fn cron_ref(&self) -> &CronScheduler {
+        &self.cron_scheduler
+    }
+
+    /// Command queue (lane-based concurrency).
+    #[inline]
+    pub fn command_queue_ref(&self) -> &CommandQueue {
+        &self.command_queue
+    }
 }
