@@ -35,7 +35,33 @@ pub(crate) struct SessionState {
     pub cancel: CancellationToken,
 }
 
+/// Namespace UUID used to derive a stable LibreFang `SessionId` from
+/// an ACP session id string. Same string ⇒ same kernel-side session,
+/// so a `session/load` after the editor reopens picks up the same
+/// LibreFang session — and therefore the same persisted message
+/// history — that the previous `session/new` minted.
+const ACP_SESSION_NS: Uuid = Uuid::from_bytes([
+    0xa3, 0x0c, 0x71, 0x3a, 0x4b, 0x1c, 0x4f, 0x6e, 0xb5, 0x12, 0x9c, 0x7f, 0x88, 0xd0, 0xa1, 0x42,
+]);
+
 impl SessionState {
+    /// Build a `SessionState` for the given ACP session id with a
+    /// `Uuid::new_v5`-derived LibreFang session id. Stable: same input
+    /// always produces the same kernel-side id, so a reconnecting
+    /// editor's `session/load` rejoins the existing session.
+    pub(crate) fn for_acp_id(acp_id: &AcpSessionId, cwd: PathBuf) -> Self {
+        let lf_uuid = Uuid::new_v5(&ACP_SESSION_NS, acp_id.0.as_bytes());
+        Self {
+            librefang_session_id: LfSessionId(lf_uuid),
+            cwd,
+            cancel: CancellationToken::new(),
+        }
+    }
+
+    /// Random-id constructor kept for tests that don't care about
+    /// cross-restart stability. Production paths should use
+    /// [`Self::for_acp_id`].
+    #[cfg(test)]
     pub(crate) fn new(cwd: PathBuf) -> Self {
         Self {
             librefang_session_id: LfSessionId(Uuid::new_v4()),

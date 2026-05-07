@@ -122,7 +122,7 @@ where
         .on_receive_request(
             async move |req: NewSessionRequest, responder, _cx| {
                 let new_id = next_session_id();
-                let state = SessionState::new(req.cwd);
+                let state = SessionState::for_acp_id(&new_id, req.cwd);
                 let lf_id = state.librefang_session_id;
                 debug!(session_id = %new_id.0, librefang_id = %lf_id.0,
                        "ACP session/new");
@@ -146,7 +146,7 @@ where
         // tracked separately under #3313 phase 2.
         .on_receive_request(
             async move |req: LoadSessionRequest, responder, _cx| {
-                let state = SessionState::new(req.cwd);
+                let state = SessionState::for_acp_id(&req.session_id, req.cwd);
                 let lf_id = state.librefang_session_id;
                 debug!(session_id = %req.session_id.0, librefang_id = %lf_id.0,
                        "ACP session/load (no history replay yet)");
@@ -163,7 +163,7 @@ where
         // history) is moot until we have history to replay.
         .on_receive_request(
             async move |req: ResumeSessionRequest, responder, _cx| {
-                let state = SessionState::new(req.cwd);
+                let state = SessionState::for_acp_id(&req.session_id, req.cwd);
                 let lf_id = state.librefang_session_id;
                 debug!(session_id = %req.session_id.0, librefang_id = %lf_id.0,
                        "ACP session/resume");
