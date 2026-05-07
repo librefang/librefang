@@ -454,7 +454,7 @@ impl LibreFangKernel {
     pub fn model_catalog_ref(
         &self,
     ) -> &arc_swap::ArcSwap<librefang_runtime::model_catalog::ModelCatalog> {
-        &self.model_catalog
+        &self.llm.model_catalog
     }
 
     /// Snapshot the current model catalog. Cheap (atomic load + Arc clone of
@@ -464,7 +464,7 @@ impl LibreFangKernel {
     pub fn model_catalog_load(
         &self,
     ) -> arc_swap::Guard<Arc<librefang_runtime::model_catalog::ModelCatalog>> {
-        self.model_catalog.load()
+        self.llm.model_catalog.load()
     }
 
     /// Atomically mutate the model catalog using the RCU pattern: clone the
@@ -482,7 +482,7 @@ impl LibreFangKernel {
         F: FnMut(&mut librefang_runtime::model_catalog::ModelCatalog) -> R,
     {
         let mut result: Option<R> = None;
-        self.model_catalog.rcu(|cat| {
+        self.llm.model_catalog.rcu(|cat| {
             let mut next = (**cat).clone();
             result = Some(f(&mut next));
             Arc::new(next)
@@ -497,7 +497,7 @@ impl LibreFangKernel {
     pub fn spawn_key_validation(self: Arc<Self>) {
         use librefang_types::model_catalog::AuthStatus;
 
-        let to_validate = self.model_catalog.load().providers_needing_validation();
+        let to_validate = self.llm.model_catalog.load().providers_needing_validation();
 
         if to_validate.is_empty() {
             return;
@@ -557,7 +557,7 @@ impl LibreFangKernel {
     /// with current provider URLs / API keys.
     #[inline]
     pub fn clear_driver_cache(&self) {
-        self.driver_cache.clear();
+        self.llm.driver_cache.clear();
     }
 
     /// Spawn the approval expiry sweep task.
@@ -1134,7 +1134,7 @@ impl LibreFangKernel {
     pub fn embedding(
         &self,
     ) -> Option<&Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>> {
-        self.embedding_driver.as_ref()
+        self.llm.embedding_driver.as_ref()
     }
 
     /// Command queue.
@@ -1248,7 +1248,7 @@ impl LibreFangKernel {
     pub fn default_model_override_ref(
         &self,
     ) -> &std::sync::RwLock<Option<librefang_types::config::DefaultModelConfig>> {
-        &self.default_model_override
+        &self.llm.default_model_override
     }
 
     /// Tool policy override (hot-reloadable).

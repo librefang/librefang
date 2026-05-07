@@ -429,6 +429,7 @@ fn test_spawn_agent_applies_local_default_model_override() {
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     *kernel
+        .llm
         .default_model_override
         .write()
         .expect("default model override lock") = Some(DefaultModelConfig {

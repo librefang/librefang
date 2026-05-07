@@ -28,7 +28,7 @@ impl LibreFangKernel {
     /// - the model returns empty / all-whitespace text
     pub fn spawn_session_label_generation(&self, agent_id: AgentId, session_id: SessionId) {
         let memory = Arc::clone(&self.memory);
-        let aux = self.aux_client.load_full();
+        let aux = self.llm.aux_client.load_full();
         tokio::spawn(async move {
             // Bail early if the label is already set — preserves user
             // overrides and prevents repeated billing on the same session.
@@ -179,7 +179,7 @@ impl LibreFangKernel {
 
         let result = match tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            self.default_driver.complete(request),
+            self.llm.default_driver.complete(request),
         )
         .await
         {

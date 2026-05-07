@@ -1236,11 +1236,14 @@ impl LibreFangKernel {
             background,
             // ArcSwap lets config_reload rebuild on `[llm.auxiliary]` edits
             // without invalidating any long-lived `Arc<Kernel>` handle.
-            aux_client: arc_swap::ArcSwap::from_pointee(initial_aux_client),
-            default_driver: driver,
+            llm: crate::kernel::subsystems::LlmSubsystem::new(
+                driver,
+                initial_aux_client,
+                embedding_driver,
+                model_catalog,
+            ),
             wasm_sandbox,
             security: crate::kernel::subsystems::SecuritySubsystem::new(auth, pairing),
-            model_catalog: arc_swap::ArcSwap::from_pointee(model_catalog),
             skill_registry: std::sync::RwLock::new(skill_registry),
             running_tasks: dashmap::DashMap::new(),
             session_interrupts: dashmap::DashMap::new(),
@@ -1263,7 +1266,6 @@ impl LibreFangKernel {
                 tts_engine,
                 media_drivers,
             ),
-            embedding_driver,
             hand_registry,
             mcp_catalog: arc_swap::ArcSwap::from_pointee(mcp_catalog),
             mcp_health,
@@ -1285,7 +1287,6 @@ impl LibreFangKernel {
             booted_at: std::time::Instant::now(),
             whatsapp_gateway_pid: Arc::new(std::sync::Mutex::new(None)),
             channel_adapters: dashmap::DashMap::new(),
-            default_model_override: std::sync::RwLock::new(None),
             tool_policy_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
             session_msg_locks: dashmap::DashMap::new(),
@@ -1310,7 +1311,6 @@ impl LibreFangKernel {
             )),
             agent_watchers: dashmap::DashMap::new(),
             mcp_generation: std::sync::atomic::AtomicU64::new(0),
-            driver_cache: librefang_runtime::drivers::DriverCache::new(),
             metering: crate::kernel::subsystems::MeteringSubsystem::new(
                 Arc::new(AuditLog::with_db_anchored(memory.pool(), audit_anchor_path)),
                 metering,
@@ -1349,7 +1349,10 @@ impl LibreFangKernel {
                 &extraction_model,
                 &cfg.default_model.provider,
             );
-            let llm = Some((Arc::clone(&kernel.default_driver) as _, extraction_model));
+            let llm = Some((
+                Arc::clone(&kernel.llm.default_driver) as _,
+                extraction_model,
+            ));
             // Use the _with_extractor variant so we get the concrete
             // `LlmMemoryExtractor` back alongside the store. The extractor
             // needs a `Weak<dyn KernelHandle>` installed before its fork-
@@ -1357,7 +1360,7 @@ impl LibreFangKernel {
             // only be formed after `Arc::new(kernel)` — so we hold the
             // concrete handle here and call `install_kernel_handle` from
             // `set_self_handle` below.
-            let embedding = kernel.embedding_driver.as_ref().map(Arc::clone);
+            let embedding = kernel.llm.embedding_driver.as_ref().map(Arc::clone);
             // Thread the global `prompt_caching` toggle through so the
             // extractor's fallback `driver.complete()` path respects the
             // same switch operators use for the main loop. The fork path
@@ -2030,7 +2033,7 @@ system_prompt = "You are a helpful assistant."
         for entry in kernel.registry.list() {
             if let Some(ref routing_config) = entry.manifest.routing {
                 let router = ModelRouter::new(routing_config.clone());
-                for warning in router.validate_models(&kernel.model_catalog.load()) {
+                for warning in router.validate_models(&kernel.llm.model_catalog.load()) {
                     warn!(agent = %entry.name, "{warning}");
                 }
             }
@@ -2041,7 +2044,7 @@ system_prompt = "You are a helpful assistant."
         // warnings at boot, not silently at first dispatch.
         if let Some(ref routing_config) = kernel.config.load().default_routing {
             let router = ModelRouter::new(routing_config.clone());
-            for warning in router.validate_models(&kernel.model_catalog.load()) {
+            for warning in router.validate_models(&kernel.llm.model_catalog.load()) {
                 warn!(target: "librefang_kernel::default_routing", "{warning}");
             }
         }

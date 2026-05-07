@@ -54,7 +54,7 @@ impl LibreFangKernel {
 
         let model = &entry.manifest.model.model;
         let cost = MeteringEngine::estimate_cost_with_catalog(
-            &self.model_catalog.load(),
+            &self.llm.model_catalog.load(),
             model,
             input_tokens,
             output_tokens,
@@ -320,6 +320,7 @@ impl LibreFangKernel {
         // Filter out 0 so image/audio entries (no context window) fall back
         // to the 200K default instead of feeding 0 into compaction math.
         let agent_ctx_window = self
+            .llm
             .model_catalog
             .load()
             .find_model(&entry.manifest.model.model)
@@ -335,6 +336,7 @@ impl LibreFangKernel {
         // default driver chain), so behaviour matches the pre-issue-#3314
         // baseline.
         let driver = self
+            .llm
             .aux_client
             .load()
             .driver_for(librefang_types::config::AuxTask::Compression);

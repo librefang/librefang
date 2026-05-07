@@ -704,24 +704,14 @@ pub struct LibreFangKernel {
     pub(crate) triggers: TriggerEngine,
     /// Background agent executor.
     pub(crate) background: BackgroundExecutor,
-    /// Default LLM driver (from kernel config).
-    default_driver: Arc<dyn LlmDriver>,
-    /// Auxiliary LLM client — resolves cheap-tier fallback chains for side
-    /// tasks (context compression, title generation, search summarisation,
-    /// vision captioning). Wrapped in `ArcSwap` so config hot-reload can
-    /// rebuild the chains without restarting the kernel. See issue #3314
-    /// and `librefang_runtime::aux_client`.
-    aux_client: arc_swap::ArcSwap<librefang_runtime::aux_client::AuxClient>,
+    /// LLM drivers + model catalog + embedding fallback. See
+    /// [`subsystems::LlmSubsystem`].
+    pub(crate) llm: subsystems::LlmSubsystem,
     /// WASM sandbox engine (shared across all WASM agent executions).
     wasm_sandbox: WasmSandbox,
     /// RBAC + device pairing + credential vault. See
     /// [`subsystems::SecuritySubsystem`].
     pub(crate) security: subsystems::SecuritySubsystem,
-    /// Model catalog registry. `ArcSwap` (#3384) so the hot `send_message_full`
-    /// path can read the snapshot atomically — was previously `std::sync::RwLock`,
-    /// which forced 5+ lock acquisitions per request. Writes use the RCU pattern
-    /// (`model_catalog_update`).
-    pub(crate) model_catalog: arc_swap::ArcSwap<librefang_runtime::model_catalog::ModelCatalog>,
     /// Skill registry for plugin skills (RwLock for hot-reload on install/uninstall).
     pub(crate) skill_registry: std::sync::RwLock<librefang_skills::registry::SkillRegistry>,
     /// Tracks running agent loops for cancellation + observability. Keyed by
@@ -760,9 +750,6 @@ pub struct LibreFangKernel {
     /// Web search + browser + media understanding + TTS + media drivers.
     /// See [`subsystems::MediaSubsystem`].
     pub(crate) media: subsystems::MediaSubsystem,
-    /// Embedding driver for vector similarity search (None = text fallback).
-    pub(crate) embedding_driver:
-        Option<Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>>,
     /// Hand registry — curated autonomous capability packages.
     pub(crate) hand_registry: librefang_hands::registry::HandRegistry,
     /// MCP catalog — read-only set of server templates shipped by the
@@ -808,9 +795,6 @@ pub struct LibreFangKernel {
     /// Channel adapters registered at bridge startup (for proactive `channel_send` tool).
     pub(crate) channel_adapters:
         dashmap::DashMap<String, Arc<dyn librefang_channels::types::ChannelAdapter>>,
-    /// Hot-reloadable default model override (set via config hot-reload, read at agent spawn).
-    pub(crate) default_model_override:
-        std::sync::RwLock<Option<librefang_types::config::DefaultModelConfig>>,
     /// Hot-reloadable tool policy override (set via config hot-reload, read in available_tools).
     pub(crate) tool_policy_override:
         std::sync::RwLock<Option<librefang_types::tool_policy::ToolPolicy>>,
@@ -918,9 +902,6 @@ pub struct LibreFangKernel {
     /// Generation counter for MCP tool definitions — bumped whenever mcp_tools
     /// are modified (connect, disconnect, rebuild). Used by the tool list cache.
     mcp_generation: std::sync::atomic::AtomicU64,
-    /// Lazy-loading driver cache — avoids recreating HTTP clients for the same
-    /// provider/key/url combination on every agent message.
-    driver_cache: librefang_runtime::drivers::DriverCache,
     /// Audit trail + cost metering + hot-reloadable budget. See
     /// [`subsystems::MeteringSubsystem`].
     pub(crate) metering: subsystems::MeteringSubsystem,

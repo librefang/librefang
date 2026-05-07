@@ -107,7 +107,7 @@ impl LibreFangKernel {
 
         let result = match tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            self.default_driver.complete(request),
+            self.llm.default_driver.complete(request),
         )
         .await
         {

@@ -446,6 +446,7 @@ impl LibreFangKernel {
                     .starts_with("General-purpose assistant");
             if (is_default_provider && is_default_model) || is_auto_spawned {
                 let override_guard = self
+                    .llm
                     .default_model_override
                     .read()
                     .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
@@ -668,7 +669,7 @@ impl LibreFangKernel {
         {
             let mut router = ModelRouter::new(routing_config.clone());
             // Resolve aliases (e.g. "sonnet" -> "claude-sonnet-4-20250514") before scoring
-            router.resolve_aliases(&self.model_catalog.load());
+            router.resolve_aliases(&self.llm.model_catalog.load());
             // Build a probe request to score complexity
             let probe = CompletionRequest {
                 model: strip_provider_prefix(&manifest.model.model, &manifest.model.provider),
@@ -694,7 +695,7 @@ impl LibreFangKernel {
             // If not, keep the current (default) provider instead of switching
             // to one the user hasn't configured.
             let mut use_routed = true;
-            let cat = self.model_catalog.load();
+            let cat = self.llm.model_catalog.load();
             {
                 if let Some(entry) = cat.find_model(&routed_model) {
                     if entry.provider != manifest.model.provider {
@@ -719,7 +720,7 @@ impl LibreFangKernel {
                     "Model routing applied"
                 );
                 manifest.model.model = routed_model.clone();
-                let cat = self.model_catalog.load();
+                let cat = self.llm.model_catalog.load();
                 {
                     if let Some(entry) = cat.find_model(&routed_model) {
                         if entry.provider != manifest.model.provider {
@@ -736,7 +737,7 @@ impl LibreFangKernel {
         // Priority: model overrides > agent manifest > system defaults.
         {
             let override_key = format!("{}:{}", manifest.model.provider, manifest.model.model);
-            let catalog = self.model_catalog.load();
+            let catalog = self.llm.model_catalog.load();
             if let Some(mo) = catalog.get_overrides(&override_key) {
                 if let Some(t) = mo.temperature {
                     manifest.model.temperature = t;
@@ -774,14 +775,14 @@ impl LibreFangKernel {
         // Look up model's actual context window from the catalog. Filter out
         // 0 so image/audio entries (no context window) fall through to the
         // caller's default rather than poisoning compaction math.
-        let ctx_window = Some(self.model_catalog.load()).and_then(|cat| {
+        let ctx_window = Some(self.llm.model_catalog.load()).and_then(|cat| {
             cat.find_model(&manifest.model.model)
                 .map(|m| m.context_window as usize)
                 .filter(|w| *w > 0)
         });
 
         // Inject model_supports_tools for auto web search augmentation
-        if let Some(supports) = Some(self.model_catalog.load()).and_then(|cat| {
+        if let Some(supports) = Some(self.llm.model_catalog.load()).and_then(|cat| {
             cat.find_model(&manifest.model.model)
                 .map(|m| m.supports_tools)
         }) {
@@ -893,7 +894,7 @@ impl LibreFangKernel {
             interrupt: Some(session_interrupt),
             max_iterations: cfg.agent_max_iterations,
             max_history_messages: cfg.max_history_messages,
-            aux_client: Some(self.aux_client.load_full()),
+            aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: None,
             tool_results_config: Some(cfg.tool_results.clone()),
         };
@@ -933,7 +934,7 @@ impl LibreFangKernel {
             Some(effective_mcp),
             Some(&self.media.web_ctx),
             Some(&self.media.browser_ctx),
-            self.embedding_driver.as_deref(),
+            self.llm.embedding_driver.as_deref(),
             manifest.workspace.as_deref(),
             None, // on_phase callback
             Some(&self.media.media_engine),
@@ -1091,7 +1092,7 @@ impl LibreFangKernel {
         // both pass the pre-check before either records its spend.
         let model = &manifest.model.model;
         let cost = MeteringEngine::estimate_cost_with_catalog(
-            &self.model_catalog.load(),
+            &self.llm.model_catalog.load(),
             model,
             result.total_usage.input_tokens,
             result.total_usage.output_tokens,

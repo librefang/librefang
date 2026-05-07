@@ -522,14 +522,14 @@ impl LibreFangKernel {
 
         let driver = self.resolve_driver(&manifest)?;
 
-        let ctx_window = Some(self.model_catalog.load()).and_then(|cat| {
+        let ctx_window = Some(self.llm.model_catalog.load()).and_then(|cat| {
             cat.find_model(&manifest.model.model)
                 .map(|m| m.context_window as usize)
                 .filter(|w| *w > 0)
         });
 
         // Inject model_supports_tools for auto web search augmentation
-        if let Some(supports) = Some(self.model_catalog.load()).and_then(|cat| {
+        if let Some(supports) = Some(self.llm.model_catalog.load()).and_then(|cat| {
             cat.find_model(&manifest.model.model)
                 .map(|m| m.supports_tools)
         }) {
@@ -593,7 +593,7 @@ impl LibreFangKernel {
                 interrupt: Some(librefang_runtime::interrupt::SessionInterrupt::new()),
                 max_iterations: self.config.load().agent_max_iterations,
                 max_history_messages: self.config.load().max_history_messages,
-                aux_client: Some(self.aux_client.load_full()),
+                aux_client: Some(self.llm.aux_client.load_full()),
                 parent_session_id: None,
                 // Ephemeral /btw sessions start with empty history so no
                 // stale tool results can accumulate — `None` uses compiled
@@ -617,7 +617,7 @@ impl LibreFangKernel {
         // accurate (prevents TOCTOU race on concurrent ephemeral requests)
         let model = &manifest.model.model;
         let cost = MeteringEngine::estimate_cost_with_catalog(
-            &self.model_catalog.load(),
+            &self.llm.model_catalog.load(),
             model,
             result.total_usage.input_tokens,
             result.total_usage.output_tokens,
@@ -777,7 +777,7 @@ impl LibreFangKernel {
             let max_out = entry.manifest.model.max_tokens as u64;
             let est_in = max_out;
             {
-                let catalog = self.model_catalog.load();
+                let catalog = self.llm.model_catalog.load();
                 MeteringEngine::estimate_cost_with_catalog(
                     &catalog,
                     &entry.manifest.model.model,
@@ -1043,14 +1043,14 @@ impl LibreFangKernel {
                     // Prefer the driver the agent's own turn resolved to.
                     // When an agent is pinned to a provider the global
                     // default isn't configured for (or vice versa), using
-                    // `self.default_driver` meant reviews failed with
+                    // `self.llm.default_driver` meant reviews failed with
                     // "unknown provider" while the task itself had
                     // succeeded — so complex workflows from those agents
                     // never got distilled into skills. Fall back to the
                     // default only if manifest resolution fails.
                     let driver = self
                         .resolve_driver(&entry.manifest)
-                        .unwrap_or_else(|_| self.default_driver.clone());
+                        .unwrap_or_else(|_| self.llm.default_driver.clone());
                     let skills_dir = self.home_dir_boot.join("skills");
                     let trace_summary = Self::summarize_traces_for_review(&result.decision_traces);
                     let response_summary = result.response.chars().take(2000).collect::<String>();
@@ -1319,7 +1319,7 @@ impl LibreFangKernel {
             interrupt: Some(session_interrupt),
             max_iterations: self.config.load().agent_max_iterations,
             max_history_messages: self.config.load().max_history_messages,
-            aux_client: Some(self.aux_client.load_full()),
+            aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: None,
             tool_results_config: Some(self.config.load().tool_results.clone()),
         };
@@ -1506,7 +1506,7 @@ impl LibreFangKernel {
             interrupt: Some(interrupt),
             max_iterations: self.config.load().agent_max_iterations,
             max_history_messages: self.config.load().max_history_messages,
-            aux_client: Some(self.aux_client.load_full()),
+            aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: Some(parent_session_id),
             tool_results_config: Some(self.config.load().tool_results.clone()),
         };
@@ -1580,7 +1580,7 @@ impl LibreFangKernel {
             interrupt: Some(session_interrupt),
             max_iterations: self.config.load().agent_max_iterations,
             max_history_messages: self.config.load().max_history_messages,
-            aux_client: Some(self.aux_client.load_full()),
+            aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: None,
             tool_results_config: Some(self.config.load().tool_results.clone()),
         };
@@ -1857,7 +1857,7 @@ impl LibreFangKernel {
         // Look up model's actual context window from the catalog. Filter out
         // 0 so image/audio entries (no context window) fall through to the
         // caller's default rather than poisoning compaction math.
-        let ctx_window = Some(self.model_catalog.load()).and_then(|cat| {
+        let ctx_window = Some(self.llm.model_catalog.load()).and_then(|cat| {
             cat.find_model(&entry.manifest.model.model)
                 .map(|m| m.context_window as usize)
                 .filter(|w| *w > 0)
@@ -1870,7 +1870,7 @@ impl LibreFangKernel {
         let mut manifest = entry.manifest.clone();
 
         // Inject model_supports_tools for auto web search augmentation
-        if let Some(supports) = Some(self.model_catalog.load()).and_then(|cat| {
+        if let Some(supports) = Some(self.llm.model_catalog.load()).and_then(|cat| {
             cat.find_model(&manifest.model.model)
                 .map(|m| m.supports_tools)
         }) {
@@ -2300,7 +2300,7 @@ impl LibreFangKernel {
                 Some(effective_mcp),
                 Some(&kernel_clone.media.web_ctx),
                 Some(&kernel_clone.media.browser_ctx),
-                kernel_clone.embedding_driver.as_deref(),
+                kernel_clone.llm.embedding_driver.as_deref(),
                 manifest.workspace.as_deref(),
                 Some(&phase_cb),
                 Some(&kernel_clone.media.media_engine),
@@ -2411,7 +2411,7 @@ impl LibreFangKernel {
                     // (mirrors non-streaming path — prevents TOCTOU race)
                     let model = &manifest.model.model;
                     let cost = MeteringEngine::estimate_cost_with_catalog(
-                        &kernel_clone.model_catalog.load(),
+                        &kernel_clone.llm.model_catalog.load(),
                         model,
                         result.total_usage.input_tokens,
                         result.total_usage.output_tokens,

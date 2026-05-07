@@ -98,6 +98,7 @@ impl LibreFangKernel {
             } else {
                 // No custom base_url: safe to auto-detect from catalog / model name
                 let resolved_provider = self
+                    .llm
                     .model_catalog
                     .load()
                     .find_model(model)

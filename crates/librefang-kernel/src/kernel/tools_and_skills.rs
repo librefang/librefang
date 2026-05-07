@@ -634,7 +634,7 @@ impl LibreFangKernel {
         // failures are logged but don't abort the review.
         if let Some(kernel) = kernel_weak.as_ref().and_then(|w| w.upgrade()) {
             let cost = MeteringEngine::estimate_cost_with_catalog(
-                &kernel.model_catalog.load(),
+                &kernel.llm.model_catalog.load(),
                 &default_model.model,
                 response.usage.input_tokens,
                 response.usage.output_tokens,

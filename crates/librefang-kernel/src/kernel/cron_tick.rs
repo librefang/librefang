@@ -339,6 +339,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                                                 // cutting an Assistant{ToolUse} /
                                                 // User{ToolResult} pair.
                                                 let driver = kernel_job
+                                                    .llm
                                                     .aux_client
                                                     .load()
                                                     .driver_for(

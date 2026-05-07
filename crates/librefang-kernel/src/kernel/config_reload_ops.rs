@@ -113,10 +113,10 @@ impl LibreFangKernel {
             // replaces the live snapshot — concurrent callers that already
             // resolved a chain keep using their `Arc<dyn LlmDriver>` until
             // the call completes.
-            self.aux_client.store(std::sync::Arc::new(
+            self.llm.aux_client.store(std::sync::Arc::new(
                 librefang_runtime::aux_client::AuxClient::new(
                     new_config_arc,
-                    Arc::clone(&self.default_driver),
+                    Arc::clone(&self.llm.default_driver),
                 ),
             ));
         }
@@ -153,7 +153,7 @@ impl LibreFangKernel {
                 HotAction::ReloadProviderUrls => {
                     info!("Hot-reload: applying provider URL overrides");
                     // Invalidate cached LLM drivers — URLs/keys may have changed.
-                    self.driver_cache.clear();
+                    self.llm.driver_cache.clear();
                     // Pre-compute everything outside the RCU closure: the closure
                     // may re-run on CAS retry, so all logging + region resolution
                     // happens here exactly once. Region resolution reads a
@@ -166,7 +166,7 @@ impl LibreFangKernel {
                         if regions.is_empty() {
                             std::collections::BTreeMap::new()
                         } else {
-                            let snapshot = self.model_catalog.load();
+                            let snapshot = self.llm.model_catalog.load();
                             let urls = snapshot.resolve_region_urls(&regions);
                             if !urls.is_empty() {
                                 info!(
@@ -205,8 +205,9 @@ impl LibreFangKernel {
                         new_config.default_model.provider, new_config.default_model.model
                     );
                     // Invalidate cached drivers — the default provider may have changed.
-                    self.driver_cache.clear();
+                    self.llm.driver_cache.clear();
                     let mut guard = self
+                        .llm
                         .default_model_override
                         .write()
                         .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
@@ -414,16 +415,16 @@ impl LibreFangKernel {
                     info!("Hot-reload: fallback provider chain updated ({count} provider(s))");
                     // Invalidate cached LLM drivers so the new fallback chain
                     // is used when drivers are next constructed.
-                    self.driver_cache.clear();
+                    self.llm.driver_cache.clear();
                 }
                 HotAction::ReloadProviderApiKeys => {
                     info!("Hot-reload: provider API keys changed — flushing driver cache");
-                    self.driver_cache.clear();
+                    self.llm.driver_cache.clear();
                 }
                 HotAction::ReloadProxy => {
                     info!("Hot-reload: proxy config changed — reinitializing HTTP proxy env");
                     librefang_runtime::http_client::init_proxy(new_config.proxy.clone());
-                    self.driver_cache.clear();
+                    self.llm.driver_cache.clear();
                 }
                 HotAction::UpdateDashboardCredentials => {
                     info!("Hot-reload: dashboard credentials updated — config swap is sufficient");

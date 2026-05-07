@@ -34,7 +34,7 @@ impl LibreFangKernel {
             return Some(url.clone());
         }
         // 2. Model catalog (updated at runtime by set_provider_url / apply_url_overrides)
-        let catalog = self.model_catalog.load();
+        let catalog = self.llm.model_catalog.load();
         {
             if let Some(p) = catalog.get_provider(provider) {
                 if !p.base_url.is_empty() {
@@ -64,6 +64,7 @@ impl LibreFangKernel {
         // API key via the dashboard and the default provider is switched,
         // resolve_driver sees the updated provider/model/api_key_env.
         let override_guard = self
+            .llm
             .default_model_override
             .read()
             .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
@@ -98,7 +99,7 @@ impl LibreFangKernel {
             )
             && !effective_default.cli_profile_dirs.is_empty()
         {
-            return Ok(self.default_driver.clone());
+            return Ok(self.llm.default_driver.clone());
         }
 
         // Always create a fresh driver by reading current env vars.
@@ -163,7 +164,7 @@ impl LibreFangKernel {
                 emit_caller_trace_headers: cfg.telemetry.emit_caller_trace_headers,
             };
 
-            match self.driver_cache.get_or_create(&driver_config) {
+            match self.llm.driver_cache.get_or_create(&driver_config) {
                 Ok(d) => d,
                 Err(e) => {
                     // If fresh driver creation fails (e.g. key not yet set for this
@@ -176,7 +177,7 @@ impl LibreFangKernel {
                             error = %e,
                             "Fresh driver creation failed, falling back to boot-time default"
                         );
-                        Arc::clone(&self.default_driver)
+                        Arc::clone(&self.llm.default_driver)
                     } else {
                         return Err(KernelError::BootFailed(format!(
                             "Agent LLM driver init failed: {e}"
@@ -252,7 +253,7 @@ impl LibreFangKernel {
                         .copied(),
                     emit_caller_trace_headers: cfg.telemetry.emit_caller_trace_headers,
                 };
-                match self.driver_cache.get_or_create(&config) {
+                match self.llm.driver_cache.get_or_create(&config) {
                     Ok(d) => chain.push((d, strip_provider_prefix(&fb.model, &fb_provider))),
                     Err(e) => {
                         warn!("Fallback driver '{}' failed to init: {e}", fb_provider);
