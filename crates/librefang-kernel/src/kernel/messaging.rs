@@ -2298,15 +2298,15 @@ impl LibreFangKernel {
                 tx,
                 Some(&skill_snapshot),
                 Some(effective_mcp),
-                Some(&kernel_clone.web_ctx),
-                Some(&kernel_clone.browser_ctx),
+                Some(&kernel_clone.media.web_ctx),
+                Some(&kernel_clone.media.browser_ctx),
                 kernel_clone.embedding_driver.as_deref(),
                 manifest.workspace.as_deref(),
                 Some(&phase_cb),
-                Some(&kernel_clone.media_engine),
-                Some(&kernel_clone.media_drivers),
+                Some(&kernel_clone.media.media_engine),
+                Some(&kernel_clone.media.media_drivers),
                 if loop_cfg.tts.enabled {
-                    Some(&kernel_clone.tts_engine)
+                    Some(&kernel_clone.media.tts_engine)
                 } else {
                     None
                 },

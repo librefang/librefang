@@ -979,31 +979,31 @@ impl LibreFangKernel {
     /// Web tools context (search + fetch).
     #[inline]
     pub fn web_tools(&self) -> &librefang_runtime::web_search::WebToolsContext {
-        &self.web_ctx
+        &self.media.web_ctx
     }
 
     /// Browser automation manager.
     #[inline]
     pub fn browser(&self) -> &librefang_runtime::browser::BrowserManager {
-        &self.browser_ctx
+        &self.media.browser_ctx
     }
 
     /// Media understanding engine.
     #[inline]
     pub fn media(&self) -> &librefang_runtime::media_understanding::MediaEngine {
-        &self.media_engine
+        &self.media.media_engine
     }
 
     /// Text-to-speech engine.
     #[inline]
     pub fn tts(&self) -> &librefang_runtime::tts::TtsEngine {
-        &self.tts_engine
+        &self.media.tts_engine
     }
 
     /// Media generation driver cache (video, music, etc.).
     #[inline]
     pub fn media_drivers(&self) -> &librefang_runtime::media::MediaDriverCache {
-        &self.media_drivers
+        &self.media.media_drivers
     }
 
     /// MCP server connections (Mutex — lazily initialized).

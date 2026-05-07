@@ -197,7 +197,7 @@ impl LibreFangKernel {
                         }
                     });
                     // Also update media driver cache with new provider URLs
-                    self.media_drivers.update_provider_urls(provider_urls);
+                    self.media.media_drivers.update_provider_urls(provider_urls);
                 }
                 HotAction::UpdateDefaultModel => {
                     info!(

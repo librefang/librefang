@@ -757,16 +757,9 @@ pub struct LibreFangKernel {
     pub a2a_task_store: librefang_runtime::a2a::A2aTaskStore,
     /// Discovered external A2A agent cards.
     pub a2a_external_agents: std::sync::Mutex<Vec<(String, librefang_runtime::a2a::AgentCard)>>,
-    /// Web tools context (multi-provider search + SSRF-protected fetch + caching).
-    pub(crate) web_ctx: librefang_runtime::web_search::WebToolsContext,
-    /// Browser automation manager (Playwright bridge sessions).
-    pub(crate) browser_ctx: librefang_runtime::browser::BrowserManager,
-    /// Media understanding engine (image description, audio transcription).
-    pub(crate) media_engine: librefang_runtime::media_understanding::MediaEngine,
-    /// Text-to-speech engine.
-    pub(crate) tts_engine: librefang_runtime::tts::TtsEngine,
-    /// Media generation driver cache (video, music, etc.).
-    pub(crate) media_drivers: librefang_runtime::media::MediaDriverCache,
+    /// Web search + browser + media understanding + TTS + media drivers.
+    /// See [`subsystems::MediaSubsystem`].
+    pub(crate) media: subsystems::MediaSubsystem,
     /// Embedding driver for vector similarity search (None = text fallback).
     pub(crate) embedding_driver:
         Option<Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>>,
@@ -1627,14 +1620,14 @@ impl LibreFangKernel {
             // allowlist is not available here so we skip the check (None).
             allowed_skills: None,
             mcp_connections: Some(&self.mcp_connections),
-            web_ctx: Some(&self.web_ctx),
-            browser_ctx: Some(&self.browser_ctx),
+            web_ctx: Some(&self.media.web_ctx),
+            browser_ctx: Some(&self.media.browser_ctx),
             allowed_env_vars: deferred.allowed_env_vars.as_deref(),
             workspace_root: deferred.workspace_root.as_deref(),
-            media_engine: Some(&self.media_engine),
-            media_drivers: Some(&self.media_drivers),
+            media_engine: Some(&self.media.media_engine),
+            media_drivers: Some(&self.media.media_drivers),
             exec_policy: deferred.exec_policy.as_ref(),
-            tts_engine: Some(&self.tts_engine),
+            tts_engine: Some(&self.media.tts_engine),
             docker_config: None,
             process_manager: Some(&self.processes.manager),
             sender_id: deferred.sender_id.as_deref(),

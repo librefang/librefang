@@ -931,15 +931,15 @@ impl LibreFangKernel {
             Some(kernel_handle),
             Some(&skill_snapshot),
             Some(effective_mcp),
-            Some(&self.web_ctx),
-            Some(&self.browser_ctx),
+            Some(&self.media.web_ctx),
+            Some(&self.media.browser_ctx),
             self.embedding_driver.as_deref(),
             manifest.workspace.as_deref(),
             None, // on_phase callback
-            Some(&self.media_engine),
-            Some(&self.media_drivers),
+            Some(&self.media.media_engine),
+            Some(&self.media.media_drivers),
             if cfg.tts.enabled {
-                Some(&self.tts_engine)
+                Some(&self.media.tts_engine)
             } else {
                 None
             },
