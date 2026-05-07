@@ -23,10 +23,12 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
             .map(|aid| format!("{channel}:{aid}"))
             .unwrap_or_else(|| channel.to_string());
         let adapter = self
+            .mesh
             .channel_adapters
             .get(&lookup_key)
             .ok_or_else(|| {
                 let available: Vec<String> = self
+                    .mesh
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
@@ -97,10 +99,12 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
             .map(|aid| format!("{channel}:{aid}"))
             .unwrap_or_else(|| channel.to_string());
         let adapter = self
+            .mesh
             .channel_adapters
             .get(&lookup_key)
             .ok_or_else(|| {
                 let available: Vec<String> = self
+                    .mesh
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
@@ -175,10 +179,12 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
             .map(|aid| format!("{channel}:{aid}"))
             .unwrap_or_else(|| channel.to_string());
         let adapter = self
+            .mesh
             .channel_adapters
             .get(&lookup_key)
             .ok_or_else(|| {
                 let available: Vec<String> = self
+                    .mesh
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
@@ -248,6 +254,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
             .map(|aid| format!("{channel}:{aid}"))
             .unwrap_or_else(|| channel.to_string());
         let adapter = self
+            .mesh
             .channel_adapters
             .get(&lookup_key)
             .ok_or_else(|| match account_id.filter(|s| !s.is_empty()) {
@@ -289,6 +296,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         username: Option<&str>,
     ) -> Result<(), kernel_handle::KernelOpError> {
         self.memory
+            .substrate
             .roster()
             .upsert(channel, chat_id, user_id, display_name, username);
         Ok(())
@@ -299,7 +307,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         channel: &str,
         chat_id: &str,
     ) -> Result<Vec<serde_json::Value>, kernel_handle::KernelOpError> {
-        let members = self.memory.roster().members(channel, chat_id);
+        let members = self.memory.substrate.roster().members(channel, chat_id);
         Ok(members
             .into_iter()
             .map(|(user_id, display_name, username)| {
@@ -319,6 +327,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         user_id: &str,
     ) -> Result<(), kernel_handle::KernelOpError> {
         self.memory
+            .substrate
             .roster()
             .remove_member(channel, chat_id, user_id);
         Ok(())

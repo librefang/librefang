@@ -27,8 +27,8 @@ impl LibreFangKernel {
     /// - the aux driver call fails or times out
     /// - the model returns empty / all-whitespace text
     pub fn spawn_session_label_generation(&self, agent_id: AgentId, session_id: SessionId) {
-        let memory = Arc::clone(&self.memory);
-        let aux = self.aux_client.load_full();
+        let memory = Arc::clone(&self.memory.substrate);
+        let aux = self.llm.aux_client.load_full();
         tokio::spawn(async move {
             // Bail early if the label is already set — preserves user
             // overrides and prevents repeated billing on the same session.
@@ -179,7 +179,7 @@ impl LibreFangKernel {
 
         let result = match tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            self.default_driver.complete(request),
+            self.llm.default_driver.complete(request),
         )
         .await
         {
@@ -242,16 +242,19 @@ impl LibreFangKernel {
 
         // Evaluate triggers before publishing (so describe_event works on the event)
         let (triggered, trigger_state_mutated) = self
+            .workflows
             .triggers
-            .evaluate_with_resolver(&event, |id| self.registry.get(id).map(|e| e.name.clone()));
+            .evaluate_with_resolver(&event, |id| {
+                self.agents.registry.get(id).map(|e| e.name.clone())
+            });
         if !triggered.is_empty() || trigger_state_mutated {
-            if let Err(e) = self.triggers.persist() {
+            if let Err(e) = self.workflows.triggers.persist() {
                 warn!("Failed to persist trigger jobs after fire: {e}");
             }
         }
 
         // Publish to the event bus
-        self.event_bus.publish(event).await;
+        self.events.event_bus.publish(event).await;
 
         // Actually dispatch triggered messages to agents.
         //
@@ -311,7 +314,7 @@ impl LibreFangKernel {
                 // whether to materialize a fresh session id. Skip dispatch
                 // if the agent has been deleted between trigger evaluation
                 // and dispatch — preserves prior behavior.
-                let manifest_mode = match kernel.registry.get(aid) {
+                let manifest_mode = match kernel.agents.registry.get(aid) {
                     Some(entry) => entry.manifest.session_mode,
                     None => continue,
                 };
@@ -322,6 +325,7 @@ impl LibreFangKernel {
                 };
 
                 let trigger_sem = kernel
+                    .workflows
                     .command_queue
                     .semaphore_for_lane(librefang_runtime::command_lane::Lane::Trigger);
                 let agent_sem = kernel.agent_concurrency_for(aid);
@@ -471,20 +475,20 @@ impl LibreFangKernel {
         session_mode: Option<librefang_types::agent::SessionMode>,
     ) -> KernelResult<TriggerId> {
         // Verify owner agent exists
-        if self.registry.get(agent_id).is_none() {
+        if self.agents.registry.get(agent_id).is_none() {
             return Err(KernelError::LibreFang(LibreFangError::AgentNotFound(
                 agent_id.to_string(),
             )));
         }
         // Verify target agent exists (if specified)
         if let Some(target) = target_agent {
-            if self.registry.get(target).is_none() {
+            if self.agents.registry.get(target).is_none() {
                 return Err(KernelError::LibreFang(LibreFangError::AgentNotFound(
                     target.to_string(),
                 )));
             }
         }
-        let id = self.triggers.register_with_target(
+        let id = self.workflows.triggers.register_with_target(
             agent_id,
             pattern,
             prompt_template,
@@ -493,7 +497,7 @@ impl LibreFangKernel {
             cooldown_secs,
             session_mode,
         );
-        if let Err(e) = self.triggers.persist() {
+        if let Err(e) = self.workflows.triggers.persist() {
             warn!(trigger_id = %id, "Failed to persist trigger jobs after register: {e}");
         }
         Ok(id)
@@ -501,9 +505,9 @@ impl LibreFangKernel {
 
     /// Remove a trigger by ID.
     pub fn remove_trigger(&self, trigger_id: TriggerId) -> bool {
-        let removed = self.triggers.remove(trigger_id);
+        let removed = self.workflows.triggers.remove(trigger_id);
         if removed {
-            if let Err(e) = self.triggers.persist() {
+            if let Err(e) = self.workflows.triggers.persist() {
                 warn!(%trigger_id, "Failed to persist trigger jobs after remove: {e}");
             }
         }
@@ -512,9 +516,9 @@ impl LibreFangKernel {
 
     /// Enable or disable a trigger. Returns true if found.
     pub fn set_trigger_enabled(&self, trigger_id: TriggerId, enabled: bool) -> bool {
-        let found = self.triggers.set_enabled(trigger_id, enabled);
+        let found = self.workflows.triggers.set_enabled(trigger_id, enabled);
         if found {
-            if let Err(e) = self.triggers.persist() {
+            if let Err(e) = self.workflows.triggers.persist() {
                 warn!(%trigger_id, "Failed to persist trigger jobs after set_enabled: {e}");
             }
         }
@@ -524,14 +528,14 @@ impl LibreFangKernel {
     /// List all triggers (optionally filtered by agent).
     pub fn list_triggers(&self, agent_id: Option<AgentId>) -> Vec<crate::triggers::Trigger> {
         match agent_id {
-            Some(id) => self.triggers.list_agent_triggers(id),
-            None => self.triggers.list_all(),
+            Some(id) => self.workflows.triggers.list_agent_triggers(id),
+            None => self.workflows.triggers.list_all(),
         }
     }
 
     /// Get a single trigger by ID.
     pub fn get_trigger(&self, trigger_id: TriggerId) -> Option<crate::triggers::Trigger> {
-        self.triggers.get_trigger(trigger_id)
+        self.workflows.triggers.get_trigger(trigger_id)
     }
 
     /// Update mutable fields of an existing trigger.
@@ -540,9 +544,9 @@ impl LibreFangKernel {
         trigger_id: TriggerId,
         patch: crate::triggers::TriggerPatch,
     ) -> Option<crate::triggers::Trigger> {
-        let result = self.triggers.update(trigger_id, patch);
+        let result = self.workflows.triggers.update(trigger_id, patch);
         if result.is_some() {
-            if let Err(e) = self.triggers.persist() {
+            if let Err(e) = self.workflows.triggers.persist() {
                 warn!(%trigger_id, "Failed to persist trigger jobs after update: {e}");
             }
         }
@@ -551,7 +555,7 @@ impl LibreFangKernel {
 
     /// Register a workflow definition.
     pub async fn register_workflow(&self, workflow: Workflow) -> WorkflowId {
-        self.workflows.register(workflow).await
+        self.workflows.engine.register(workflow).await
     }
 
     /// Run a workflow pipeline end-to-end.
@@ -571,6 +575,7 @@ impl LibreFangKernel {
         let cfg = self.config.load_full();
         let run_id = self
             .workflows
+            .engine
             .create_run(workflow_id, input)
             .await
             .ok_or_else(|| {
@@ -583,12 +588,12 @@ impl LibreFangKernel {
             match agent_ref {
                 StepAgent::ById { id } => {
                     let agent_id: AgentId = id.parse().ok()?;
-                    let entry = self.registry.get(agent_id)?;
+                    let entry = self.agents.registry.get(agent_id)?;
                     let inherit = entry.manifest.inherit_parent_context;
                     Some((agent_id, entry.name.clone(), inherit))
                 }
                 StepAgent::ByName { name } => {
-                    let entry = self.registry.find_by_name(name)?;
+                    let entry = self.agents.registry.find_by_name(name)?;
                     let inherit = entry.manifest.inherit_parent_context;
                     Some((entry.id, entry.name.clone(), inherit))
                 }
@@ -614,7 +619,9 @@ impl LibreFangKernel {
 
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(max_workflow_secs),
-            self.workflows.execute_run(run_id, resolver, send_message),
+            self.workflows
+                .engine
+                .execute_run(run_id, resolver, send_message),
         )
         .await
         .map_err(|_| {
@@ -642,12 +649,12 @@ impl LibreFangKernel {
                 match agent_ref {
                     StepAgent::ById { id } => {
                         let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
-                        let entry = self.registry.get(agent_id)?;
+                        let entry = self.agents.registry.get(agent_id)?;
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((agent_id, entry.name.clone(), inherit))
                     }
                     StepAgent::ByName { name } => {
-                        let entry = self.registry.find_by_name(name)?;
+                        let entry = self.agents.registry.find_by_name(name)?;
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((entry.id, entry.name.clone(), inherit))
                     }
@@ -655,6 +662,7 @@ impl LibreFangKernel {
             };
 
         self.workflows
+            .engine
             .dry_run(workflow_id, &input, resolver)
             .await
             .map_err(|e| {

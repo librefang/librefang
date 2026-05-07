@@ -21,7 +21,7 @@ pub async fn probe_and_update_local_provider(
     // the probe always 401s and the catalog flips to LocalOffline even
     // when the underlying ollama is healthy.
     let api_key = {
-        let catalog = kernel.model_catalog.load();
+        let catalog = kernel.llm.model_catalog.load();
         let env_var = catalog
             .get_provider(provider_id)
             .map(|p| p.api_key_env.clone())
@@ -120,7 +120,7 @@ pub(super) async fn probe_all_local_providers_once(
     relevant_providers: &std::collections::HashSet<String>,
 ) {
     let local_providers: Vec<(String, String)> = {
-        let catalog = kernel.model_catalog.load();
+        let catalog = kernel.llm.model_catalog.load();
         catalog
             .list_providers()
             .iter()

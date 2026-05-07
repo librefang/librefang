@@ -54,6 +54,7 @@ impl LibreFangKernel {
         let cfg = self.config.load();
 
         let def = self
+            .skills
             .hand_registry
             .get_definition(hand_id)
             .ok_or_else(|| {
@@ -66,7 +67,7 @@ impl LibreFangKernel {
         // Check requirements — warn but don't block activation.
         // Hands can still be activated and paused (pre-install); the user
         // gets a degraded experience until dependencies are installed.
-        if let Ok(results) = self.hand_registry.check_requirements(hand_id) {
+        if let Ok(results) = self.skills.hand_registry.check_requirements(hand_id) {
             let missing: Vec<_> = results
                 .iter()
                 .filter(|(_, satisfied)| !satisfied)
@@ -93,7 +94,7 @@ impl LibreFangKernel {
 
         // Create the instance in the registry
         let instance = self
-            .hand_registry
+            .skills.hand_registry
             .activate_with_id(
                 hand_id,
                 config,
@@ -145,7 +146,7 @@ impl LibreFangKernel {
             String,
             Vec<librefang_types::scheduler::CronJob>,
         > = std::collections::BTreeMap::new();
-        for entry in self.registry.list() {
+        for entry in self.agents.registry.list() {
             if entry.tags.contains(&hand_tag) {
                 let old_id = entry.id;
                 // Extract role from tag (hand_role:xxx) to migrate cron to correct new agent
@@ -155,14 +156,14 @@ impl LibreFangKernel {
                     .find_map(|t| t.strip_prefix("hand_role:"))
                     .unwrap_or("main")
                     .to_string();
-                let taken_triggers = self.triggers.take_agent_triggers(entry.id);
+                let taken_triggers = self.workflows.triggers.take_agent_triggers(entry.id);
                 if !taken_triggers.is_empty() {
                     saved_triggers
                         .entry(old_role.clone())
                         .or_insert_with(Vec::new)
                         .extend(taken_triggers);
                 }
-                let taken_crons = self.cron_scheduler.list_jobs(old_id);
+                let taken_crons = self.workflows.cron_scheduler.list_jobs(old_id);
                 if !taken_crons.is_empty() {
                     // Dedupe by job id within this snapshot: if two registry
                     // entries somehow tag the same role (concurrent activation
@@ -187,9 +188,12 @@ impl LibreFangKernel {
                 // edge cases like out-of-band cron creation between kill and
                 // respawn.
                 let new_id = AgentId::from_hand_agent(hand_id, &old_role, instance_id);
-                let migrated = self.cron_scheduler.reassign_agent_jobs(old_id, new_id);
+                let migrated = self
+                    .workflows
+                    .cron_scheduler
+                    .reassign_agent_jobs(old_id, new_id);
                 if migrated > 0 {
-                    let _ = self.cron_scheduler.persist();
+                    let _ = self.workflows.cron_scheduler.persist();
                 }
             }
         }
@@ -209,7 +213,7 @@ impl LibreFangKernel {
             // Reuse existing hand agent if one with the same prefixed name is already running.
             // NOTE: this check-then-spawn is not atomic, but is safe because hand activation
             // is serialized by the activate_lock mutex at the HandRegistry level.
-            if let Some(existing) = self.registry.find_by_name(&manifest.name) {
+            if let Some(existing) = self.agents.registry.find_by_name(&manifest.name) {
                 agent_ids_map.insert(role.clone(), existing.id);
                 continue;
             }
@@ -422,7 +426,7 @@ impl LibreFangKernel {
                         }
                     }
                     // Deactivate the hand instance
-                    if let Err(e) = self.hand_registry.deactivate(instance.instance_id) {
+                    if let Err(e) = self.skills.hand_registry.deactivate(instance.instance_id) {
                         warn!(
                             instance_id = %instance.instance_id,
                             error = %e,
@@ -440,7 +444,7 @@ impl LibreFangKernel {
         if !saved_triggers.is_empty() {
             for (role, triggers) in saved_triggers {
                 if let Some(&new_id) = agent_ids_map.get(&role) {
-                    let restored = self.triggers.restore_triggers(new_id, triggers);
+                    let restored = self.workflows.triggers.restore_triggers(new_id, triggers);
                     if restored > 0 {
                         info!(
                             hand = %hand_id,
@@ -458,7 +462,7 @@ impl LibreFangKernel {
                     );
                 }
             }
-            if let Err(e) = self.triggers.persist() {
+            if let Err(e) = self.workflows.triggers.persist() {
                 warn!("Failed to persist trigger jobs after hand reactivation: {e}");
             }
         }
@@ -483,7 +487,7 @@ impl LibreFangKernel {
                         // resilient to future changes in `add_job`.
                         job.next_run = Some(crate::cron::compute_next_run(&job.schedule));
                         job.last_run = None;
-                        if self.cron_scheduler.add_job(job, false).is_ok() {
+                        if self.workflows.cron_scheduler.add_job(job, false).is_ok() {
                             restored += 1;
                         }
                     }
@@ -506,14 +510,14 @@ impl LibreFangKernel {
                 }
             }
             if total_restored > 0 {
-                if let Err(e) = self.cron_scheduler.persist() {
+                if let Err(e) = self.workflows.cron_scheduler.persist() {
                     warn!("Failed to persist cron jobs after restoration: {e}");
                 }
             }
         }
 
         // Link all agents to instance
-        self.hand_registry
+        self.skills.hand_registry
             .set_agents(
                 instance.instance_id,
                 agent_ids_map.clone(),
@@ -541,6 +545,7 @@ impl LibreFangKernel {
 
         // Return instance with agent set
         Ok(self
+            .skills
             .hand_registry
             .get_instance(instance.instance_id)
             .unwrap_or(instance))
@@ -549,7 +554,7 @@ impl LibreFangKernel {
     /// Deactivate a hand: kill agent and remove instance.
     pub fn deactivate_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
         let instance = self
-            .hand_registry
+            .skills.hand_registry
             .deactivate(instance_id)
             // #3711: propagate typed HandError (Display preserved).
             .map_err(KernelError::from)?;
@@ -576,7 +581,7 @@ impl LibreFangKernel {
         } else {
             // Fallback: if agent_ids was never set (incomplete activation), search by hand tag
             let hand_tag = format!("hand:{}", instance.hand_id);
-            for entry in self.registry.list() {
+            for entry in self.agents.registry.list() {
                 if entry.tags.contains(&hand_tag) {
                     affected_agents.push(entry.id);
                     if let Err(e) = self.kill_agent(entry.id) {
@@ -592,7 +597,7 @@ impl LibreFangKernel {
         // `remove_agent` cascades to session rows, so we don't need a
         // separate `delete_agent_sessions` call here.
         for agent_id in &affected_agents {
-            if let Err(e) = self.memory.remove_agent(*agent_id) {
+            if let Err(e) = self.memory.substrate.remove_agent(*agent_id) {
                 warn!(
                     agent = %agent_id,
                     hand_id = %instance.hand_id,
@@ -604,7 +609,7 @@ impl LibreFangKernel {
 
         // Drop the per-instance runtime-override mutex so reactivating
         // with a fresh `instance_id` doesn't leak entries here.
-        self.hand_runtime_override_locks.remove(&instance_id);
+        self.agents.hand_runtime_override_locks.remove(&instance_id);
 
         // Persist hand state so it survives restarts
         self.persist_hand_state();
@@ -613,7 +618,10 @@ impl LibreFangKernel {
 
     /// Reload hand definitions from disk (hot reload).
     pub fn reload_hands(&self) -> (usize, usize) {
-        let (added, updated) = self.hand_registry.reload_from_disk(&self.home_dir_boot);
+        let (added, updated) = self
+            .skills
+            .hand_registry
+            .reload_from_disk(&self.home_dir_boot);
         info!(added, updated, "Reloaded hand definitions from disk");
         (added, updated)
     }
@@ -630,14 +638,14 @@ impl LibreFangKernel {
     /// Persist active hand state to disk.
     pub fn persist_hand_state(&self) {
         let state_path = self.home_dir_boot.join("data").join("hand_state.json");
-        if let Err(e) = self.hand_registry.persist_state(&state_path) {
+        if let Err(e) = self.skills.hand_registry.persist_state(&state_path) {
             warn!(error = %e, "Failed to persist hand state");
         }
     }
 
     fn persist_hand_state_result(&self) -> KernelResult<()> {
         let state_path = self.home_dir_boot.join("data").join("hand_state.json");
-        self.hand_registry
+        self.skills.hand_registry
             .persist_state(&state_path)
             // #3711: propagate typed HandError (Display preserved).
             .map_err(KernelError::from)
@@ -647,7 +655,8 @@ impl LibreFangKernel {
     /// See the field comment on `hand_runtime_override_locks` for the
     /// race this guards against.
     fn hand_runtime_override_lock(&self, instance_id: uuid::Uuid) -> Arc<std::sync::Mutex<()>> {
-        self.hand_runtime_override_locks
+        self.agents
+            .hand_runtime_override_locks
             .entry(instance_id)
             .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
             .clone()
@@ -666,7 +675,8 @@ impl LibreFangKernel {
         {
             let (default_model, default_provider, default_api_key_env, default_base_url) =
                 self.resolve_hand_agent_model_defaults(default_manifest);
-            self.registry
+            self.agents
+                .registry
                 .update_model_provider_config(
                     agent_id,
                     merged.model.clone().unwrap_or(default_model),
@@ -677,17 +687,20 @@ impl LibreFangKernel {
                 .map_err(KernelError::LibreFang)?;
         }
         if let Some(max_tokens) = merged.max_tokens {
-            self.registry
+            self.agents
+                .registry
                 .update_max_tokens(agent_id, max_tokens)
                 .map_err(KernelError::LibreFang)?;
         }
         if let Some(temperature) = merged.temperature {
-            self.registry
+            self.agents
+                .registry
                 .update_temperature(agent_id, temperature)
                 .map_err(KernelError::LibreFang)?;
         }
         if let Some(mode) = merged.web_search_augmentation {
-            self.registry
+            self.agents
+                .registry
                 .update_web_search_augmentation(agent_id, mode)
                 .map_err(KernelError::LibreFang)?;
         }
@@ -735,9 +748,13 @@ impl LibreFangKernel {
         agent_id: AgentId,
         override_config: librefang_hands::HandAgentRuntimeOverride,
     ) -> KernelResult<()> {
-        let instance = self.hand_registry.find_by_agent(agent_id).ok_or_else(|| {
-            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
-        })?;
+        let instance = self
+            .skills
+            .hand_registry
+            .find_by_agent(agent_id)
+            .ok_or_else(|| {
+                KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+            })?;
         // Serialize the entire merge → persist → apply flow per hand
         // instance. The DashMap shard lock inside
         // `merge_agent_runtime_override` only covers the merge step; without
@@ -755,9 +772,13 @@ impl LibreFangKernel {
         // Re-read the instance under the lock so any concurrent
         // mutation (e.g. an in-flight clear) is reflected in the
         // `previous` snapshot used for rollback.
-        let instance = self.hand_registry.find_by_agent(agent_id).ok_or_else(|| {
-            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
-        })?;
+        let instance = self
+            .skills
+            .hand_registry
+            .find_by_agent(agent_id)
+            .ok_or_else(|| {
+                KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+            })?;
         let role = instance
             .agent_ids
             .iter()
@@ -768,6 +789,7 @@ impl LibreFangKernel {
                 )))
             })?;
         let def = self
+            .skills
             .hand_registry
             .get_definition(&instance.hand_id)
             .ok_or_else(|| {
@@ -784,12 +806,12 @@ impl LibreFangKernel {
 
         let previous = instance.agent_runtime_overrides.get(&role).cloned();
         let merged = self
-            .hand_registry
+            .skills.hand_registry
             .merge_agent_runtime_override(instance.instance_id, &role, override_config)
             // #3711: propagate typed HandError (Display preserved).
             .map_err(KernelError::from)?;
         if let Err(err) = self.persist_hand_state_result() {
-            let _ = self.hand_registry.restore_agent_runtime_override(
+            let _ = self.skills.hand_registry.restore_agent_runtime_override(
                 instance.instance_id,
                 &role,
                 previous,
@@ -801,7 +823,7 @@ impl LibreFangKernel {
             &agent_def.manifest,
             &merged,
         ) {
-            let _ = self.hand_registry.restore_agent_runtime_override(
+            let _ = self.skills.hand_registry.restore_agent_runtime_override(
                 instance.instance_id,
                 &role,
                 previous,
@@ -832,9 +854,13 @@ impl LibreFangKernel {
     /// fails. Mirrors the rollback discipline in
     /// [`Self::update_hand_agent_runtime_override`].
     pub fn clear_hand_agent_runtime_override(&self, agent_id: AgentId) -> KernelResult<()> {
-        let instance = self.hand_registry.find_by_agent(agent_id).ok_or_else(|| {
-            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
-        })?;
+        let instance = self
+            .skills
+            .hand_registry
+            .find_by_agent(agent_id)
+            .ok_or_else(|| {
+                KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+            })?;
         // See the matching block in `update_hand_agent_runtime_override`:
         // serialize per instance so PATCH and DELETE on the same hand
         // can't interleave their AgentRegistry writes.
@@ -848,9 +874,13 @@ impl LibreFangKernel {
         });
         // Re-read after taking the lock so a concurrent update isn't
         // silently overwritten by a stale snapshot.
-        let instance = self.hand_registry.find_by_agent(agent_id).ok_or_else(|| {
-            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
-        })?;
+        let instance = self
+            .skills
+            .hand_registry
+            .find_by_agent(agent_id)
+            .ok_or_else(|| {
+                KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+            })?;
         let role = instance
             .agent_ids
             .iter()
@@ -868,7 +898,7 @@ impl LibreFangKernel {
         // Step 1: clear from the in-memory hand registry (atomic under
         // the DashMap shard lock). If `previous` was already None this
         // returns Ok(None) — idempotent.
-        self.hand_registry
+        self.skills.hand_registry
             .clear_agent_runtime_override(instance.instance_id, &role)
             // #3711: propagate typed HandError (Display preserved).
             .map_err(KernelError::from)?;
@@ -877,7 +907,7 @@ impl LibreFangKernel {
         // fails, restore the in-memory entry and bail — the operator
         // sees the original override on retry.
         if let Err(err) = self.persist_hand_state_result() {
-            let _ = self.hand_registry.restore_agent_runtime_override(
+            let _ = self.skills.hand_registry.restore_agent_runtime_override(
                 instance.instance_id,
                 &role,
                 previous,
@@ -889,7 +919,7 @@ impl LibreFangKernel {
         // defaults. Errors here roll back both the in-memory override
         // and the persisted file so the next PATCH/DELETE sees a
         // coherent snapshot.
-        let def = self.hand_registry.get_definition(&instance.hand_id);
+        let def = self.skills.hand_registry.get_definition(&instance.hand_id);
         if let Some(def) = def {
             if let Some(agent_def) = def.agents.get(&role) {
                 // Start from the raw HAND.toml manifest and re-apply the
@@ -901,7 +931,8 @@ impl LibreFangKernel {
                     self.resolve_hand_agent_model_defaults(&agent_def.manifest);
 
                 let apply_result = (|| -> KernelResult<()> {
-                    self.registry
+                    self.agents
+                        .registry
                         .update_model_provider_config(
                             agent_id,
                             model,
@@ -910,13 +941,16 @@ impl LibreFangKernel {
                             base_url,
                         )
                         .map_err(KernelError::LibreFang)?;
-                    self.registry
+                    self.agents
+                        .registry
                         .update_max_tokens(agent_id, agent_def.manifest.model.max_tokens)
                         .map_err(KernelError::LibreFang)?;
-                    self.registry
+                    self.agents
+                        .registry
                         .update_temperature(agent_id, agent_def.manifest.model.temperature)
                         .map_err(KernelError::LibreFang)?;
-                    self.registry
+                    self.agents
+                        .registry
                         .update_web_search_augmentation(
                             agent_id,
                             agent_def.manifest.web_search_augmentation,
@@ -926,7 +960,7 @@ impl LibreFangKernel {
                 })();
 
                 if let Err(err) = apply_result {
-                    let _ = self.hand_registry.restore_agent_runtime_override(
+                    let _ = self.skills.hand_registry.restore_agent_runtime_override(
                         instance.instance_id,
                         &role,
                         previous,
@@ -956,12 +990,12 @@ impl LibreFangKernel {
     /// Pause a hand (marks it paused and suspends background loop ticks).
     pub fn pause_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
         // Pause the background loop for all of this hand's agents
-        if let Some(instance) = self.hand_registry.get_instance(instance_id) {
+        if let Some(instance) = self.skills.hand_registry.get_instance(instance_id) {
             for &agent_id in instance.agent_ids.values() {
-                self.background.pause_agent(agent_id);
+                self.workflows.background.pause_agent(agent_id);
             }
         }
-        self.hand_registry
+        self.skills.hand_registry
             .pause(instance_id)
             // #3711: propagate typed HandError (Display preserved).
             .map_err(KernelError::from)?;
@@ -971,14 +1005,14 @@ impl LibreFangKernel {
 
     /// Resume a paused hand (restores background loop ticks).
     pub fn resume_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
-        self.hand_registry
+        self.skills.hand_registry
             .resume(instance_id)
             // #3711: propagate typed HandError (Display preserved).
             .map_err(KernelError::from)?;
         // Resume the background loop for all of this hand's agents
-        if let Some(instance) = self.hand_registry.get_instance(instance_id) {
+        if let Some(instance) = self.skills.hand_registry.get_instance(instance_id) {
             for &agent_id in instance.agent_ids.values() {
-                self.background.resume_agent(agent_id);
+                self.workflows.background.resume_agent(agent_id);
             }
         }
         self.persist_hand_state();

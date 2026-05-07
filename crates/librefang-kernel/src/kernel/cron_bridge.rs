@@ -113,9 +113,11 @@ pub(super) async fn cron_deliver_response(
             tracing::debug!(channel = %channel, to = %to, "Cron: delivering to channel");
             // Persist as last channel for this agent (survives restarts)
             let kv_val = serde_json::json!({"channel": channel, "recipient": to});
-            let _ = kernel
-                .memory
-                .structured_set(agent_id, "delivery.last_channel", kv_val);
+            let _ =
+                kernel
+                    .memory
+                    .substrate
+                    .structured_set(agent_id, "delivery.last_channel", kv_val);
             if let Err(e) = kernel
                 .send_channel_message(channel, to, response, None, None)
                 .await
@@ -126,6 +128,7 @@ pub(super) async fn cron_deliver_response(
         CronDelivery::LastChannel => {
             match kernel
                 .memory
+                .substrate
                 .structured_get(agent_id, "delivery.last_channel")
             {
                 Ok(Some(val)) => {

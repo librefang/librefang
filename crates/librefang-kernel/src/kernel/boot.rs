@@ -20,7 +20,7 @@ impl LibreFangKernel {
     /// in-flight `StreamEvent` flow. Returns the shared `Arc` so subscribers
     /// outlive any individual turn.
     pub fn session_stream_hub(&self) -> Arc<crate::session_stream_hub::SessionStreamHub> {
-        Arc::clone(&self.session_stream_hub)
+        Arc::clone(&self.events.session_stream_hub)
     }
 
     /// Boot the kernel with configuration from the given path.
@@ -1215,105 +1215,77 @@ impl LibreFangKernel {
             data_dir_boot: config.data_dir.clone(),
             config: ArcSwap::new(std::sync::Arc::new(config)),
             raw_config_toml: ArcSwap::new(std::sync::Arc::new(initial_raw_config_toml)),
-            registry: AgentRegistry::new(),
-            agent_identities,
-            capabilities: CapabilityManager::new(),
-            event_bus: EventBus::new(),
-            session_lifecycle_bus: Arc::new(crate::session_lifecycle::SessionLifecycleBus::new(
-                256,
-            )),
-            session_stream_hub: Arc::new(crate::session_stream_hub::SessionStreamHub::new()),
-            scheduler: AgentScheduler::new(),
-            memory: memory.clone(),
-            wiki_vault: wiki_vault.clone(),
-            proactive_memory: OnceLock::new(),
-            proactive_memory_extractor: OnceLock::new(),
-            prompt_store: OnceLock::new(),
-            supervisor,
-            workflows: WorkflowEngine::new_with_persistence(&workflow_home_dir),
-            template_registry: WorkflowTemplateRegistry::new(),
-            triggers: trigger_engine,
-            background,
-            audit_log: Arc::new(AuditLog::with_db_anchored(memory.pool(), audit_anchor_path)),
-            metering,
+            agents: crate::kernel::subsystems::AgentSubsystem::new(agent_identities, supervisor),
+            events: crate::kernel::subsystems::EventSubsystem::new(),
+            memory: crate::kernel::subsystems::MemorySubsystem::new(
+                memory.clone(),
+                wiki_vault.clone(),
+            ),
+            workflows: crate::kernel::subsystems::WorkflowSubsystem::new(
+                WorkflowEngine::new_with_persistence(&workflow_home_dir),
+                trigger_engine,
+                background,
+                cron_scheduler,
+                command_queue,
+            ),
             // ArcSwap lets config_reload rebuild on `[llm.auxiliary]` edits
             // without invalidating any long-lived `Arc<Kernel>` handle.
-            aux_client: arc_swap::ArcSwap::from_pointee(initial_aux_client),
-            default_driver: driver,
-            wasm_sandbox,
-            auth,
-            model_catalog: arc_swap::ArcSwap::from_pointee(model_catalog),
-            skill_registry: std::sync::RwLock::new(skill_registry),
-            running_tasks: dashmap::DashMap::new(),
-            session_interrupts: dashmap::DashMap::new(),
-            mcp_connections: tokio::sync::Mutex::new(Vec::new()),
-            mcp_auth_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-            mcp_oauth_provider: Arc::new(crate::mcp_oauth_provider::KernelOAuthProvider::new(
-                oauth_home_dir,
-            )),
-            mcp_tools: std::sync::Mutex::new(Vec::new()),
-            mcp_summary_cache: dashmap::DashMap::new(),
-            a2a_task_store: librefang_runtime::a2a::A2aTaskStore::with_persistence(
-                1000,
-                &a2a_db_path,
+            llm: crate::kernel::subsystems::LlmSubsystem::new(
+                driver,
+                initial_aux_client,
+                embedding_driver,
+                model_catalog,
             ),
-            a2a_external_agents: std::sync::Mutex::new(Vec::new()),
-            web_ctx,
-            browser_ctx,
-            media_engine,
-            tts_engine,
-            media_drivers,
-            pairing,
-            embedding_driver,
-            hand_registry,
-            mcp_catalog: arc_swap::ArcSwap::from_pointee(mcp_catalog),
-            mcp_health,
-            effective_mcp_servers: std::sync::RwLock::new(all_mcp_servers),
-            delivery_tracker: DeliveryTracker::new(),
-            cron_scheduler,
-            approval_manager,
-            bindings: std::sync::Mutex::new(initial_bindings),
-            broadcast: initial_broadcast,
+            wasm_sandbox,
+            security: crate::kernel::subsystems::SecuritySubsystem::new(auth, pairing),
+            skills: crate::kernel::subsystems::SkillsSubsystem::new(
+                skill_registry,
+                hand_registry,
+                Self::MAX_INFLIGHT_SKILL_REVIEWS,
+            ),
+            mcp: crate::kernel::subsystems::McpSubsystem::new(
+                Arc::new(crate::mcp_oauth_provider::KernelOAuthProvider::new(
+                    oauth_home_dir,
+                )),
+                mcp_catalog,
+                mcp_health,
+                all_mcp_servers,
+            ),
+            media: crate::kernel::subsystems::MediaSubsystem::new(
+                web_ctx,
+                browser_ctx,
+                media_engine,
+                tts_engine,
+                media_drivers,
+            ),
+            mesh: crate::kernel::subsystems::MeshSubsystem::new(
+                librefang_runtime::a2a::A2aTaskStore::with_persistence(1000, &a2a_db_path),
+                initial_bindings,
+                initial_broadcast,
+            ),
+            governance: crate::kernel::subsystems::GovernanceSubsystem::new(
+                approval_manager,
+                crate::hooks::ExternalHookSystem::load(hooks_dir),
+            ),
             auto_reply_engine,
-            hooks: librefang_runtime::hooks::HookRegistry::new(),
-            external_hooks: crate::hooks::ExternalHookSystem::load(hooks_dir),
-            process_manager: Arc::new(librefang_runtime::process_manager::ProcessManager::new(5)),
-            process_registry: Arc::new(librefang_runtime::process_registry::ProcessRegistry::new()),
-            peer_registry: OnceLock::new(),
-            peer_node: OnceLock::new(),
+            processes: crate::kernel::subsystems::ProcessSubsystem::new(
+                Arc::new(librefang_runtime::process_manager::ProcessManager::new(5)),
+                Arc::new(librefang_runtime::process_registry::ProcessRegistry::new()),
+            ),
             booted_at: std::time::Instant::now(),
             whatsapp_gateway_pid: Arc::new(std::sync::Mutex::new(None)),
-            channel_adapters: dashmap::DashMap::new(),
-            default_model_override: std::sync::RwLock::new(None),
             tool_policy_override: std::sync::RwLock::new(None),
-            agent_msg_locks: dashmap::DashMap::new(),
-            session_msg_locks: dashmap::DashMap::new(),
-            agent_concurrency: dashmap::DashMap::new(),
-            hand_runtime_override_locks: dashmap::DashMap::new(),
-            injection_senders: dashmap::DashMap::new(),
-            injection_receivers: dashmap::DashMap::new(),
-            assistant_routes: dashmap::DashMap::new(),
-            route_divergence: dashmap::DashMap::new(),
-            decision_traces: dashmap::DashMap::new(),
-            command_queue,
             context_engine,
             context_engine_config,
             self_handle: OnceLock::new(),
             provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
             config_reload_lock: tokio::sync::RwLock::new(()),
             prompt_metadata_cache: PromptMetadataCache::new(),
-            skill_generation: std::sync::atomic::AtomicU64::new(0),
-            skill_review_cooldowns: dashmap::DashMap::new(),
-            skill_review_concurrency: std::sync::Arc::new(tokio::sync::Semaphore::new(
-                Self::MAX_INFLIGHT_SKILL_REVIEWS,
-            )),
-            agent_watchers: dashmap::DashMap::new(),
-            mcp_generation: std::sync::atomic::AtomicU64::new(0),
-            driver_cache: librefang_runtime::drivers::DriverCache::new(),
-            budget_config: arc_swap::ArcSwap::from_pointee(initial_budget),
-            approval_sweep_started: AtomicBool::new(false),
-            task_board_sweep_started: AtomicBool::new(false),
-            session_stream_hub_gc_started: AtomicBool::new(false),
+            metering: crate::kernel::subsystems::MeteringSubsystem::new(
+                Arc::new(AuditLog::with_db_anchored(memory.pool(), audit_anchor_path)),
+                metering,
+                initial_budget,
+            ),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             checkpoint_manager: {
                 let cp_dir = checkpoint_base_dir
@@ -1324,8 +1296,6 @@ impl LibreFangKernel {
             },
             taint_rules_swap: initial_taint_rules,
             log_reloader: OnceLock::new(),
-            vault_recovery_codes_mutex: std::sync::Mutex::new(()),
-            vault_cache: std::sync::OnceLock::new(),
         };
 
         // Initialize proactive memory system (mem0-style) from config.
@@ -1346,7 +1316,10 @@ impl LibreFangKernel {
                 &extraction_model,
                 &cfg.default_model.provider,
             );
-            let llm = Some((Arc::clone(&kernel.default_driver) as _, extraction_model));
+            let llm = Some((
+                Arc::clone(&kernel.llm.default_driver) as _,
+                extraction_model,
+            ));
             // Use the _with_extractor variant so we get the concrete
             // `LlmMemoryExtractor` back alongside the store. The extractor
             // needs a `Weak<dyn KernelHandle>` installed before its fork-
@@ -1354,7 +1327,7 @@ impl LibreFangKernel {
             // only be formed after `Arc::new(kernel)` — so we hold the
             // concrete handle here and call `install_kernel_handle` from
             // `set_self_handle` below.
-            let embedding = kernel.embedding_driver.as_ref().map(Arc::clone);
+            let embedding = kernel.llm.embedding_driver.as_ref().map(Arc::clone);
             // Thread the global `prompt_caching` toggle through so the
             // extractor's fallback `driver.complete()` path respects the
             // same switch operators use for the main loop. The fork path
@@ -1363,22 +1336,22 @@ impl LibreFangKernel {
             let prompt_caching = cfg.prompt_caching;
             let result =
                 librefang_runtime::proactive_memory::init_proactive_memory_full_with_extractor(
-                    Arc::clone(&kernel.memory),
+                    Arc::clone(&kernel.memory.substrate),
                     pm_config,
                     llm,
                     embedding,
                     prompt_caching,
                 );
             if let Some((store, extractor)) = result {
-                let _ = kernel.proactive_memory.set(store);
+                let _ = kernel.memory.proactive_memory.set(store);
                 if let Some(ex) = extractor {
-                    let _ = kernel.proactive_memory_extractor.set(ex);
+                    let _ = kernel.memory.proactive_memory_extractor.set(ex);
                 }
             }
         }
 
         // Initialize prompt store
-        let _ = kernel.prompt_store.set(prompt_store);
+        let _ = kernel.memory.prompt_store.set(prompt_store);
 
         // Pre-load persisted hand instance configs so the per-agent drift
         // detection below can re-render the `## User Configuration` settings
@@ -1405,7 +1378,7 @@ impl LibreFangKernel {
         };
 
         // Restore persisted agents from SQLite
-        match kernel.memory.load_all_agents() {
+        match kernel.memory.substrate.load_all_agents() {
             Ok(agents) => {
                 let count = agents.len();
                 for entry in agents {
@@ -1440,7 +1413,7 @@ impl LibreFangKernel {
                     };
                     if source_path_changed {
                         entry.source_toml_path = Some(toml_path.clone());
-                        if let Err(e) = kernel.memory.save_agent(&entry) {
+                        if let Err(e) = kernel.memory.substrate.save_agent(&entry) {
                             warn!(
                                 agent = %name,
                                 "Failed to persist source_toml_path repoint: {e}"
@@ -1546,8 +1519,10 @@ impl LibreFangKernel {
                                                 .find_map(|t| t.strip_prefix("hand:"))
                                                 .map(|s| s.to_string())
                                             {
-                                                if let Some(def) =
-                                                    kernel.hand_registry.get_definition(&hand_id)
+                                                if let Some(def) = kernel
+                                                    .skills
+                                                    .hand_registry
+                                                    .get_definition(&hand_id)
                                                 {
                                                     if !def.settings.is_empty() {
                                                         let empty =
@@ -1621,7 +1596,9 @@ impl LibreFangKernel {
                                             }
 
                                             // Persist the update back to DB
-                                            if let Err(e) = kernel.memory.save_agent(&entry) {
+                                            if let Err(e) =
+                                                kernel.memory.substrate.save_agent(&entry)
+                                            {
                                                 warn!(
                                                     agent = %name,
                                                     "Failed to persist TOML update: {e}"
@@ -1679,10 +1656,11 @@ impl LibreFangKernel {
 
                     // Re-grant capabilities
                     let caps = manifest_to_capabilities(&entry.manifest);
-                    kernel.capabilities.grant(agent_id, caps);
+                    kernel.agents.capabilities.grant(agent_id, caps);
 
                     // Re-register with scheduler
                     kernel
+                        .agents
                         .scheduler
                         .register(agent_id, entry.manifest.resources.clone());
 
@@ -1849,7 +1827,7 @@ impl LibreFangKernel {
                         );
                         continue;
                     }
-                    if let Err(e) = kernel.registry.register(restored_entry) {
+                    if let Err(e) = kernel.agents.registry.register(restored_entry) {
                         tracing::warn!(agent = %name, "Failed to restore agent: {e}");
                     } else {
                         tracing::debug!(agent = %name, id = %agent_id, "Restored agent");
@@ -1878,6 +1856,7 @@ impl LibreFangKernel {
         // (or canonical overtakes it), this is a no-op on subsequent boots.
         {
             let registry_snapshot: Vec<(AgentId, SessionId)> = kernel
+                .agents
                 .registry
                 .list()
                 .iter()
@@ -1888,7 +1867,7 @@ impl LibreFangKernel {
                 if webui_session_id == canonical_session_id {
                     continue;
                 }
-                let webui_msgs = match kernel.memory.get_session(webui_session_id) {
+                let webui_msgs = match kernel.memory.substrate.get_session(webui_session_id) {
                     Ok(Some(s)) => s.messages.len(),
                     _ => continue,
                 };
@@ -1902,6 +1881,7 @@ impl LibreFangKernel {
                 // in `list_agent_sessions` and switch manually if desired.
                 let canonical_session = kernel
                     .memory
+                    .substrate
                     .get_session(canonical_session_id)
                     .ok()
                     .flatten();
@@ -1922,14 +1902,15 @@ impl LibreFangKernel {
                     continue;
                 }
                 if let Err(e) = kernel
+                    .agents
                     .registry
                     .update_session_id(agent_id, webui_session_id)
                 {
                     warn!(agent_id = %agent_id, "Failed to adopt webui session: {e}");
                     continue;
                 }
-                if let Some(entry) = kernel.registry.get(agent_id) {
-                    if let Err(e) = kernel.memory.save_agent(&entry) {
+                if let Some(entry) = kernel.agents.registry.get(agent_id) {
+                    if let Err(e) = kernel.memory.substrate.save_agent(&entry) {
                         warn!(agent_id = %agent_id, "Failed to persist webui adoption: {e}");
                     }
                 }
@@ -1943,7 +1924,7 @@ impl LibreFangKernel {
         }
 
         // If no agents exist (fresh install), spawn a default assistant.
-        if kernel.registry.list().is_empty() {
+        if kernel.agents.registry.list().is_empty() {
             info!("No agents found — spawning default assistant");
             let manifest = router::load_template_manifest(&kernel.home_dir_boot, "assistant")
                 .or_else(|_| {
@@ -1976,8 +1957,9 @@ system_prompt = "You are a helpful assistant."
         // Auto-register workflow definitions from ~/.librefang/workflows/
         {
             let workflows_dir = kernel.home_dir_boot.join("workflows");
-            let loaded =
-                tokio::task::block_in_place(|| kernel.workflows.load_from_dir_sync(&workflows_dir));
+            let loaded = tokio::task::block_in_place(|| {
+                kernel.workflows.engine.load_from_dir_sync(&workflows_dir)
+            });
             if loaded > 0 {
                 info!(
                     "Auto-registered {loaded} workflow(s) from {}",
@@ -1988,7 +1970,7 @@ system_prompt = "You are a helpful assistant."
 
         // Load persisted workflow runs (completed/failed) from disk.
         {
-            match tokio::task::block_in_place(|| kernel.workflows.load_runs()) {
+            match tokio::task::block_in_place(|| kernel.workflows.engine.load_runs()) {
                 Ok(count) if count > 0 => {
                     info!("Loaded {count} persisted workflow run(s) from disk");
                 }
@@ -2005,7 +1987,10 @@ system_prompt = "You are a helpful assistant."
             let stale_timeout_mins = kernel.config.load().workflow_stale_timeout_minutes;
             if stale_timeout_mins > 0 {
                 let stale_timeout = std::time::Duration::from_secs(stale_timeout_mins * 60);
-                let recovered = kernel.workflows.recover_stale_running_runs(stale_timeout);
+                let recovered = kernel
+                    .workflows
+                    .engine
+                    .recover_stale_running_runs(stale_timeout);
                 if recovered > 0 {
                     info!(
                         "Recovered {recovered} stale workflow run(s) interrupted by daemon restart"
@@ -2017,17 +2002,20 @@ system_prompt = "You are a helpful assistant."
         // Load workflow templates
         {
             let user_dir = kernel.home_dir_boot.join("workflows").join("templates");
-            let loaded = kernel.template_registry.load_templates_from_dir(&user_dir);
+            let loaded = kernel
+                .workflows
+                .template_registry
+                .load_templates_from_dir(&user_dir);
             if loaded > 0 {
                 info!("Loaded {loaded} workflow template(s)");
             }
         }
 
         // Validate routing configs against model catalog
-        for entry in kernel.registry.list() {
+        for entry in kernel.agents.registry.list() {
             if let Some(ref routing_config) = entry.manifest.routing {
                 let router = ModelRouter::new(routing_config.clone());
-                for warning in router.validate_models(&kernel.model_catalog.load()) {
+                for warning in router.validate_models(&kernel.llm.model_catalog.load()) {
                     warn!(agent = %entry.name, "{warning}");
                 }
             }
@@ -2038,7 +2026,7 @@ system_prompt = "You are a helpful assistant."
         // warnings at boot, not silently at first dispatch.
         if let Some(ref routing_config) = kernel.config.load().default_routing {
             let router = ModelRouter::new(routing_config.clone());
-            for warning in router.validate_models(&kernel.model_catalog.load()) {
+            for warning in router.validate_models(&kernel.llm.model_catalog.load()) {
                 warn!(target: "librefang_kernel::default_routing", "{warning}");
             }
         }

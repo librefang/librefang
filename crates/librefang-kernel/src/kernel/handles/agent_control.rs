@@ -71,7 +71,8 @@ impl kernel_handle::AgentControl for LibreFangKernel {
     }
 
     fn list_agents(&self) -> Vec<kernel_handle::AgentInfo> {
-        self.registry
+        self.agents
+            .registry
             .list()
             .into_iter()
             .map(|e| kernel_handle::AgentInfo {
@@ -89,7 +90,7 @@ impl kernel_handle::AgentControl for LibreFangKernel {
 
     fn touch_heartbeat(&self, agent_id: &str) {
         if let Ok(id) = agent_id.parse::<AgentId>() {
-            self.registry.touch(id);
+            self.agents.registry.touch(id);
         }
     }
 
@@ -140,7 +141,8 @@ impl kernel_handle::AgentControl for LibreFangKernel {
 
     fn find_agents(&self, query: &str) -> Vec<kernel_handle::AgentInfo> {
         let q = query.to_lowercase();
-        self.registry
+        self.agents
+            .registry
             .list()
             .into_iter()
             .filter(|e| {
@@ -200,7 +202,7 @@ impl kernel_handle::AgentControl for LibreFangKernel {
     }
 
     fn fire_agent_step(&self, agent_id: &str, step: u32) {
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::AgentStep,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),

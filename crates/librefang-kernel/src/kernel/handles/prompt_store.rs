@@ -23,6 +23,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
             kernel_handle::KernelOpError::Internal(format!("Invalid agent ID: {e}"))
         })?;
         let store = self
+            .memory
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
@@ -46,6 +47,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
             kernel_handle::KernelOpError::Internal(format!("Invalid variant ID: {e}"))
         })?;
         let store = self
+            .memory
             .prompt_store
             .get()
             .ok_or(kernel_handle::KernelOpError::unavailable("Prompt store"))?;
@@ -64,6 +66,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
             kernel_handle::KernelOpError::Internal(format!("Invalid version ID: {e}"))
         })?;
         let store = self
+            .memory
             .prompt_store
             .get()
             .ok_or(kernel_handle::KernelOpError::unavailable("Prompt store"))?;
@@ -77,6 +80,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         agent_id: librefang_types::agent::AgentId,
     ) -> Result<Vec<librefang_types::agent::PromptVersion>, kernel_handle::KernelOpError> {
         let store = self
+            .memory
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
@@ -91,6 +95,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
     ) -> Result<(), kernel_handle::KernelOpError> {
         let cfg = self.config.load();
         let store = self
+            .memory
             .prompt_store
             .get()
             .ok_or(kernel_handle::KernelOpError::unavailable("Prompt store"))?;
@@ -111,6 +116,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
             kernel_handle::KernelOpError::Internal(format!("Invalid version ID: {e}"))
         })?;
         let store = self
+            .memory
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
@@ -131,6 +137,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
             kernel_handle::KernelOpError::Internal(format!("Invalid agent ID: {e}"))
         })?;
         let store = self
+            .memory
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
@@ -144,6 +151,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         agent_id: librefang_types::agent::AgentId,
     ) -> Result<Vec<librefang_types::agent::PromptExperiment>, kernel_handle::KernelOpError> {
         let store = self
+            .memory
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
@@ -157,6 +165,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         experiment: &librefang_types::agent::PromptExperiment,
     ) -> Result<(), kernel_handle::KernelOpError> {
         let store = self
+            .memory
             .prompt_store
             .get()
             .ok_or(kernel_handle::KernelOpError::unavailable("Prompt store"))?;
@@ -175,6 +184,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
             kernel_handle::KernelOpError::Internal(format!("Invalid experiment ID: {e}"))
         })?;
         let store = self
+            .memory
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
@@ -192,6 +202,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
             kernel_handle::KernelOpError::Internal(format!("Invalid experiment ID: {e}"))
         })?;
         let store = self
+            .memory
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
@@ -241,6 +252,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
             kernel_handle::KernelOpError::Internal(format!("Invalid experiment ID: {e}"))
         })?;
         let store = self
+            .memory
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
@@ -259,6 +271,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
             return Ok(());
         }
         let store = self
+            .memory
             .prompt_store
             .get()
             .ok_or(kernel_handle::KernelOpError::unavailable("Prompt store"))?;
