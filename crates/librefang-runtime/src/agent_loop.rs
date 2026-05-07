@@ -4492,6 +4492,14 @@ fn record_retry_failure(
     }
 }
 
+/// Conservative defer window when a provider exhausts in-loop retries
+/// without giving us a structured `retry_after_ms` hint. 5 minutes is short
+/// enough that quota-clearing windows (claude.ai 5h hard caps, OpenAI 1m
+/// per-token windows) usually open well before this re-fires, and long
+/// enough that a tight ticker doesn't burn a fresh quota the moment it
+/// resets.
+const DEFAULT_DEFER_MS: u64 = 5 * 60 * 1000;
+
 async fn handle_retryable_llm_error(
     attempt: u32,
     retry_after_ms: u64,
@@ -4503,7 +4511,16 @@ async fn handle_retryable_llm_error(
 ) -> Result<String, LibreFangError> {
     if attempt == MAX_RETRIES {
         record_retry_failure(provider, cooldown, false);
-        return Err(LibreFangError::llm_driver_msg(exhausted_message));
+        // Append the defer marker so the channel bridge can route this
+        // entry to `JournalStatus::Deferred` (re-dispatched on a ticker
+        // once the quota window resets) instead of `Failed` (one-shot).
+        // Floor the hint at DEFAULT_DEFER_MS — providers that returned no
+        // structured retry-after still need a usable delay.
+        let defer_ms = retry_after_ms.max(DEFAULT_DEFER_MS);
+        return Err(LibreFangError::llm_driver_msg(format!(
+            "{exhausted_message} {marker}={defer_ms}",
+            marker = librefang_channels::message_journal::RATE_LIMIT_DEFER_MARKER,
+        )));
     }
 
     let delay = std::cmp::max(retry_after_ms, BASE_RETRY_DELAY_MS * 2u64.pow(attempt));
@@ -5955,10 +5972,16 @@ pub async fn run_agent_loop_streaming(
 
 /// Detect when the LLM claims to have performed an action in text without
 /// actually calling any tools — a common hallucination pattern.
+///
+/// Covers three claim families: English present-perfect (`i've|i have` +
+/// verb), Italian present-perfect (`ho` + past participle), and impersonal
+/// completion claims in either language (`successfully X`, `è stato/stata`,
+/// `messaggio inviato`). Bare "fatto" is intentionally absent — too noisy
+/// as a substring (matches "non ho fatto in tempo").
 fn looks_like_hallucinated_action(text: &str) -> bool {
     let lower = text.to_lowercase();
-    // Action verbs that imply tool usage
     let action_phrases = [
+        // English present-perfect — dev/file flavor.
         "i've created",
         "i've written",
         "i've updated",
@@ -5979,14 +6002,113 @@ fn looks_like_hallucinated_action(text: &str) -> bool {
         "i have deleted",
         "i have added",
         "i have removed",
+        // English present-perfect — transactional/domain flavor.
+        "i've sent",
+        "i've scheduled",
+        "i've booked",
+        "i've ordered",
+        "i've registered",
+        "i've recorded",
+        "i've transferred",
+        "i've logged",
+        "i've notified",
+        "i've cancelled",
+        "i've canceled",
+        "i've reserved",
+        "i've submitted",
+        "i've forwarded",
+        "i've attached",
+        "i've published",
+        "i've uploaded",
+        "i have sent",
+        "i have scheduled",
+        "i have booked",
+        "i have ordered",
+        "i have registered",
+        "i have recorded",
+        "i have transferred",
+        "i have logged",
+        "i have notified",
+        "i have submitted",
+        "i have attached",
+        // English impersonal completion claims.
         "file has been",
         "changes have been",
         "code has been",
+        "message has been sent",
+        "transaction has been",
+        "appointment has been",
+        "booking has been",
+        "order has been placed",
         "successfully created",
         "successfully updated",
         "successfully saved",
         "successfully written",
         "successfully modified",
+        "successfully sent",
+        "successfully scheduled",
+        "successfully booked",
+        "successfully registered",
+        // Italian present-perfect — ho + past participle.
+        "ho creato",
+        "ho scritto",
+        "ho aggiornato",
+        "ho salvato",
+        "ho modificato",
+        "ho cancellato",
+        "ho aggiunto",
+        "ho rimosso",
+        "ho eliminato",
+        "ho inviato",
+        "ho mandato",
+        "ho spedito",
+        "ho registrato",
+        "ho allegato",
+        "ho prenotato",
+        "ho ordinato",
+        "ho schedulato",
+        "ho programmato",
+        "ho bonificato",
+        "ho trasferito",
+        "ho recapitato",
+        "ho notificato",
+        "ho pubblicato",
+        "ho caricato",
+        "ho fissato",
+        "ho impostato",
+        // Italian impersonal completion claims.
+        "è stato inviato",
+        "è stato registrato",
+        "è stato salvato",
+        "è stato creato",
+        "è stato aggiornato",
+        "è stato cancellato",
+        "è stato programmato",
+        "è stato schedulato",
+        "è stato prenotato",
+        "è stato bonificato",
+        "è stata inviata",
+        "è stata creata",
+        "è stata aggiornata",
+        "è stata salvata",
+        "è stata cancellata",
+        "è stata registrata",
+        "è stata programmata",
+        "è stata schedulata",
+        "è stata prenotata",
+        "è stata recapitata",
+        // Italian outcome adjectives — narrow forms that imply a completed
+        // operation. Avoid bare "fatto" — too noisy as a substring.
+        "messaggio inviato",
+        "messaggio recapitato",
+        "spesa registrata",
+        "transazione registrata",
+        "operazione completata",
+        "operazione riuscita",
+        "ordine effettuato",
+        "prenotazione effettuata",
+        "bonifico effettuato",
+        "trasferimento effettuato",
     ];
     action_phrases.iter().any(|phrase| lower.contains(phrase))
 }
@@ -6994,6 +7116,110 @@ mod tests {
             "This is a much longer response where the model actually produced a full explanation of what it did and the ellipsis at the end is just stylistic...";
         assert!(long.chars().count() > 120);
         assert!(!is_progress_text_leak(long));
+    }
+
+    #[test]
+    fn hallucinated_action_detects_english_dev_claims() {
+        // Regression: original EN dev/file claims must keep firing.
+        assert!(looks_like_hallucinated_action(
+            "I've created the file in src/utils.rs"
+        ));
+        assert!(looks_like_hallucinated_action(
+            "I have updated the configuration."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "The file has been written successfully."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "Successfully modified the schema."
+        ));
+    }
+
+    #[test]
+    fn hallucinated_action_detects_english_transactional_claims() {
+        // Domain-action claims that previously slipped through (channel send,
+        // YNAB record, calendar booking, etc.).
+        assert!(looks_like_hallucinated_action(
+            "I've sent the message to your contact."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "I've scheduled the appointment for tomorrow."
+        ));
+        assert!(looks_like_hallucinated_action("I've booked the flight."));
+        assert!(looks_like_hallucinated_action(
+            "I've registered the transaction in YNAB."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "I've transferred €100 to your savings account."
+        ));
+        assert!(looks_like_hallucinated_action("Order has been placed."));
+        assert!(looks_like_hallucinated_action(
+            "Message has been sent successfully."
+        ));
+    }
+
+    #[test]
+    fn hallucinated_action_detects_italian_present_perfect_claims() {
+        // Italian "ho + past participle" — the form Ambrogio falls into when
+        // it lies about completing a domain operation.
+        assert!(looks_like_hallucinated_action(
+            "Ho registrato la spesa di 12 euro al supermercato."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "Ho inviato il messaggio a Jessica come richiesto."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "Ho allegato il PDF alla mail."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "Ho prenotato il ristorante per le 20:00."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "Ho schedulato il bonifico per domani."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "Ho bonificato 500 euro sul conto risparmio."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "Ho aggiornato la nota sul calendario."
+        ));
+    }
+
+    #[test]
+    fn hallucinated_action_detects_italian_impersonal_claims() {
+        assert!(looks_like_hallucinated_action(
+            "Il messaggio è stato inviato al destinatario."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "La transazione è stata registrata correttamente."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "L'appuntamento è stato programmato."
+        ));
+        assert!(looks_like_hallucinated_action("Messaggio inviato."));
+        assert!(looks_like_hallucinated_action("Operazione completata."));
+        assert!(looks_like_hallucinated_action(
+            "Bonifico effettuato con successo."
+        ));
+    }
+
+    #[test]
+    fn hallucinated_action_does_not_fire_on_neutral_text() {
+        // Plain replies must never trigger a corrective retry — a false
+        // positive burns one in-loop iteration.
+        assert!(!looks_like_hallucinated_action(""));
+        assert!(!looks_like_hallucinated_action("Hello, how can I help?"));
+        assert!(!looks_like_hallucinated_action(
+            "Vuoi che registri questa spesa? Confermami pure."
+        ));
+        assert!(!looks_like_hallucinated_action(
+            "Posso inviare il messaggio se mi confermi il numero."
+        ));
+        // Bare "fatto" intentionally NOT in the trigger list — too noisy
+        // ("non ho fatto in tempo a chiamarti" should not retry).
+        assert!(!looks_like_hallucinated_action(
+            "Non ho fatto in tempo a chiamarti."
+        ));
     }
 
     #[test]

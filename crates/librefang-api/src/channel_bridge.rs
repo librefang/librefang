@@ -2259,6 +2259,154 @@ pub async fn start_channel_bridge(
 /// Start channels from an explicit `ChannelsConfig` (used by hot-reload).
 ///
 /// Returns `(Option<BridgeManager>, Vec<started_channel_names>, webhook_router)`.
+/// Re-dispatch a single journaled message after crash-recovery or after a
+/// rate-limit / overload window has elapsed.
+///
+/// Routes through `handle.send_message`, then delivers any response back to
+/// the originating channel adapter, and updates the journal status with
+/// [`MessageJournal::record_outcome`] (which itself routes the entry to
+/// `Completed` / `Deferred` / `Failed`). Re-dispatch failures that hit a
+/// fresh rate-limit get re-deferred — they do NOT count against the retry
+/// budget. Hard failures DO count (3-strike cap).
+async fn redispatch_journal_entry(
+    entry: &librefang_channels::message_journal::JournalEntry,
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    kernel: &Arc<dyn KernelApi>,
+    journal: Option<&librefang_channels::message_journal::MessageJournal>,
+) {
+    use librefang_channels::message_journal::JournalStatus;
+
+    let age_secs = (chrono::Utc::now() - entry.received_at).num_seconds();
+    let was_in_flight = entry.status == JournalStatus::Processing;
+    let is_deferred_retry = entry.status == JournalStatus::Deferred;
+    info!(
+        id = %entry.message_id,
+        channel = %entry.channel,
+        sender = %entry.sender_name,
+        age_secs,
+        was_in_flight,
+        is_deferred_retry,
+        "Re-dispatching journaled message"
+    );
+
+    // Resolve target agent: prefer the journaled name, fall back to the
+    // first registered agent (preserves the pre-existing crash-recovery
+    // contract — better to deliver to the wrong agent than to lose the
+    // message entirely).
+    let agent_id = if let Some(ref name) = entry.agent_name {
+        handle.find_agent_by_name(name).await.ok().flatten()
+    } else {
+        None
+    };
+    let agent_id = match agent_id {
+        Some(id) => id,
+        None => match kernel.agent_registry().list().first().map(|e| e.id) {
+            Some(id) => id,
+            None => {
+                warn!(id = %entry.message_id, "No agents available for re-dispatch");
+                return;
+            }
+        },
+    };
+
+    // Claim the entry by flipping it to Processing before the slow LLM
+    // call. Without this, a second ticker tick that fires while
+    // send_message is still in flight would observe the original Deferred
+    // status and dispatch the same entry concurrently — double LLM bill,
+    // double user-facing reply.
+    if let Some(j) = journal {
+        j.update_status(
+            &entry.message_id,
+            librefang_channels::message_journal::JournalStatus::Processing,
+            None,
+        )
+        .await;
+    }
+
+    // Prefix tells the agent why this message is arriving late so it can
+    // adjust its response (e.g., not re-do work it already completed).
+    let prefix = if is_deferred_retry {
+        format!(
+            "[RETRY: this message hit a provider rate-limit / overload {age_secs}s ago and the \
+             quota window has now elapsed. Process it now if still relevant.]\n\n"
+        )
+    } else if was_in_flight {
+        format!(
+            "[RECOVERY: this message was being processed {age_secs}s ago when the \
+             system restarted. It may have been partially handled — check your \
+             session context before re-doing work. If you already responded, \
+             reply with NO_REPLY.]\n\n"
+        )
+    } else {
+        format!(
+            "[RECOVERY: this message was received {age_secs}s ago but processing \
+             never started. Please process it now.]\n\n"
+        )
+    };
+    let msg = format!("{prefix}{}", entry.content);
+
+    match handle.send_message(agent_id, &msg).await {
+        Ok(response) => {
+            info!(id = %entry.message_id, "Re-dispatched journaled message");
+            if !response.is_empty() {
+                const DELIVERY_DELAYS: &[u64] = &[5, 10, 15];
+                let mut delivered = false;
+                for delay in DELIVERY_DELAYS {
+                    if let Some(adapter) = kernel.channel_adapters_ref().get(&entry.channel) {
+                        let user = librefang_channels::types::ChannelUser {
+                            platform_id: entry.sender_id.clone(),
+                            display_name: entry.sender_name.clone(),
+                            librefang_user: None,
+                        };
+                        let content =
+                            librefang_channels::types::ChannelContent::Text(response.clone());
+                        match adapter.send(&user, content).await {
+                            Ok(()) => {
+                                delivered = true;
+                                break;
+                            }
+                            Err(e) => {
+                                warn!(
+                                    id = %entry.message_id,
+                                    error = %e,
+                                    "Re-dispatch delivery failed, retrying in {delay}s"
+                                );
+                            }
+                        }
+                    } else {
+                        warn!(
+                            id = %entry.message_id,
+                            channel = %entry.channel,
+                            "Adapter not ready, retrying in {delay}s"
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(*delay)).await;
+                }
+                if !delivered {
+                    warn!(
+                        id = %entry.message_id,
+                        "Could not deliver re-dispatched response after retries"
+                    );
+                }
+            }
+            if let Some(j) = journal {
+                j.record_outcome(&entry.message_id, true, None).await;
+            }
+        }
+        Err(e) => {
+            let err_str = e.to_string();
+            warn!(id = %entry.message_id, error = %err_str, "Re-dispatch failed");
+            if let Some(j) = journal {
+                // Routes to Deferred again if the failure carries a fresh
+                // rate-limit marker — otherwise to Failed (counts against
+                // the 3-strike retry cap).
+                j.record_outcome(&entry.message_id, false, Some(err_str))
+                    .await;
+            }
+        }
+    }
+}
+
 pub async fn start_channel_bridge_with_config(
     kernel: Arc<dyn KernelApi>,
     config: &librefang_types::config::ChannelsConfig,
@@ -3481,139 +3629,80 @@ pub async fn start_channel_bridge_with_config(
         warn!("Could not open message journal — crash recovery disabled");
     }
 
-    // Recover messages that were in-flight during last shutdown/crash
-    let pending = manager.recover_pending().await;
-    if !pending.is_empty() {
+    // Recover messages that were in-flight during last shutdown/crash AND
+    // any deferred entries whose retry deadline has already passed
+    // (rate-limit window reset while the daemon was down).
+    let initial_recoverable = match manager.journal() {
+        Some(j) => j.recoverable_entries().await,
+        None => Vec::new(),
+    };
+    if !initial_recoverable.is_empty() {
+        info!(
+            count = initial_recoverable.len(),
+            "Recovering messages from journal (in-flight + due-deferred)"
+        );
         let handle = bridge_handle.clone();
         let kernel_for_recovery = kernel.clone();
         let recovery_journal = manager.journal().cloned();
-        tokio::spawn(async move {
-            // Wait for adapters to initialize before sending responses.
-            // Retry with increasing delays: 5s, 10s, 15s.
-            const RECOVERY_DELAYS: &[u64] = &[5, 10, 15];
+        let mut shutdown_recv = manager.shutdown_signal();
+        let recovery_task = tokio::spawn(async move {
+            tokio::select! {
+                _ = async {
+                    // Wait for adapters to boot before re-dispatch.
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    for entry in &initial_recoverable {
+                        redispatch_journal_entry(
+                            entry,
+                            &handle,
+                            &kernel_for_recovery,
+                            recovery_journal.as_ref(),
+                        )
+                        .await;
+                    }
+                } => {}
+                _ = shutdown_recv.changed() => {}
+            }
+        });
+        manager.track_task(recovery_task);
+    }
 
-            // First delay: let adapters boot
-            tokio::time::sleep(std::time::Duration::from_secs(RECOVERY_DELAYS[0])).await;
-
-            for entry in &pending {
-                let age_secs = (chrono::Utc::now() - entry.received_at).num_seconds();
-                let was_in_flight =
-                    entry.status == librefang_channels::message_journal::JournalStatus::Processing;
-                info!(
-                    id = %entry.message_id,
-                    channel = %entry.channel,
-                    sender = %entry.sender_name,
-                    age_secs,
-                    was_in_flight,
-                    "Re-dispatching recovered message"
-                );
-                let agent_id = if let Some(ref name) = entry.agent_name {
-                    handle.find_agent_by_name(name).await.ok().flatten()
-                } else {
-                    None
-                };
-                let agent_id = match agent_id {
-                    Some(id) => id,
-                    None => match kernel_for_recovery
-                        .agent_registry()
-                        .list()
-                        .first()
-                        .map(|e| e.id)
-                    {
-                        Some(id) => id,
-                        None => {
-                            warn!(id = %entry.message_id, "No agents available for recovery");
+    // Periodic ticker: every 60s, re-dispatch any Deferred entries whose
+    // retry deadline has passed since the last sweep. This is what makes
+    // the journal recover from rate-limit windows that elapse WHILE the
+    // daemon is running. Tied to the BridgeManager's lifecycle via
+    // `track_task` so a hot-reload cancels the old ticker before
+    // spawning a new one — otherwise N reloads = N tickers reading the
+    // same JSONL through N independent in-memory views, leading to
+    // double-dispatch on the same `message_id`.
+    if let Some(j) = manager.journal().cloned() {
+        let handle = bridge_handle.clone();
+        let kernel_for_retry = kernel.clone();
+        let mut shutdown_recv = manager.shutdown_signal();
+        let retry_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            // Skip the first immediate tick — initial-recovery already
+            // covers anything due at boot.
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let due = j.due_deferred_entries().await;
+                        if due.is_empty() {
                             continue;
                         }
-                    },
-                };
-                // Differentiate prefix: if the task was already in-flight, the
-                // agent may have partially processed it. Tell it so.
-                let prefix = if was_in_flight {
-                    format!(
-                        "[RECOVERY: this message was being processed {age_secs}s ago when the \
-                         system restarted. It may have been partially handled — check your \
-                         session context before re-doing work. If you already responded, \
-                         reply with NO_REPLY.]\n\n"
-                    )
-                } else {
-                    format!(
-                        "[RECOVERY: this message was received {age_secs}s ago but processing \
-                         never started. Please process it now.]\n\n"
-                    )
-                };
-                let msg = format!("{prefix}{}", entry.content);
-                match handle.send_message(agent_id, &msg).await {
-                    Ok(response) => {
-                        info!(id = %entry.message_id, "Recovered message processed");
-                        if !response.is_empty() {
-                            // Retry delivery with backoff if adapter isn't ready yet
-                            let mut delivered = false;
-                            for delay in RECOVERY_DELAYS {
-                                if let Some(adapter) = kernel_for_recovery
-                                    .channel_adapters_ref()
-                                    .get(&entry.channel)
-                                {
-                                    let user = librefang_channels::types::ChannelUser {
-                                        platform_id: entry.sender_id.clone(),
-                                        display_name: entry.sender_name.clone(),
-                                        librefang_user: None,
-                                    };
-                                    let content = librefang_channels::types::ChannelContent::Text(
-                                        response.clone(),
-                                    );
-                                    match adapter.send(&user, content).await {
-                                        Ok(()) => {
-                                            delivered = true;
-                                            break;
-                                        }
-                                        Err(e) => {
-                                            warn!(
-                                                id = %entry.message_id,
-                                                error = %e,
-                                                "Recovery delivery failed, retrying in {delay}s"
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    warn!(
-                                        id = %entry.message_id,
-                                        channel = %entry.channel,
-                                        "Adapter not ready, retrying in {delay}s"
-                                    );
-                                }
-                                tokio::time::sleep(std::time::Duration::from_secs(*delay)).await;
-                            }
-                            if !delivered {
-                                warn!(
-                                    id = %entry.message_id,
-                                    "Could not deliver recovery response after retries"
-                                );
-                            }
-                        }
-                        if let Some(ref j) = recovery_journal {
-                            j.update_status(
-                                &entry.message_id,
-                                librefang_channels::message_journal::JournalStatus::Completed,
-                                None,
-                            )
-                            .await;
+                        info!(
+                            count = due.len(),
+                            "Retry ticker re-dispatching deferred entries (quota window elapsed)"
+                        );
+                        for entry in &due {
+                            redispatch_journal_entry(entry, &handle, &kernel_for_retry, Some(&j)).await;
                         }
                     }
-                    Err(e) => {
-                        warn!(id = %entry.message_id, error = %e, "Recovery re-dispatch failed");
-                        if let Some(ref j) = recovery_journal {
-                            j.update_status(
-                                &entry.message_id,
-                                librefang_channels::message_journal::JournalStatus::Failed,
-                                Some(e.to_string()),
-                            )
-                            .await;
-                        }
-                    }
+                    _ = shutdown_recv.changed() => break,
                 }
             }
         });
+        manager.track_task(retry_task);
     }
 
     let mut started_names = Vec::new();
