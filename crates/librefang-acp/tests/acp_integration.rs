@@ -12,14 +12,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::{
-    ContentBlock, InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse,
-    PermissionOptionId, PromptRequest, PromptResponse, ProtocolVersion, ReadTextFileRequest,
-    ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
-    StopReason, TextContent,
+    ContentBlock, CreateTerminalRequest, CreateTerminalResponse, InitializeRequest,
+    InitializeResponse, NewSessionRequest, NewSessionResponse, PermissionOptionId, PromptRequest,
+    PromptResponse, ProtocolVersion, ReadTextFileRequest, ReadTextFileResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionNotification, SessionUpdate, StopReason, TerminalExitStatus, TerminalId,
+    TerminalOutputRequest, TerminalOutputResponse, TextContent, WaitForTerminalExitRequest,
+    WaitForTerminalExitResponse,
 };
 use agent_client_protocol::{ConnectionTo, JsonRpcResponse, Responder, SentRequest};
 use async_trait::async_trait;
+use librefang_acp::TerminalClientHandle;
 use librefang_acp::{AcpKernel, AcpResult, FsClientHandle};
 use librefang_llm_driver::StreamEvent;
 use librefang_types::agent::{AgentId, SessionId as LfSessionId};
@@ -42,6 +46,7 @@ struct MockKernel {
     /// out and exercise the reverse-RPC against the live connection
     /// directly.
     fs_client: std::sync::Mutex<Option<FsClientHandle>>,
+    terminal_client: std::sync::Mutex<Option<TerminalClientHandle>>,
 }
 
 impl MockKernel {
@@ -53,11 +58,16 @@ impl MockKernel {
             resolves: AsyncMutex::new(Vec::new()),
             last_session_id: AsyncMutex::new(None),
             fs_client: std::sync::Mutex::new(None),
+            terminal_client: std::sync::Mutex::new(None),
         })
     }
 
     fn fs_client_handle(&self) -> Option<FsClientHandle> {
         self.fs_client.lock().ok().and_then(|g| g.clone())
+    }
+
+    fn terminal_client_handle(&self) -> Option<TerminalClientHandle> {
+        self.terminal_client.lock().ok().and_then(|g| g.clone())
     }
 
     /// Inject an approval into the broadcast as if the kernel had just
@@ -132,6 +142,12 @@ impl AcpKernel for MockKernel {
 
     fn set_fs_client(&self, handle: FsClientHandle) {
         if let Ok(mut guard) = self.fs_client.lock() {
+            *guard = Some(handle);
+        }
+    }
+
+    fn set_terminal_client(&self, handle: TerminalClientHandle) {
+        if let Ok(mut guard) = self.terminal_client.lock() {
             *guard = Some(handle);
         }
     }
@@ -510,4 +526,110 @@ async fn poll_for<T, F: FnMut() -> Option<T>>(mut f: F) -> T {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("poll_for: condition never satisfied within 1s");
+}
+
+/// `terminal/*` round-trip: server-side `TerminalClientHandle` runs
+/// the full create→wait_for_exit→output→release dance, and the
+/// client builder answers each method with a stub. Verifies the five
+/// reverse-RPCs interleave cleanly + the `AcpTerminalRunResult` the
+/// runtime sees carries the expected exit code, output, and
+/// truncation flag.
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_run_command_round_trip() {
+    use tokio::task::LocalSet;
+
+    let local = LocalSet::new();
+    local
+        .run_until(async {
+            let kernel = MockKernel::new(vec![]);
+            let (server_reader, server_writer, client_reader, client_writer) = duplex_pair();
+            let server_transport =
+                agent_client_protocol::ByteStreams::new(server_writer, server_reader);
+            let client_transport =
+                agent_client_protocol::ByteStreams::new(client_writer, client_reader);
+
+            let kernel_for_server = kernel.clone();
+            tokio::task::spawn_local(async move {
+                let _ = librefang_acp::run_with_transport(
+                    kernel_for_server,
+                    AgentId(Uuid::nil()),
+                    server_transport,
+                )
+                .await;
+            });
+
+            // Client side: stub all four `terminal/*` requests the
+            // run_command dance issues.
+            let client = agent_client_protocol::Client
+                .builder()
+                .on_receive_request(
+                    async move |_req: CreateTerminalRequest,
+                                responder: Responder<CreateTerminalResponse>,
+                                _cx| {
+                        responder.respond(CreateTerminalResponse::new(TerminalId::new("term-1")))
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |_req: WaitForTerminalExitRequest,
+                                responder: Responder<WaitForTerminalExitResponse>,
+                                _cx| {
+                        let mut exit = TerminalExitStatus::default();
+                        exit.exit_code = Some(0);
+                        responder.respond(WaitForTerminalExitResponse::new(exit))
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |_req: TerminalOutputRequest,
+                                responder: Responder<TerminalOutputResponse>,
+                                _cx| {
+                        responder.respond(TerminalOutputResponse::new("hello world\n", false))
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |_req: ReleaseTerminalRequest,
+                                responder: Responder<ReleaseTerminalResponse>,
+                                _cx| { responder.respond(ReleaseTerminalResponse::default()) },
+                    agent_client_protocol::on_receive_request!(),
+                );
+
+            let kernel_for_driver = kernel.clone();
+            let result = client
+                .connect_with(
+                    client_transport,
+                    async move |cx: ConnectionTo<agent_client_protocol::Agent>| -> Result<(), agent_client_protocol::Error> {
+                        let mut init_req = InitializeRequest::new(ProtocolVersion::LATEST);
+                        init_req.client_capabilities.terminal = true;
+                        let _: InitializeResponse = recv(cx.send_request(init_req)).await?;
+
+                        let handle = poll_for(|| kernel_for_driver.terminal_client_handle()).await;
+                        assert!(handle.capabilities().terminal);
+
+                        // Drive `run_command` through the
+                        // `AcpTerminalClient` trait — the same path the
+                        // runtime's `shell_exec` arm uses.
+                        use librefang_kernel_handle::AcpTerminalClient;
+                        let result = handle
+                            .run_command(
+                                "echo".to_string(),
+                                vec!["hello".to_string()],
+                                Vec::new(),
+                                None,
+                                None,
+                            )
+                            .await
+                            .expect("terminal run_command should succeed");
+                        assert_eq!(result.output, "hello world\n");
+                        assert!(!result.truncated);
+                        assert_eq!(result.exit_code, Some(0));
+                        assert_eq!(result.signal, None);
+                        Ok(())
+                    },
+                )
+                .await;
+            assert!(result.is_ok(), "client driver failed: {result:?}");
+        })
+        .await;
 }
