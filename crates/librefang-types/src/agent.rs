@@ -548,8 +548,17 @@ impl ResourceQuota {
     }
 
     /// Return the effective burst ratio, clamped to `[0.01, 1.0]`.
-    pub fn effective_burst_ratio(&self) -> f32 {
-        self.burst_ratio.unwrap_or(0.2).clamp(0.01, 1.0)
+    ///
+    /// Resolution: agent override > global default > compiled default (0.2).
+    /// Pass `global_default` from `BudgetConfig::default_burst_ratio`;
+    /// a value of `0.0` means "not configured" and falls through to 0.2.
+    pub fn effective_burst_ratio(&self, global_default: f32) -> f32 {
+        let raw = self.burst_ratio.unwrap_or(if global_default > 0.0 {
+            global_default
+        } else {
+            0.2
+        });
+        raw.clamp(0.01, 1.0)
     }
 }
 

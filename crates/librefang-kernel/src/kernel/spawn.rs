@@ -266,9 +266,15 @@ impl LibreFangKernel {
         let caps = manifest_to_capabilities(&manifest);
         self.capabilities.grant(agent_id, caps);
 
-        // Register with scheduler
-        self.scheduler
-            .register(agent_id, manifest.resources.clone());
+        // Register with scheduler — pre-resolve global burst ratio
+        let mut quota = manifest.resources.clone();
+        if quota.burst_ratio.is_none() {
+            let global = self.budget_config().default_burst_ratio;
+            if global > 0.0 {
+                quota.burst_ratio = Some(global);
+            }
+        }
+        self.scheduler.register(agent_id, quota);
 
         // Create registry entry
         let tags = manifest.tags.clone();

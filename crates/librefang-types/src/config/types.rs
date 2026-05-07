@@ -4068,6 +4068,10 @@ pub struct BudgetConfig {
     /// will be overridden to this value. Set to 0 to keep each agent's own limit.
     /// Use this to globally raise or lower the token budget for all agents.
     pub default_max_llm_tokens_per_hour: u64,
+    /// Default burst ratio applied to agents that don't set their own.
+    /// 0.0 = use compiled default (0.2). Values clamped to `[0.01, 1.0]`.
+    #[serde(default)]
+    pub default_burst_ratio: f32,
     /// Per-provider spending caps, keyed by provider id (e.g. `"moonshot"`,
     /// `"openai"`, `"litellm"`). Missing providers are unlimited.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -4082,6 +4086,7 @@ impl Default for BudgetConfig {
             max_monthly_usd: 0.0,
             alert_threshold: 0.8,
             default_max_llm_tokens_per_hour: 0,
+            default_burst_ratio: 0.0,
             providers: std::collections::HashMap::new(),
         }
     }
