@@ -1,8 +1,3 @@
-// Wired into `server.rs` in the next milestone of #3313; the workspace
-// `warnings = "deny"` lint would otherwise reject the scaffolding-only
-// state of this PR.
-#![allow(dead_code)]
-
 //! ACP session state map.
 //!
 //! ACP sessions are created via `session/new`. Each ACP session is a
@@ -33,6 +28,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 pub(crate) struct SessionState {
     pub librefang_session_id: LfSessionId,
+    #[allow(dead_code)] // surfaced to the agent loop in Phase 2 via SenderContext
     pub cwd: PathBuf,
     /// Cancelled by the `session/cancel` notification. Cloned by the
     /// prompt pump so a tokio `select!` can short-circuit on cancel.
@@ -71,8 +67,14 @@ impl SessionStore {
         self.inner.get(id).map(|r| r.value().clone())
     }
 
-    pub(crate) fn remove(&self, id: &AcpSessionId) -> Option<SessionState> {
-        self.inner.remove(id).map(|(_, v)| v)
+    /// Reverse lookup used by the permission bridge to translate a kernel
+    /// `ApprovalRequest.session_id` (LibreFang `SessionId` serialised as
+    /// a UUID string) back to the ACP `SessionId` we should target.
+    pub(crate) fn find_by_librefang_id(&self, lf_id: &LfSessionId) -> Option<AcpSessionId> {
+        self.inner
+            .iter()
+            .find(|entry| entry.value().librefang_session_id == *lf_id)
+            .map(|entry| entry.key().clone())
     }
 
     /// Trigger the cancel token for `id` if it exists. Returns `true`
@@ -98,11 +100,12 @@ mod tests {
         let store = SessionStore::default();
         let id: AcpSessionId = "sess-1".into();
         let state = SessionState::new(PathBuf::from("/tmp/proj"));
+        let lf_id = state.librefang_session_id;
         store.insert(id.clone(), state.clone());
         let fetched = store.get(&id).expect("session should exist");
         assert_eq!(fetched.cwd, PathBuf::from("/tmp/proj"));
-        assert!(store.remove(&id).is_some());
-        assert!(store.get(&id).is_none());
+        let reverse = store.find_by_librefang_id(&lf_id).expect("reverse lookup");
+        assert_eq!(reverse, id);
     }
 
     #[test]
@@ -122,5 +125,12 @@ mod tests {
         let store = SessionStore::default();
         let unknown: AcpSessionId = "nope".into();
         assert!(!store.cancel(&unknown));
+    }
+
+    #[test]
+    fn reverse_lookup_misses_when_unknown() {
+        let store = SessionStore::default();
+        let phantom = LfSessionId(Uuid::new_v4());
+        assert!(store.find_by_librefang_id(&phantom).is_none());
     }
 }

@@ -40,7 +40,10 @@ pub enum AcpError {
 }
 
 impl AcpError {
-    pub(crate) fn internal(msg: impl Into<String>) -> Self {
+    /// Construct an [`AcpError::Internal`] from a message. Used by the
+    /// `librefang-cli` kernel adapter when wrapping unexpected join /
+    /// channel failures.
+    pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
     }
 

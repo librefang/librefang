@@ -3,8 +3,8 @@
 use chrono::Utc;
 use dashmap::DashMap;
 use librefang_types::approval::{
-    ApprovalAuditEntry, ApprovalDecision, ApprovalPolicy, ApprovalRequest, ApprovalResponse,
-    RiskLevel, SecondFactor, TimeoutFallback,
+    ApprovalAuditEntry, ApprovalDecision, ApprovalEvent, ApprovalPolicy, ApprovalRequest,
+    ApprovalResponse, RiskLevel, SecondFactor, TimeoutFallback,
 };
 use librefang_types::capability::glob_matches;
 use r2d2::Pool;
@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
+use tokio::sync::broadcast;
 use totp_rs::{Algorithm, Secret, TOTP};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -49,6 +50,13 @@ pub struct ApprovalManager {
     /// Callers hold this lock across the check and record to prevent TOCTOU
     /// races where concurrent requests both pass the lockout check (fixes #3584).
     failure_rw_mutex: StdMutex<()>,
+    /// Broadcast surface for external transports that need low-latency
+    /// awareness of pending-queue changes. The ACP adapter (#3313) listens
+    /// on this so editor-side `session/request_permission` requests can
+    /// fire the moment a tool needs approval, instead of polling
+    /// `list_pending` on a 100ms tick. Capacity is small — slow consumers
+    /// drop old events rather than apply back-pressure to the agent loop.
+    events_tx: broadcast::Sender<ApprovalEvent>,
 }
 
 struct PendingRequest {
@@ -81,6 +89,7 @@ impl ApprovalManager {
     }
 
     pub fn new(policy: ApprovalPolicy) -> Self {
+        let (events_tx, _) = broadcast::channel(256);
         Self {
             pending: DashMap::new(),
             recent: std::sync::Mutex::new(VecDeque::new()),
@@ -89,6 +98,7 @@ impl ApprovalManager {
             totp_grace: StdMutex::new(HashMap::new()),
             totp_failures: StdMutex::new(HashMap::new()),
             failure_rw_mutex: StdMutex::new(()),
+            events_tx,
         }
     }
 
@@ -103,6 +113,7 @@ impl ApprovalManager {
         let pending: DashMap<Uuid, PendingRequest> = DashMap::new();
         // Restore pending approvals from the previous session.
         Self::restore_pending_approvals(&pool, &pending);
+        let (events_tx, _) = broadcast::channel(256);
         Self {
             pending,
             recent: std::sync::Mutex::new(VecDeque::new()),
@@ -111,7 +122,21 @@ impl ApprovalManager {
             totp_grace: StdMutex::new(HashMap::new()),
             totp_failures: StdMutex::new(failures),
             failure_rw_mutex: StdMutex::new(()),
+            events_tx,
         }
+    }
+
+    /// Subscribe to [`ApprovalEvent`]s from this manager.
+    ///
+    /// The receiver yields events in commit order. Slow consumers may see
+    /// `RecvError::Lagged` if more than 256 events queue up before they
+    /// resume polling — they should re-sync via [`Self::list_pending`] in
+    /// that case rather than relying on the broadcast as the source of
+    /// truth. Returning the receiver from this method (rather than
+    /// `subscribe(&Sender)`) lets external surfaces hold the manager
+    /// behind `&Arc<Self>` without needing to expose the internal sender.
+    pub fn subscribe(&self) -> broadcast::Receiver<ApprovalEvent> {
+        self.events_tx.subscribe()
     }
 
     /// Restore pending approvals from the database into the in-memory map.
@@ -448,6 +473,12 @@ impl ApprovalManager {
                     submitted_at: chrono::Utc::now(),
                 },
             );
+            // Notify broadcast subscribers (#3313). Ignore the result —
+            // an empty receiver list is the steady state when nothing is
+            // listening (no ACP client attached).
+            let _ = self
+                .events_tx
+                .send(ApprovalEvent::Created(req_for_timeout.clone()));
 
             info!(request_id = %id, escalation, "Approval request submitted, waiting for resolution");
 
@@ -518,6 +549,7 @@ impl ApprovalManager {
         let id = req.id;
         // Persist before inserting so the entry survives a daemon restart (issue #3611).
         self.db_insert_pending(&req);
+        let req_for_event = req.clone();
         self.pending.insert(
             id,
             PendingRequest {
@@ -527,6 +559,10 @@ impl ApprovalManager {
                 submitted_at: chrono::Utc::now(),
             },
         );
+        // Notify broadcast subscribers (#3313). The deferred path is what
+        // tool execution uses, so this is the primary signal for the ACP
+        // permission bridge.
+        let _ = self.events_tx.send(ApprovalEvent::Created(req_for_event));
         Ok(id)
     }
 
@@ -675,6 +711,15 @@ impl ApprovalManager {
                     response.decided_at,
                     totp_verified,
                 );
+                // Notify broadcast subscribers (#3313) so external
+                // transports can clear their pending UI even when the
+                // resolution came from another surface (TUI / dashboard
+                // / ACP).
+                let _ = self.events_tx.send(ApprovalEvent::Resolved {
+                    request_id,
+                    decision: response.decision.clone(),
+                    decided_by: response.decided_by.clone(),
+                });
                 // Send decision to waiting agent via oneshot if present (blocking path)
                 info!(request_id = %request_id, decision = ?response.decision, "Approval request resolved");
                 if let Some(sender) = pending.sender {

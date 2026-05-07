@@ -1,8 +1,3 @@
-// Wired into `server.rs::handle_prompt` in the next milestone of #3313;
-// the workspace `warnings = "deny"` lint would otherwise reject the
-// scaffolding-only state of this PR.
-#![allow(dead_code)]
-
 //! Translation from LibreFang `StreamEvent` to ACP `SessionUpdate`.
 //!
 //! The agent loop in `librefang-runtime` emits a flat stream of
@@ -146,7 +141,7 @@ impl EventTranslator {
 /// We err on the side of `Other` so unknown tools still render with a neutral
 /// icon. The categories we recognise are the ones that have established
 /// names across LibreFang's stdlib (`read_*`, `write_*`, `bash`, etc.).
-fn infer_tool_kind(name: &str) -> ToolKind {
+pub(crate) fn infer_tool_kind(name: &str) -> ToolKind {
     let lower = name.to_ascii_lowercase();
     if lower.starts_with("read") || lower.contains("get_") || lower.contains("list_") {
         ToolKind::Read

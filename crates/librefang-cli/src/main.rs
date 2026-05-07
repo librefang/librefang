@@ -7,6 +7,7 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+mod acp;
 mod desktop_install;
 pub mod doctor;
 mod http_client;
@@ -310,6 +311,20 @@ enum Commands {
     Mcp {
         #[command(subcommand)]
         command: Option<McpCommands>,
+    },
+    /// Run the Agent Client Protocol (ACP) server over stdio (#3313).
+    ///
+    /// Launches an in-process kernel and serves an ACP `Agent` on
+    /// stdin/stdout. Editors like Zed, VS Code (Claude Code), and
+    /// JetBrains spawn this as a child process per workspace and
+    /// drive prompts / approvals / streaming through it.
+    #[command(
+        long_about = "Run the Agent Client Protocol (ACP) server over stdio (#3313).\n\nExposes a LibreFang agent to ACP-compatible editors (Zed, VS Code, JetBrains).\nThe editor spawns `librefang acp` as a child process per workspace; this\ncommand runs an in-process kernel and serves the JSON-RPC protocol on\nstdin/stdout until the editor disconnects.\n\nExamples:\n  librefang acp                    # Use the default agent (\"assistant\")\n  librefang acp --agent reviewer   # Use a named agent\n  librefang acp --agent <uuid>     # Use an agent by UUID"
+    )]
+    Acp {
+        /// Agent name or UUID to embed. Defaults to "assistant".
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// Authenticate with a provider (chatgpt) [*].
     #[command(
@@ -2238,6 +2253,7 @@ fn main() {
             Some(McpCommands::Add { name, key }) => cmd_mcp_add(&name, key.as_deref()),
             Some(McpCommands::Remove { name }) => cmd_mcp_remove(&name),
         },
+        Some(Commands::Acp { agent }) => acp::run_acp_server(cli.config, agent),
         Some(Commands::Auth(sub)) => match sub {
             AuthCommands::Chatgpt { device_auth } => cmd_auth_chatgpt(device_auth),
         },
