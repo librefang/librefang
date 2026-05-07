@@ -44,6 +44,57 @@ impl LibreFangKernel {
                     Arc::downgrade(self),
                 )),
             );
+            // Skill workshop (#3328) — same wiring shape as auto_dream:
+            // registers a Weak<Self>-holding handler on AgentLoopEnd so the
+            // captured workflow's pending file write happens off the agent
+            // loop's return path. Default behaviour is heuristic-only
+            // capture into pending/ (no LLM call, no auto-promote);
+            // operators turn it off entirely with
+            // `[skill_workshop] enabled = false` in agent.toml — see
+            // `crate::skill_workshop`. Post-#3565: hooks live on the
+            // governance subsystem (same site as the auto_dream
+            // registration above).
+            self.governance.hooks.register(
+                librefang_types::agent::HookEvent::AgentLoopEnd,
+                std::sync::Arc::new(crate::skill_workshop::SkillWorkshopTurnEndHook::new(
+                    Arc::downgrade(self),
+                )),
+            );
+            // Best-effort cleanup of `.toml.tmp` orphans left over from
+            // crashes mid-write between previous daemon runs. Pushed to
+            // a background task so kernel boot does not block on a
+            // `read_dir` walk of `~/.librefang/skills/pending/` —
+            // matters more now that the workshop is on by default and
+            // the directory is reliably non-empty after the first
+            // candidate lands.
+            //
+            // `set_self_handle` has historically been a sync call that
+            // does not require a tokio runtime; we only spawn when one
+            // happens to be current (production daemon boot via
+            // `setup_router` and every `#[tokio::test]` test do have a
+            // runtime; pure-sync test harnesses or Drop impls do not).
+            // When no runtime is available we fall back to the inline
+            // call so behaviour is unchanged for those callers.
+            let pending_root = self.home_dir().join("skills");
+            let prune = move || match crate::skill_workshop::storage::prune_orphan_temp_files(
+                &pending_root,
+            ) {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(
+                    pruned = n,
+                    "skill_workshop: removed orphan .toml.tmp files left from a previous crash"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "skill_workshop: failed to scan pending dir for orphan tmp files"
+                ),
+            };
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    handle.spawn_blocking(prune);
+                }
+                Err(_) => prune(),
+            }
             // Install the kernel-handle weak ref on the proactive-memory
             // extractor so its `extract_memories_with_agent_id` path can
             // route through `run_forked_agent_oneshot` for cache alignment
@@ -78,7 +129,13 @@ impl LibreFangKernel {
     /// (`send_message_with_handle`, etc.) keep the `Option` for test stubs;
     /// they call this helper to materialize a handle when the caller passes
     /// `None`.
-    pub(crate) fn kernel_handle(&self) -> Arc<dyn KernelHandle> {
+    ///
+    /// Visibility: `pub` so external surfaces (the ACP adapter, future
+    /// daemon-attached transports) can route `resolve_tool_approval`
+    /// through the trait — that's the only path that spawns
+    /// `handle_approval_resolution`, which is required for deferred tool
+    /// executions to actually run after approval (#3313).
+    pub fn kernel_handle(&self) -> Arc<dyn KernelHandle> {
         self.self_handle
             .get()
             .and_then(|w| w.upgrade())

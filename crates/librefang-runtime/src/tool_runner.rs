@@ -329,6 +329,16 @@ pub struct ToolExecContext<'a> {
     pub process_registry: Option<&'a crate::process_registry::ProcessRegistry>,
     pub sender_id: Option<&'a str>,
     pub channel: Option<&'a str>,
+    /// LibreFang `SessionId` the tool call belongs to. When `Some`, the
+    /// `file_read` / `file_write` builtins consult
+    /// `kernel.acp_fs_client(session_id)` and route through the editor's
+    /// `fs/*` reverse-RPC instead of the local filesystem (#3313).
+    /// `None` for legacy / test call sites that don't have the id on
+    /// hand — those keep the previous local-fs behaviour. Owned (vs.
+    /// borrowed) because `SessionId` is `Copy` (16 bytes) and the
+    /// upstream agent-loop callers pass it as a `Option<&str>` UUID
+    /// string that we parse here.
+    pub session_id: Option<librefang_types::agent::SessionId>,
     /// Artifact spill threshold from `[tool_results] spill_threshold_bytes`.
     /// Tool results larger than this are written to the artifact store.
     /// `0` means use the compiled default (16 KiB).
@@ -412,6 +422,7 @@ pub async fn execute_tool_raw(
         process_registry: _,
         sender_id,
         channel: _,
+        session_id,
         spill_threshold_bytes,
         max_artifact_bytes,
         checkpoint_manager,
@@ -422,14 +433,51 @@ pub async fn execute_tool_raw(
     let result = match tool_name {
         // Filesystem tools
         "file_read" => {
-            let mut extra = named_ws_prefixes(*kernel, *caller_agent_id);
-            // #4434: widen with the channel bridge's download directory so
-            // agents can open Telegram/voice/etc. attachments the bridge
-            // saved outside their workspace_root.
+            // SECURITY: Validate the requested path stays inside the
+            // agent's allowed-workspace set BEFORE handing off to ACP
+            // (#3313 review). The editor would otherwise faithfully
+            // serve `/etc/shadow` back to the LLM if the agent asked
+            // for it — the editor sandbox is for editor users, not
+            // for agents pretending to be editor users.
+            let mut allowed = named_ws_prefixes(*kernel, *caller_agent_id);
             if let Some(dl) = kernel.and_then(|k| k.channel_file_download_dir()) {
-                extra.push(dl);
+                allowed.push(dl);
             }
-            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            if let Some(violation) = check_absolute_path_inside_workspace(
+                input.get("path").and_then(|v| v.as_str()),
+                *workspace_root,
+                &allowed,
+            ) {
+                return ToolResult::error(tool_use_id.to_string(), violation);
+            }
+
+            // ACP routing: when an editor is bound to this session,
+            // hand the read off to the editor's `fs/read_text_file`
+            // instead of touching the local fs. The editor sees its
+            // in-memory buffer state (unsaved edits, virtual fs) which
+            // is what the user expects when prompting from inside the
+            // editor (#3313).
+            if let (Some(k), Some(sid)) = (kernel, session_id) {
+                if let Some(client) = k.acp_fs_client(*sid) {
+                    let Some(path_str) = input.get("path").and_then(|v| v.as_str()) else {
+                        return ToolResult::error(
+                            tool_use_id.to_string(),
+                            "Missing 'path' parameter".to_string(),
+                        );
+                    };
+                    let path = std::path::PathBuf::from(path_str);
+                    let line = input["line"].as_u64().map(|v| v as u32);
+                    let limit = input["limit"].as_u64().map(|v| v as u32);
+                    return match client.read_text_file(path, line, limit).await {
+                        Ok(content) => ToolResult::ok(tool_use_id.to_string(), content),
+                        Err(e) => ToolResult::error(
+                            tool_use_id.to_string(),
+                            format!("ACP fs/read_text_file failed: {e}"),
+                        ),
+                    };
+                }
+            }
+            let extra_refs: Vec<&Path> = allowed.iter().map(|p| p.as_path()).collect();
             tool_file_read(input, *workspace_root, &extra_refs).await
         }
         "file_write" => {
@@ -453,9 +501,52 @@ pub async fn execute_tool_raw(
                     }
                 }
             }
+            // SECURITY: workspace-jail check on absolute paths BEFORE
+            // ACP routing (#3313 review). Same rationale as file_read:
+            // the editor sandbox is for editor users, not agents.
+            // `tool_file_write` runs the equivalent check on the
+            // local-fs path; this is the missing pre-ACP guard.
+            let writable = named_ws_prefixes_writable(*kernel, *caller_agent_id);
+            if let Some(violation) = check_absolute_path_inside_workspace(
+                input.get("path").and_then(|v| v.as_str()),
+                *workspace_root,
+                &writable,
+            ) {
+                return ToolResult::error(tool_use_id.to_string(), violation);
+            }
+            // ACP routing: if an editor is attached to this session,
+            // route the write through `fs/write_text_file` so it goes
+            // into the editor's buffer (with its own undo stack and
+            // dirty-state tracking) instead of the local fs (#3313).
+            if let (Some(k), Some(sid)) = (kernel, session_id) {
+                if let Some(client) = k.acp_fs_client(*sid) {
+                    let Some(path_str) = input.get("path").and_then(|v| v.as_str()) else {
+                        return ToolResult::error(
+                            tool_use_id.to_string(),
+                            "Missing 'path' parameter".to_string(),
+                        );
+                    };
+                    let Some(content) = input.get("content").and_then(|v| v.as_str()) else {
+                        return ToolResult::error(
+                            tool_use_id.to_string(),
+                            "Missing 'content' parameter".to_string(),
+                        );
+                    };
+                    let path = std::path::PathBuf::from(path_str);
+                    return match client.write_text_file(path, content.to_string()).await {
+                        Ok(()) => ToolResult::ok(
+                            tool_use_id.to_string(),
+                            format!("Wrote {path_str} via editor"),
+                        ),
+                        Err(e) => ToolResult::error(
+                            tool_use_id.to_string(),
+                            format!("ACP fs/write_text_file failed: {e}"),
+                        ),
+                    };
+                }
+            }
             maybe_snapshot(checkpoint_manager, *workspace_root, "pre file_write").await;
-            let extra = named_ws_prefixes_writable(*kernel, *caller_agent_id);
-            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            let extra_refs: Vec<&Path> = writable.iter().map(|p| p.as_path()).collect();
             tool_file_write(input, *workspace_root, &extra_refs).await
         }
         "file_list" => {
@@ -636,22 +727,31 @@ pub async fn execute_tool_raw(
                 };
             };
 
-            // FIXME(#3822): shell_exec does not enforce readonly_workspace_prefixes.
-            // Named workspaces declared with `mode = "r"` are exposed to the shell
-            // environment via TOOLS.md, but nothing prevents the spawned process from
-            // writing to those directories.  A proper sandbox (e.g. Linux mount
-            // namespaces, macOS sandbox-exec, or a chroot) is required to close this
-            // gap.  Until then we emit a warning whenever readonly prefixes exist so
-            // the issue is visible in daemon logs.
-            // Track: https://github.com/librefang/librefang/issues/3822
+            // SECURITY (#3313 review): every check below runs BEFORE
+            // the ACP routing branch — earlier revisions of this file
+            // returned to the editor's terminal panel before validating
+            // exec_policy / metacharacters / taint / dangerous patterns
+            // / readonly-workspace prefixes, which let an agent
+            // exfiltrate or destroy local data through the editor by
+            // sending commands the LibreFang sandbox would otherwise
+            // refuse. The editor's own sandbox is for editor users —
+            // an agent driving the editor must satisfy LibreFang's
+            // policy first.
+
+            // FIXME(#3822): shell_exec still cannot stop a spawned
+            // process from writing to read-only named workspaces (no
+            // mount-namespace / sandbox-exec / chroot). We block
+            // commands whose argv references a read-only prefix
+            // below, but a process that calls `open()` directly with
+            // a hard-coded path is out of scope for this layer.
             if let (Some(k), Some(aid)) = (kernel, caller_agent_id) {
                 let ro = k.readonly_workspace_prefixes(aid);
                 if !ro.is_empty() {
-                    tracing::warn!(
+                    tracing::debug!(
                         agent_id = %aid,
                         readonly_prefixes = ?ro,
-                        "shell_exec: readonly_workspace_prefixes are not enforced for shell \
-                         commands — the spawned process may write to read-only named workspaces"
+                        "shell_exec: argv-level readonly enforcement engaged \
+                         (in-process syscalls bypass this layer — see #3822)"
                     );
                 }
             }
@@ -810,6 +910,74 @@ pub async fn execute_tool_raw(
                                 ..Default::default()
                             };
                         }
+                    }
+                }
+            }
+
+            // ACP routing: when an editor is bound to this session and
+            // declares `terminal` capability, host the command's PTY in
+            // the editor's terminal panel (#3313). All LibreFang-side
+            // policy checks above must pass first — see the SECURITY
+            // comment at the top of this arm.
+            //
+            // We also pass `cwd = Some(workspace_root)` (when
+            // available) so the editor terminal lands inside the
+            // agent's declared workspace, mirroring the local-exec
+            // path. Earlier revisions passed `None`, which let the
+            // editor pick its session cwd — fine for project-scoped
+            // editors, but invalid relative paths once the agent's
+            // own workspace differs from the editor's project root
+            // (e.g. a daemon-attached agent in `~/.librefang/agents/X`).
+            if let (Some(k), Some(sid)) = (kernel, session_id) {
+                if let Some(client) = k.acp_terminal_client(*sid) {
+                    if client.capabilities() {
+                        let cwd_for_acp = workspace_root.map(|p| p.to_path_buf());
+                        // Pick a platform-appropriate command interpreter.
+                        // ACP's trust model is same-user, same-host, so
+                        // the editor's host platform matches the
+                        // daemon's; `cfg!(windows)` gates correctly.
+                        // Hardcoding `sh -c` would fail on Windows
+                        // editors that don't ship a POSIX shell on PATH.
+                        let (shell, shell_arg) = if cfg!(windows) {
+                            ("cmd", "/C")
+                        } else {
+                            ("sh", "-c")
+                        };
+                        let result = client
+                            .run_command(
+                                shell.to_string(),
+                                vec![shell_arg.to_string(), command.to_string()],
+                                Vec::new(),
+                                cwd_for_acp,
+                                Some(64 * 1024),
+                            )
+                            .await;
+                        return match result {
+                            Ok(r) => {
+                                let suffix = if r.truncated {
+                                    "\n[output truncated]"
+                                } else {
+                                    ""
+                                };
+                                let exit_summary = match (r.exit_code, r.signal) {
+                                    (Some(0), _) => String::new(),
+                                    (Some(code), _) => format!("\n[exit code: {code}]"),
+                                    (None, Some(sig)) => format!("\n[signal: {sig}]"),
+                                    (None, None) => "\n[exit: unknown]".to_string(),
+                                };
+                                let is_err = r.exit_code.unwrap_or(1) != 0;
+                                ToolResult {
+                                    tool_use_id: tool_use_id.to_string(),
+                                    content: format!("{}{suffix}{exit_summary}", r.output),
+                                    is_error: is_err,
+                                    ..Default::default()
+                                }
+                            }
+                            Err(e) => ToolResult::error(
+                                tool_use_id.to_string(),
+                                format!("ACP terminal/* failed: {e}"),
+                            ),
+                        };
                     }
                 }
             }
@@ -1272,6 +1440,23 @@ pub async fn execute_tool(
     let shell_exec_full_mode = tool_name == "shell_exec"
         && exec_policy.is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
 
+    // Parse the session id once. Invalid UUIDs (legacy non-uuid session
+    // ids, channel-derived synthetic ids) leave this `None` so the ACP
+    // routing in `file_read` / `file_write` falls through to the
+    // local-fs path — same effect as not having the field at all.
+    //
+    // Computed up here (rather than at the `ToolExecContext`
+    // construction site below) so the deferred-approval branch can
+    // persist the SessionId into `DeferredToolExecution.session_id` —
+    // the field threads through v36's `deferred_payload` BLOB so a
+    // post-restart `Allow once` rebuilds the same routing context and
+    // resumes against the editor's `acp_fs_client` /
+    // `acp_terminal_client` instead of silently falling back to local
+    // fs / shell (#3313 review, H1).
+    let parsed_session_id = session_id
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .map(librefang_types::agent::SessionId);
+
     // Approval gate: check if this tool requires human approval before execution.
     // Uses sender/channel context for per-sender trust and channel-specific policies.
     if let Some(kh) = kernel {
@@ -1351,6 +1536,13 @@ pub async fn execute_tool(
                 // When the user gate demanded approval, hand-tagged agents
                 // must NOT auto-approve — see kernel `submit_tool_approval`.
                 force_human: force_approval,
+                // Persist the SessionId into the v36 deferred_payload
+                // so a post-restart `Allow once` re-binds to the same
+                // editor's `acp_fs_client` / `acp_terminal_client`
+                // (#3313 review, H1). `None` for non-UUID session
+                // strings or non-session contexts — same fallback as
+                // the live path. `SessionId: Copy`, no clone needed.
+                session_id: parsed_session_id,
             };
             match kh
                 .submit_tool_approval(agent_id_str, tool_name, &summary, deferred, session_id)
@@ -1402,6 +1594,9 @@ pub async fn execute_tool(
     }
 
     debug!(tool_name, "Executing tool");
+    // `parsed_session_id` is computed once at the top of this fn so
+    // both the deferred-approval payload (v36 H1 fix) and this
+    // ToolExecContext below see the same SessionId.
     let ctx = ToolExecContext {
         kernel,
         allowed_tools,
@@ -1423,6 +1618,7 @@ pub async fn execute_tool(
         process_registry,
         sender_id,
         channel,
+        session_id: parsed_session_id,
         spill_threshold_bytes: 0,
         max_artifact_bytes: 0,
         checkpoint_manager,
@@ -2632,6 +2828,159 @@ fn named_ws_prefixes_readonly(
     match (kernel, caller_agent_id) {
         (Some(k), Some(aid)) => k.readonly_workspace_prefixes(aid),
         _ => Vec::new(),
+    }
+}
+
+/// Validate that a file path stays inside the agent's allowed
+/// workspace set BEFORE the path is forwarded to an ACP client
+/// (#3313 review).
+///
+/// Returns `Some(error_message)` if the path is rejected (either
+/// because it contains `..` traversal or because the absolute path
+/// escapes every allowed prefix). Returns `None` for relative paths
+/// without `..` and for absolute paths inside the workspace.
+///
+/// **Why this is the editor's threat surface but ours too:** ACP
+/// editors faithfully serve whatever path the agent asks for. Without
+/// this guard an LLM could ask the editor to read `/etc/shadow` or
+/// `~/.ssh/id_ed25519` and the contents would land in the agent's
+/// next prompt as legitimate tool output. The editor has no way to
+/// distinguish "agent asked for a file" from "user clicked a file in
+/// the IDE." So the LibreFang side has to enforce the same workspace
+/// jail it applies to the local-fs path.
+///
+/// SECURITY (#3313 follow-up): `Path::starts_with` is component-based
+/// and does NOT collapse `..`, so the previous revision of this fn
+/// accepted `/<workspace_root>/../etc/shadow` because the first
+/// `<workspace_root>` components matched as a prefix and the
+/// `..`/`etc`/`shadow` components were ignored. Reject any `..`
+/// component up front — mirrors the input filter
+/// [`crate::workspace_sandbox::resolve_sandbox_path_ext`] applies on
+/// the local-fs side. Same rejection regardless of absolute-vs-
+/// relative so a relative `../../etc/shadow` (resolved by the editor
+/// against its declared cwd) can't slip past either.
+fn check_absolute_path_inside_workspace(
+    raw_path: Option<&str>,
+    workspace_root: Option<&Path>,
+    allowed_prefixes: &[std::path::PathBuf],
+) -> Option<String> {
+    let raw = raw_path?;
+    let p = Path::new(raw);
+    if p.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Some(format!(
+            "path '{raw}' contains '..' components which are forbidden; \
+             absolute paths must resolve inside the agent's workspace \
+             without traversal"
+        ));
+    }
+    if !p.is_absolute() {
+        return None;
+    }
+    if let Some(root) = workspace_root {
+        if p.starts_with(root) {
+            return None;
+        }
+    }
+    if allowed_prefixes.iter().any(|prefix| p.starts_with(prefix)) {
+        return None;
+    }
+    Some(format!(
+        "path '{raw}' is outside the agent's workspace and named-workspace allowlist; \
+         absolute paths must reside inside the agent's declared filesystem boundary"
+    ))
+}
+
+#[cfg(test)]
+mod path_check_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn absolute_inside_workspace_passes() {
+        let root = PathBuf::from("/ws");
+        assert!(
+            check_absolute_path_inside_workspace(Some("/ws/file.txt"), Some(&root), &[]).is_none()
+        );
+    }
+
+    #[test]
+    fn relative_path_passes() {
+        let root = PathBuf::from("/ws");
+        assert!(
+            check_absolute_path_inside_workspace(Some("subdir/file.txt"), Some(&root), &[])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn missing_path_passes() {
+        let root = PathBuf::from("/ws");
+        assert!(check_absolute_path_inside_workspace(None, Some(&root), &[]).is_none());
+    }
+
+    #[test]
+    fn absolute_outside_workspace_blocked() {
+        let root = PathBuf::from("/ws");
+        let err = check_absolute_path_inside_workspace(Some("/etc/passwd"), Some(&root), &[])
+            .expect("path outside workspace must be blocked");
+        assert!(err.contains("outside the agent's workspace"));
+    }
+
+    #[test]
+    fn absolute_inside_named_workspace_passes() {
+        let root = PathBuf::from("/ws");
+        let extra = PathBuf::from("/shared");
+        assert!(check_absolute_path_inside_workspace(
+            Some("/shared/data.txt"),
+            Some(&root),
+            std::slice::from_ref(&extra),
+        )
+        .is_none());
+    }
+
+    /// SECURITY regression test: `Path::starts_with` is component-based
+    /// and does not collapse `..`, so an absolute path of the form
+    /// `<root>/../<elsewhere>` previously bypassed the workspace jail
+    /// and reached the editor's `fs/read_text_file` because the leading
+    /// `<root>` components matched as a prefix and the `..` was ignored
+    /// during the comparison. The fix rejects any `..` component up
+    /// front.
+    #[test]
+    fn absolute_with_dotdot_traversal_blocked_even_under_workspace_root() {
+        let root = PathBuf::from("/ws");
+        let err = check_absolute_path_inside_workspace(Some("/ws/../etc/shadow"), Some(&root), &[])
+            .expect("`..` traversal must be blocked");
+        assert!(
+            err.contains("'..'"),
+            "error must call out the forbidden component, got: {err}"
+        );
+    }
+
+    #[test]
+    fn absolute_with_dotdot_traversal_blocked_under_named_workspace() {
+        let root = PathBuf::from("/ws");
+        let extra = PathBuf::from("/shared");
+        let err = check_absolute_path_inside_workspace(
+            Some("/shared/../etc/shadow"),
+            Some(&root),
+            std::slice::from_ref(&extra),
+        )
+        .expect("`..` traversal under named workspace must also be blocked");
+        assert!(err.contains("'..'"));
+    }
+
+    #[test]
+    fn relative_with_dotdot_traversal_blocked() {
+        // The editor would resolve relative paths against its declared
+        // cwd, but a relative `..` chain still trivially escapes the
+        // editor's own project root. Mirror the local-fs sandbox's
+        // refusal of `..` so neither wire path leaks the difference.
+        let root = PathBuf::from("/ws");
+        let err = check_absolute_path_inside_workspace(Some("../../etc/shadow"), Some(&root), &[])
+            .expect("relative `..` must be blocked");
+        assert!(err.contains("'..'"));
     }
 }
 
@@ -7101,6 +7450,8 @@ mod tests {
         ) {
         }
     }
+    impl AcpFsBridge for ApprovalKernel {}
+    impl AcpTerminalBridge for ApprovalKernel {}
 
     // ---- END role-trait impls (#3746) ----
 
@@ -7327,6 +7678,8 @@ mod tests {
         ) {
         }
     }
+    impl AcpFsBridge for ForceHumanCapturingKernel {}
+    impl AcpTerminalBridge for ForceHumanCapturingKernel {}
 
     // ---- END role-trait impls (#3746) ----
 
@@ -7915,6 +8268,8 @@ mod tests {
         ) {
         }
     }
+    impl AcpFsBridge for NamedWsKernel {}
+    impl AcpTerminalBridge for NamedWsKernel {}
 
     // ---- END role-trait impls (#3746) ----
 
@@ -10606,6 +10961,8 @@ mod tests {
         ) {
         }
     }
+    impl AcpFsBridge for SpawnCheckKernel {}
+    impl AcpTerminalBridge for SpawnCheckKernel {}
 
     // ---- END role-trait impls (#3746) ----
 

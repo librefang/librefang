@@ -38,6 +38,7 @@ import { Input } from "../components/ui/Input";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { PageHeader } from "../components/ui/PageHeader";
+import { PendingSkillsSection } from "../components/PendingSkillsSection";
 import { useUIStore } from "../lib/store";
 import {
   SkillHubBar,
@@ -1805,6 +1806,12 @@ export function SkillsPage() {
           </>
         }
       />
+
+      {/* Skill workshop pending review (#3328). Mounts above the
+          installed/browse tab bar so a fresh capture is the first
+          thing the operator sees on the Skills page; if the queue is
+          empty this collapses to a one-line empty state. */}
+      <PendingSkillsSection />
 
       {/* Tab bar */}
       <div className="flex gap-1 p-1 bg-surface rounded-xl border border-border-subtle w-fit">

@@ -32,6 +32,23 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             axum::routing::post(evolve_write_file).delete(evolve_remove_file),
         )
         .route("/skills/{name}/file", axum::routing::get(get_supporting_file))
+        // Skill workshop (#3328) — passive after-turn capture review.
+        .route(
+            "/skills/pending",
+            axum::routing::get(list_pending_candidates),
+        )
+        .route(
+            "/skills/pending/{id}",
+            axum::routing::get(show_pending_candidate),
+        )
+        .route(
+            "/skills/pending/{id}/approve",
+            axum::routing::post(approve_pending_candidate),
+        )
+        .route(
+            "/skills/pending/{id}/reject",
+            axum::routing::post(reject_pending_candidate),
+        )
         // Marketplace / ClawHub
         .route(
             "/marketplace/search",
@@ -480,6 +497,304 @@ pub async fn reload_skills(State(state): State<Arc<AppState>>) -> impl IntoRespo
         StatusCode::OK,
         Json(serde_json::json!({"status": "reloaded", "count": count})),
     )
+}
+
+// ─── Skill workshop pending review (#3328) ──────────────────────────
+
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+pub struct PendingListQuery {
+    /// Optional agent UUID filter. When set, only candidates from that
+    /// agent are returned. Omit for a workspace-wide list.
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
+/// GET /api/skills/pending — list skill-workshop pending candidates,
+/// oldest captured first. Optionally filtered by agent.
+#[utoipa::path(
+    get,
+    path = "/api/skills/pending",
+    tag = "skills",
+    params(PendingListQuery),
+    responses(
+        (status = 200, description = "List pending workshop candidates", body = crate::types::JsonObject)
+    )
+)]
+pub async fn list_pending_candidates(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<PendingListQuery>,
+) -> impl IntoResponse {
+    let skills_root = state.kernel.home_dir().join("skills");
+    let result = match q.agent.as_deref() {
+        Some(agent) => librefang_kernel::skill_workshop::storage::list_pending(&skills_root, agent),
+        None => librefang_kernel::skill_workshop::storage::list_pending_all(&skills_root),
+    };
+    match result {
+        Ok(candidates) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"candidates": candidates})),
+        ),
+        Err(librefang_kernel::skill_workshop::WorkshopError::InvalidId(id)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("invalid agent id (must be a UUID): {id}")})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("failed to read pending dir: {e}")})),
+        ),
+    }
+}
+
+/// GET /api/skills/pending/{id} — return a single pending candidate by id.
+#[utoipa::path(
+    get,
+    path = "/api/skills/pending/{id}",
+    tag = "skills",
+    params(
+        ("id" = String, Path, description = "Candidate UUID")
+    ),
+    responses(
+        (status = 200, description = "Pending candidate detail", body = crate::types::JsonObject),
+        (status = 404, description = "Candidate not found", body = crate::types::JsonObject)
+    )
+)]
+pub async fn show_pending_candidate(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let skills_root = state.kernel.home_dir().join("skills");
+    match librefang_kernel::skill_workshop::storage::load_candidate(&skills_root, &id) {
+        Ok(candidate) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"candidate": candidate})),
+        ),
+        Err(librefang_kernel::skill_workshop::WorkshopError::InvalidId(_)) => (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": format!("invalid candidate id (must be a UUID): {id}")}),
+            ),
+        ),
+        Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("candidate '{id}' not found")})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("failed to load candidate: {e}")})),
+        ),
+    }
+}
+
+/// POST /api/skills/pending/{id}/approve — promote a pending candidate
+/// into the active skill registry via `evolution::create_skill`.
+#[utoipa::path(
+    post,
+    path = "/api/skills/pending/{id}/approve",
+    tag = "skills",
+    params(
+        ("id" = String, Path, description = "Candidate UUID")
+    ),
+    responses(
+        (status = 200, description = "Candidate promoted to active skill", body = crate::types::JsonObject),
+        (status = 404, description = "Candidate not found", body = crate::types::JsonObject),
+        (status = 409, description = "Promotion blocked (security scan or naming collision)", body = crate::types::JsonObject)
+    )
+)]
+pub async fn approve_pending_candidate(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let skills_root = state.kernel.home_dir().join("skills");
+    match librefang_kernel::skill_workshop::storage::approve_candidate(
+        &skills_root,
+        &skills_root,
+        &id,
+    ) {
+        Ok(result) => {
+            // Successful promotion landed a new directory under
+            // `skills_root`; refresh the in-memory registry so the next
+            // turn's prompt build sees the new skill.
+            state.kernel.reload_skills();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "approved",
+                    "candidate_id": id,
+                    "skill_name": result.skill_name,
+                    "version": result.version,
+                    "message": result.message,
+                })),
+            )
+        }
+        Err(librefang_kernel::skill_workshop::WorkshopError::InvalidId(_)) => (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": format!("invalid candidate id (must be a UUID): {id}")}),
+            ),
+        ),
+        Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("candidate '{id}' not found")})),
+        ),
+        Err(e @ librefang_kernel::skill_workshop::WorkshopError::SecurityBlocked(_)) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+        Err(librefang_kernel::skill_workshop::WorkshopError::Skill(
+            librefang_skills::SkillError::AlreadyInstalled(skill_name),
+        )) => {
+            // `AlreadyInstalled` from `evolution::create_skill` is
+            // ambiguous and we MUST NOT collapse the two cases:
+            //
+            //   * Phantom pending — a previous approve of THIS candidate
+            //     promoted the skill but the pending-file cleanup failed
+            //     transiently (Windows AV holding a handle, read-only
+            //     mount mid-clean-up). The active body is byte-identical
+            //     to the candidate's `prompt_context`. Idempotent
+            //     recovery: drop the pending row, return 200
+            //     `already_promoted`.
+            //   * Name collision — the user already has an unrelated
+            //     skill with the same name (manual install, marketplace,
+            //     prior `evolve`, or a `synth_name` fallback collision).
+            //     The active body differs from the candidate body.
+            //     Silently dropping the pending row in this case would
+            //     destroy the candidate the user wanted reviewed without
+            //     them ever seeing it — a real data-loss bug. Return 409
+            //     and KEEP the pending file so the reviewer can rename
+            //     and retry.
+            //
+            // Decide by reading the active skill's `prompt_context.md`
+            // and comparing byte-for-byte against the candidate's stored
+            // `prompt_context` (`evolution::create_skill` writes the
+            // string verbatim — no trim, no normalisation — so equality
+            // is well-defined). If we cannot load the candidate (e.g.
+            // it was already cleaned up by a concurrent reject), the
+            // recovery target state is reached anyway → 200.
+            let candidate = match librefang_kernel::skill_workshop::storage::load_candidate(
+                &skills_root,
+                &id,
+            ) {
+                Ok(c) => Some(c),
+                Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => None,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "error": format!(
+                                "Active skill '{skill_name}' already exists; failed to read candidate to disambiguate phantom vs collision: {e}"
+                            ),
+                        })),
+                    );
+                }
+            };
+            let bodies_match = match &candidate {
+                None => true, // Concurrent cleanup beat us — terminal state already reached.
+                Some(cand) => {
+                    let active_body_path = skills_root.join(&skill_name).join("prompt_context.md");
+                    match std::fs::read_to_string(&active_body_path) {
+                        Ok(active) => active == cand.prompt_context,
+                        // If we can't read the active body we cannot prove
+                        // it's a phantom — fall through to the collision
+                        // branch so we never drop the pending file.
+                        Err(_) => false,
+                    }
+                }
+            };
+            if bodies_match {
+                // Phantom recovery. `NotFound` from the nested reject is
+                // the desired terminal state (a concurrent reject / CLI
+                // cleanup beat us to the row), not a failure.
+                match librefang_kernel::skill_workshop::storage::reject_candidate(&skills_root, &id)
+                {
+                    Ok(()) | Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "status": "already_promoted",
+                            "candidate_id": id,
+                            "skill_name": skill_name,
+                            "message": format!(
+                                "Active skill '{skill_name}' already exists with the same body; pending entry cleared.",
+                            ),
+                        })),
+                    ),
+                    Err(e) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "error": format!(
+                                "Active skill '{skill_name}' already exists, but failed to clear pending entry: {e}"
+                            ),
+                        })),
+                    ),
+                }
+            } else {
+                // Real name collision. Pending file is intentionally
+                // left in place so the reviewer can rename and retry
+                // without losing their candidate.
+                (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "Skill '{skill_name}' already exists with different content. \
+                             Edit the candidate's `name` field in its pending TOML \
+                             (or reject it and capture again under a different rule) and retry."
+                        ),
+                        "kind": "name_collision",
+                        "candidate_id": id,
+                        "skill_name": skill_name,
+                    })),
+                )
+            }
+        }
+        Err(librefang_kernel::skill_workshop::WorkshopError::Skill(e)) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": format!("promotion rejected: {e}")})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("failed to approve candidate: {e}")})),
+        ),
+    }
+}
+
+/// POST /api/skills/pending/{id}/reject — drop a pending candidate
+/// without promoting.
+#[utoipa::path(
+    post,
+    path = "/api/skills/pending/{id}/reject",
+    tag = "skills",
+    params(
+        ("id" = String, Path, description = "Candidate UUID")
+    ),
+    responses(
+        (status = 200, description = "Candidate dropped", body = crate::types::JsonObject),
+        (status = 404, description = "Candidate not found", body = crate::types::JsonObject)
+    )
+)]
+pub async fn reject_pending_candidate(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let skills_root = state.kernel.home_dir().join("skills");
+    match librefang_kernel::skill_workshop::storage::reject_candidate(&skills_root, &id) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "rejected", "candidate_id": id})),
+        ),
+        Err(librefang_kernel::skill_workshop::WorkshopError::InvalidId(_)) => (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": format!("invalid candidate id (must be a UUID): {id}")}),
+            ),
+        ),
+        Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("candidate '{id}' not found")})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("failed to reject candidate: {e}")})),
+        ),
+    }
 }
 
 /// GET /api/skills/registry — List official skills from the local registry cache (~/.librefang/registry/skills).

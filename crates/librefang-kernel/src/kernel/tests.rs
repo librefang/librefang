@@ -218,6 +218,7 @@ async fn test_notify_escalated_approval_prefers_request_route_to() {
         route_to: vec![explicit_target],
         escalation_count: 1,
         session_id: None,
+        tool_use_id: None,
     };
 
     kernel.notify_escalated_approval(&req, req.id).await;
