@@ -935,3 +935,29 @@ async fn cron_job_update_accepts_public_webhook_in_delivery_targets() {
         "public webhook must still be accepted: {response:?}"
     );
 }
+
+// `/api/schedules/{id}` and `/api/cron/jobs/{id}` are different routes
+// that ultimately funnel into the same `CronScheduler::update_job` path,
+// so both gained the `InvalidInput → 400` mapping in #4732. Without a
+// test on this route the mapping is unverified — a future refactor that
+// drops the arm would silently regress SSRF rejection back to a 404
+// "Schedule not found" on this surface only.
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_update_rejects_ssrf_webhook_in_delivery_targets() {
+    let h = boot().await;
+    let id = seed_cron_job(&h).await;
+
+    let body = serde_json::json!({
+        "delivery_targets": [
+            {"type": "webhook", "url": "http://169.254.169.254/latest/meta-data/"}
+        ]
+    });
+    let (status, response) =
+        json_request(&h, Method::PUT, &format!("/api/schedules/{id}"), Some(body)).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "must be 400, not 404: SSRF rejection on /api/schedules/{{id}} \
+         must surface as bad request, not as a missing-resource error: {response:?}"
+    );
+}
