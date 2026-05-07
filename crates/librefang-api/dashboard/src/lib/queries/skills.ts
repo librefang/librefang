@@ -3,6 +3,8 @@ import {
   listSkills,
   getSkillDetail,
   getSupportingFile,
+  listPendingCandidates,
+  getPendingCandidate,
   clawhubBrowse,
   clawhubSearch,
   clawhubGetSkill,
@@ -109,6 +111,22 @@ export const skillQueries = {
       queryFn: fanghubListSkills,
       staleTime: BROWSE_STALE_MS,
     }),
+  // Skill workshop (#3328) — passive after-turn capture review.
+  pendingList: (agent?: string | null) =>
+    queryOptions({
+      queryKey: skillKeys.pendingList(agent ?? null),
+      queryFn: () => listPendingCandidates(agent ?? undefined),
+      staleTime: STALE_MS,
+      refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false,
+    }),
+  pendingDetail: (id: string) =>
+    queryOptions({
+      queryKey: skillKeys.pendingDetail(id),
+      queryFn: () => getPendingCandidate(id),
+      enabled: !!id,
+      staleTime: STALE_MS,
+    }),
 };
 
 export function useSkills(options: QueryOverrides = {}) {
@@ -153,4 +171,15 @@ export function useSkillHubSkill(slug: string, options: QueryOverrides = {}) {
 
 export function useFangHubSkills(options: QueryOverrides = {}) {
   return useQuery(withOverrides(skillQueries.fanghubList(), options));
+}
+
+export function usePendingSkillCandidates(
+  agent?: string | null,
+  options: QueryOverrides = {},
+) {
+  return useQuery(withOverrides(skillQueries.pendingList(agent), options));
+}
+
+export function usePendingSkillCandidate(id: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(skillQueries.pendingDetail(id), options));
 }

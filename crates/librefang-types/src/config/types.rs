@@ -1038,6 +1038,18 @@ pub enum AuxTask {
     /// Tool-result history fold (#3347 3/N): summarise stale tool results
     /// from turns older than `history_fold_after_turns` into a compact stub.
     Fold,
+    /// Skill workshop (#3328) candidate review: classify whether a
+    /// captured workflow is worth promoting to a draft skill, and refine
+    /// its name / one-line summary if so. Cheap classification call,
+    /// runs at most once per turn that produced a heuristic match.
+    SkillReview,
+    /// Skill workshop (#3328) — separate aux slot from `SkillReview` so
+    /// the workshop's after-turn capture review can be costed and
+    /// configured independently of the existing `background_skill_review`
+    /// pipeline (which also resolves through `SkillReview`). Operators
+    /// can disable one without disabling the other; budget tooling sees
+    /// distinct line items.
+    SkillWorkshopReview,
 }
 
 impl AuxTask {
@@ -1050,6 +1062,8 @@ impl AuxTask {
             AuxTask::Vision => "vision",
             AuxTask::BrowserVision => "browser_vision",
             AuxTask::Fold => "fold",
+            AuxTask::SkillReview => "skill_review",
+            AuxTask::SkillWorkshopReview => "skill_workshop_review",
         }
     }
 }

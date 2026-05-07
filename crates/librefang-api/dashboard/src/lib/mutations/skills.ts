@@ -13,6 +13,8 @@ import {
   evolveDeleteSkill,
   evolveWriteFile,
   evolveRemoveFile,
+  approvePendingCandidate,
+  rejectPendingCandidate,
 } from "../http/client";
 import {
   skillKeys,
@@ -205,6 +207,38 @@ export function useEvolveRemoveFile() {
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: skillKeys.detail(variables.name) });
       qc.removeQueries({ queryKey: skillKeys.supportingFile(variables.name, variables.path) });
+    },
+  });
+}
+
+// Skill workshop (#3328) — approve / reject pending candidates.
+// Approve also grew a new active skill, so every skill surface (lists,
+// hubs' `is_installed` flags) is invalidated alongside the pending tree.
+// Reject only touches the pending tree.
+
+export function useApprovePendingCandidate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id }: { id: string }) => approvePendingCandidate(id),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: skillKeys.pending() });
+      qc.removeQueries({ queryKey: skillKeys.pendingDetail(variables.id) });
+      // A new active skill landed under `~/.librefang/skills/<name>/`,
+      // so the installed-skills list and every hub's `is_installed`
+      // flag may have flipped — same invalidation set as
+      // useInstallSkill / useReloadSkills.
+      invalidateAllSkillSurfaces(qc);
+    },
+  });
+}
+
+export function useRejectPendingCandidate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id }: { id: string }) => rejectPendingCandidate(id),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: skillKeys.pending() });
+      qc.removeQueries({ queryKey: skillKeys.pendingDetail(variables.id) });
     },
   });
 }

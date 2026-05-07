@@ -412,6 +412,18 @@ impl LibreFangKernel {
         self.memory.substrate_ref()
     }
 
+    /// Auxiliary LLM client snapshot (cheap-tier fallback chains for
+    /// side tasks: compression, titles, search, vision, fold,
+    /// skill_review, skill_workshop_review). `ArcSwap` snapshot lives
+    /// on [`LlmSubsystem::aux_client`] (post-#3565 refactor) so
+    /// hot-reload of `[llm.auxiliary]` swaps the resolver without
+    /// restarting the daemon — callers always see the latest
+    /// committed config.
+    #[inline]
+    pub fn aux_client(&self) -> Arc<librefang_runtime::aux_client::AuxClient> {
+        self.llm.aux_client.load_full()
+    }
+
     /// Proactive memory store. Delegates to
     /// [`MemorySubsystem::proactive_store`].
     #[inline]

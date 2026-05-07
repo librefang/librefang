@@ -89,6 +89,14 @@ export const skillKeys = {
     [...skillKeys.detail(name), "supportingFile"] as const,
   supportingFile: (name: string, path: string) =>
     [...skillKeys.supportingFiles(name), path] as const,
+  // Skill workshop (#3328) pending-candidate queries. Hierarchical so
+  // `invalidateQueries({ queryKey: skillKeys.pending() })` clears every
+  // pending list / detail at once after an approve / reject mutation.
+  pending: () => [...skillKeys.all, "pending"] as const,
+  pendingList: (agent?: string | null) =>
+    [...skillKeys.pending(), "list", agent ?? null] as const,
+  pendingDetail: (id: string) =>
+    [...skillKeys.pending(), "detail", id] as const,
 };
 
 export const clawhubKeys = {

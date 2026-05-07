@@ -1791,6 +1791,79 @@ export async function getSupportingFile(name: string, path: string): Promise<Sup
   return get<SupportingFileContents>(`/api/skills/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}`);
 }
 
+// Skill workshop pending review (#3328)
+
+export type PendingCaptureSource =
+  | { kind: "explicit_instruction"; trigger: string }
+  | { kind: "user_correction"; trigger: string }
+  | { kind: "repeated_tool_pattern"; tools: string; repeat_count: number };
+
+export interface PendingProvenance {
+  user_message_excerpt: string;
+  assistant_response_excerpt?: string | null;
+  turn_index: number;
+}
+
+export interface PendingCandidate {
+  id: string;
+  agent_id: string;
+  session_id?: string | null;
+  /** RFC3339 timestamp set by the workshop when the candidate was captured. */
+  captured_at: string;
+  source: PendingCaptureSource;
+  name: string;
+  description: string;
+  prompt_context: string;
+  provenance: PendingProvenance;
+}
+
+// Discriminated on `status`:
+//   * `approved` — fresh promotion; `version` carries the new skill's
+//     initial version string.
+//   * `already_promoted` — the active skill already existed (a previous
+//     approve promoted it but the pending-file cleanup failed). The
+//     server idempotently dropped the phantom pending row and returned
+//     200; no `version` field, since this call did not perform a write.
+//     UI should treat both as a successful resolution of the candidate.
+export type PendingApprovalResult =
+  | {
+      status: "approved";
+      candidate_id: string;
+      skill_name: string;
+      version?: string;
+      message: string;
+    }
+  | {
+      status: "already_promoted";
+      candidate_id: string;
+      skill_name: string;
+      message: string;
+    };
+
+export async function listPendingCandidates(agent?: string): Promise<PendingCandidate[]> {
+  const query = agent ? `?agent=${encodeURIComponent(agent)}` : "";
+  const data = await get<{ candidates?: PendingCandidate[] }>(`/api/skills/pending${query}`);
+  return data.candidates ?? [];
+}
+
+export async function getPendingCandidate(id: string): Promise<PendingCandidate> {
+  const data = await get<{ candidate: PendingCandidate }>(
+    `/api/skills/pending/${encodeURIComponent(id)}`,
+  );
+  return data.candidate;
+}
+
+export async function approvePendingCandidate(id: string): Promise<PendingApprovalResult> {
+  return post<PendingApprovalResult>(`/api/skills/pending/${encodeURIComponent(id)}/approve`, {});
+}
+
+export async function rejectPendingCandidate(id: string): Promise<{ status: "rejected"; candidate_id: string }> {
+  return post<{ status: "rejected"; candidate_id: string }>(
+    `/api/skills/pending/${encodeURIComponent(id)}/reject`,
+    {},
+  );
+}
+
 // ClawHub types
 export interface ClawHubBrowseItem {
   slug: string;

@@ -978,6 +978,11 @@ pub struct AgentManifest {
     /// `None` means inherit from kernel config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_exec_backend: Option<crate::tool_exec::BackendKind>,
+    /// Skill workshop (#3328): passive after-turn capture of reusable
+    /// workflows from successful interactions. Default disabled — opt-in
+    /// per agent via `[skill_workshop]` in `agent.toml`.
+    #[serde(default)]
+    pub skill_workshop: SkillWorkshopConfig,
 }
 
 /// Access mode for a named workspace.
@@ -1083,6 +1088,7 @@ impl Default for AgentManifest {
             max_history_messages: None,
             cache_context: false,
             tool_exec_backend: None,
+            skill_workshop: SkillWorkshopConfig::default(),
         }
     }
 }
@@ -1116,6 +1122,141 @@ pub struct ManifestCapabilities {
     /// Allowed OFP peer patterns.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub ofp_connect: Vec<String>,
+}
+
+/// Skill workshop configuration (#3328).
+///
+/// Controls passive, after-turn capture of reusable workflows from
+/// successful interactions. When the user spends multiple turns teaching
+/// the agent a multi-step workflow, the workshop detects the teaching
+/// signal (`from now on, always X` / `no, do it like Y` / repeated tool
+/// patterns) and stores a draft skill in
+/// `~/.librefang/skills/pending/<agent_id>/<uuid>.toml` for review.
+///
+/// **Default on with the conservative knob set** (`enabled=true`,
+/// `auto_capture=true`, `review_mode="heuristic"` so no LLM call,
+/// `approval_policy="pending"` so no auto-promote, `max_pending=20`).
+/// Candidates land in `pending/` and wait for human review via
+/// `librefang skill pending approve <id>` (CLI) or the Skills page
+/// (dashboard). With `approval_policy = "auto"`, the workshop still
+/// writes the candidate to `pending/` first — for the audit trail and
+/// to give the prompt-injection scan a place to fail loudly — and then
+/// promotes it through `evolution::create_skill` and removes the
+/// pending file. Either way the active skill goes through the same
+/// `SkillVerifier::scan_prompt_content` gate that guards marketplace
+/// skills.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillWorkshopConfig {
+    /// Master switch. When `false`, the after-turn hook is a no-op for
+    /// this agent (no scanning, no LLM call, no disk write).
+    pub enabled: bool,
+    /// When `true`, the after-turn hook runs the heuristic / LLM
+    /// capture pass. When `false`, the hook short-circuits before
+    /// scanning, so no new candidates are produced — the
+    /// approval-side CLI / dashboard / API still work over whatever
+    /// is already in `pending/`. Independent of `enabled` so an
+    /// operator can pause capture on a single agent during a busy
+    /// session without flipping the master switch.
+    pub auto_capture: bool,
+    /// What the workshop does with a positively-classified candidate.
+    pub approval_policy: ApprovalPolicy,
+    /// How candidates are classified.
+    pub review_mode: ReviewMode,
+    /// Maximum number of pending candidates retained per agent. When the
+    /// limit is reached, the oldest candidate (by `captured_at`) is
+    /// deleted before the new one is written. Set to `0` to skip the
+    /// disk write entirely (the scanner still runs; if you want to
+    /// skip the scan as well, use `auto_capture = false`).
+    pub max_pending: u32,
+    /// Optional time-to-live for pending candidates, in days. When set
+    /// to `Some(n)` with `n > 0`, `save_candidate` prunes any pending
+    /// candidate whose `captured_at` is older than `n` days before
+    /// writing the new one — bounds the worst case where a user opts
+    /// in but never reviews the pending tree. `None` (default) and
+    /// `Some(0)` both keep the historical behaviour: candidates only
+    /// age out when the per-agent `max_pending` cap evicts them by
+    /// LRU. `Some(0)` is treated as "disabled" rather than "expire
+    /// everything" because the latter would be a footgun for an
+    /// operator who configured zero expecting the disabled meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pending_age_days: Option<u32>,
+}
+
+impl Default for SkillWorkshopConfig {
+    fn default() -> Self {
+        // Default-on with the conservative knob set: heuristic-only
+        // review (no LLM cost), pending policy (no auto-promote into
+        // the active registry, every candidate waits for human approve
+        // / reject), 20-candidate cap (oldest evicts on overflow).
+        // Heuristic mode is microseconds of regex per turn plus a small
+        // toml file when a candidate lands, so the cost regression vs
+        // pre-#3328 is well under the noise floor.
+        //
+        // Operators who want the LLM refinement pass set
+        // `review_mode = "threshold_llm"`; operators who want to
+        // disable the feature wholesale set `enabled = false`.
+        Self {
+            enabled: true,
+            auto_capture: true,
+            approval_policy: ApprovalPolicy::Pending,
+            review_mode: ReviewMode::Heuristic,
+            max_pending: 20,
+            // No TTL by default — the cap is the only aging mechanism
+            // unless the operator opts in. Avoids a second silent
+            // surprise on top of the default-on flip.
+            max_pending_age_days: None,
+        }
+    }
+}
+
+/// What happens to a positively-classified skill workshop candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApprovalPolicy {
+    /// Default. Write the candidate to
+    /// `~/.librefang/skills/pending/<agent_id>/<uuid>.toml`. The skill
+    /// is not loaded into the active registry until a user approves it.
+    #[default]
+    Pending,
+    /// Bypass review — write directly to `~/.librefang/skills/active/`
+    /// and reload the skill registry. The same prompt-injection scan
+    /// that gates marketplace skills still applies. Intended for trust-
+    /// established power-user setups; do not enable on shared accounts.
+    Auto,
+}
+
+/// How a skill workshop candidate is classified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewMode {
+    /// Cheap pattern match only — no LLM call, no token spend.
+    #[default]
+    Heuristic,
+    /// Heuristic gate first; only candidates that pass the heuristic
+    /// are forwarded to a cheap auxiliary LLM
+    /// (`AuxTask::SkillWorkshopReview`) for confirmation and
+    /// refinement. The LLM may reject a candidate that the heuristic
+    /// accepted, but it cannot resurrect one the heuristic dropped —
+    /// keeps the LLM call rate bounded by the heuristic's hit rate.
+    /// `both` from openclaw's vocabulary is accepted as an alias and
+    /// is functionally identical: a parallel "run both gates
+    /// independently and union accepts" mode would require feeding
+    /// the LLM raw turn text without a heuristic seed and is
+    /// out-of-scope for the current pipeline.
+    #[serde(
+        alias = "threshold-llm",
+        alias = "threshold_llm",
+        alias = "both",
+        alias = "Both"
+    )]
+    ThresholdLlm,
+    /// Run the heuristic scanners but drop every hit before writing
+    /// to disk. No new candidates are produced. Use `auto_capture =
+    /// false` instead if you want to also skip the regex scan; this
+    /// variant exists for the test path that wants the scanner code
+    /// exercised without polluting the pending tree.
+    None,
 }
 
 /// Human-readable session label (e.g., "support inbox", "research").

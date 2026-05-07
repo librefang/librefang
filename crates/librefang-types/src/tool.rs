@@ -162,6 +162,22 @@ pub struct DeferredToolExecution {
     /// tool surface (RBAC M3, issue #3054 Phase 2).
     #[serde(default, skip_serializing_if = "is_false")]
     pub force_human: bool,
+    /// LibreFang `SessionId` the deferred tool will resume in. Threaded
+    /// through so a daemon-restart `Allow once` (v36 deferred-payload
+    /// restore path) can rebuild `ToolExecContext.session_id` and route
+    /// the resumed tool through the *original* editor's `acp_fs_client`
+    /// / `acp_terminal_client` rather than silently falling back to
+    /// local fs / local shell (#3313 review).
+    ///
+    /// `Option<_>` + `#[serde(default)]` so:
+    ///
+    /// 1. Surfaces that don't track session ids (synchronous
+    ///    `request_approval`) just leave it `None`.
+    /// 2. Pre-existing v36 rows persisted before this field was added
+    ///    deserialise cleanly with `None` — they fall back to local-fs
+    ///    routing on resume, which is the historical behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<crate::agent::SessionId>,
 }
 
 #[inline]
@@ -1123,6 +1139,7 @@ mod tests {
             channel: Some("telegram".to_string()),
             workspace_root: Some(std::path::PathBuf::from("/tmp")),
             force_human: false,
+            session_id: None,
         };
         let json = serde_json::to_string(&deferred).unwrap();
         let deserialized: DeferredToolExecution = serde_json::from_str(&json).unwrap();

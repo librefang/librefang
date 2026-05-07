@@ -96,6 +96,9 @@ export {
   listSkills,
   getSkillDetail,
   getSupportingFile,
+  // skill workshop pending review (#3328)
+  listPendingCandidates,
+  getPendingCandidate,
   clawhubBrowse,
   clawhubSearch,
   clawhubGetSkill,
@@ -275,6 +278,9 @@ export {
   evolveRemoveFile,
   installSkill,
   uninstallSkill,
+  // skill workshop pending review (#3328)
+  approvePendingCandidate,
+  rejectPendingCandidate,
   clawhubInstall,
   clawhubCnInstall,
   skillhubInstall,
