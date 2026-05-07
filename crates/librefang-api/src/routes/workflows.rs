@@ -1776,6 +1776,11 @@ pub async fn update_schedule(
                 Json(serde_json::json!({"status": "updated", "schedule_id": id})),
             )
         }
+        // SSRF / shape rejections must map to 400, not the catch-all 404
+        // — see the parallel branch in `update_cron_job` (#4732).
+        Err(librefang_types::error::LibreFangError::InvalidInput(msg)) => {
+            ApiErrorResponse::bad_request(msg).into_json_tuple()
+        }
         Err(e) => ApiErrorResponse::not_found(format!("Schedule not found: {e}")).into_json_tuple(),
     }
 }
@@ -2039,6 +2044,14 @@ pub async fn update_cron_job(
                         StatusCode::OK,
                         Json(serde_json::to_value(&job).unwrap_or_default()),
                     )
+                }
+                // SSRF / shape rejections from `validate_cron_delivery*`
+                // surface as `InvalidInput` and must map to 400, not the
+                // catch-all 404 (#4732). 404 here would silently mask a
+                // refused webhook host as "schedule not found", letting
+                // attacker-controlled clients confuse the failure mode.
+                Err(librefang_types::error::LibreFangError::InvalidInput(msg)) => {
+                    ApiErrorResponse::bad_request(msg).into_json_tuple()
                 }
                 Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
             }

@@ -235,7 +235,7 @@ params = { region = "us" }
     expect(result.form.autonomous.enabled).toBe(true);
     expect(result.form.autonomous.max_iterations).toBe("100");
     expect(result.form.autonomous.heartbeat_channel).toBe("telegram");
-    expect(result.form.fallback_models).toEqual([
+    expect(result.form.fallback_models.map(({ _uid, ...rest }) => rest)).toEqual([
       {
         provider: "anthropic",
         model: "claude-3-5-sonnet",
@@ -244,7 +244,7 @@ params = { region = "us" }
         extras: {},
       },
     ]);
-    expect(result.form.context_injection).toEqual([
+    expect(result.form.context_injection.map(({ _uid, ...rest }) => rest)).toEqual([
       { name: "policy", content: "Always be polite.", position: "before_user", condition: "" },
     ]);
     // Genuinely unknown stuff (model.custom_provider_param, [tools.*])
@@ -569,7 +569,17 @@ params = { region = "us" }
     if (!reparsed.ok) return;
 
     // The form state and extras should match exactly after a full round-trip.
-    expect(reparsed.form).toEqual(parsed.form);
+    // _uid is an ephemeral React key, regenerated on each parse, so strip it.
+    const stripUids = <
+      T extends Record<string, unknown> & { _uid?: string },
+    >(items: T[]): Omit<T, "_uid">[] =>
+      items.map(({ _uid, ...rest }) => rest) as Omit<T, "_uid">[];
+    const cleanForm = (f: typeof parsed.form) => ({
+      ...f,
+      fallback_models: stripUids(f.fallback_models),
+      context_injection: stripUids(f.context_injection),
+    });
+    expect(cleanForm(reparsed.form)).toEqual(cleanForm(parsed.form));
     expect(reparsed.extras).toEqual(parsed.extras);
   });
 });

@@ -9,6 +9,7 @@
  * stamp every entry with its origin.
  */
 import { Boxes, Check, Loader2, AlertCircle } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { SKILL_HUBS, type SkillHub, type SkillHubId, getSkillHub } from "../lib/skillHubs";
 
 export type HubFilter = "all" | SkillHubId;
@@ -89,6 +90,7 @@ function HubPill({
   health: HubHealth | undefined;
   onClick: () => void;
 }) {
+  const { t } = useTranslation();
   const HealthIcon =
     health === "down" ? AlertCircle : health === "checking" ? Loader2 : Check;
   const showSpinner = health === "checking";
@@ -96,6 +98,7 @@ function HubPill({
     <button
       type="button"
       onClick={onClick}
+      aria-pressed={active}
       className={`px-2.5 py-1.5 text-[12px] rounded-md border inline-flex items-center gap-1.5 transition-colors cursor-pointer font-medium ${
         active ? "" : "hover:bg-main/40"
       }`}
@@ -104,7 +107,7 @@ function HubPill({
         borderColor: active ? `${hub.color}60` : "var(--color-border-subtle)",
         color: active ? hub.color : "var(--color-text-main)",
       }}
-      title={`${hub.domain}${health === "down" ? " · unreachable" : health === "checking" ? " · checking…" : ""}`}
+      title={`${hub.domain}${health === "down" ? ` · ${t("skills.hub_unreachable")}` : health === "checking" ? ` · ${t("skills.hub_checking")}` : ""}`}
     >
       <span className="text-[13px] leading-none">{hub.glyph}</span>
       <span>{hub.name}</span>
@@ -129,6 +132,7 @@ export function SkillHubBar({
   totalCount,
 }: SkillHubBarProps) {
   const allActive = hubFilter === "all";
+  const { t } = useTranslation();
   return (
     <div className="flex flex-wrap items-stretch gap-2">
       <button
@@ -141,7 +145,7 @@ export function SkillHubBar({
         }`}
       >
         <Boxes className="w-3.5 h-3.5" />
-        All hubs
+        {t("skills.all_hubs")}
         {typeof totalCount === "number" && (
           <span className="font-mono text-[10.5px] text-text-dim/80 tabular-nums">
             {totalCount}

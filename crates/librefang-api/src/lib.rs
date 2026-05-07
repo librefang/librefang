@@ -131,6 +131,7 @@ pub mod openapi;
 pub mod password_hash;
 pub mod rate_limiter;
 pub mod routes;
+pub mod secrets_env;
 pub mod server;
 pub mod stream_chunker;
 pub mod stream_dedup;

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Plus, Trash2, ShieldCheck, ShieldOff, AlertTriangle } from "lucide-react";
 import {
@@ -30,18 +30,19 @@ const RULE_IDS: TaintRuleId[] = [
   "sensitive_key_name",
 ];
 
-/** Short, human-readable hint shown next to each rule ID. */
-const RULE_LABELS: Record<TaintRuleId, string> = {
-  authorization_literal: "Blocks `Authorization:` header prefix",
-  key_value_secret: "Blocks `key=value` / `key: value` secret shapes",
-  well_known_prefix: "Blocks `sk-` / `ghp_` / `AKIA` / `AIza` prefixes",
-  opaque_token: "Blocks long mixed-alnum opaque tokens",
-  pii_email: "Blocks e-mail addresses",
-  pii_phone: "Blocks phone numbers",
-  pii_credit_card: "Blocks credit-card numbers",
-  pii_ssn: "Blocks Social Security numbers",
-  sensitive_key_name: "Blocks JSON keys named `authorization`/`api_key`/...",
-};
+function getRuleLabels(t: (key: string, fallback: string) => string): Record<TaintRuleId, string> {
+  return {
+    authorization_literal: t("mcp.taint_rule_label.authorization_literal", "Blocks `Authorization:` header prefix"),
+    key_value_secret: t("mcp.taint_rule_label.key_value_secret", "Blocks `key=value` / `key: value` secret shapes"),
+    well_known_prefix: t("mcp.taint_rule_label.well_known_prefix", "Blocks `sk-` / `ghp_` / `AKIA` / `AIza` prefixes"),
+    opaque_token: t("mcp.taint_rule_label.opaque_token", "Blocks long mixed-alnum opaque tokens"),
+    pii_email: t("mcp.taint_rule_label.pii_email", "Blocks e-mail addresses"),
+    pii_phone: t("mcp.taint_rule_label.pii_phone", "Blocks phone numbers"),
+    pii_credit_card: t("mcp.taint_rule_label.pii_credit_card", "Blocks credit-card numbers"),
+    pii_ssn: t("mcp.taint_rule_label.pii_ssn", "Blocks Social Security numbers"),
+    sensitive_key_name: t("mcp.taint_rule_label.sensitive_key_name", "Blocks JSON keys named `authorization`/`api_key`/..."),
+  };
+}
 
 type DraftPaths = Record<string, McpTaintPathPolicy>;
 type DraftTools = Record<string, McpTaintToolPolicy>;
@@ -136,9 +137,7 @@ export function TaintPolicyEditor({
     const policy: McpTaintPolicy | undefined = Object.keys(cleaned).length
       ? { tools: cleaned }
       : undefined;
-    const id =
-      (server as unknown as { id?: string; name?: string }).id ??
-      (server as unknown as { name: string }).name;
+    const id = server.id ?? server.name;
     mutation.mutate(
       {
         id,
@@ -286,6 +285,7 @@ function ToolPolicyRow({
 }) {
   const { t } = useTranslation();
   const [localName, setLocalName] = useState(name);
+  useEffect(() => { setLocalName(name); }, [name]);
   const [ruleSetsText, setRuleSetsText] = useState((policy.rule_sets ?? []).join(", "));
   // Names typed by the operator that don't match any registered
   // `[[taint_rules]]` set — flagged inline so typos don't sit silent
@@ -477,7 +477,9 @@ function PathRow({
   onRemove: () => void;
 }) {
   const { t } = useTranslation();
+  const ruleLabels = useMemo(() => getRuleLabels(t), [t]);
   const [draft, setDraft] = useState(pathKey);
+  useEffect(() => { setDraft(pathKey); }, [pathKey]);
   const skipSet = useMemo(() => new Set(policy.skip_rules), [policy.skip_rules]);
 
   const toggle = (rule: TaintRuleId) => {
@@ -512,7 +514,7 @@ function PathRow({
             <button
               key={rule}
               onClick={() => toggle(rule)}
-              title={RULE_LABELS[rule]}
+              title={ruleLabels[rule]}
               className={`text-[10px] font-mono px-2 py-1 rounded-md border transition-colors ${
                 active
                   ? "bg-brand/10 border-brand/40 text-brand"

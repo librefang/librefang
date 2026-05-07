@@ -137,7 +137,7 @@ vi.mock("../lib/store", () => {
 vi.mock("../components/TerminalTabs", () => ({
   TerminalTabs: (props: {
     displayedActiveWindowId: string | null;
-    onSwitchWindow: (id: string) => void;
+    onSwitchWindow: (id: string | null) => void;
   }) => {
     terminalTabsPropsMock(props);
     return (

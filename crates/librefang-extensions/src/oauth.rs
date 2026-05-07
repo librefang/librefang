@@ -433,6 +433,13 @@ fn open_browser(url: &str) -> Result<(), String> {
             .spawn()
             .map_err(|e| e.to_string())?;
     }
+    // Mobile / unknown targets: no desktop browser to launch — the OAuth
+    // flow on those platforms is driven from the host shell. Consume `url`
+    // so `-D unused_variables` stays happy on e.g. aarch64-linux-android.
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        let _ = url;
+    }
     Ok(())
 }
 
