@@ -29,7 +29,7 @@
     "focus-visible": "^5.2.1",
     "hast-util-from-html": "^2.0.3",
     "lucide-react": "^1.14.0",
-    "marked": "16.2.1",
+    "marked": "18.0.3",
     "mdast-util-to-string": "^4.0.0",
     "mdx-annotations": "^0.1.4",
     "motion": "12.38.0",
