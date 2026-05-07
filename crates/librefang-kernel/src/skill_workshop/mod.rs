@@ -1,6 +1,9 @@
 //! Skill workshop (#3328) — passive after-turn capture of reusable
 //! workflows from successful agent-user interactions.
 //!
+//! Operator-facing reference (config knobs, security model, cost when
+//! disabled, file map): `docs/architecture/skill-workshop.md`.
+//!
 //! # Wiring
 //!
 //! 1. `LibreFangKernel::set_self_handle` registers a
