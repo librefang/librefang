@@ -3613,6 +3613,23 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
         }
     }
 
+    // Load `<home>/secrets.env` into the current process environment BEFORE
+    // building the tokio runtime or booting the kernel. Without this, a
+    // dashboard-saved provider key (`POST /api/providers/{p}/key` writes to
+    // `secrets.env`) is dropped on every daemon restart because the systemd
+    // unit's `EnvironmentFile=` references a different file and nothing in
+    // the boot path re-reads `secrets.env`. Synchronous on the main thread —
+    // `std::env::set_var` is unsound under concurrent reads, but no tokio
+    // runtime exists yet so this is the safe window. See #4701.
+    match librefang_api::secrets_env::load_into_process_blocking(&daemon.home_dir) {
+        Ok(0) => {}
+        Ok(n) => tracing::debug!("Loaded {n} entries from secrets.env"),
+        Err(e) => tracing::warn!(
+            "Failed to read secrets.env from {}: {e}",
+            daemon.home_dir.display()
+        ),
+    }
+
     ui::banner();
     ui::blank();
     println!("  {}", i18n::t("daemon-starting"));
@@ -11661,6 +11678,7 @@ fn service_install_linux(binary: &std::path::Path, librefang_home: &std::path::P
          RestartSec=5\n\
          WorkingDirectory={home}\n\
          EnvironmentFile=-{home}/env\n\
+         EnvironmentFile=-{home}/secrets.env\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
