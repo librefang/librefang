@@ -12,9 +12,10 @@ use std::sync::Arc;
 use agent_client_protocol::schema::{
     AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse,
     InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest,
-    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities,
-    SessionInfo, SessionListCapabilities, SessionResumeCapabilities,
+    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
+    PromptCapabilities, PromptRequest, ResumeSessionRequest, ResumeSessionResponse,
+    SessionCapabilities, SessionCloseCapabilities, SessionInfo, SessionListCapabilities,
+    SessionResumeCapabilities,
 };
 use agent_client_protocol::{Agent, Client, ConnectTo, Dispatch};
 use agent_client_protocol_tokio::Stdio;
@@ -29,9 +30,10 @@ use crate::{AcpKernel, AcpResult};
 /// Run the ACP server bound to `kernel` and `agent_id` on stdio.
 ///
 /// Returns when stdin closes (the editor has disconnected) or the
-/// transport hits an unrecoverable error. The function is intended to
-/// be called once per process from the `librefang acp` CLI subcommand;
-/// daemon-attached mode lands in Phase 2.
+/// transport hits an unrecoverable error. Used by the `librefang acp`
+/// CLI subcommand for the in-process execution mode; the
+/// daemon-attached UDS path uses [`run_with_transport`] directly with
+/// the connection's framed stream.
 pub async fn run<K: AcpKernel>(kernel: Arc<K>, agent_id: AgentId) -> AcpResult<()> {
     run_with_transport(kernel, agent_id, Stdio::new()).await
 }
@@ -74,9 +76,18 @@ where
                     .list(SessionListCapabilities::default())
                     .resume(SessionResumeCapabilities::default())
                     .close(SessionCloseCapabilities::default());
+                // Explicit declaration: this build does not yet pipe
+                // image / audio / embedded resource content blocks
+                // through the agent loop. `PromptCapabilities::new()`
+                // defaults all three to `false`, which is what we
+                // want — telling the editor up front lets it downgrade
+                // or warn instead of silently dropping multimodal
+                // input on the floor.
+                let prompt_caps = PromptCapabilities::new();
                 let agent_caps = AgentCapabilities::new()
                     .load_session(true)
-                    .session_capabilities(session_caps);
+                    .session_capabilities(session_caps)
+                    .prompt_capabilities(prompt_caps);
                 responder.respond(
                     InitializeResponse::new(req.protocol_version)
                         .agent_capabilities(agent_caps)
@@ -177,8 +188,12 @@ where
             agent_client_protocol::on_receive_notification!(),
         )
         // Catch-all for methods we don't yet implement (authenticate,
-        // session/load, session/list, terminal/*, fs/*, …) so the
-        // editor gets a clean method_not_found instead of hanging.
+        // terminal/*, fs/*, …) so the editor gets a JSON-RPC
+        // `method_not_found` (-32601) instead of `internal_error`
+        // (-32603). Editors typically handle the former by silently
+        // skipping the optional feature; `internal_error` looks like a
+        // bug and surfaces a user-visible diagnostic.
+        //
         // Matches all three [`Dispatch`] variants explicitly so that
         // *responses* to our own outgoing requests (the permission
         // bridge's `cx.send_request(RequestPermissionRequest)` round
@@ -187,11 +202,8 @@ where
         .on_receive_dispatch(
             async move |message: Dispatch, _cx: agent_client_protocol::ConnectionTo<Client>| {
                 match message {
-                    Dispatch::Request(_, responder) => responder.respond_with_error(
-                        agent_client_protocol::util::internal_error(
-                            "method not supported by librefang ACP Phase 1",
-                        ),
-                    ),
+                    Dispatch::Request(_, responder) => responder
+                        .respond_with_error(agent_client_protocol::Error::method_not_found()),
                     Dispatch::Notification(_) => Ok(()),
                     Dispatch::Response(result, router) => router.respond_with_result(result),
                 }
@@ -210,10 +222,10 @@ where
     Ok(())
 }
 
-/// Mint a fresh ACP `SessionId`. Phase 1 uses a UUID v4; we don't
-/// derive deterministic ids since each `librefang acp` invocation
-/// gets its own fresh kernel and prior sessions don't survive
-/// process exit.
+/// Mint a fresh ACP `SessionId`. UUID v4; we don't derive
+/// deterministic ids because session-history replay across daemon
+/// restarts (which would benefit from a stable id) is tracked as a
+/// follow-up — see the doc on `session/load` in the handler chain.
 fn next_session_id() -> agent_client_protocol::schema::SessionId {
     let uuid = uuid::Uuid::new_v4();
     agent_client_protocol::schema::SessionId::new(uuid.to_string())

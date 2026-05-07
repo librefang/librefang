@@ -23,13 +23,15 @@
 //! * [`server`] — assemble the handler chain on top of
 //!   [`agent_client_protocol::Agent`]'s `.builder()` and run the stdio loop.
 //!
-//! # Phase split
+//! # Scope
 //!
-//! This is **Phase 1** scope (#3313). The crate is intentionally narrow:
-//! `initialize`, `session/new`, `session/prompt`, `session/cancel`, plus
-//! the agent → client `session/request_permission` round trip. Phase 2
-//! (separate issue) will add `fs/*`, `terminal/*`, `session/load`,
-//! image/audio content blocks, and daemon-attached mode.
+//! Implements `initialize`, `session/{new,load,list,resume,close,prompt,
+//! cancel}`, and the agent → client `session/request_permission` round
+//! trip with persisted `allow_always` / `reject_always`. Both
+//! in-process (over stdio) and daemon-attached (over a Unix domain
+//! socket) execution modes are wired up. `fs/*`, `terminal/*`, and
+//! image / audio / embedded resource content blocks are tracked as
+//! follow-up issues.
 
 pub mod error;
 pub mod events;
@@ -54,18 +56,6 @@ use librefang_types::agent::{AgentId, SessionId as LfSessionId};
 use librefang_types::approval::{ApprovalDecision, ApprovalEvent};
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
-
-/// Reason the agent loop ended a prompt turn. Mapped onto
-/// [`agent_client_protocol::schema::StopReason`] before the response goes
-/// out on the wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PromptStopReason {
-    EndTurn,
-    MaxTokens,
-    MaxTurnRequests,
-    Refusal,
-    Cancelled,
-}
 
 /// The minimal kernel surface the ACP adapter needs.
 ///

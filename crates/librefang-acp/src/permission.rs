@@ -108,8 +108,15 @@ async fn dispatch_pending<K: AcpKernel>(
     } else {
         format!("{}: {}", approval.tool_name, approval.action_summary)
     };
+    // The ideal `ToolCallId` here is the LLM-assigned `tool_use_id`
+    // emitted by `StreamEvent::ToolUseStart` — the editor would then
+    // attach the permission modal to the streaming "running tool" card
+    // it already rendered. `ApprovalRequest` doesn't carry that id
+    // today (tracked as a follow-up); prefix `approval-` so the
+    // ToolCallId namespace at least doesn't collide with real
+    // tool-call ids the editor has seen.
     let tool_call = ToolCallUpdate::new(
-        ToolCallId::new(req_id.to_string()),
+        ToolCallId::new(format!("approval-{req_id}")),
         ToolCallUpdateFields::new()
             .title(title)
             .kind(infer_tool_kind(&approval.tool_name)),
@@ -215,8 +222,16 @@ fn decision_from_outcome(outcome: RequestPermissionOutcome) -> (ApprovalDecision
         // tool execution path bails out cleanly. Don't remember.
         RequestPermissionOutcome::Cancelled => (ApprovalDecision::Denied, false),
         // ACP marks the outcome enum `#[non_exhaustive]`; any future
-        // variant defaults to deny without remembering for safety.
-        _ => (ApprovalDecision::Denied, false),
+        // variant defaults to deny without remembering for safety. Log
+        // so a schema upgrade doesn't silently downgrade everyone to
+        // "Denied" without operators noticing.
+        _ => {
+            warn!(
+                "ACP RequestPermissionOutcome variant not recognised by this build; \
+                 denying for safety. Consider upgrading agent-client-protocol."
+            );
+            (ApprovalDecision::Denied, false)
+        }
     }
 }
 

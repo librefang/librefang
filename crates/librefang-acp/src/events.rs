@@ -16,8 +16,20 @@
 //!   immediately, which matches Zed's UX.
 //!
 //! * `ToolExecutionResult` carries no `id`, only `name`. The pump tracks
-//!   `name → most-recent in-progress tool_call_id` and applies updates by
-//!   that mapping. This matches hermes's approach (see `acp_adapter/events.py`).
+//!   `name → FIFO of in-progress tool_call_ids` and pops the front on
+//!   each result. This matches hermes's approach (see `acp_adapter/events.py`).
+//!
+//!   **Known limitation:** the FIFO is correct when same-named parallel
+//!   calls complete in start order. When they complete out of order —
+//!   e.g. `start fetch A; start fetch B; B completes first; A completes
+//!   second` — the first result will be misattributed to call `A` and
+//!   the second to call `B`. Fixing this requires the runtime's
+//!   `StreamEvent::ToolExecutionResult` to carry the originating
+//!   tool-use id (cross-crate change, tracked as a follow-up). Until
+//!   then, editor UIs may show the wrong tool's status flipping for
+//!   parallel same-named invocations. The misattribution is purely
+//!   cosmetic — it does not affect what tools execute or what the
+//!   agent sees.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -273,6 +285,39 @@ mod tests {
                 assert_eq!(u.tool_call_id.0.as_ref(), "b");
                 assert_eq!(u.fields.status, Some(ToolCallStatus::Failed));
             }
+            _ => panic!(),
+        }
+    }
+
+    /// Known limitation placeholder. The ideal contract is "result is
+    /// attributed to whichever in-flight call actually finished" — but
+    /// `StreamEvent::ToolExecutionResult` carries only `name`, not the
+    /// LLM-assigned id, so out-of-order completion misattributes. This
+    /// test pins the desired behaviour for the day the runtime adds
+    /// `id` to the result event; until then it stays `#[ignore]` so CI
+    /// stays green while the limitation is documented in code.
+    #[test]
+    #[ignore = "needs ToolExecutionResult.id from runtime — see crate-level docs"]
+    fn parallel_same_named_out_of_order_completion_correctly_attributes() {
+        let mut t = EventTranslator::new();
+        let _ = t.translate(StreamEvent::ToolUseStart {
+            id: "a".into(),
+            name: "fetch".into(),
+        });
+        let _ = t.translate(StreamEvent::ToolUseStart {
+            id: "b".into(),
+            name: "fetch".into(),
+        });
+        // B completes before A — current impl will misattribute this
+        // result to "a" because the FIFO pops front. The ideal contract
+        // is to attribute by id, which this assertion encodes.
+        let r1 = t.translate(StreamEvent::ToolExecutionResult {
+            name: "fetch".into(),
+            result_preview: "B finished first".into(),
+            is_error: false,
+        });
+        match &r1[0] {
+            SessionUpdate::ToolCallUpdate(u) => assert_eq!(u.tool_call_id.0.as_ref(), "b"),
             _ => panic!(),
         }
     }

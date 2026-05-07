@@ -454,11 +454,12 @@ impl ApprovalManager {
     /// Returns `true` (approval needed) if:
     /// 1. A channel rule explicitly denies the tool, OR
     /// 2. The tool is in `require_approval` and none of the above bypasses apply.
+    ///
     /// Agent-aware variant that consults the remembered-decisions cache
-    /// (#3313) before falling through to the policy check. Caller
-    /// passes the same `agent_id` it would later submit on the
-    /// `ApprovalRequest`. A cached `Approved` short-circuits to
-    /// "no approval needed".
+    /// (#3313) before falling through to the policy check. The caller
+    /// passes the same `agent_id` it would later submit on the approval
+    /// request; a cached `Approved` short-circuits to "no approval
+    /// needed".
     pub fn requires_approval_with_context_for(
         &self,
         agent_id: &str,
