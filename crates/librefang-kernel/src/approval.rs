@@ -296,6 +296,29 @@ impl ApprovalManager {
                             );
                             return None;
                         }
+                        // Cross-check the BLOB's session_id against the
+                        // row's separate `session_id` TEXT column. A
+                        // local writer with sqlite access could otherwise
+                        // re-target the deferred resume to a different
+                        // editor connection's `acp_fs_client` /
+                        // `acp_terminal_client` registry slot — the
+                        // tool would still be "the right tool" but the
+                        // editor receiving the side effects (file
+                        // contents, shell output) would be a victim
+                        // session, not the one that originally asked.
+                        let payload_session_str =
+                            d.session_id.map(|s| s.0.to_string());
+                        if request.session_id.as_deref()
+                            != payload_session_str.as_deref()
+                        {
+                            warn!(
+                                request_id = %id,
+                                row_session = ?request.session_id,
+                                payload_session = ?payload_session_str,
+                                "Deferred payload session_id mismatches row column — refusing auto-resume"
+                            );
+                            return None;
+                        }
                         Some(d)
                     })
             });
@@ -3920,9 +3943,14 @@ mod tests {
             librefang_memory::migration::run_migrations(&conn).unwrap();
         }
 
-        let req = make_request("agent-restart", "shell_exec", 300);
-        let request_id = req.id;
         let original_session_id = librefang_types::agent::SessionId(uuid::Uuid::new_v4());
+        // Production-shape fixture: the row's `session_id` column and
+        // the BLOB's `session_id` field come from the same origin in
+        // real submit paths, so the integrity check at restore (#3313
+        // H1) requires they match. Keep them consistent here.
+        let mut req = make_request("agent-restart", "shell_exec", 300);
+        req.session_id = Some(original_session_id.0.to_string());
+        let request_id = req.id;
         let deferred = DeferredToolExecution {
             agent_id: "agent-restart".to_string(),
             tool_use_id: "tool-restart-1".to_string(),
@@ -4081,6 +4109,85 @@ mod tests {
         assert!(
             returned_deferred.is_none(),
             "tampered deferred payload must NOT auto-fire on resume"
+        );
+    }
+
+    /// Session-id tampering variant of the integrity check above. A
+    /// local writer with sqlite access could otherwise re-target a
+    /// deferred resume to a different ACP session — the tool runs with
+    /// the original tool_name + agent_id (so the row-level audit looks
+    /// fine) but the editor receiving fs/terminal reverse-RPC side
+    /// effects is a victim session, not the one that asked. Forge a
+    /// row whose deferred_payload.session_id disagrees with the
+    /// row.session_id column and verify the deferred slot is dropped.
+    #[tokio::test]
+    async fn deferred_payload_with_tampered_session_id_is_dropped_on_restore() {
+        use rusqlite::params;
+
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            librefang_memory::migration::run_migrations(&conn).unwrap();
+        }
+
+        let req_id = uuid::Uuid::new_v4();
+        let row_session = librefang_types::agent::SessionId(uuid::Uuid::new_v4());
+        let payload_session = librefang_types::agent::SessionId(uuid::Uuid::new_v4());
+        assert_ne!(row_session.0, payload_session.0);
+
+        let tampered = DeferredToolExecution {
+            agent_id: "agent-X".to_string(),
+            tool_use_id: "tool-session-tampered".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"command": "echo hi"}),
+            allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+            force_human: false,
+            // *** mismatch *** — row column carries `row_session`.
+            session_id: Some(payload_session),
+        };
+        let blob = serde_json::to_vec(&tampered).unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO pending_approvals \
+                 (id, agent_id, session_id, tool_name, tool_input, created_at, tool_use_id, deferred_payload) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    req_id.to_string(),
+                    "agent-X",
+                    row_session.0.to_string(),
+                    "shell_exec",
+                    "{}",
+                    chrono::Utc::now().timestamp(),
+                    "tool-session-tampered",
+                    blob,
+                ],
+            )
+            .expect("seed tampered row");
+        }
+
+        let mgr = ApprovalManager::new_with_db(ApprovalPolicy::default(), pool);
+        let pending = mgr.list_pending();
+        assert_eq!(
+            pending.len(),
+            1,
+            "row must still surface for operator triage"
+        );
+
+        let (_resp, returned_deferred) = mgr
+            .resolve(req_id, ApprovalDecision::Approved, None, false, None)
+            .expect("resolve must still succeed — only the deferred is dropped");
+        assert!(
+            returned_deferred.is_none(),
+            "session-tampered deferred payload must NOT auto-fire on resume"
         );
     }
 

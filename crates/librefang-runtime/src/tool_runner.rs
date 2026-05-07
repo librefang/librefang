@@ -459,8 +459,13 @@ pub async fn execute_tool_raw(
             // editor (#3313).
             if let (Some(k), Some(sid)) = (kernel, session_id) {
                 if let Some(client) = k.acp_fs_client(*sid) {
-                    let path_str = input["path"].as_str().unwrap_or("").to_string();
-                    let path = std::path::PathBuf::from(&path_str);
+                    let Some(path_str) = input.get("path").and_then(|v| v.as_str()) else {
+                        return ToolResult::error(
+                            tool_use_id.to_string(),
+                            "Missing 'path' parameter".to_string(),
+                        );
+                    };
+                    let path = std::path::PathBuf::from(path_str);
                     let line = input["line"].as_u64().map(|v| v as u32);
                     let limit = input["limit"].as_u64().map(|v| v as u32);
                     return match client.read_text_file(path, line, limit).await {
@@ -515,13 +520,23 @@ pub async fn execute_tool_raw(
             // dirty-state tracking) instead of the local fs (#3313).
             if let (Some(k), Some(sid)) = (kernel, session_id) {
                 if let Some(client) = k.acp_fs_client(*sid) {
-                    let path_str = input["path"].as_str().unwrap_or("").to_string();
-                    let content = input["content"].as_str().unwrap_or("").to_string();
-                    let path = std::path::PathBuf::from(&path_str);
-                    return match client.write_text_file(path, content).await {
+                    let Some(path_str) = input.get("path").and_then(|v| v.as_str()) else {
+                        return ToolResult::error(
+                            tool_use_id.to_string(),
+                            "Missing 'path' parameter".to_string(),
+                        );
+                    };
+                    let Some(content) = input.get("content").and_then(|v| v.as_str()) else {
+                        return ToolResult::error(
+                            tool_use_id.to_string(),
+                            "Missing 'content' parameter".to_string(),
+                        );
+                    };
+                    let path = std::path::PathBuf::from(path_str);
+                    return match client.write_text_file(path, content.to_string()).await {
                         Ok(()) => ToolResult::ok(
                             tool_use_id.to_string(),
-                            format!("Wrote {} via editor", path_str),
+                            format!("Wrote {path_str} via editor"),
                         ),
                         Err(e) => ToolResult::error(
                             tool_use_id.to_string(),
@@ -917,10 +932,21 @@ pub async fn execute_tool_raw(
                 if let Some(client) = k.acp_terminal_client(*sid) {
                     if client.capabilities() {
                         let cwd_for_acp = workspace_root.map(|p| p.to_path_buf());
+                        // Pick a platform-appropriate command interpreter.
+                        // ACP's trust model is same-user, same-host, so
+                        // the editor's host platform matches the
+                        // daemon's; `cfg!(windows)` gates correctly.
+                        // Hardcoding `sh -c` would fail on Windows
+                        // editors that don't ship a POSIX shell on PATH.
+                        let (shell, shell_arg) = if cfg!(windows) {
+                            ("cmd", "/C")
+                        } else {
+                            ("sh", "-c")
+                        };
                         let result = client
                             .run_command(
-                                "sh".to_string(),
-                                vec!["-c".to_string(), command.to_string()],
+                                shell.to_string(),
+                                vec![shell_arg.to_string(), command.to_string()],
                                 Vec::new(),
                                 cwd_for_acp,
                                 Some(64 * 1024),
