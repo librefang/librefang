@@ -15391,6 +15391,20 @@ system_prompt = "You are a helpful assistant."
 
         self.supervisor.shutdown();
 
+        // Drain in-flight workflow runs (#3335). `Running` / `Pending`
+        // are deliberately not persisted by `persist_runs` (no durable
+        // boundary), so without this the dashboard would silently lose
+        // every workflow that happened to be mid-flight at stop time.
+        // Transition them to `Paused` with a fresh resume_token so the
+        // operator (or the stale-timeout sweep at next boot) can decide
+        // whether to resume or fail them. Must run *after*
+        // `supervisor.shutdown()` so no agent loop is still flipping a
+        // run's state under us.
+        let drained = self.workflows.drain_on_shutdown();
+        if drained > 0 {
+            tracing::info!(drained, "Paused in-flight workflow runs for shutdown");
+        }
+
         // Update agent states to Suspended in persistent storage (not delete).
         // Track failures so we can emit a single critical summary if any
         // agent could not be persisted — without this, a partial-shutdown
