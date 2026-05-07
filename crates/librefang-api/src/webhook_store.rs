@@ -162,7 +162,8 @@ pub async fn validate_webhook_url_resolved(url_str: &str) -> Result<ValidatedHos
             || is_link_local(ip)
         {
             return Err(format!(
-                "host '{host}' resolves to private/loopback/link-local address {ip}"
+                "host '{host}' resolves to {ip} \
+                 (loopback / unspecified / private / link-local / zeronet)"
             ));
         }
     }
@@ -211,9 +212,10 @@ pub fn validate_webhook_url(url_str: &str) -> Result<(), String> {
         Some(url::Host::Ipv4(v4)) => {
             let ip = std::net::IpAddr::V4(v4);
             if is_blocked_ip(ip) {
-                return Err(
-                    "url must not point to a private, loopback, or link-local address".to_string(),
-                );
+                return Err(format!(
+                    "url host '{v4}' is not allowed \
+                     (loopback / unspecified / private / link-local / zeronet / metadata)"
+                ));
             }
         }
         Some(url::Host::Ipv6(v6)) => {
@@ -223,9 +225,10 @@ pub fn validate_webhook_url(url_str: &str) -> Result<(), String> {
             // is_private_ip / is_link_local do not recognise the mapped form.
             let ip = canonical_ip(std::net::IpAddr::V6(v6));
             if is_blocked_ip(ip) {
-                return Err(
-                    "url must not point to a private, loopback, or link-local address".to_string(),
-                );
+                return Err(format!(
+                    "url host '{v6}' is not allowed \
+                     (loopback / unspecified / private / link-local / zeronet / metadata)"
+                ));
             }
         }
         Some(url::Host::Domain(host)) => {
@@ -707,6 +710,14 @@ mod tests {
     #[test]
     fn validate_webhook_url_blocks_unspecified_v4() {
         assert!(validate_webhook_url("http://0.0.0.0/hook").is_err());
+    }
+
+    /// IPv6 unspecified `[::]` — symmetry with the V4 form. `is_unspecified()`
+    /// covers both, but a literal test pins the wire-level behaviour so a
+    /// future regression that splits the V4/V6 paths can't quietly drop one.
+    #[test]
+    fn validate_webhook_url_blocks_unspecified_v6() {
+        assert!(validate_webhook_url("http://[::]/hook").is_err());
     }
 
     /// RFC 1122 §3.2.1.3 reserves `0.0.0.0/8`. The pre-#4739 implementation

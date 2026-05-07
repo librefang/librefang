@@ -243,101 +243,99 @@ impl CronScheduler {
         id: CronJobId,
         updates: &serde_json::Value,
     ) -> LibreFangResult<CronJob> {
-        // Two-phase pattern: parse and validate every provided field into
-        // a local first, mutate the live `meta.job` only after the last
-        // validation passes. The pre-#4739 in-place pattern would
-        // partially mutate state on later-field failure — e.g. a request
-        // carrying both a valid `delivery` and an SSRF-laden
-        // `delivery_targets` would have its `delivery` overwrite already
-        // committed before the targets check failed and the route
-        // returned 400, leaving cron state half-updated and divergent
-        // from the wire response. With staged updates an `Err` from any
-        // phase leaves `meta.job` untouched, so a subsequent successful
-        // PUT can't smuggle the abandoned half-mutation forward.
-        let new_name = updates["name"].as_str().map(str::to_string);
-        let new_enabled = updates["enabled"].as_bool();
-        let new_agent_id = if let Some(s) = updates["agent_id"].as_str() {
-            Some(
-                s.parse::<AgentId>()
-                    .map_err(|e| LibreFangError::Internal(format!("Invalid agent_id: {e}")))?,
-            )
-        } else {
-            None
+        // Candidate-validate-swap: clone the current job, apply the
+        // partial updates onto the candidate, run the same `validate(0)`
+        // that `add_job` runs, and only after that passes do we swap the
+        // candidate into place under the shard lock. This generalises
+        // the #4732 bypass closure from "delivery / delivery_targets
+        // re-validated on update" to "the entire CronJob shape is
+        // re-validated on update" — name length, schedule cron-expr
+        // syntax, every CronAction shape, and the SSRF / path checks all
+        // gate update the same way they gate add. A pre-#4739 PUT
+        // carrying e.g. an empty `name` plus a valid `delivery` was
+        // accepted; now the same payload is rejected before any field
+        // hits live state.
+        //
+        // Atomicity: `meta.job` is replaced once with a fully validated
+        // candidate, so an `Err` at any step leaves the live row
+        // untouched. The earlier in-place pattern could commit `delivery`
+        // before failing on `delivery_targets`; that race is gone.
+        let mut candidate = match self.jobs.get(&id) {
+            Some(entry) => entry.value().job.clone(),
+            None => {
+                return Err(LibreFangError::Internal(format!("Cron job {id} not found")));
+            }
         };
-        let new_schedule = if !updates["schedule"].is_null() {
-            Some(
+
+        let enabled_updated = updates["enabled"].as_bool();
+        let schedule_updated = !updates["schedule"].is_null();
+
+        if let Some(name) = updates["name"].as_str() {
+            candidate.name = name.to_string();
+        }
+        if let Some(enabled) = enabled_updated {
+            candidate.enabled = enabled;
+        }
+        if let Some(s) = updates["agent_id"].as_str() {
+            candidate.agent_id = s
+                .parse::<AgentId>()
+                .map_err(|e| LibreFangError::Internal(format!("Invalid agent_id: {e}")))?;
+        }
+        if schedule_updated {
+            candidate.schedule =
                 serde_json::from_value::<CronSchedule>(updates["schedule"].clone())
-                    .map_err(|e| LibreFangError::Internal(format!("Invalid schedule: {e}")))?,
+                    .map_err(|e| LibreFangError::Internal(format!("Invalid schedule: {e}")))?;
+        }
+        if !updates["action"].is_null() {
+            candidate.action = serde_json::from_value::<librefang_types::scheduler::CronAction>(
+                updates["action"].clone(),
             )
-        } else {
-            None
-        };
-        let new_action = if !updates["action"].is_null() {
-            Some(
-                serde_json::from_value::<librefang_types::scheduler::CronAction>(
-                    updates["action"].clone(),
+            .map_err(|e| LibreFangError::Internal(format!("Invalid action: {e}")))?;
+        }
+        if !updates["delivery"].is_null() {
+            candidate.delivery =
+                serde_json::from_value::<librefang_types::scheduler::CronDelivery>(
+                    updates["delivery"].clone(),
                 )
-                .map_err(|e| LibreFangError::Internal(format!("Invalid action: {e}")))?,
-            )
-        } else {
-            None
-        };
-        // SSRF / shape checks (`validate_cron_delivery*`) also run in
-        // `add_job`; running them again on the update boundary closes
-        // the bypass route flagged in #4732.
-        let new_delivery = if !updates["delivery"].is_null() {
-            let d: librefang_types::scheduler::CronDelivery =
-                serde_json::from_value(updates["delivery"].clone())
-                    .map_err(|e| LibreFangError::Internal(format!("Invalid delivery: {e}")))?;
-            librefang_types::scheduler::validate_cron_delivery(&d)
-                .map_err(LibreFangError::InvalidInput)?;
-            Some(d)
-        } else {
-            None
-        };
-        let new_targets = if !updates["delivery_targets"].is_null() {
-            let t: Vec<librefang_types::scheduler::CronDeliveryTarget> =
-                serde_json::from_value(updates["delivery_targets"].clone()).map_err(|e| {
-                    LibreFangError::Internal(format!("Invalid delivery_targets: {e}"))
-                })?;
-            librefang_types::scheduler::validate_cron_delivery_targets(&t)
-                .map_err(LibreFangError::InvalidInput)?;
-            Some(t)
-        } else {
-            None
-        };
+                .map_err(|e| LibreFangError::Internal(format!("Invalid delivery: {e}")))?;
+        }
+        if !updates["delivery_targets"].is_null() {
+            candidate.delivery_targets = serde_json::from_value::<
+                Vec<librefang_types::scheduler::CronDeliveryTarget>,
+            >(updates["delivery_targets"].clone())
+            .map_err(|e| LibreFangError::Internal(format!("Invalid delivery_targets: {e}")))?;
+        }
+
+        // Run the same shape + SSRF validation `add_job` runs. We pass
+        // `existing_count = 0` because this is an in-place update on an
+        // existing job — capacity (MAX_JOBS_PER_AGENT) is unaffected by
+        // an update that doesn't change `agent_id`. Cross-agent moves
+        // are NOT capacity-checked here today; tracking under a
+        // separate follow-up issue (#4732 followup).
+        candidate
+            .validate(0)
+            .map_err(LibreFangError::InvalidInput)?;
+
+        // Recompute next_run when the schedule shape changed, OR when
+        // the job is being re-enabled (mirrors the prior in-place
+        // semantics so an existing job that was paused with a stale
+        // next_run gets a fresh tick on activation).
+        if schedule_updated || matches!(enabled_updated, Some(true)) {
+            candidate.next_run = Some(compute_next_run(&candidate.schedule));
+        }
 
         match self.jobs.get_mut(&id) {
             Some(mut entry) => {
                 let meta = entry.value_mut();
-                if let Some(name) = new_name {
-                    meta.job.name = name;
-                }
-                if let Some(enabled) = new_enabled {
-                    meta.job.enabled = enabled;
-                    // Explicit update from user clears the auto_disabled flag.
+                if let Some(enabled) = enabled_updated {
+                    // An explicit toggle from the user clears the
+                    // auto_disabled flag regardless of direction.
                     meta.auto_disabled = false;
                     if enabled {
                         meta.consecutive_errors = 0;
-                        meta.job.next_run = Some(compute_next_run(&meta.job.schedule));
                     }
                 }
-                if let Some(agent_id) = new_agent_id {
-                    meta.job.agent_id = agent_id;
-                }
-                if let Some(schedule) = new_schedule {
-                    meta.job.next_run = Some(compute_next_run(&schedule));
-                    meta.job.schedule = schedule;
-                }
-                if let Some(action) = new_action {
-                    meta.job.action = action;
-                }
-                if let Some(delivery) = new_delivery {
-                    meta.job.delivery = delivery;
-                }
-                if let Some(targets) = new_targets {
-                    meta.job.delivery_targets = targets;
-                }
+                meta.job = candidate;
                 Ok(meta.job.clone())
             }
             None => Err(LibreFangError::Internal(format!("Cron job {id} not found"))),
@@ -2002,6 +2000,42 @@ mod tests {
             after.delivery
         );
         assert!(after.delivery_targets.is_empty());
+    }
+
+    /// candidate-validate-swap (#4739 review followup): non-SSRF shape
+    /// rules now also gate the update path. Empty name was previously
+    /// accepted on PUT — `add_job` rejected the same payload, so this
+    /// closes a parallel bypass surface to the SSRF webhook one.
+    #[test]
+    fn update_job_rejects_empty_name() {
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let id = sched.add_job(make_job(agent), false).unwrap();
+        let original_name = sched.get_job(id).unwrap().name;
+
+        let updates = serde_json::json!({ "name": "" });
+        let err = sched
+            .update_job(id, &updates)
+            .expect_err("empty name must be refused");
+        assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
+        // State invariant: rejected payload must not partially mutate.
+        assert_eq!(sched.get_job(id).unwrap().name, original_name);
+    }
+
+    /// `validate(0)` on the candidate also catches over-long names.
+    #[test]
+    fn update_job_rejects_oversized_name() {
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let id = sched.add_job(make_job(agent), false).unwrap();
+
+        // librefang_types::scheduler::MAX_NAME_LEN is 128.
+        let long = "x".repeat(200);
+        let updates = serde_json::json!({ "name": long });
+        let err = sched
+            .update_job(id, &updates)
+            .expect_err("oversized name must be refused");
+        assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
     }
 
     /// Same atomicity guarantee in the other direction: failure in the
