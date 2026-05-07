@@ -120,7 +120,7 @@ describe("generateManifestMarkdown", () => {
     form.model.model = "gpt-4o";
     form.schedule = { mode: "periodic", cron: "0 9 * * *" };
     form.fallback_models = [
-      { provider: "anthropic", model: "claude-3-5-sonnet", api_key_env: "", base_url: "", extras: {} },
+      { _uid: "test-fb-1", provider: "anthropic", model: "claude-3-5-sonnet", api_key_env: "", base_url: "", extras: {} },
     ];
     form.thinking = { enabled: true, budget_tokens: "5000", stream_thinking: true };
     form.autonomous = {
@@ -142,7 +142,7 @@ describe("generateManifestMarkdown", () => {
       complex_threshold: "500",
     };
     form.context_injection = [
-      { name: "policy", content: "Be polite.", position: "before_user", condition: "" },
+      { _uid: "test-ci-1", name: "policy", content: "Be polite.", position: "before_user", condition: "" },
     ];
     form.response_format = { mode: "json" };
 
