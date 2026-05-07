@@ -13,9 +13,8 @@
 //! optional refinement, not a permission gate.
 
 use crate::skill_workshop::heuristic::HeuristicHit;
-use librefang_llm_driver::{
-    CompletionRequest, ContentBlock, LlmDriver, Message, MessageContent, Role,
-};
+use librefang_llm_driver::{CompletionRequest, LlmDriver};
+use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
 use serde::Deserialize;
 use std::sync::Arc;
 use tracing::{debug, warn};
@@ -210,9 +209,8 @@ mod tests {
     use super::*;
     use crate::skill_workshop::candidate::CaptureSource;
     use async_trait::async_trait;
-    use librefang_llm_driver::{
-        CompletionResponse, ContentBlock, LlmError, StopReason, TokenUsage,
-    };
+    use librefang_llm_driver::{CompletionResponse, LlmError};
+    use librefang_types::message::{StopReason, TokenUsage};
 
     fn fixture_hit() -> HeuristicHit {
         HeuristicHit {

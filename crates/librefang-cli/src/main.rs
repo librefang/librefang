@@ -755,6 +755,38 @@ enum SkillCommands {
         long_about = "Manually invoke the skill evolution pipeline that agents use internally.\n\nOperates on the globally-installed skill directory (~/.librefang/skills).\nAll mutations go through the same validation, security scan, file locking,\nand version-history bookkeeping as the agent tools.\n\nExamples:\n  librefang skill evolve create --name my-skill --description ... --context-file prompt.md\n  librefang skill evolve update my-skill prompt.md --changelog \"tightened wording\"\n  librefang skill evolve patch my-skill --old-file a.txt --new-file b.txt --changelog \"fix typo\"\n  librefang skill evolve rollback my-skill\n  librefang skill evolve history my-skill"
     )]
     Evolve(EvolveCommands),
+    /// Skill workshop (#3328) — review pending candidates captured from
+    /// agent conversations.
+    #[command(
+        subcommand,
+        long_about = "Review candidates produced by the skill workshop after-turn capture.\n\nA candidate is a draft skill the workshop extracted from a conversation\nturn (e.g. `from now on always run cargo fmt`). Candidates land in\n`~/.librefang/skills/pending/<agent_id>/<uuid>.toml` and are NOT loaded\ninto the active registry until you approve them. Approval routes\nthrough the same evolution::create_skill path used for marketplace\ninstalls, so name validation and prompt-injection scans run a second\ntime before anything reaches `~/.librefang/skills/`.\n\nExamples:\n  librefang skill pending list\n  librefang skill pending show <id>\n  librefang skill pending approve <id>\n  librefang skill pending reject <id>"
+    )]
+    Pending(PendingCommands),
+}
+
+#[derive(Subcommand)]
+enum PendingCommands {
+    /// List pending candidates (newest captured first).
+    List {
+        /// Show only candidates from the given agent UUID.
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Print a candidate's full TOML and provenance.
+    Show {
+        /// Candidate UUID (shown by `pending list`).
+        id: String,
+    },
+    /// Promote a candidate into the active skill registry.
+    Approve {
+        /// Candidate UUID.
+        id: String,
+    },
+    /// Drop a candidate without promoting.
+    Reject {
+        /// Candidate UUID.
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2182,6 +2214,7 @@ fn main() {
             } => cmd_skill_publish(path, repo, tag, output, dry_run),
             SkillCommands::Create => cmd_skill_create(),
             SkillCommands::Evolve(sub) => cmd_skill_evolve(sub),
+            SkillCommands::Pending(sub) => cmd_skill_pending(sub),
         },
         Some(Commands::Channel(sub)) => match sub {
             ChannelCommands::List => cmd_channel_list(),
@@ -7775,6 +7808,109 @@ fn cmd_skill_evolve(sub: EvolveCommands) {
                 t.add_row(&[&v.version, &v.timestamp, &v.changelog]);
             }
             t.print();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Skill workshop pending review (#3328)
+// ---------------------------------------------------------------------------
+
+fn cmd_skill_pending(sub: PendingCommands) {
+    let skills_root = librefang_home().join("skills");
+    match sub {
+        PendingCommands::List { agent } => {
+            let candidates = match &agent {
+                Some(a) => librefang_kernel::skill_workshop::storage::list_pending(&skills_root, a),
+                None => librefang_kernel::skill_workshop::storage::list_pending_all(&skills_root),
+            };
+            let candidates = match candidates {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("Failed to read pending directory: {e}");
+                    std::process::exit(1);
+                }
+            };
+            if candidates.is_empty() {
+                println!(
+                    "No pending skill candidates.{}",
+                    match &agent {
+                        Some(a) => format!(" (filter: agent {a})"),
+                        None => String::new(),
+                    }
+                );
+                return;
+            }
+            println!("{:<38}  {:<18}  {:<22}  NAME", "ID", "SOURCE", "CAPTURED");
+            for c in candidates {
+                let source_label = match &c.source {
+                    librefang_kernel::skill_workshop::CaptureSource::ExplicitInstruction {
+                        ..
+                    } => "explicit_instr",
+                    librefang_kernel::skill_workshop::CaptureSource::UserCorrection { .. } => {
+                        "user_correction"
+                    }
+                    librefang_kernel::skill_workshop::CaptureSource::RepeatedToolPattern {
+                        ..
+                    } => "tool_pattern",
+                };
+                println!(
+                    "{:<38}  {:<18}  {:<22}  {}",
+                    c.id,
+                    source_label,
+                    c.captured_at.format("%Y-%m-%d %H:%M:%S UTC"),
+                    c.name
+                );
+            }
+        }
+        PendingCommands::Show { id } => {
+            let candidate = match librefang_kernel::skill_workshop::storage::load_candidate(
+                &skills_root,
+                &id,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Failed to load candidate: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let toml_str = match toml::to_string_pretty(&candidate) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to render candidate as TOML: {e}");
+                    std::process::exit(1);
+                }
+            };
+            print!("{toml_str}");
+        }
+        PendingCommands::Approve { id } => {
+            match librefang_kernel::skill_workshop::storage::approve_candidate(
+                &skills_root,
+                &skills_root,
+                &id,
+            ) {
+                Ok(result) => {
+                    println!(
+                        "Approved candidate {} → installed skill '{}' (v{}).",
+                        id,
+                        result.skill_name,
+                        result.version.unwrap_or_else(|| "?".to_string())
+                    );
+                }
+                Err(e) => {
+                    eprintln!("Approve failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        PendingCommands::Reject { id } => {
+            match librefang_kernel::skill_workshop::storage::reject_candidate(&skills_root, &id) {
+                Ok(()) => println!("Rejected and removed candidate {id}."),
+                Err(e) => {
+                    eprintln!("Reject failed: {e}");
+                    std::process::exit(1);
+                }
+            }
         }
     }
 }

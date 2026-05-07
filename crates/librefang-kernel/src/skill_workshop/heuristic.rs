@@ -275,11 +275,11 @@ fn sentence_around(text: &str, start: usize, end: usize) -> String {
     let preceding = &text[..start];
     let following = &text[end..];
     let lo = preceding
-        .rfind(|c: char| matches!(c, '.' | '!' | '?' | '\n'))
+        .rfind(['.', '!', '?', '\n'])
         .map(|i| i + 1)
         .unwrap_or(0);
     let hi = following
-        .find(|c: char| matches!(c, '.' | '!' | '?' | '\n'))
+        .find(['.', '!', '?', '\n'])
         .map(|i| end + i + 1)
         .unwrap_or(text.len());
     text[lo..hi].trim().to_string()
