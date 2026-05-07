@@ -172,7 +172,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
           <input
             type="text"
             value={search}
-            onChange={(e) => { setSearch(e.target.value); setSelectedIndex(0); }}
+            onChange={(e) => setSearch(e.target.value)}
             placeholder={t("command_palette.search_placeholder")}
             className="flex-1 bg-transparent text-sm font-medium outline-none placeholder:text-text-dim"
             autoFocus
