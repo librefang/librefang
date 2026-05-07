@@ -16,6 +16,11 @@ on:
 
 permissions:
   contents: read
+  # Required by `actions/download-artifact` when fetching an artifact
+  # from a different workflow run (the collector). Without this the
+  # download step 403s — once a workflow declares `permissions:`,
+  # unspecified scopes default to `none`.
+  actions: read
   issues: write
   pull-requests: write
 
