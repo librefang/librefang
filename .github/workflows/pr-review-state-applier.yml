@@ -1,0 +1,106 @@
+name: PR Review Sync (applier)
+
+# Triggered by completion of `PR Review Sync (collector)`. Reads the
+# captured event payload and applies the ready-for-review /
+# needs-changes labels.
+#
+# Runs in the default-branch context, so the GITHUB_TOKEN here gets
+# the workflow's declared permissions (issues: write, pull-requests:
+# write) — unlike the collector's pull_request_review token, which
+# GitHub forces read-only.
+
+on:
+  workflow_run:
+    workflows: ["PR Review Sync (collector)"]
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  apply:
+    name: Apply review-state labels
+    runs-on: ubuntu-latest
+    # Skip if the collector failed (e.g. the review state filter
+    # excluded it, jq missing, etc.). The artifact would also be
+    # absent in that case.
+    if: github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: Download payload
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: pr-review-event
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ./payload
+
+      - name: Apply labels
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const fs = require('fs');
+            const payload = JSON.parse(fs.readFileSync('./payload/event.json', 'utf8'));
+
+            const prNumber = payload.pr_number;
+            const reviewState = payload.review_state;
+
+            // Defensive: collector pre-filters but double-check here so
+            // a stale or hand-crafted artifact can't drive label state.
+            if (reviewState !== 'changes_requested' && reviewState !== 'approved') {
+              core.info(`Ignoring review_state=${reviewState}`);
+              return;
+            }
+            if (!Number.isInteger(prNumber) || prNumber <= 0) {
+              core.setFailed(`Invalid pr_number in payload: ${prNumber}`);
+              return;
+            }
+
+            const READY = 'ready-for-review';
+            const NEEDS = 'needs-changes';
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+            const labels = pr.labels.map(l => l.name);
+
+            async function addLabel(label) {
+              if (!labels.includes(label)) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  labels: [label],
+                });
+              }
+            }
+            async function removeLabel(label) {
+              if (labels.includes(label)) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  name: label,
+                }).catch(() => {});
+              }
+            }
+
+            const hasBlocker = labels.includes('has-conflicts') || labels.includes('ci-failed');
+
+            if (reviewState === 'changes_requested') {
+              await addLabel(NEEDS);
+              await removeLabel(READY);
+              core.info(`#${prNumber}: changes requested → +${NEEDS} -${READY}`);
+            } else {
+              // approved
+              await removeLabel(NEEDS);
+              if (!hasBlocker) {
+                await addLabel(READY);
+                core.info(`#${prNumber}: approved → -${NEEDS} +${READY}`);
+              } else {
+                core.info(`#${prNumber}: approved but has blockers, skipping ${READY}`);
+              }
+            }
