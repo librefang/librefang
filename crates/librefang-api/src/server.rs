@@ -1559,12 +1559,13 @@ pub async fn run_daemon(
     // every 10 seconds and handles their resolution.
     kernel.clone().spawn_approval_sweep_task();
 
-    // ACP UDS listener (#3313) — accepts editor-side `librefang acp`
-    // connections in proxy mode. CLI-side detects the socket file and
-    // pipes stdin/stdout through it; daemon-side runs the ACP server
-    // with the daemon's existing kernel so multiple editor tabs share
-    // state, agent history, and remembered approval decisions. Skipped
-    // on non-Unix targets (Windows would need named pipes — Phase 2).
+    // ACP listener (#3313) — accepts editor-side `librefang acp`
+    // connections in proxy mode. CLI-side detects the live transport
+    // and pipes stdin/stdout through it; daemon-side runs the ACP
+    // server with the daemon's existing kernel so multiple editor
+    // tabs share state, agent history, and remembered approval
+    // decisions. Unix uses a UDS at `~/.librefang/acp.sock`; Windows
+    // uses the named pipe `\\.\pipe\librefang-acp`.
     #[cfg(unix)]
     {
         let kernel = kernel.clone();
@@ -1572,6 +1573,15 @@ pub async fn run_daemon(
         bg_tasks.push(tokio::spawn(async move {
             if let Err(e) = crate::acp_uds::run_listener(kernel, sock_path).await {
                 tracing::warn!(error = %e, "ACP UDS listener exited");
+            }
+        }));
+    }
+    #[cfg(windows)]
+    {
+        let kernel = kernel.clone();
+        bg_tasks.push(tokio::spawn(async move {
+            if let Err(e) = crate::acp_pipe::run_listener(kernel).await {
+                tracing::warn!(error = %e, "ACP named-pipe listener exited");
             }
         }));
     }

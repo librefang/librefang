@@ -29,12 +29,21 @@ const DEFAULT_AGENT_NAME: &str = "assistant";
 /// available, switch to proxy mode.
 pub fn run_acp_server(config: Option<PathBuf>, agent: Option<String>) {
     // Fast path: daemon already hosting an ACP listener — just be a
-    // transparent stdio↔UDS proxy. The daemon-side kernel is shared
+    // transparent stdio↔socket proxy. The daemon-side kernel is shared
     // across every concurrent `librefang acp` client, so editor tabs
-    // see a consistent agent state.
+    // see a consistent agent state. Unix uses a UDS, Windows uses a
+    // named pipe.
     #[cfg(unix)]
     if let Some(sock) = locate_acp_socket() {
         let exit_code = run_uds_proxy(&sock);
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+        return;
+    }
+    #[cfg(windows)]
+    if super::find_daemon().is_some() {
+        let exit_code = run_pipe_proxy();
         if exit_code != 0 {
             std::process::exit(exit_code);
         }
@@ -155,6 +164,70 @@ fn run_uds_proxy(sock_path: &std::path::Path) -> i32 {
 
         // Either direction closing ends the session. Use `tokio::join!`
         // to allow the slower side to drain before we exit.
+        tokio::select! {
+            _ = inbound => {}
+            _ = outbound => {}
+        }
+        0
+    })
+}
+
+/// Bidirectional stdin↔named-pipe↔stdout pipe (Windows). Returns 0 on
+/// clean EOF, 1 if the pipe couldn't be reached. The daemon must
+/// already be hosting `\\.\pipe\librefang-acp` for this to succeed —
+/// `find_daemon()` is checked at the call site.
+#[cfg(windows)]
+fn run_pipe_proxy() -> i32 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    const PIPE_NAME: &str = r"\\.\pipe\librefang-acp";
+
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+    rt.block_on(async {
+        let stream = match ClientOptions::new().open(PIPE_NAME) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ACP named-pipe connect failed at {PIPE_NAME}: {e}");
+                return 1;
+            }
+        };
+        let (mut sock_read, mut sock_write) = tokio::io::split(stream);
+        let mut stdin = tokio::io::stdin();
+        let mut stdout = tokio::io::stdout();
+
+        let inbound = async move {
+            let mut buf = vec![0u8; 8192];
+            loop {
+                match stdin.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if sock_write.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = sock_write.shutdown().await;
+        };
+
+        let outbound = async move {
+            let mut buf = vec![0u8; 8192];
+            loop {
+                match sock_read.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if stdout.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                        let _ = stdout.flush().await;
+                    }
+                    Err(_) => break,
+                }
+            }
+        };
+
         tokio::select! {
             _ = inbound => {}
             _ = outbound => {}
