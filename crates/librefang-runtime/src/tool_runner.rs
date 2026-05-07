@@ -329,6 +329,16 @@ pub struct ToolExecContext<'a> {
     pub process_registry: Option<&'a crate::process_registry::ProcessRegistry>,
     pub sender_id: Option<&'a str>,
     pub channel: Option<&'a str>,
+    /// LibreFang `SessionId` the tool call belongs to. When `Some`, the
+    /// `file_read` / `file_write` builtins consult
+    /// `kernel.acp_fs_client(session_id)` and route through the editor's
+    /// `fs/*` reverse-RPC instead of the local filesystem (#3313).
+    /// `None` for legacy / test call sites that don't have the id on
+    /// hand — those keep the previous local-fs behaviour. Owned (vs.
+    /// borrowed) because `SessionId` is `Copy` (16 bytes) and the
+    /// upstream agent-loop callers pass it as a `Option<&str>` UUID
+    /// string that we parse here.
+    pub session_id: Option<librefang_types::agent::SessionId>,
     /// Artifact spill threshold from `[tool_results] spill_threshold_bytes`.
     /// Tool results larger than this are written to the artifact store.
     /// `0` means use the compiled default (16 KiB).
@@ -412,6 +422,7 @@ pub async fn execute_tool_raw(
         process_registry: _,
         sender_id,
         channel: _,
+        session_id,
         spill_threshold_bytes,
         max_artifact_bytes,
         checkpoint_manager,
@@ -422,6 +433,27 @@ pub async fn execute_tool_raw(
     let result = match tool_name {
         // Filesystem tools
         "file_read" => {
+            // ACP routing: when an editor is bound to this session,
+            // hand the read off to the editor's `fs/read_text_file`
+            // instead of touching the local fs. The editor sees its
+            // in-memory buffer state (unsaved edits, virtual fs) which
+            // is what the user expects when prompting from inside the
+            // editor (#3313).
+            if let (Some(k), Some(sid)) = (kernel, session_id) {
+                if let Some(client) = k.acp_fs_client(*sid) {
+                    let path_str = input["path"].as_str().unwrap_or("").to_string();
+                    let path = std::path::PathBuf::from(&path_str);
+                    let line = input["line"].as_u64().map(|v| v as u32);
+                    let limit = input["limit"].as_u64().map(|v| v as u32);
+                    return match client.read_text_file(path, line, limit).await {
+                        Ok(content) => ToolResult::ok(tool_use_id.to_string(), content),
+                        Err(e) => ToolResult::error(
+                            tool_use_id.to_string(),
+                            format!("ACP fs/read_text_file failed: {e}"),
+                        ),
+                    };
+                }
+            }
             let mut extra = named_ws_prefixes(*kernel, *caller_agent_id);
             // #4434: widen with the channel bridge's download directory so
             // agents can open Telegram/voice/etc. attachments the bridge
@@ -451,6 +483,27 @@ pub async fn execute_tool_raw(
                             ..Default::default()
                         };
                     }
+                }
+            }
+            // ACP routing: if an editor is attached to this session,
+            // route the write through `fs/write_text_file` so it goes
+            // into the editor's buffer (with its own undo stack and
+            // dirty-state tracking) instead of the local fs (#3313).
+            if let (Some(k), Some(sid)) = (kernel, session_id) {
+                if let Some(client) = k.acp_fs_client(*sid) {
+                    let path_str = input["path"].as_str().unwrap_or("").to_string();
+                    let content = input["content"].as_str().unwrap_or("").to_string();
+                    let path = std::path::PathBuf::from(&path_str);
+                    return match client.write_text_file(path, content).await {
+                        Ok(()) => ToolResult::ok(
+                            tool_use_id.to_string(),
+                            format!("Wrote {} via editor", path_str),
+                        ),
+                        Err(e) => ToolResult::error(
+                            tool_use_id.to_string(),
+                            format!("ACP fs/write_text_file failed: {e}"),
+                        ),
+                    };
                 }
             }
             maybe_snapshot(checkpoint_manager, *workspace_root, "pre file_write").await;
@@ -1402,6 +1455,13 @@ pub async fn execute_tool(
     }
 
     debug!(tool_name, "Executing tool");
+    // Parse the session id once. Invalid UUIDs (legacy non-uuid session
+    // ids, channel-derived synthetic ids) leave the field `None` so the
+    // ACP routing in `file_read` / `file_write` falls through to the
+    // local-fs path — same effect as not having the field at all.
+    let parsed_session_id = session_id
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .map(librefang_types::agent::SessionId);
     let ctx = ToolExecContext {
         kernel,
         allowed_tools,
@@ -1423,6 +1483,7 @@ pub async fn execute_tool(
         process_registry,
         sender_id,
         channel,
+        session_id: parsed_session_id,
         spill_threshold_bytes: 0,
         max_artifact_bytes: 0,
         checkpoint_manager,
@@ -7101,6 +7162,7 @@ mod tests {
         ) {
         }
     }
+    impl AcpFsBridge for ApprovalKernel {}
 
     // ---- END role-trait impls (#3746) ----
 
@@ -7327,6 +7389,7 @@ mod tests {
         ) {
         }
     }
+    impl AcpFsBridge for ForceHumanCapturingKernel {}
 
     // ---- END role-trait impls (#3746) ----
 
@@ -7915,6 +7978,7 @@ mod tests {
         ) {
         }
     }
+    impl AcpFsBridge for NamedWsKernel {}
 
     // ---- END role-trait impls (#3746) ----
 
@@ -10606,6 +10670,7 @@ mod tests {
         ) {
         }
     }
+    impl AcpFsBridge for SpawnCheckKernel {}
 
     // ---- END role-trait impls (#3746) ----
 

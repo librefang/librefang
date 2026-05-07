@@ -1686,6 +1686,9 @@ impl LibreFangKernel {
             process_manager: Some(&self.process_manager),
             sender_id: deferred.sender_id.as_deref(),
             channel: deferred.channel.as_deref(),
+            // Deferred resume path doesn't carry the session id today;
+            // ACP routing falls back to local fs.
+            session_id: None,
             spill_threshold_bytes: cfg.tool_results.spill_threshold_bytes,
             max_artifact_bytes: cfg.tool_results.max_artifact_bytes,
             checkpoint_manager: self.checkpoint_manager.as_ref(),

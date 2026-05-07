@@ -235,6 +235,8 @@ impl librefang_kernel_handle::SessionWriter for CapturingKernel {
 
 // --- Helpers ---------------------------------------------------------------
 
+impl librefang_kernel_handle::AcpFsBridge for CapturingKernel {}
+
 fn make_ctx<'a>(kernel: &'a Arc<dyn KernelHandle>, caller: Option<&'a str>) -> ToolExecContext<'a> {
     ToolExecContext {
         kernel: Some(kernel),
@@ -257,6 +259,7 @@ fn make_ctx<'a>(kernel: &'a Arc<dyn KernelHandle>, caller: Option<&'a str>) -> T
         process_registry: None,
         sender_id: None,
         channel: None,
+        session_id: None,
         spill_threshold_bytes: 0,
         max_artifact_bytes: 0,
         checkpoint_manager: None,
