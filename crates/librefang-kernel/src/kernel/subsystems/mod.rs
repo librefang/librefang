@@ -11,6 +11,8 @@
 
 pub mod metering;
 pub mod processes;
+pub mod security;
 
 pub use metering::MeteringSubsystem;
 pub use processes::ProcessSubsystem;
+pub use security::SecuritySubsystem;

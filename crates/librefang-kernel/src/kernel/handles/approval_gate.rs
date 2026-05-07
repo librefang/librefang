@@ -73,7 +73,8 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             channel,
             Some(c) if c == SYSTEM_CHANNEL_CRON || c == SYSTEM_CHANNEL_AUTONOMOUS
         );
-        self.auth
+        self.security
+            .auth
             .resolve_user_tool_decision(tool_name, sender_id, channel, system_call)
     }
 

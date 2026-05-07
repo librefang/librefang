@@ -2097,7 +2097,7 @@ impl LibreFangKernel {
         // exists we still record the channel so the spend rolls up under
         // an "unknown user" bucket on that channel.
         let attribution_user_id: Option<UserId> =
-            sender_context.and_then(|sc| self.auth.identify(&sc.channel, &sc.user_id));
+            sender_context.and_then(|sc| self.security.auth.identify(&sc.channel, &sc.user_id));
         let attribution_channel: Option<String> = sender_context.map(|sc| sc.channel.clone());
 
         // `loop_opts` is already a local — the spawned async move will
@@ -2462,7 +2462,7 @@ impl LibreFangKernel {
                         // were already billed) — it trips BudgetExceeded
                         // so the next call from this user gets denied at
                         // the gate.
-                        if let Some(user_budget) = kernel_clone.auth.budget_for(uid) {
+                        if let Some(user_budget) = kernel_clone.security.auth.budget_for(uid) {
                             if let Err(e) = kernel_clone
                                 .metering
                                 .engine

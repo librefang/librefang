@@ -434,7 +434,8 @@ impl LibreFangKernel {
                         new_config.users.len(),
                         new_config.tool_policy.groups.len(),
                     );
-                    self.auth
+                    self.security
+                        .auth
                         .reload(&new_config.users, &new_config.tool_policy.groups);
                     // Re-validate channel-role-mapping role strings on
                     // every reload so an operator who just edited the

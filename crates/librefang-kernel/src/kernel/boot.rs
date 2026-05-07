@@ -1239,7 +1239,7 @@ impl LibreFangKernel {
             aux_client: arc_swap::ArcSwap::from_pointee(initial_aux_client),
             default_driver: driver,
             wasm_sandbox,
-            auth,
+            security: crate::kernel::subsystems::SecuritySubsystem::new(auth, pairing),
             model_catalog: arc_swap::ArcSwap::from_pointee(model_catalog),
             skill_registry: std::sync::RwLock::new(skill_registry),
             running_tasks: dashmap::DashMap::new(),
@@ -1261,7 +1261,6 @@ impl LibreFangKernel {
             media_engine,
             tts_engine,
             media_drivers,
-            pairing,
             embedding_driver,
             hand_registry,
             mcp_catalog: arc_swap::ArcSwap::from_pointee(mcp_catalog),
@@ -1328,8 +1327,6 @@ impl LibreFangKernel {
             },
             taint_rules_swap: initial_taint_rules,
             log_reloader: OnceLock::new(),
-            vault_recovery_codes_mutex: std::sync::Mutex::new(()),
-            vault_cache: std::sync::OnceLock::new(),
         };
 
         // Initialize proactive memory system (mem0-style) from config.

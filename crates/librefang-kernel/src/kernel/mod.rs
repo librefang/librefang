@@ -714,8 +714,9 @@ pub struct LibreFangKernel {
     aux_client: arc_swap::ArcSwap<librefang_runtime::aux_client::AuxClient>,
     /// WASM sandbox engine (shared across all WASM agent executions).
     wasm_sandbox: WasmSandbox,
-    /// RBAC authentication manager.
-    pub(crate) auth: AuthManager,
+    /// RBAC + device pairing + credential vault. See
+    /// [`subsystems::SecuritySubsystem`].
+    pub(crate) security: subsystems::SecuritySubsystem,
     /// Model catalog registry. `ArcSwap` (#3384) so the hot `send_message_full`
     /// path can read the snapshot atomically — was previously `std::sync::RwLock`,
     /// which forced 5+ lock acquisitions per request. Writes use the RCU pattern
@@ -766,8 +767,6 @@ pub struct LibreFangKernel {
     pub(crate) tts_engine: librefang_runtime::tts::TtsEngine,
     /// Media generation driver cache (video, music, etc.).
     pub(crate) media_drivers: librefang_runtime::media::MediaDriverCache,
-    /// Device pairing manager.
-    pub(crate) pairing: crate::pairing::PairingManager,
     /// Embedding driver for vector similarity search (None = text fallback).
     pub(crate) embedding_driver:
         Option<Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>>,
@@ -957,36 +956,6 @@ pub struct LibreFangKernel {
     /// don't take effect on the active filter (the hot-reload action is a
     /// no-op with a warning).
     pub(crate) log_reloader: OnceLock<crate::log_reload::LogLevelReloaderArc>,
-    /// Serialises all recovery-code redemption attempts so the
-    /// read-verify-write sequence is atomic within the process.
-    /// Fixes the TOCTOU race described in issue #3560: without this lock a
-    /// concurrent second request that reads the same code list before the
-    /// first request has written the updated list can redeem the same code
-    /// twice.
-    vault_recovery_codes_mutex: std::sync::Mutex<()>,
-    /// Process-lifetime cache of the unlocked credential vault (#3598).
-    ///
-    /// Without this cache, every `vault_get` / `vault_set` rebuilt a fresh
-    /// `CredentialVault`, re-read `vault.enc` from disk, and re-ran the
-    /// Argon2id KDF inside `unlock()` — which is intentionally slow.
-    /// `dashboard_login` reads two keys (`dashboard_user`, `dashboard_password`)
-    /// per request and so paid two full KDF runs every login attempt.
-    ///
-    /// Lazy-initialised on first `vault_handle()` call so kernels that never
-    /// touch the vault do no I/O. Subsequent reads hit the in-memory
-    /// `HashMap<String, Zeroizing<String>>` directly. Writes still call
-    /// `CredentialVault::set` which re-derives a fresh per-write KDF inside
-    /// `save()` (that path is unchanged — at-rest security is not
-    /// regressed). The vault's `Drop` impl still zeroises entries when the
-    /// kernel is dropped.
-    ///
-    /// `OnceLock<Arc<RwLock<…>>>` because:
-    /// - lazy init must be one-shot and race-safe (`OnceLock`),
-    /// - the cached vault is shared by &-borrowing kernel methods (`Arc`),
-    /// - reads dominate writes (`RwLock`).
-    vault_cache: std::sync::OnceLock<
-        std::sync::Arc<std::sync::RwLock<librefang_extensions::vault::CredentialVault>>,
-    >,
 }
 
 /// Bounded in-memory delivery receipt tracker.

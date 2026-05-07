@@ -1101,7 +1101,7 @@ impl LibreFangKernel {
         // RBAC M5: derive user/channel attribution from the inbound sender
         // so per-user budgets and audit events can roll up per call.
         let attribution_user_id: Option<UserId> =
-            sender_context.and_then(|sc| self.auth.identify(&sc.channel, &sc.user_id));
+            sender_context.and_then(|sc| self.security.auth.identify(&sc.channel, &sc.user_id));
         let attribution_channel: Option<String> = sender_context.map(|sc| sc.channel.clone());
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
@@ -1147,7 +1147,7 @@ impl LibreFangKernel {
             // call). A breach trips BudgetExceeded for downstream gating
             // and dashboard visibility; the current response is returned
             // unchanged because the tokens are already billed.
-            if let Some(user_budget) = self.auth.budget_for(uid) {
+            if let Some(user_budget) = self.security.auth.budget_for(uid) {
                 if let Err(e) = self.metering.engine.check_user_budget(uid, &user_budget) {
                     tracing::warn!(
                         agent_id = %agent_id,

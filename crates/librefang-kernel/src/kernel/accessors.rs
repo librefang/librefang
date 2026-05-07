@@ -811,7 +811,7 @@ impl LibreFangKernel {
         String,
     > {
         // Fast path: cache already populated.
-        if let Some(handle) = self.vault_cache.get() {
+        if let Some(handle) = self.security.vault_cache.get() {
             return Ok(std::sync::Arc::clone(handle));
         }
 
@@ -828,11 +828,17 @@ impl LibreFangKernel {
                 .map_err(|e| format!("Vault unlock failed: {e}"))?;
         }
         let handle = std::sync::Arc::new(std::sync::RwLock::new(vault));
-        match self.vault_cache.set(std::sync::Arc::clone(&handle)) {
+        match self
+            .security
+            .vault_cache
+            .set(std::sync::Arc::clone(&handle))
+        {
             Ok(()) => Ok(handle),
-            Err(_) => Ok(std::sync::Arc::clone(self.vault_cache.get().expect(
-                "OnceLock::set() returned Err; another thread must have installed a value",
-            ))),
+            Err(_) => Ok(std::sync::Arc::clone(
+                self.security.vault_cache.get().expect(
+                    "OnceLock::set() returned Err; another thread must have installed a value",
+                ),
+            )),
         }
     }
 
@@ -895,6 +901,7 @@ impl LibreFangKernel {
     pub fn vault_redeem_recovery_code(&self, code: &str) -> Result<bool, String> {
         // Hold the mutex for the entire read-verify-write sequence.
         let _guard = self
+            .security
             .vault_recovery_codes_mutex
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -960,13 +967,13 @@ impl LibreFangKernel {
     /// RBAC authentication manager.
     #[inline]
     pub fn auth_manager(&self) -> &AuthManager {
-        &self.auth
+        &self.security.auth
     }
 
     /// Device pairing manager.
     #[inline]
     pub fn pairing_ref(&self) -> &crate::pairing::PairingManager {
-        &self.pairing
+        &self.security.pairing
     }
 
     /// Web tools context (search + fetch).

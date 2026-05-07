@@ -109,10 +109,10 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         sender_id: Option<&str>,
         channel: Option<&str>,
     ) -> Option<librefang_types::user_policy::UserMemoryAccess> {
-        if !self.auth.is_enabled() {
+        if !self.security.auth.is_enabled() {
             return None;
         }
-        let user_id = self.auth.resolve_user(sender_id, channel)?;
-        self.auth.memory_acl_for(user_id)
+        let user_id = self.security.auth.resolve_user(sender_id, channel)?;
+        self.security.auth.memory_acl_for(user_id)
     }
 }
