@@ -460,27 +460,57 @@ async fn auto_policy_promotes_to_active_and_reloads_registry() {
         skills_root_path.display()
     );
 
+    // Auto branch must reload the kernel's in-memory skill registry
+    // after promotion — otherwise the next turn's prompt build will not
+    // see the new skill until daemon restart, and the whole point of
+    // auto-promote (vs pending review) is "agent picks it up
+    // immediately". This is the assertion that locks the
+    // `kernel.reload_skills()` call site in `mod.rs::capture_one`'s
+    // Auto branch; without the reload, this assertion fails even
+    // though the on-disk file landed.
+    let registry = kernel
+        .skill_registry_ref()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    let registered: Vec<String> = registry
+        .list()
+        .iter()
+        .map(|s| s.manifest.skill.name.clone())
+        .collect();
+    assert!(
+        registered.iter().any(|n| n == &expected_name),
+        "auto-promoted skill must be visible in kernel.skill_registry after reload; got {registered:?}, expected to include {expected_name:?}"
+    );
+    drop(registry);
+
     // Pending file must have been removed by `approve_candidate` after
-    // promotion succeeded.
+    // promotion succeeded. The directory may or may not exist depending
+    // on whether `agent_pending_dir` ever ran (the auto path always
+    // calls `save_candidate` first, which always creates it, so we
+    // require it to exist as a regression guard against a future
+    // refactor that skips the staging write).
     let pending_dir = skills_root_path.join("pending").join(agent_id.to_string());
-    if pending_dir.exists() {
-        let leftovers: Vec<_> = std::fs::read_dir(&pending_dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s == "toml")
-                    .unwrap_or(false)
-            })
-            .collect();
-        assert!(
-            leftovers.is_empty(),
-            "auto-promotion should drop the pending file; found {} leftover .toml file(s)",
-            leftovers.len()
-        );
-    }
+    assert!(
+        pending_dir.exists(),
+        "auto path should still stage the pending file before promotion; pending_dir={} missing",
+        pending_dir.display()
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(&pending_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s == "toml")
+                .unwrap_or(false)
+        })
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "auto-promotion should drop the pending file; found {} leftover .toml file(s)",
+        leftovers.len()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

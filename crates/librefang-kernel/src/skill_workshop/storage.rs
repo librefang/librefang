@@ -248,7 +248,17 @@ fn is_duplicate_pending(dir: &Path, candidate: &CandidateSkill) -> io::Result<bo
 /// `max_age_days`. No-op when no entries match. Logged at DEBUG so a
 /// chatty agent does not flood INFO; failures to remove are WARN
 /// because they indicate a real disk problem.
+///
+/// `max_age_days == 0` is treated as "no TTL" rather than "expire
+/// everything" — the natural reading of `Some(0)` for an age threshold
+/// is "disabled", and "delete every pending candidate including the
+/// one we are about to write" would be a footgun for an operator who
+/// configured `max_pending_age_days = 0` expecting the disabled
+/// behaviour. To purge the queue, set `max_pending = 0` instead.
 fn enforce_age_ttl(dir: &Path, max_age_days: u32) -> io::Result<()> {
+    if max_age_days == 0 {
+        return Ok(());
+    }
     let cutoff = chrono::Utc::now() - chrono::Duration::days(max_age_days as i64);
     for entry in read_dir_candidates(dir)? {
         if entry.candidate.captured_at < cutoff {
@@ -916,6 +926,39 @@ mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn save_ttl_zero_is_treated_as_disabled() {
+        // `Some(0)` must NOT expire every candidate (which would be the
+        // naive `cutoff = now - 0 days` reading) — it is treated as
+        // "disabled" so an operator who picked zero expecting the
+        // disabled meaning does not silently lose their queue.
+        let tmp = tempdir().unwrap();
+        let mut old = fixture(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "33333333-0000-0000-0000-000000000020",
+            "# old",
+        );
+        old.name = "old_skill".to_string();
+        old.captured_at = Utc::now() - chrono::Duration::days(365);
+        save_candidate(tmp.path(), &old, 20, None).unwrap();
+
+        let mut fresh = fixture(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "33333333-0000-0000-0000-000000000021",
+            "# fresh",
+        );
+        fresh.name = "fresh_skill".to_string();
+        // TTL = 0 must not nuke the year-old candidate.
+        save_candidate(tmp.path(), &fresh, 20, Some(0)).unwrap();
+
+        let listed = list_pending(tmp.path(), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        assert_eq!(
+            listed.len(),
+            2,
+            "Some(0) must be a no-op TTL; got listed={listed:?}"
         );
     }
 

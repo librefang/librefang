@@ -188,13 +188,20 @@ collision are extremely rare; the cap LRU eventually flushes them.
 
 ### Aging (optional TTL)
 
-`max_pending_age_days = Some(n)` reaps any pending candidate whose
-`captured_at` is older than `n` days at the next save, before the cap
-check. Default is `None` so an operator who never reviews their
-pending tree never silently loses an old candidate — the cap LRU is
-the only aging mechanism unless the operator opts in. Combined with
-the cap, opting in gives a hard upper bound on both queue length AND
-queue age.
+`max_pending_age_days = Some(n)` with `n > 0` reaps any pending
+candidate whose `captured_at` is older than `n` days at the next
+save, before the cap check. Default is `None` so an operator who
+never reviews their pending tree never silently loses an old
+candidate — the cap LRU is the only aging mechanism unless the
+operator opts in. Combined with the cap, opting in gives a hard
+upper bound on both queue length AND queue age.
+
+`max_pending_age_days = Some(0)` is treated as **disabled** rather
+than "expire everything immediately". The natural reading of `Some(0)`
+for a TTL is "no TTL", and the alternative ("delete every pending
+candidate including the one we are about to write") would be a
+footgun. To purge the queue, set `max_pending = 0` instead — that
+short-circuits `save_candidate` before any write or eviction runs.
 
 ## Security model
 

@@ -1169,13 +1169,16 @@ pub struct SkillWorkshopConfig {
     /// disk write entirely (the scanner still runs; if you want to
     /// skip the scan as well, use `auto_capture = false`).
     pub max_pending: u32,
-    /// Optional time-to-live for pending candidates, in days. When set,
-    /// `save_candidate` prunes any pending candidate whose `captured_at`
-    /// is older than this threshold before writing the new one — bounds
-    /// the worst case where a user opts in but never reviews the
-    /// pending tree. `None` (default) keeps the historical behaviour:
-    /// candidates only age out when the per-agent `max_pending` cap
-    /// evicts them by LRU.
+    /// Optional time-to-live for pending candidates, in days. When set
+    /// to `Some(n)` with `n > 0`, `save_candidate` prunes any pending
+    /// candidate whose `captured_at` is older than `n` days before
+    /// writing the new one — bounds the worst case where a user opts
+    /// in but never reviews the pending tree. `None` (default) and
+    /// `Some(0)` both keep the historical behaviour: candidates only
+    /// age out when the per-agent `max_pending` cap evicts them by
+    /// LRU. `Some(0)` is treated as "disabled" rather than "expire
+    /// everything" because the latter would be a footgun for an
+    /// operator who configured zero expecting the disabled meaning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_pending_age_days: Option<u32>,
 }
