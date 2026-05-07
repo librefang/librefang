@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { Bell, Check, X, ExternalLink } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useUIStore } from "../lib/store";
@@ -13,12 +13,22 @@ const MAX_BADGE_COUNT = 99;
 export function NotificationCenter() {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [open]);
+
   const addToast = useUIStore((s) => s.addToast);
   const navigate = useNavigate();
 
   const countQuery = useApprovalCount({ refetchInterval: POLL_INTERVAL_MS });
   const listQuery = useApprovals({ enabled: open });
-  const totpQuery = useTotpStatus();
+  const totpQuery = useTotpStatus({ enabled: open });
   const approveMutation = useApproveApproval();
   const rejectMutation = useRejectApproval();
 

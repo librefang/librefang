@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import i18n from "./i18n";
 
-function createClientId(): string {
+export function createClientId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
@@ -81,8 +81,8 @@ export const useUIStore = create<UIState>()(
       toggleTheme: () =>
         set((state) => ({ theme: state.theme === "light" ? "dark" : "light" })),
       setLanguage: (lang) => {
-        void i18n.changeLanguage(lang);
         set({ language: lang });
+        void i18n.changeLanguage(lang).catch((err) => console.error(err));
       },
       setMobileMenuOpen: (open) => set({ isMobileMenuOpen: open }),
       toggleSidebar: () => set((state) => ({ isSidebarCollapsed: !state.isSidebarCollapsed })),
