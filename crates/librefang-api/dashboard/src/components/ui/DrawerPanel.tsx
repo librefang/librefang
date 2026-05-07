@@ -52,6 +52,11 @@ export function DrawerPanel({
     onCloseRef.current = onClose;
   }, [onClose]);
 
+  const isOpenRef = useRef(isOpen);
+  useEffect(() => {
+    isOpenRef.current = isOpen;
+  }, [isOpen]);
+
   // Track the body identity we last pushed into the slot. The
   // parent-driven close watcher uses this to skip `close()` when another
   // DrawerPanel has taken over the slot in the same commit — see
@@ -132,7 +137,7 @@ export function DrawerPanel({
   // Cleanup on unmount.
   useEffect(
     () => () => {
-      if (isOpen) close();
+      if (isOpenRef.current) close();
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
