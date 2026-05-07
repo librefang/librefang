@@ -105,6 +105,7 @@ mod provider_probe;
 mod reviewer_sanitize;
 mod session_ops;
 mod spawn;
+mod subsystem_forwards;
 pub(crate) mod subsystems;
 mod tools_and_skills;
 mod triggers_and_workflow;
