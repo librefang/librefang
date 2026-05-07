@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Plus, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { type JsonSchema, resolveRef, type ConfigSchemaRoot } from "../../api";
+import { createClientId } from "../../lib/store";
 
 // Editor for `Vec<Struct>` config fields. Each item is rendered as a
 // collapsible card with a JSON editor for its fields. The collapsed header
@@ -74,7 +75,7 @@ function defaultItemFor(itemSchema: JsonSchema | undefined, root: ConfigSchemaRo
 // surface this implementation detail. We re-attach on incoming items
 // that don't have one yet (e.g. from a fresh /api/config GET).
 function newItemId(): string {
-  return crypto.randomUUID();
+  return createClientId();
 }
 const itemIdMap = new WeakMap<object, string>();
 

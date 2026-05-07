@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { createClientId } from "../../lib/store";
 
 // Editor for `BTreeMap<String, String | Number>` config fields. The whole
 // section (e.g. `provider_urls`, `tool_timeouts`) is a single value posted
@@ -27,7 +28,7 @@ type Props = {
 };
 
 function newRowId(): string {
-  return crypto.randomUUID();
+  return createClientId();
 }
 
 function rowsFromValue(value: Props["value"]): Row[] {

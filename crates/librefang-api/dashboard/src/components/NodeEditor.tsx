@@ -9,22 +9,32 @@ interface NodeEditorProps {
 export const NodeEditor = React.memo(function NodeEditor({ node, onUpdate }: NodeEditorProps) {
   const { t } = useTranslation();
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingRef = useRef<{ id: string; label: string } | null>(null);
   const [localLabel, setLocalLabel] = useState(node?.data?.label ?? "");
-  const prevNodeId = useRef<string | null>(null);
+  const prevNodeId = useRef<string | null>(node?.id ?? null);
 
   useEffect(() => {
     if (node) {
+      if (prevNodeId.current && prevNodeId.current !== node.id) {
+        const pending = pendingRef.current;
+        if (pending && pending.id === prevNodeId.current) {
+          onUpdate(pending.id, { label: pending.label });
+        }
+        pendingRef.current = null;
+      }
       if (timerRef.current) clearTimeout(timerRef.current);
       prevNodeId.current = node.id;
       setLocalLabel(node.data?.label ?? "");
     }
-  }, [node?.id]);
+  }, [node?.id, onUpdate]);
 
   useEffect(() => {
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
+      const pending = pendingRef.current;
+      if (pending) onUpdate(pending.id, { label: pending.label });
     };
-  }, []);
+  }, [onUpdate]);
 
   if (!node) return (
     <div className="h-full flex items-center justify-center text-text-dim/40 font-bold uppercase tracking-widest text-[10px]">
@@ -45,8 +55,10 @@ export const NodeEditor = React.memo(function NodeEditor({ node, onUpdate }: Nod
               const value = e.target.value;
               setLocalLabel(value);
               if (timerRef.current) clearTimeout(timerRef.current);
+              pendingRef.current = { id: node.id, label: value };
               timerRef.current = setTimeout(() => {
                 onUpdate(node.id, { label: value });
+                pendingRef.current = null;
               }, 300);
             }}
             className="w-full rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm focus:border-brand outline-none transition-colors"

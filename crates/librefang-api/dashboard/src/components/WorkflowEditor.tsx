@@ -13,7 +13,7 @@ import {
   type Connection,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { useUIStore } from "../lib/store";
+import { useUIStore, createClientId } from "../lib/store";
 import { ChevronLeft } from "lucide-react";
 
 interface CustomNodeProps {
@@ -39,8 +39,8 @@ const nodeTypesConfig = [
   { type: "channel", color: "var(--accent-color)", icon: "M" },
 ];
 
-const CustomNode = React.memo(function CustomNode({ data }: CustomNodeProps) {
-  const config = nodeTypesConfig.find(n => n.type === data.nodeType) || nodeTypesConfig[2];
+const CustomNode = React.memo(function CustomNode({ data, type }: CustomNodeProps) {
+  const config = nodeTypesConfig.find(c => c.type === (data.nodeType ?? type)) ?? nodeTypesConfig[2];
   return (
     <div className="rounded-lg border-2 border-border-subtle bg-surface shadow-lg min-w-[150px] overflow-hidden">
       <div className="flex items-center gap-2 px-3 py-2" style={{ backgroundColor: config.color }}>
@@ -74,12 +74,12 @@ export function WorkflowEditor({ initialNodes = [], initialEdges = [], onSave, o
 
   const addNode = useCallback((type: string) => {
     const newNode: Node = {
-      id: `${type}-${crypto.randomUUID()}`,
+      id: `${type}-${createClientId()}`,
       type: "custom",
       position: { x: 0, y: 0 },
       data: { label: t(`canvas.nodes.${type}`), description: t(`canvas.nodes.${type}_desc`), nodeType: type }
     };
-    setNodes((nds) => [{ ...newNode, position: { x: 100 + nds.length * 40, y: 100 + nds.length * 40 } }, ...nds]);
+    setNodes((nds) => [...nds, { ...newNode, position: { x: 100 + nds.length * 40, y: 100 + nds.length * 40 } }]);
   }, [setNodes, t]);
 
   return (
