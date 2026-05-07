@@ -86,7 +86,7 @@ fn test_read_daemon_info_corrupt_json() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_full_daemon_lifecycle() {
     let test = librefang_testing::TestAppState::new();
-    test.state.kernel.set_self_handle();
+    test.state.kernel.clone().set_self_handle();
     let state = test.state.clone();
 
     let app = Router::new()

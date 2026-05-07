@@ -55,8 +55,13 @@ export function PushDrawer() {
   const desktopRef = useRef<HTMLDivElement>(null);
   const mobileRef = useRef<HTMLDivElement>(null);
 
-  useFocusTrap(isOpen, desktopRef, false, false);
+  // Scope each focus trap to the viewport actually showing it. Without the
+  // `!isMobile` / `isMobile` split, both traps would activate on every
+  // viewport — wasted work, and also a subtle a11y trap if either
+  // `<aside>` (desktop) or the mobile overlay <div> were visible
+  // simultaneously while the other is `display:none`.
   const isMobile = useIsMobile();
+  useFocusTrap(isOpen && !isMobile, desktopRef, false, false);
   useFocusTrap(isOpen && isMobile, mobileRef, false);
 
   // Single dismissal path — DrawerPanel observes the store flip and calls

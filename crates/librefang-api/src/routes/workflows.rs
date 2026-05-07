@@ -736,7 +736,7 @@ pub async fn run_workflow(
 
     let input = req["input"].as_str().unwrap_or("").to_string();
 
-    match state.kernel.run_workflow(workflow_id, input).await {
+    match state.kernel.run_workflow_typed(workflow_id, input).await {
         Ok((run_id, output)) => {
             // Include step-level detail in the response so callers can inspect I/O
             let run = state.kernel.workflow_engine().get_run(run_id).await;
@@ -1839,7 +1839,7 @@ pub async fn run_schedule(
             let wf_input = input
                 .clone()
                 .unwrap_or_else(|| format!("[Scheduled workflow '{}' triggered]", name));
-            match state.kernel.run_workflow(wid, wf_input).await {
+            match state.kernel.run_workflow_typed(wid, wf_input).await {
                 Ok((run_id, output)) => (
                     StatusCode::OK,
                     Json(serde_json::json!({
@@ -1861,8 +1861,7 @@ pub async fn run_schedule(
             }
         }
         librefang_types::scheduler::CronAction::AgentTurn { message, .. } => {
-            let kernel_handle: Arc<dyn KernelHandle> =
-                state.kernel.clone() as Arc<dyn KernelHandle>;
+            let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
             match state
                 .kernel
                 .send_message_with_handle(agent_id, message, Some(kernel_handle))
@@ -1894,7 +1893,7 @@ pub async fn run_schedule(
                 librefang_types::event::EventTarget::Broadcast,
                 librefang_types::event::EventPayload::Custom(text.as_bytes().to_vec()),
             );
-            state.kernel.publish_event(event).await;
+            state.kernel.publish_typed_event(event).await;
             (
                 StatusCode::OK,
                 Json(serde_json::json!({

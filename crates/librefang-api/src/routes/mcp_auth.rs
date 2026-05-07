@@ -891,7 +891,7 @@ pub async fn auth_callback(
     // the UX cost is worth the state consistency.
     // The kernel's retry_mcp_connection is the single source of truth for setting
     // Authorized (on Ok) or Error (on Err) in mcp_auth_states.
-    state.kernel.retry_mcp_connection(&name).await;
+    state.kernel.clone().retry_mcp_connection(&name).await;
 
     callback_text("Authorization Complete\n\nYou can close this tab.".to_string())
 }

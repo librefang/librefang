@@ -84,7 +84,10 @@ fn spawn_named(state: &Arc<AppState>, name: &str) -> AgentId {
         name: name.to_string(),
         ..AgentManifest::default()
     };
-    state.kernel.spawn_agent(manifest).expect("spawn_agent")
+    state
+        .kernel
+        .spawn_agent_typed(manifest)
+        .expect("spawn_agent")
 }
 
 async fn send(app: axum::Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useId, memo, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useId, memo, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
@@ -92,9 +92,18 @@ export const Modal = memo(function Modal({
   // pointer-events-none) without first hitting Esc.
   useFocusTrap(isOpen, dialogRef, true, !isDrawer);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     onCloseRef.current = onClose;
   }, [onClose]);
+
+  useEffect(() => {
+    if (!isOpen || isDrawer) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [isOpen, isDrawer]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -165,9 +174,10 @@ export const Modal = memo(function Modal({
         >
           <motion.div
             ref={dialogRef}
-            role="dialog"
-            aria-modal={isDrawer ? "false" : "true"}
-            aria-labelledby={titleId}
+            {...(isDrawer
+              ? { role: "complementary" as const }
+              : { role: "dialog" as const, "aria-modal": true })}
+            {...(title ? { "aria-labelledby": titleId } : {})}
             className={dialogClass}
             onClick={(e) => e.stopPropagation()}
             {...dialogMotion}
@@ -176,7 +186,7 @@ export const Modal = memo(function Modal({
               <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle shrink-0">
                 {title ? (
                   <h3 id={titleId} className="text-sm font-bold tracking-tight">{title}</h3>
-                ) : <span />}
+                ) : <span aria-hidden="true" />}
                 {!hideCloseButton && (
                   <button
                     onClick={onClose}
