@@ -48,6 +48,16 @@ pub use kernel::DeliveryTracker;
 pub use kernel::LibreFangKernel;
 pub use kernel_api::KernelApi;
 
+// Focused per-subsystem traits (refs #3565). Re-exported so external
+// crates can bind `&dyn FooSubsystemApi` instead of dragging in the
+// entire `KernelApi` surface, and so the upcoming method-body
+// migration can move callers off `LibreFangKernel` inherent forwards.
+pub use kernel::subsystems::{
+    AgentSubsystemApi, EventSubsystemApi, GovernanceSubsystemApi, LlmSubsystemApi, McpSubsystemApi,
+    MediaSubsystemApi, MemorySubsystemApi, MeshSubsystemApi, MeteringSubsystemApi,
+    ProcessSubsystemApi, SecuritySubsystemApi, SkillsSubsystemApi, WorkflowSubsystemApi,
+};
+
 // ---------------------------------------------------------------------------
 // Runtime re-exports (refs #3596 — API → Kernel → Runtime layering)
 // ---------------------------------------------------------------------------
