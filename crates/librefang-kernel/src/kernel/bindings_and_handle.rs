@@ -44,6 +44,18 @@ impl LibreFangKernel {
                     Arc::downgrade(self),
                 )),
             );
+            // Skill workshop (#3328) — same wiring shape as auto_dream:
+            // registers a Weak<Self>-holding handler on AgentLoopEnd so the
+            // captured workflow's pending file write happens off the agent
+            // loop's return path. Default-off; per-agent opt-in via
+            // `[skill_workshop] enabled` in agent.toml — see
+            // `crate::skill_workshop`.
+            self.hooks.register(
+                librefang_types::agent::HookEvent::AgentLoopEnd,
+                std::sync::Arc::new(crate::skill_workshop::SkillWorkshopTurnEndHook::new(
+                    Arc::downgrade(self),
+                )),
+            );
             // Install the kernel-handle weak ref on the proactive-memory
             // extractor so its `extract_memories_with_agent_id` path can
             // route through `run_forked_agent_oneshot` for cache alignment

@@ -1038,6 +1038,11 @@ pub enum AuxTask {
     /// Tool-result history fold (#3347 3/N): summarise stale tool results
     /// from turns older than `history_fold_after_turns` into a compact stub.
     Fold,
+    /// Skill workshop (#3328) candidate review: classify whether a
+    /// captured workflow is worth promoting to a draft skill, and refine
+    /// its name / one-line summary if so. Cheap classification call,
+    /// runs at most once per turn that produced a heuristic match.
+    SkillReview,
 }
 
 impl AuxTask {
@@ -1050,6 +1055,7 @@ impl AuxTask {
             AuxTask::Vision => "vision",
             AuxTask::BrowserVision => "browser_vision",
             AuxTask::Fold => "fold",
+            AuxTask::SkillReview => "skill_review",
         }
     }
 }
