@@ -24,13 +24,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      # `cache: pnpm` feature runs `pnpm --version` to compute the cache
-      # key, and that fails if pnpm isn't on PATH yet. Modern setup-node
-      # (v6 + Node ≥22, which bundles corepack) preserves corepack shims
-      # across the Node swap, so running `enable` once up front is
-      # sufficient — no need for the second call after setup-node.
-      - name: Enable corepack (activates pnpm from packageManager field)
-        run: corepack enable
+      # setup-node's `cache: pnpm` runs `pnpm store path --silent` from the
+      # repo root to compute the cache directory. Our `packageManager` field
+      # lives in docs/package.json, so corepack at the root falls back to the
+      # runner image's default pnpm 11 and records `~/.local/share/pnpm/store/v11`.
+      # The actual install (`cd docs && pnpm install`) then runs pnpm 10.x,
+      # which writes to `…/store/v10`. Post-job cache save then errors with
+      # "Path Validation Error" because the v11 directory was never populated.
+      # Pin pnpm explicitly via docs/package.json so PATH carries the right
+      # version before setup-node's cache pre-step runs.
+      - name: Install pnpm (version from docs/package.json packageManager)
+        uses: pnpm/action-setup@8912a9102ac27614460f54aedde9e1e7f9aec20d # v6
+        with:
+          package_json_file: docs/package.json
+          run_install: false
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
