@@ -61,9 +61,11 @@ pub fn parse_secrets_env(content: &str) -> Vec<(String, String)> {
 /// Safety: the underlying `std::env::set_var` is unsound when another thread
 /// concurrently reads the environment. The contract here is that the caller
 /// has not yet spawned any other thread that touches `std::env`. The CLI
-/// `cmd_start` path satisfies this — both the detached-spawn parent and the
-/// foreground/spawned daemon process call this from `main()` before any
-/// runtime is built.
+/// `cmd_start` path satisfies this — the detached-spawn parent returns
+/// before reaching this loader (the spawn loop calls `return` once the child
+/// is up), so only the foreground or `--spawned` child invocation actually
+/// runs the loader, and both call it from `main()` before the tokio runtime
+/// is built.
 pub fn load_into_process_blocking(home: &Path) -> std::io::Result<usize> {
     let path = home.join("secrets.env");
     let content = match std::fs::read_to_string(&path) {
@@ -155,8 +157,9 @@ no_equals_here
     #[test]
     fn unmatched_quote_is_left_intact() {
         let entries = parse_secrets_env("X=\"oops\nY='dangling\n");
-        assert_eq!(entries[0].1, "\"oops");
-        assert_eq!(entries[1].1, "'dangling");
+        assert_eq!(entries.len(), 2, "both lines should parse");
+        assert_eq!(entries[0], ("X".into(), "\"oops".into()));
+        assert_eq!(entries[1], ("Y".into(), "'dangling".into()));
     }
 
     #[test]
