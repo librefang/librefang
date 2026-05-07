@@ -1074,21 +1074,34 @@ impl WorkflowEngine {
                         Ok(Err(e)) => {
                             last_err = e.to_string();
                             if attempt < *max_retries {
+                                let backoff = if last_err.contains("burst")
+                                    || last_err.contains("QuotaExceeded")
+                                {
+                                    std::time::Duration::from_secs(65)
+                                } else {
+                                    std::time::Duration::from_secs(2u64.saturating_pow(attempt))
+                                };
                                 warn!(
-                                    "Step '{}' attempt {} failed: {e}, retrying",
+                                    "Step '{}' attempt {} failed: {e}, retrying in {}s",
                                     step.name,
-                                    attempt + 1
+                                    attempt + 1,
+                                    backoff.as_secs()
                                 );
+                                tokio::time::sleep(backoff).await;
                             }
                         }
                         Err(_) => {
                             last_err = format!("timed out after {}s", step.timeout_secs);
                             if attempt < *max_retries {
+                                let backoff =
+                                    std::time::Duration::from_secs(2u64.saturating_pow(attempt));
                                 warn!(
-                                    "Step '{}' attempt {} timed out, retrying",
+                                    "Step '{}' attempt {} timed out, retrying in {}s",
                                     step.name,
-                                    attempt + 1
+                                    attempt + 1,
+                                    backoff.as_secs()
                                 );
+                                tokio::time::sleep(backoff).await;
                             }
                         }
                     }
