@@ -57,10 +57,23 @@ impl LibreFangKernel {
                 )),
             );
             // Best-effort cleanup of `.toml.tmp` orphans left over from
-            // crashes mid-write between previous daemon runs. Cheap; no
-            // need to spawn a task. Errors are logged inside the helper.
+            // crashes mid-write between previous daemon runs. Pushed to
+            // a background task so kernel boot stays off the FS path
+            // entirely when no agent has skill_workshop enabled — the
+            // public contract is "default-off, ~zero hot-path cost",
+            // which includes startup, not just per-turn work.
+            //
+            // `set_self_handle` has historically been a sync call that
+            // does not require a tokio runtime; we only spawn when one
+            // happens to be current (production daemon boot via
+            // `setup_router` and every `#[tokio::test]` test do have a
+            // runtime; pure-sync test harnesses or Drop impls do not).
+            // When no runtime is available we fall back to the inline
+            // call so behaviour is unchanged for those callers.
             let pending_root = self.home_dir().join("skills");
-            match crate::skill_workshop::storage::prune_orphan_temp_files(&pending_root) {
+            let prune = move || match crate::skill_workshop::storage::prune_orphan_temp_files(
+                &pending_root,
+            ) {
                 Ok(0) => {}
                 Ok(n) => tracing::info!(
                     pruned = n,
@@ -70,6 +83,12 @@ impl LibreFangKernel {
                     error = %e,
                     "skill_workshop: failed to scan pending dir for orphan tmp files"
                 ),
+            };
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    handle.spawn_blocking(prune);
+                }
+                Err(_) => prune(),
             }
             // Install the kernel-handle weak ref on the proactive-memory
             // extractor so its `extract_memories_with_agent_id` path can

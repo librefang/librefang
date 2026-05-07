@@ -534,6 +534,10 @@ pub async fn list_pending_candidates(
             StatusCode::OK,
             Json(serde_json::json!({"candidates": candidates})),
         ),
+        Err(librefang_kernel::skill_workshop::WorkshopError::InvalidId(id)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("invalid agent id (must be a UUID): {id}")})),
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("failed to read pending dir: {e}")})),
@@ -563,6 +567,12 @@ pub async fn show_pending_candidate(
         Ok(candidate) => (
             StatusCode::OK,
             Json(serde_json::json!({"candidate": candidate})),
+        ),
+        Err(librefang_kernel::skill_workshop::WorkshopError::InvalidId(_)) => (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": format!("invalid candidate id (must be a UUID): {id}")}),
+            ),
         ),
         Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => (
             StatusCode::NOT_FOUND,
@@ -616,6 +626,12 @@ pub async fn approve_pending_candidate(
                 })),
             )
         }
+        Err(librefang_kernel::skill_workshop::WorkshopError::InvalidId(_)) => (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": format!("invalid candidate id (must be a UUID): {id}")}),
+            ),
+        ),
         Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": format!("candidate '{id}' not found")})),
@@ -658,6 +674,12 @@ pub async fn reject_pending_candidate(
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "rejected", "candidate_id": id})),
+        ),
+        Err(librefang_kernel::skill_workshop::WorkshopError::InvalidId(_)) => (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": format!("invalid candidate id (must be a UUID): {id}")}),
+            ),
         ),
         Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => (
             StatusCode::NOT_FOUND,

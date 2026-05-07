@@ -196,9 +196,38 @@ async fn pending_show_returns_full_candidate() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pending_show_unknown_id_returns_404() {
     let h = boot().await;
-    let (status, body) = json_request(&h, Method::GET, "/api/skills/pending/no-such-id").await;
+    // UUID-shaped id that has never been saved — must surface as 404,
+    // not 400. Pre-#4741 this used "no-such-id" which now hits the new
+    // UUID validation gate first.
+    let (status, body) = json_request(
+        &h,
+        Method::GET,
+        "/api/skills/pending/00000000-0000-0000-0000-deadbeefdead",
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
     assert!(body["error"].is_string());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_show_non_uuid_id_returns_400() {
+    // Defence in depth: anything that isn't UUID-shaped must be
+    // rejected at the route boundary, never reach the FS layer where
+    // a future bug in path-joining could escape `pending/`.
+    //
+    // Restricted to single-path-segment inputs because axum splits
+    // strings containing `/` into multiple segments before our handler
+    // is reached, so `../etc` would surface as a route mismatch (404
+    // from the router, not 400 from our extractor). Path-traversal
+    // safety from those shapes is enforced separately by
+    // `agent_pending_dir`'s UUID parse — see the storage unit tests.
+    let h = boot().await;
+    for bad in ["no-such-id", "12345", "AGENT-A"] {
+        let (status, body) =
+            json_request(&h, Method::GET, &format!("/api/skills/pending/{bad}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}: {body:?}");
+        assert!(body["error"].as_str().unwrap_or("").contains("UUID"));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,10 +267,23 @@ async fn pending_approve_promotes_and_drops_pending() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pending_approve_unknown_id_returns_404() {
     let h = boot().await;
-    let (status, body) =
-        json_request(&h, Method::POST, "/api/skills/pending/no-such-id/approve").await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/skills/pending/00000000-0000-0000-0000-deadbeefdead/approve",
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
     assert!(body["error"].is_string());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_approve_non_uuid_id_returns_400() {
+    let h = boot().await;
+    let (status, body) =
+        json_request(&h, Method::POST, "/api/skills/pending/no-such-id/approve").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(body["error"].as_str().unwrap_or("").contains("UUID"));
 }
 
 // ---------------------------------------------------------------------------
@@ -280,8 +322,32 @@ async fn pending_reject_removes_file() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pending_reject_unknown_id_returns_404() {
     let h = boot().await;
-    let (status, body) =
-        json_request(&h, Method::POST, "/api/skills/pending/no-such-id/reject").await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/skills/pending/00000000-0000-0000-0000-deadbeefdead/reject",
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
     assert!(body["error"].is_string());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_reject_non_uuid_id_returns_400() {
+    let h = boot().await;
+    let (status, body) =
+        json_request(&h, Method::POST, "/api/skills/pending/no-such-id/reject").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(body["error"].as_str().unwrap_or("").contains("UUID"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_list_non_uuid_agent_filter_returns_400() {
+    // `?agent=…` with a non-UUID value used to 500 with whatever
+    // `read_dir` produced. The route layer now translates it to a
+    // structured 400 before any FS work.
+    let h = boot().await;
+    let (status, body) = json_request(&h, Method::GET, "/api/skills/pending?agent=../etc").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(body["error"].as_str().unwrap_or("").contains("UUID"));
 }
