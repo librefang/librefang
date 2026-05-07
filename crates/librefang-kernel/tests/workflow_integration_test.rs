@@ -17,6 +17,7 @@ use librefang_kernel::workflow::{
     ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep,
 };
 use librefang_kernel::LibreFangKernel;
+use librefang_kernel::WorkflowSubsystemApi;
 use librefang_testing::MockKernelBuilder;
 use librefang_types::agent::AgentManifest;
 
@@ -145,7 +146,7 @@ memory_write = ["self.*"]
     let wf_id = kernel.register_workflow(workflow).await;
 
     // Verify workflow is registered
-    let workflows = kernel.workflow_engine().list_workflows().await;
+    let workflows = kernel.engine_ref().list_workflows().await;
     assert_eq!(workflows.len(), 1);
     assert_eq!(workflows[0].name, "alpha-beta-pipeline");
 
@@ -160,16 +161,12 @@ memory_write = ["self.*"]
 
     // Verify workflow run can be created
     let run_id = kernel
-        .workflow_engine()
+        .engine_ref()
         .create_run(wf_id, "test input".to_string())
         .await;
     assert!(run_id.is_some());
 
-    let run = kernel
-        .workflow_engine()
-        .get_run(run_id.unwrap())
-        .await
-        .unwrap();
+    let run = kernel.engine_ref().get_run(run_id.unwrap()).await.unwrap();
     assert_eq!(run.input, "test input");
 
     kernel.shutdown();
@@ -232,7 +229,7 @@ memory_write = ["self.*"]
 
     // Can create run (agent resolution happens at execute time)
     let run_id = kernel
-        .workflow_engine()
+        .engine_ref()
         .create_run(wf_id, "hello".to_string())
         .await;
     assert!(run_id.is_some());
@@ -406,7 +403,7 @@ async fn test_workflow_e2e_with_groq() {
     assert!(!output.is_empty(), "Workflow output should not be empty");
 
     // Verify the workflow run record
-    let run = kernel.workflow_engine().get_run(run_id).await.unwrap();
+    let run = kernel.engine_ref().get_run(run_id).await.unwrap();
     assert!(matches!(
         run.state,
         librefang_kernel::workflow::WorkflowRunState::Completed
@@ -422,7 +419,7 @@ async fn test_workflow_e2e_with_groq() {
     assert!(run.step_results[1].output_tokens > 0);
 
     // List runs
-    let runs = kernel.workflow_engine().list_runs(None).await;
+    let runs = kernel.engine_ref().list_runs(None).await;
     assert_eq!(runs.len(), 1);
 
     kernel.shutdown();

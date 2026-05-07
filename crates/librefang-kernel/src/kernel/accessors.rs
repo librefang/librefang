@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use super::subsystems::{
     AgentSubsystemApi, EventSubsystemApi, LlmSubsystemApi, McpSubsystemApi, MediaSubsystemApi,
-    MemorySubsystemApi, WorkflowSubsystemApi,
+    MemorySubsystemApi,
 };
 
 use tracing::{debug, info, warn};
@@ -30,8 +30,7 @@ use crate::error::{KernelError, KernelResult};
 use crate::registry::AgentRegistry;
 use crate::scheduler::AgentScheduler;
 use crate::supervisor::Supervisor;
-use crate::triggers::TriggerEngine;
-use crate::workflow::{WorkflowEngine, WorkflowTemplateRegistry};
+use crate::workflow::WorkflowEngine;
 
 use super::workspace_setup::migrate_legacy_agent_dirs;
 use super::LibreFangKernel;
@@ -730,12 +729,6 @@ impl LibreFangKernel {
         self.mcp.health()
     }
 
-    /// Cron job scheduler.
-    #[inline]
-    pub fn cron(&self) -> &crate::cron::CronScheduler {
-        self.workflows.cron_ref()
-    }
-
     /// Lazily open and unlock the credential vault, caching the result for
     /// the lifetime of this kernel (#3598).
     ///
@@ -873,18 +866,6 @@ impl LibreFangKernel {
         }
     }
 
-    /// Workflow engine.
-    #[inline]
-    pub fn workflow_engine(&self) -> &WorkflowEngine {
-        self.workflows.engine_ref()
-    }
-
-    /// Workflow template registry.
-    #[inline]
-    pub fn templates(&self) -> &WorkflowTemplateRegistry {
-        self.workflows.templates_ref()
-    }
-
     /// Convert a workflow into a reusable template.
     ///
     /// Thin wrapper around [`WorkflowEngine::workflow_to_template`] so that
@@ -896,12 +877,6 @@ impl LibreFangKernel {
         workflow: &crate::workflow::Workflow,
     ) -> librefang_types::workflow_template::WorkflowTemplate {
         WorkflowEngine::workflow_to_template(workflow)
-    }
-
-    /// Event-driven trigger engine.
-    #[inline]
-    pub fn trigger_engine(&self) -> &TriggerEngine {
-        self.workflows.triggers_ref()
     }
 
     /// Process supervisor.
@@ -1035,12 +1010,6 @@ impl LibreFangKernel {
         &self,
     ) -> Option<&Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>> {
         self.llm.embedding()
-    }
-
-    /// Command queue.
-    #[inline]
-    pub fn command_queue_ref(&self) -> &librefang_runtime::command_lane::CommandQueue {
-        self.workflows.command_queue_ref()
     }
 
     /// Resolve the per-agent concurrency semaphore, lazily creating it on

@@ -558,7 +558,7 @@ impl KernelApi for LibreFangKernel {
         Self::browser(self)
     }
     fn cron(&self) -> &CronScheduler {
-        Self::cron(self)
+        <Self as crate::WorkflowSubsystemApi>::cron_ref(self)
     }
     fn delivery(&self) -> &DeliveryTracker {
         <Self as crate::MeshSubsystemApi>::delivery(self)
@@ -606,7 +606,7 @@ impl KernelApi for LibreFangKernel {
         Self::supervisor_ref(self)
     }
     fn templates(&self) -> &crate::workflow::WorkflowTemplateRegistry {
-        Self::templates(self)
+        <Self as crate::WorkflowSubsystemApi>::templates_ref(self)
     }
     fn tts(&self) -> &librefang_runtime::tts::TtsEngine {
         Self::tts(self)
@@ -615,11 +615,11 @@ impl KernelApi for LibreFangKernel {
         Self::web_tools(self)
     }
     fn workflow_engine(&self) -> &WorkflowEngine {
-        Self::workflow_engine(self)
+        <Self as crate::WorkflowSubsystemApi>::engine_ref(self)
     }
 
     fn command_queue_ref(&self) -> &librefang_runtime::command_lane::CommandQueue {
-        Self::command_queue_ref(self)
+        <Self as crate::WorkflowSubsystemApi>::command_queue_ref(self)
     }
     fn config_ref(&self) -> arc_swap::Guard<Arc<KernelConfig>> {
         Self::config_ref(self)
@@ -1193,7 +1193,7 @@ impl KernelApi for LibreFangKernel {
         <Self as crate::MeshSubsystemApi>::channel_adapters_ref(self)
     }
     fn trigger_engine(&self) -> &crate::triggers::TriggerEngine {
-        Self::trigger_engine(self)
+        <Self as crate::WorkflowSubsystemApi>::triggers_ref(self)
     }
     fn broadcast_ref(&self) -> &librefang_types::config::BroadcastConfig {
         <Self as crate::MeshSubsystemApi>::broadcast_ref(self)
