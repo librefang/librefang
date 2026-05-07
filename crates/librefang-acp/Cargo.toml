@@ -1,0 +1,31 @@
+[package]
+name = "librefang-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent Client Protocol (ACP) adapter for LibreFang — embeds LibreFang agents in Zed/VSCode/JetBrains via stdio JSON-RPC (#3313)"
+
+[dependencies]
+librefang-types = { path = "../librefang-types" }
+librefang-llm-driver = { path = "../librefang-llm-driver" }
+
+agent-client-protocol = { workspace = true }
+agent-client-protocol-tokio = { workspace = true }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+dashmap = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+
+[lints]
+workspace = true

@@ -11,6 +11,7 @@ members = [
     "crates/librefang-runtime-wasm",
     "crates/librefang-llm-driver",
     "crates/librefang-kernel-handle",
+    "crates/librefang-acp",
     "crates/librefang-http",
     "crates/librefang-wire",
     "crates/librefang-api",
@@ -119,6 +120,11 @@ futures = "0.3"
 
 # MCP SDK
 rmcp = { version = "1.5", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
+
+# ACP (Agent Client Protocol) SDK — official Zed-maintained crates for IDE integration (#3313)
+agent-client-protocol = "0.11"
+agent-client-protocol-tokio = "0.11"
+tokio-util = { version = "0.7", features = ["compat"] }
 
 # WebSocket client (for Discord/Slack gateway)
 tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }

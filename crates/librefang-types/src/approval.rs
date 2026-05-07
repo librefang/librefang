@@ -402,6 +402,36 @@ pub struct ApprovalResponse {
 }
 
 // ---------------------------------------------------------------------------
+// ApprovalEvent — broadcast surface for external subscribers (#3313)
+// ---------------------------------------------------------------------------
+
+/// Event emitted by the kernel's `ApprovalManager` when a request enters
+/// or leaves the pending queue.
+///
+/// Subscribed to by external transports that need to mirror approval
+/// state into their own UI surface (e.g. the ACP adapter forwards
+/// `Created` events into editor-side `session/request_permission`
+/// requests). The dashboard and TUI continue to use the synchronous
+/// `list_pending` / `list_recent` API; the broadcast is purely additive
+/// for low-latency subscribers.
+///
+/// Variants are non-exhaustive so future kernel versions can add states
+/// (e.g. `Escalated`) without breaking subscribers.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum ApprovalEvent {
+    /// A new approval request has been added to the pending queue.
+    Created(ApprovalRequest),
+    /// A pending approval has been resolved (approved, denied, modified,
+    /// timed out, or skipped).
+    Resolved {
+        request_id: Uuid,
+        decision: ApprovalDecision,
+        decided_by: Option<String>,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
