@@ -12,6 +12,16 @@ interface ToolCallsPanelProps {
   tools: ReadonlyArray<PanelTool>;
 }
 
+function stableToolKey(tool: PanelTool, i: number): string {
+  if (tool._call_id) return tool._call_id;
+  const raw = `${tool.name ?? ""}:${JSON.stringify(tool.input ?? "")}`;
+  let h = 0;
+  for (let j = 0; j < raw.length; j++) {
+    h = ((h << 5) - h + raw.charCodeAt(j)) | 0;
+  }
+  return `${tool.name ?? "tool"}-${(h >>> 0).toString(36)}-${i}`;
+}
+
 export const ToolCallsPanel = React.memo(function ToolCallsPanel({ tools }: ToolCallsPanelProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -71,9 +81,9 @@ export const ToolCallsPanel = React.memo(function ToolCallsPanel({ tools }: Tool
         size="2xl"
       >
         <div className="px-4 py-3">
-          {tools.map((tool, i) => (
+          {tools.map((tool, idx) => (
             <ToolCallCard
-              key={tool._call_id ?? `${tool.name}-${i}`}
+              key={stableToolKey(tool, idx)}
               tool={tool}
             />
           ))}

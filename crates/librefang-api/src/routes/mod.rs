@@ -94,7 +94,7 @@ pub use workflows::*;
 use crate::middleware::RequestLanguage;
 use crate::rate_limiter::KeyedRateLimiter;
 use dashmap::DashMap;
-use librefang_kernel::LibreFangKernel;
+use librefang_kernel::KernelApi;
 use librefang_types::i18n::{self, ErrorTranslator};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -121,10 +121,14 @@ pub(crate) fn resolve_lang(lang: Option<&axum::Extension<RequestLanguage>>) -> &
 
 /// Shared application state.
 ///
-/// The kernel is wrapped in Arc so it can serve as both the main kernel
-/// and the KernelHandle for inter-agent tool access.
+/// `kernel` is `Arc<dyn KernelApi>` (#3566) — routes interact with the
+/// kernel exclusively through the [`KernelApi`] trait surface, not via
+/// the concrete `LibreFangKernel` struct. This is the single explicit
+/// contract between the HTTP layer and the kernel; widening it is an
+/// explicit choice rather than a side-effect of adding a new inherent
+/// method on the kernel struct.
 pub struct AppState {
-    pub kernel: Arc<LibreFangKernel>,
+    pub kernel: Arc<dyn KernelApi>,
     pub started_at: Instant,
     /// Channel bridge manager — held in an `ArcSwap` for lock-free reads and atomic
     /// swap on hot-reload. Write sites use `store(Arc::new(new_value))`; the stop

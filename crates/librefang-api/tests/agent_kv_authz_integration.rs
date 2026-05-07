@@ -53,7 +53,10 @@ fn spawn_owned_by(state: &Arc<AppState>, name: &str, author: &str) -> AgentId {
         author: author.to_string(),
         ..AgentManifest::default()
     };
-    state.kernel.spawn_agent(manifest).expect("spawn_agent")
+    state
+        .kernel
+        .spawn_agent_typed(manifest)
+        .expect("spawn_agent")
 }
 
 fn admin(name: &str) -> AuthenticatedApiUser {

@@ -916,10 +916,12 @@ async fn health_detail_daily_spend_percent_reflects_configured_cap() {
 
     // Set a non-zero daily cap so the *_percent fields become defined (0.0
     // for an empty kernel rather than null).
-    h.state.kernel.update_budget_config(|b: &mut BudgetConfig| {
-        b.max_daily_usd = 25.0;
-        b.max_hourly_usd = 5.0;
-    });
+    h.state
+        .kernel
+        .update_budget_config(&|b: &mut BudgetConfig| {
+            b.max_daily_usd = 25.0;
+            b.max_hourly_usd = 5.0;
+        });
 
     let (status, body) = send(h.app.clone(), auth_get("/api/health/detail")).await;
     assert_eq!(status, StatusCode::OK);
