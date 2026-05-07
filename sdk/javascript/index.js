@@ -1023,6 +1023,22 @@ class SkillsResource {
     return this._c._request("POST", "/api/skills/install", data, undefined);
   }
 
+  async listPendingCandidates(query) {
+    return this._c._request("GET", "/api/skills/pending", undefined, query);
+  }
+
+  async showPendingCandidate(id) {
+    return this._c._request("GET", `/api/skills/pending/${id}`);
+  }
+
+  async approvePendingCandidate(id) {
+    return this._c._request("POST", `/api/skills/pending/${id}/approve`);
+  }
+
+  async rejectPendingCandidate(id) {
+    return this._c._request("POST", `/api/skills/pending/${id}/reject`);
+  }
+
   async uninstallSkill(data) {
     return this._c._request("POST", "/api/skills/uninstall", data, undefined);
   }
