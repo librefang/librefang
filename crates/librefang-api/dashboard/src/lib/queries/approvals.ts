@@ -91,6 +91,6 @@ export function useApprovalAudit(
   return useQuery(withOverrides(approvalQueries.audit(params), options));
 }
 
-export function useTotpStatus() {
-  return useQuery(approvalQueries.totpStatus());
+export function useTotpStatus(options: QueryOverrides = {}) {
+  return useQuery(withOverrides(approvalQueries.totpStatus(), options));
 }

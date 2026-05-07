@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Plus, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { type JsonSchema, resolveRef, type ConfigSchemaRoot } from "../../api";
+import { createClientId } from "../../lib/store";
 
 // Editor for `Vec<Struct>` config fields. Each item is rendered as a
 // collapsible card with a JSON editor for its fields. The collapsed header
@@ -73,24 +74,17 @@ function defaultItemFor(itemSchema: JsonSchema | undefined, root: ConfigSchemaRo
 // JSON.stringify of an item the user sees in the textarea doesn't
 // surface this implementation detail. We re-attach on incoming items
 // that don't have one yet (e.g. from a fresh /api/config GET).
-let itemIdCounter = 0;
 function newItemId(): string {
-  itemIdCounter += 1;
-  return `i${itemIdCounter}`;
+  return createClientId();
 }
-const ITEM_ID = Symbol("structListEditor.itemId");
-type WithItemId = { [ITEM_ID]?: string };
+const itemIdMap = new WeakMap<object, string>();
+
 function ensureItemId(item: unknown): string {
   if (item !== null && typeof item === "object") {
-    const obj = item as WithItemId;
-    if (typeof obj[ITEM_ID] === "string") return obj[ITEM_ID]!;
+    const existing = itemIdMap.get(item);
+    if (existing) return existing;
     const id = newItemId();
-    Object.defineProperty(obj, ITEM_ID, {
-      value: id,
-      enumerable: false,
-      writable: true,
-      configurable: true,
-    });
+    itemIdMap.set(item, id);
     return id;
   }
   return newItemId();
@@ -164,11 +158,15 @@ function StructListRow({
   const [text, setText] = useState(() => JSON.stringify(item, null, 2));
   const [error, setError] = useState<string | null>(null);
   const lastEmittedRef = useRef<string>(text);
+  const isDirtyRef = useRef(false);
 
   // Keep the textarea in sync with external value updates (e.g. when a
   // sibling row is removed and `item` shifts) without clobbering the
   // user's in-progress edits.
   useEffect(() => {
+    if (isDirtyRef.current) {
+      return;
+    }
     const incoming = JSON.stringify(item, null, 2);
     if (incoming === lastEmittedRef.current) return;
     setText(incoming);
@@ -189,8 +187,10 @@ function StructListRow({
       setError(null);
       onChange(parsed);
       lastEmittedRef.current = raw;
+      isDirtyRef.current = false;
     } catch (e) {
       setError((e as Error).message);
+      isDirtyRef.current = true;
     }
   }, [onChange]);
 

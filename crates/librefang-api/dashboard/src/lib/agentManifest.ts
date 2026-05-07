@@ -7,6 +7,9 @@
 
 import { parse, stringify, TomlError, type TomlTable } from "smol-toml";
 
+let _nextUid = 1;
+export const generateUid = (): string => String(_nextUid++);
+
 // Numeric inputs are stored as raw strings so empty fields stay empty
 // (instead of becoming 0 and silently overriding kernel defaults).
 export interface ManifestFormState {
@@ -38,6 +41,7 @@ export interface ManifestFormState {
   };
 
   fallback_models: Array<{
+    _uid: string;
     provider: string;
     model: string;
     api_key_env: string;
@@ -98,6 +102,7 @@ export interface ManifestFormState {
   };
 
   context_injection: Array<{
+    _uid: string;
     name: string;
     content: string;
     position: "system" | "before_user" | "after_reset";
@@ -815,6 +820,7 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
   // so e.g. Qwen's enable_memory survives a TOML→Form→TOML round-trip.
   if (Array.isArray(parsed.fallback_models)) {
     form.fallback_models = parsed.fallback_models.filter(isTomlTable).map((fb) => ({
+      _uid: generateUid(),
       provider: asString(fb.provider),
       model: asString(fb.model),
       api_key_env: asString(fb.api_key_env),
@@ -884,6 +890,7 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
     form.context_injection = parsed.context_injection
       .filter(isTomlTable)
       .map((ci) => ({
+        _uid: generateUid(),
         name: asString(ci.name),
         content: asString(ci.content),
         position: asEnum(ci.position, INJECTION_POSITIONS, "system"),
