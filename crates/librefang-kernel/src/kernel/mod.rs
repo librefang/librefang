@@ -13163,6 +13163,14 @@ system_prompt = "You are a helpful assistant."
     }
 
     /// Run a workflow pipeline end-to-end.
+    ///
+    /// **Naming**: this inherent method takes typed `WorkflowId` /
+    /// `WorkflowRunId`. The role-trait
+    /// [`kernel_handle::WorkflowRunner::run_workflow`] takes `&str` and
+    /// returns `String` shapes for backward compat. From `Arc<dyn KernelApi>`
+    /// callers, reach the typed shape via
+    /// [`KernelApi::run_workflow_typed`](crate::kernel_api::KernelApi::run_workflow_typed)
+    /// rather than going through the trait method.
     pub async fn run_workflow(
         &self,
         workflow_id: WorkflowId,

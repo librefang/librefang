@@ -27,8 +27,10 @@
 // the kernel-inherent signatures verbatim — both already exceed clippy's
 // 7-arg threshold on the kernel side. Splitting the trait method into a
 // builder would diverge the trait surface from the inherent surface and
-// break the "trait is a thin facade" invariant of #3566.
-#![allow(clippy::too_many_arguments)]
+// break the "trait is a thin facade" invariant of #3566. Per-method
+// `#[allow(clippy::too_many_arguments)]` is applied at each call site
+// rather than as a module-level blanket so unrelated methods that
+// accidentally creep over 7 args still trip the lint.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -278,6 +280,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
 
     fn list_triggers(&self, agent_id: Option<AgentId>) -> Vec<Trigger>;
     fn get_trigger(&self, trigger_id: TriggerId) -> Option<Trigger>;
+    #[allow(clippy::too_many_arguments)]
     fn register_trigger_with_target(
         &self,
         agent_id: AgentId,
@@ -418,6 +421,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         kernel_handle: Option<Arc<dyn crate::kernel_handle::KernelHandle>>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
+    #[allow(clippy::too_many_arguments)]
     async fn send_message_with_incognito(
         &self,
         agent_id: AgentId,
@@ -893,6 +897,7 @@ impl KernelApi for LibreFangKernel {
     fn get_trigger(&self, trigger_id: TriggerId) -> Option<Trigger> {
         Self::get_trigger(self, trigger_id)
     }
+    #[allow(clippy::too_many_arguments)]
     fn register_trigger_with_target(
         &self,
         agent_id: AgentId,
@@ -1076,6 +1081,7 @@ impl KernelApi for LibreFangKernel {
         )
         .await
     }
+    #[allow(clippy::too_many_arguments)]
     async fn send_message_with_incognito(
         &self,
         agent_id: AgentId,
@@ -1256,9 +1262,4 @@ impl KernelApi for LibreFangKernel {
     fn set_self_handle(self: Arc<Self>) {
         LibreFangKernel::set_self_handle(&self);
     }
-}
-
-/// Convenience: type-erase any `Arc<T: KernelApi>` to `Arc<dyn KernelApi>`.
-pub fn as_dyn<T: KernelApi + 'static>(k: Arc<T>) -> Arc<dyn KernelApi> {
-    k
 }
