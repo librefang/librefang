@@ -1,4 +1,5 @@
 use super::*;
+use crate::registry::AgentRegistry;
 use futures::stream;
 use librefang_channels::types::{ChannelAdapter, ChannelContent, ChannelType, ChannelUser};
 use librefang_types::approval::{
@@ -470,7 +471,11 @@ fn test_spawn_agent_applies_local_default_model_override() {
         )
         .expect("agent should spawn with local model override");
 
-    let entry = kernel.registry.get(agent_id).expect("agent registry entry");
+    let entry = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent registry entry");
     // Spawn now stores "default"/"default" so provider changes propagate at
     // execute time without re-spawning. Concrete resolution happens in
     // execute_llm_agent, not at spawn.
@@ -554,6 +559,7 @@ fn test_spawn_child_exceeding_parent_is_rejected() {
     // Nothing called "escalated-child" should be registered —
     // the check ran before `register()`.
     assert!(kernel
+        .agents
         .registry
         .list()
         .iter()
@@ -618,7 +624,11 @@ fn test_spawn_child_with_subset_capabilities_is_allowed() {
         )
         .expect("subset child should be allowed");
 
-    let entry = kernel.registry.get(child_id).expect("child registered");
+    let entry = kernel
+        .agents
+        .registry
+        .get(child_id)
+        .expect("child registered");
     assert_eq!(entry.parent, Some(parent));
 
     kernel.shutdown();
@@ -715,7 +725,11 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
         .expect("agent should spawn");
 
     // Sanity: stale overrides are present.
-    let pre = kernel.registry.get(agent_id).expect("agent registry entry");
+    let pre = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent registry entry");
     assert_eq!(pre.manifest.model.provider, "cloudverse");
     assert_eq!(
         pre.manifest.model.api_key_env.as_deref(),
@@ -733,6 +747,7 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
         .expect("provider switch should succeed");
 
     let post = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("agent registry entry after switch");
@@ -762,6 +777,7 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
     // Seed an override on the now-openrouter agent so we can confirm the
     // same-provider branch leaves it alone.
     kernel
+        .agents
         .registry
         .update_model_provider_config(
             agent_id,
@@ -781,6 +797,7 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
         .expect("same-provider swap should succeed");
 
     let same_provider = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("agent after same-provider swap");
@@ -822,6 +839,7 @@ fn test_hand_activation_does_not_seed_runtime_tool_filters() {
     };
     let agent_id = instance.agent_id().expect("apitester hand agent id");
     let entry = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("apitester hand agent entry");
@@ -863,6 +881,7 @@ fn test_hand_reactivation_rebuilds_same_runtime_profile() {
     };
     let first_agent_id = first_instance.agent_id().expect("first apitester agent id");
     let first_entry = kernel
+        .agents
         .registry
         .get(first_agent_id)
         .expect("first apitester hand agent entry");
@@ -899,6 +918,7 @@ fn test_hand_reactivation_rebuilds_same_runtime_profile() {
         .agent_id()
         .expect("second apitester agent id");
     let second_entry = kernel
+        .agents
         .registry
         .get(second_agent_id)
         .expect("second apitester hand agent entry");
@@ -974,6 +994,7 @@ fn reactivate_builds_from_hand_toml_not_override() {
     };
     let first_agent_id = first_instance.agent_id().expect("first apitester agent id");
     let first_entry = kernel
+        .agents
         .registry
         .get(first_agent_id)
         .expect("first apitester hand agent entry");
@@ -994,6 +1015,7 @@ fn reactivate_builds_from_hand_toml_not_override() {
         .expect("hand runtime override should update");
 
     let overridden_entry = kernel
+        .agents
         .registry
         .get(first_agent_id)
         .expect("overridden apitester hand agent entry");
@@ -1034,6 +1056,7 @@ fn reactivate_builds_from_hand_toml_not_override() {
         .agent_id()
         .expect("second apitester agent id");
     let second_entry = kernel
+        .agents
         .registry
         .get(second_agent_id)
         .expect("second apitester hand agent entry");
@@ -1162,6 +1185,7 @@ system_prompt = "You are a test worker."
         .agent_id()
         .expect("derived agent id from activated hand");
     let entry = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("hand-derived agent must be in the registry");
@@ -1228,6 +1252,7 @@ system_prompt = "You are a test worker."
         .agent_id()
         .expect("derived agent id from activated hand");
     let entry = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("hand-derived agent must be in the registry");
@@ -1374,6 +1399,7 @@ fn test_shell_exec_available_when_declared_in_tools_without_explicit_exec_policy
 
     // Verify exec_policy was promoted to Full
     let entry = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("agent must be registered");
@@ -1440,7 +1466,7 @@ fn test_boot_spawns_assistant_as_default_agent() {
     };
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-    let agents = kernel.registry.list();
+    let agents = kernel.agents.registry.list();
 
     assert!(
         agents.iter().any(|entry| entry.name == "assistant"),
@@ -1490,7 +1516,7 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
 
     // Find the auto-spawned assistant agent
-    let agents = kernel.registry.list();
+    let agents = kernel.agents.registry.list();
     let assistant = agents
         .iter()
         .find(|a| a.name == "assistant")
@@ -2309,7 +2335,7 @@ async fn test_cron_create_preserves_peer_id() {
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
 
-    let agents = kernel.registry.list();
+    let agents = kernel.agents.registry.list();
     let assistant = agents
         .iter()
         .find(|a| a.name == "assistant")
@@ -2416,6 +2442,7 @@ async fn cascade_primitives_via_session_interrupts_dashmap() {
     let parent_session_id = SessionId::new();
     let parent_interrupt = SessionInterrupt::new();
     kernel
+        .agents
         .session_interrupts
         .insert((parent_id, parent_session_id), parent_interrupt.clone());
 
@@ -2749,6 +2776,7 @@ system_prompt = "BASE PROMPT"
         .get("operator")
         .expect("operator role must be present in restored instance");
     let restored = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("restored operator agent must be registered in memory");
@@ -2899,6 +2927,7 @@ system_prompt = "WORKER PROMPT"
         .get("lead")
         .expect("lead role must be present in restored instance");
     let restored = kernel
+        .agents
         .registry
         .get(lead_agent_id)
         .expect("restored lead agent must be registered in memory");
@@ -3019,6 +3048,7 @@ fn hand_runtime_override_survives_restart_via_activate_hand_with_id() {
 
         // Sanity: in-memory manifest already carries the overrides.
         let entry = kernel
+            .agents
             .registry
             .get(agent_id)
             .expect("apitester hand agent entry");
@@ -3099,6 +3129,7 @@ fn hand_runtime_override_survives_restart_via_activate_hand_with_id() {
     let _ = persisted_agent_id;
 
     let restored_entry = kernel
+        .agents
         .registry
         .get(restored_agent_id)
         .expect("restored apitester agent entry");
@@ -3210,6 +3241,7 @@ fn hand_runtime_override_survives_restart_via_start_background_agents() {
         .expect("apitester instance must be restored by start_background_agents");
     let agent_id = instance.agent_id().expect("restored apitester agent id");
     let entry = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("restored apitester agent entry");
@@ -3290,7 +3322,7 @@ fn deactivate_hand_removes_hand_agent_rows_from_sqlite() {
     // Err out without touching the SQLite row — the scenario the new
     // explicit `memory.remove_agent` pass in `deactivate_hand` covers.
     for id in &agent_ids {
-        let _ = kernel.registry.remove(*id);
+        let _ = kernel.agents.registry.remove(*id);
     }
 
     kernel
@@ -3533,6 +3565,7 @@ fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
     };
     let agent_id = instance.agent_id().expect("apitester hand agent id");
     let default_entry = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("apitester hand agent entry");
@@ -3555,6 +3588,7 @@ fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
         )
         .expect("apply override");
     let overridden = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("apitester hand agent entry post-override");
@@ -3566,6 +3600,7 @@ fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
         .clear_hand_agent_runtime_override(agent_id)
         .expect("clear override");
     let cleared = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("apitester hand agent entry post-clear");
@@ -3724,7 +3759,7 @@ fn test_running_tasks_two_concurrent_sessions_for_same_agent() {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     });
 
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (agent_id, session_a),
         RunningTask {
             abort: h_a.abort_handle(),
@@ -3732,7 +3767,7 @@ fn test_running_tasks_two_concurrent_sessions_for_same_agent() {
             task_id: uuid::Uuid::new_v4(),
         },
     );
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (agent_id, session_b),
         RunningTask {
             abort: h_b.abort_handle(),
@@ -3808,7 +3843,7 @@ fn test_running_session_ids_reflects_live_tasks() {
     };
 
     for (a, s) in [(agent_a, s1), (agent_a, s2), (agent_b, s3)] {
-        kernel.running_tasks.insert(
+        kernel.agents.running_tasks.insert(
             (a, s),
             RunningTask {
                 abort: mk_handle(),
@@ -3866,7 +3901,7 @@ fn test_stop_agent_run_fans_out_across_sessions() {
         .abort_handle()
     };
 
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (agent_id, s1),
         RunningTask {
             abort: mk_handle(),
@@ -3874,7 +3909,7 @@ fn test_stop_agent_run_fans_out_across_sessions() {
             task_id: uuid::Uuid::new_v4(),
         },
     );
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (agent_id, s2),
         RunningTask {
             abort: mk_handle(),
@@ -3883,7 +3918,7 @@ fn test_stop_agent_run_fans_out_across_sessions() {
         },
     );
     // Different agent — must NOT be touched by stop_agent_run.
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (other_agent, s3),
         RunningTask {
             abort: mk_handle(),
@@ -3965,7 +4000,7 @@ fn test_fork_does_not_overwrite_parent_registration() {
     // insert into both `running_tasks` and `session_interrupts` keyed by
     // `(agent, parent_session)`.
     let parent_started_at = chrono::Utc::now();
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (agent_id, parent_session),
         RunningTask {
             abort: parent_abort,
@@ -3975,6 +4010,7 @@ fn test_fork_does_not_overwrite_parent_registration() {
     );
     let parent_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
     kernel
+        .agents
         .session_interrupts
         .insert((agent_id, parent_session), parent_interrupt.clone());
 
@@ -4087,7 +4123,11 @@ fn fork_session_snapshot_is_unaffected_by_registry_mutation_4291() {
         is_hand: false,
         ..Default::default()
     };
-    kernel.registry.register(entry).expect("register agent");
+    kernel
+        .agents
+        .registry
+        .register(entry)
+        .expect("register agent");
 
     // Simulate the parent loop being mid-turn: insert its interrupt
     // under `(agent, parent_session)`, exactly as
@@ -4096,6 +4136,7 @@ fn fork_session_snapshot_is_unaffected_by_registry_mutation_4291() {
     // spawn site uses to discover which session to land on.
     let parent_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
     kernel
+        .agents
         .session_interrupts
         .insert((agent_id, parent_session), parent_interrupt.clone());
 
@@ -4115,12 +4156,14 @@ fn fork_session_snapshot_is_unaffected_by_registry_mutation_4291() {
     let switched_session = SessionId::new();
     assert_ne!(switched_session, parent_session);
     kernel
+        .agents
         .registry
         .update_session_id(agent_id, switched_session)
         .expect("update_session_id");
 
     // Sanity: the registry pointer really did flip.
     let entry_after = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("agent still registered");
@@ -4807,7 +4850,7 @@ fn register_test_agent(kernel: &LibreFangKernel, name: &str) -> AgentId {
         is_hand: false,
         ..Default::default()
     };
-    kernel.registry.register(entry).unwrap();
+    kernel.agents.registry.register(entry).unwrap();
     id
 }
 
@@ -6520,7 +6563,11 @@ fn list_agent_sessions_active_reflects_running_tasks_not_registry_pointer() {
         .unwrap();
 
     // Point the registry pointer at s2 — the legacy "active" answer.
-    kernel.registry.update_session_id(agent_id, s2.id).unwrap();
+    kernel
+        .agents
+        .registry
+        .update_session_id(agent_id, s2.id)
+        .unwrap();
 
     // Mark s1 and s3 as in-flight via running_tasks (not s2).
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -6530,7 +6577,7 @@ fn list_agent_sessions_active_reflects_running_tasks_not_registry_pointer() {
     let h3 = rt.spawn(async {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     });
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (agent_id, s1.id),
         RunningTask {
             abort: h1.abort_handle(),
@@ -6538,7 +6585,7 @@ fn list_agent_sessions_active_reflects_running_tasks_not_registry_pointer() {
             task_id: uuid::Uuid::new_v4(),
         },
     );
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (agent_id, s3.id),
         RunningTask {
             abort: h3.abort_handle(),
@@ -6628,13 +6675,17 @@ fn list_agent_sessions_canonical_and_active_can_coexist_on_same_row() {
         .substrate
         .create_session_with_label(agent_id, Some("only"))
         .unwrap();
-    kernel.registry.update_session_id(agent_id, s.id).unwrap();
+    kernel
+        .agents
+        .registry
+        .update_session_id(agent_id, s.id)
+        .unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let h = rt.spawn(async {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     });
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (agent_id, s.id),
         RunningTask {
             abort: h.abort_handle(),

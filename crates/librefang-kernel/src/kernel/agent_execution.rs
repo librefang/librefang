@@ -253,7 +253,7 @@ impl LibreFangKernel {
         // The heartbeat monitor uses this flag (not a time window) to
         // decide whether an idle agent should be flagged unresponsive.
         // Idempotent: subsequent calls only refresh `last_active`.
-        self.registry.mark_processed_message(agent_id);
+        self.agents.registry.mark_processed_message(agent_id);
 
         // Derive session ID. Resolution order (highest priority first):
         //
@@ -399,11 +399,14 @@ impl LibreFangKernel {
                             "Failed to persist session after auto-reset"
                         );
                     }
-                    let _ = self.registry.update_session_reset_state(agent_id, reason);
+                    let _ = self
+                        .agents
+                        .registry
+                        .update_session_reset_state(agent_id, reason);
                     // Persist the updated entry so the reset state survives a crash.
                     // Other registry updates (update_skills, update_mcp_servers, etc.)
                     // follow the same pattern: update + save_agent.
-                    if let Some(updated) = self.registry.get(agent_id) {
+                    if let Some(updated) = self.agents.registry.get(agent_id) {
                         if let Err(e) = self.memory.substrate.save_agent_async(&updated).await {
                             tracing::warn!(
                                 agent_id = %agent_id,
@@ -487,6 +490,7 @@ impl LibreFangKernel {
                 manifest.workspace = Some(workspace_dir);
                 // Persist updated workspace in registry
                 let _ = self
+                    .agents
                     .registry
                     .update_workspace(agent_id, manifest.workspace.clone());
             }
@@ -507,7 +511,8 @@ impl LibreFangKernel {
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
-            let peer_agents: Vec<(String, String, String)> = self.registry.peer_agents_summary();
+            let peer_agents: Vec<(String, String, String)> =
+                self.agents.registry.peer_agents_summary();
 
             // Use cached workspace metadata (identity files + workspace context)
             let ws_meta = manifest
@@ -890,7 +895,8 @@ impl LibreFangKernel {
         // can call cancel() even when the caller uses the non-streaming
         // send_message() path. Map keyed by (agent, session) post-#3172 so
         // concurrent sessions for one agent don't overwrite each other.
-        self.session_interrupts
+        self.agents
+            .session_interrupts
             .insert((agent_id, effective_session_id), session_interrupt.clone());
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: false,
@@ -973,7 +979,8 @@ impl LibreFangKernel {
         // Clean up the interrupt handle regardless of outcome — the map must
         // not retain stale entries that would suppress cancellation on the
         // next run for the same (agent, session) pair.
-        self.session_interrupts
+        self.agents
+            .session_interrupts
             .remove(&(agent_id, effective_session_id));
 
         let latency_ms = start_time.elapsed().as_millis() as u64;

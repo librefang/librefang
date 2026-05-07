@@ -16,7 +16,7 @@ impl kernel_handle::SessionWriter for LibreFangKernel {
     ) {
         use librefang_types::message::{Message, MessageContent, Role};
 
-        let entry = match self.registry.get(agent_id) {
+        let entry = match self.agents.registry.get(agent_id) {
             Some(e) => e,
             None => {
                 tracing::warn!(

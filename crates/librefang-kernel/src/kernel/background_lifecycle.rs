@@ -350,7 +350,7 @@ impl LibreFangKernel {
             }
         }
 
-        let agents = self.registry.list();
+        let agents = self.agents.registry.list();
         let mut bg_agents: Vec<(librefang_types::agent::AgentId, String, ScheduleMode)> =
             Vec::new();
 
@@ -430,7 +430,7 @@ impl LibreFangKernel {
             } else {
                 60
             };
-            let mut shutdown_rx = self.supervisor.subscribe();
+            let mut shutdown_rx = self.agents.supervisor.subscribe();
             spawn_logged("local_provider_probe", async move {
                 let mut interval =
                     tokio::time::interval(std::time::Duration::from_secs(probe_interval_secs));
@@ -460,7 +460,7 @@ impl LibreFangKernel {
                 interval.tick().await; // Skip first immediate tick
                 loop {
                     interval.tick().await;
-                    if kernel.supervisor.is_shutting_down() {
+                    if kernel.agents.supervisor.is_shutting_down() {
                         break;
                     }
                     match kernel.metering.engine.cleanup(90) {
@@ -495,7 +495,7 @@ impl LibreFangKernel {
                     interval.tick().await; // skip immediate tick
                     loop {
                         interval.tick().await;
-                        if kernel.supervisor.is_shutting_down() {
+                        if kernel.agents.supervisor.is_shutting_down() {
                             break;
                         }
                         if memory_retention > 0 {
@@ -560,7 +560,7 @@ impl LibreFangKernel {
                     interval.tick().await; // Skip first immediate tick
                     loop {
                         interval.tick().await;
-                        if kernel.supervisor.is_shutting_down() {
+                        if kernel.agents.supervisor.is_shutting_down() {
                             break;
                         }
                         let pruned = kernel.metering.audit_log.prune(retention);
@@ -593,7 +593,7 @@ impl LibreFangKernel {
                     interval.tick().await; // Skip first immediate tick.
                     loop {
                         interval.tick().await;
-                        if kernel.supervisor.is_shutting_down() {
+                        if kernel.agents.supervisor.is_shutting_down() {
                             break;
                         }
                         let report = kernel
@@ -649,7 +649,7 @@ impl LibreFangKernel {
                     interval.tick().await; // Skip first immediate tick
                     loop {
                         interval.tick().await;
-                        if kernel.supervisor.is_shutting_down() {
+                        if kernel.agents.supervisor.is_shutting_down() {
                             break;
                         }
                         let mut total = 0u64;
@@ -742,7 +742,7 @@ impl LibreFangKernel {
                 interval.tick().await; // skip first immediate tick
                 loop {
                     interval.tick().await;
-                    if kernel.supervisor.is_shutting_down() {
+                    if kernel.agents.supervisor.is_shutting_down() {
                         break;
                     }
                     let upload_dir = kernel.config_ref().channels.effective_file_download_dir();
@@ -779,7 +779,7 @@ impl LibreFangKernel {
                     interval.tick().await; // Skip first immediate tick
                     loop {
                         interval.tick().await;
-                        if kernel.supervisor.is_shutting_down() {
+                        if kernel.agents.supervisor.is_shutting_down() {
                             break;
                         }
                         match kernel.memory.substrate.consolidate().await {
@@ -816,7 +816,7 @@ impl LibreFangKernel {
                     interval.tick().await; // Skip first immediate tick
                     loop {
                         interval.tick().await;
-                        if kernel.supervisor.is_shutting_down() {
+                        if kernel.agents.supervisor.is_shutting_down() {
                             break;
                         }
                         match kernel.memory.substrate.run_decay(&decay_config) {
@@ -843,7 +843,7 @@ impl LibreFangKernel {
                 interval.tick().await; // Skip first immediate tick
                 loop {
                     interval.tick().await;
-                    if kernel.supervisor.is_shutting_down() {
+                    if kernel.agents.supervisor.is_shutting_down() {
                         break;
                     }
                     kernel.gc_sweep();
@@ -1082,15 +1082,15 @@ impl LibreFangKernel {
             loop {
                 interval.tick().await;
 
-                if kernel.supervisor.is_shutting_down() {
+                if kernel.agents.supervisor.is_shutting_down() {
                     info!("Heartbeat monitor stopping (shutdown)");
                     break;
                 }
 
-                let statuses = check_agents(&kernel.registry, &config);
+                let statuses = check_agents(&kernel.agents.registry, &config);
                 for status in &statuses {
                     // Skip agents in quiet hours (per-agent config)
-                    if let Some(entry) = kernel.registry.get(status.agent_id) {
+                    if let Some(entry) = kernel.agents.registry.get(status.agent_id) {
                         if let Some(ref auto_cfg) = entry.manifest.autonomous {
                             if let Some(ref qh) = auto_cfg.quiet_hours {
                                 if is_quiet_hours(qh) {
@@ -1267,7 +1267,7 @@ impl LibreFangKernel {
             }
         }
 
-        self.supervisor.shutdown();
+        self.agents.supervisor.shutdown();
 
         // Drain in-flight workflow runs (#3335). `Running` / `Pending`
         // are deliberately not persisted by `persist_runs` (no durable
@@ -1299,14 +1299,18 @@ impl LibreFangKernel {
         let mut total = 0usize;
         let mut state_failures = 0usize;
         let mut save_failures = 0usize;
-        for entry in self.registry.list() {
+        for entry in self.agents.registry.list() {
             total += 1;
-            if let Err(e) = self.registry.set_state(entry.id, AgentState::Suspended) {
+            if let Err(e) = self
+                .agents
+                .registry
+                .set_state(entry.id, AgentState::Suspended)
+            {
                 state_failures += 1;
                 tracing::error!(agent_id = %entry.id, "failed to set agent state to Suspended on shutdown: {e}");
             }
             // Re-save with Suspended state for clean resume on next boot
-            if let Some(updated) = self.registry.get(entry.id) {
+            if let Some(updated) = self.agents.registry.get(entry.id) {
                 if let Err(e) = self.memory.substrate.save_agent(&updated) {
                     save_failures += 1;
                     tracing::error!(agent_id = %entry.id, "failed to persist agent state on shutdown: {e}");
@@ -1327,7 +1331,7 @@ impl LibreFangKernel {
 
         info!(
             "LibreFang kernel shut down ({} agents preserved)",
-            self.registry.list().len()
+            self.agents.registry.list().len()
         );
     }
 }

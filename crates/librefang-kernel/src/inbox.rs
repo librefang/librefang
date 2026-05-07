@@ -114,7 +114,7 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
         loop {
             interval.tick().await;
 
-            if kernel.supervisor.is_shutting_down() {
+            if kernel.agents.supervisor.is_shutting_down() {
                 info!("Inbox watcher stopping (shutdown)");
                 break;
             }
@@ -227,7 +227,7 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
                 };
 
                 // Resolve agent by name
-                let agent_entry = kernel.registry.find_by_name(&agent_name);
+                let agent_entry = kernel.agents.registry.find_by_name(&agent_name);
                 let agent_id = match agent_entry {
                     Some(entry) => entry.id,
                     None => {

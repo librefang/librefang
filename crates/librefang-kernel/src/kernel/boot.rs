@@ -1215,16 +1215,12 @@ impl LibreFangKernel {
             data_dir_boot: config.data_dir.clone(),
             config: ArcSwap::new(std::sync::Arc::new(config)),
             raw_config_toml: ArcSwap::new(std::sync::Arc::new(initial_raw_config_toml)),
-            registry: AgentRegistry::new(),
-            agent_identities,
-            capabilities: CapabilityManager::new(),
+            agents: crate::kernel::subsystems::AgentSubsystem::new(agent_identities, supervisor),
             events: crate::kernel::subsystems::EventSubsystem::new(),
-            scheduler: AgentScheduler::new(),
             memory: crate::kernel::subsystems::MemorySubsystem::new(
                 memory.clone(),
                 wiki_vault.clone(),
             ),
-            supervisor,
             workflows: crate::kernel::subsystems::WorkflowSubsystem::new(
                 WorkflowEngine::new_with_persistence(&workflow_home_dir),
                 trigger_engine,
@@ -1247,8 +1243,6 @@ impl LibreFangKernel {
                 hand_registry,
                 Self::MAX_INFLIGHT_SKILL_REVIEWS,
             ),
-            running_tasks: dashmap::DashMap::new(),
-            session_interrupts: dashmap::DashMap::new(),
             mcp: crate::kernel::subsystems::McpSubsystem::new(
                 Arc::new(crate::mcp_oauth_provider::KernelOAuthProvider::new(
                     oauth_home_dir,
@@ -1281,18 +1275,12 @@ impl LibreFangKernel {
             booted_at: std::time::Instant::now(),
             whatsapp_gateway_pid: Arc::new(std::sync::Mutex::new(None)),
             tool_policy_override: std::sync::RwLock::new(None),
-            agent_msg_locks: dashmap::DashMap::new(),
-            session_msg_locks: dashmap::DashMap::new(),
-            agent_concurrency: dashmap::DashMap::new(),
-            hand_runtime_override_locks: dashmap::DashMap::new(),
-            decision_traces: dashmap::DashMap::new(),
             context_engine,
             context_engine_config,
             self_handle: OnceLock::new(),
             provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
             config_reload_lock: tokio::sync::RwLock::new(()),
             prompt_metadata_cache: PromptMetadataCache::new(),
-            agent_watchers: dashmap::DashMap::new(),
             metering: crate::kernel::subsystems::MeteringSubsystem::new(
                 Arc::new(AuditLog::with_db_anchored(memory.pool(), audit_anchor_path)),
                 metering,
@@ -1668,10 +1656,11 @@ impl LibreFangKernel {
 
                     // Re-grant capabilities
                     let caps = manifest_to_capabilities(&entry.manifest);
-                    kernel.capabilities.grant(agent_id, caps);
+                    kernel.agents.capabilities.grant(agent_id, caps);
 
                     // Re-register with scheduler
                     kernel
+                        .agents
                         .scheduler
                         .register(agent_id, entry.manifest.resources.clone());
 
@@ -1838,7 +1827,7 @@ impl LibreFangKernel {
                         );
                         continue;
                     }
-                    if let Err(e) = kernel.registry.register(restored_entry) {
+                    if let Err(e) = kernel.agents.registry.register(restored_entry) {
                         tracing::warn!(agent = %name, "Failed to restore agent: {e}");
                     } else {
                         tracing::debug!(agent = %name, id = %agent_id, "Restored agent");
@@ -1867,6 +1856,7 @@ impl LibreFangKernel {
         // (or canonical overtakes it), this is a no-op on subsequent boots.
         {
             let registry_snapshot: Vec<(AgentId, SessionId)> = kernel
+                .agents
                 .registry
                 .list()
                 .iter()
@@ -1912,13 +1902,14 @@ impl LibreFangKernel {
                     continue;
                 }
                 if let Err(e) = kernel
+                    .agents
                     .registry
                     .update_session_id(agent_id, webui_session_id)
                 {
                     warn!(agent_id = %agent_id, "Failed to adopt webui session: {e}");
                     continue;
                 }
-                if let Some(entry) = kernel.registry.get(agent_id) {
+                if let Some(entry) = kernel.agents.registry.get(agent_id) {
                     if let Err(e) = kernel.memory.substrate.save_agent(&entry) {
                         warn!(agent_id = %agent_id, "Failed to persist webui adoption: {e}");
                     }
@@ -1933,7 +1924,7 @@ impl LibreFangKernel {
         }
 
         // If no agents exist (fresh install), spawn a default assistant.
-        if kernel.registry.list().is_empty() {
+        if kernel.agents.registry.list().is_empty() {
             info!("No agents found — spawning default assistant");
             let manifest = router::load_template_manifest(&kernel.home_dir_boot, "assistant")
                 .or_else(|_| {
@@ -2021,7 +2012,7 @@ system_prompt = "You are a helpful assistant."
         }
 
         // Validate routing configs against model catalog
-        for entry in kernel.registry.list() {
+        for entry in kernel.agents.registry.list() {
             if let Some(ref routing_config) = entry.manifest.routing {
                 let router = ModelRouter::new(routing_config.clone());
                 for warning in router.validate_models(&kernel.llm.model_catalog.load()) {

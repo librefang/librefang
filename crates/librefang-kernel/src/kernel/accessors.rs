@@ -155,7 +155,7 @@ impl LibreFangKernel {
     ) -> KernelResult<crate::trajectory::TrajectoryBundle> {
         use crate::trajectory::{AgentContext, RedactionPolicy, TrajectoryExporter};
 
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
@@ -407,7 +407,7 @@ impl LibreFangKernel {
     /// Agent registry (list, get, update agents).
     #[inline]
     pub fn agent_registry(&self) -> &AgentRegistry {
-        &self.registry
+        &self.agents.registry
     }
 
     /// Canonical agent UUID registry (refs #4614). Persists
@@ -417,7 +417,7 @@ impl LibreFangKernel {
     /// API surfaces.
     #[inline]
     pub fn agent_identities(&self) -> &Arc<crate::agent_identity_registry::AgentIdentityRegistry> {
-        &self.agent_identities
+        &self.agents.agent_identities
     }
 
     /// Memory substrate (structured storage, vector search).
@@ -447,7 +447,7 @@ impl LibreFangKernel {
     /// Agent scheduler.
     #[inline]
     pub fn scheduler_ref(&self) -> &AgentScheduler {
-        &self.scheduler
+        &self.agents.scheduler
     }
 
     /// Model catalog (`ArcSwap` since #3384 — auth status refresh from API).
@@ -978,7 +978,7 @@ impl LibreFangKernel {
     /// Process supervisor.
     #[inline]
     pub fn supervisor_ref(&self) -> &Supervisor {
-        &self.supervisor
+        &self.agents.supervisor
     }
 
     /// RBAC authentication manager.
@@ -1091,7 +1091,8 @@ impl LibreFangKernel {
         &self,
         agent_id: AgentId,
     ) -> Option<librefang_runtime::interrupt::SessionInterrupt> {
-        self.session_interrupts
+        self.agents
+            .session_interrupts
             .iter()
             .find(|e| e.key().0 == agent_id)
             .map(|e| e.value().clone())
@@ -1108,7 +1109,8 @@ impl LibreFangKernel {
         &self,
         agent_id: AgentId,
     ) -> Option<(SessionId, librefang_runtime::interrupt::SessionInterrupt)> {
-        self.session_interrupts
+        self.agents
+            .session_interrupts
             .iter()
             .find(|e| e.key().0 == agent_id)
             .map(|e| (e.key().1, e.value().clone()))
@@ -1117,7 +1119,7 @@ impl LibreFangKernel {
     /// Per-agent decision traces.
     #[inline]
     pub fn traces(&self) -> &dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>> {
-        &self.decision_traces
+        &self.agents.decision_traces
     }
 
     /// Channel adapters map.
@@ -1175,13 +1177,13 @@ impl LibreFangKernel {
     /// registry will silently retain the old capacity. This avoids a
     /// permit-loss race during live config reloads.
     pub(crate) fn agent_concurrency_for(&self, agent_id: AgentId) -> Arc<tokio::sync::Semaphore> {
-        if let Some(existing) = self.agent_concurrency.get(&agent_id) {
+        if let Some(existing) = self.agents.agent_concurrency.get(&agent_id) {
             return existing.clone();
         }
         // Single registry read so cap and session_mode come from the
         // same manifest snapshot — avoids a TOCTOU window where two
         // separate gets see manifests on either side of a swap.
-        let (manifest_cap, session_mode) = match self.registry.get(agent_id) {
+        let (manifest_cap, session_mode) = match self.agents.registry.get(agent_id) {
             Some(e) => (
                 e.manifest.max_concurrent_invocations.map(|n| n as usize),
                 e.manifest.session_mode,
@@ -1212,7 +1214,8 @@ impl LibreFangKernel {
             (_, None) => self.config.load().queue.concurrency.default_per_agent,
         }
         .max(1);
-        self.agent_concurrency
+        self.agents
+            .agent_concurrency
             .entry(agent_id)
             .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(resolved_cap)))
             .clone()
@@ -1330,7 +1333,7 @@ impl LibreFangKernel {
     /// cache entries, and caps prompt metadata cache size.
     pub(crate) fn gc_sweep(&self) {
         let live_agents: std::collections::HashSet<AgentId> =
-            self.registry.list().iter().map(|e| e.id).collect();
+            self.agents.registry.list().iter().map(|e| e.id).collect();
         let mut total_removed: usize = 0;
 
         // 1. running_tasks — abort and remove handles for dead agents; also
@@ -1342,6 +1345,7 @@ impl LibreFangKernel {
         //    fans out across all sessions for each dead/finished agent.
         {
             let finished: Vec<(AgentId, SessionId)> = self
+                .agents
                 .running_tasks
                 .iter()
                 .filter(|e| !live_agents.contains(&e.key().0) || e.value().abort.is_finished())
@@ -1349,13 +1353,14 @@ impl LibreFangKernel {
                 .collect();
             total_removed += finished.len();
             for key in finished {
-                self.running_tasks.remove(&key);
+                self.agents.running_tasks.remove(&key);
             }
         }
 
         // 3. agent_msg_locks — remove locks for dead agents
         {
             let stale: Vec<AgentId> = self
+                .agents
                 .agent_msg_locks
                 .iter()
                 .filter(|e| !live_agents.contains(e.key()))
@@ -1363,7 +1368,7 @@ impl LibreFangKernel {
                 .collect();
             total_removed += stale.len();
             for id in stale {
-                self.agent_msg_locks.remove(&id);
+                self.agents.agent_msg_locks.remove(&id);
             }
         }
 
@@ -1382,6 +1387,7 @@ impl LibreFangKernel {
         // because the previous lock had no waiters.
         {
             let candidates: Vec<SessionId> = self
+                .agents
                 .session_msg_locks
                 .iter()
                 .filter(|e| Arc::strong_count(e.value()) == 1)
@@ -1391,6 +1397,7 @@ impl LibreFangKernel {
                 // Re-check under the shard lock so a writer that grabbed
                 // the Arc between iter() and remove() doesn't lose it.
                 if self
+                    .agents
                     .session_msg_locks
                     .remove_if(&sid, |_, arc| Arc::strong_count(arc) == 1)
                     .is_some()
@@ -1405,6 +1412,7 @@ impl LibreFangKernel {
         // re-init on next dispatch will pick up any updated manifest cap.
         {
             let stale: Vec<AgentId> = self
+                .agents
                 .agent_concurrency
                 .iter()
                 .filter(|e| !live_agents.contains(e.key()))
@@ -1412,7 +1420,7 @@ impl LibreFangKernel {
                 .collect();
             total_removed += stale.len();
             for id in stale {
-                self.agent_concurrency.remove(&id);
+                self.agents.agent_concurrency.remove(&id);
             }
         }
 
@@ -1451,6 +1459,7 @@ impl LibreFangKernel {
         // 6. decision_traces — remove dead agents, cap per-agent at 15
         {
             let stale: Vec<AgentId> = self
+                .agents
                 .decision_traces
                 .iter()
                 .filter(|e| !live_agents.contains(e.key()))
@@ -1458,10 +1467,10 @@ impl LibreFangKernel {
                 .collect();
             total_removed += stale.len();
             for id in stale {
-                self.decision_traces.remove(&id);
+                self.agents.decision_traces.remove(&id);
             }
             // Cap surviving entries
-            for mut entry in self.decision_traces.iter_mut() {
+            for mut entry in self.agents.decision_traces.iter_mut() {
                 let traces = entry.value_mut();
                 if traces.len() > 15 {
                     let drain = traces.len() - 15;

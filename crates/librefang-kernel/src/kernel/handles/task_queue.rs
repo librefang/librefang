@@ -55,10 +55,10 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
         let (resolved, resolved_name) = match librefang_types::agent::AgentId::from_str(agent_id) {
             Ok(parsed_id) => {
                 // Caller passed a UUID — look up the name from the registry.
-                let name = self.registry.get(parsed_id).map(|e| e.name.clone());
+                let name = self.agents.registry.get(parsed_id).map(|e| e.name.clone());
                 (agent_id.to_string(), name)
             }
-            Err(_) => match self.registry.find_by_name(agent_id) {
+            Err(_) => match self.agents.registry.find_by_name(agent_id) {
                 Some(entry) => (entry.id.to_string(), Some(agent_id.to_string())),
                 None => {
                     return Err(KernelOpError::AgentNotFound(agent_id.to_string()));
@@ -99,7 +99,7 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
         use kernel_handle::KernelOpError;
         let resolved = match librefang_types::agent::AgentId::from_str(agent_id) {
             Ok(_) => agent_id.to_string(),
-            Err(_) => match self.registry.find_by_name(agent_id) {
+            Err(_) => match self.agents.registry.find_by_name(agent_id) {
                 Some(entry) => entry.id.to_string(),
                 None => {
                     return Err(KernelOpError::AgentNotFound(agent_id.to_string()));

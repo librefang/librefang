@@ -94,7 +94,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         // Hand agents are curated trusted packages — auto-approve tool execution.
         // Check if this agent has a "hand:" tag indicating it was spawned by activate_hand().
         if let Ok(aid) = agent_id.parse::<AgentId>() {
-            if let Some(entry) = self.registry.get(aid) {
+            if let Some(entry) = self.agents.registry.get(aid) {
                 if entry.tags.iter().any(|t| t.starts_with("hand:")) {
                     info!(agent_id, tool_name, "Auto-approved for hand agent");
                     return Ok(ApprovalDecision::Approved);
@@ -240,7 +240,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         // tool surface, defeating user-level RBAC entirely.
         if !deferred.force_human {
             if let Ok(aid) = agent_id.parse::<AgentId>() {
-                if let Some(entry) = self.registry.get(aid) {
+                if let Some(entry) = self.agents.registry.get(aid) {
                     if entry.tags.iter().any(|t| t.starts_with("hand:")) {
                         info!(
                             agent_id,

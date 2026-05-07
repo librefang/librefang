@@ -244,7 +244,9 @@ impl LibreFangKernel {
         let (triggered, trigger_state_mutated) = self
             .workflows
             .triggers
-            .evaluate_with_resolver(&event, |id| self.registry.get(id).map(|e| e.name.clone()));
+            .evaluate_with_resolver(&event, |id| {
+                self.agents.registry.get(id).map(|e| e.name.clone())
+            });
         if !triggered.is_empty() || trigger_state_mutated {
             if let Err(e) = self.workflows.triggers.persist() {
                 warn!("Failed to persist trigger jobs after fire: {e}");
@@ -312,7 +314,7 @@ impl LibreFangKernel {
                 // whether to materialize a fresh session id. Skip dispatch
                 // if the agent has been deleted between trigger evaluation
                 // and dispatch — preserves prior behavior.
-                let manifest_mode = match kernel.registry.get(aid) {
+                let manifest_mode = match kernel.agents.registry.get(aid) {
                     Some(entry) => entry.manifest.session_mode,
                     None => continue,
                 };
@@ -473,14 +475,14 @@ impl LibreFangKernel {
         session_mode: Option<librefang_types::agent::SessionMode>,
     ) -> KernelResult<TriggerId> {
         // Verify owner agent exists
-        if self.registry.get(agent_id).is_none() {
+        if self.agents.registry.get(agent_id).is_none() {
             return Err(KernelError::LibreFang(LibreFangError::AgentNotFound(
                 agent_id.to_string(),
             )));
         }
         // Verify target agent exists (if specified)
         if let Some(target) = target_agent {
-            if self.registry.get(target).is_none() {
+            if self.agents.registry.get(target).is_none() {
                 return Err(KernelError::LibreFang(LibreFangError::AgentNotFound(
                     target.to_string(),
                 )));
@@ -586,12 +588,12 @@ impl LibreFangKernel {
             match agent_ref {
                 StepAgent::ById { id } => {
                     let agent_id: AgentId = id.parse().ok()?;
-                    let entry = self.registry.get(agent_id)?;
+                    let entry = self.agents.registry.get(agent_id)?;
                     let inherit = entry.manifest.inherit_parent_context;
                     Some((agent_id, entry.name.clone(), inherit))
                 }
                 StepAgent::ByName { name } => {
-                    let entry = self.registry.find_by_name(name)?;
+                    let entry = self.agents.registry.find_by_name(name)?;
                     let inherit = entry.manifest.inherit_parent_context;
                     Some((entry.id, entry.name.clone(), inherit))
                 }
@@ -647,12 +649,12 @@ impl LibreFangKernel {
                 match agent_ref {
                     StepAgent::ById { id } => {
                         let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
-                        let entry = self.registry.get(agent_id)?;
+                        let entry = self.agents.registry.get(agent_id)?;
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((agent_id, entry.name.clone(), inherit))
                     }
                     StepAgent::ByName { name } => {
-                        let entry = self.registry.find_by_name(name)?;
+                        let entry = self.agents.registry.find_by_name(name)?;
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((entry.id, entry.name.clone(), inherit))
                     }

@@ -257,7 +257,7 @@ pub async fn start_whatsapp_gateway(kernel: &Arc<super::kernel::LibreFangKernel>
                         }
                     };
 
-                    if kernel.supervisor.is_shutting_down() {
+                    if kernel.agents.supervisor.is_shutting_down() {
                         info!("WhatsApp gateway stopped (daemon shutting down)");
                         return;
                     }

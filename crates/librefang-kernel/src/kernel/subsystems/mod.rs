@@ -9,6 +9,7 @@
 //! Focused per-subsystem traits and method-body migration are explicit
 //! follow-ups — kept out of this PR so the diff stays reviewable.
 
+pub mod agents;
 pub mod events;
 pub mod governance;
 pub mod llm;
@@ -22,6 +23,7 @@ pub mod security;
 pub mod skills;
 pub mod workflow;
 
+pub use agents::AgentSubsystem;
 pub use events::EventSubsystem;
 pub use governance::GovernanceSubsystem;
 pub use llm::LlmSubsystem;

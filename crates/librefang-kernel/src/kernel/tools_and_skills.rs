@@ -58,7 +58,7 @@ impl LibreFangKernel {
         };
 
         // Look up agent entry for profile, skill/MCP allowlists, and declared tools
-        let entry = self.registry.get(agent_id);
+        let entry = self.agents.registry.get(agent_id);
         if entry.as_ref().is_some_and(|e| e.manifest.tools_disabled) {
             return Arc::new(Vec::new());
         }
@@ -90,7 +90,7 @@ impl LibreFangKernel {
         // Step 1: Filter builtin tools.
         // Priority: declared tools > ToolProfile > all builtins.
         let has_tool_all = entry.as_ref().is_some_and(|_| {
-            let caps = self.capabilities.list(agent_id);
+            let caps = self.agents.capabilities.list(agent_id);
             caps.iter().any(|c| matches!(c, Capability::ToolAll))
         });
 

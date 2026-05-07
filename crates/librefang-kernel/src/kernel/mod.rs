@@ -2,13 +2,10 @@
 
 use crate::auth::AuthManager;
 use crate::background::{self, BackgroundExecutor};
-use crate::capabilities::CapabilityManager;
 use crate::config::load_config;
 use crate::error::{KernelError, KernelResult};
 use crate::metering::MeteringEngine;
-use crate::registry::AgentRegistry;
 use crate::router;
-use crate::scheduler::AgentScheduler;
 use crate::supervisor::Supervisor;
 use crate::triggers::{TriggerEngine, TriggerId, TriggerPattern};
 use crate::workflow::{DryRunStep, StepAgent, Workflow, WorkflowEngine, WorkflowId, WorkflowRunId};
@@ -650,27 +647,16 @@ pub struct LibreFangKernel {
     /// `[skills.config.<key>]` namespace that `resolve_config_vars`
     /// walks, so we keep a separate `toml::Value` snapshot.
     pub(crate) raw_config_toml: ArcSwap<toml::Value>,
-    /// Agent registry.
-    pub(crate) registry: AgentRegistry,
-    /// Canonical agent UUID registry (refs #4614). Persists `agent_name →
-    /// canonical_uuid` independently of the agent registry / SQLite agent
-    /// rows so that respawn after kill / panic / manifest reload reuses the
-    /// same `AgentId` and surviving sessions remain reachable. See
-    /// `crate::agent_identity_registry` for layout and rationale.
-    pub(crate) agent_identities: Arc<crate::agent_identity_registry::AgentIdentityRegistry>,
-    /// Capability manager.
-    pub(crate) capabilities: CapabilityManager,
+    /// Agent registries + scheduler + supervisor + lock maps + traces.
+    /// See [`subsystems::AgentSubsystem`].
+    pub(crate) agents: subsystems::AgentSubsystem,
     /// Event buses + mid-turn injection channels + sticky routing
     /// state + session-stream-hub GC guard. See
     /// [`subsystems::EventSubsystem`].
     pub(crate) events: subsystems::EventSubsystem,
-    /// Agent scheduler.
-    pub(crate) scheduler: AgentScheduler,
     /// Memory substrate + wiki vault + proactive memory + prompt store.
     /// See [`subsystems::MemorySubsystem`].
     pub(crate) memory: subsystems::MemorySubsystem,
-    /// Process supervisor.
-    pub(crate) supervisor: Supervisor,
     /// Workflow engine + triggers + background + cron + command queue.
     /// See [`subsystems::WorkflowSubsystem`].
     pub(crate) workflows: subsystems::WorkflowSubsystem,
@@ -692,16 +678,6 @@ pub struct LibreFangKernel {
     /// was `DashMap<AgentId, AbortHandle>`, which silently overwrote prior
     /// handles when a second loop spawned and left earlier loops un-stoppable.
     /// See issue #3172.
-    pub(crate) running_tasks: dashmap::DashMap<(AgentId, SessionId), RunningTask>,
-    /// Tracks per-(agent, session) interrupts so `stop_agent_run` /
-    /// `stop_session_run` can signal `cancel()` in addition to aborting the
-    /// tokio task. Without this, `SessionInterrupt` is moved into
-    /// `LoopOptions` and the external handle is lost, making all
-    /// `is_cancelled()` checks inside tool futures permanently return
-    /// `false`. Same key shape as `running_tasks` so the two maps stay in
-    /// sync at a glance.
-    pub(crate) session_interrupts:
-        dashmap::DashMap<(AgentId, SessionId), librefang_runtime::interrupt::SessionInterrupt>,
     /// MCP connection pool + OAuth + tool cache + catalog + health
     /// monitor + summary cache. See [`subsystems::McpSubsystem`].
     pub(crate) mcp: subsystems::McpSubsystem,
@@ -726,44 +702,6 @@ pub struct LibreFangKernel {
     /// Hot-reloadable tool policy override (set via config hot-reload, read in available_tools).
     pub(crate) tool_policy_override:
         std::sync::RwLock<Option<librefang_types::tool_policy::ToolPolicy>>,
-    /// Per-agent message locks — serializes LLM calls for the same agent to prevent
-    /// session corruption when multiple messages arrive concurrently (e.g. rapid voice
-    /// messages via Telegram). Different agents can still run in parallel.
-    agent_msg_locks: dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
-    /// Per-session message locks — used instead of `agent_msg_locks` when a caller
-    /// supplies an explicit `session_id_override`. Allows concurrent messages to
-    /// different sessions of the same agent (multi-tab / multi-session UIs).
-    session_msg_locks: dashmap::DashMap<SessionId, Arc<tokio::sync::Mutex<()>>>,
-    /// Per-agent invocation semaphore — caps concurrent **trigger
-    /// dispatch** fires to a single agent. Capacity is resolved lazily
-    /// on first use from `AgentManifest.max_concurrent_invocations`,
-    /// falling back to `KernelConfig.queue.concurrency.default_per_agent`.
-    /// Permits are acquired in addition to (and AFTER) the global
-    /// trigger lane permit, so a hot agent throttles itself without
-    /// starving the kernel. NOT acquired by `agent_send`, channel
-    /// bridges, or cron — those paths still serialize at the existing
-    /// `agent_msg_locks` / `session_msg_locks` inside `send_message_full`.
-    agent_concurrency: dashmap::DashMap<AgentId, Arc<tokio::sync::Semaphore>>,
-    /// Per-hand-instance lock serializing runtime-override mutations
-    /// (PATCH/DELETE on `/api/agents/{id}/hand-runtime-config`).
-    ///
-    /// `merge_agent_runtime_override` is atomic under the DashMap shard
-    /// lock, but the subsequent `apply_*` writes against `AgentRegistry`
-    /// happen after that lock is released. Without an outer per-instance
-    /// lock, two concurrent PATCHes can interleave their `apply` steps
-    /// and leave the live AgentRegistry disagreeing with the persisted
-    /// `hand_state.json` until the next restart reconciles it. PATCH/DELETE
-    /// here is a dashboard-driven path (≪ 1 QPS), so per-instance
-    /// serialization has zero observable cost.
-    ///
-    /// Entries are removed in `deactivate_hand` so reactivating with a
-    /// fresh `instance_id` doesn't accumulate stale mutexes across
-    /// activate/deactivate cycles.
-    hand_runtime_override_locks: dashmap::DashMap<uuid::Uuid, Arc<std::sync::Mutex<()>>>,
-    /// Per-agent decision traces from the most recent message exchange.
-    /// Stored for retrieval via `/api/agents/{id}/traces`.
-    pub(crate) decision_traces:
-        dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>,
     /// Pluggable context engine for memory recall, assembly, and compaction.
     pub(crate) context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>>,
     /// Runtime config passed to context-engine lifecycle hooks.
@@ -781,15 +719,6 @@ pub struct LibreFangKernel {
     /// Cache for workspace context, identity files, and skill metadata to avoid
     /// redundant filesystem I/O and registry scans on every message.
     prompt_metadata_cache: PromptMetadataCache,
-    /// Per-agent fire-and-forget background tasks (skill reviews, owner
-    /// notifications, …) that hold semaphore permits or spend tokens on
-    /// behalf of a specific agent. `kill_agent` drains and aborts these so
-    /// permits release immediately and a deleted agent stops accruing cost
-    /// from in-flight retry loops (#3705).
-    pub(crate) agent_watchers: dashmap::DashMap<
-        AgentId,
-        std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
-    >,
     /// Audit trail + cost metering + hot-reloadable budget. See
     /// [`subsystems::MeteringSubsystem`].
     pub(crate) metering: subsystems::MeteringSubsystem,
@@ -1041,7 +970,7 @@ impl LibreFangKernel {
         old_provider: &str,
         dm: &librefang_types::config::DefaultModelConfig,
     ) {
-        for entry in self.registry.list() {
+        for entry in self.agents.registry.list() {
             let is_default_provider = entry.manifest.model.provider.is_empty()
                 || entry.manifest.model.provider == "default";
             let is_default_model =
@@ -1059,13 +988,13 @@ impl LibreFangKernel {
                 || is_auto_spawned
                 || is_stale_dashboard_default
             {
-                let _ = self.registry.update_model_and_provider(
+                let _ = self.agents.registry.update_model_and_provider(
                     entry.id,
                     dm.model.clone(),
                     dm.provider.clone(),
                 );
                 if !dm.api_key_env.is_empty() {
-                    if let Some(mut e) = self.registry.get(entry.id) {
+                    if let Some(mut e) = self.agents.registry.get(entry.id) {
                         if e.manifest.model.api_key_env.is_none() {
                             e.manifest.model.api_key_env = Some(dm.api_key_env.clone());
                         }
@@ -1082,7 +1011,7 @@ impl LibreFangKernel {
                         }
                         let _ = self.memory.substrate.save_agent(&e);
                     }
-                } else if let Some(e) = self.registry.get(entry.id) {
+                } else if let Some(e) = self.agents.registry.get(entry.id) {
                     let _ = self.memory.substrate.save_agent(&e);
                 }
             }
@@ -1272,14 +1201,15 @@ impl LibreFangKernel {
     /// round trip.
     fn resolve_agent_identifier(&self, agent_id: &str) -> Result<AgentId, String> {
         if let Ok(uid) = agent_id.parse::<AgentId>() {
-            if self.registry.get(uid).is_some() {
+            if self.agents.registry.get(uid).is_some() {
                 return Ok(uid);
             }
         }
-        if let Some(entry) = self.registry.find_by_name(agent_id) {
+        if let Some(entry) = self.agents.registry.find_by_name(agent_id) {
             return Ok(entry.id);
         }
         let available: Vec<String> = self
+            .agents
             .registry
             .list()
             .iter()
@@ -1337,7 +1267,7 @@ impl LibreFangKernel {
     /// human-readable descriptions) only.
     fn approval_agent_display(&self, agent_id: &str) -> String {
         if let Ok(aid) = agent_id.parse::<AgentId>() {
-            if let Some(entry) = self.registry.get(aid) {
+            if let Some(entry) = self.agents.registry.get(aid) {
                 let short = agent_id.get(..8).unwrap_or(agent_id);
                 // Names are user-configured free text. Escape embedded `"` so
                 // adapters that interpret the surrounding context (Telegram
@@ -1570,7 +1500,7 @@ impl LibreFangKernel {
         result: &librefang_types::tool::ToolResult,
     ) {
         // Resolve the agent's session_id from the registry.
-        let session_id = match self.registry.get(*agent_id) {
+        let session_id = match self.agents.registry.get(*agent_id) {
             Some(entry) => entry.session_id,
             None => {
                 warn!(
@@ -1826,7 +1756,8 @@ impl LibreFangKernel {
 #[async_trait]
 impl librefang_wire::peer::PeerHandle for LibreFangKernel {
     fn local_agents(&self) -> Vec<librefang_wire::message::RemoteAgentInfo> {
-        self.registry
+        self.agents
+            .registry
             .list()
             .iter()
             .map(|entry| librefang_wire::message::RemoteAgentInfo {
@@ -1851,7 +1782,8 @@ impl librefang_wire::peer::PeerHandle for LibreFangKernel {
             AgentId(uuid)
         } else {
             // Find by name
-            self.registry
+            self.agents
+                .registry
                 .list()
                 .iter()
                 .find(|e| e.name == agent)
@@ -1867,7 +1799,8 @@ impl librefang_wire::peer::PeerHandle for LibreFangKernel {
 
     fn discover_agents(&self, query: &str) -> Vec<librefang_wire::message::RemoteAgentInfo> {
         let q = query.to_lowercase();
-        self.registry
+        self.agents
+            .registry
             .list()
             .iter()
             .filter(|entry| {

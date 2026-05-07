@@ -102,7 +102,7 @@ impl LibreFangKernel {
         // it as the canonical UUID for this name (first-spawn wins).
         let agent_id = predetermined_id.unwrap_or_else(|| {
             if parent.is_none() {
-                if let Some(existing) = self.agent_identities.get(&name) {
+                if let Some(existing) = self.agents.agent_identities.get(&name) {
                     debug!(
                         agent = %name,
                         id = %existing,
@@ -111,7 +111,10 @@ impl LibreFangKernel {
                     existing
                 } else {
                     let derived = AgentId::from_name(&name);
-                    let recorded = self.agent_identities.register_if_absent(&name, derived);
+                    let recorded = self
+                        .agents
+                        .agent_identities
+                        .register_if_absent(&name, derived);
                     if recorded != derived {
                         // Someone else won the race; honor their UUID.
                         debug!(
@@ -150,7 +153,7 @@ impl LibreFangKernel {
         // channel bootstrap) pass `parent = None` and are unaffected —
         // they're an owner action, not a privilege inheritance.
         if let Some(parent_id) = parent {
-            if let Some(parent_entry) = self.registry.get(parent_id) {
+            if let Some(parent_entry) = self.agents.registry.get(parent_id) {
                 let parent_caps = manifest_to_capabilities(&parent_entry.manifest);
                 let child_caps = manifest_to_capabilities(&manifest);
                 if let Err(violation) = librefang_types::capability::validate_capability_inheritance(
@@ -266,10 +269,11 @@ impl LibreFangKernel {
 
         // Register capabilities
         let caps = manifest_to_capabilities(&manifest);
-        self.capabilities.grant(agent_id, caps);
+        self.agents.capabilities.grant(agent_id, caps);
 
         // Register with scheduler
-        self.scheduler
+        self.agents
+            .scheduler
             .register(agent_id, manifest.resources.clone());
 
         // Create registry entry
@@ -294,7 +298,8 @@ impl LibreFangKernel {
             is_hand,
             ..Default::default()
         };
-        self.registry
+        self.agents
+            .registry
             .register(entry.clone())
             .map_err(KernelError::LibreFang)?;
 
@@ -313,7 +318,7 @@ impl LibreFangKernel {
 
         // Update parent's children list
         if let Some(parent_id) = parent {
-            self.registry.add_child(parent_id, agent_id);
+            self.agents.registry.add_child(parent_id, agent_id);
         }
 
         // Persist agent to SQLite so it survives restarts
@@ -375,7 +380,9 @@ impl LibreFangKernel {
         let (triggered, trigger_state_mutated) = self
             .workflows
             .triggers
-            .evaluate_with_resolver(&event, |id| self.registry.get(id).map(|e| e.name.clone()));
+            .evaluate_with_resolver(&event, |id| {
+                self.agents.registry.get(id).map(|e| e.name.clone())
+            });
         if !triggered.is_empty() || trigger_state_mutated {
             if let Err(e) = self.workflows.triggers.persist() {
                 warn!("Failed to persist trigger jobs after spawn event: {e}");

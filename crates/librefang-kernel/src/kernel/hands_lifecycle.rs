@@ -146,7 +146,7 @@ impl LibreFangKernel {
             String,
             Vec<librefang_types::scheduler::CronJob>,
         > = std::collections::BTreeMap::new();
-        for entry in self.registry.list() {
+        for entry in self.agents.registry.list() {
             if entry.tags.contains(&hand_tag) {
                 let old_id = entry.id;
                 // Extract role from tag (hand_role:xxx) to migrate cron to correct new agent
@@ -213,7 +213,7 @@ impl LibreFangKernel {
             // Reuse existing hand agent if one with the same prefixed name is already running.
             // NOTE: this check-then-spawn is not atomic, but is safe because hand activation
             // is serialized by the activate_lock mutex at the HandRegistry level.
-            if let Some(existing) = self.registry.find_by_name(&manifest.name) {
+            if let Some(existing) = self.agents.registry.find_by_name(&manifest.name) {
                 agent_ids_map.insert(role.clone(), existing.id);
                 continue;
             }
@@ -581,7 +581,7 @@ impl LibreFangKernel {
         } else {
             // Fallback: if agent_ids was never set (incomplete activation), search by hand tag
             let hand_tag = format!("hand:{}", instance.hand_id);
-            for entry in self.registry.list() {
+            for entry in self.agents.registry.list() {
                 if entry.tags.contains(&hand_tag) {
                     affected_agents.push(entry.id);
                     if let Err(e) = self.kill_agent(entry.id) {
@@ -609,7 +609,7 @@ impl LibreFangKernel {
 
         // Drop the per-instance runtime-override mutex so reactivating
         // with a fresh `instance_id` doesn't leak entries here.
-        self.hand_runtime_override_locks.remove(&instance_id);
+        self.agents.hand_runtime_override_locks.remove(&instance_id);
 
         // Persist hand state so it survives restarts
         self.persist_hand_state();
@@ -655,7 +655,8 @@ impl LibreFangKernel {
     /// See the field comment on `hand_runtime_override_locks` for the
     /// race this guards against.
     fn hand_runtime_override_lock(&self, instance_id: uuid::Uuid) -> Arc<std::sync::Mutex<()>> {
-        self.hand_runtime_override_locks
+        self.agents
+            .hand_runtime_override_locks
             .entry(instance_id)
             .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
             .clone()
@@ -674,7 +675,8 @@ impl LibreFangKernel {
         {
             let (default_model, default_provider, default_api_key_env, default_base_url) =
                 self.resolve_hand_agent_model_defaults(default_manifest);
-            self.registry
+            self.agents
+                .registry
                 .update_model_provider_config(
                     agent_id,
                     merged.model.clone().unwrap_or(default_model),
@@ -685,17 +687,20 @@ impl LibreFangKernel {
                 .map_err(KernelError::LibreFang)?;
         }
         if let Some(max_tokens) = merged.max_tokens {
-            self.registry
+            self.agents
+                .registry
                 .update_max_tokens(agent_id, max_tokens)
                 .map_err(KernelError::LibreFang)?;
         }
         if let Some(temperature) = merged.temperature {
-            self.registry
+            self.agents
+                .registry
                 .update_temperature(agent_id, temperature)
                 .map_err(KernelError::LibreFang)?;
         }
         if let Some(mode) = merged.web_search_augmentation {
-            self.registry
+            self.agents
+                .registry
                 .update_web_search_augmentation(agent_id, mode)
                 .map_err(KernelError::LibreFang)?;
         }
@@ -926,7 +931,8 @@ impl LibreFangKernel {
                     self.resolve_hand_agent_model_defaults(&agent_def.manifest);
 
                 let apply_result = (|| -> KernelResult<()> {
-                    self.registry
+                    self.agents
+                        .registry
                         .update_model_provider_config(
                             agent_id,
                             model,
@@ -935,13 +941,16 @@ impl LibreFangKernel {
                             base_url,
                         )
                         .map_err(KernelError::LibreFang)?;
-                    self.registry
+                    self.agents
+                        .registry
                         .update_max_tokens(agent_id, agent_def.manifest.model.max_tokens)
                         .map_err(KernelError::LibreFang)?;
-                    self.registry
+                    self.agents
+                        .registry
                         .update_temperature(agent_id, agent_def.manifest.model.temperature)
                         .map_err(KernelError::LibreFang)?;
-                    self.registry
+                    self.agents
+                        .registry
                         .update_web_search_augmentation(
                             agent_id,
                             agent_def.manifest.web_search_augmentation,

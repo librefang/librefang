@@ -41,7 +41,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
     interval.tick().await; // Skip first immediate tick
     loop {
         interval.tick().await;
-        if kernel.supervisor.is_shutting_down() {
+        if kernel.agents.supervisor.is_shutting_down() {
             // Persist on shutdown
             let _ = kernel.workflows.cron_scheduler.persist();
             break;
@@ -89,6 +89,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                     // dispatching any message — a Suspended agent cannot run,
                     // and recording success here would be misleading.
                     let is_suspended = kernel
+                        .agents
                         .registry
                         .get(agent_id)
                         .map(|e| e.state == AgentState::Suspended)
@@ -110,6 +111,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                         // Resolve the agent workspace so cron_script_wake_gate
                         // can restrict the child's cwd to the agent's own directory.
                         let agent_ws = kernel
+                            .agents
                             .registry
                             .get(agent_id)
                             .and_then(|e| e.manifest.workspace.clone());
@@ -161,6 +163,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                     // the agent.toml actually asked for, in
                     // addition to the per-job override.
                     let manifest_session_mode = kernel
+                        .agents
                         .registry
                         .get(agent_id)
                         .map(|entry| entry.manifest.session_mode);
@@ -275,6 +278,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                                 // (which uses agent_msg_locks for
                                 // persistent cron sessions).
                                 let prune_lock = kernel_job
+                                    .agents
                                     .session_msg_locks
                                     .entry(cron_sid)
                                     .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
@@ -358,7 +362,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                                                 // registry / scheduler inconsistency
                                                 // worth surfacing in logs.
                                                 let model = match kernel_job
-                                                    .registry
+                                                    .agents.registry
                                                     .get(agent_id)
                                                 {
                                                     Some(e) => {

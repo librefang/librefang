@@ -25,7 +25,7 @@ use super::LibreFangKernel;
 impl LibreFangKernel {
     /// Get session token usage and estimated cost for an agent.
     pub fn session_usage_cost(&self, agent_id: AgentId) -> KernelResult<(u64, u64, f64)> {
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
@@ -95,12 +95,14 @@ impl LibreFangKernel {
     /// through this method).
     pub fn stop_agent_run(&self, agent_id: AgentId) -> KernelResult<bool> {
         let sessions: Vec<SessionId> = self
+            .agents
             .running_tasks
             .iter()
             .filter(|e| e.key().0 == agent_id)
             .map(|e| e.key().1)
             .collect();
         let interrupt_sessions: Vec<SessionId> = self
+            .agents
             .session_interrupts
             .iter()
             .filter(|e| e.key().0 == agent_id)
@@ -109,13 +111,13 @@ impl LibreFangKernel {
         // Signal interrupts first so tools see cancellation before the
         // tokio tasks are dropped at the next .await.
         for sid in &interrupt_sessions {
-            if let Some((_, interrupt)) = self.session_interrupts.remove(&(agent_id, *sid)) {
+            if let Some((_, interrupt)) = self.agents.session_interrupts.remove(&(agent_id, *sid)) {
                 interrupt.cancel();
             }
         }
         let mut stopped = 0usize;
         for sid in &sessions {
-            if let Some((_, task)) = self.running_tasks.remove(&(agent_id, *sid)) {
+            if let Some((_, task)) = self.agents.running_tasks.remove(&(agent_id, *sid)) {
                 task.abort.abort();
                 stopped += 1;
             }
@@ -136,10 +138,14 @@ impl LibreFangKernel {
     /// no loop was running for that pair (already finished, never started,
     /// or the session belongs to a different agent).
     pub fn stop_session_run(&self, agent_id: AgentId, session_id: SessionId) -> KernelResult<bool> {
-        if let Some((_, interrupt)) = self.session_interrupts.remove(&(agent_id, session_id)) {
+        if let Some((_, interrupt)) = self
+            .agents
+            .session_interrupts
+            .remove(&(agent_id, session_id))
+        {
             interrupt.cancel();
         }
-        if let Some((_, task)) = self.running_tasks.remove(&(agent_id, session_id)) {
+        if let Some((_, task)) = self.agents.running_tasks.remove(&(agent_id, session_id)) {
             task.abort.abort();
             info!(agent_id = %agent_id, session_id = %session_id, "Session run cancelled");
             Ok(true)
@@ -153,7 +159,8 @@ impl LibreFangKernel {
     /// (DashMap iteration order); callers that need a stable order should
     /// sort by `started_at` themselves.
     pub fn list_running_sessions(&self, agent_id: AgentId) -> Vec<RunningSessionSnapshot> {
-        self.running_tasks
+        self.agents
+            .running_tasks
             .iter()
             .filter(|e| e.key().0 == agent_id)
             .map(|e| RunningSessionSnapshot {
@@ -167,7 +174,10 @@ impl LibreFangKernel {
     /// Cheap check used by `librefang-api/src/ws.rs` to gate state-event
     /// fan-out — true when `agent_id` has at least one session in flight.
     pub fn agent_has_active_session(&self, agent_id: AgentId) -> bool {
-        self.running_tasks.iter().any(|e| e.key().0 == agent_id)
+        self.agents
+            .running_tasks
+            .iter()
+            .any(|e| e.key().0 == agent_id)
     }
 
     /// Snapshot of every `SessionId` whose agent loop is currently in flight,
@@ -178,16 +188,23 @@ impl LibreFangKernel {
     /// caller treats the result as a set lookup, never as a list. Cheap:
     /// one `(AgentId, SessionId)` clone per running task.
     pub fn running_session_ids(&self) -> std::collections::HashSet<SessionId> {
-        self.running_tasks.iter().map(|e| e.key().1).collect()
+        self.agents
+            .running_tasks
+            .iter()
+            .map(|e| e.key().1)
+            .collect()
     }
 
     /// Suspend an agent — sets state to Suspended, persists enabled=false to TOML.
     pub fn suspend_agent(&self, agent_id: AgentId) -> KernelResult<()> {
         use librefang_types::agent::AgentState;
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
-        let _ = self.registry.set_state(agent_id, AgentState::Suspended);
+        let _ = self
+            .agents
+            .registry
+            .set_state(agent_id, AgentState::Suspended);
         // Stop every active session for the agent — same fan-out as
         // `stop_agent_run` so a multi-session agent is fully halted.
         let _ = self.stop_agent_run(agent_id);
@@ -200,10 +217,13 @@ impl LibreFangKernel {
     /// Resume a suspended agent — sets state back to Running, persists enabled=true.
     pub fn resume_agent(&self, agent_id: AgentId) -> KernelResult<()> {
         use librefang_types::agent::AgentState;
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
-        let _ = self.registry.set_state(agent_id, AgentState::Running);
+        let _ = self
+            .agents
+            .registry
+            .set_state(agent_id, AgentState::Running);
         // Persist enabled=true to agent.toml
         self.persist_agent_enabled(agent_id, &entry.name, true);
         info!(agent_id = %agent_id, "Agent resumed");
@@ -282,7 +302,7 @@ impl LibreFangKernel {
         let cfg = self.config.load_full();
         use librefang_runtime::compactor::{compact_session, needs_compaction, CompactionConfig};
 
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
@@ -416,7 +436,7 @@ impl LibreFangKernel {
     ) -> KernelResult<librefang_runtime::compactor::ContextReport> {
         use librefang_runtime::compactor::generate_context_report;
 
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
@@ -461,6 +481,7 @@ impl LibreFangKernel {
         handle: tokio::task::JoinHandle<()>,
     ) {
         let slot = self
+            .agents
             .agent_watchers
             .entry(agent_id)
             .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
@@ -478,7 +499,7 @@ impl LibreFangKernel {
 
     /// Abort and drop every tracked watcher task for `agent_id`.
     fn abort_agent_watchers(&self, agent_id: AgentId) {
-        if let Some((_, slot)) = self.agent_watchers.remove(&agent_id) {
+        if let Some((_, slot)) = self.agents.agent_watchers.remove(&agent_id) {
             if let Ok(mut guard) = slot.lock() {
                 for h in guard.drain(..) {
                     h.abort();
@@ -514,6 +535,7 @@ impl LibreFangKernel {
         purge_identity: bool,
     ) -> KernelResult<()> {
         let entry = self
+            .agents
             .registry
             .remove(agent_id)
             .map_err(KernelError::LibreFang)?;
@@ -522,8 +544,8 @@ impl LibreFangKernel {
         // they release semaphore permits and stop spending tokens on
         // behalf of a now-deleted agent (#3705).
         self.abort_agent_watchers(agent_id);
-        self.scheduler.unregister(agent_id);
-        self.capabilities.revoke_all(agent_id);
+        self.agents.scheduler.unregister(agent_id);
+        self.agents.capabilities.revoke_all(agent_id);
         self.events.event_bus.unsubscribe_agent(agent_id);
         self.workflows.triggers.remove_agent_triggers(agent_id);
         if let Err(e) = self.workflows.triggers.persist() {
@@ -555,7 +577,7 @@ impl LibreFangKernel {
         // confirmation at the API/CLI surface) also drops the entry,
         // which is the destructive path the issue describes.
         if purge_identity {
-            if let Some(dropped) = self.agent_identities.purge(&entry.name) {
+            if let Some(dropped) = self.agents.agent_identities.purge(&entry.name) {
                 info!(
                     agent = %entry.name,
                     id = %dropped,

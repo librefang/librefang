@@ -317,7 +317,7 @@ impl LibreFangKernel {
     /// in that case callers should fall back to sender-context-less dispatch
     /// (the pre-#2872 behavior).
     pub(crate) fn resolve_agent_home_channel(&self, agent_id: AgentId) -> Option<SenderContext> {
-        let entry = self.registry.get(agent_id)?;
+        let entry = self.agents.registry.get(agent_id)?;
         let agent_name = entry.name.clone();
         let cfg = self.config.load_full();
         let channels = &cfg.channels;
@@ -405,7 +405,7 @@ impl LibreFangKernel {
         agent_id: AgentId,
         message: &str,
     ) -> KernelResult<AgentLoopResult> {
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
@@ -430,7 +430,8 @@ impl LibreFangKernel {
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
-            let peer_agents: Vec<(String, String, String)> = self.registry.peer_agents_summary();
+            let peer_agents: Vec<(String, String, String)> =
+                self.agents.registry.peer_agents_summary();
 
             let ws_meta = manifest
                 .workspace
@@ -749,12 +750,14 @@ impl LibreFangKernel {
         // Without an override, fall back to the per-agent lock to preserve the
         // existing serialization guarantee for single-session agents.
         let lock = if let Some(sid) = session_id_override {
-            self.session_msg_locks
+            self.agents
+                .session_msg_locks
                 .entry(sid)
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         } else {
-            self.agent_msg_locks
+            self.agents
+                .agent_msg_locks
                 .entry(agent_id)
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
@@ -767,7 +770,7 @@ impl LibreFangKernel {
         // pre-call total and collectively overshoot the cap. Settled
         // (after success) or released (on failure / suspended target)
         // alongside the existing token reservation below.
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
         let estimated_usd = {
@@ -802,6 +805,7 @@ impl LibreFangKernel {
         // them calls record_usage (#3736).
         let estimated_tokens = entry.manifest.model.max_tokens as u64;
         let token_reservation = match self
+            .agents
             .scheduler
             .check_quota_and_reserve(agent_id, estimated_tokens)
         {
@@ -818,7 +822,8 @@ impl LibreFangKernel {
             tracing::debug!(agent_id = %agent_id, "Skipping message to suspended agent");
             // No LLM call is made; release reservations without inflating
             // llm_calls or the burst window.
-            self.scheduler
+            self.agents
+                .scheduler
                 .release_reservation(agent_id, token_reservation);
             usd_reservation.release();
             return Ok(AgentLoopResult::default());
@@ -874,19 +879,28 @@ impl LibreFangKernel {
                 // cost will be recorded by `check_all_and_record` further
                 // down the call path; releasing the in-memory hold lets
                 // the next reservation pass see a consistent total.
-                self.scheduler
-                    .settle_reservation(agent_id, token_reservation, &result.total_usage);
+                self.agents.scheduler.settle_reservation(
+                    agent_id,
+                    token_reservation,
+                    &result.total_usage,
+                );
                 usd_reservation.settle();
                 // Record tool calls for rate limiting
                 let tool_count = result.decision_traces.len() as u32;
-                self.scheduler.record_tool_calls(agent_id, tool_count);
+                self.agents
+                    .scheduler
+                    .record_tool_calls(agent_id, tool_count);
 
                 // Update last active time
-                let _ = self.registry.set_state(agent_id, AgentState::Running);
+                let _ = self
+                    .agents
+                    .registry
+                    .set_state(agent_id, AgentState::Running);
 
                 // Store decision traces for API retrieval
                 if !result.decision_traces.is_empty() {
-                    self.decision_traces
+                    self.agents
+                        .decision_traces
                         .insert(agent_id, result.decision_traces.clone());
                 }
 
@@ -917,7 +931,7 @@ impl LibreFangKernel {
                 );
 
                 // Push task_completed notification for autonomous (hand) agents
-                if let Some(entry) = self.registry.get(agent_id) {
+                if let Some(entry) = self.agents.registry.get(agent_id) {
                     let is_autonomous = entry.tags.iter().any(|t| t.starts_with("hand:"))
                         || entry.manifest.autonomous.is_some();
                     if is_autonomous {
@@ -1179,7 +1193,8 @@ impl LibreFangKernel {
             Err(e) => {
                 // Release the pre-charged token + USD reservations — the
                 // agent loop failed before completing, no usage to settle.
-                self.scheduler
+                self.agents
+                    .scheduler
                     .release_reservation(agent_id, token_reservation);
                 usd_reservation.release();
 
@@ -1192,7 +1207,7 @@ impl LibreFangKernel {
                 );
 
                 // Record the failure in supervisor for health reporting
-                self.supervisor.record_panic();
+                self.agents.supervisor.record_panic();
                 let session_id_for_log = resolved_session_id
                     .map(|s| s.0.to_string())
                     .unwrap_or_else(|| "<none>".to_string());
@@ -1205,6 +1220,7 @@ impl LibreFangKernel {
 
                 // Push failure notification to alert_channels
                 let agent_name = self
+                    .agents
                     .registry
                     .get(agent_id)
                     .map(|a| a.name.clone())
@@ -1464,7 +1480,7 @@ impl LibreFangKernel {
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
         if entry.manifest.module.starts_with("wasm:")
@@ -1627,7 +1643,7 @@ impl LibreFangKernel {
         let _config_guard = self.config_reload_lock.try_read();
         let cfg = self.config.load();
 
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
@@ -1636,6 +1652,7 @@ impl LibreFangKernel {
         // task after the LLM call completes.
         let estimated_tokens = entry.manifest.model.max_tokens as u64;
         let token_reservation = self
+            .agents
             .scheduler
             .check_quota_and_reserve(agent_id, estimated_tokens)
             .map_err(KernelError::LibreFang)?;
@@ -1681,12 +1698,13 @@ impl LibreFangKernel {
                             })
                             .await;
                         // Settle pre-charged reservation (#3736)
-                        kernel_clone.scheduler.settle_reservation(
+                        kernel_clone.agents.scheduler.settle_reservation(
                             agent_id,
                             token_reservation,
                             &result.total_usage,
                         );
                         let _ = kernel_clone
+                            .agents
                             .registry
                             .set_state(agent_id, AgentState::Running);
                         Ok(result)
@@ -1696,9 +1714,10 @@ impl LibreFangKernel {
                         // LLM call, release reservation without inflating
                         // llm_calls.
                         kernel_clone
+                            .agents
                             .scheduler
                             .release_reservation(agent_id, token_reservation);
-                        kernel_clone.supervisor.record_panic();
+                        kernel_clone.agents.supervisor.record_panic();
                         warn!(agent_id = %agent_id, error = %e, "Non-LLM agent failed");
                         Err(e)
                     }
@@ -1811,7 +1830,8 @@ impl LibreFangKernel {
         // overwrite it. See #3172 for the rekey rationale.
         if !loop_opts.is_fork {
             if let Some(interrupt) = loop_opts.interrupt.as_ref() {
-                self.session_interrupts
+                self.agents
+                    .session_interrupts
                     .insert((agent_id, effective_session_id), interrupt.clone());
             }
         }
@@ -1907,6 +1927,7 @@ impl LibreFangKernel {
                 migrate_identity_files(&workspace_dir);
                 manifest.workspace = Some(workspace_dir);
                 let _ = self
+                    .agents
                     .registry
                     .update_workspace(agent_id, manifest.workspace.clone());
             }
@@ -1927,7 +1948,8 @@ impl LibreFangKernel {
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
-            let peer_agents: Vec<(String, String, String)> = self.registry.peer_agents_summary();
+            let peer_agents: Vec<(String, String, String)> =
+                self.agents.registry.peer_agents_summary();
 
             // Use cached workspace metadata (identity files + workspace context)
             let ws_meta = manifest
@@ -2127,12 +2149,14 @@ impl LibreFangKernel {
         // Acquire the same session/agent lock as the non-streaming path so concurrent
         // turns are serialized. Clone the Arc here (sync fn); lock inside the spawn.
         let session_lock = if session_id_override.is_some() {
-            self.session_msg_locks
+            self.agents
+                .session_msg_locks
                 .entry(effective_session_id)
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         } else {
-            self.agent_msg_locks
+            self.agents
+                .agent_msg_locks
                 .entry(agent_id)
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
@@ -2400,7 +2424,7 @@ impl LibreFangKernel {
                     // Settle the pre-charged token reservation with actual usage
                     // (#3736). This replaces record_usage for the token counters
                     // while still correctly accounting for the burst window.
-                    kernel_clone.scheduler.settle_reservation(
+                    kernel_clone.agents.scheduler.settle_reservation(
                         agent_id,
                         token_reservation,
                         &result.total_usage,
@@ -2408,6 +2432,7 @@ impl LibreFangKernel {
                     // Record tool calls for rate limiting
                     let tool_count = result.decision_traces.len() as u32;
                     kernel_clone
+                        .agents
                         .scheduler
                         .record_tool_calls(agent_id, tool_count);
 
@@ -2522,6 +2547,7 @@ impl LibreFangKernel {
                     }
 
                     let _ = kernel_clone
+                        .agents
                         .registry
                         .set_state(agent_id, AgentState::Running);
 
@@ -2584,12 +2610,14 @@ impl LibreFangKernel {
                     // parent turn cleans up the map.
                     if !loop_opts.is_fork {
                         kernel_clone
+                            .agents
                             .session_interrupts
                             .remove(&(agent_id, effective_session_id));
                         // #3445: only remove if THIS turn's entry is still
                         // present — a faster successor turn may have already
                         // swapped it for its own RunningTask.
                         kernel_clone
+                            .agents
                             .running_tasks
                             .remove_if(&(agent_id, effective_session_id), |_, v| {
                                 v.task_id == turn_task_id
@@ -2601,9 +2629,10 @@ impl LibreFangKernel {
                     // Release the pre-charged token reservation — the
                     // streaming loop failed, no usage to settle.
                     kernel_clone
+                        .agents
                         .scheduler
                         .release_reservation(agent_id, token_reservation);
-                    kernel_clone.supervisor.record_panic();
+                    kernel_clone.agents.supervisor.record_panic();
                     warn!(agent_id = %agent_id, error = %e, "Streaming agent loop failed");
                     // Lifecycle: emit TurnFailed before cleanup so subscribers
                     // see the failure with the live session_id still valid.
@@ -2616,11 +2645,13 @@ impl LibreFangKernel {
                     );
                     if !loop_opts.is_fork {
                         kernel_clone
+                            .agents
                             .session_interrupts
                             .remove(&(agent_id, effective_session_id));
                         // #3445: only remove if THIS turn's entry is still
                         // present — see Ok branch above.
                         kernel_clone
+                            .agents
                             .running_tasks
                             .remove_if(&(agent_id, effective_session_id), |_, v| {
                                 v.task_id == turn_task_id
@@ -2674,6 +2705,7 @@ impl LibreFangKernel {
                     task_id: turn_task_id,
                 };
                 if let Some(old_task) = self
+                    .agents
                     .running_tasks
                     .insert((agent_id, effective_session_id), new_task)
                 {

@@ -136,7 +136,7 @@ impl LibreFangKernel {
 
     /// Resolve a specialist agent by name — find existing or spawn from template.
     fn resolve_or_spawn_specialist(&self, name: &str) -> KernelResult<AgentId> {
-        if let Some(entry) = self.registry.find_by_name(name) {
+        if let Some(entry) = self.agents.registry.find_by_name(name) {
             return Ok(entry.id);
         }
         let manifest = router::load_template_manifest(&self.home_dir_boot, name)
@@ -177,7 +177,7 @@ impl LibreFangKernel {
         message: &str,
         sender_context: Option<&SenderContext>,
     ) -> KernelResult<AgentId> {
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
         if entry.name != "assistant" {
