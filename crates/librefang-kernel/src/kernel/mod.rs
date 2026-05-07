@@ -803,6 +803,13 @@ pub struct LibreFangKernel {
         librefang_types::agent::SessionId,
         std::sync::Arc<dyn librefang_runtime::kernel_handle::AcpFsClient>,
     >,
+    /// Per-LibreFang-session ACP `terminal/*` clients (#3313).
+    /// Same shape as `acp_fs_clients`; lets `shell_exec` route
+    /// commands through the editor's terminal panel.
+    pub(crate) acp_terminal_clients: dashmap::DashMap<
+        librefang_types::agent::SessionId,
+        std::sync::Arc<dyn librefang_runtime::kernel_handle::AcpTerminalClient>,
+    >,
     /// Agent bindings for multi-account routing (Mutex for runtime add/remove).
     pub(crate) bindings: std::sync::Mutex<Vec<librefang_types::config::AgentBinding>>,
     /// Broadcast configuration.

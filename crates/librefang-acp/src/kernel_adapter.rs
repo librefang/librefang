@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
-use librefang_kernel::kernel_handle::{AcpFsBridge, KernelHandle};
+use librefang_kernel::kernel_handle::{AcpFsBridge, AcpTerminalBridge, KernelHandle};
 use librefang_kernel::LibreFangKernel;
 use librefang_llm_driver::StreamEvent;
 use librefang_types::agent::{AgentId, SessionId as LfSessionId};
@@ -19,6 +19,7 @@ use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
 use crate::fs::FsClientHandle;
+use crate::terminal::TerminalClientHandle;
 use crate::{AcpError, AcpKernel, AcpResult};
 
 /// Wraps an `Arc<LibreFangKernel>` so it can serve ACP traffic.
@@ -40,6 +41,9 @@ pub struct KernelAdapter {
     /// haven't completed the handshake yet (test harnesses,
     /// pre-initialize tool calls — both Phase-2 niches).
     fs_client: Arc<RwLock<Option<FsClientHandle>>>,
+    /// Editor-bound `terminal/*` reverse-RPC handle. Same lifecycle
+    /// as `fs_client`.
+    terminal_client: Arc<RwLock<Option<TerminalClientHandle>>>,
 }
 
 impl KernelAdapter {
@@ -52,6 +56,7 @@ impl KernelAdapter {
             kernel,
             kernel_handle,
             fs_client: Arc::new(RwLock::new(None)),
+            terminal_client: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -67,6 +72,15 @@ impl KernelAdapter {
     /// before `initialize` has handed us a connection.
     pub fn fs_client(&self) -> Option<FsClientHandle> {
         self.fs_client.read().ok().and_then(|guard| guard.clone())
+    }
+
+    /// Snapshot of the `terminal/*` client handle, if any. Mirrors
+    /// [`Self::fs_client`].
+    pub fn terminal_client(&self) -> Option<TerminalClientHandle> {
+        self.terminal_client
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 }
 
@@ -191,5 +205,26 @@ impl AcpKernel for KernelAdapter {
 
     fn unregister_session_fs(&self, lf_session_id: LfSessionId) {
         self.kernel.unregister_acp_fs_client(lf_session_id);
+    }
+
+    fn set_terminal_client(&self, handle: TerminalClientHandle) {
+        let mut guard = self
+            .terminal_client
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(handle);
+    }
+
+    fn register_session_terminal(&self, lf_session_id: LfSessionId) {
+        let Some(handle) = self.terminal_client() else {
+            return;
+        };
+        let client: Arc<dyn librefang_kernel::kernel_handle::AcpTerminalClient> = Arc::new(handle);
+        self.kernel
+            .register_acp_terminal_client(lf_session_id, client);
+    }
+
+    fn unregister_session_terminal(&self, lf_session_id: LfSessionId) {
+        self.kernel.unregister_acp_terminal_client(lf_session_id);
     }
 }

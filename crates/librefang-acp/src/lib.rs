@@ -42,6 +42,7 @@ pub mod permission;
 pub mod prompt;
 pub mod server;
 pub mod session;
+pub mod terminal;
 
 #[cfg(feature = "kernel-adapter")]
 pub use kernel_adapter::KernelAdapter;
@@ -49,6 +50,7 @@ pub use kernel_adapter::KernelAdapter;
 pub use error::{AcpError, AcpResult};
 pub use fs::{FsCapabilities, FsClientHandle};
 pub use server::{run, run_with_transport};
+pub use terminal::{TerminalCapabilities, TerminalClientHandle};
 
 use std::sync::Arc;
 
@@ -136,6 +138,18 @@ pub trait AcpKernel: Send + Sync + 'static {
     /// LibreFang session — called from `session/close` so a stale
     /// handle can't keep firing requests onto a closed connection.
     fn unregister_session_fs(&self, _lf_session_id: LfSessionId) {}
+
+    /// Hand the kernel a [`terminal::TerminalClientHandle`] for the
+    /// `terminal/*` reverse-RPC channel (#3313). Mirrors
+    /// [`Self::set_fs_client`].
+    fn set_terminal_client(&self, _handle: terminal::TerminalClientHandle) {}
+
+    /// Bind the active `terminal/*` client (set via
+    /// [`Self::set_terminal_client`]) to a LibreFang session.
+    fn register_session_terminal(&self, _lf_session_id: LfSessionId) {}
+
+    /// Drop the runtime-side `terminal/*` registration on close.
+    fn unregister_session_terminal(&self, _lf_session_id: LfSessionId) {}
 }
 
 /// Convenience type alias for `Arc<dyn AcpKernel>`. Most call sites pass

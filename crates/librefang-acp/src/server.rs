@@ -26,6 +26,7 @@ use crate::fs::{FsCapabilities, FsClientHandle};
 use crate::permission;
 use crate::prompt;
 use crate::session::{SessionState, SessionStore};
+use crate::terminal::{TerminalCapabilities, TerminalClientHandle};
 use crate::{AcpKernel, AcpResult};
 
 /// Run the ACP server bound to `kernel` and `agent_id` on stdio.
@@ -87,6 +88,9 @@ where
                 // round-tripping a `method_not_found`.
                 let fs_caps = FsCapabilities::from_client(&req.client_capabilities);
                 kernel_for_init.set_fs_client(FsClientHandle::new(cx.clone(), fs_caps));
+                let term_caps = TerminalCapabilities::from_client(&req.client_capabilities);
+                kernel_for_init
+                    .set_terminal_client(TerminalClientHandle::new(cx.clone(), term_caps));
                 let session_caps = SessionCapabilities::new()
                     .list(SessionListCapabilities::default())
                     .resume(SessionResumeCapabilities::default())
@@ -128,6 +132,7 @@ where
                 // route through the editor (#3313). No-op for kernels
                 // without an attached editor.
                 kernel_for_new.register_session_fs(lf_id);
+                kernel_for_new.register_session_terminal(lf_id);
                 responder.respond(NewSessionResponse::new(new_id))
             },
             agent_client_protocol::on_receive_request!(),
@@ -147,6 +152,7 @@ where
                        "ACP session/load (no history replay yet)");
                 sessions_for_load.insert(req.session_id, state);
                 kernel_for_load.register_session_fs(lf_id);
+                kernel_for_load.register_session_terminal(lf_id);
                 responder.respond(LoadSessionResponse::default())
             },
             agent_client_protocol::on_receive_request!(),
@@ -163,6 +169,7 @@ where
                        "ACP session/resume");
                 sessions_for_resume.insert(req.session_id, state);
                 kernel_for_resume.register_session_fs(lf_id);
+                kernel_for_resume.register_session_terminal(lf_id);
                 responder.respond(ResumeSessionResponse::default())
             },
             agent_client_protocol::on_receive_request!(),
@@ -192,6 +199,7 @@ where
                 let removed = sessions_for_close.remove(&req.session_id);
                 if let Some(state) = removed.as_ref() {
                     kernel_for_close.unregister_session_fs(state.librefang_session_id);
+                    kernel_for_close.unregister_session_terminal(state.librefang_session_id);
                 }
                 debug!(
                     session_id = %req.session_id.0,

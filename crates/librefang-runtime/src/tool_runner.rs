@@ -689,6 +689,59 @@ pub async fn execute_tool_raw(
                 };
             };
 
+            // ACP routing: when an editor is bound to this session and
+            // declares `terminal` capability, host the command's PTY in
+            // the editor's terminal panel (#3313). The editor is
+            // responsible for sandboxing — we hand off the command
+            // verbatim. Local exec_policy still applies on the
+            // fallback path; ACP delegates that to the editor.
+            if let (Some(k), Some(sid)) = (kernel, session_id) {
+                if let Some(client) = k.acp_terminal_client(*sid) {
+                    if client.capabilities() {
+                        let cwd = workspace_root.map(|p| p.to_path_buf());
+                        // shell_exec on the local path runs the command
+                        // through `sh -c <command>`; mirror that here so
+                        // multi-token / pipeline commands behave the same
+                        // when routed through the editor.
+                        let result = client
+                            .run_command(
+                                "sh".to_string(),
+                                vec!["-c".to_string(), command.to_string()],
+                                Vec::new(),
+                                cwd,
+                                Some(64 * 1024),
+                            )
+                            .await;
+                        return match result {
+                            Ok(r) => {
+                                let suffix = if r.truncated {
+                                    "\n[output truncated]"
+                                } else {
+                                    ""
+                                };
+                                let exit_summary = match (r.exit_code, r.signal) {
+                                    (Some(0), _) => String::new(),
+                                    (Some(code), _) => format!("\n[exit code: {code}]"),
+                                    (None, Some(sig)) => format!("\n[signal: {sig}]"),
+                                    (None, None) => "\n[exit: unknown]".to_string(),
+                                };
+                                let is_err = r.exit_code.unwrap_or(1) != 0;
+                                ToolResult {
+                                    tool_use_id: tool_use_id.to_string(),
+                                    content: format!("{}{suffix}{exit_summary}", r.output),
+                                    is_error: is_err,
+                                    ..Default::default()
+                                }
+                            }
+                            Err(e) => ToolResult::error(
+                                tool_use_id.to_string(),
+                                format!("ACP terminal/* failed: {e}"),
+                            ),
+                        };
+                    }
+                }
+            }
+
             // FIXME(#3822): shell_exec does not enforce readonly_workspace_prefixes.
             // Named workspaces declared with `mode = "r"` are exposed to the shell
             // environment via TOOLS.md, but nothing prevents the spawned process from
@@ -7163,6 +7216,7 @@ mod tests {
         }
     }
     impl AcpFsBridge for ApprovalKernel {}
+    impl AcpTerminalBridge for ApprovalKernel {}
 
     // ---- END role-trait impls (#3746) ----
 
@@ -7390,6 +7444,7 @@ mod tests {
         }
     }
     impl AcpFsBridge for ForceHumanCapturingKernel {}
+    impl AcpTerminalBridge for ForceHumanCapturingKernel {}
 
     // ---- END role-trait impls (#3746) ----
 
@@ -7979,6 +8034,7 @@ mod tests {
         }
     }
     impl AcpFsBridge for NamedWsKernel {}
+    impl AcpTerminalBridge for NamedWsKernel {}
 
     // ---- END role-trait impls (#3746) ----
 
@@ -10671,6 +10727,7 @@ mod tests {
         }
     }
     impl AcpFsBridge for SpawnCheckKernel {}
+    impl AcpTerminalBridge for SpawnCheckKernel {}
 
     // ---- END role-trait impls (#3746) ----
 

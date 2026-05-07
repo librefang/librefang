@@ -13,6 +13,7 @@
 
 mod a2a_registry;
 mod acp_fs_bridge;
+mod acp_terminal_bridge;
 mod agent_control;
 mod api_auth;
 mod approval_gate;
