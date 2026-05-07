@@ -6,6 +6,8 @@ const sessionCache = new Map<string, { messages: unknown[]; expiresAt: number }>
 export const chatSessionCacheKey = (agentId: string, sessionId: string | null): string =>
   `${agentId}:${sessionId ?? ""}`;
 
+const EVICT_TARGET = Math.floor(MAX_CACHE_ENTRIES * 0.8);
+
 function evictCacheIfNeeded() {
   if (sessionCache.size < MAX_CACHE_ENTRIES) return;
   const now = Date.now();
@@ -13,8 +15,15 @@ function evictCacheIfNeeded() {
     if (value.expiresAt <= now) sessionCache.delete(key);
   }
   if (sessionCache.size >= MAX_CACHE_ENTRIES) {
-    const firstKey = sessionCache.keys().next().value;
-    if (firstKey !== undefined) sessionCache.delete(firstKey);
+    // Evict oldest entries (insertion-order) down to 80 % capacity
+    // to avoid thrashing on every insert under continuous churn.
+    const excess = sessionCache.size - EVICT_TARGET;
+    let removed = 0;
+    for (const key of sessionCache.keys()) {
+      if (removed >= excess) break;
+      sessionCache.delete(key);
+      removed++;
+    }
   }
 }
 

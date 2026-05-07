@@ -535,6 +535,20 @@ function ConfigBackupSection() {
 // hours" label. Returns "never" when ts is 0 or undefined — the status
 // endpoint omits `next_eligible_at_ms` for never-dreamed agents, and
 // `last_consolidated_at_ms` is 0 in the same case.
+const _rtfCache = new Map<string, Intl.RelativeTimeFormat>();
+
+function getRelativeTimeFormat(locale: string): Intl.RelativeTimeFormat {
+  let rtf = _rtfCache.get(locale);
+  if (!rtf) {
+    rtf = new Intl.RelativeTimeFormat(locale, {
+      numeric: "auto",
+      style: "narrow",
+    });
+    _rtfCache.set(locale, rtf);
+  }
+  return rtf;
+}
+
 function formatRelativeMs(
   ts: number | undefined,
   now: number,
@@ -544,10 +558,7 @@ function formatRelativeMs(
   if (ts === undefined || ts === 0) return t("common.never");
   const diff = ts - now;
   const absMinutes = Math.abs(diff) / 60_000;
-  const rtf = new Intl.RelativeTimeFormat(locale, {
-    numeric: "auto",
-    style: "narrow",
-  });
+  const rtf = getRelativeTimeFormat(locale);
   if (absMinutes < 60) {
     return rtf.format(Math.round(diff / 60_000), "minute");
   }

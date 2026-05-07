@@ -97,7 +97,7 @@ export function PromptsExperimentsModal({
             >
               {agentName}
             </h3>
-            <p className="text-xs text-text-dim">Prompts & Experiments</p>
+            <p className="text-xs text-text-dim">{t("agents.prompts_experiments.title")}</p>
           </div>
           <button
             onClick={onClose}
@@ -110,7 +110,7 @@ export function PromptsExperimentsModal({
 
         <div
           role="tablist"
-          aria-label="Prompts &amp; Experiments"
+          aria-label={t("agents.prompts_experiments.title")}
           className="px-6 py-3 border-b border-border-subtle flex gap-2 shrink-0"
         >
           <button
@@ -122,7 +122,7 @@ export function PromptsExperimentsModal({
             onClick={() => setActiveTab("versions")}
             className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "versions" ? "bg-brand text-white" : "bg-main text-text-dim"}`}
           >
-            <FlaskConical className="w-3 h-3 inline mr-1" /> Versions
+            <FlaskConical className="w-3 h-3 inline mr-1" /> {t("agents.prompts_experiments.versions_tab")}
           </button>
           <button
             id="agents-tab-experiments"
@@ -133,7 +133,7 @@ export function PromptsExperimentsModal({
             onClick={() => setActiveTab("experiments")}
             className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "experiments" ? "bg-brand text-white" : "bg-main text-text-dim"}`}
           >
-            <GitBranch className="w-3 h-3 inline mr-1" /> Experiments
+            <GitBranch className="w-3 h-3 inline mr-1" /> {t("agents.prompts_experiments.experiments_tab")}
           </button>
         </div>
 
@@ -159,7 +159,7 @@ export function PromptsExperimentsModal({
                       size="sm"
                       onClick={() => setShowCreateVersion(true)}
                     >
-                      <Plus className="w-3 h-3 mr-1" /> New Version
+                      <Plus className="w-3 h-3 mr-1" /> {t("agents.prompts_experiments.new_version")}
                     </Button>
                   </div>
 
@@ -167,7 +167,7 @@ export function PromptsExperimentsModal({
                     <CardSkeleton />
                   ) : versions.length === 0 ? (
                     <EmptyState
-                      title="No prompt versions yet"
+                      title={t("agents.prompts_experiments.no_versions")}
                       icon={<FlaskConical className="h-6 w-6" />}
                     />
                   ) : (
@@ -183,7 +183,7 @@ export function PromptsExperimentsModal({
                                 v{v.version}
                               </span>
                               {v.is_active && (
-                                <Badge variant="success">Active</Badge>
+                                      <Badge variant="success">{t("agents.prompts_experiments.active")}</Badge>
                               )}
                               {v.description && (
                                 <span className="text-xs text-text-dim">
@@ -203,7 +203,7 @@ export function PromptsExperimentsModal({
                                     })
                                   }
                                 >
-                                  <Check className="w-3 h-3 mr-1" /> Activate
+                                  <Check className="w-3 h-3 mr-1" /> {t("agents.prompts_experiments.activate")}
                                 </Button>
                               )}
                               {!v.is_active && (
@@ -226,7 +226,7 @@ export function PromptsExperimentsModal({
                             {v.system_prompt.slice(0, 200)}...
                           </pre>
                           <p className="text-[10px] text-text-dim mt-2">
-                            Created: {new Date(v.created_at).toLocaleDateString()}
+                            {t("agents.prompts_experiments.created_label")} {new Date(v.created_at).toLocaleDateString()}
                           </p>
                         </div>
                       ))}
@@ -249,12 +249,12 @@ export function PromptsExperimentsModal({
                           id="create-version-dialog-title"
                           className="font-bold mb-4"
                         >
-                          Create Prompt Version
+                          {t("agents.prompts_experiments.create_version_title")}
                         </h4>
                         <div className="space-y-4">
                           <div>
                             <label className="text-xs text-text-dim">
-                              System Prompt
+                              {t("agents.prompts_experiments.system_prompt")}
                             </label>
                             <textarea
                               value={newPromptSystemPrompt}
@@ -263,12 +263,12 @@ export function PromptsExperimentsModal({
                               }
                               rows={6}
                               className="w-full mt-1 rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs font-mono"
-                              placeholder="You are a helpful AI assistant..."
+                              placeholder={t("agents.prompts_experiments.system_prompt_placeholder")}
                             />
                           </div>
                           <div>
                             <label className="text-xs text-text-dim">
-                              Description (optional)
+                              {t("agents.prompts_experiments.description_optional")}
                             </label>
                             <input
                               value={newPromptDescription}
@@ -276,7 +276,7 @@ export function PromptsExperimentsModal({
                                 setNewPromptDescription(e.target.value)
                               }
                               className="w-full mt-1 rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs"
-                              placeholder="What's different in this version?"
+                              placeholder={t("agents.prompts_experiments.description_placeholder")}
                             />
                           </div>
                         </div>
@@ -315,14 +315,14 @@ export function PromptsExperimentsModal({
                             }
                           >
                             {createVersionMutation.isPending
-                              ? "Creating..."
-                              : "Create"}
+                              ? t("common.creating")
+                              : t("common.create")}
                           </Button>
                           <Button
                             variant="secondary"
                             onClick={() => setShowCreateVersion(false)}
                           >
-                            Cancel
+                            {t("common.cancel")}
                           </Button>
                         </div>
                       </div>
@@ -344,7 +344,7 @@ export function PromptsExperimentsModal({
                       size="sm"
                       onClick={() => setShowCreateExperiment(true)}
                     >
-                      <Plus className="w-3 h-3 mr-1" /> New Experiment
+                      <Plus className="w-3 h-3 mr-1" /> {t("agents.prompts_experiments.new_experiment")}
                     </Button>
                   </div>
 
@@ -352,7 +352,7 @@ export function PromptsExperimentsModal({
                     <CardSkeleton />
                   ) : experiments.length === 0 ? (
                     <EmptyState
-                      title="No experiments yet"
+                      title={t("agents.prompts_experiments.no_experiments")}
                       icon={<GitBranch className="h-6 w-6" />}
                     />
                   ) : (
@@ -392,7 +392,7 @@ export function PromptsExperimentsModal({
                                   }
                                 >
                                   <Play className="w-3 h-3 mr-1" />
-                                  Start
+                                  {t("agents.prompts_experiments.start")}
                                 </Button>
                               )}
                               {exp.status === "running" && (
@@ -407,7 +407,7 @@ export function PromptsExperimentsModal({
                                   }
                                 >
                                   <Pause className="w-3 h-3 mr-1" />
-                                  Pause
+                                  {t("agents.prompts_experiments.pause")}
                                 </Button>
                               )}
                               {(exp.status === "running" ||
@@ -423,7 +423,7 @@ export function PromptsExperimentsModal({
                                   }
                                 >
                                   <Check className="w-3 h-3 mr-1" />
-                                  Complete
+                                  {t("agents.prompts_experiments.complete")}
                                 </Button>
                               )}
                               {(exp.status === "running" ||
@@ -434,13 +434,13 @@ export function PromptsExperimentsModal({
                                   onClick={() => setSelectedMetrics(exp.id)}
                                 >
                                   <BarChart3 className="w-3 h-3 mr-1" />
-                                  Metrics
+                                  {t("agents.prompts_experiments.metrics")}
                                 </Button>
                               )}
                             </div>
                           </div>
                           <p className="text-xs text-text-dim">
-                            {exp.variants?.length || 0} variants
+                            {t("agents.prompts_experiments.variants_count", { count: exp.variants?.length || 0 })}
                           </p>
                         </div>
                       ))}
@@ -450,7 +450,7 @@ export function PromptsExperimentsModal({
                   {selectedMetrics && metricsQuery.data && (
                     <div className="mt-4 p-4 rounded-xl bg-main/50 border border-border-subtle">
                       <h5 className="text-xs font-bold mb-3">
-                        Experiment Metrics
+                        {t("agents.prompts_experiments.experiment_metrics")}
                       </h5>
                       <div className="space-y-2">
                         {metrics.map((m: ExperimentVariantMetrics) => (
@@ -477,16 +477,16 @@ export function PromptsExperimentsModal({
                             <div className="grid grid-cols-3 gap-2 text-[10px] text-text-dim">
                               <div>
                                 <span className="block text-text-dim/60">
-                                  Requests
+                                  {t("agents.prompts_experiments.requests")}
                                 </span>
                                 <span className="font-mono">
                                   {m.total_requests} ({m.successful_requests}{" "}
-                                  ok / {m.failed_requests} err)
+                                  {t("agents.prompts_experiments.ok_label")} / {m.failed_requests} {t("agents.prompts_experiments.err_label")})
                                 </span>
                               </div>
                               <div>
                                 <span className="block text-text-dim/60">
-                                  Avg Latency
+                                  {t("agents.prompts_experiments.avg_latency")}
                                 </span>
                                 <span className="font-mono">
                                   {m.avg_latency_ms?.toFixed(0)}ms
@@ -494,7 +494,7 @@ export function PromptsExperimentsModal({
                               </div>
                               <div>
                                 <span className="block text-text-dim/60">
-                                  Avg Cost
+                                  {t("agents.prompts_experiments.avg_cost")}
                                 </span>
                                 <span className="font-mono">
                                   ${m.avg_cost_usd?.toFixed(4)}
@@ -510,7 +510,7 @@ export function PromptsExperimentsModal({
                         className="mt-3 w-full"
                         onClick={() => setSelectedMetrics(null)}
                       >
-                        Close Metrics
+                        {t("agents.prompts_experiments.close_metrics")}
                       </Button>
                     </div>
                   )}
@@ -531,12 +531,12 @@ export function PromptsExperimentsModal({
                           id="create-experiment-dialog-title"
                           className="font-bold mb-4"
                         >
-                          Create Experiment
+                          {t("agents.prompts_experiments.create_experiment_title")}
                         </h4>
                         <div className="space-y-4">
                           <div>
                             <label className="text-xs text-text-dim">
-                              Experiment Name
+                              {t("agents.prompts_experiments.experiment_name")}
                             </label>
                             <input
                               value={newExperimentName}
@@ -544,16 +544,16 @@ export function PromptsExperimentsModal({
                                 setNewExperimentName(e.target.value)
                               }
                               className="w-full mt-1 rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs"
-                              placeholder="My A/B Test"
+                              placeholder={t("agents.prompts_experiments.experiment_name_placeholder")}
                             />
                           </div>
                           <div>
                             <label className="text-xs text-text-dim mb-2 block">
-                              Select Prompt Versions (min 2)
+                              {t("agents.prompts_experiments.select_versions")}
                             </label>
                             {versions.length < 2 ? (
                               <p className="text-xs text-warning">
-                                Create at least 2 prompt versions first.
+                                {t("agents.prompts_experiments.create_versions_first")}
                               </p>
                             ) : (
                               <div className="space-y-1 max-h-40 overflow-y-auto">
@@ -586,7 +586,7 @@ export function PromptsExperimentsModal({
                                       v{v.version}
                                     </span>
                                     {v.is_active && (
-                                      <Badge variant="success">Active</Badge>
+                                <Badge variant="success">{t("agents.prompts_experiments.active")}</Badge>
                                     )}
                                     <span className="text-text-dim truncate">
                                       {v.description ||
@@ -626,7 +626,7 @@ export function PromptsExperimentsModal({
                                         return {
                                           name:
                                             i === 0
-                                              ? "Control"
+                                              ? t("agents.prompts_experiments.control")
                                               : `Variant ${String.fromCharCode(65 + i)}`,
                                           prompt_version_id: vId,
                                           description: ver
@@ -653,8 +653,8 @@ export function PromptsExperimentsModal({
                             }
                           >
                             {createExperimentMutation.isPending
-                              ? "Creating..."
-                              : `Create (${selectedVariantIds.length} variants)`}
+                              ? t("common.creating")
+                              : t("agents.prompts_experiments.create_with_variants", { count: selectedVariantIds.length })}
                           </Button>
                           <Button
                             variant="secondary"
@@ -663,7 +663,7 @@ export function PromptsExperimentsModal({
                               setSelectedVariantIds([]);
                             }}
                           >
-                            Cancel
+                            {t("common.cancel")}
                           </Button>
                         </div>
                       </div>

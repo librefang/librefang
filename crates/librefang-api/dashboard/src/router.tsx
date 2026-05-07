@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState, type ComponentType } from "react";
-import { Navigate, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
+import { Link, Navigate, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { App } from "./App";
 
 // Matches chunk load failures across browsers:
@@ -494,12 +494,12 @@ function NotFound() {
     <div className="flex h-[60vh] items-center justify-center">
       <div className="max-w-xl text-center space-y-4 px-4">
         <p className="text-lg font-semibold">Page not found</p>
-        <a
-          href="/dashboard/overview"
+        <Link
+          to="/overview"
           className="inline-block rounded-xl bg-sky-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-sky-600 transition-colors"
         >
           Go to Overview
-        </a>
+        </Link>
       </div>
     </div>
   );

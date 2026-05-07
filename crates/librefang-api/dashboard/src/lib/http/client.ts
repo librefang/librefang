@@ -153,6 +153,7 @@ export type {
   UserBudgetResponse,
   UserBudgetWindow,
   UserBudgetPayload,
+  ListSessionsResult,
 } from "../../api";
 
 // ---------------------------------------------------------------------------

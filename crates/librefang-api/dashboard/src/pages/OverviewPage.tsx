@@ -31,7 +31,7 @@ import { formatCompact, formatCost } from "../lib/format";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 
-type Range = "7d";
+type Range = "7d" | "30d" | "90d";
 
 function computeRangeData(
   days: { date?: string; cost_usd?: number }[] | undefined,
@@ -40,7 +40,7 @@ function computeRangeData(
   const empty = { trend: [] as number[], cost: 0, prior: 0, labelKey: `overview.range.${range}` as string };
   if (!days || days.length === 0) return empty;
   const sorted = [...days].sort((a, b) => (a.date ?? "").localeCompare(b.date ?? ""));
-  const n = 7;
+  const n = range === "90d" ? 90 : range === "30d" ? 30 : 7;
   const recent = sorted.slice(-n);
   const older = sorted.slice(-(n * 2), -n);
   const cost = recent.reduce((s, d) => s + (d.cost_usd ?? 0), 0);
@@ -278,7 +278,7 @@ export function OverviewPage() {
   const isError = snapshotQuery.isError;
   const needsInit = snapshot?.status?.config_exists === false;
 
-  const range: Range = "7d";
+  const [range, setRange] = useState<Range>("7d");
   const [dismissedAlerts, setDismissedAlerts] = useState<string[]>([]);
   const [showAllAlerts, setShowAllAlerts] = useState(false);
 
@@ -374,7 +374,7 @@ export function OverviewPage() {
       grandTotal += cost;
       let provider = 'Other';
       for (const [prefix, name] of PROVIDER_PREFIXES) {
-        if (model.includes(prefix)) {
+        if (model.startsWith(prefix)) {
           provider = name;
           break;
         }
@@ -605,9 +605,22 @@ export function OverviewPage() {
           >
             {snapshotQuery.isFetching ? t("overview.refreshing", { defaultValue: "Refreshing…" }) : t("overview.refresh", { defaultValue: "Refresh" })}
           </Button>
-          <span className="h-8 px-2.5 rounded-md border border-border-subtle bg-surface text-text-dim inline-flex items-center text-[11px] font-mono">
-            {t(rangeData.labelKey, { defaultValue: "7 days" })}
-          </span>
+          <div className="flex gap-1 shrink-0">
+            {(["7d", "30d", "90d"] as const).map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => setRange(p)}
+                className={`h-8 px-2.5 rounded-md text-[11px] font-mono cursor-pointer transition-colors ${
+                  p === range
+                    ? "bg-brand/10 border border-brand/30 text-brand"
+                    : "bg-transparent border border-border-subtle text-text-dim hover:border-brand/20"
+                }`}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
           <Button variant="primary" size="sm" leftIcon={<Plus className="w-3.5 h-3.5" />} onClick={() => navigate({ to: "/agents" })}>
             {t("overview.new_agent", { defaultValue: "New agent" })}
           </Button>
@@ -622,9 +635,22 @@ export function OverviewPage() {
           >
             <RefreshCw className={`w-4 h-4 ${snapshotQuery.isFetching ? "animate-spin" : ""}`} />
           </button>
-          <span className="h-9 px-2.5 rounded-md border border-border-subtle bg-surface text-text-dim inline-flex items-center text-[11px] font-mono">
-            {range}
-          </span>
+          <div className="flex gap-1 shrink-0">
+            {(["7d", "30d", "90d"] as const).map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => setRange(p)}
+                className={`h-9 px-2.5 rounded-md text-[11px] font-mono cursor-pointer transition-colors ${
+                  p === range
+                    ? "bg-brand/10 border border-brand/30 text-brand"
+                    : "bg-transparent border border-border-subtle text-text-dim hover:border-brand/20"
+                }`}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
           <button
             type="button"
             onClick={() => navigate({ to: "/agents" })}
@@ -692,7 +718,7 @@ export function OverviewPage() {
           label={`${t("nav.sessions", { defaultValue: "Sessions" })} · 24h`}
           value={sessionsCount > 0 ? formatCompact(sessionsCount) : "0"}
           sub={dailyTokens.length > 0 ? `${formatCompact(dailyTokens.reduce((a, b) => a + b, 0))} ${t("overview.kpi.tokens_over_7d", { defaultValue: "tokens over 7d" })}` : undefined}
-          sparkline={dailyTokens.length > 1 ? <Sparkline data={dailyTokens.slice(-12)} width={70} height={28} color="#34d399" /> : undefined}
+          sparkline={dailyTokens.length > 1 ? <Sparkline data={dailyTokens.slice(-12)} width={70} height={28} color="#34d399" /> : undefined/* Needs 2+ data points to draw a line; text sub still shows for 1 day */}
           onClick={() => navigate({ to: "/sessions" })}
         />
         <Kpi
@@ -720,12 +746,13 @@ export function OverviewPage() {
               </div>
             </div>
             <div className="flex gap-1 lg:gap-1.5 shrink-0">
-              {(["7d"] as const).map((p) => {
+              {(["7d", "30d", "90d"] as const).map((p) => {
                 const active = p === range;
                 return (
                   <button
                     key={p}
                     type="button"
+                    onClick={() => setRange(p)}
                     className={`px-2 lg:px-2.5 py-0.5 text-[11px] rounded-md font-mono cursor-pointer transition-colors ${
                       active
                         ? "bg-brand/10 border border-brand/30 text-brand"

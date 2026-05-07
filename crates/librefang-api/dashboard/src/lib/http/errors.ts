@@ -19,6 +19,12 @@ export class ApiError extends Error {
       // #3639 deferred: prefer the nested `error: {code, message, request_id}`
       // envelope when present; fall back to the legacy flat shape so we
       // keep parsing responses from older daemons during the rollout.
+      //
+      // Four supported shapes (checked in priority order):
+      //   1. Nested envelope — { error: { code, message, request_id } }
+      //   2. Flat detail     — { detail: "..." }
+      //   3. Flat message    — { message: "..." }
+      //   4. Flat error      — { error: "..." }
       const nested =
         typeof json.error === "object" && json.error !== null
           ? (json.error as Record<string, unknown>)

@@ -82,7 +82,9 @@ export const useUIStore = create<UIState>()(
         set((state) => ({ theme: state.theme === "light" ? "dark" : "light" })),
       setLanguage: (lang) => {
         set({ language: lang });
-        void i18n.changeLanguage(lang).catch((err) => console.error(err));
+        void i18n.changeLanguage(lang).catch((err) => {
+          console.error("Failed to change language:", err);
+        });
       },
       setMobileMenuOpen: (open) => set({ isMobileMenuOpen: open }),
       toggleSidebar: () => set((state) => ({ isSidebarCollapsed: !state.isSidebarCollapsed })),
@@ -130,8 +132,6 @@ export const useUIStore = create<UIState>()(
     }),
     {
       name: "librefang-ui-storage",
-      version: 1,
-      migrate: (persisted) => persisted,
       partialize: (state) => ({
         theme: state.theme,
         language: state.language,

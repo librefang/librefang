@@ -1147,6 +1147,9 @@ async function del<T>(path: string): Promise<T> {
     throw await parseError(response);
   }
   if (response.status === 204 || response.headers.get("content-length") === "0") {
+    // 204 No Content — no JSON body. Return an empty object so callers
+    // that access optional fields (e.g. r.status on ApiActionResponse)
+    // get `undefined` per-field instead of NPE on the root value.
     return {} as T;
   }
   return (await response.json()) as T;
@@ -2602,16 +2605,13 @@ export async function createAgentSession(
   return post(`/api/agents/${encodeURIComponent(agentId)}/sessions`, label ? { label } : {});
 }
 
-export async function listSessions(): Promise<SessionListItem[]> {
+export type ListSessionsResult = { items: SessionListItem[]; truncated: boolean };
+
+export async function listSessions(): Promise<ListSessionsResult> {
   const data = await get<PaginatedResponse<SessionListItem>>("/api/sessions?limit=500");
   const items = data.items ?? [];
   const total = data.total ?? 0;
-  if (total > items.length) {
-    console.warn(
-      `listSessions: ${total} total sessions but only ${items.length} fetched (limit=500). Increase limit or add pagination.`,
-    );
-  }
-  return items;
+  return { items, truncated: total > items.length };
 }
 
 export async function getSessionDetails(sessionId: string): Promise<SessionDetailResponse> {

@@ -248,9 +248,10 @@ describe("OverviewPage", () => {
 
     renderPage();
 
-    expect(screen.getAllByText("overview.range.7d").length).toBeGreaterThan(0);
-    expect(screen.queryByText("30d")).not.toBeInTheDocument();
-    expect(screen.queryByText("90d")).not.toBeInTheDocument();
+    // Range selector buttons restored — all three options present.
+    expect(screen.getAllByText("7d").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("30d").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("90d").length).toBeGreaterThan(0);
     expect(screen.getByText(/overview\.kpi\.tokens_over_7d$/)).toBeInTheDocument();
     expect(screen.getByText("overview.kpi.no_prior")).toBeInTheDocument();
     expect(screen.getByText("overview.cost.provider_all_time")).toBeInTheDocument();

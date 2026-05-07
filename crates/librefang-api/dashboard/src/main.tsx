@@ -33,6 +33,7 @@ class RootErrorBoundary extends React.Component<
 
   render() {
     if (this.state.hasError) {
+      // Inline styles: this boundary may render before CSS is loaded.
       return (
         <div style={{ display: "flex", height: "100vh", alignItems: "center", justifyContent: "center" }}>
           <div style={{ textAlign: "center", padding: "2rem", maxWidth: "32rem" }}>

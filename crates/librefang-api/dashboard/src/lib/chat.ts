@@ -1,3 +1,4 @@
+import { createClientId } from "./store";
 import { formatCost } from "./format";
 import type { ContentBlock } from "../api";
 
@@ -70,7 +71,7 @@ export function normalizeToolOutput(event: {
   const content = rawResult || (isError ? "Tool failed without a preview." : "Tool finished.");
 
   return {
-    id: `${tool}-${crypto.randomUUID()}`,
+    id: `${tool}-${createClientId()}`,
     tool,
     content,
     isError,
