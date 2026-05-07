@@ -86,12 +86,13 @@ impl kernel_handle::CronControl for LibreFangKernel {
         };
 
         let id = self
+            .workflows
             .cron_scheduler
             .add_job(job, one_shot)
             .map_err(|e| KernelOpError::Internal(e.to_string()))?;
 
         // Persist after adding
-        if let Err(e) = self.cron_scheduler.persist() {
+        if let Err(e) = self.workflows.cron_scheduler.persist() {
             tracing::warn!("Failed to persist cron jobs: {e}");
         }
 
@@ -111,7 +112,7 @@ impl kernel_handle::CronControl for LibreFangKernel {
             uuid::Uuid::parse_str(agent_id)
                 .map_err(|e| KernelOpError::InvalidInput(format!("agent_id: {e}")))?,
         );
-        let jobs = self.cron_scheduler.list_jobs(aid);
+        let jobs = self.workflows.cron_scheduler.list_jobs(aid);
         let json_jobs: Vec<serde_json::Value> = jobs
             .into_iter()
             .map(|j| serde_json::to_value(&j).unwrap_or_default())
@@ -125,12 +126,13 @@ impl kernel_handle::CronControl for LibreFangKernel {
             uuid::Uuid::parse_str(job_id)
                 .map_err(|e| KernelOpError::InvalidInput(format!("job_id: {e}")))?,
         );
-        self.cron_scheduler
+        self.workflows
+            .cron_scheduler
             .remove_job(id)
             .map_err(|e| KernelOpError::Internal(e.to_string()))?;
 
         // Persist after removal
-        if let Err(e) = self.cron_scheduler.persist() {
+        if let Err(e) = self.workflows.cron_scheduler.persist() {
             tracing::warn!("Failed to persist cron jobs: {e}");
         }
 

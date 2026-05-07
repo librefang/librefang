@@ -20,6 +20,7 @@ impl kernel_handle::WikiAccess for LibreFangKernel {
     fn wiki_get(&self, topic: &str) -> Result<serde_json::Value, kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
         let vault = self
+            .memory
             .wiki_vault
             .as_ref()
             .ok_or_else(|| KernelOpError::unavailable("wiki_get"))?;
@@ -40,6 +41,7 @@ impl kernel_handle::WikiAccess for LibreFangKernel {
     ) -> Result<serde_json::Value, kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
         let vault = self
+            .memory
             .wiki_vault
             .as_ref()
             .ok_or_else(|| KernelOpError::unavailable("wiki_search"))?;
@@ -59,6 +61,7 @@ impl kernel_handle::WikiAccess for LibreFangKernel {
     ) -> Result<serde_json::Value, kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
         let vault = self
+            .memory
             .wiki_vault
             .as_ref()
             .ok_or_else(|| KernelOpError::unavailable("wiki_write"))?;

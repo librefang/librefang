@@ -113,10 +113,10 @@ impl LibreFangKernel {
             // replaces the live snapshot — concurrent callers that already
             // resolved a chain keep using their `Arc<dyn LlmDriver>` until
             // the call completes.
-            self.aux_client.store(std::sync::Arc::new(
+            self.llm.aux_client.store(std::sync::Arc::new(
                 librefang_runtime::aux_client::AuxClient::new(
                     new_config_arc,
-                    Arc::clone(&self.default_driver),
+                    Arc::clone(&self.llm.default_driver),
                 ),
             ));
         }
@@ -139,7 +139,8 @@ impl LibreFangKernel {
             match action {
                 HotAction::UpdateApprovalPolicy => {
                     info!("Hot-reload: updating approval policy");
-                    self.approval_manager
+                    self.governance
+                        .approval_manager
                         .update_policy(new_config.approval.clone());
                 }
                 HotAction::UpdateCronConfig => {
@@ -147,13 +148,14 @@ impl LibreFangKernel {
                         "Hot-reload: updating cron config (max_jobs={})",
                         new_config.max_cron_jobs
                     );
-                    self.cron_scheduler
+                    self.workflows
+                        .cron_scheduler
                         .set_max_total_jobs(new_config.max_cron_jobs);
                 }
                 HotAction::ReloadProviderUrls => {
                     info!("Hot-reload: applying provider URL overrides");
                     // Invalidate cached LLM drivers — URLs/keys may have changed.
-                    self.driver_cache.clear();
+                    self.llm.driver_cache.clear();
                     // Pre-compute everything outside the RCU closure: the closure
                     // may re-run on CAS retry, so all logging + region resolution
                     // happens here exactly once. Region resolution reads a
@@ -166,7 +168,7 @@ impl LibreFangKernel {
                         if regions.is_empty() {
                             std::collections::BTreeMap::new()
                         } else {
-                            let snapshot = self.model_catalog.load();
+                            let snapshot = self.llm.model_catalog.load();
                             let urls = snapshot.resolve_region_urls(&regions);
                             if !urls.is_empty() {
                                 info!(
@@ -197,7 +199,7 @@ impl LibreFangKernel {
                         }
                     });
                     // Also update media driver cache with new provider URLs
-                    self.media_drivers.update_provider_urls(provider_urls);
+                    self.media.media_drivers.update_provider_urls(provider_urls);
                 }
                 HotAction::UpdateDefaultModel => {
                     info!(
@@ -205,8 +207,9 @@ impl LibreFangKernel {
                         new_config.default_model.provider, new_config.default_model.model
                     );
                     // Invalidate cached drivers — the default provider may have changed.
-                    self.driver_cache.clear();
+                    self.llm.driver_cache.clear();
                     let mut guard = self
+                        .llm
                         .default_model_override
                         .write()
                         .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
@@ -226,7 +229,7 @@ impl LibreFangKernel {
                 }
                 HotAction::UpdateProactiveMemory => {
                     info!("Hot-reload: updating proactive memory config");
-                    if let Some(pm) = self.proactive_memory.get() {
+                    if let Some(pm) = self.memory.proactive_memory.get() {
                         pm.update_config(new_config.proactive_memory.clone());
                     }
                 }
@@ -237,9 +240,9 @@ impl LibreFangKernel {
                     info!(
                         "Hot-reload: channel config updated — clearing {} adapter(s), \
                          will reinitialize on next bridge cycle",
-                        self.channel_adapters.len()
+                        self.mesh.channel_adapters.len()
                     );
-                    self.channel_adapters.clear();
+                    self.mesh.channel_adapters.clear();
                 }
                 HotAction::ReloadSkills => {
                     self.reload_skills();
@@ -281,6 +284,7 @@ impl LibreFangKernel {
                     // Effective MCP server list now == config.mcp_servers directly.
                     let new_mcp = new_config.mcp_servers.clone();
                     let mut effective = self
+                        .mcp
                         .effective_mcp_servers
                         .write()
                         .unwrap_or_else(|e| e.into_inner());
@@ -290,7 +294,8 @@ impl LibreFangKernel {
                         effective.len()
                     );
                     // Bump MCP generation so tool list caches are invalidated
-                    self.mcp_generation
+                    self.mcp
+                        .mcp_generation
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 HotAction::ReloadMcpServers => {
@@ -309,6 +314,7 @@ impl LibreFangKernel {
                     // or any non-PATCH path would silently keep the old
                     // policy alive on already-connected servers.
                     let old_mcp = self
+                        .mcp
                         .effective_mcp_servers
                         .read()
                         .map(|s| s.clone())
@@ -341,6 +347,7 @@ impl LibreFangKernel {
                     }
 
                     let mut effective = self
+                        .mcp
                         .effective_mcp_servers
                         .write()
                         .unwrap_or_else(|e| e.into_inner());
@@ -354,17 +361,18 @@ impl LibreFangKernel {
                     let new_names: std::collections::HashSet<String> =
                         new_mcp.iter().map(|s| s.name.clone()).collect();
                     for name in old_names.difference(&new_names) {
-                        self.mcp_health.unregister(name);
+                        self.mcp.mcp_health.unregister(name);
                     }
                     for name in new_names.difference(&old_names) {
-                        self.mcp_health.register(name);
+                        self.mcp.mcp_health.register(name);
                     }
                     let count = new_mcp.len();
                     *effective = new_mcp;
                     drop(effective);
 
                     // Bump MCP generation so tool list caches are invalidated
-                    self.mcp_generation
+                    self.mcp
+                        .mcp_generation
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                     if to_reconnect.is_empty() {
@@ -414,16 +422,16 @@ impl LibreFangKernel {
                     info!("Hot-reload: fallback provider chain updated ({count} provider(s))");
                     // Invalidate cached LLM drivers so the new fallback chain
                     // is used when drivers are next constructed.
-                    self.driver_cache.clear();
+                    self.llm.driver_cache.clear();
                 }
                 HotAction::ReloadProviderApiKeys => {
                     info!("Hot-reload: provider API keys changed — flushing driver cache");
-                    self.driver_cache.clear();
+                    self.llm.driver_cache.clear();
                 }
                 HotAction::ReloadProxy => {
                     info!("Hot-reload: proxy config changed — reinitializing HTTP proxy env");
                     librefang_runtime::http_client::init_proxy(new_config.proxy.clone());
-                    self.driver_cache.clear();
+                    self.llm.driver_cache.clear();
                 }
                 HotAction::UpdateDashboardCredentials => {
                     info!("Hot-reload: dashboard credentials updated — config swap is sufficient");
@@ -434,7 +442,8 @@ impl LibreFangKernel {
                         new_config.users.len(),
                         new_config.tool_policy.groups.len(),
                     );
-                    self.auth
+                    self.security
+                        .auth
                         .reload(&new_config.users, &new_config.tool_policy.groups);
                     // Re-validate channel-role-mapping role strings on
                     // every reload so an operator who just edited the
@@ -481,13 +490,17 @@ impl LibreFangKernel {
                     // max_concurrent_invocations) are NOT rebuilt — those
                     // semaphores are owned by individual agents. Operators
                     // need to respawn the agent for those to apply.
-                    self.command_queue
+                    self.workflows
+                        .command_queue
                         .resize_lane(Lane::Main, cc.main_lane as u32);
-                    self.command_queue
+                    self.workflows
+                        .command_queue
                         .resize_lane(Lane::Cron, cc.cron_lane as u32);
-                    self.command_queue
+                    self.workflows
+                        .command_queue
                         .resize_lane(Lane::Subagent, cc.subagent_lane as u32);
-                    self.command_queue
+                    self.workflows
+                        .command_queue
                         .resize_lane(Lane::Trigger, cc.trigger_lane as u32);
                 }
             }

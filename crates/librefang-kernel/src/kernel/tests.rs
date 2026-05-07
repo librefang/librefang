@@ -1,4 +1,5 @@
 use super::*;
+use crate::registry::AgentRegistry;
 use futures::stream;
 use librefang_channels::types::{ChannelAdapter, ChannelContent, ChannelType, ChannelUser};
 use librefang_types::approval::{
@@ -198,7 +199,10 @@ async fn test_notify_escalated_approval_prefers_request_route_to() {
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel.channel_adapters.insert("test".to_string(), adapter);
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
 
     let req = ApprovalRequest {
         id: uuid::Uuid::new_v4(),
@@ -430,6 +434,7 @@ fn test_spawn_agent_applies_local_default_model_override() {
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     *kernel
+        .llm
         .default_model_override
         .write()
         .expect("default model override lock") = Some(DefaultModelConfig {
@@ -467,7 +472,11 @@ fn test_spawn_agent_applies_local_default_model_override() {
         )
         .expect("agent should spawn with local model override");
 
-    let entry = kernel.registry.get(agent_id).expect("agent registry entry");
+    let entry = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent registry entry");
     // Spawn now stores "default"/"default" so provider changes propagate at
     // execute time without re-spawning. Concrete resolution happens in
     // execute_llm_agent, not at spawn.
@@ -551,6 +560,7 @@ fn test_spawn_child_exceeding_parent_is_rejected() {
     // Nothing called "escalated-child" should be registered —
     // the check ran before `register()`.
     assert!(kernel
+        .agents
         .registry
         .list()
         .iter()
@@ -615,7 +625,11 @@ fn test_spawn_child_with_subset_capabilities_is_allowed() {
         )
         .expect("subset child should be allowed");
 
-    let entry = kernel.registry.get(child_id).expect("child registered");
+    let entry = kernel
+        .agents
+        .registry
+        .get(child_id)
+        .expect("child registered");
     assert_eq!(entry.parent, Some(parent));
 
     kernel.shutdown();
@@ -712,7 +726,11 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
         .expect("agent should spawn");
 
     // Sanity: stale overrides are present.
-    let pre = kernel.registry.get(agent_id).expect("agent registry entry");
+    let pre = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent registry entry");
     assert_eq!(pre.manifest.model.provider, "cloudverse");
     assert_eq!(
         pre.manifest.model.api_key_env.as_deref(),
@@ -730,6 +748,7 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
         .expect("provider switch should succeed");
 
     let post = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("agent registry entry after switch");
@@ -759,6 +778,7 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
     // Seed an override on the now-openrouter agent so we can confirm the
     // same-provider branch leaves it alone.
     kernel
+        .agents
         .registry
         .update_model_provider_config(
             agent_id,
@@ -778,6 +798,7 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
         .expect("same-provider swap should succeed");
 
     let same_provider = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("agent after same-provider swap");
@@ -819,6 +840,7 @@ fn test_hand_activation_does_not_seed_runtime_tool_filters() {
     };
     let agent_id = instance.agent_id().expect("apitester hand agent id");
     let entry = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("apitester hand agent entry");
@@ -860,6 +882,7 @@ fn test_hand_reactivation_rebuilds_same_runtime_profile() {
     };
     let first_agent_id = first_instance.agent_id().expect("first apitester agent id");
     let first_entry = kernel
+        .agents
         .registry
         .get(first_agent_id)
         .expect("first apitester hand agent entry");
@@ -896,6 +919,7 @@ fn test_hand_reactivation_rebuilds_same_runtime_profile() {
         .agent_id()
         .expect("second apitester agent id");
     let second_entry = kernel
+        .agents
         .registry
         .get(second_agent_id)
         .expect("second apitester hand agent entry");
@@ -971,6 +995,7 @@ fn reactivate_builds_from_hand_toml_not_override() {
     };
     let first_agent_id = first_instance.agent_id().expect("first apitester agent id");
     let first_entry = kernel
+        .agents
         .registry
         .get(first_agent_id)
         .expect("first apitester hand agent entry");
@@ -991,6 +1016,7 @@ fn reactivate_builds_from_hand_toml_not_override() {
         .expect("hand runtime override should update");
 
     let overridden_entry = kernel
+        .agents
         .registry
         .get(first_agent_id)
         .expect("overridden apitester hand agent entry");
@@ -1031,6 +1057,7 @@ fn reactivate_builds_from_hand_toml_not_override() {
         .agent_id()
         .expect("second apitester agent id");
     let second_entry = kernel
+        .agents
         .registry
         .get(second_agent_id)
         .expect("second apitester hand agent entry");
@@ -1146,6 +1173,7 @@ system_prompt = "You are a test worker."
 "#;
 
     kernel
+        .skills
         .hand_registry
         .install_from_content(hand_toml, "")
         .expect("install hand from content");
@@ -1158,6 +1186,7 @@ system_prompt = "You are a test worker."
         .agent_id()
         .expect("derived agent id from activated hand");
     let entry = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("hand-derived agent must be in the registry");
@@ -1211,6 +1240,7 @@ system_prompt = "You are a test worker."
 "#;
 
     kernel
+        .skills
         .hand_registry
         .install_from_content(hand_toml, "")
         .expect("install hand from content");
@@ -1223,6 +1253,7 @@ system_prompt = "You are a test worker."
         .agent_id()
         .expect("derived agent id from activated hand");
     let entry = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("hand-derived agent must be in the registry");
@@ -1369,6 +1400,7 @@ fn test_shell_exec_available_when_declared_in_tools_without_explicit_exec_policy
 
     // Verify exec_policy was promoted to Full
     let entry = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("agent must be registered");
@@ -1435,7 +1467,7 @@ fn test_boot_spawns_assistant_as_default_agent() {
     };
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-    let agents = kernel.registry.list();
+    let agents = kernel.agents.registry.list();
 
     assert!(
         agents.iter().any(|entry| entry.name == "assistant"),
@@ -1485,7 +1517,7 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
 
     // Find the auto-spawned assistant agent
-    let agents = kernel.registry.list();
+    let agents = kernel.agents.registry.list();
     let assistant = agents
         .iter()
         .find(|a| a.name == "assistant")
@@ -1494,7 +1526,7 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
     let session_id = assistant.session_id;
 
     // Get session messages before ephemeral call
-    let session_before = kernel.memory.get_session(session_id).unwrap();
+    let session_before = kernel.memory.substrate.get_session(session_id).unwrap();
     let msg_count_before = session_before.map(|s| s.messages.len()).unwrap_or(0);
 
     // Send ephemeral message (will fail because no LLM provider, but that's OK —
@@ -1504,7 +1536,7 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
         .await;
 
     // Check session is unchanged
-    let session_after = kernel.memory.get_session(session_id).unwrap();
+    let session_after = kernel.memory.substrate.get_session(session_id).unwrap();
     let msg_count_after = session_after.map(|s| s.messages.len()).unwrap_or(0);
     assert_eq!(
         msg_count_before, msg_count_after,
@@ -1529,15 +1561,24 @@ async fn test_spawn_approval_sweep_task_is_idempotent() {
     let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
 
     Arc::clone(&kernel).spawn_approval_sweep_task();
-    assert!(kernel.approval_sweep_started.load(Ordering::Acquire));
+    assert!(kernel
+        .governance
+        .approval_sweep_started
+        .load(Ordering::Acquire));
 
     Arc::clone(&kernel).spawn_approval_sweep_task();
-    assert!(kernel.approval_sweep_started.load(Ordering::Acquire));
+    assert!(kernel
+        .governance
+        .approval_sweep_started
+        .load(Ordering::Acquire));
 
     kernel.shutdown();
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
-    assert!(!kernel.approval_sweep_started.load(Ordering::Acquire));
+    assert!(!kernel
+        .governance
+        .approval_sweep_started
+        .load(Ordering::Acquire));
 }
 
 /// The task-board sweeper must be spawn-idempotent so repeated callers
@@ -1558,17 +1599,26 @@ async fn test_spawn_task_board_sweep_task_is_idempotent() {
     let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
 
     Arc::clone(&kernel).spawn_task_board_sweep_task();
-    assert!(kernel.task_board_sweep_started.load(Ordering::Acquire));
+    assert!(kernel
+        .governance
+        .task_board_sweep_started
+        .load(Ordering::Acquire));
 
     // Re-spawning while already running is a no-op — the atomic guard
     // short-circuits instead of starting a second loop.
     Arc::clone(&kernel).spawn_task_board_sweep_task();
-    assert!(kernel.task_board_sweep_started.load(Ordering::Acquire));
+    assert!(kernel
+        .governance
+        .task_board_sweep_started
+        .load(Ordering::Acquire));
 
     kernel.shutdown();
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
-    assert!(!kernel.task_board_sweep_started.load(Ordering::Acquire));
+    assert!(!kernel
+        .governance
+        .task_board_sweep_started
+        .load(Ordering::Acquire));
 }
 
 /// End-to-end sanity check at the kernel layer: after a worker claims a task
@@ -2060,7 +2110,7 @@ fn test_skills_config_disabled_list_filters_at_boot() {
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
 
-    let registry = kernel.skill_registry.read().unwrap();
+    let registry = kernel.skills.skill_registry.read().unwrap();
     assert!(
         registry.get("kept-skill").is_some(),
         "non-disabled skill must load"
@@ -2101,7 +2151,7 @@ fn test_skills_config_extra_dirs_loaded_as_overlay() {
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
 
-    let registry = kernel.skill_registry.read().unwrap();
+    let registry = kernel.skills.skill_registry.read().unwrap();
     assert!(
         registry.get("external-only").is_some(),
         "external skill must load"
@@ -2147,7 +2197,7 @@ fn test_reload_skills_preserves_disabled_and_extra_dirs() {
 
     // Baseline
     {
-        let reg = kernel.skill_registry.read().unwrap();
+        let reg = kernel.skills.skill_registry.read().unwrap();
         assert!(reg.get("keep-me").is_some());
         assert!(reg.get("silence-me").is_none());
         assert!(reg.get("overlay-skill").is_some());
@@ -2157,7 +2207,7 @@ fn test_reload_skills_preserves_disabled_and_extra_dirs() {
     // "silence-me" and drop "overlay-skill".
     kernel.reload_skills();
 
-    let reg = kernel.skill_registry.read().unwrap();
+    let reg = kernel.skills.skill_registry.read().unwrap();
     assert!(
         reg.get("keep-me").is_some(),
         "normal skill must stay loaded across reload"
@@ -2197,7 +2247,7 @@ fn test_stable_mode_freezes_registry_and_skips_review_gate() {
     };
     let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
 
-    let registry = kernel.skill_registry.read().unwrap();
+    let registry = kernel.skills.skill_registry.read().unwrap();
     assert!(
         registry.is_frozen(),
         "Stable mode must freeze the skill registry"
@@ -2286,7 +2336,7 @@ async fn test_cron_create_preserves_peer_id() {
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
 
-    let agents = kernel.registry.list();
+    let agents = kernel.agents.registry.list();
     let assistant = agents
         .iter()
         .find(|a| a.name == "assistant")
@@ -2393,6 +2443,7 @@ async fn cascade_primitives_via_session_interrupts_dashmap() {
     let parent_session_id = SessionId::new();
     let parent_interrupt = SessionInterrupt::new();
     kernel
+        .agents
         .session_interrupts
         .insert((parent_id, parent_session_id), parent_interrupt.clone());
 
@@ -2689,7 +2740,11 @@ system_prompt = "BASE PROMPT"
 
     // Sanity: the synthetic hand landed in the in-memory registry.
     assert!(
-        kernel.hand_registry.get_definition(hand_id).is_some(),
+        kernel
+            .skills
+            .hand_registry
+            .get_definition(hand_id)
+            .is_some(),
         "synthetic HAND.toml must be loaded from registry/hands/{hand_id}"
     );
 
@@ -2722,6 +2777,7 @@ system_prompt = "BASE PROMPT"
         .get("operator")
         .expect("operator role must be present in restored instance");
     let restored = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("restored operator agent must be registered in memory");
@@ -2839,7 +2895,11 @@ system_prompt = "WORKER PROMPT"
     let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
 
     assert!(
-        kernel.hand_registry.get_definition(hand_id).is_some(),
+        kernel
+            .skills
+            .hand_registry
+            .get_definition(hand_id)
+            .is_some(),
         "synthetic HAND.toml must be loaded from registry/hands/{hand_id}"
     );
 
@@ -2868,6 +2928,7 @@ system_prompt = "WORKER PROMPT"
         .get("lead")
         .expect("lead role must be present in restored instance");
     let restored = kernel
+        .agents
         .registry
         .get(lead_agent_id)
         .expect("restored lead agent must be registered in memory");
@@ -2988,6 +3049,7 @@ fn hand_runtime_override_survives_restart_via_activate_hand_with_id() {
 
         // Sanity: in-memory manifest already carries the overrides.
         let entry = kernel
+            .agents
             .registry
             .get(agent_id)
             .expect("apitester hand agent entry");
@@ -3068,6 +3130,7 @@ fn hand_runtime_override_survives_restart_via_activate_hand_with_id() {
     let _ = persisted_agent_id;
 
     let restored_entry = kernel
+        .agents
         .registry
         .get(restored_agent_id)
         .expect("restored apitester agent entry");
@@ -3171,6 +3234,7 @@ fn hand_runtime_override_survives_restart_via_start_background_agents() {
     });
 
     let instance = kernel
+        .skills
         .hand_registry
         .list_instances()
         .into_iter()
@@ -3178,6 +3242,7 @@ fn hand_runtime_override_survives_restart_via_start_background_agents() {
         .expect("apitester instance must be restored by start_background_agents");
     let agent_id = instance.agent_id().expect("restored apitester agent id");
     let entry = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("restored apitester agent entry");
@@ -3243,6 +3308,7 @@ fn deactivate_hand_removes_hand_agent_rows_from_sqlite() {
         assert!(
             kernel
                 .memory
+                .substrate
                 .load_agent(*id)
                 .expect("load_agent before deactivate")
                 .is_some(),
@@ -3257,7 +3323,7 @@ fn deactivate_hand_removes_hand_agent_rows_from_sqlite() {
     // Err out without touching the SQLite row — the scenario the new
     // explicit `memory.remove_agent` pass in `deactivate_hand` covers.
     for id in &agent_ids {
-        let _ = kernel.registry.remove(*id);
+        let _ = kernel.agents.registry.remove(*id);
     }
 
     kernel
@@ -3268,6 +3334,7 @@ fn deactivate_hand_removes_hand_agent_rows_from_sqlite() {
         assert!(
             kernel
                 .memory
+                .substrate
                 .load_agent(*id)
                 .expect("load_agent after deactivate")
                 .is_none(),
@@ -3332,10 +3399,15 @@ fn boot_gc_removes_orphaned_hand_agent_rows() {
             is_hand: true,
             ..Default::default()
         };
-        kernel.memory.save_agent(&entry).expect("seed orphan row");
+        kernel
+            .memory
+            .substrate
+            .save_agent(&entry)
+            .expect("seed orphan row");
         assert!(
             kernel
                 .memory
+                .substrate
                 .load_agent(orphan_id)
                 .expect("load_agent after seed")
                 .is_some(),
@@ -3364,6 +3436,7 @@ fn boot_gc_removes_orphaned_hand_agent_rows() {
     assert!(
         kernel
             .memory
+            .substrate
             .load_agent(orphan_id)
             .expect("load_agent after GC")
             .is_none(),
@@ -3419,7 +3492,11 @@ fn boot_gc_skips_orphan_cleanup_when_hand_state_is_corrupt() {
             is_hand: true,
             ..Default::default()
         };
-        kernel.memory.save_agent(&entry).expect("seed orphan row");
+        kernel
+            .memory
+            .substrate
+            .save_agent(&entry)
+            .expect("seed orphan row");
         kernel.shutdown();
     }
 
@@ -3443,6 +3520,7 @@ fn boot_gc_skips_orphan_cleanup_when_hand_state_is_corrupt() {
     assert!(
         kernel
             .memory
+            .substrate
             .load_agent(orphan_id)
             .expect("load_agent after skipped GC")
             .is_some(),
@@ -3488,6 +3566,7 @@ fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
     };
     let agent_id = instance.agent_id().expect("apitester hand agent id");
     let default_entry = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("apitester hand agent entry");
@@ -3510,6 +3589,7 @@ fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
         )
         .expect("apply override");
     let overridden = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("apitester hand agent entry post-override");
@@ -3521,6 +3601,7 @@ fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
         .clear_hand_agent_runtime_override(agent_id)
         .expect("clear override");
     let cleared = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("apitester hand agent entry post-clear");
@@ -3555,6 +3636,7 @@ fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
 
     // hand_state must no longer carry the per-role entry.
     let restored_instance = kernel
+        .skills
         .hand_registry
         .get_instance(instance.instance_id)
         .expect("instance still active");
@@ -3627,6 +3709,7 @@ fn update_hand_agent_runtime_override_merges_partial_updates_in_state() {
         .expect("apply provider override");
 
     let restored_instance = kernel
+        .skills
         .hand_registry
         .get_instance(instance.instance_id)
         .expect("instance still active");
@@ -3677,7 +3760,7 @@ fn test_running_tasks_two_concurrent_sessions_for_same_agent() {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     });
 
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (agent_id, session_a),
         RunningTask {
             abort: h_a.abort_handle(),
@@ -3685,7 +3768,7 @@ fn test_running_tasks_two_concurrent_sessions_for_same_agent() {
             task_id: uuid::Uuid::new_v4(),
         },
     );
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (agent_id, session_b),
         RunningTask {
             abort: h_b.abort_handle(),
@@ -3761,7 +3844,7 @@ fn test_running_session_ids_reflects_live_tasks() {
     };
 
     for (a, s) in [(agent_a, s1), (agent_a, s2), (agent_b, s3)] {
-        kernel.running_tasks.insert(
+        kernel.agents.running_tasks.insert(
             (a, s),
             RunningTask {
                 abort: mk_handle(),
@@ -3819,7 +3902,7 @@ fn test_stop_agent_run_fans_out_across_sessions() {
         .abort_handle()
     };
 
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (agent_id, s1),
         RunningTask {
             abort: mk_handle(),
@@ -3827,7 +3910,7 @@ fn test_stop_agent_run_fans_out_across_sessions() {
             task_id: uuid::Uuid::new_v4(),
         },
     );
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (agent_id, s2),
         RunningTask {
             abort: mk_handle(),
@@ -3836,7 +3919,7 @@ fn test_stop_agent_run_fans_out_across_sessions() {
         },
     );
     // Different agent — must NOT be touched by stop_agent_run.
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (other_agent, s3),
         RunningTask {
             abort: mk_handle(),
@@ -3918,7 +4001,7 @@ fn test_fork_does_not_overwrite_parent_registration() {
     // insert into both `running_tasks` and `session_interrupts` keyed by
     // `(agent, parent_session)`.
     let parent_started_at = chrono::Utc::now();
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (agent_id, parent_session),
         RunningTask {
             abort: parent_abort,
@@ -3928,6 +4011,7 @@ fn test_fork_does_not_overwrite_parent_registration() {
     );
     let parent_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
     kernel
+        .agents
         .session_interrupts
         .insert((agent_id, parent_session), parent_interrupt.clone());
 
@@ -4040,7 +4124,11 @@ fn fork_session_snapshot_is_unaffected_by_registry_mutation_4291() {
         is_hand: false,
         ..Default::default()
     };
-    kernel.registry.register(entry).expect("register agent");
+    kernel
+        .agents
+        .registry
+        .register(entry)
+        .expect("register agent");
 
     // Simulate the parent loop being mid-turn: insert its interrupt
     // under `(agent, parent_session)`, exactly as
@@ -4049,6 +4137,7 @@ fn fork_session_snapshot_is_unaffected_by_registry_mutation_4291() {
     // spawn site uses to discover which session to land on.
     let parent_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
     kernel
+        .agents
         .session_interrupts
         .insert((agent_id, parent_session), parent_interrupt.clone());
 
@@ -4068,12 +4157,14 @@ fn fork_session_snapshot_is_unaffected_by_registry_mutation_4291() {
     let switched_session = SessionId::new();
     assert_ne!(switched_session, parent_session);
     kernel
+        .agents
         .registry
         .update_session_id(agent_id, switched_session)
         .expect("update_session_id");
 
     // Sanity: the registry pointer really did flip.
     let entry_after = kernel
+        .agents
         .registry
         .get(agent_id)
         .expect("agent still registered");
@@ -4356,7 +4447,10 @@ async fn test_push_notification_health_check_failed_falls_back_to_alert_channels
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel.channel_adapters.insert("test".to_string(), adapter);
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
 
     kernel
         .push_notification(
@@ -4410,7 +4504,10 @@ async fn test_push_notification_health_check_failed_agent_rule_overrides_alert_c
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel.channel_adapters.insert("test".to_string(), adapter);
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
 
     kernel
         .push_notification(
@@ -4449,7 +4546,10 @@ async fn test_push_notification_health_check_failed_no_targets_when_unconfigured
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel.channel_adapters.insert("test".to_string(), adapter);
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
 
     kernel
         .push_notification(
@@ -4500,7 +4600,10 @@ async fn test_push_notification_unknown_event_type_yields_no_targets() {
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel.channel_adapters.insert("test".to_string(), adapter);
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
 
     kernel
         .push_notification(
@@ -4548,7 +4651,10 @@ async fn test_push_notification_appends_session_suffix_when_provided() {
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel.channel_adapters.insert("test".to_string(), adapter);
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
 
     let session_id = SessionId::new();
     kernel
@@ -4600,7 +4706,10 @@ async fn test_push_notification_omits_session_suffix_for_agent_level_alerts() {
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel.channel_adapters.insert("test".to_string(), adapter);
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
 
     kernel
         .push_notification(
@@ -4742,7 +4851,7 @@ fn register_test_agent(kernel: &LibreFangKernel, name: &str) -> AgentId {
         is_hand: false,
         ..Default::default()
     };
-    kernel.registry.register(entry).unwrap();
+    kernel.agents.registry.register(entry).unwrap();
     id
 }
 
@@ -5056,6 +5165,7 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
         });
     }
     kernel
+        .mcp
         .mcp_generation
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let names_a: Vec<String> = kernel
@@ -5086,6 +5196,7 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
         });
     }
     kernel
+        .mcp
         .mcp_generation
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let names_b: Vec<String> = kernel
@@ -5779,12 +5890,14 @@ async fn injection_senders_two_sessions_one_agent_do_not_collide() {
     // Both senders must be live concurrently (second insert used to overwrite the first).
     assert!(
         kernel
+            .events
             .injection_senders
             .contains_key(&(agent_id, session_a)),
         "session A sender lost under (agent, session) keying"
     );
     assert!(
         kernel
+            .events
             .injection_senders
             .contains_key(&(agent_id, session_b)),
         "session B sender lost under (agent, session) keying"
@@ -5833,9 +5946,11 @@ async fn injection_teardown_only_removes_target_session() {
     // Tearing down session A must NOT clear session B's sender.
     kernel.teardown_injection_channel(agent_id, session_a);
     assert!(!kernel
+        .events
         .injection_senders
         .contains_key(&(agent_id, session_a)));
     assert!(kernel
+        .events
         .injection_senders
         .contains_key(&(agent_id, session_b)));
 
@@ -6434,19 +6549,26 @@ fn list_agent_sessions_active_reflects_running_tasks_not_registry_pointer() {
     // Seed three persisted sessions for this agent.
     let s1 = kernel
         .memory
+        .substrate
         .create_session_with_label(agent_id, Some("one"))
         .unwrap();
     let s2 = kernel
         .memory
+        .substrate
         .create_session_with_label(agent_id, Some("two"))
         .unwrap();
     let s3 = kernel
         .memory
+        .substrate
         .create_session_with_label(agent_id, Some("three"))
         .unwrap();
 
     // Point the registry pointer at s2 — the legacy "active" answer.
-    kernel.registry.update_session_id(agent_id, s2.id).unwrap();
+    kernel
+        .agents
+        .registry
+        .update_session_id(agent_id, s2.id)
+        .unwrap();
 
     // Mark s1 and s3 as in-flight via running_tasks (not s2).
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -6456,7 +6578,7 @@ fn list_agent_sessions_active_reflects_running_tasks_not_registry_pointer() {
     let h3 = rt.spawn(async {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     });
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (agent_id, s1.id),
         RunningTask {
             abort: h1.abort_handle(),
@@ -6464,7 +6586,7 @@ fn list_agent_sessions_active_reflects_running_tasks_not_registry_pointer() {
             task_id: uuid::Uuid::new_v4(),
         },
     );
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (agent_id, s3.id),
         RunningTask {
             abort: h3.abort_handle(),
@@ -6527,6 +6649,7 @@ fn list_agent_sessions_idle_agent_marks_all_inactive() {
     for label in ["a", "b", "c", "d", "e"] {
         kernel
             .memory
+            .substrate
             .create_session_with_label(agent_id, Some(label))
             .unwrap();
     }
@@ -6550,15 +6673,20 @@ fn list_agent_sessions_canonical_and_active_can_coexist_on_same_row() {
 
     let s = kernel
         .memory
+        .substrate
         .create_session_with_label(agent_id, Some("only"))
         .unwrap();
-    kernel.registry.update_session_id(agent_id, s.id).unwrap();
+    kernel
+        .agents
+        .registry
+        .update_session_id(agent_id, s.id)
+        .unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let h = rt.spawn(async {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     });
-    kernel.running_tasks.insert(
+    kernel.agents.running_tasks.insert(
         (agent_id, s.id),
         RunningTask {
             abort: h.abort_handle(),
@@ -7340,12 +7468,19 @@ async fn reload_config_with_invalid_toml_preserves_live_config() {
     let kernel =
         LibreFangKernel::boot_with_config(baseline.clone()).expect("kernel boot with baseline");
 
-    // Sanity: live config has the user-picked model.
-    assert_eq!(
-        kernel.config_ref().default_model.model,
-        "user-picked-model",
-        "boot must seed the live config with the baseline model"
-    );
+    // Snapshot the post-boot default_model. We do NOT assert it equals the
+    // baseline here: `boot_with_config` legitimately rewrites
+    // `config.default_model` when the primary driver fails to construct
+    // (no key for the requested provider), falling back to whichever
+    // provider it can auto-detect from env vars / CLI auth dirs
+    // (see `kernel/boot.rs` ~line 449-510). That fallback is correct
+    // production behaviour; the regression we're guarding here is
+    // strictly that an *invalid TOML reload* does not clobber whatever
+    // boot settled on. Snapshotting decouples this test from local
+    // ambient credentials so it stays deterministic on dev machines that
+    // happen to have OPENAI_API_KEY / Claude Code / Copilot CLI logged in.
+    let post_boot_provider = kernel.config_ref().default_model.provider.clone();
+    let post_boot_model = kernel.config_ref().default_model.model.clone();
 
     // Now corrupt config.toml the way the bug report did: append a duplicate
     // `[web.searxng]` key that already appears earlier in the file (or in this
@@ -7366,16 +7501,17 @@ async fn reload_config_with_invalid_toml_preserves_live_config() {
          live config is intact; got: {err}"
     );
 
-    // Live config must still hold the operator's chosen model — proves the
-    // watcher's reload tick won't silently revert their settings.
+    // Live config must still match the post-boot snapshot — proves the
+    // watcher's reload tick won't silently revert whatever the operator
+    // (or boot's auto-detect) settled on.
     assert_eq!(
         kernel.config_ref().default_model.model,
-        "user-picked-model",
-        "live default_model must be preserved when the on-disk file is unparseable"
+        post_boot_model,
+        "live default_model.model must be preserved when the on-disk file is unparseable"
     );
     assert_eq!(
         kernel.config_ref().default_model.provider,
-        "anthropic",
+        post_boot_provider,
         "live default_model.provider must be preserved when the on-disk file is unparseable"
     );
 
