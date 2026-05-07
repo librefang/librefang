@@ -15,6 +15,14 @@ use librefang_runtime::hooks::HookRegistry;
 use crate::approval::ApprovalManager;
 use crate::hooks::ExternalHookSystem;
 
+/// Focused approval + hooks API.
+pub trait GovernanceSubsystemApi: Send + Sync {
+    /// Approval enforcement manager.
+    fn approvals(&self) -> &ApprovalManager;
+    /// In-process plugin lifecycle hook registry.
+    fn hook_registry(&self) -> &HookRegistry;
+}
+
 /// Approval + hooks + sweeper guard cluster — see module docs.
 pub struct GovernanceSubsystem {
     /// Execution approval manager.
@@ -44,16 +52,16 @@ impl GovernanceSubsystem {
             task_board_sweep_started: AtomicBool::new(false),
         }
     }
+}
 
-    /// Approval enforcement manager.
+impl GovernanceSubsystemApi for GovernanceSubsystem {
     #[inline]
-    pub fn approvals(&self) -> &ApprovalManager {
+    fn approvals(&self) -> &ApprovalManager {
         &self.approval_manager
     }
 
-    /// In-process plugin lifecycle hook registry.
     #[inline]
-    pub fn hook_registry(&self) -> &HookRegistry {
+    fn hook_registry(&self) -> &HookRegistry {
         &self.hooks
     }
 }

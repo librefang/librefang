@@ -14,6 +14,12 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use super::subsystems::{
+    AgentSubsystemApi, EventSubsystemApi, GovernanceSubsystemApi, LlmSubsystemApi, McpSubsystemApi,
+    MediaSubsystemApi, MemorySubsystemApi, MeshSubsystemApi, MeteringSubsystemApi,
+    ProcessSubsystemApi, SecuritySubsystemApi, SkillsSubsystemApi, WorkflowSubsystemApi,
+};
+
 use tracing::{debug, info, warn};
 
 use librefang_memory::MemorySubstrate;

@@ -17,6 +17,18 @@ use crate::event_bus::EventBus;
 use crate::session_lifecycle::SessionLifecycleBus;
 use crate::session_stream_hub::SessionStreamHub;
 
+/// Focused event-bus + injection-channel API.
+pub trait EventSubsystemApi: Send + Sync {
+    /// Top-level event bus handle.
+    fn event_bus_ref(&self) -> &EventBus;
+    /// Cloneable session-lifecycle bus.
+    fn lifecycle_bus(&self) -> Arc<SessionLifecycleBus>;
+    /// Per-(agent, session) injection senders map.
+    fn injection_senders_ref(
+        &self,
+    ) -> &DashMap<(AgentId, SessionId), tokio::sync::mpsc::Sender<AgentLoopSignal>>;
+}
+
 /// Event buses + injection channels + routing cluster — see module docs.
 pub struct EventSubsystem {
     /// Event bus.
@@ -57,22 +69,21 @@ impl EventSubsystem {
             session_stream_hub_gc_started: AtomicBool::new(false),
         }
     }
+}
 
-    /// Top-level event bus handle.
+impl EventSubsystemApi for EventSubsystem {
     #[inline]
-    pub fn event_bus_ref(&self) -> &EventBus {
+    fn event_bus_ref(&self) -> &EventBus {
         &self.event_bus
     }
 
-    /// Session lifecycle event bus (Arc-cloneable).
     #[inline]
-    pub fn lifecycle_bus(&self) -> Arc<SessionLifecycleBus> {
+    fn lifecycle_bus(&self) -> Arc<SessionLifecycleBus> {
         Arc::clone(&self.session_lifecycle_bus)
     }
 
-    /// Per-(agent, session) injection senders map.
     #[inline]
-    pub fn injection_senders_ref(
+    fn injection_senders_ref(
         &self,
     ) -> &DashMap<(AgentId, SessionId), tokio::sync::mpsc::Sender<AgentLoopSignal>> {
         &self.injection_senders

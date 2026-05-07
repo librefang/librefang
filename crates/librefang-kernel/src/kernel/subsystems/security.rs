@@ -13,6 +13,14 @@ use crate::auth::AuthManager;
 use crate::pairing::PairingManager;
 use librefang_extensions::vault::CredentialVault;
 
+/// Focused security API.
+pub trait SecuritySubsystemApi: Send + Sync {
+    /// RBAC authentication manager.
+    fn auth_ref(&self) -> &AuthManager;
+    /// Device pairing manager.
+    fn pairing_ref(&self) -> &PairingManager;
+}
+
 /// Auth + pairing + vault cluster — see module docs.
 pub struct SecuritySubsystem {
     /// RBAC authentication manager.
@@ -39,16 +47,16 @@ impl SecuritySubsystem {
             vault_cache: OnceLock::new(),
         }
     }
+}
 
-    /// RBAC authentication manager.
+impl SecuritySubsystemApi for SecuritySubsystem {
     #[inline]
-    pub fn auth_ref(&self) -> &AuthManager {
+    fn auth_ref(&self) -> &AuthManager {
         &self.auth
     }
 
-    /// Device pairing manager.
     #[inline]
-    pub fn pairing_ref(&self) -> &PairingManager {
+    fn pairing_ref(&self) -> &PairingManager {
         &self.pairing
     }
 }

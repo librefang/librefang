@@ -22,6 +22,20 @@ use crate::registry::AgentRegistry;
 use crate::scheduler::AgentScheduler;
 use crate::supervisor::Supervisor;
 
+/// Focused agent-registry API.
+pub trait AgentSubsystemApi: Send + Sync {
+    /// Agent registry handle.
+    fn registry_ref(&self) -> &AgentRegistry;
+    /// Canonical agent UUID registry.
+    fn identities_ref(&self) -> &Arc<AgentIdentityRegistry>;
+    /// Agent scheduler handle.
+    fn scheduler_ref(&self) -> &AgentScheduler;
+    /// Process supervisor handle.
+    fn supervisor_ref(&self) -> &Supervisor;
+    /// Per-agent decision-trace storage.
+    fn traces(&self) -> &DashMap<AgentId, Vec<DecisionTrace>>;
+}
+
 /// Agent registries + scheduler + supervisor + lock maps + traces —
 /// see module docs.
 pub struct AgentSubsystem {
@@ -84,34 +98,31 @@ impl AgentSubsystem {
             agent_watchers: DashMap::new(),
         }
     }
+}
 
-    /// Agent registry handle.
+impl AgentSubsystemApi for AgentSubsystem {
     #[inline]
-    pub fn registry_ref(&self) -> &AgentRegistry {
+    fn registry_ref(&self) -> &AgentRegistry {
         &self.registry
     }
 
-    /// Canonical agent UUID registry (refs #4614).
     #[inline]
-    pub fn identities_ref(&self) -> &Arc<AgentIdentityRegistry> {
+    fn identities_ref(&self) -> &Arc<AgentIdentityRegistry> {
         &self.agent_identities
     }
 
-    /// Agent scheduler handle.
     #[inline]
-    pub fn scheduler_ref(&self) -> &AgentScheduler {
+    fn scheduler_ref(&self) -> &AgentScheduler {
         &self.scheduler
     }
 
-    /// Process supervisor handle.
     #[inline]
-    pub fn supervisor_ref(&self) -> &Supervisor {
+    fn supervisor_ref(&self) -> &Supervisor {
         &self.supervisor
     }
 
-    /// Per-agent decision-trace storage.
     #[inline]
-    pub fn traces(&self) -> &DashMap<AgentId, Vec<DecisionTrace>> {
+    fn traces(&self) -> &DashMap<AgentId, Vec<DecisionTrace>> {
         &self.decision_traces
     }
 }

@@ -11,6 +11,14 @@ use std::sync::Arc;
 use librefang_runtime::process_manager::ProcessManager;
 use librefang_runtime::process_registry::ProcessRegistry;
 
+/// Focused process-management API.
+pub trait ProcessSubsystemApi: Send + Sync {
+    /// Persistent process manager handle.
+    fn manager(&self) -> &Arc<ProcessManager>;
+    /// Background process registry handle.
+    fn registry(&self) -> &Arc<ProcessRegistry>;
+}
+
 /// Process management cluster — see module docs.
 pub struct ProcessSubsystem {
     /// Persistent process manager for interactive sessions (REPLs, servers).
@@ -25,16 +33,16 @@ impl ProcessSubsystem {
     pub(crate) fn new(manager: Arc<ProcessManager>, registry: Arc<ProcessRegistry>) -> Self {
         Self { manager, registry }
     }
+}
 
-    /// Persistent process manager.
+impl ProcessSubsystemApi for ProcessSubsystem {
     #[inline]
-    pub fn manager(&self) -> &Arc<ProcessManager> {
+    fn manager(&self) -> &Arc<ProcessManager> {
         &self.manager
     }
 
-    /// Background process registry.
     #[inline]
-    pub fn registry(&self) -> &Arc<ProcessRegistry> {
+    fn registry(&self) -> &Arc<ProcessRegistry> {
         &self.registry
     }
 }

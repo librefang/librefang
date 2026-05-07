@@ -13,6 +13,14 @@ use librefang_memory::{MemorySubstrate, ProactiveMemoryStore, PromptStore};
 use librefang_memory_wiki::WikiVault;
 use librefang_runtime::proactive_memory::LlmMemoryExtractor;
 
+/// Focused memory API.
+pub trait MemorySubsystemApi: Send + Sync {
+    /// Primary memory substrate handle.
+    fn substrate_ref(&self) -> &Arc<MemorySubstrate>;
+    /// Optional proactive memory store (initialised lazily).
+    fn proactive_store(&self) -> Option<&Arc<ProactiveMemoryStore>>;
+}
+
 /// Memory cluster — see module docs.
 pub struct MemorySubsystem {
     /// Primary memory substrate (renamed from the original `memory`
@@ -40,16 +48,16 @@ impl MemorySubsystem {
             prompt_store: OnceLock::new(),
         }
     }
+}
 
-    /// Primary memory substrate handle.
+impl MemorySubsystemApi for MemorySubsystem {
     #[inline]
-    pub fn substrate_ref(&self) -> &Arc<MemorySubstrate> {
+    fn substrate_ref(&self) -> &Arc<MemorySubstrate> {
         &self.substrate
     }
 
-    /// Optional proactive memory store (initialised lazily).
     #[inline]
-    pub fn proactive_store(&self) -> Option<&Arc<ProactiveMemoryStore>> {
+    fn proactive_store(&self) -> Option<&Arc<ProactiveMemoryStore>> {
         self.proactive_memory.get()
     }
 }

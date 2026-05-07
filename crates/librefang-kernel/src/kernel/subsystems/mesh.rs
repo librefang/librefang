@@ -16,6 +16,26 @@ use librefang_wire::{PeerNode, PeerRegistry};
 
 use crate::kernel::DeliveryTracker;
 
+/// Focused mesh API.
+pub trait MeshSubsystemApi: Send + Sync {
+    /// A2A task store.
+    fn a2a_tasks(&self) -> &A2aTaskStore;
+    /// Discovered external A2A agent cards.
+    fn a2a_agents(&self) -> &Mutex<Vec<(String, AgentCard)>>;
+    /// Bridge-registered channel adapters.
+    fn channel_adapters_ref(&self) -> &DashMap<String, Arc<dyn ChannelAdapter>>;
+    /// Multi-account agent binding list.
+    fn bindings_ref(&self) -> &Mutex<Vec<AgentBinding>>;
+    /// Broadcast configuration snapshot.
+    fn broadcast_ref(&self) -> &BroadcastConfig;
+    /// Delivery receipt tracker.
+    fn delivery(&self) -> &DeliveryTracker;
+    /// OFP peer registry (set once at startup).
+    fn peer_registry_ref(&self) -> Option<&PeerRegistry>;
+    /// OFP peer node (set once at startup).
+    fn peer_node_ref(&self) -> Option<&Arc<PeerNode>>;
+}
+
 /// A2A + peers + channels + bindings cluster — see module docs.
 pub struct MeshSubsystem {
     /// A2A task store for tracking task lifecycle.
@@ -57,52 +77,46 @@ impl MeshSubsystem {
             channel_adapters: DashMap::new(),
         }
     }
+}
 
-    /// A2A task lifecycle store.
+impl MeshSubsystemApi for MeshSubsystem {
     #[inline]
-    pub fn a2a_tasks(&self) -> &A2aTaskStore {
+    fn a2a_tasks(&self) -> &A2aTaskStore {
         &self.a2a_task_store
     }
 
-    /// Discovered external A2A agent cards.
     #[inline]
-    pub fn a2a_agents(&self) -> &Mutex<Vec<(String, AgentCard)>> {
+    fn a2a_agents(&self) -> &Mutex<Vec<(String, AgentCard)>> {
         &self.a2a_external_agents
     }
 
-    /// Bridge-registered channel adapters.
     #[inline]
-    pub fn channel_adapters_ref(&self) -> &DashMap<String, Arc<dyn ChannelAdapter>> {
+    fn channel_adapters_ref(&self) -> &DashMap<String, Arc<dyn ChannelAdapter>> {
         &self.channel_adapters
     }
 
-    /// Multi-account agent binding list.
     #[inline]
-    pub fn bindings_ref(&self) -> &Mutex<Vec<AgentBinding>> {
+    fn bindings_ref(&self) -> &Mutex<Vec<AgentBinding>> {
         &self.bindings
     }
 
-    /// Broadcast configuration snapshot.
     #[inline]
-    pub fn broadcast_ref(&self) -> &BroadcastConfig {
+    fn broadcast_ref(&self) -> &BroadcastConfig {
         &self.broadcast
     }
 
-    /// Delivery receipt tracker.
     #[inline]
-    pub fn delivery(&self) -> &DeliveryTracker {
+    fn delivery(&self) -> &DeliveryTracker {
         &self.delivery_tracker
     }
 
-    /// OFP peer registry (set once at startup).
     #[inline]
-    pub fn peer_registry_ref(&self) -> Option<&PeerRegistry> {
+    fn peer_registry_ref(&self) -> Option<&PeerRegistry> {
         self.peer_registry.get()
     }
 
-    /// OFP peer node (set once at startup).
     #[inline]
-    pub fn peer_node_ref(&self) -> Option<&Arc<PeerNode>> {
+    fn peer_node_ref(&self) -> Option<&Arc<PeerNode>> {
         self.peer_node.get()
     }
 }

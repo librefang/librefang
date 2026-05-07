@@ -14,6 +14,20 @@ use crate::cron::CronScheduler;
 use crate::triggers::TriggerEngine;
 use crate::workflow::{WorkflowEngine, WorkflowTemplateRegistry};
 
+/// Focused workflow + scheduler + queue API.
+pub trait WorkflowSubsystemApi: Send + Sync {
+    /// Workflow execution engine handle.
+    fn engine_ref(&self) -> &WorkflowEngine;
+    /// Workflow template registry.
+    fn templates_ref(&self) -> &WorkflowTemplateRegistry;
+    /// Event-driven trigger engine.
+    fn triggers_ref(&self) -> &TriggerEngine;
+    /// Cron scheduler.
+    fn cron_ref(&self) -> &CronScheduler;
+    /// Command queue (lane-based concurrency).
+    fn command_queue_ref(&self) -> &CommandQueue;
+}
+
 /// Workflow / trigger / cron / queue cluster — see module docs.
 pub struct WorkflowSubsystem {
     /// Workflow execution engine (renamed from the original `workflows`
@@ -48,34 +62,31 @@ impl WorkflowSubsystem {
             command_queue,
         }
     }
+}
 
-    /// Workflow execution engine handle.
+impl WorkflowSubsystemApi for WorkflowSubsystem {
     #[inline]
-    pub fn engine_ref(&self) -> &WorkflowEngine {
+    fn engine_ref(&self) -> &WorkflowEngine {
         &self.engine
     }
 
-    /// Workflow template registry.
     #[inline]
-    pub fn templates_ref(&self) -> &WorkflowTemplateRegistry {
+    fn templates_ref(&self) -> &WorkflowTemplateRegistry {
         &self.template_registry
     }
 
-    /// Event-driven trigger engine.
     #[inline]
-    pub fn triggers_ref(&self) -> &TriggerEngine {
+    fn triggers_ref(&self) -> &TriggerEngine {
         &self.triggers
     }
 
-    /// Cron scheduler.
     #[inline]
-    pub fn cron_ref(&self) -> &CronScheduler {
+    fn cron_ref(&self) -> &CronScheduler {
         &self.cron_scheduler
     }
 
-    /// Command queue (lane-based concurrency).
     #[inline]
-    pub fn command_queue_ref(&self) -> &CommandQueue {
+    fn command_queue_ref(&self) -> &CommandQueue {
         &self.command_queue
     }
 }

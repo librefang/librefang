@@ -14,6 +14,19 @@ use librefang_types::config::BudgetConfig;
 
 use crate::metering::MeteringEngine;
 
+/// Focused metering API — read-only accessors that the rest of the
+/// kernel and the API layer need. Generic mutators (`update_budget`)
+/// stay as inherent methods on `MeteringSubsystem` since trait methods
+/// cannot accept `impl Fn` arguments.
+pub trait MeteringSubsystemApi: Send + Sync {
+    /// Audit log handle.
+    fn audit_log(&self) -> &Arc<AuditLog>;
+    /// Metering engine handle.
+    fn engine(&self) -> &Arc<MeteringEngine>;
+    /// Snapshot the current `BudgetConfig`.
+    fn current_budget(&self) -> BudgetConfig;
+}
+
 /// Cost / audit / budget cluster — see module docs.
 pub struct MeteringSubsystem {
     /// Merkle hash chain audit trail.
@@ -42,32 +55,30 @@ impl MeteringSubsystem {
         }
     }
 
-    /// Audit log handle.
-    #[inline]
-    pub fn audit_log(&self) -> &Arc<AuditLog> {
-        &self.audit_log
-    }
-
-    /// Metering engine handle.
-    #[inline]
-    pub fn engine(&self) -> &Arc<MeteringEngine> {
-        &self.engine
-    }
-
-    /// Snapshot the current `BudgetConfig` (cheap clone of the
-    /// `ArcSwap`-loaded value).
-    #[inline]
-    pub fn current_budget(&self) -> BudgetConfig {
-        (*self.budget_config.load_full()).clone()
-    }
-
-    /// RCU-update the budget configuration. The closure receives a
-    /// mutable copy; the result is atomically swapped in.
+    /// RCU-update the budget configuration. Inherent (not on the
+    /// trait) so callers can pass `impl Fn` directly.
     pub fn update_budget(&self, f: impl Fn(&mut BudgetConfig)) {
         self.budget_config.rcu(|current| {
             let mut next = (**current).clone();
             f(&mut next);
             std::sync::Arc::new(next)
         });
+    }
+}
+
+impl MeteringSubsystemApi for MeteringSubsystem {
+    #[inline]
+    fn audit_log(&self) -> &Arc<AuditLog> {
+        &self.audit_log
+    }
+
+    #[inline]
+    fn engine(&self) -> &Arc<MeteringEngine> {
+        &self.engine
+    }
+
+    #[inline]
+    fn current_budget(&self) -> BudgetConfig {
+        (*self.budget_config.load_full()).clone()
     }
 }

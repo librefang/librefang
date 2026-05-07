@@ -14,6 +14,14 @@ use librefang_hands::registry::HandRegistry;
 use librefang_skills::registry::SkillRegistry;
 use tokio::sync::Semaphore;
 
+/// Focused skills + hands API.
+pub trait SkillsSubsystemApi: Send + Sync {
+    /// Plugin skill registry handle.
+    fn registry_ref(&self) -> &std::sync::RwLock<SkillRegistry>;
+    /// Curated hand registry.
+    fn hand_registry_ref(&self) -> &HandRegistry;
+}
+
 /// Skill registry + hand registry + skill review bookkeeping —
 /// see module docs.
 pub struct SkillsSubsystem {
@@ -46,16 +54,16 @@ impl SkillsSubsystem {
             skill_review_concurrency: Arc::new(Semaphore::new(max_inflight_skill_reviews)),
         }
     }
+}
 
-    /// Plugin skill registry handle (RwLock for hot-reload).
+impl SkillsSubsystemApi for SkillsSubsystem {
     #[inline]
-    pub fn registry_ref(&self) -> &std::sync::RwLock<SkillRegistry> {
+    fn registry_ref(&self) -> &std::sync::RwLock<SkillRegistry> {
         &self.skill_registry
     }
 
-    /// Curated hand registry.
     #[inline]
-    pub fn hand_registry_ref(&self) -> &HandRegistry {
+    fn hand_registry_ref(&self) -> &HandRegistry {
         &self.hand_registry
     }
 }

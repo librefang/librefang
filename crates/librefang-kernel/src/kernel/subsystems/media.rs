@@ -12,6 +12,20 @@ use librefang_runtime::media_understanding::MediaEngine;
 use librefang_runtime::tts::TtsEngine;
 use librefang_runtime::web_search::WebToolsContext;
 
+/// Focused media API.
+pub trait MediaSubsystemApi: Send + Sync {
+    /// Web tools context.
+    fn web_tools(&self) -> &WebToolsContext;
+    /// Browser automation manager.
+    fn browser(&self) -> &BrowserManager;
+    /// Media understanding engine.
+    fn engine(&self) -> &MediaEngine;
+    /// Text-to-speech engine.
+    fn tts(&self) -> &TtsEngine;
+    /// Media generation driver cache.
+    fn drivers(&self) -> &MediaDriverCache;
+}
+
 /// Web + browser + media + TTS cluster — see module docs.
 pub struct MediaSubsystem {
     /// Web tools context (multi-provider search + SSRF-protected fetch + caching).
@@ -42,34 +56,31 @@ impl MediaSubsystem {
             media_drivers,
         }
     }
+}
 
-    /// Web tools context (search + fetch).
+impl MediaSubsystemApi for MediaSubsystem {
     #[inline]
-    pub fn web_tools(&self) -> &WebToolsContext {
+    fn web_tools(&self) -> &WebToolsContext {
         &self.web_ctx
     }
 
-    /// Browser automation manager.
     #[inline]
-    pub fn browser(&self) -> &BrowserManager {
+    fn browser(&self) -> &BrowserManager {
         &self.browser_ctx
     }
 
-    /// Media understanding engine.
     #[inline]
-    pub fn engine(&self) -> &MediaEngine {
+    fn engine(&self) -> &MediaEngine {
         &self.media_engine
     }
 
-    /// Text-to-speech engine.
     #[inline]
-    pub fn tts(&self) -> &TtsEngine {
+    fn tts(&self) -> &TtsEngine {
         &self.tts_engine
     }
 
-    /// Media generation driver cache (video, music, etc.).
     #[inline]
-    pub fn drivers(&self) -> &MediaDriverCache {
+    fn drivers(&self) -> &MediaDriverCache {
         &self.media_drivers
     }
 }
