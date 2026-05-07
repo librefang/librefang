@@ -97,6 +97,12 @@ mod tests {
     /// by `#[instrument]` on `run_agent_loop`. Without `.in_current_span()`
     /// in `spawn_supervised` (or equivalent), every supervised background
     /// task starts in a bare span context and its logs cannot be correlated.
+    // Relies on the default `current_thread` flavor of `#[tokio::test]`:
+    // `tracing::subscriber::set_default` installs the subscriber on the
+    // calling thread only, so the supervised task must run on that same
+    // thread to capture its events. Switching this test to
+    // `#[tokio::test(flavor = "multi_thread")]` would land the spawned
+    // task on a worker without the subscriber and break the assertion.
     #[tokio::test]
     async fn supervised_task_inherits_caller_span() {
         use std::io;
@@ -141,7 +147,7 @@ mod tests {
             agent.id = "agent-uuid-aaaa",
             session.id = "session-uuid-bbbb",
         );
-        let h = async {
+        async {
             let h = spawn_supervised("test_span_inherit", async {
                 warn!("event from supervised task");
             });
@@ -149,7 +155,6 @@ mod tests {
         }
         .instrument(parent)
         .await;
-        let _ = h;
 
         let captured = String::from_utf8(buf.lock().unwrap().clone()).expect("utf8");
         assert!(
