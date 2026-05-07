@@ -37,6 +37,7 @@ impl LibreFangKernel {
             .skill_generation
             .load(std::sync::atomic::Ordering::Relaxed);
         let mcp_gen = self
+            .mcp
             .mcp_generation
             .load(std::sync::atomic::Ordering::Relaxed);
         if let Some(cached) = self.prompt_metadata_cache.tools.get(&agent_id) {
@@ -183,8 +184,9 @@ impl LibreFangKernel {
 
         // Step 3: Add MCP tools (filtered by agent's MCP server allowlist,
         // then by declared tools).
-        if let Ok(mcp_tools) = self.mcp_tools.lock() {
+        if let Ok(mcp_tools) = self.mcp.mcp_tools.lock() {
             let configured_servers: Vec<String> = self
+                .mcp
                 .effective_mcp_servers
                 .read()
                 .map(|servers| servers.iter().map(|s| s.name.clone()).collect())

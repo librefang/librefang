@@ -5069,6 +5069,7 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
         });
     }
     kernel
+        .mcp
         .mcp_generation
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let names_a: Vec<String> = kernel
@@ -5099,6 +5100,7 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
         });
     }
     kernel
+        .mcp
         .mcp_generation
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let names_b: Vec<String> = kernel

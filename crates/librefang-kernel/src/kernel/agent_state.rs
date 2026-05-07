@@ -420,10 +420,11 @@ impl LibreFangKernel {
     ) -> KernelResult<()> {
         // Validate server names if allowlist is non-empty
         if !servers.is_empty() {
-            if let Ok(mcp_tools) = self.mcp_tools.lock() {
+            if let Ok(mcp_tools) = self.mcp.mcp_tools.lock() {
                 let mut known_servers: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
                 let configured_servers: Vec<String> = self
+                    .mcp
                     .effective_mcp_servers
                     .read()
                     .map(|servers| servers.iter().map(|s| s.name.clone()).collect())

@@ -837,6 +837,7 @@ impl LibreFangKernel {
 
         // Connect to configured + extension MCP servers
         let has_mcp = self
+            .mcp
             .effective_mcp_servers
             .read()
             .map(|s| !s.is_empty())

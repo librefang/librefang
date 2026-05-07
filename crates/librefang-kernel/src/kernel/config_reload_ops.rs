@@ -283,6 +283,7 @@ impl LibreFangKernel {
                     // Effective MCP server list now == config.mcp_servers directly.
                     let new_mcp = new_config.mcp_servers.clone();
                     let mut effective = self
+                        .mcp
                         .effective_mcp_servers
                         .write()
                         .unwrap_or_else(|e| e.into_inner());
@@ -292,7 +293,8 @@ impl LibreFangKernel {
                         effective.len()
                     );
                     // Bump MCP generation so tool list caches are invalidated
-                    self.mcp_generation
+                    self.mcp
+                        .mcp_generation
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 HotAction::ReloadMcpServers => {
@@ -311,6 +313,7 @@ impl LibreFangKernel {
                     // or any non-PATCH path would silently keep the old
                     // policy alive on already-connected servers.
                     let old_mcp = self
+                        .mcp
                         .effective_mcp_servers
                         .read()
                         .map(|s| s.clone())
@@ -343,6 +346,7 @@ impl LibreFangKernel {
                     }
 
                     let mut effective = self
+                        .mcp
                         .effective_mcp_servers
                         .write()
                         .unwrap_or_else(|e| e.into_inner());
@@ -356,17 +360,18 @@ impl LibreFangKernel {
                     let new_names: std::collections::HashSet<String> =
                         new_mcp.iter().map(|s| s.name.clone()).collect();
                     for name in old_names.difference(&new_names) {
-                        self.mcp_health.unregister(name);
+                        self.mcp.mcp_health.unregister(name);
                     }
                     for name in new_names.difference(&old_names) {
-                        self.mcp_health.register(name);
+                        self.mcp.mcp_health.register(name);
                     }
                     let count = new_mcp.len();
                     *effective = new_mcp;
                     drop(effective);
 
                     // Bump MCP generation so tool list caches are invalidated
-                    self.mcp_generation
+                    self.mcp
+                        .mcp_generation
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                     if to_reconnect.is_empty() {

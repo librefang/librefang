@@ -276,6 +276,7 @@ impl LibreFangKernel {
         use librefang_types::config::McpTransportEntry;
 
         let servers = self
+            .mcp
             .effective_mcp_servers
             .read()
             .map(|s| s.clone())
@@ -748,7 +749,7 @@ impl LibreFangKernel {
     /// use this accessor when you need the `ArcSwap` handle directly.
     #[inline]
     pub fn mcp_catalog(&self) -> &arc_swap::ArcSwap<librefang_extensions::catalog::McpCatalog> {
-        &self.mcp_catalog
+        &self.mcp.mcp_catalog
     }
 
     /// Load a snapshot of the MCP catalog — lock-free, no blocking.
@@ -759,7 +760,7 @@ impl LibreFangKernel {
     pub fn mcp_catalog_load(
         &self,
     ) -> arc_swap::Guard<std::sync::Arc<librefang_extensions::catalog::McpCatalog>> {
-        self.mcp_catalog.load()
+        self.mcp.mcp_catalog.load()
     }
 
     /// Reload the MCP catalog from disk, replacing the current snapshot
@@ -768,14 +769,14 @@ impl LibreFangKernel {
     pub fn mcp_catalog_reload(&self, home_dir: &std::path::Path) -> usize {
         let mut fresh = librefang_extensions::catalog::McpCatalog::new(home_dir);
         let count = fresh.load(home_dir);
-        self.mcp_catalog.store(std::sync::Arc::new(fresh));
+        self.mcp.mcp_catalog.store(std::sync::Arc::new(fresh));
         count
     }
 
     /// MCP server health monitor.
     #[inline]
     pub fn mcp_health(&self) -> &librefang_extensions::health::HealthMonitor {
-        &self.mcp_health
+        &self.mcp.mcp_health
     }
 
     /// Cron job scheduler.
@@ -1011,13 +1012,13 @@ impl LibreFangKernel {
     pub fn mcp_connections_ref(
         &self,
     ) -> &tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>> {
-        &self.mcp_connections
+        &self.mcp.mcp_connections
     }
 
     /// Per-server MCP OAuth authentication states.
     #[inline]
     pub fn mcp_auth_states_ref(&self) -> &librefang_runtime::mcp_oauth::McpAuthStates {
-        &self.mcp_auth_states
+        &self.mcp.mcp_auth_states
     }
 
     /// Pluggable OAuth provider for MCP server auth flows.
@@ -1025,13 +1026,13 @@ impl LibreFangKernel {
     pub fn oauth_provider_ref(
         &self,
     ) -> Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync> {
-        Arc::clone(&self.mcp_oauth_provider)
+        Arc::clone(&self.mcp.mcp_oauth_provider)
     }
 
     /// MCP tool definitions cache.
     #[inline]
     pub fn mcp_tools_ref(&self) -> &std::sync::Mutex<Vec<ToolDefinition>> {
-        &self.mcp_tools
+        &self.mcp.mcp_tools
     }
 
     /// Effective MCP server list (config + extensions merged).
@@ -1039,7 +1040,7 @@ impl LibreFangKernel {
     pub fn effective_mcp_servers_ref(
         &self,
     ) -> &std::sync::RwLock<Vec<librefang_types::config::McpServerConfigEntry>> {
-        &self.effective_mcp_servers
+        &self.mcp.effective_mcp_servers
     }
 
     /// A2A task store.

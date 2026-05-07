@@ -10,6 +10,7 @@
 //! follow-ups — kept out of this PR so the diff stays reviewable.
 
 pub mod llm;
+pub mod mcp;
 pub mod media;
 pub mod metering;
 pub mod processes;
@@ -18,6 +19,7 @@ pub mod skills;
 pub mod workflow;
 
 pub use llm::LlmSubsystem;
+pub use mcp::McpSubsystem;
 pub use media::MediaSubsystem;
 pub use metering::MeteringSubsystem;
 pub use processes::ProcessSubsystem;

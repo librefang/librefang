@@ -420,7 +420,7 @@ impl LibreFangKernel {
 
         // Reuse the prompt-builder to get a proper system prompt
         {
-            let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
+            let mcp_tool_count = self.mcp.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
             let user_name = self
                 .memory
@@ -1913,7 +1913,7 @@ impl LibreFangKernel {
         // Workspace metadata and skill summaries are cached to avoid redundant
         // filesystem I/O and skill registry iteration on every message.
         {
-            let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
+            let mcp_tool_count = self.mcp.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
             let stable_prefix_mode = cfg.stable_prefix_mode;
             let user_name = self
@@ -2292,7 +2292,9 @@ impl LibreFangKernel {
             let agent_mcp = kernel_clone
                 .build_agent_mcp_pool(manifest.workspace.as_deref())
                 .await;
-            let effective_mcp = agent_mcp.as_ref().unwrap_or(&kernel_clone.mcp_connections);
+            let effective_mcp = agent_mcp
+                .as_ref()
+                .unwrap_or(&kernel_clone.mcp.mcp_connections);
 
             let result = run_agent_loop_streaming(
                 &manifest,

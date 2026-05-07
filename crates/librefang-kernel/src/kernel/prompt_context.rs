@@ -243,12 +243,13 @@ impl LibreFangKernel {
     /// Build a compact MCP server/tool summary for the system prompt; caches per allowlist + mcp_generation to skip Mutex and re-render on hit.
     pub(crate) fn build_mcp_summary(&self, mcp_allowlist: &[String]) -> String {
         let mcp_gen = self
+            .mcp
             .mcp_generation
             .load(std::sync::atomic::Ordering::Relaxed);
         let cache_key = mcp_summary_cache_key(mcp_allowlist);
 
         // Cache hit on the current generation: clone the cached String.
-        if let Some(entry) = self.mcp_summary_cache.get(&cache_key) {
+        if let Some(entry) = self.mcp.mcp_summary_cache.get(&cache_key) {
             let (cached_gen, cached_str) = entry.value();
             if *cached_gen == mcp_gen {
                 return cached_str.clone();
@@ -256,7 +257,7 @@ impl LibreFangKernel {
         }
 
         // Cache miss / stale: extract only names under the lock, then release before rendering.
-        let tool_names: Vec<String> = match self.mcp_tools.lock() {
+        let tool_names: Vec<String> = match self.mcp.mcp_tools.lock() {
             Ok(t) => {
                 if t.is_empty() {
                     return String::new();
@@ -268,13 +269,15 @@ impl LibreFangKernel {
         // Lock released here — all further work is lock-free.
 
         let configured_servers: Vec<String> = self
+            .mcp
             .effective_mcp_servers
             .read()
             .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
             .unwrap_or_default();
 
         let rendered = render_mcp_summary(&tool_names, &configured_servers, mcp_allowlist);
-        self.mcp_summary_cache
+        self.mcp
+            .mcp_summary_cache
             .insert(cache_key, (mcp_gen, rendered.clone()));
         rendered
     }

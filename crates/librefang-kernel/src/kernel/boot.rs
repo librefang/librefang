@@ -1254,13 +1254,14 @@ impl LibreFangKernel {
             ),
             running_tasks: dashmap::DashMap::new(),
             session_interrupts: dashmap::DashMap::new(),
-            mcp_connections: tokio::sync::Mutex::new(Vec::new()),
-            mcp_auth_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-            mcp_oauth_provider: Arc::new(crate::mcp_oauth_provider::KernelOAuthProvider::new(
-                oauth_home_dir,
-            )),
-            mcp_tools: std::sync::Mutex::new(Vec::new()),
-            mcp_summary_cache: dashmap::DashMap::new(),
+            mcp: crate::kernel::subsystems::McpSubsystem::new(
+                Arc::new(crate::mcp_oauth_provider::KernelOAuthProvider::new(
+                    oauth_home_dir,
+                )),
+                mcp_catalog,
+                mcp_health,
+                all_mcp_servers,
+            ),
             a2a_task_store: librefang_runtime::a2a::A2aTaskStore::with_persistence(
                 1000,
                 &a2a_db_path,
@@ -1273,9 +1274,6 @@ impl LibreFangKernel {
                 tts_engine,
                 media_drivers,
             ),
-            mcp_catalog: arc_swap::ArcSwap::from_pointee(mcp_catalog),
-            mcp_health,
-            effective_mcp_servers: std::sync::RwLock::new(all_mcp_servers),
             delivery_tracker: DeliveryTracker::new(),
             approval_manager,
             bindings: std::sync::Mutex::new(initial_bindings),
@@ -1309,7 +1307,6 @@ impl LibreFangKernel {
             config_reload_lock: tokio::sync::RwLock::new(()),
             prompt_metadata_cache: PromptMetadataCache::new(),
             agent_watchers: dashmap::DashMap::new(),
-            mcp_generation: std::sync::atomic::AtomicU64::new(0),
             metering: crate::kernel::subsystems::MeteringSubsystem::new(
                 Arc::new(AuditLog::with_db_anchored(memory.pool(), audit_anchor_path)),
                 metering,

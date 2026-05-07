@@ -724,18 +724,9 @@ pub struct LibreFangKernel {
     /// sync at a glance.
     pub(crate) session_interrupts:
         dashmap::DashMap<(AgentId, SessionId), librefang_runtime::interrupt::SessionInterrupt>,
-    /// MCP server connections (lazily initialized at start_background_agents).
-    pub(crate) mcp_connections: tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>>,
-    /// Per-server MCP OAuth authentication state.
-    pub(crate) mcp_auth_states: librefang_runtime::mcp_oauth::McpAuthStates,
-    /// Pluggable OAuth provider for MCP server authorization flows.
-    pub(crate) mcp_oauth_provider:
-        Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync>,
-    /// MCP tool definitions cache (populated after connections are established).
-    pub(crate) mcp_tools: std::sync::Mutex<Vec<ToolDefinition>>,
-    /// Rendered MCP summary cache keyed by allowlist + mcp_generation; skips Mutex + re-render on hit.
-    /// Stale entries from old generations are never evicted; bounded by distinct allowlists in practice.
-    pub(crate) mcp_summary_cache: dashmap::DashMap<String, (u64, String)>,
+    /// MCP connection pool + OAuth + tool cache + catalog + health
+    /// monitor + summary cache. See [`subsystems::McpSubsystem`].
+    pub(crate) mcp: subsystems::McpSubsystem,
     /// A2A task store for tracking task lifecycle.
     pub a2a_task_store: librefang_runtime::a2a::A2aTaskStore,
     /// Discovered external A2A agent cards.
@@ -743,19 +734,6 @@ pub struct LibreFangKernel {
     /// Web search + browser + media understanding + TTS + media drivers.
     /// See [`subsystems::MediaSubsystem`].
     pub(crate) media: subsystems::MediaSubsystem,
-    /// MCP catalog — read-only set of server templates shipped by the
-    /// registry. Refreshed by `registry_sync` and re-read on
-    /// `POST /api/mcp/reload`. Lock-free reads via `ArcSwap`; writes use
-    /// `rcu()` so readers are never blocked (matches `model_catalog` pattern).
-    pub(crate) mcp_catalog: arc_swap::ArcSwap<librefang_extensions::catalog::McpCatalog>,
-    /// MCP server health monitor.
-    pub(crate) mcp_health: librefang_extensions::health::HealthMonitor,
-    /// Effective MCP server list — mirrors `config.mcp_servers`.
-    ///
-    /// Kept as its own field (instead of always reading `config.load()`) so
-    /// hot-reload and tests can snapshot the list atomically.
-    pub(crate) effective_mcp_servers:
-        std::sync::RwLock<Vec<librefang_types::config::McpServerConfigEntry>>,
     /// Delivery receipt tracker (bounded LRU, max 10K entries).
     pub(crate) delivery_tracker: DeliveryTracker,
     /// Execution approval manager.
@@ -872,9 +850,6 @@ pub struct LibreFangKernel {
         AgentId,
         std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     >,
-    /// Generation counter for MCP tool definitions — bumped whenever mcp_tools
-    /// are modified (connect, disconnect, rebuild). Used by the tool list cache.
-    mcp_generation: std::sync::atomic::AtomicU64,
     /// Audit trail + cost metering + hot-reloadable budget. See
     /// [`subsystems::MeteringSubsystem`].
     pub(crate) metering: subsystems::MeteringSubsystem,
@@ -1576,7 +1551,7 @@ impl LibreFangKernel {
             // Deferred tools have already passed the approval gate; skill
             // allowlist is not available here so we skip the check (None).
             allowed_skills: None,
-            mcp_connections: Some(&self.mcp_connections),
+            mcp_connections: Some(&self.mcp.mcp_connections),
             web_ctx: Some(&self.media.web_ctx),
             browser_ctx: Some(&self.media.browser_ctx),
             allowed_env_vars: deferred.allowed_env_vars.as_deref(),
