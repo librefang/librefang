@@ -7467,12 +7467,19 @@ async fn reload_config_with_invalid_toml_preserves_live_config() {
     let kernel =
         LibreFangKernel::boot_with_config(baseline.clone()).expect("kernel boot with baseline");
 
-    // Sanity: live config has the user-picked model.
-    assert_eq!(
-        kernel.config_ref().default_model.model,
-        "user-picked-model",
-        "boot must seed the live config with the baseline model"
-    );
+    // Snapshot the post-boot default_model. We do NOT assert it equals the
+    // baseline here: `boot_with_config` legitimately rewrites
+    // `config.default_model` when the primary driver fails to construct
+    // (no key for the requested provider), falling back to whichever
+    // provider it can auto-detect from env vars / CLI auth dirs
+    // (see `kernel/boot.rs` ~line 449-510). That fallback is correct
+    // production behaviour; the regression we're guarding here is
+    // strictly that an *invalid TOML reload* does not clobber whatever
+    // boot settled on. Snapshotting decouples this test from local
+    // ambient credentials so it stays deterministic on dev machines that
+    // happen to have OPENAI_API_KEY / Claude Code / Copilot CLI logged in.
+    let post_boot_provider = kernel.config_ref().default_model.provider.clone();
+    let post_boot_model = kernel.config_ref().default_model.model.clone();
 
     // Now corrupt config.toml the way the bug report did: append a duplicate
     // `[web.searxng]` key that already appears earlier in the file (or in this
@@ -7493,16 +7500,17 @@ async fn reload_config_with_invalid_toml_preserves_live_config() {
          live config is intact; got: {err}"
     );
 
-    // Live config must still hold the operator's chosen model — proves the
-    // watcher's reload tick won't silently revert their settings.
+    // Live config must still match the post-boot snapshot — proves the
+    // watcher's reload tick won't silently revert whatever the operator
+    // (or boot's auto-detect) settled on.
     assert_eq!(
         kernel.config_ref().default_model.model,
-        "user-picked-model",
-        "live default_model must be preserved when the on-disk file is unparseable"
+        post_boot_model,
+        "live default_model.model must be preserved when the on-disk file is unparseable"
     );
     assert_eq!(
         kernel.config_ref().default_model.provider,
-        "anthropic",
+        post_boot_provider,
         "live default_model.provider must be preserved when the on-disk file is unparseable"
     );
 
