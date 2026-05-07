@@ -72,12 +72,10 @@ impl LlmDriver for BudgetGatedDriver {
 mod tests {
     use super::*;
     use librefang_kernel_metering::MeteringEngine;
-    use librefang_llm_driver::{
-        CompletionRequest, CompletionResponse, LlmDriver, LlmError, StopReason,
-    };
+    use librefang_llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError};
     use librefang_memory::usage::UsageStore;
     use librefang_types::config::ProviderBudget;
-    use librefang_types::message::TokenUsage;
+    use librefang_types::message::{StopReason, TokenUsage};
     use std::collections::HashMap;
     use std::sync::Arc;
 
