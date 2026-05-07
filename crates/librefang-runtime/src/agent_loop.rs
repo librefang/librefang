@@ -7072,6 +7072,7 @@ mod tests {
             "purge_sentinels_test.rs", // fixtures for the CLI
             "lib.rs",             // librefang-types: legacy is_no_reply_sentinel compat shim
             "mod.rs",             // librefang-kernel: inline comment only
+            "cron_tick.rs", // librefang-kernel #4713 phase 3: split out of kernel/mod.rs, comment only
         ];
         let offenders: Vec<&str> = stdout
             .lines()
