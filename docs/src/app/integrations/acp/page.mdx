@@ -141,18 +141,26 @@ The audit log records `decided_by = "acp"` so operators can distinguish editor-s
 
 ---
 
-## Limitations
+## What's wired up vs. follow-up
 
-The following are intentionally out of scope today and tracked as follow-ups:
+**Wired up:**
 
-- `fs/read_text_file` / `fs/write_text_file` agent → client requests (the editor as the file source).
-- `terminal/*` agent → client requests (the editor as the PTY host).
-- Image / audio / embedded resource content blocks in `session/prompt` (declared as unsupported in `PromptCapabilities`).
-- Editor-declared `cwd` plumbed through to the agent loop's tool execution context.
-- Windows named-pipe equivalent of the UDS listener.
-- Session-history replay on `session/load` / `session/resume` across daemon restarts.
+- `fs/read_text_file` / `fs/write_text_file` agent → client requests. The runtime's `file_read` / `file_write` builtins route through the editor when an `AcpFsClient` is registered for the session.
+- `terminal/{create,output,wait_for_exit,kill,release}` agent → client requests. `shell_exec` runs the command's PTY in the editor's terminal panel when an `AcpTerminalClient` is registered.
+- Editor-declared `cwd`: `terminal/create` is dispatched without an explicit `cwd` so the editor uses the `cwd` it declared at `session/new` time (the user's project root).
+- Windows named pipes: daemon-attached mode works on Windows via `\\.\pipe\librefang-acp` in addition to the Unix UDS at `~/.librefang/acp.sock`.
+- `session/load` / `session/resume` honour the supplied ACP session id by deriving the LibreFang `SessionId` deterministically (`Uuid::new_v5` keyed on the ACP id), so a reconnecting editor rejoins the same kernel-side session and picks up its persisted history without an explicit replay step.
+- Multimodal content blocks (image / audio / embedded resource) are declared as unsupported in `PromptCapabilities`; if a defensive editor still sends them, the adapter emits a visible `session/update` message chunk telling the user the attachment was dropped.
 
-If your editor ships an ACP feature that depends on one of the above, the adapter currently returns JSON-RPC `method_not_found` (-32601) for the request — your editor should skip the optional feature gracefully.
+**Follow-up issues** (not yet shipped):
+
+- `session/update` history replay stream — sending past assistant messages back as `session/update` notifications so the editor's chat panel rehydrates immediately on reconnect (the agent already has the history through the kernel; this is just a UX polish).
+- True multimodal pipeline — image / audio / embedded resource content actually reaching the LLM driver. Cross-cutting work in `librefang-llm-drivers` is required.
+- `tool_use_id` on synchronous (`request_approval`) approvals and dashboard manual approvals — today only the deferred path carries it; the others fall back to a clearly-namespaced `approval-{req_id}` ToolCallId.
+- Persisting `tool_use_id` and `DeferredToolExecution.session_id` across daemon restarts — needs a column on `pending_approvals` and a small migration.
+- End-to-end integration tests for `fs/*` and `terminal/*` reverse-RPC routing under a duplex transport with mock client handlers.
+
+If your editor ships an ACP feature outside the supported set above, the adapter returns JSON-RPC `method_not_found` (-32601) for the request — your editor should skip the optional feature gracefully.
 
 ---
 
