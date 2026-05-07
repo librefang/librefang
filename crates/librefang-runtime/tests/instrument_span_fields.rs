@@ -6,10 +6,11 @@
 
 use std::io;
 use std::sync::{Arc, Mutex};
-use tracing::{info_span, warn};
+use tracing::{info_span, span, warn, Level};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Clone, Default)]
 struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
@@ -64,5 +65,86 @@ fn warn_inside_agent_span_includes_agent_and_session_ids() {
         captured.contains("session.id=\"session-uuid-5678\"")
             || captured.contains("session.id=session-uuid-5678"),
         "expected session.id in captured log, got: {captured}"
+    );
+}
+
+/// Reproduces the production daemon filter (`librefang_runtime=warn`) and
+/// asserts that an INFO-level instrument span gets dropped — confirming WHY
+/// `run_agent_loop` must use `level = "warn"`. If this test ever flips
+/// behaviour (i.e. INFO spans survive a WARN target filter), our
+/// `level = "warn"` workaround is no longer needed.
+#[test]
+fn info_span_is_dropped_under_warn_target_filter() {
+    let writer = CaptureWriter::default();
+    let buf = writer.0.clone();
+
+    let env_filter = EnvFilter::new("warn");
+    let layer = tracing_subscriber::fmt::layer()
+        .with_writer(writer)
+        .with_ansi(false)
+        .with_target(false);
+
+    let _guard = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(layer)
+        .set_default();
+
+    // INFO span — same as the original `#[instrument]` default.
+    let info_span = info_span!(
+        "run_agent_loop",
+        agent.id = "agent-uuid-aaaa",
+        session.id = "session-uuid-bbbb",
+    );
+    let _e = info_span.enter();
+    warn!("event under warn filter, info span");
+
+    let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        !captured.contains("agent.id=\"agent-uuid-aaaa\""),
+        "INFO span should have been filtered out by warn-only filter, but agent.id leaked: {captured}"
+    );
+}
+
+/// The actual production fix: a WARN-level span survives the WARN target
+/// filter and propagates `agent.id` / `session.id` to events fired inside it.
+/// This test pins the behaviour `run_agent_loop`'s `#[instrument(level = "warn", ...)]`
+/// guarantees on the live daemon, where `init_tracing_stderr` installs
+/// `librefang_runtime=warn` as a baseline directive.
+#[test]
+fn warn_span_survives_warn_target_filter_and_carries_fields() {
+    let writer = CaptureWriter::default();
+    let buf = writer.0.clone();
+
+    let env_filter = EnvFilter::new("warn");
+    let layer = tracing_subscriber::fmt::layer()
+        .with_writer(writer)
+        .with_ansi(false)
+        .with_target(false);
+
+    let _guard = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(layer)
+        .set_default();
+
+    // WARN-level span — matches the real `#[instrument(level = "warn", ...)]`.
+    let warn_span = span!(
+        Level::WARN,
+        "run_agent_loop",
+        agent.id = "agent-uuid-cccc",
+        session.id = "session-uuid-dddd",
+    );
+    let _e = warn_span.enter();
+    warn!("event under warn filter, warn span");
+
+    let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        captured.contains("agent.id=\"agent-uuid-cccc\"")
+            || captured.contains("agent.id=agent-uuid-cccc"),
+        "WARN span should survive warn filter and surface agent.id, got: {captured}"
+    );
+    assert!(
+        captured.contains("session.id=\"session-uuid-dddd\"")
+            || captured.contains("session.id=session-uuid-dddd"),
+        "WARN span should surface session.id, got: {captured}"
     );
 }

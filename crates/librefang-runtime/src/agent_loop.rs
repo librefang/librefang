@@ -3288,7 +3288,13 @@ async fn maybe_fold_stale_tool_results(
 /// This is the core of LibreFang: it loads session context, recalls memories,
 /// runs the LLM in a tool-use loop, and saves the updated session.
 #[allow(clippy::too_many_arguments)]
-#[instrument(skip_all, fields(agent.name = %manifest.name, agent.id = %session.agent_id, session.id = %session.id))]
+// `level = "warn"` (not the default `info`) so the daemon's baseline filter
+// (`librefang_runtime=warn` in `init_tracing_stderr`) keeps this span alive.
+// At INFO the span gets filtered out before it's ever created, and every
+// WARN/ERROR event inside the loop loses its parent context — including the
+// `agent.id` / `session.id` fields, which is the whole point of instrumenting.
+// The span itself does not emit a log line; the level only gates creation.
+#[instrument(level = "warn", skip_all, fields(agent.name = %manifest.name, agent.id = %session.agent_id, session.id = %session.id))]
 pub async fn run_agent_loop(
     manifest: &AgentManifest,
     user_message: &str,
@@ -4744,7 +4750,10 @@ async fn stream_with_retry(
 /// as tokens arrive from the LLM. Tool execution happens between LLM calls
 /// and is not streamed.
 #[allow(clippy::too_many_arguments)]
-#[instrument(skip_all, fields(agent.name = %manifest.name, agent.id = %session.agent_id))]
+// `level = "warn"` to survive the daemon's `librefang_runtime=warn` baseline
+// filter — see the comment on `run_agent_loop` above. Also fold in
+// `session.id` so streaming events get the same correlation surface.
+#[instrument(level = "warn", skip_all, fields(agent.name = %manifest.name, agent.id = %session.agent_id, session.id = %session.id))]
 pub async fn run_agent_loop_streaming(
     manifest: &AgentManifest,
     user_message: &str,
