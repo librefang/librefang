@@ -15,7 +15,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::subsystems::{
-    AgentSubsystemApi, EventSubsystemApi, LlmSubsystemApi, McpSubsystemApi, MemorySubsystemApi,
+    AgentSubsystemApi, EventSubsystemApi, McpSubsystemApi, MemorySubsystemApi,
 };
 
 use tracing::{debug, info, warn};
@@ -401,24 +401,6 @@ impl LibreFangKernel {
         self.agents.scheduler_ref()
     }
 
-    /// Model catalog (`ArcSwap` since #3384). Delegates to
-    /// [`LlmSubsystem::catalog_swap`].
-    #[inline]
-    pub fn model_catalog_ref(
-        &self,
-    ) -> &arc_swap::ArcSwap<librefang_runtime::model_catalog::ModelCatalog> {
-        self.llm.model_catalog_swap()
-    }
-
-    /// Snapshot the current model catalog. Delegates to
-    /// [`LlmSubsystem::catalog_load`].
-    #[inline]
-    pub fn model_catalog_load(
-        &self,
-    ) -> arc_swap::Guard<Arc<librefang_runtime::model_catalog::ModelCatalog>> {
-        self.llm.model_catalog_load()
-    }
-
     /// Atomically mutate the model catalog using the RCU pattern: clone the
     /// current snapshot, hand the closure a `&mut` to the clone, and store
     /// the result. Used by API/probe paths that previously held a write
@@ -498,14 +480,6 @@ impl LibreFangKernel {
                 .collect();
             futures::future::join_all(handles).await;
         });
-    }
-
-    /// Invalidate all cached LLM drivers so the next request rebuilds them
-    /// with current provider URLs / API keys. Delegates to
-    /// [`LlmSubsystem::clear_driver_cache`].
-    #[inline]
-    pub fn clear_driver_cache(&self) {
-        self.llm.clear_driver_cache();
     }
 
     /// Spawn the approval expiry sweep task.
@@ -969,14 +943,6 @@ impl LibreFangKernel {
         self.booted_at.elapsed()
     }
 
-    /// Embedding driver (None = text fallback).
-    #[inline]
-    pub fn embedding(
-        &self,
-    ) -> Option<&Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>> {
-        self.llm.embedding()
-    }
-
     /// Resolve the per-agent concurrency semaphore, lazily creating it on
     /// first use. Capacity comes from `AgentManifest.max_concurrent_invocations`,
     /// falling back to `KernelConfig.queue.concurrency.default_per_agent`,
@@ -1052,14 +1018,6 @@ impl LibreFangKernel {
     #[inline]
     pub fn auto_reply(&self) -> &crate::auto_reply::AutoReplyEngine {
         &self.auto_reply_engine
-    }
-
-    /// Default model override (hot-reloadable).
-    #[inline]
-    pub fn default_model_override_ref(
-        &self,
-    ) -> &std::sync::RwLock<Option<librefang_types::config::DefaultModelConfig>> {
-        self.llm.default_model_override_ref()
     }
 
     /// Tool policy override (hot-reloadable).

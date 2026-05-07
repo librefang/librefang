@@ -24,7 +24,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use librefang_api::server::read_daemon_info;
 use librefang_extensions::dotenv;
-use librefang_kernel::{config::load_config, LibreFangKernel};
+use librefang_kernel::{config::load_config, LibreFangKernel, LlmSubsystemApi};
 use librefang_types::agent::{AgentId, AgentManifest};
 use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
@@ -3679,7 +3679,7 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
         let provider = cfg.default_model.provider.clone();
         let model = cfg.default_model.model.clone();
         let agent_count = kernel.agent_registry().count();
-        let model_count = kernel.model_catalog_ref().load().list_models().len();
+        let model_count = kernel.model_catalog_swap().load().list_models().len();
 
         ui::success(&i18n::t_args(
             "kernel-booted",

@@ -8,6 +8,7 @@ use super::event::{self, AppEvent};
 use super::screens::chat::{self, ChatAction, ChatState, Role};
 use super::theme;
 use librefang_kernel::LibreFangKernel;
+use librefang_kernel::LlmSubsystemApi;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::{AgentEntry, AgentId};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -420,7 +421,7 @@ impl StandaloneChat {
                 }
             }
             Backend::InProcess { kernel } => {
-                let catalog = kernel.model_catalog_ref().load();
+                let catalog = kernel.model_catalog_swap().load();
                 catalog
                     .available_models()
                     .into_iter()
@@ -490,7 +491,7 @@ impl StandaloneChat {
             Backend::InProcess { kernel } => {
                 if let Some(id) = self.agent_id_inprocess {
                     let provider = kernel
-                        .model_catalog_ref()
+                        .model_catalog_swap()
                         .load()
                         .find_model(model_id)
                         .map(|e| e.provider.clone());

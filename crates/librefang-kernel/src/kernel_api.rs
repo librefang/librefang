@@ -633,7 +633,7 @@ impl KernelApi for LibreFangKernel {
     fn default_model_override_ref(
         &self,
     ) -> &std::sync::RwLock<Option<librefang_types::config::DefaultModelConfig>> {
-        Self::default_model_override_ref(self)
+        <Self as crate::LlmSubsystemApi>::default_model_override_ref(self)
     }
     fn mcp_auth_states_ref(&self) -> &librefang_runtime::mcp_oauth::McpAuthStates {
         Self::mcp_auth_states_ref(self)
@@ -649,7 +649,7 @@ impl KernelApi for LibreFangKernel {
     fn model_catalog_ref(
         &self,
     ) -> &arc_swap::ArcSwap<librefang_runtime::model_catalog::ModelCatalog> {
-        Self::model_catalog_ref(self)
+        <Self as crate::LlmSubsystemApi>::model_catalog_swap(self)
     }
     fn oauth_provider_ref(
         &self,
@@ -677,7 +677,7 @@ impl KernelApi for LibreFangKernel {
         Self::shutdown(self);
     }
     fn clear_driver_cache(&self) {
-        Self::clear_driver_cache(self);
+        <Self as crate::LlmSubsystemApi>::clear_driver_cache(self);
     }
     fn relocate_legacy_agent_dirs(&self) {
         Self::relocate_legacy_agent_dirs(self);
@@ -971,7 +971,7 @@ impl KernelApi for LibreFangKernel {
     fn model_catalog_load(
         &self,
     ) -> arc_swap::Guard<Arc<librefang_runtime::model_catalog::ModelCatalog>> {
-        Self::model_catalog_load(self)
+        <Self as crate::LlmSubsystemApi>::model_catalog_load(self)
     }
     fn model_catalog_update(
         &self,
@@ -1014,7 +1014,7 @@ impl KernelApi for LibreFangKernel {
     fn embedding(
         &self,
     ) -> Option<&Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>> {
-        Self::embedding(self)
+        <Self as crate::LlmSubsystemApi>::embedding(self)
     }
     async fn inject_message_for_session(
         &self,
