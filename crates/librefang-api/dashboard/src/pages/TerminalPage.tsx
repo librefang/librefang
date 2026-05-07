@@ -424,7 +424,7 @@ export function TerminalPage() {
     }
   }, [serverOs]);
 
-  const handleSwitchWindow = useCallback((id: string) => {
+  const handleSwitchWindow = useCallback((id: string | null) => {
     desiredWindowIdRef.current = id;
     setPendingWindowId(id);
   }, []);

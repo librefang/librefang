@@ -38,7 +38,7 @@ interface TerminalTabsProps {
   tmuxAvailable: boolean;
   maxWindows: number;
   displayedActiveWindowId: string | null;
-  onSwitchWindow: (windowId: string) => void;
+  onSwitchWindow: (windowId: string | null) => void;
   terminalRef: RefObject<Terminal | null>;
   fitAddonRef: RefObject<FitAddon | null>;
 }
@@ -49,7 +49,7 @@ const WINDOW_NAME_RE = /^[^|\x00-\x1f\x7f]{1,64}$/u;
 const ORDER_KEY = "terminal.tabOrder";
 
 function loadOrder(): string[] {
-  try { return JSON.parse(localStorage.getItem(ORDER_KEY) ?? "[]"); } catch { return []; }
+  try { return JSON.parse(localStorage.getItem(ORDER_KEY) ?? "[]"); } catch (e) { console.warn("Failed to parse tab order from localStorage:", e); return []; }
 }
 function saveOrder(ids: string[]) {
   localStorage.setItem(ORDER_KEY, JSON.stringify(ids));
@@ -93,7 +93,8 @@ export function TerminalTabs({
     setTabOrder(prev => {
       const existing = new Set(windows.map(w => w.id));
       const filtered = prev.filter(id => existing.has(id));
-      const newIds = windows.map(w => w.id).filter(id => !filtered.includes(id));
+      const filteredSet = new Set(filtered);
+      const newIds = windows.map(w => w.id).filter(id => !filteredSet.has(id));
       const next = [...filtered, ...newIds];
       saveOrder(next);
       return next;
@@ -210,7 +211,7 @@ export function TerminalTabs({
             }
             onSwitchWindow(next.id);
           } else {
-            onSwitchWindow("");
+            onSwitchWindow(null);
           }
         }
       } catch {
@@ -291,14 +292,20 @@ export function TerminalTabs({
             <ChevronRight className="h-3 w-3 text-gray-500" />
           </div>
         )}
-      <div ref={tabScrollRef} className="flex items-end gap-0.5 px-2 pt-1.5 overflow-x-auto flex-1 scrollbar-thin">
+      <div ref={tabScrollRef} role="tablist" className="flex items-end gap-0.5 px-2 pt-1.5 overflow-x-auto flex-1 scrollbar-thin">
       {sortedWindows.map((w) => {
         const isActive = w.id === displayedActiveWindowId;
         const isEditing = editingId === w.id;
         return (
           <div
             key={w.id}
+            role="tab"
+            tabIndex={0}
+            aria-selected={isActive}
             onClick={() => handleTabClick(w.id)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleTabClick(w.id); }
+            }}
             onDoubleClick={(e) => {
               e.stopPropagation();
               startRename(w);

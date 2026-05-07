@@ -2596,7 +2596,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
         <div className="px-6 py-4 border-b border-border-subtle flex items-center justify-between shrink-0">
           <div>
             <h3 id="prompts-experiments-dialog-title" className="text-lg font-black">{agentName}</h3>
-            <p className="text-xs text-text-dim">Prompts & Experiments</p>
+            <p className="text-xs text-text-dim">{t("prompts_experiments.subtitle")}</p>
           </div>
           <button onClick={onClose} className="p-2 rounded-xl hover:bg-main" aria-label={t("common.close", { defaultValue: "Close dialog" })}><X className="w-4 h-4" /></button>
         </div>
@@ -2611,7 +2611,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
             onClick={() => setActiveTab("versions")}
             className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "versions" ? "bg-brand text-white" : "bg-main text-text-dim"}`}
           >
-            <FlaskConical className="w-3 h-3 inline mr-1" /> Versions
+            <FlaskConical className="w-3 h-3 inline mr-1" /> {t("prompts_experiments.tab_versions")}
           </button>
           <button
             id="agents-tab-experiments"
@@ -2622,7 +2622,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
             onClick={() => setActiveTab("experiments")}
             className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "experiments" ? "bg-brand text-white" : "bg-main text-text-dim"}`}
           >
-            <GitBranch className="w-3 h-3 inline mr-1" /> Experiments
+            <GitBranch className="w-3 h-3 inline mr-1" /> {t("prompts_experiments.tab_experiments")}
           </button>
         </div>
 
@@ -2633,12 +2633,12 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
             <div id="agents-panel-versions" role="tabpanel" aria-labelledby="agents-tab-versions" className="space-y-4">
               <div className="flex justify-end">
                 <Button variant="primary" size="sm" onClick={() => setShowCreateVersion(true)}>
-                  <Plus className="w-3 h-3 mr-1" /> New Version
+                  <Plus className="w-3 h-3 mr-1" /> {t("prompts_experiments.new_version")}
                 </Button>
               </div>
               
               {versionsQuery.isLoading ? <CardSkeleton /> : versions.length === 0 ? (
-                <EmptyState title="No prompt versions yet" icon={<FlaskConical className="h-6 w-6" />} />
+                <EmptyState title={t("prompts_experiments.no_versions")} icon={<FlaskConical className="h-6 w-6" />} />
               ) : (
                 <div className="space-y-2">
                   {versions.map((v: PromptVersion) => (
@@ -2646,13 +2646,13 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                       <div className="flex items-center justify-between mb-2">
                         <div className="flex items-center gap-2">
                           <span className="font-bold text-sm">v{v.version}</span>
-                          {v.is_active && <Badge variant="success">Active</Badge>}
+                          {v.is_active && <Badge variant="success">{t("prompts_experiments.active")}</Badge>}
                           {v.description && <span className="text-xs text-text-dim">- {v.description}</span>}
                         </div>
                         <div className="flex gap-2">
                           {!v.is_active && (
                             <Button variant="secondary" size="sm" onClick={() => activateMutation.mutate({ versionId: v.id, agentId })}>
-                              <Check className="w-3 h-3 mr-1" /> Activate
+                              <Check className="w-3 h-3 mr-1" /> {t("prompts_experiments.activate")}
                             </Button>
                           )}
                           {!v.is_active && (
@@ -2663,7 +2663,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                         </div>
                       </div>
                       <pre className="text-xs text-text-dim whitespace-pre-wrap max-h-24 overflow-y-auto">{v.system_prompt.slice(0, 200)}...</pre>
-                      <p className="text-[10px] text-text-dim mt-2">Created: {new Date(v.created_at).toLocaleDateString()}</p>
+                      <p className="text-[10px] text-text-dim mt-2">{t("prompts_experiments.created_label")} {new Date(v.created_at).toLocaleDateString()}</p>
                     </div>
                   ))}
                 </div>
@@ -2672,24 +2672,24 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
               {showCreateVersion && (
                 <div className="fixed inset-0 z-60 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4" onClick={() => setShowCreateVersion(false)}>
                   <div role="dialog" aria-modal="true" aria-labelledby="create-version-dialog-title" className="bg-surface rounded-t-2xl sm:rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
-                    <h4 id="create-version-dialog-title" className="font-bold mb-4">Create Prompt Version</h4>
+                    <h4 id="create-version-dialog-title" className="font-bold mb-4">{t("prompts_experiments.create_version_title")}</h4>
                     <div className="space-y-4">
                       <div>
-                        <label className="text-xs text-text-dim">System Prompt</label>
+                        <label className="text-xs text-text-dim">{t("prompts_experiments.system_prompt_label")}</label>
                         <textarea value={newPromptSystemPrompt} onChange={e => setNewPromptSystemPrompt(e.target.value)} rows={6}
-                          className="w-full mt-1 rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs font-mono" placeholder="You are a helpful AI assistant..." />
+                          className="w-full mt-1 rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs font-mono" placeholder={t("prompts_experiments.system_prompt_placeholder")} />
                       </div>
                       <div>
-                        <label className="text-xs text-text-dim">Description (optional)</label>
+                        <label className="text-xs text-text-dim">{t("prompts_experiments.description_optional")}</label>
                         <input value={newPromptDescription} onChange={e => setNewPromptDescription(e.target.value)}
-                          className="w-full mt-1 rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs" placeholder="What's different in this version?" />
+                          className="w-full mt-1 rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs" placeholder={t("prompts_experiments.description_placeholder")} />
                       </div>
                     </div>
                     <div className="flex gap-2 mt-4">
                       <Button variant="primary" className="flex-1" isLoading={createVersionMutation.isPending} onClick={() => createVersionMutation.mutate({ agentId, version: { system_prompt: newPromptSystemPrompt, description: newPromptDescription, version: (versionsQuery.data?.length || 0) + 1, content_hash: "", tools: [], variables: [], created_by: "dashboard" } }, { onSuccess: () => { setShowCreateVersion(false); setNewPromptSystemPrompt(""); setNewPromptDescription(""); } })} disabled={!newPromptSystemPrompt.trim() || createVersionMutation.isPending}>
-                        {createVersionMutation.isPending ? "Creating..." : "Create"}
+                        {createVersionMutation.isPending ? t("prompts_experiments.creating") : t("prompts_experiments.create")}
                       </Button>
-                      <Button variant="secondary" onClick={() => setShowCreateVersion(false)}>Cancel</Button>
+                      <Button variant="secondary" onClick={() => setShowCreateVersion(false)}>{t("prompts_experiments.cancel")}</Button>
                     </div>
                   </div>
                 </div>
@@ -2701,12 +2701,12 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
             <div id="agents-panel-experiments" role="tabpanel" aria-labelledby="agents-tab-experiments" className="space-y-4">
               <div className="flex justify-end">
                 <Button variant="primary" size="sm" onClick={() => setShowCreateExperiment(true)}>
-                  <Plus className="w-3 h-3 mr-1" /> New Experiment
+                  <Plus className="w-3 h-3 mr-1" /> {t("prompts_experiments.new_experiment")}
                 </Button>
               </div>
 
               {experimentsQuery.isLoading ? <CardSkeleton /> : experiments.length === 0 ? (
-                <EmptyState title="No experiments yet" icon={<GitBranch className="h-6 w-6" />} />
+                <EmptyState title={t("prompts_experiments.no_experiments")} icon={<GitBranch className="h-6 w-6" />} />
               ) : (
                 <div className="space-y-2">
                   {experiments.map((exp: PromptExperiment) => (
@@ -2717,16 +2717,16 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                           <Badge variant={exp.status === "running" ? "success" : exp.status === "completed" ? "default" : "warning"}>{exp.status}</Badge>
                         </div>
                         <div className="flex gap-2">
-                          {exp.status === "draft" && <Button variant="secondary" size="sm" onClick={() => startExpMutation.mutate({ experimentId: exp.id, agentId })}><Play className="w-3 h-3 mr-1" />Start</Button>}
-                          {exp.status === "running" && <Button variant="secondary" size="sm" onClick={() => pauseExpMutation.mutate({ experimentId: exp.id, agentId })}><Pause className="w-3 h-3 mr-1" />Pause</Button>}
+                          {exp.status === "draft" && <Button variant="secondary" size="sm" onClick={() => startExpMutation.mutate({ experimentId: exp.id, agentId })}><Play className="w-3 h-3 mr-1" />{t("prompts_experiments.start")}</Button>}
+                          {exp.status === "running" && <Button variant="secondary" size="sm" onClick={() => pauseExpMutation.mutate({ experimentId: exp.id, agentId })}><Pause className="w-3 h-3 mr-1" />{t("prompts_experiments.pause")}</Button>}
                           {(exp.status === "running" || exp.status === "paused") && (
                             <Button variant="secondary" size="sm" onClick={() => completeExpMutation.mutate({ experimentId: exp.id, agentId })}>
-                              <Check className="w-3 h-3 mr-1" />Complete
+                              <Check className="w-3 h-3 mr-1" />{t("prompts_experiments.complete")}
                             </Button>
                           )}
                           {(exp.status === "running" || exp.status === "paused") && (
                             <Button variant="secondary" size="sm" onClick={() => setSelectedMetrics(exp.id)}>
-                              <BarChart3 className="w-3 h-3 mr-1" />Metrics
+                              <BarChart3 className="w-3 h-3 mr-1" />{t("prompts_experiments.metrics")}
                             </Button>
                           )}
                         </div>
@@ -2739,7 +2739,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
 
               {selectedMetrics && metricsQuery.data && (
                 <div className="mt-4 p-4 rounded-xl bg-main/50 border border-border-subtle">
-                  <h5 className="text-xs font-bold mb-3">Experiment Metrics</h5>
+                  <h5 className="text-xs font-bold mb-3">{t("prompts_experiments.experiment_metrics")}</h5>
                   <div className="space-y-2">
                     {metrics.map((m: ExperimentVariantMetrics) => (
                       <div key={m.variant_id} className="p-3 rounded-lg bg-surface border border-border-subtle">
@@ -2751,39 +2751,39 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                         </div>
                         <div className="grid grid-cols-3 gap-2 text-[10px] text-text-dim">
                           <div>
-                            <span className="block text-text-dim/60">Requests</span>
+                            <span className="block text-text-dim/60">{t("prompts_experiments.requests")}</span>
                             <span className="font-mono">{m.total_requests} ({m.successful_requests} ok / {m.failed_requests} err)</span>
                           </div>
                           <div>
-                            <span className="block text-text-dim/60">Avg Latency</span>
+                            <span className="block text-text-dim/60">{t("prompts_experiments.avg_latency")}</span>
                             <span className="font-mono">{m.avg_latency_ms?.toFixed(0)}ms</span>
                           </div>
                           <div>
-                            <span className="block text-text-dim/60">Avg Cost</span>
+                            <span className="block text-text-dim/60">{t("prompts_experiments.avg_cost")}</span>
                             <span className="font-mono">${m.avg_cost_usd?.toFixed(4)}</span>
                           </div>
                         </div>
                       </div>
                     ))}
                   </div>
-                  <Button variant="secondary" size="sm" className="mt-3 w-full" onClick={() => setSelectedMetrics(null)}>Close Metrics</Button>
+                  <Button variant="secondary" size="sm" className="mt-3 w-full" onClick={() => setSelectedMetrics(null)}>{t("prompts_experiments.close_metrics")}</Button>
                 </div>
               )}
 
               {showCreateExperiment && (
                 <div className="fixed inset-0 z-60 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4" onClick={() => setShowCreateExperiment(false)}>
                   <div role="dialog" aria-modal="true" aria-labelledby="create-experiment-dialog-title" className="bg-surface rounded-t-2xl sm:rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
-                    <h4 id="create-experiment-dialog-title" className="font-bold mb-4">Create Experiment</h4>
+                    <h4 id="create-experiment-dialog-title" className="font-bold mb-4">{t("prompts_experiments.create_experiment_title")}</h4>
                     <div className="space-y-4">
                       <div>
-                        <label className="text-xs text-text-dim">Experiment Name</label>
+                        <label className="text-xs text-text-dim">{t("prompts_experiments.experiment_name_label")}</label>
                         <input value={newExperimentName} onChange={e => setNewExperimentName(e.target.value)}
-                          className="w-full mt-1 rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs" placeholder="My A/B Test" />
+                          className="w-full mt-1 rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs" placeholder={t("prompts_experiments.experiment_name_placeholder")} />
                       </div>
                       <div>
-                        <label className="text-xs text-text-dim mb-2 block">Select Prompt Versions (min 2)</label>
+                        <label className="text-xs text-text-dim mb-2 block">{t("prompts_experiments.select_versions_label")}</label>
                         {versions.length < 2 ? (
-                          <p className="text-xs text-warning">Create at least 2 prompt versions first.</p>
+                          <p className="text-xs text-warning">{t("prompts_experiments.min_versions_warning")}</p>
                         ) : (
                           <div className="space-y-1 max-h-40 overflow-y-auto">
                             {versions.map((v: PromptVersion) => (
@@ -2794,7 +2794,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                                     else setSelectedVariantIds(selectedVariantIds.filter(id => id !== v.id));
                                   }} className="rounded" />
                                 <span className="font-bold">v{v.version}</span>
-                                {v.is_active && <Badge variant="success">Active</Badge>}
+                                {v.is_active && <Badge variant="success">{t("prompts_experiments.active")}</Badge>}
                                 <span className="text-text-dim truncate">{v.description || v.system_prompt.slice(0, 40) + "..."}</span>
                               </label>
                             ))}
@@ -2803,10 +2803,10 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                       </div>
                     </div>
                     <div className="flex gap-2 mt-4">
-                      <Button variant="primary" className="flex-1" isLoading={createExperimentMutation.isPending} onClick={() => createExperimentMutation.mutate({ agentId, experiment: { name: newExperimentName, status: "draft", traffic_split: selectedVariantIds.map(() => Math.floor(100 / selectedVariantIds.length)), success_criteria: { require_user_helpful: true, require_no_tool_errors: true, require_non_empty: true }, variants: selectedVariantIds.map((vId, i) => { const ver = versions.find(v => v.id === vId); return { name: i === 0 ? "Control" : `Variant ${String.fromCharCode(65 + i)}`, prompt_version_id: vId, description: ver ? `v${ver.version}` : undefined }; }) } }, { onSuccess: () => { setShowCreateExperiment(false); setNewExperimentName(""); setSelectedVariantIds([]); } })} disabled={!newExperimentName.trim() || selectedVariantIds.length < 2 || createExperimentMutation.isPending}>
-                        {createExperimentMutation.isPending ? "Creating..." : `Create (${selectedVariantIds.length} variants)`}
+                      <Button variant="primary" className="flex-1" isLoading={createExperimentMutation.isPending} onClick={() => createExperimentMutation.mutate({ agentId, experiment: { name: newExperimentName, status: "draft", traffic_split: selectedVariantIds.map(() => Math.floor(100 / selectedVariantIds.length)), success_criteria: { require_user_helpful: true, require_no_tool_errors: true, require_non_empty: true }, variants: selectedVariantIds.map((vId, i) => { const ver = versions.find(v => v.id === vId); return { name: i === 0 ? t("prompts_experiments.control") : t("prompts_experiments.variant_label", { letter: String.fromCharCode(65 + i) }), prompt_version_id: vId, description: ver ? `v${ver.version}` : undefined }; }) } }, { onSuccess: () => { setShowCreateExperiment(false); setNewExperimentName(""); setSelectedVariantIds([]); } })} disabled={!newExperimentName.trim() || selectedVariantIds.length < 2 || createExperimentMutation.isPending}>
+                        {createExperimentMutation.isPending ? t("prompts_experiments.creating") : t("prompts_experiments.create_with_count", { count: selectedVariantIds.length })}
                       </Button>
-                      <Button variant="secondary" onClick={() => { setShowCreateExperiment(false); setSelectedVariantIds([]); }}>Cancel</Button>
+                      <Button variant="secondary" onClick={() => { setShowCreateExperiment(false); setSelectedVariantIds([]); }}>{t("prompts_experiments.cancel")}</Button>
                     </div>
                   </div>
                 </div>

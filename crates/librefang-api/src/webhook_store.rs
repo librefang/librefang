@@ -155,9 +155,15 @@ pub async fn validate_webhook_url_resolved(url_str: &str) -> Result<ValidatedHos
     }
     for sa in &addrs {
         let ip = canonical_ip(sa.ip());
-        if ip.is_loopback() || is_private_ip(ip) || is_link_local(ip) {
+        if ip.is_loopback()
+            || ip.is_unspecified()
+            || is_zeronet_v4(ip)
+            || is_private_ip(ip)
+            || is_link_local(ip)
+        {
             return Err(format!(
-                "host '{host}' resolves to private/loopback/link-local address {ip}"
+                "host '{host}' resolves to {ip} \
+                 (loopback / unspecified / private / link-local / zeronet)"
             ));
         }
     }
@@ -169,7 +175,13 @@ pub async fn validate_webhook_url_resolved(url_str: &str) -> Result<ValidatedHos
 }
 
 /// Validate that a URL is safe to send webhooks to (mitigate SSRF).
-/// Only allows http and https schemes, blocks private/link-local IPs.
+/// Only allows http and https schemes, blocks private/loopback/link-local
+/// IPs, the unspecified address, RFC 1122 `0.0.0.0/8`, and the
+/// cloud-metadata / `*.internal` / `*.localhost` hostname families.
+///
+/// Mirrors `librefang_types::scheduler::validate_webhook_url` so the cron
+/// and the dashboard webhook subscription paths apply the same blocklist
+/// (#4739).
 ///
 /// **DNS-blind**: a hostname that resolves to a private IP at request time
 /// (DNS rebind) is NOT caught here — call
@@ -188,7 +200,7 @@ pub fn validate_webhook_url(url_str: &str) -> Result<(), String> {
         }
     }
 
-    // Block private/link-local IPs to mitigate SSRF.
+    // Block private/link-local/unspecified IPs to mitigate SSRF.
     //
     // Use the typed `url::Host` enum rather than `host_str().parse::<IpAddr>()`:
     // `host_str()` returns IPv6 literals wrapped in brackets (e.g.
@@ -199,10 +211,11 @@ pub fn validate_webhook_url(url_str: &str) -> Result<(), String> {
     match parsed.host() {
         Some(url::Host::Ipv4(v4)) => {
             let ip = std::net::IpAddr::V4(v4);
-            if ip.is_loopback() || is_private_ip(ip) || is_link_local(ip) {
-                return Err(
-                    "url must not point to a private, loopback, or link-local address".to_string(),
-                );
+            if is_blocked_ip(ip) {
+                return Err(format!(
+                    "url host '{v4}' is not allowed \
+                     (loopback / unspecified / private / link-local / zeronet / metadata)"
+                ));
             }
         }
         Some(url::Host::Ipv6(v6)) => {
@@ -211,26 +224,71 @@ pub fn validate_webhook_url(url_str: &str) -> Result<(), String> {
             // these checks — ip.is_loopback() and the V6 arms of
             // is_private_ip / is_link_local do not recognise the mapped form.
             let ip = canonical_ip(std::net::IpAddr::V6(v6));
-            if ip.is_loopback() || is_private_ip(ip) || is_link_local(ip) {
-                return Err(
-                    "url must not point to a private, loopback, or link-local address".to_string(),
-                );
+            if is_blocked_ip(ip) {
+                return Err(format!(
+                    "url host '{v6}' is not allowed \
+                     (loopback / unspecified / private / link-local / zeronet / metadata)"
+                ));
             }
         }
         Some(url::Host::Domain(host)) => {
-            // Also block common internal hostnames
+            // Block common internal hostnames. `url::Url::parse` has
+            // already converted IDN forms to ASCII punycode, so a literal
+            // ASCII match here is sufficient for the common cases —
+            // homoglyph attacks that punycode to a non-blocked string
+            // still rely on DNS resolution and are caught by
+            // `validate_webhook_url_resolved` at fire-time.
+            //
+            // `*.localhost` is reserved by RFC 6761 §6.3.
             let lower = host.to_lowercase();
-            if lower == "localhost"
-                || lower == "metadata.google.internal"
-                || lower.ends_with(".internal")
-            {
+            if is_blocked_domain(&lower) {
                 return Err("url must not point to an internal/localhost address".to_string());
             }
         }
-        None => {}
+        None => {
+            // `url::Url::parse` populates `host` for every "special" scheme
+            // (http/https/ftp/ws/wss/file). Reaching this arm means the
+            // input is malformed in a way the parser tolerated but we
+            // cannot safely route — refuse explicitly. The pre-#4739
+            // implementation silently accepted these (#4739 review).
+            return Err("url has no host component".to_string());
+        }
     }
 
     Ok(())
+}
+
+fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    let ip = canonical_ip(ip);
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || is_zeronet_v4(ip)
+        || is_private_ip(ip)
+        || is_link_local(ip)
+}
+
+/// RFC 1122 §3.2.1.3 reserves `0.0.0.0/8` ("this network"). Some legacy
+/// stacks rewrote `0.x.y.z` to `127.x.y.z`, making the entire prefix an
+/// SSRF surface to localhost. Modern Linux rejects outbound traffic to
+/// this range, but blocking explicitly removes the platform dependency.
+fn is_zeronet_v4(ip: std::net::IpAddr) -> bool {
+    matches!(ip, std::net::IpAddr::V4(v4) if v4.octets()[0] == 0)
+}
+
+/// Hostnames that must not be webhook destinations. Mirrors
+/// `librefang_types::scheduler::is_blocked_domain` so the dashboard-side
+/// subscription store and the cron path apply the same blocklist (#4739).
+fn is_blocked_domain(lower: &str) -> bool {
+    matches!(
+        lower,
+        "localhost"
+            | "metadata"
+            | "metadata.google.internal"
+            | "metadata.aws.amazon.com"
+            | "instance-data"
+            | "instance-data.ec2.internal"
+    ) || lower.ends_with(".localhost")
+        || lower.ends_with(".internal")
 }
 
 /// Unwrap IPv4-mapped IPv6 (`::ffff:X.X.X.X`) to its IPv4 form. All other
@@ -259,9 +317,14 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
+/// IPv4 link-local is `169.254.0.0/16` per RFC 3927; IPv6 link-local is
+/// `fe80::/10` per RFC 4291. The previous implementation also matched
+/// `octets()[0] == 169` which over-blocks globally-routable addresses
+/// outside the actual link-local range; aligned with
+/// `librefang_types::scheduler::is_link_local` (#4739 review).
 fn is_link_local(ip: std::net::IpAddr) -> bool {
     match canonical_ip(ip) {
-        std::net::IpAddr::V4(v4) => v4.is_link_local() || v4.octets()[0] == 169,
+        std::net::IpAddr::V4(v4) => v4.is_link_local(),
         std::net::IpAddr::V6(v6) => {
             // Link-local fe80::/10
             (v6.segments()[0] & 0xffc0) == 0xfe80
@@ -640,6 +703,64 @@ mod tests {
     fn validate_webhook_url_blocks_ipv4_mapped_ipv6_private() {
         assert!(validate_webhook_url("http://[::ffff:10.0.0.1]/hook").is_err());
         assert!(validate_webhook_url("http://[::ffff:192.168.1.1]/hook").is_err());
+    }
+
+    /// `0.0.0.0` is unspecified — block it so it can't be used as a
+    /// loopback alias on stacks that route it locally (#4739).
+    #[test]
+    fn validate_webhook_url_blocks_unspecified_v4() {
+        assert!(validate_webhook_url("http://0.0.0.0/hook").is_err());
+    }
+
+    /// IPv6 unspecified `[::]` — symmetry with the V4 form. `is_unspecified()`
+    /// covers both, but a literal test pins the wire-level behaviour so a
+    /// future regression that splits the V4/V6 paths can't quietly drop one.
+    #[test]
+    fn validate_webhook_url_blocks_unspecified_v6() {
+        assert!(validate_webhook_url("http://[::]/hook").is_err());
+    }
+
+    /// RFC 1122 §3.2.1.3 reserves `0.0.0.0/8`. The pre-#4739 implementation
+    /// only blocked the all-zero literal; legacy stacks that rewrote
+    /// `0.x.y.z` to `127.x.y.z` would have left this prefix as an SSRF
+    /// surface.
+    #[test]
+    fn validate_webhook_url_blocks_zeronet_v4() {
+        assert!(validate_webhook_url("http://0.1.2.3/hook").is_err());
+        assert!(validate_webhook_url("http://0.255.255.255/hook").is_err());
+    }
+
+    /// New cloud-metadata aliases the cron path already blocked — backport
+    /// keeps webhook subscriptions and cron consistent (#4739 review).
+    #[test]
+    fn validate_webhook_url_blocks_extended_metadata_hosts() {
+        assert!(validate_webhook_url("http://metadata/").is_err());
+        assert!(validate_webhook_url("http://metadata.aws.amazon.com/").is_err());
+        assert!(validate_webhook_url("http://instance-data/").is_err());
+        assert!(validate_webhook_url("http://instance-data.ec2.internal/").is_err());
+    }
+
+    /// RFC 6761 §6.3 reserves the entire `.localhost` tree as loopback.
+    #[test]
+    fn validate_webhook_url_blocks_localhost_subtree() {
+        assert!(validate_webhook_url("http://api.localhost/hook").is_err());
+        assert!(validate_webhook_url("http://anything.localhost/hook").is_err());
+    }
+
+    /// `Ipv4Addr::is_link_local` matches `169.254/16` per RFC 3927; the
+    /// previous over-broad `octets()[0] == 169` check refused publicly
+    /// routable addresses outside that range. Aligned with
+    /// `librefang_types::scheduler::is_link_local` (#4739 review).
+    #[test]
+    fn validate_webhook_url_accepts_169_outside_link_local() {
+        assert!(validate_webhook_url("http://169.10.0.1/hook").is_ok());
+        assert!(validate_webhook_url("http://169.255.0.1/hook").is_ok());
+    }
+
+    /// Link-local address itself must still be refused.
+    #[test]
+    fn validate_webhook_url_blocks_link_local_v4() {
+        assert!(validate_webhook_url("http://169.254.169.254/").is_err());
     }
 
     #[test]

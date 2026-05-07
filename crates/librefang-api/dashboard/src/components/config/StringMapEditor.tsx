@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { createClientId } from "../../lib/store";
 
 // Editor for `BTreeMap<String, String | Number>` config fields. The whole
 // section (e.g. `provider_urls`, `tool_timeouts`) is a single value posted
@@ -26,10 +27,8 @@ type Props = {
   step?: number;
 };
 
-let rowIdCounter = 0;
 function newRowId(): string {
-  rowIdCounter += 1;
-  return `r${rowIdCounter}`;
+  return createClientId();
 }
 
 function rowsFromValue(value: Props["value"]): Row[] {
@@ -88,31 +87,40 @@ export function StringMapEditor({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
 
-  const emit = useCallback((next: Row[]) => {
-    setRows(next);
-    const obj = commitRows(next);
-    lastEmittedRef.current = obj;
-    onChange(obj);
+  const emit = useCallback((updater: (prev: Row[]) => Row[]) => {
+    setRows((prev) => {
+      const next = updater(prev);
+      const obj = commitRows(next);
+      lastEmittedRef.current = obj;
+      onChange(obj);
+      return next;
+    });
   }, [onChange]);
 
   const updateKey = useCallback((id: string, key: string) => {
-    emit(rows.map((r) => r.id === id ? { ...r, key } : r));
-  }, [rows, emit]);
+    emit((prev) => prev.map((r) => r.id === id ? { ...r, key } : r));
+  }, [emit]);
 
   const updateValue = useCallback((id: string, raw: string) => {
-    const parsed: string | number = valueType === "number"
-      ? (raw === "" ? 0 : Number(raw))
-      : raw;
-    emit(rows.map((r) => r.id === id ? { ...r, value: parsed } : r));
-  }, [rows, emit, valueType]);
+    let parsed: string | number = raw;
+    if (valueType === "number") {
+      if (raw === "") {
+        parsed = 0;
+      } else {
+        const n = Number(raw);
+        parsed = Number.isNaN(n) ? 0 : n;
+      }
+    }
+    emit((prev) => prev.map((r) => r.id === id ? { ...r, value: parsed } : r));
+  }, [emit, valueType]);
 
   const removeRow = useCallback((id: string) => {
-    emit(rows.filter((r) => r.id !== id));
-  }, [rows, emit]);
+    emit((prev) => prev.filter((r) => r.id !== id));
+  }, [emit]);
 
   const addRow = useCallback(() => {
-    emit([...rows, { id: newRowId(), key: "", value: valueType === "number" ? 0 : "" }]);
-  }, [rows, emit, valueType]);
+    emit((prev) => [...prev, { id: newRowId(), key: "", value: valueType === "number" ? 0 : "" }]);
+  }, [emit, valueType]);
 
   const inputClass =
     "px-2.5 py-1.5 rounded-lg border border-border-subtle bg-main text-xs font-mono outline-none focus:border-brand transition-colors";
