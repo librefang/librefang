@@ -1174,6 +1174,9 @@ async function del<T>(path: string): Promise<T> {
   if (!response.ok) {
     throw await parseError(response);
   }
+  if (response.status === 204) {
+    return { status: "ok" } as T;
+  }
   return (await response.json()) as T;
 }
 
