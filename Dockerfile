@@ -9,7 +9,12 @@ FROM node:20.18.1-alpine AS dashboard-builder
 WORKDIR /build
 COPY crates/librefang-api/dashboard ./dashboard
 WORKDIR /build/dashboard
+# `corepack enable` alone hits `fetchLatestStableVersion2` against the npm
+# registry, which has flaked on us during builds. Activate the pinned pnpm
+# version (matches the `packageManager` field in package.json) directly so
+# the build never has to ask the registry "what's the latest stable?".
 RUN corepack enable \
+    && corepack prepare pnpm@10.33.0 --activate \
     && pnpm install --frozen-lockfile --ignore-scripts \
     && pnpm run build
 
