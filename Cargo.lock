@@ -4460,6 +4460,7 @@ dependencies = [
  "librefang-kernel-router",
  "librefang-llm-driver",
  "librefang-memory",
+ "librefang-memory-wiki",
  "librefang-runtime",
  "librefang-skills",
  "librefang-testing",
@@ -4593,6 +4594,22 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "librefang-memory-wiki"
+version = "2026.5.2-beta8"
+dependencies = [
+ "chrono",
+ "librefang-kernel-handle",
+ "librefang-types",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

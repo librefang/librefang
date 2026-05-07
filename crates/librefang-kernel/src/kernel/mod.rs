@@ -778,6 +778,10 @@ pub struct LibreFangKernel {
     pub(crate) scheduler: AgentScheduler,
     /// Memory substrate.
     pub(crate) memory: Arc<MemorySubstrate>,
+    /// Memory wiki vault (issue #3329). `None` when `[memory_wiki] enabled
+    /// = false`, in which case the `WikiAccess` trait methods short-circuit
+    /// to `KernelOpError::unavailable("wiki")`.
+    pub(crate) wiki_vault: Option<Arc<librefang_memory_wiki::WikiVault>>,
     /// Proactive memory store (mem0-style auto_retrieve/auto_memorize).
     pub(crate) proactive_memory: OnceLock<Arc<librefang_memory::ProactiveMemoryStore>>,
     /// Concrete handle to the LLM-backed memory extractor used by
@@ -3904,6 +3908,28 @@ impl LibreFangKernel {
             None => config.data_dir.join("audit.anchor"),
         };
         let hooks_dir = config.home_dir.join("hooks");
+        // Optional memory-wiki vault (issue #3329). Off by default; only
+        // constructed when the operator has flipped `[memory_wiki] enabled
+        // = true`. A construction failure (e.g. unwritable vault path)
+        // logs a warning and disables the vault for this boot — it must
+        // not abort the kernel because the rest of the daemon is
+        // independent of the wiki feature.
+        let wiki_vault: Option<Arc<librefang_memory_wiki::WikiVault>> =
+            if config.memory_wiki.enabled {
+                match librefang_memory_wiki::WikiVault::new(&config.memory_wiki, &config.home_dir) {
+                    Ok(v) => Some(Arc::new(v)),
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "[memory_wiki] enabled but vault construction failed; \
+                             wiki tools will return KernelOpError::unavailable"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
         // Snapshot the initial taint rule registry into a shared
         // `Arc<ArcSwap<...>>`. This swap is the single source of truth read
         // by every connected MCP server's scanner — `Self::reload_config`
@@ -3954,6 +3980,7 @@ impl LibreFangKernel {
             session_stream_hub: Arc::new(crate::session_stream_hub::SessionStreamHub::new()),
             scheduler: AgentScheduler::new(),
             memory: memory.clone(),
+            wiki_vault: wiki_vault.clone(),
             proactive_memory: OnceLock::new(),
             proactive_memory_extractor: OnceLock::new(),
             prompt_store: OnceLock::new(),
@@ -12394,13 +12421,24 @@ system_prompt = "You are a helpful assistant."
         let old_cfg = self.config.load();
         use crate::config_reload::{should_apply_hot, validate_config_for_reload};
 
-        // Read and parse config file (using load_config to process $include directives)
+        // Read and parse the on-disk config via the strict loader (#4664).
+        // Unlike `crate::config::load_config`, `try_load_config` returns `Err`
+        // on every failure mode (TOML syntax error, broken `include = [...]`
+        // chain, migration failure, deserialize-shape mismatch) instead of
+        // silently falling back to `KernelConfig::default()`. Without this,
+        // the diff-and-apply path below would treat the defaults as the
+        // operator's intent and wipe out their `default_model`,
+        // `provider_api_keys`, channels, etc. — the symptom the bug report
+        // describes (a duplicate `[web.searxng]` key in `config.toml` made
+        // the dashboard stop loading after the next 30 s reload tick).
+        //
+        // Surfacing `Err` here lets the watcher's
+        // `Err(e) => tracing::warn!("Config hot-reload failed: {e}")` branch
+        // fire and the `POST /api/config/reload` handler return 400, both
+        // without touching the live config.
         let config_path = self.home_dir_boot.join("config.toml");
-        let mut new_config = if config_path.exists() {
-            crate::config::load_config(Some(&config_path))
-        } else {
-            return Err("Config file not found".to_string());
-        };
+        let mut new_config = crate::config::try_load_config(&config_path)
+            .map_err(|e| format!("Config reload failed; live config unchanged: {e}"))?;
 
         // Clamp bounds on the new config before validating or applying.
         // Initial boot calls clamp_bounds() at kernel construction time,
@@ -12409,9 +12447,17 @@ system_prompt = "You are a helpful assistant."
         // startup path normally corrects.
         new_config.clamp_bounds();
 
-        // Validate new config
+        // Validate new config. Use the same `live config unchanged` wrapper as
+        // the strict-loader path so every reload-rejection error carries the
+        // operator-actionable pledge — both for log readability and so the
+        // integration helper `assert_reload_rejects_and_preserves_default_model`
+        // (api crate) can assert reload-boundary semantics with one substring
+        // regardless of which inner branch tripped.
         if let Err(errors) = validate_config_for_reload(&new_config) {
-            return Err(format!("Validation failed: {}", errors.join("; ")));
+            return Err(format!(
+                "Config reload failed; live config unchanged: validation: {}",
+                errors.join("; ")
+            ));
         }
 
         // Build the reload plan against the live capability set so changes
@@ -18776,6 +18822,79 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         }
         let user_id = self.auth.resolve_user(sender_id, channel)?;
         self.auth.memory_acl_for(user_id)
+    }
+}
+
+impl kernel_handle::WikiAccess for LibreFangKernel {
+    fn wiki_get(&self, topic: &str) -> Result<serde_json::Value, kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
+        let vault = self
+            .wiki_vault
+            .as_ref()
+            .ok_or_else(|| KernelOpError::unavailable("wiki_get"))?;
+        match vault.get(topic) {
+            Ok(page) => serde_json::to_value(&page)
+                .map_err(|e| KernelOpError::Internal(format!("Wiki get serialize: {e}"))),
+            Err(librefang_memory_wiki::WikiError::NotFound(_)) => Err(KernelOpError::Internal(
+                format!("wiki topic `{topic}` not found"),
+            )),
+            Err(err) => Err(KernelOpError::Internal(format!("Wiki get failed: {err}"))),
+        }
+    }
+
+    fn wiki_search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<serde_json::Value, kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
+        let vault = self
+            .wiki_vault
+            .as_ref()
+            .ok_or_else(|| KernelOpError::unavailable("wiki_search"))?;
+        let hits = vault
+            .search(query, limit)
+            .map_err(|e| KernelOpError::Internal(format!("Wiki search failed: {e}")))?;
+        serde_json::to_value(&hits)
+            .map_err(|e| KernelOpError::Internal(format!("Wiki search serialize: {e}")))
+    }
+
+    fn wiki_write(
+        &self,
+        topic: &str,
+        body: &str,
+        provenance: serde_json::Value,
+        force: bool,
+    ) -> Result<serde_json::Value, kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
+        let vault = self
+            .wiki_vault
+            .as_ref()
+            .ok_or_else(|| KernelOpError::unavailable("wiki_write"))?;
+        let prov: librefang_memory_wiki::ProvenanceEntry = serde_json::from_value(provenance)
+            .map_err(|e| {
+                KernelOpError::InvalidInput(format!(
+                    "wiki_write `provenance` must be {{agent, [session], [channel], [turn], at}}: {e}"
+                ))
+            })?;
+        match vault.write(topic, body, prov, force) {
+            Ok(outcome) => serde_json::to_value(&outcome)
+                .map_err(|e| KernelOpError::Internal(format!("Wiki write serialize: {e}"))),
+            Err(librefang_memory_wiki::WikiError::HandEditConflict { topic }) => {
+                Err(KernelOpError::Internal(format!(
+                    "wiki page `{topic}` was edited externally; re-read the file or pass force=true"
+                )))
+            }
+            Err(librefang_memory_wiki::WikiError::InvalidTopic { topic, reason }) => Err(
+                KernelOpError::InvalidInput(format!("wiki_write topic `{topic}`: {reason}")),
+            ),
+            Err(librefang_memory_wiki::WikiError::BodyTooLarge { topic, size, cap }) => {
+                Err(KernelOpError::InvalidInput(format!(
+                    "wiki_write body for `{topic}` is {size} bytes; exceeds the {cap}-byte cap"
+                )))
+            }
+            Err(err) => Err(KernelOpError::Internal(format!("Wiki write failed: {err}"))),
+        }
     }
 }
 

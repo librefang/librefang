@@ -1283,6 +1283,8 @@ mod tests {
         }
     }
 
+    impl librefang_kernel_handle::WikiAccess for RecordingKernel {}
+
     #[async_trait::async_trait]
     impl librefang_kernel_handle::TaskQueue for RecordingKernel {
         async fn task_post(
