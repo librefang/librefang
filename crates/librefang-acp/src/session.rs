@@ -132,6 +132,35 @@ impl SessionStore {
             None => false,
         }
     }
+
+    /// Empty the store, returning every `(acp_id, librefang_session_id)`
+    /// pair that was active. Used by `run_with_transport`'s cleanup
+    /// path: when the JSON-RPC loop ends without `session/close` for
+    /// every session (editor crash, network drop, kill -9), we still
+    /// need to unregister the per-session `fs/*` and `terminal/*`
+    /// clients in the kernel registry. Otherwise a subsequent
+    /// `register_session_fs` against a recycled `SessionId` would land
+    /// alongside the dead handle and tool calls would race against a
+    /// closed transport for `FS_RPC_TIMEOUT` (60s) before falling
+    /// back. Returning the LibreFang ids — not just the ACP ids —
+    /// lets the caller drive `unregister_session_fs` /
+    /// `unregister_session_terminal` directly without re-looking-up
+    /// each entry.
+    pub(crate) fn drain_active(&self) -> Vec<(AcpSessionId, LfSessionId)> {
+        let mut out = Vec::with_capacity(self.inner.len());
+        // `DashMap` doesn't expose `drain`; we iterate keys, then
+        // remove each. The shard locking is per-key so no deadlock
+        // hazard with concurrent handlers — by the time `drain_active`
+        // runs the connection is dead and no handler closure will
+        // observe the store again.
+        let keys: Vec<AcpSessionId> = self.inner.iter().map(|e| e.key().clone()).collect();
+        for k in keys {
+            if let Some((id, state)) = self.inner.remove(&k) {
+                out.push((id, state.librefang_session_id));
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]

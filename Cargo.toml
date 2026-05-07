@@ -124,8 +124,13 @@ rmcp = { version = "1.5", default-features = false, features = ["client", "trans
 # ACP (Agent Client Protocol) SDK — official Zed-maintained crates for IDE integration (#3313)
 # `unstable` enables session/{resume,close,fork,list-additional-directories}, message-id, session-usage,
 # and auth-method extensions so our agent surface matches what Zed publishes downstream.
-agent-client-protocol = { version = "0.11", features = ["unstable"] }
-agent-client-protocol-tokio = "0.11"
+#
+# Pinned exactly (`=`-prefix). The `unstable` feature is explicitly
+# marked breaking by upstream, so a caret bump (0.11.x) could change
+# wire-format expectations between minor releases without warning.
+# Bumping this pin is an explicit, reviewed change.
+agent-client-protocol = { version = "=0.11.1", features = ["unstable"] }
+agent-client-protocol-tokio = "=0.11.1"
 tokio-util = { version = "0.7", features = ["compat"] }
 
 # WebSocket client (for Discord/Slack gateway)

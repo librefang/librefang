@@ -192,6 +192,20 @@ mini = [
 rustix = { version = "1.1", features = ["process"] }
 libc = "0.2"
 
+# Windows-only: SDDL → SECURITY_DESCRIPTOR for the ACP named-pipe
+# listener (#3313). Restricts the pipe DACL to the daemon's owner SID
+# so other local users can't connect. The features list is the minimum
+# needed for `ConvertStringSecurityDescriptorToSecurityDescriptorW` +
+# `SECURITY_ATTRIBUTES` + `LocalFree`. windows-sys is already in the
+# dependency tree transitively (tokio uses it on Windows), so adding
+# it as a direct dep is essentially free.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 uuid = { workspace = true }

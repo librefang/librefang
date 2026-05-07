@@ -33,8 +33,17 @@ pub fn run_acp_server(config: Option<PathBuf>, agent: Option<String>) {
     // across every concurrent `librefang acp` client, so editor tabs
     // see a consistent agent state. Unix uses a UDS, Windows uses a
     // named pipe.
+    //
+    // We log which mode we picked to stderr so the user can tell which
+    // kernel is backing this invocation. This matters because in-process
+    // and daemon-attached have *different* `allow_always` caches: an
+    // approval the user remembered in an earlier in-process run does
+    // NOT carry over once the daemon comes up, and vice-versa. Without
+    // this hint, "why did my agent forget I approved this tool?" is an
+    // unfindable bug. (#3313 review, M2)
     #[cfg(unix)]
     if let Some(sock) = locate_acp_socket() {
+        eprintln!("librefang acp: attached to daemon (UDS {})", sock.display());
         let exit_code = run_uds_proxy(&sock);
         if exit_code != 0 {
             std::process::exit(exit_code);
@@ -43,12 +52,14 @@ pub fn run_acp_server(config: Option<PathBuf>, agent: Option<String>) {
     }
     #[cfg(windows)]
     if super::find_daemon().is_some() {
+        eprintln!("librefang acp: attached to daemon (named pipe)");
         let exit_code = run_pipe_proxy();
         if exit_code != 0 {
             std::process::exit(exit_code);
         }
         return;
     }
+    eprintln!("librefang acp: in-process kernel (no daemon detected)");
 
     let kernel = match LibreFangKernel::boot(config.as_deref()) {
         Ok(k) => Arc::new(k),

@@ -1693,9 +1693,14 @@ impl LibreFangKernel {
             process_manager: Some(&self.process_manager),
             sender_id: deferred.sender_id.as_deref(),
             channel: deferred.channel.as_deref(),
-            // Deferred resume path doesn't carry the session id today;
-            // ACP routing falls back to local fs.
-            session_id: None,
+            // Restore the originating SessionId from v36's persisted
+            // `deferred_payload` so a post-restart `Allow once` resumes
+            // through the *original* editor's `acp_fs_client` /
+            // `acp_terminal_client` rather than silently falling back
+            // to local fs / shell. `None` for deferred rows written
+            // before this field existed (pre-#3313 H1) — those still
+            // resume, just without ACP routing.
+            session_id: deferred.session_id,
             spill_threshold_bytes: cfg.tool_results.spill_threshold_bytes,
             max_artifact_bytes: cfg.tool_results.max_artifact_bytes,
             checkpoint_manager: self.checkpoint_manager.as_ref(),

@@ -256,6 +256,17 @@ impl ApprovalManager {
             // (corruption, schema mismatch) log a warning and degrade
             // to no-resume so a single bad row doesn't lock everyone
             // else out.
+            //
+            // SECURITY (#3313 review, H3): integrity-check the decoded
+            // payload against the row's *separate* `agent_id` and
+            // `tool_name` columns before trusting it. The sqlite file
+            // sits on disk at the daemon's user perms; a local writer
+            // could swap `tool_name` from `file_read` to `shell_exec`
+            // (or change `agent_id` to a different victim agent) and
+            // the kernel would auto-fire the tampered tool on next
+            // `Allow once`. On mismatch we drop the deferred slot —
+            // the pending request still surfaces in the UI for an
+            // operator to investigate, but no auto-resume happens.
             let deferred = deferred_blob.and_then(|bytes| {
                 serde_json::from_slice::<DeferredToolExecution>(&bytes)
                     .map_err(|e| {
@@ -266,6 +277,27 @@ impl ApprovalManager {
                         );
                     })
                     .ok()
+                    .and_then(|d| {
+                        if d.agent_id != request.agent_id {
+                            warn!(
+                                request_id = %id,
+                                row_agent = %request.agent_id,
+                                payload_agent = %d.agent_id,
+                                "Deferred payload agent_id mismatches row column — refusing auto-resume"
+                            );
+                            return None;
+                        }
+                        if d.tool_name != request.tool_name {
+                            warn!(
+                                request_id = %id,
+                                row_tool = %request.tool_name,
+                                payload_tool = %d.tool_name,
+                                "Deferred payload tool_name mismatches row column — refusing auto-resume"
+                            );
+                            return None;
+                        }
+                        Some(d)
+                    })
             });
             info!(
                 request_id = %id,
@@ -2374,6 +2406,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
 
         let result = mgr.submit_request(req, deferred);
@@ -2404,6 +2437,7 @@ mod tests {
             channel: Some("telegram".to_string()),
             workspace_root: Some(std::path::PathBuf::from("/tmp")),
             force_human: false,
+            session_id: None,
         };
 
         let id = mgr.submit_request(req, deferred.clone()).unwrap();
@@ -2446,6 +2480,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
 
         let id = mgr.submit_request(req, deferred.clone()).unwrap();
@@ -2486,6 +2521,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
         mgr.submit_request(req, deferred).unwrap();
         mgr.pending.get_mut(&id).unwrap().submitted_at = Utc::now() - chrono::Duration::seconds(5);
@@ -2520,6 +2556,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
         mgr.submit_request(req, deferred).unwrap();
 
@@ -2558,6 +2595,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
 
         let id1 = mgr.submit_request(req1, deferred1).unwrap();
@@ -2576,6 +2614,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
 
         let result = mgr.submit_request(req2, deferred2);
@@ -2602,6 +2641,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
         let id1 = mgr.submit_request(req1, deferred1).unwrap();
 
@@ -2618,6 +2658,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
 
         let id2 = mgr.submit_request(req2, deferred2).unwrap();
@@ -2646,6 +2687,7 @@ mod tests {
                 channel: None,
                 workspace_root: None,
                 force_human: false,
+                session_id: None,
             };
             let id = mgr.submit_request(req, deferred).unwrap();
             ids.push(id);
@@ -2665,6 +2707,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
         let result = mgr.submit_request(req, deferred);
         assert!(result.is_err());
@@ -2684,6 +2727,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
         let result = mgr.submit_request(req, deferred);
         assert!(result.is_ok());
@@ -2717,6 +2761,7 @@ mod tests {
                     channel: None,
                     workspace_root: None,
                     force_human: false,
+                    session_id: None,
                 }),
                 submitted_at: Utc::now() - chrono::Duration::seconds(120),
             },
@@ -2759,6 +2804,7 @@ mod tests {
                     channel: None,
                     workspace_root: None,
                     force_human: false,
+                    session_id: None,
                 }),
                 submitted_at: Utc::now() - chrono::Duration::seconds(120),
             },
@@ -3424,6 +3470,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
 
         let req1 = make_session_request("agent-1", "sess-dedup");
@@ -3448,6 +3495,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
         let req3 = make_session_request("agent-1", "sess-dedup");
         let id3 = mgr.submit_request(req3, deferred2).unwrap();
@@ -3476,6 +3524,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
         let req = make_session_request("agent-3611", "sess-3611");
         let request_id = mgr.submit_request(req, deferred).unwrap();
@@ -3845,6 +3894,194 @@ mod tests {
         patterns
             .iter()
             .any(|p| oracle_pattern_matches(p, tool_name))
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-restart deferred-execution restore (#3313 review, PR-2)
+    //
+    // The headline persistence promise of v36 (`pending_approvals.deferred_payload`)
+    // is that a daemon dying mid-approval can come back and resume the deferred
+    // tool when the operator clicks "Allow once". This test exercises exactly
+    // that round-trip: write through one ApprovalManager, drop it, build a fresh
+    // ApprovalManager backed by the same sqlite pool, then resolve the restored
+    // entry and assert the deferred payload comes back byte-equivalent — proving
+    // both that v36 serialization is round-trip safe AND that the v36 H1 fix
+    // (session_id threaded through the BLOB) survives the restart.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn deferred_payload_survives_manager_drop_and_resume() {
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            librefang_memory::migration::run_migrations(&conn).unwrap();
+        }
+
+        let req = make_request("agent-restart", "shell_exec", 300);
+        let request_id = req.id;
+        let original_session_id = librefang_types::agent::SessionId(uuid::Uuid::new_v4());
+        let deferred = DeferredToolExecution {
+            agent_id: "agent-restart".to_string(),
+            tool_use_id: "tool-restart-1".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"command": "echo restart-survived"}),
+            allowed_tools: Some(vec!["shell_exec".to_string()]),
+            allowed_env_vars: Some(vec!["PATH".to_string()]),
+            exec_policy: Some(librefang_types::config::ExecPolicy {
+                mode: librefang_types::config::ExecSecurityMode::Full,
+                ..Default::default()
+            }),
+            sender_id: Some("operator-7".to_string()),
+            channel: Some("acp".to_string()),
+            workspace_root: Some(std::path::PathBuf::from("/tmp/restart-test")),
+            force_human: false,
+            session_id: Some(original_session_id),
+        };
+
+        // 1. Pre-restart: submit + persist via the first ApprovalManager.
+        {
+            let mgr = ApprovalManager::new_with_db(ApprovalPolicy::default(), pool.clone());
+            let returned_id = mgr.submit_request(req, deferred.clone()).unwrap();
+            assert_eq!(
+                returned_id, request_id,
+                "submit_request should preserve the request id"
+            );
+            // Drop mgr at end of scope; pool stays alive (in-memory sqlite
+            // would otherwise be wiped because the single connection is
+            // pinned to that DB instance).
+        }
+
+        // 2. Post-restart: a fresh ApprovalManager backed by the same pool
+        //    must restore the pending entry from sqlite (#3611) AND decode
+        //    the v36 deferred_payload BLOB into the original payload (#3313).
+        let mgr2 = ApprovalManager::new_with_db(ApprovalPolicy::default(), pool.clone());
+        let pending = mgr2.list_pending();
+        assert_eq!(pending.len(), 1, "exactly one pending row must restore");
+        assert_eq!(pending[0].id, request_id);
+        assert_eq!(pending[0].agent_id, "agent-restart");
+        assert_eq!(pending[0].tool_name, "shell_exec");
+
+        // 3. Approve and assert the deferred payload is returned with all
+        //    fields intact — including session_id, the H1-critical
+        //    plumbing for editor-bound resume.
+        let (response, restored_deferred) = mgr2
+            .resolve(
+                request_id,
+                ApprovalDecision::Approved,
+                Some("operator-7".to_string()),
+                false,
+                None,
+            )
+            .expect("resolve must succeed against restored entry");
+        assert_eq!(response.decision, ApprovalDecision::Approved);
+        let restored = restored_deferred
+            .expect("v36 deferred_payload must round-trip through sqlite — H1 critical");
+        assert_eq!(restored.agent_id, deferred.agent_id);
+        assert_eq!(restored.tool_use_id, deferred.tool_use_id);
+        assert_eq!(restored.tool_name, deferred.tool_name);
+        assert_eq!(restored.input, deferred.input);
+        assert_eq!(restored.allowed_tools, deferred.allowed_tools);
+        assert_eq!(restored.allowed_env_vars, deferred.allowed_env_vars);
+        assert_eq!(
+            restored.exec_policy.as_ref().map(|p| p.mode),
+            deferred.exec_policy.as_ref().map(|p| p.mode)
+        );
+        assert_eq!(restored.sender_id, deferred.sender_id);
+        assert_eq!(restored.channel, deferred.channel);
+        assert_eq!(restored.workspace_root, deferred.workspace_root);
+        assert_eq!(restored.force_human, deferred.force_human);
+        // The H1 invariant: the SessionId persisted into deferred_payload
+        // must come back. Without this, a post-restart resume would
+        // silently fall back to local-fs / local-shell instead of routing
+        // through the editor's `acp_fs_client` / `acp_terminal_client`.
+        assert_eq!(
+            restored.session_id,
+            Some(original_session_id),
+            "session_id must round-trip through v36 deferred_payload (#3313 H1)"
+        );
+    }
+
+    /// Companion to the round-trip test above: when the persisted blob's
+    /// `tool_name` (or `agent_id`) disagrees with the row column, we MUST
+    /// drop the deferred slot rather than auto-fire the tampered tool.
+    /// Forge a row directly and verify the integrity check (#3313 H3).
+    #[tokio::test]
+    async fn deferred_payload_with_tampered_tool_name_is_dropped_on_restore() {
+        use rusqlite::params;
+
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            librefang_memory::migration::run_migrations(&conn).unwrap();
+        }
+
+        // Forge a pending_approvals row whose row.tool_name is `file_read`
+        // but whose deferred_payload claims `tool_name = "shell_exec"`.
+        // A naïve restore would use the BLOB, fire shell_exec on Allow,
+        // and bypass the row-level audit signal that recorded the call
+        // as `file_read`. The integrity check must drop the deferred.
+        let req_id = uuid::Uuid::new_v4();
+        let tampered = DeferredToolExecution {
+            agent_id: "agent-X".to_string(),
+            tool_use_id: "tool-tampered".to_string(),
+            // *** mismatch *** — row says file_read.
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"command": "rm -rf /"}),
+            allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+            force_human: false,
+            session_id: None,
+        };
+        let blob = serde_json::to_vec(&tampered).unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO pending_approvals \
+                 (id, agent_id, session_id, tool_name, tool_input, created_at, tool_use_id, deferred_payload) \
+                 VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    req_id.to_string(),
+                    "agent-X",
+                    "file_read", // row column
+                    "{}",
+                    chrono::Utc::now().timestamp(),
+                    "tool-tampered",
+                    blob,
+                ],
+            )
+            .expect("seed tampered row");
+        }
+
+        let mgr = ApprovalManager::new_with_db(ApprovalPolicy::default(), pool);
+        let pending = mgr.list_pending();
+        assert_eq!(
+            pending.len(),
+            1,
+            "row must still surface for operator triage"
+        );
+
+        // Resolve as Approved — the deferred slot must be `None` because
+        // the integrity check refused the tampered payload, even though
+        // the operator clicked allow. Without this guard, an attacker
+        // who can write to the sqlite file rewrites tool_name and gains
+        // a one-click foothold on operator approval.
+        let (_resp, returned_deferred) = mgr
+            .resolve(req_id, ApprovalDecision::Approved, None, false, None)
+            .expect("resolve must still succeed — only the deferred is dropped");
+        assert!(
+            returned_deferred.is_none(),
+            "tampered deferred payload must NOT auto-fire on resume"
+        );
     }
 
     mod prop {

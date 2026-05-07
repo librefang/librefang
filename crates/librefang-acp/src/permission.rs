@@ -125,20 +125,45 @@ async fn dispatch_pending<K: AcpKernel>(
             .title(title)
             .kind(infer_tool_kind(&approval.tool_name)),
     );
-    let options = vec![
-        PermissionOption::new("allow_once", "Allow once", PermissionOptionKind::AllowOnce),
-        PermissionOption::new(
+    // Build the permission modal's option set.
+    //
+    // SECURITY (#3313 review, H2): the in-memory `remembered` cache in
+    // `ApprovalManager::remember` is keyed on `(agent_id, tool_name)`
+    // *only* — it does NOT bind to args. One click on "Allow always"
+    // for `shell_exec` therefore grants the agent a permanent shell
+    // key for every future `shell_exec` call regardless of command,
+    // which is approximately never what an editor user expects from
+    // a per-call permission modal.
+    //
+    // Until the cache key is widened to include a canonical args
+    // hash, suppress `Allow always` for the high-risk tool set so
+    // the only way to grant blanket access is via the dashboard /
+    // config (where the implications are visible up front).
+    // `Deny always` is preserved on every tool — denying forever is
+    // safe, only the *allow* side is the foot-gun.
+    let high_risk = is_high_risk_tool(&approval.tool_name);
+    let mut options = vec![PermissionOption::new(
+        "allow_once",
+        "Allow once",
+        PermissionOptionKind::AllowOnce,
+    )];
+    if !high_risk {
+        options.push(PermissionOption::new(
             "allow_always",
             "Allow always",
             PermissionOptionKind::AllowAlways,
-        ),
-        PermissionOption::new("reject_once", "Deny", PermissionOptionKind::RejectOnce),
-        PermissionOption::new(
-            "reject_always",
-            "Deny always",
-            PermissionOptionKind::RejectAlways,
-        ),
-    ];
+        ));
+    }
+    options.push(PermissionOption::new(
+        "reject_once",
+        "Deny",
+        PermissionOptionKind::RejectOnce,
+    ));
+    options.push(PermissionOption::new(
+        "reject_always",
+        "Deny always",
+        PermissionOptionKind::RejectAlways,
+    ));
 
     let perm_req = RequestPermissionRequest::new(acp_id, tool_call, options);
     let sent = cx.send_request(perm_req);
@@ -237,6 +262,22 @@ fn decision_from_outcome(outcome: RequestPermissionOutcome) -> (ApprovalDecision
             (ApprovalDecision::Denied, false)
         }
     }
+}
+
+/// Tools where a one-click "Allow always" would grant the agent
+/// outsized blast radius given the current `(agent, tool_name)`-only
+/// cache key in `ApprovalManager::remember` (#3313 review, H2). The
+/// permission modal hides `Allow always` for these — operators that
+/// genuinely want blanket allow can still set the policy via the
+/// dashboard / `agent.toml`, where the scope of what they're doing
+/// is visible up front. The low-risk default tool set keeps the
+/// "Allow always" UX so casual cases (one approved `file_read` per
+/// project) still get the friction reduction.
+fn is_high_risk_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "shell_exec" | "file_write" | "file_delete" | "apply_patch"
+    ) || tool.starts_with("skill_evolve_")
 }
 
 #[cfg(test)]

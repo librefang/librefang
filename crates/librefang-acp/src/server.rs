@@ -63,6 +63,16 @@ where
     let kernel_for_close = Arc::clone(&kernel);
     let kernel_for_perm = Arc::clone(&kernel);
     let kernel_for_prompt = Arc::clone(&kernel);
+    // Reserved for the post-loop cleanup path. The runner-level drop
+    // guard below uses these to unregister any sessions that didn't
+    // get an explicit `session/close` (editor crash, network drop,
+    // kill -9). Without this, `kernel.acp_fs_clients` /
+    // `acp_terminal_clients` would leak `Arc<dyn AcpFsClient>`
+    // entries forever — and a subsequent `register_session_fs` for
+    // the same deterministic SessionId would silently displace the
+    // dead handle while every tool call timed out against the
+    // closed transport for `FS_RPC_TIMEOUT` (60s).
+    let kernel_for_cleanup = Arc::clone(&kernel);
     let sessions_for_new = Arc::clone(&sessions);
     let sessions_for_load = Arc::clone(&sessions);
     let sessions_for_resume = Arc::clone(&sessions);
@@ -71,8 +81,9 @@ where
     let sessions_for_prompt = Arc::clone(&sessions);
     let sessions_for_cancel = Arc::clone(&sessions);
     let sessions_for_perm = Arc::clone(&sessions);
+    let sessions_for_cleanup = Arc::clone(&sessions);
 
-    Agent
+    let outcome = Agent
         .builder()
         .name("librefang")
         // initialize ----------------------------------------------------
@@ -138,12 +149,14 @@ where
             agent_client_protocol::on_receive_request!(),
         )
         // session/load --------------------------------------------------
-        // Phase 1 doesn't persist session history across `librefang acp`
-        // invocations, so loading is a no-op on history but does honour
-        // the client-supplied session id so multi-tab editors can
-        // reconnect with a stable id within one process. A real history
-        // replay (including past `session/update` notifications) is
-        // tracked separately under #3313 phase 2.
+        // Replay text turns of the persisted session as
+        // `session/update` notifications so the editor's chat panel
+        // rehydrates immediately on reconnect. Capped at the most
+        // recent `MAX_REPLAY_TURNS` entries (see below). Tool-call
+        // detail (input/output/status flips) is *not* replayed today
+        // — the goal here is conversational context, not exact wire
+        // reconstruction. Multimodal blocks degrade to text
+        // placeholders identical to the live-prompt path.
         .on_receive_request(
             async move |req: LoadSessionRequest, responder, cx: agent_client_protocol::ConnectionTo<Client>| {
                 let state = SessionState::for_acp_id(&req.session_id, req.cwd);
@@ -262,8 +275,30 @@ where
             permission::run_bridge(kernel, sessions, cx).await
         })
         .connect_to(transport)
-        .await?;
+        .await;
 
+    // Drop-guard cleanup. Whether `connect_to` finished cleanly,
+    // hit a transport error, or the editor crashed mid-prompt, every
+    // session this connection registered must release its kernel-side
+    // `fs/*` and `terminal/*` client handles — otherwise the next
+    // `register_session_fs` for the same deterministic LibreFang
+    // SessionId would land alongside a dead handle and runtime tools
+    // would block on a closed transport for `FS_RPC_TIMEOUT` (60s)
+    // before falling back. Idempotent for sessions already torn
+    // down via `session/close`.
+    let leftover = sessions_for_cleanup.drain_active();
+    if !leftover.is_empty() {
+        debug!(
+            count = leftover.len(),
+            "ACP run_with_transport: cleaning up sessions without explicit session/close"
+        );
+    }
+    for (_acp_id, lf_id) in leftover {
+        kernel_for_cleanup.unregister_session_fs(lf_id);
+        kernel_for_cleanup.unregister_session_terminal(lf_id);
+    }
+
+    outcome?;
     Ok(())
 }
 

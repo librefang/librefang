@@ -19,17 +19,19 @@
 //!   `name → FIFO of in-progress tool_call_ids` and pops the front on
 //!   each result. This matches hermes's approach (see `acp_adapter/events.py`).
 //!
-//!   **Known limitation:** the FIFO is correct when same-named parallel
-//!   calls complete in start order. When they complete out of order —
-//!   e.g. `start fetch A; start fetch B; B completes first; A completes
-//!   second` — the first result will be misattributed to call `A` and
-//!   the second to call `B`. Fixing this requires the runtime's
-//!   `StreamEvent::ToolExecutionResult` to carry the originating
-//!   tool-use id (cross-crate change, tracked as a follow-up). Until
-//!   then, editor UIs may show the wrong tool's status flipping for
-//!   parallel same-named invocations. The misattribution is purely
-//!   cosmetic — it does not affect what tools execute or what the
-//!   agent sees.
+//!   **Known limitation:** when multiple same-named calls are in
+//!   flight and complete out of start-order, the FIFO pop attributes
+//!   the first finished result to the first started call regardless
+//!   of which one actually finished. The proper fix lives in
+//!   `librefang-runtime`'s `StreamEvent::ToolExecutionResult` — it
+//!   needs to carry the originating tool-use id (cross-crate change,
+//!   tracked as a follow-up). Until that lands, the pump prepends a
+//!   disambiguation note to the result content whenever ≥2 calls are
+//!   in flight for the same name (#3313 review, PR-3). The editor
+//!   user sees the wire-level attribution may be a guess and can
+//!   verify against tool input args before relying on it. The
+//!   misattribution still doesn't affect what runs or what the agent
+//!   sees — it only colours the modal-↔-card mapping in the editor.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -118,9 +120,18 @@ impl EventTranslator {
                 // Pop the oldest in-flight call for this name. If we don't
                 // have one (mismatched event ordering), fall back to a
                 // synthetic id so the update is still well-formed.
-                let tool_call_id = self
-                    .in_flight_by_name
-                    .get_mut(&name)
+                let queue = self.in_flight_by_name.get_mut(&name);
+                // Snapshot the queue depth *before* popping so we can
+                // tell whether more than one call is in flight for this
+                // tool name. When >1 are pending the FIFO pop is a
+                // best-effort guess (the runtime can't yet tell us
+                // which call this result came from — see crate-level
+                // doc for the limitation), so we annotate the wire
+                // payload to surface that ambiguity instead of
+                // confidently attributing the result to the wrong
+                // tool-call card. (#3313 review, PR-3)
+                let pending_before = queue.as_ref().map(|q| q.len()).unwrap_or(0);
+                let tool_call_id = queue
                     .and_then(|q| q.pop_front())
                     .unwrap_or_else(|| ToolCallId::new(format!("orphan-{name}")));
                 let status = if is_error {
@@ -128,10 +139,20 @@ impl EventTranslator {
                 } else {
                     ToolCallStatus::Completed
                 };
+                let payload = if pending_before > 1 {
+                    format!(
+                        "[note: {pending_before} concurrent calls to `{name}` are in flight; the runtime does \
+                         not yet correlate results back to a specific tool_use_id, so this result may be \
+                         attributed to a sibling call. Verify against the tool's input arguments before relying \
+                         on the attribution.]\n\n{result_preview}"
+                    )
+                } else {
+                    result_preview
+                };
                 vec![SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                     tool_call_id,
                     ToolCallUpdateFields::new().status(status).content(vec![
-                        ToolCallContent::from(ContentBlock::Text(TextContent::new(result_preview))),
+                        ToolCallContent::from(ContentBlock::Text(TextContent::new(payload))),
                     ]),
                 ))]
             }
@@ -289,16 +310,17 @@ mod tests {
         }
     }
 
-    /// Known limitation placeholder. The ideal contract is "result is
-    /// attributed to whichever in-flight call actually finished" — but
-    /// `StreamEvent::ToolExecutionResult` carries only `name`, not the
-    /// LLM-assigned id, so out-of-order completion misattributes. This
-    /// test pins the desired behaviour for the day the runtime adds
-    /// `id` to the result event; until then it stays `#[ignore]` so CI
-    /// stays green while the limitation is documented in code.
+    /// Without `ToolExecutionResult.id` from the runtime we cannot
+    /// correlate the result back to a specific tool_use_id when
+    /// multiple parallel same-named calls are in flight (see
+    /// crate-level docs). PR-3 (#3313 review) takes the
+    /// best-available middle ground: the result still ends up on the
+    /// front-of-queue card (so the FIFO test above still passes),
+    /// but the wire payload carries a disambiguation note when two
+    /// or more calls are pending so the editor user knows the
+    /// attribution is a guess.
     #[test]
-    #[ignore = "needs ToolExecutionResult.id from runtime — see crate-level docs"]
-    fn parallel_same_named_out_of_order_completion_correctly_attributes() {
+    fn parallel_same_named_first_result_carries_ambiguity_note() {
         let mut t = EventTranslator::new();
         let _ = t.translate(StreamEvent::ToolUseStart {
             id: "a".into(),
@@ -308,16 +330,57 @@ mod tests {
             id: "b".into(),
             name: "fetch".into(),
         });
-        // B completes before A — current impl will misattribute this
-        // result to "a" because the FIFO pops front. The ideal contract
-        // is to attribute by id, which this assertion encodes.
         let r1 = t.translate(StreamEvent::ToolExecutionResult {
             name: "fetch".into(),
-            result_preview: "B finished first".into(),
+            result_preview: "the body".into(),
             is_error: false,
         });
+        // 2 pending before pop — the result carries the
+        // disambiguation note prepended.
         match &r1[0] {
-            SessionUpdate::ToolCallUpdate(u) => assert_eq!(u.tool_call_id.0.as_ref(), "b"),
+            SessionUpdate::ToolCallUpdate(u) => {
+                let content = u.fields.content.as_ref().expect("content set");
+                let text = match &content[0] {
+                    ToolCallContent::Content(c) => match &c.content {
+                        ContentBlock::Text(t) => t.text.clone(),
+                        _ => panic!("expected text content"),
+                    },
+                    _ => panic!("expected ToolCallContent::Content"),
+                };
+                assert!(
+                    text.contains("concurrent calls to `fetch`"),
+                    "expected ambiguity note, got: {text}"
+                );
+                assert!(
+                    text.contains("the body"),
+                    "original preview must still be present"
+                );
+            }
+            _ => panic!(),
+        }
+        // After the first pop only one is pending — second result
+        // is unambiguous, no note.
+        let r2 = t.translate(StreamEvent::ToolExecutionResult {
+            name: "fetch".into(),
+            result_preview: "second body".into(),
+            is_error: false,
+        });
+        match &r2[0] {
+            SessionUpdate::ToolCallUpdate(u) => {
+                let content = u.fields.content.as_ref().expect("content set");
+                let text = match &content[0] {
+                    ToolCallContent::Content(c) => match &c.content {
+                        ContentBlock::Text(t) => t.text.clone(),
+                        _ => panic!("expected text content"),
+                    },
+                    _ => panic!("expected ToolCallContent::Content"),
+                };
+                assert!(
+                    !text.contains("concurrent calls"),
+                    "single-pending result must not carry ambiguity note"
+                );
+                assert_eq!(text, "second body");
+            }
             _ => panic!(),
         }
     }
