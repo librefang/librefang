@@ -124,6 +124,18 @@ pub trait AcpKernel: Send + Sync + 'static {
     /// Default impl drops the handle on the floor — pure-protocol
     /// consumers (integration tests) ignore it.
     fn set_fs_client(&self, _handle: fs::FsClientHandle) {}
+
+    /// Bind the active `fs/*` client (set via [`Self::set_fs_client`])
+    /// to a LibreFang session so the runtime can dispatch through it
+    /// when handling that session's tool calls (#3313). Called once
+    /// per ACP `session/{new,load,resume}` after the LibreFang
+    /// session id has been minted. Default impl is a no-op.
+    fn register_session_fs(&self, _lf_session_id: LfSessionId) {}
+
+    /// Drop the runtime-side `fs/*` registration for the given
+    /// LibreFang session — called from `session/close` so a stale
+    /// handle can't keep firing requests onto a closed connection.
+    fn unregister_session_fs(&self, _lf_session_id: LfSessionId) {}
 }
 
 /// Convenience type alias for `Arc<dyn AcpKernel>`. Most call sites pass

@@ -19,6 +19,7 @@ kernel-adapter = ["dep:librefang-kernel"]
 [dependencies]
 librefang-types = { path = "../librefang-types" }
 librefang-llm-driver = { path = "../librefang-llm-driver" }
+librefang-kernel-handle = { path = "../librefang-kernel-handle" }
 librefang-kernel = { path = "../librefang-kernel", optional = true }
 
 agent-client-protocol = { workspace = true }

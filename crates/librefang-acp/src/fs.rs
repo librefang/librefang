@@ -33,6 +33,8 @@ use agent_client_protocol::schema::{
 };
 use agent_client_protocol::Client;
 use agent_client_protocol::ConnectionTo;
+use async_trait::async_trait;
+use librefang_kernel_handle::{AcpFsClient, KernelOpError, KernelResult};
 
 use crate::AcpError;
 
@@ -147,4 +149,59 @@ impl FsClientHandle {
             )),
         }
     }
+
+    /// ACP `SessionId` placeholder used when the caller's session id
+    /// has been folded into the `register_acp_fs_client` registration
+    /// key already (and so the ACP-side session id is no longer
+    /// available at the call site). Editors don't reuse the bytes for
+    /// anything in `fs/*` requests beyond echoing them back, so an
+    /// empty string is fine on the wire.
+    fn dummy_acp_session_id() -> agent_client_protocol::schema::SessionId {
+        agent_client_protocol::schema::SessionId::new(String::new())
+    }
+}
+
+/// Bridge into [`librefang_kernel_handle::AcpFsClient`] so the kernel
+/// can route runtime tool calls through the editor without depending
+/// on the ACP schema crate.
+///
+/// The kernel keys its registry by LibreFang `SessionId`, not by the
+/// ACP `SessionId` the editor uses on the wire — so when the kernel
+/// asks us to read a file, we don't have the editor-facing id to put
+/// in the `ReadTextFileRequest`. The protocol allows an empty session
+/// id (the request is implicitly scoped by the connection); editors
+/// echo it back without inspecting the contents.
+#[async_trait]
+impl AcpFsClient for FsClientHandle {
+    async fn read_text_file(
+        &self,
+        path: PathBuf,
+        line: Option<u32>,
+        limit: Option<u32>,
+    ) -> KernelResult<String> {
+        FsClientHandle::read_text_file(
+            self,
+            FsClientHandle::dummy_acp_session_id(),
+            path,
+            line,
+            limit,
+        )
+        .await
+        .map_err(acp_to_kernel_err)
+    }
+
+    async fn write_text_file(&self, path: PathBuf, content: String) -> KernelResult<()> {
+        FsClientHandle::write_text_file(self, FsClientHandle::dummy_acp_session_id(), path, content)
+            .await
+            .map_err(acp_to_kernel_err)
+    }
+
+    fn capabilities(&self) -> (bool, bool) {
+        let caps = FsClientHandle::capabilities(self);
+        (caps.read_text_file, caps.write_text_file)
+    }
+}
+
+fn acp_to_kernel_err(e: AcpError) -> KernelOpError {
+    KernelOpError::Internal(e.to_string())
 }

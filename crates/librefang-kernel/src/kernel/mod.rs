@@ -795,6 +795,14 @@ pub struct LibreFangKernel {
     pub(crate) cron_scheduler: crate::cron::CronScheduler,
     /// Execution approval manager.
     pub(crate) approval_manager: crate::approval::ApprovalManager,
+    /// Per-LibreFang-session ACP `fs/*` clients, populated by the ACP
+    /// adapter at `session/new` time so runtime tools can route file
+    /// reads/writes back through the editor instead of the local
+    /// filesystem (#3313).
+    pub(crate) acp_fs_clients: dashmap::DashMap<
+        librefang_types::agent::SessionId,
+        std::sync::Arc<dyn librefang_runtime::kernel_handle::AcpFsClient>,
+    >,
     /// Agent bindings for multi-account routing (Mutex for runtime add/remove).
     pub(crate) bindings: std::sync::Mutex<Vec<librefang_types::config::AgentBinding>>,
     /// Broadcast configuration.

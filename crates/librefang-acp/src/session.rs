@@ -87,10 +87,11 @@ impl SessionStore {
             .collect()
     }
 
-    /// Remove a session by id. Returns true if it existed. Used by
-    /// `session/close`.
-    pub(crate) fn remove(&self, id: &AcpSessionId) -> bool {
-        self.inner.remove(id).is_some()
+    /// Remove a session by id. Returns the removed state if it
+    /// existed so callers (`session/close`) can pull the
+    /// LibreFang session id back out for downstream cleanup.
+    pub(crate) fn remove(&self, id: &AcpSessionId) -> Option<SessionState> {
+        self.inner.remove(id).map(|(_, state)| state)
     }
 
     /// Trigger the cancel token for `id` if it exists. Returns `true`

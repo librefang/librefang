@@ -56,6 +56,10 @@ where
     // Each builder method consumes the builder, so we clone the Arcs
     // we want each handler to own up front.
     let kernel_for_init = Arc::clone(&kernel);
+    let kernel_for_new = Arc::clone(&kernel);
+    let kernel_for_load = Arc::clone(&kernel);
+    let kernel_for_resume = Arc::clone(&kernel);
+    let kernel_for_close = Arc::clone(&kernel);
     let kernel_for_perm = Arc::clone(&kernel);
     let kernel_for_prompt = Arc::clone(&kernel);
     let sessions_for_new = Arc::clone(&sessions);
@@ -115,9 +119,15 @@ where
             async move |req: NewSessionRequest, responder, _cx| {
                 let new_id = next_session_id();
                 let state = SessionState::new(req.cwd);
-                debug!(session_id = %new_id.0, librefang_id = %state.librefang_session_id.0,
+                let lf_id = state.librefang_session_id;
+                debug!(session_id = %new_id.0, librefang_id = %lf_id.0,
                        "ACP session/new");
                 sessions_for_new.insert(new_id.clone(), state);
+                // Bind the editor's `fs/*` client (set at `initialize`)
+                // to this session so runtime tools dispatched on it can
+                // route through the editor (#3313). No-op for kernels
+                // without an attached editor.
+                kernel_for_new.register_session_fs(lf_id);
                 responder.respond(NewSessionResponse::new(new_id))
             },
             agent_client_protocol::on_receive_request!(),
@@ -132,9 +142,11 @@ where
         .on_receive_request(
             async move |req: LoadSessionRequest, responder, _cx| {
                 let state = SessionState::new(req.cwd);
-                debug!(session_id = %req.session_id.0, librefang_id = %state.librefang_session_id.0,
-                       "ACP session/load (no history replay in Phase 1)");
+                let lf_id = state.librefang_session_id;
+                debug!(session_id = %req.session_id.0, librefang_id = %lf_id.0,
+                       "ACP session/load (no history replay yet)");
                 sessions_for_load.insert(req.session_id, state);
+                kernel_for_load.register_session_fs(lf_id);
                 responder.respond(LoadSessionResponse::default())
             },
             agent_client_protocol::on_receive_request!(),
@@ -146,8 +158,11 @@ where
         .on_receive_request(
             async move |req: ResumeSessionRequest, responder, _cx| {
                 let state = SessionState::new(req.cwd);
-                debug!(session_id = %req.session_id.0, "ACP session/resume");
+                let lf_id = state.librefang_session_id;
+                debug!(session_id = %req.session_id.0, librefang_id = %lf_id.0,
+                       "ACP session/resume");
                 sessions_for_resume.insert(req.session_id, state);
+                kernel_for_resume.register_session_fs(lf_id);
                 responder.respond(ResumeSessionResponse::default())
             },
             agent_client_protocol::on_receive_request!(),
@@ -175,7 +190,14 @@ where
         .on_receive_request(
             async move |req: CloseSessionRequest, responder, _cx| {
                 let removed = sessions_for_close.remove(&req.session_id);
-                debug!(session_id = %req.session_id.0, removed, "ACP session/close");
+                if let Some(state) = removed.as_ref() {
+                    kernel_for_close.unregister_session_fs(state.librefang_session_id);
+                }
+                debug!(
+                    session_id = %req.session_id.0,
+                    removed = removed.is_some(),
+                    "ACP session/close",
+                );
                 responder.respond(CloseSessionResponse::default())
             },
             agent_client_protocol::on_receive_request!(),

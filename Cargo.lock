@@ -4276,6 +4276,7 @@ dependencies = [
  "dashmap",
  "futures",
  "librefang-kernel",
+ "librefang-kernel-handle",
  "librefang-llm-driver",
  "librefang-types",
  "serde",

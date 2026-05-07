@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
-use librefang_kernel::kernel_handle::KernelHandle;
+use librefang_kernel::kernel_handle::{AcpFsBridge, KernelHandle};
 use librefang_kernel::LibreFangKernel;
 use librefang_llm_driver::StreamEvent;
 use librefang_types::agent::{AgentId, SessionId as LfSessionId};
@@ -174,5 +174,22 @@ impl AcpKernel for KernelAdapter {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *guard = Some(handle);
+    }
+
+    fn register_session_fs(&self, lf_session_id: LfSessionId) {
+        // No client handle yet (initialize hasn't run, or this server
+        // is a stub-mock harness) → nothing to register; runtime tools
+        // will see `Unavailable` and fall back to local fs.
+        let Some(handle) = self.fs_client() else {
+            return;
+        };
+        // `FsClientHandle` impls `AcpFsClient`, so we coerce into the
+        // trait object the kernel registry expects.
+        let client: Arc<dyn librefang_kernel::kernel_handle::AcpFsClient> = Arc::new(handle);
+        self.kernel.register_acp_fs_client(lf_session_id, client);
+    }
+
+    fn unregister_session_fs(&self, lf_session_id: LfSessionId) {
+        self.kernel.unregister_acp_fs_client(lf_session_id);
     }
 }
