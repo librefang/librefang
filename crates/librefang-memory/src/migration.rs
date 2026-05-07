@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 34;
+const SCHEMA_VERSION: u32 = 35;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -80,6 +80,11 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // POSTs. The API layer reads/writes this table via the substrate
     // connection pool (handed out via `MemorySubstrate::pool()`).
     run_step!(34, migrate_v34);
+    // v35 (#3313): add `tool_use_id` column to `pending_approvals` so
+    // the LLM-assigned tool_use id survives a daemon restart and the
+    // ACP adapter can keep correlating restored approvals back to the
+    // streaming `ToolCall` card.
+    run_step!(35, migrate_v35);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1270,6 +1275,25 @@ fn migrate_v34(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (34, datetime('now'), 'Add idempotency_keys table for Idempotency-Key replay cache (#3637)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 35: Add `tool_use_id` column to `pending_approvals` so the
+/// LLM-assigned tool_use id survives a daemon restart (#3313).
+///
+/// The ACP adapter uses `tool_use_id` to correlate the editor's
+/// permission modal with the streaming `ToolCall` card the editor
+/// already rendered. Without persistence, restored approvals from a
+/// pre-restart session lose the id and fall back to a clearly-namespaced
+/// `approval-{req_id}` ToolCallId — functional but visually
+/// disconnected.
+fn migrate_v35(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch("ALTER TABLE pending_approvals ADD COLUMN tool_use_id TEXT;")?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (35, datetime('now'), 'Add tool_use_id to pending_approvals for ACP adapter cross-restart correlation (#3313)')",
         [],
     )?;
     Ok(())

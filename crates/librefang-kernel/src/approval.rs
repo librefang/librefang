@@ -190,7 +190,7 @@ impl ApprovalManager {
     ) {
         let Ok(guard) = conn.get() else { return };
         let Ok(mut stmt) = guard.prepare(
-            "SELECT id, agent_id, session_id, tool_name, tool_input, created_at, expires_at \
+            "SELECT id, agent_id, session_id, tool_name, tool_input, created_at, expires_at, tool_use_id \
              FROM pending_approvals",
         ) else {
             return;
@@ -204,12 +204,21 @@ impl ApprovalManager {
                 row.get::<_, String>(4)?,
                 row.get::<_, i64>(5)?,
                 row.get::<_, Option<i64>>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         });
         let Ok(rows) = rows else { return };
         for row in rows.filter_map(|r| r.ok()) {
-            let (id_str, agent_id, session_id, tool_name, tool_input, created_at_unix, _expires_at) =
-                row;
+            let (
+                id_str,
+                agent_id,
+                session_id,
+                tool_name,
+                tool_input,
+                created_at_unix,
+                _expires_at,
+                tool_use_id,
+            ) = row;
             let Ok(id) = id_str.parse::<Uuid>() else {
                 warn!(id = %id_str, "pending_approvals: skipping row with invalid UUID");
                 continue;
@@ -231,10 +240,11 @@ impl ApprovalManager {
                 route_to: Vec::new(),
                 escalation_count: 0,
                 session_id,
-                // The deferred payload is in-memory only; restored rows
-                // can't recover the original LLM `tool_use_id`. ACP
-                // adapter falls back to `approval-{req_id}`.
-                tool_use_id: None,
+                // Restored from sqlite v35 column. Pre-v35 rows have
+                // `NULL` here so the ACP adapter still falls back to
+                // `approval-{req_id}` for them, same as the synchronous
+                // (`request_approval`) and dashboard-manual paths.
+                tool_use_id,
             };
             info!(
                 request_id = %id,
@@ -263,8 +273,8 @@ impl ApprovalManager {
         let created_unix = req.requested_at.timestamp();
         if let Err(e) = conn.execute(
             "INSERT OR IGNORE INTO pending_approvals \
-             (id, agent_id, session_id, tool_name, tool_input, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (id, agent_id, session_id, tool_name, tool_input, created_at, tool_use_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
                 req.id.to_string(),
                 req.agent_id,
@@ -272,6 +282,7 @@ impl ApprovalManager {
                 req.tool_name,
                 &req.action_summary,
                 created_unix,
+                req.tool_use_id,
             ],
         ) {
             warn!(request_id = %req.id, error = %e, "Failed to persist pending approval to database");
