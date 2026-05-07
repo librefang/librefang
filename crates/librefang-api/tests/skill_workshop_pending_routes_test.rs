@@ -126,8 +126,16 @@ async fn pending_list_returns_seeded_candidates() {
     let id_a = "00000000-0000-0000-0000-00000000000a";
     let id_b = "00000000-0000-0000-0000-00000000000b";
     let root = skills_root(&h);
-    storage::save_candidate(&root, &fixture_candidate(agent, id_a), 20).unwrap();
-    storage::save_candidate(&root, &fixture_candidate(agent, id_b), 20).unwrap();
+    // Names must differ across the two seeds because the dedup check
+    // (same source kind + same name → skip) would otherwise drop the
+    // second save and break the assertion that both ids appear in the
+    // listing.
+    let mut a = fixture_candidate(agent, id_a);
+    a.name = "fmt_before_commit_a".to_string();
+    let mut b = fixture_candidate(agent, id_b);
+    b.name = "fmt_before_commit_b".to_string();
+    storage::save_candidate(&root, &a, 20, None).unwrap();
+    storage::save_candidate(&root, &b, 20, None).unwrap();
 
     let (status, body) = json_request(&h, Method::GET, "/api/skills/pending").await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
@@ -148,12 +156,14 @@ async fn pending_list_filters_by_agent() {
         &root,
         &fixture_candidate(agent_a, "aaaaaaaa-0000-0000-0000-000000000001"),
         20,
+        None,
     )
     .unwrap();
     storage::save_candidate(
         &root,
         &fixture_candidate(agent_b, "bbbbbbbb-0000-0000-0000-000000000002"),
         20,
+        None,
     )
     .unwrap();
 
@@ -178,7 +188,7 @@ async fn pending_show_returns_full_candidate() {
     let h = boot().await;
     let id = "cccccccc-0000-0000-0000-000000000003";
     let agent = "11111111-1111-1111-1111-111111111111";
-    storage::save_candidate(&skills_root(&h), &fixture_candidate(agent, id), 20).unwrap();
+    storage::save_candidate(&skills_root(&h), &fixture_candidate(agent, id), 20, None).unwrap();
 
     let (status, body) = json_request(&h, Method::GET, &format!("/api/skills/pending/{id}")).await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
@@ -240,7 +250,7 @@ async fn pending_approve_promotes_and_drops_pending() {
     let id = "dddddddd-0000-0000-0000-000000000004";
     let agent = "11111111-1111-1111-1111-111111111111";
     let root = skills_root(&h);
-    storage::save_candidate(&root, &fixture_candidate(agent, id), 20).unwrap();
+    storage::save_candidate(&root, &fixture_candidate(agent, id), 20, None).unwrap();
 
     let (status, body) = json_request(
         &h,
@@ -296,7 +306,7 @@ async fn pending_reject_removes_file() {
     let id = "eeeeeeee-0000-0000-0000-000000000005";
     let agent = "11111111-1111-1111-1111-111111111111";
     let root = skills_root(&h);
-    storage::save_candidate(&root, &fixture_candidate(agent, id), 20).unwrap();
+    storage::save_candidate(&root, &fixture_candidate(agent, id), 20, None).unwrap();
     assert!(
         storage::load_candidate(&root, id).is_ok(),
         "seed precondition"

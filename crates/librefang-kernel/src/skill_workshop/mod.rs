@@ -235,7 +235,12 @@ async fn capture_one(
     let skills_root = kernel.home_dir().join("skills");
     match cfg.approval_policy {
         ApprovalPolicy::Pending => {
-            match storage::save_candidate(&skills_root, &candidate, cfg.max_pending) {
+            match storage::save_candidate(
+                &skills_root,
+                &candidate,
+                cfg.max_pending,
+                cfg.max_pending_age_days,
+            ) {
                 Ok(true) => {
                     debug!(%agent_id, id = %candidate.id, "skill_workshop: pending candidate written")
                 }
@@ -254,7 +259,12 @@ async fn capture_one(
             // chance to fail loudly before evolution::create_skill
             // touches the active tree, and leaves an audit trail in
             // case the auto-write surprises the operator.
-            let written = match storage::save_candidate(&skills_root, &candidate, cfg.max_pending) {
+            let written = match storage::save_candidate(
+                &skills_root,
+                &candidate,
+                cfg.max_pending,
+                cfg.max_pending_age_days,
+            ) {
                 Ok(b) => b,
                 Err(WorkshopError::SecurityBlocked(msg)) => {
                     warn!(%agent_id, msg, "skill_workshop: auto candidate blocked by security scan");
@@ -276,7 +286,22 @@ async fn capture_one(
                     // does this; without it here, an `auto`-policy hit
                     // would write the active skill but the agent would
                     // not see it until daemon restart.
-                    kernel.reload_skills();
+                    //
+                    // `reload_skills` takes a `RwLock` write lock and
+                    // walks the skills directory synchronously. Defer to
+                    // `spawn_blocking` so this hook does not stall the
+                    // tokio worker thread on disk IO + lock contention
+                    // (every other future on the same worker would
+                    // queue behind it). Same shape as the boot-time
+                    // `prune_orphan_temp_files` dispatch in
+                    // `bindings_and_handle.rs::set_self_handle`.
+                    let kernel_for_reload = Arc::clone(kernel);
+                    match tokio::runtime::Handle::try_current() {
+                        Ok(handle) => {
+                            handle.spawn_blocking(move || kernel_for_reload.reload_skills());
+                        }
+                        Err(_) => kernel_for_reload.reload_skills(),
+                    }
                     debug!(%agent_id, id = %candidate.id, "skill_workshop: auto-promoted candidate")
                 }
                 Err(e) => {
@@ -597,7 +622,8 @@ mod tests {
             },
         };
 
-        let written = storage::save_candidate(tmp.path(), &candidate, 20).expect("save_candidate");
+        let written =
+            storage::save_candidate(tmp.path(), &candidate, 20, None).expect("save_candidate");
         assert!(written, "save_candidate should report a write");
 
         let pending = storage::list_pending(tmp.path(), agent_id).expect("list_pending");
@@ -640,7 +666,7 @@ mod tests {
                 turn_index: 1,
             },
         };
-        let err = storage::save_candidate(tmp.path(), &malicious, 20)
+        let err = storage::save_candidate(tmp.path(), &malicious, 20, None)
             .expect_err("must be blocked by security scan");
         assert!(matches!(err, WorkshopError::SecurityBlocked(_)));
         assert!(storage::list_pending(tmp.path(), agent_id)

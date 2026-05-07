@@ -1133,12 +1133,18 @@ pub struct ManifestCapabilities {
 /// patterns) and stores a draft skill in
 /// `~/.librefang/skills/pending/<agent_id>/<uuid>.toml` for review.
 ///
-/// **Default off.** Even with `enabled = true`, candidates land in
-/// `pending/` (not `active/`) until the user approves them via the
-/// `librefang skill pending approve <id>` CLI — unless
-/// `approval_policy = "auto"` is set, which writes through to `active/`
-/// directly (still subject to the same prompt-injection scan that
-/// guards marketplace skills).
+/// **Default on with the conservative knob set** (`enabled=true`,
+/// `auto_capture=true`, `review_mode="heuristic"` so no LLM call,
+/// `approval_policy="pending"` so no auto-promote, `max_pending=20`).
+/// Candidates land in `pending/` and wait for human review via
+/// `librefang skill pending approve <id>` (CLI) or the Skills page
+/// (dashboard). With `approval_policy = "auto"`, the workshop still
+/// writes the candidate to `pending/` first — for the audit trail and
+/// to give the prompt-injection scan a place to fail loudly — and then
+/// promotes it through `evolution::create_skill` and removes the
+/// pending file. Either way the active skill goes through the same
+/// `SkillVerifier::scan_prompt_content` gate that guards marketplace
+/// skills.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SkillWorkshopConfig {
@@ -1159,9 +1165,19 @@ pub struct SkillWorkshopConfig {
     pub review_mode: ReviewMode,
     /// Maximum number of pending candidates retained per agent. When the
     /// limit is reached, the oldest candidate (by `captured_at`) is
-    /// deleted before the new one is written. Set to `0` to disable
-    /// capture (equivalent to `auto_capture = false`).
+    /// deleted before the new one is written. Set to `0` to skip the
+    /// disk write entirely (the scanner still runs; if you want to
+    /// skip the scan as well, use `auto_capture = false`).
     pub max_pending: u32,
+    /// Optional time-to-live for pending candidates, in days. When set,
+    /// `save_candidate` prunes any pending candidate whose `captured_at`
+    /// is older than this threshold before writing the new one — bounds
+    /// the worst case where a user opts in but never reviews the
+    /// pending tree. `None` (default) keeps the historical behaviour:
+    /// candidates only age out when the per-agent `max_pending` cap
+    /// evicts them by LRU.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pending_age_days: Option<u32>,
 }
 
 impl Default for SkillWorkshopConfig {
@@ -1183,6 +1199,10 @@ impl Default for SkillWorkshopConfig {
             approval_policy: ApprovalPolicy::Pending,
             review_mode: ReviewMode::Heuristic,
             max_pending: 20,
+            // No TTL by default — the cap is the only aging mechanism
+            // unless the operator opts in. Avoids a second silent
+            // surprise on top of the default-on flip.
+            max_pending_age_days: None,
         }
     }
 }

@@ -99,14 +99,17 @@ any subset; serde fills the rest from `Default`.
 ```toml
 # agent.toml — explicit form, equivalent to omitting the block:
 [skill_workshop]
-enabled         = true             # default true
-auto_capture    = true             # default true
-approval_policy = "pending"        # "pending" | "auto"
-review_mode     = "heuristic"      # "heuristic" | "threshold_llm" | "none"
+enabled              = true        # default true
+auto_capture         = true        # default true
+approval_policy      = "pending"   # "pending" | "auto"
+review_mode          = "heuristic" # "heuristic" | "threshold_llm" | "none"
                                    #   ("both" is a serde alias for
                                    #   threshold_llm, kept for openclaw
                                    #   vocabulary compat)
-max_pending     = 20               # 0 disables writes (pipeline still runs)
+max_pending          = 20          # 0 disables writes (pipeline still runs)
+# max_pending_age_days = 30        # Optional TTL — omit (None) to keep
+                                   #   the historical "cap-LRU is the only
+                                   #   aging mechanism" behaviour.
 
 # To turn the feature off entirely:
 # enabled = false
@@ -119,9 +122,10 @@ max_pending     = 20               # 0 disables writes (pipeline still runs)
 |-------|---------|--------|
 | `enabled` | `true` | Master switch. With `false`, the hook returns before scanners run. |
 | `auto_capture` | `true` | Lets an enabled agent skip capture without disabling the whole hook (useful for live debugging of an agent that you don't want to disturb). |
-| `approval_policy` | `"pending"` | `"pending"` parks candidates in `~/.librefang/skills/pending/<agent>/`. `"auto"` immediately promotes through `evolution::create_skill`, with the same security scan applied. |
+| `approval_policy` | `"pending"` | `"pending"` parks candidates in `~/.librefang/skills/pending/<agent>/`. `"auto"` writes the pending file (audit trail) and then promotes via `evolution::create_skill` + reloads the registry so the new skill is visible the next turn — the same security scan applies in both modes. |
 | `review_mode` | `"heuristic"` | `"heuristic"` is regex-only (no LLM cost). `"threshold_llm"` ALSO consults the cheap-tier LLM after the heuristic accepts. `"none"` runs the regex scan but discards every hit (testing path). `"both"` is a serde alias for `"threshold_llm"`. |
 | `max_pending` | `20` | Per-agent cap. `0` is honoured as "do not store" — the pipeline still runs but `save_candidate` returns `Ok(false)`. |
+| `max_pending_age_days` | `None` | Optional TTL. When set, candidates older than `n` days are reaped at the next save (before the cap check). `None` keeps the historical "cap-LRU only" behaviour, so an operator who never reviews their pending tree never silently loses an old candidate. |
 
 The hook re-reads the config from `AgentRegistry` on every fire, so
 `agent.toml` edits take effect on the next turn without daemon restart.
@@ -164,6 +168,33 @@ The breach is bounded by the in-flight invocation count and self-heals
 on the next save. If parallel-invocation usage grows, the upgrade path
 is per-agent `fs2::FileExt::lock_exclusive`, mirroring
 `librefang_skills::evolution::acquire_skill_lock`.
+
+### Dedup
+
+`save_candidate` skips the write when a pending candidate with the
+same `(source kind, name)` already exists for this agent. Critical for
+default-on with `RepeatedToolPattern`: the same recent-window pattern
+matches every turn until a new tool sequence pushes it out of the
+window, so without dedup the operator would accumulate one duplicate
+candidate per turn against the cap. The check is `O(N)` over at most
+`max_pending` parsed TOML files — microseconds in practice.
+
+The dedup key intentionally does NOT include `prompt_context` or
+`description` — those fields are derived deterministically from the
+matching trigger inside the heuristic, so equality on `(source kind,
+name)` already implies equality of the rest of the candidate body.
+Different teaching signals that happen to produce the same name
+collision are extremely rare; the cap LRU eventually flushes them.
+
+### Aging (optional TTL)
+
+`max_pending_age_days = Some(n)` reaps any pending candidate whose
+`captured_at` is older than `n` days at the next save, before the cap
+check. Default is `None` so an operator who never reviews their
+pending tree never silently loses an old candidate — the cap LRU is
+the only aging mechanism unless the operator opts in. Combined with
+the cap, opting in gives a hard upper bound on both queue length AND
+queue age.
 
 ## Security model
 
