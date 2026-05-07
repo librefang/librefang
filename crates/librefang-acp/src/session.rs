@@ -77,6 +77,22 @@ impl SessionStore {
             .map(|entry| entry.key().clone())
     }
 
+    /// Enumerate `(acp_id, cwd)` for every active session. Used by the
+    /// `session/list` handler. Cheap enough to do un-paginated for Phase 1
+    /// — daemon-attached mode in Phase 2 will need a real cursor scheme.
+    pub(crate) fn list(&self) -> Vec<(AcpSessionId, std::path::PathBuf)> {
+        self.inner
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().cwd.clone()))
+            .collect()
+    }
+
+    /// Remove a session by id. Returns true if it existed. Used by
+    /// `session/close`.
+    pub(crate) fn remove(&self, id: &AcpSessionId) -> bool {
+        self.inner.remove(id).is_some()
+    }
+
     /// Trigger the cancel token for `id` if it exists. Returns `true`
     /// if a session was found, regardless of whether it was already
     /// cancelled — ACP `session/cancel` is fire-and-forget.

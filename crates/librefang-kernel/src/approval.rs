@@ -57,6 +57,16 @@ pub struct ApprovalManager {
     /// `list_pending` on a 100ms tick. Capacity is small — slow consumers
     /// drop old events rather than apply back-pressure to the agent loop.
     events_tx: broadcast::Sender<ApprovalEvent>,
+    /// In-memory "always" decision cache (#3313): when an external
+    /// surface (currently only the ACP bridge) records that a user
+    /// chose `allow_always` / `reject_always`, future calls of the
+    /// same `(agent_id, tool_name)` skip the approval gate (Approved
+    /// → no approval prompt; Denied → tool blocked at
+    /// `is_tool_denied_with_context`). Persistence across daemon
+    /// restart is tracked under a follow-up — Phase 1 keeps it in
+    /// memory so user-level remembered decisions don't outlive an
+    /// `acp` invocation in surprising ways.
+    remembered: DashMap<(String, String), ApprovalDecision>,
 }
 
 struct PendingRequest {
@@ -99,6 +109,7 @@ impl ApprovalManager {
             totp_failures: StdMutex::new(HashMap::new()),
             failure_rw_mutex: StdMutex::new(()),
             events_tx,
+            remembered: DashMap::new(),
         }
     }
 
@@ -123,7 +134,35 @@ impl ApprovalManager {
             totp_failures: StdMutex::new(failures),
             failure_rw_mutex: StdMutex::new(()),
             events_tx,
+            remembered: DashMap::new(),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Remembered "always" decisions (#3313)
+    // -----------------------------------------------------------------
+
+    /// Record an "always" decision for `(agent_id, tool_name)`. Future
+    /// `requires_approval_with_context` / `is_tool_denied_with_context`
+    /// calls for the same pair short-circuit on the cached decision.
+    pub fn remember(&self, agent_id: &str, tool_name: &str, decision: ApprovalDecision) {
+        self.remembered
+            .insert((agent_id.to_string(), tool_name.to_string()), decision);
+    }
+
+    /// Retrieve a previously-remembered decision, if any.
+    pub fn recall(&self, agent_id: &str, tool_name: &str) -> Option<ApprovalDecision> {
+        self.remembered
+            .get(&(agent_id.to_string(), tool_name.to_string()))
+            .map(|r| r.value().clone())
+    }
+
+    /// Forget any remembered decision for `(agent_id, tool_name)`.
+    /// Returns the previously-cached decision, if any.
+    pub fn forget(&self, agent_id: &str, tool_name: &str) -> Option<ApprovalDecision> {
+        self.remembered
+            .remove(&(agent_id.to_string(), tool_name.to_string()))
+            .map(|(_, v)| v)
     }
 
     /// Subscribe to [`ApprovalEvent`]s from this manager.
@@ -357,6 +396,30 @@ impl ApprovalManager {
     }
 
     /// Check whether a tool is hard-denied in the current sender/channel context.
+    ///
+    /// `agent_id` is consulted against the remembered-decisions cache
+    /// first (#3313). If the user previously chose `reject_always` for
+    /// the `(agent_id, tool_name)` pair via the ACP permission UI, the
+    /// tool is hard-denied without further policy evaluation.
+    pub fn is_tool_denied_with_context_for(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> bool {
+        if matches!(
+            self.recall(agent_id, tool_name),
+            Some(ApprovalDecision::Denied)
+        ) {
+            debug!(agent_id, tool_name, "remembered decision: deny");
+            return true;
+        }
+        self.is_tool_denied_with_context(tool_name, sender_id, channel)
+    }
+
+    /// Pre-#3313 entry point — kept for callers that don't have an
+    /// `agent_id` handy. Skips the remembered-decisions cache.
     pub fn is_tool_denied_with_context(
         &self,
         tool_name: &str,
@@ -391,6 +454,28 @@ impl ApprovalManager {
     /// Returns `true` (approval needed) if:
     /// 1. A channel rule explicitly denies the tool, OR
     /// 2. The tool is in `require_approval` and none of the above bypasses apply.
+    /// Agent-aware variant that consults the remembered-decisions cache
+    /// (#3313) before falling through to the policy check. Caller
+    /// passes the same `agent_id` it would later submit on the
+    /// `ApprovalRequest`. A cached `Approved` short-circuits to
+    /// "no approval needed".
+    pub fn requires_approval_with_context_for(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> bool {
+        if matches!(
+            self.recall(agent_id, tool_name),
+            Some(ApprovalDecision::Approved)
+        ) {
+            debug!(agent_id, tool_name, "remembered decision: allow");
+            return false;
+        }
+        self.requires_approval_with_context(tool_name, sender_id, channel)
+    }
+
     pub fn requires_approval_with_context(
         &self,
         tool_name: &str,

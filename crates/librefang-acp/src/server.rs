@@ -10,10 +10,13 @@
 use std::sync::Arc;
 
 use agent_client_protocol::schema::{
-    AgentCapabilities, CancelNotification, InitializeRequest, InitializeResponse,
-    NewSessionRequest, NewSessionResponse, PromptRequest,
+    AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse,
+    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest,
+    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities,
+    SessionInfo, SessionListCapabilities, SessionResumeCapabilities,
 };
-use agent_client_protocol::{Agent, Client, Dispatch};
+use agent_client_protocol::{Agent, Client, ConnectTo, Dispatch};
 use agent_client_protocol_tokio::Stdio;
 use librefang_types::agent::AgentId;
 use tracing::debug;
@@ -30,6 +33,21 @@ use crate::{AcpKernel, AcpResult};
 /// be called once per process from the `librefang acp` CLI subcommand;
 /// daemon-attached mode lands in Phase 2.
 pub async fn run<K: AcpKernel>(kernel: Arc<K>, agent_id: AgentId) -> AcpResult<()> {
+    run_with_transport(kernel, agent_id, Stdio::new()).await
+}
+
+/// Same as [`run`] but with an explicit transport. Used by integration
+/// tests in `tests/acp_integration.rs` to drive the server over a
+/// `tokio::io::duplex` pipe instead of real stdio.
+pub async fn run_with_transport<K, T>(
+    kernel: Arc<K>,
+    agent_id: AgentId,
+    transport: T,
+) -> AcpResult<()>
+where
+    K: AcpKernel,
+    T: ConnectTo<Agent> + Send + 'static,
+{
     let sessions = SessionStore::new_arc();
 
     // Each builder method consumes the builder, so we clone the Arcs
@@ -37,6 +55,10 @@ pub async fn run<K: AcpKernel>(kernel: Arc<K>, agent_id: AgentId) -> AcpResult<(
     let kernel_for_perm = Arc::clone(&kernel);
     let kernel_for_prompt = Arc::clone(&kernel);
     let sessions_for_new = Arc::clone(&sessions);
+    let sessions_for_load = Arc::clone(&sessions);
+    let sessions_for_resume = Arc::clone(&sessions);
+    let sessions_for_list = Arc::clone(&sessions);
+    let sessions_for_close = Arc::clone(&sessions);
     let sessions_for_prompt = Arc::clone(&sessions);
     let sessions_for_cancel = Arc::clone(&sessions);
     let sessions_for_perm = Arc::clone(&sessions);
@@ -48,9 +70,16 @@ pub async fn run<K: AcpKernel>(kernel: Arc<K>, agent_id: AgentId) -> AcpResult<(
         .on_receive_request(
             async move |req: InitializeRequest, responder, _cx| {
                 debug!(client = ?req.client_info, "ACP initialize");
+                let session_caps = SessionCapabilities::new()
+                    .list(SessionListCapabilities::default())
+                    .resume(SessionResumeCapabilities::default())
+                    .close(SessionCloseCapabilities::default());
+                let agent_caps = AgentCapabilities::new()
+                    .load_session(true)
+                    .session_capabilities(session_caps);
                 responder.respond(
                     InitializeResponse::new(req.protocol_version)
-                        .agent_capabilities(AgentCapabilities::new())
+                        .agent_capabilities(agent_caps)
                         .agent_info(agent_client_protocol::schema::Implementation::new(
                             "librefang",
                             env!("CARGO_PKG_VERSION"),
@@ -68,6 +97,64 @@ pub async fn run<K: AcpKernel>(kernel: Arc<K>, agent_id: AgentId) -> AcpResult<(
                        "ACP session/new");
                 sessions_for_new.insert(new_id.clone(), state);
                 responder.respond(NewSessionResponse::new(new_id))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        // session/load --------------------------------------------------
+        // Phase 1 doesn't persist session history across `librefang acp`
+        // invocations, so loading is a no-op on history but does honour
+        // the client-supplied session id so multi-tab editors can
+        // reconnect with a stable id within one process. A real history
+        // replay (including past `session/update` notifications) is
+        // tracked separately under #3313 phase 2.
+        .on_receive_request(
+            async move |req: LoadSessionRequest, responder, _cx| {
+                let state = SessionState::new(req.cwd);
+                debug!(session_id = %req.session_id.0, librefang_id = %state.librefang_session_id.0,
+                       "ACP session/load (no history replay in Phase 1)");
+                sessions_for_load.insert(req.session_id, state);
+                responder.respond(LoadSessionResponse::default())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        // session/resume ------------------------------------------------
+        // Identical to load in Phase 1 — both create-or-replace the
+        // mapping. The protocol distinction (resume MUST NOT replay
+        // history) is moot until we have history to replay.
+        .on_receive_request(
+            async move |req: ResumeSessionRequest, responder, _cx| {
+                let state = SessionState::new(req.cwd);
+                debug!(session_id = %req.session_id.0, "ACP session/resume");
+                sessions_for_resume.insert(req.session_id, state);
+                responder.respond(ResumeSessionResponse::default())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        // session/list --------------------------------------------------
+        .on_receive_request(
+            async move |req: ListSessionsRequest, responder, _cx| {
+                let mut sessions: Vec<SessionInfo> = sessions_for_list
+                    .list()
+                    .into_iter()
+                    .filter(|(_, cwd)| match req.cwd.as_ref() {
+                        Some(filter) => cwd == filter,
+                        None => true,
+                    })
+                    .map(|(id, cwd)| SessionInfo::new(id, cwd))
+                    .collect();
+                // Stable order so test fixtures don't flap on DashMap
+                // iteration nondeterminism.
+                sessions.sort_by(|a, b| a.session_id.0.cmp(&b.session_id.0));
+                responder.respond(ListSessionsResponse::new(sessions))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        // session/close -------------------------------------------------
+        .on_receive_request(
+            async move |req: CloseSessionRequest, responder, _cx| {
+                let removed = sessions_for_close.remove(&req.session_id);
+                debug!(session_id = %req.session_id.0, removed, "ACP session/close");
+                responder.respond(CloseSessionResponse::default())
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -92,14 +179,22 @@ pub async fn run<K: AcpKernel>(kernel: Arc<K>, agent_id: AgentId) -> AcpResult<(
         // Catch-all for methods we don't yet implement (authenticate,
         // session/load, session/list, terminal/*, fs/*, …) so the
         // editor gets a clean method_not_found instead of hanging.
+        // Matches all three [`Dispatch`] variants explicitly so that
+        // *responses* to our own outgoing requests (the permission
+        // bridge's `cx.send_request(RequestPermissionRequest)` round
+        // trips, etc.) don't get rewrapped as JSON-RPC errors and
+        // propagated back to the bridge.
         .on_receive_dispatch(
-            async move |message: Dispatch, cx: agent_client_protocol::ConnectionTo<Client>| {
-                message.respond_with_error(
-                    agent_client_protocol::util::internal_error(
-                        "method not supported by librefang ACP Phase 1",
+            async move |message: Dispatch, _cx: agent_client_protocol::ConnectionTo<Client>| {
+                match message {
+                    Dispatch::Request(_, responder) => responder.respond_with_error(
+                        agent_client_protocol::util::internal_error(
+                            "method not supported by librefang ACP Phase 1",
+                        ),
                     ),
-                    cx,
-                )
+                    Dispatch::Notification(_) => Ok(()),
+                    Dispatch::Response(result, router) => router.respond_with_result(result),
+                }
             },
             agent_client_protocol::on_receive_dispatch!(),
         )
@@ -109,7 +204,7 @@ pub async fn run<K: AcpKernel>(kernel: Arc<K>, agent_id: AgentId) -> AcpResult<(
             let sessions = sessions_for_perm;
             permission::run_bridge(kernel, sessions, cx).await
         })
-        .connect_to(Stdio::new())
+        .connect_to(transport)
         .await?;
 
     Ok(())

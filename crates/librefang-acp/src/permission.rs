@@ -144,62 +144,79 @@ async fn dispatch_pending<K: AcpKernel>(
     })
     .map_err(AcpError::Transport)?;
 
-    // The agent loop blocks waiting for the oneshot inside
-    // `request_approval` (or for the deferred path, callers poll
-    // `list_pending`). Resolving asynchronously is fine — we don't
-    // block dispatching the next pending while this one waits.
-    let kernel = Arc::clone(kernel);
-    tokio::spawn(async move {
-        let decision = match tokio::time::timeout(PERMISSION_TIMEOUT, rx).await {
-            Ok(Ok(Ok(resp))) => decision_from_outcome(resp.outcome),
-            Ok(Ok(Err(e))) => {
-                warn!(error = %e, request_id = %req_id, "ACP request_permission transport error");
-                ApprovalDecision::Denied
-            }
-            Ok(Err(_recv_err)) => {
-                // Connection closed before the editor responded.
-                warn!(request_id = %req_id, "ACP request_permission: response channel dropped");
-                ApprovalDecision::Denied
-            }
-            Err(_elapsed) => {
-                debug!(request_id = %req_id, "ACP request_permission timed out, denying");
-                ApprovalDecision::Denied
-            }
-        };
+    // Serialize approvals — wait inline before processing the next
+    // broadcast event. Phase 1 prefers correctness over throughput;
+    // pending approvals queue in the broadcast (capacity 256). The
+    // serial path keeps tests deterministic and avoids spawning
+    // detached tasks whose runtime context (LocalSet vs not) can
+    // diverge between production and test harnesses.
+    let (decision, remember) = match tokio::time::timeout(PERMISSION_TIMEOUT, rx).await {
+        Ok(Ok(Ok(resp))) => decision_from_outcome(resp.outcome),
+        Ok(Ok(Err(e))) => {
+            warn!(error = %e, request_id = %req_id, "ACP request_permission transport error");
+            (ApprovalDecision::Denied, false)
+        }
+        Ok(Err(_recv_err)) => {
+            warn!(request_id = %req_id, "ACP request_permission: response channel dropped");
+            (ApprovalDecision::Denied, false)
+        }
+        Err(_elapsed) => {
+            debug!(request_id = %req_id, "ACP request_permission timed out, denying");
+            (ApprovalDecision::Denied, false)
+        }
+    };
+
+    // Persist "always" choices so future tool requests for the same
+    // (agent_id, tool_name) skip the editor entirely. Done before the
+    // resolve so the cache is populated by the time any concurrent
+    // tool call queries `requires_approval_with_context_for`.
+    if remember {
         if let Err(e) = kernel
-            .resolve_approval(req_id, decision, Some("acp".into()))
+            .remember_decision(&approval.agent_id, &approval.tool_name, decision.clone())
             .await
         {
-            warn!(error = %e, request_id = %req_id, "ACP permission bridge: resolve_approval failed");
+            warn!(error = %e, request_id = %req_id,
+                  "ACP permission bridge: remember_decision failed");
         }
-    });
+    }
+
+    if let Err(e) = kernel
+        .resolve_approval(req_id, decision, Some("acp".into()))
+        .await
+    {
+        warn!(error = %e, request_id = %req_id, "ACP permission bridge: resolve_approval failed");
+    }
 
     Ok(())
 }
 
 /// Translate ACP's [`RequestPermissionOutcome`] into LibreFang's
-/// [`ApprovalDecision`].
+/// [`ApprovalDecision`] plus a `remember_always` flag (#3313).
 ///
-/// `allow_once` and `allow_always` both map to `Approved` — Phase 1
-/// doesn't yet support persisting "always" decisions on the kernel
-/// side, so they degrade gracefully to one-shot allow. `reject_*`
-/// and `Cancelled` map to `Denied`.
-fn decision_from_outcome(outcome: RequestPermissionOutcome) -> ApprovalDecision {
+/// * `allow_once` / `reject_once` / `Cancelled` → `(decision, false)` —
+///   one-shot, no persistence.
+/// * `allow_always` / `reject_always` → `(decision, true)` — caller
+///   should also persist via `AcpKernel::remember_decision` so future
+///   `(agent_id, tool_name)` calls short-circuit.
+fn decision_from_outcome(outcome: RequestPermissionOutcome) -> (ApprovalDecision, bool) {
     match outcome {
         RequestPermissionOutcome::Selected(selected) => {
             let id: &str = &selected.option_id.0;
-            if id.starts_with("allow") {
+            let approved = id.starts_with("allow");
+            let remember = id.ends_with("_always");
+            let decision = if approved {
                 ApprovalDecision::Approved
             } else {
                 ApprovalDecision::Denied
-            }
+            };
+            (decision, remember)
         }
         // Cancellation = client wants to abort this turn; deny so the
-        // tool execution path bails out cleanly.
-        RequestPermissionOutcome::Cancelled => ApprovalDecision::Denied,
+        // tool execution path bails out cleanly. Don't remember.
+        RequestPermissionOutcome::Cancelled => (ApprovalDecision::Denied, false),
         // ACP marks the outcome enum `#[non_exhaustive]`; any future
-        // variant defaults to deny for safety.
-        _ => ApprovalDecision::Denied,
+        // variant defaults to deny without remembering for safety.
+        _ => (ApprovalDecision::Denied, false),
     }
 }
 
@@ -208,41 +225,57 @@ mod tests {
     use super::*;
     use agent_client_protocol::schema::{PermissionOptionId, SelectedPermissionOutcome};
 
-    #[test]
-    fn allow_once_maps_to_approved() {
-        let outcome = RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-            PermissionOptionId::new("allow_once"),
-        ));
-        assert_eq!(decision_from_outcome(outcome), ApprovalDecision::Approved);
+    fn outcome(id: &'static str) -> RequestPermissionOutcome {
+        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(PermissionOptionId::new(
+            id,
+        )))
     }
 
     #[test]
-    fn allow_always_maps_to_approved() {
-        let outcome = RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-            PermissionOptionId::new("allow_always"),
-        ));
-        assert_eq!(decision_from_outcome(outcome), ApprovalDecision::Approved);
+    fn allow_once_is_approved_no_remember() {
+        assert_eq!(
+            decision_from_outcome(outcome("allow_once")),
+            (ApprovalDecision::Approved, false)
+        );
     }
 
     #[test]
-    fn reject_once_maps_to_denied() {
-        let outcome = RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-            PermissionOptionId::new("reject_once"),
-        ));
-        assert_eq!(decision_from_outcome(outcome), ApprovalDecision::Denied);
+    fn allow_always_is_approved_with_remember() {
+        assert_eq!(
+            decision_from_outcome(outcome("allow_always")),
+            (ApprovalDecision::Approved, true)
+        );
     }
 
     #[test]
-    fn cancelled_maps_to_denied() {
-        let outcome = RequestPermissionOutcome::Cancelled;
-        assert_eq!(decision_from_outcome(outcome), ApprovalDecision::Denied);
+    fn reject_once_is_denied_no_remember() {
+        assert_eq!(
+            decision_from_outcome(outcome("reject_once")),
+            (ApprovalDecision::Denied, false)
+        );
     }
 
     #[test]
-    fn unknown_option_id_maps_to_denied() {
-        let outcome = RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-            PermissionOptionId::new("frobnicate"),
-        ));
-        assert_eq!(decision_from_outcome(outcome), ApprovalDecision::Denied);
+    fn reject_always_is_denied_with_remember() {
+        assert_eq!(
+            decision_from_outcome(outcome("reject_always")),
+            (ApprovalDecision::Denied, true)
+        );
+    }
+
+    #[test]
+    fn cancelled_is_denied_no_remember() {
+        assert_eq!(
+            decision_from_outcome(RequestPermissionOutcome::Cancelled),
+            (ApprovalDecision::Denied, false)
+        );
+    }
+
+    #[test]
+    fn unknown_id_is_denied_no_remember() {
+        assert_eq!(
+            decision_from_outcome(outcome("frobnicate")),
+            (ApprovalDecision::Denied, false)
+        );
     }
 }

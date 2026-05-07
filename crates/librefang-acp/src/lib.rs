@@ -39,7 +39,7 @@ pub mod server;
 pub mod session;
 
 pub use error::{AcpError, AcpResult};
-pub use server::run;
+pub use server::{run, run_with_transport};
 
 use std::sync::Arc;
 
@@ -105,6 +105,20 @@ pub trait AcpKernel: Send + Sync + 'static {
         decision: ApprovalDecision,
         decided_by: Option<String>,
     ) -> AcpResult<()>;
+
+    /// Persist an "always" decision so future approval queries for the
+    /// same `(agent_id, tool_name)` short-circuit (#3313). Called by
+    /// the permission bridge when the editor user picks
+    /// `allow_always` / `reject_always`. Default impl is a no-op so
+    /// test mocks don't have to override.
+    async fn remember_decision(
+        &self,
+        _agent_id: &str,
+        _tool_name: &str,
+        _decision: ApprovalDecision,
+    ) -> AcpResult<()> {
+        Ok(())
+    }
 }
 
 /// Convenience type alias for `Arc<dyn AcpKernel>`. Most call sites pass

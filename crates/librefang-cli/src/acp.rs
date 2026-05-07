@@ -99,6 +99,22 @@ impl AcpKernel for KernelAdapter {
             .map_err(AcpError::internal)?;
         Ok(())
     }
+
+    async fn remember_decision(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        decision: ApprovalDecision,
+    ) -> AcpResult<()> {
+        // Persist into the kernel's in-memory remembered-decisions
+        // cache (#3313). Future calls of `requires_approval_with_context_for`
+        // / `is_tool_denied_with_context_for` for the same
+        // `(agent_id, tool_name)` will short-circuit on this entry.
+        self.kernel
+            .approvals()
+            .remember(agent_id, tool_name, decision);
+        Ok(())
+    }
 }
 
 /// Phase-1 default agent name when the CLI is invoked without `--agent`.
