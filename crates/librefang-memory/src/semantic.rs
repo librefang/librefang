@@ -13,13 +13,14 @@ use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{
     MemoryFilter, MemoryFragment, MemoryId, MemoryModality, MemorySource, VectorStore,
 };
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 // Single canonical impl lives in librefang-types; re-exported here so
 // existing `librefang_memory::semantic::cosine_similarity` callers keep
 // working without three independently-edited copies drifting (see PR #4125).
 pub use librefang_types::memory::cosine_similarity;
-use rusqlite::Connection;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// Semantic store backed by SQLite with optional vector search.
@@ -30,26 +31,26 @@ use tracing::{debug, warn};
 /// When no backend is set (the default), the original SQLite path is used.
 #[derive(Clone)]
 pub struct SemanticStore {
-    conn: Arc<Mutex<Connection>>,
+    pool: Pool<SqliteConnectionManager>,
     vector_store: Option<Arc<dyn VectorStore>>,
 }
 
 impl SemanticStore {
-    /// Create a new semantic store wrapping the given connection.
-    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
+    /// Create a new semantic store wrapping the given connection pool.
+    pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
         Self {
-            conn,
+            pool,
             vector_store: None,
         }
     }
 
     /// Create a new semantic store with an external vector backend.
     pub fn new_with_vector_store(
-        conn: Arc<Mutex<Connection>>,
+        pool: Pool<SqliteConnectionManager>,
         vector_store: Arc<dyn VectorStore>,
     ) -> Self {
         Self {
-            conn,
+            pool,
             vector_store: Some(vector_store),
         }
     }
@@ -60,8 +61,8 @@ impl SemanticStore {
     }
 
     /// Get a reference to the underlying connection for advanced operations.
-    pub fn conn(&self) -> &Arc<Mutex<Connection>> {
-        &self.conn
+    pub fn pool(&self) -> &Pool<SqliteConnectionManager> {
+        &self.pool
     }
 
     /// Store a new memory fragment (without embedding).
@@ -129,10 +130,7 @@ impl SemanticStore {
         modality: MemoryModality,
         peer_id: Option<&str>,
     ) -> LibreFangResult<MemoryId> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let id = MemoryId::new();
         let now = Utc::now().to_rfc3339();
         let source_str = serde_json::to_string(&source).map_err(LibreFangError::serialization)?;
@@ -195,10 +193,7 @@ impl SemanticStore {
             return self.recall_via_vector_store(vs, qe, limit, filter.clone());
         }
 
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         // Build SQL: fetch candidates (broader than limit for vector re-ranking)
         let fetch_limit = if query_embedding.is_some() {
@@ -465,10 +460,7 @@ impl SemanticStore {
 
         // Update access counts — see note on the SQLite-path update above
         // for why silent drops would corrupt decay logic.
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         for frag in &fragments {
             if let Err(e) = conn.execute(
                 "UPDATE memories SET access_count = access_count + 1, accessed_at = ?1 WHERE id = ?2",
@@ -487,10 +479,7 @@ impl SemanticStore {
         id: MemoryId,
         include_deleted: bool,
     ) -> LibreFangResult<Option<MemoryFragment>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         let deleted_clause = if include_deleted {
             ""
@@ -601,10 +590,7 @@ impl SemanticStore {
 
     /// Soft-delete a memory fragment.
     pub fn forget(&self, id: MemoryId) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         conn.execute(
             "UPDATE memories SET deleted = 1 WHERE id = ?1",
             rusqlite::params![id.0.to_string()],
@@ -620,8 +606,8 @@ impl SemanticStore {
     /// scope)` method remains for internal proactive-store use.
     pub fn count_by_filter(&self, filter: MemoryFilter) -> LibreFangResult<u64> {
         let conn = self
-            .conn
-            .lock()
+            .pool
+            .get()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut sql = "SELECT count(*) FROM memories WHERE deleted = 0".to_string();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -663,8 +649,8 @@ impl SemanticStore {
     /// Update `accessed_at` to now and increment `access_count` for a memory.
     pub fn update_access(&self, id: MemoryId) -> LibreFangResult<()> {
         let conn = self
-            .conn
-            .lock()
+            .pool
+            .get()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
@@ -685,10 +671,7 @@ impl SemanticStore {
         new_content: &str,
         new_metadata: Option<HashMap<String, serde_json::Value>>,
     ) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let now = Utc::now().to_rfc3339();
         if let Some(meta) = new_metadata {
             let meta_str = serde_json::to_string(&meta).map_err(LibreFangError::serialization)?;
@@ -709,10 +692,7 @@ impl SemanticStore {
 
     /// Update the embedding for an existing memory.
     pub fn update_embedding(&self, id: MemoryId, embedding: &[f32]) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let bytes = embedding_to_bytes(embedding);
         conn.execute(
             "UPDATE memories SET embedding = ?1 WHERE id = ?2",
@@ -730,10 +710,7 @@ impl SemanticStore {
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         // SQLite doesn't support IN with parameterized lists easily for large N,
         // so we query one at a time for safety (N ≤ 100 in find_duplicates).
@@ -756,10 +733,7 @@ impl SemanticStore {
 
     /// Soft-delete all memories for a specific agent.
     pub fn forget_by_agent(&self, agent_id: AgentId) -> LibreFangResult<u64> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let count = conn
             .execute(
                 "UPDATE memories SET deleted = 1 WHERE agent_id = ?1 AND deleted = 0",
@@ -771,10 +745,7 @@ impl SemanticStore {
 
     /// Soft-delete all memories for a specific agent and scope.
     pub fn forget_by_scope(&self, agent_id: AgentId, scope: &str) -> LibreFangResult<u64> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let count = conn
             .execute(
                 "UPDATE memories SET deleted = 1 WHERE agent_id = ?1 AND scope = ?2 AND deleted = 0",
@@ -791,10 +762,7 @@ impl SemanticStore {
         scope: &str,
         before: chrono::DateTime<Utc>,
     ) -> LibreFangResult<u64> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let count = conn
             .execute(
                 "UPDATE memories SET deleted = 1 WHERE agent_id = ?1 AND scope = ?2 AND created_at < ?3 AND deleted = 0",
@@ -813,10 +781,7 @@ impl SemanticStore {
         scope: &str,
         before: chrono::DateTime<Utc>,
     ) -> LibreFangResult<u64> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let count = conn
             .execute(
                 "UPDATE memories SET deleted = 1 WHERE scope = ?1 AND created_at < ?2 AND deleted = 0",
@@ -828,10 +793,7 @@ impl SemanticStore {
 
     /// Count non-deleted memories for a specific agent, optionally filtered by scope.
     pub fn count(&self, agent_id: AgentId, scope: Option<&str>) -> LibreFangResult<u64> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let count: i64 = if let Some(s) = scope {
             conn.query_row(
                 "SELECT COUNT(*) FROM memories WHERE agent_id = ?1 AND scope = ?2 AND deleted = 0",
@@ -857,10 +819,7 @@ impl SemanticStore {
         agent_id: AgentId,
         limit: usize,
     ) -> LibreFangResult<Vec<MemoryId>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare(
                 "SELECT id FROM memories WHERE agent_id = ?1 AND deleted = 0 \
@@ -887,10 +846,7 @@ impl SemanticStore {
 
     /// Count memories across ALL agents, optionally filtered by scope.
     pub fn count_all(&self, scope: Option<&str>) -> LibreFangResult<u64> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let count: i64 = if let Some(s) = scope {
             conn.query_row(
                 "SELECT COUNT(*) FROM memories WHERE scope = ?1 AND deleted = 0",
@@ -916,10 +872,7 @@ impl SemanticStore {
         &self,
         agent_id: Option<AgentId>,
     ) -> LibreFangResult<HashMap<String, usize>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =
             if let Some(aid) = agent_id {
@@ -1003,13 +956,13 @@ use librefang_types::memory::VectorSearchResult;
 /// trait for a dedicated vector database (Qdrant, Pinecone, Chroma, etc.).
 #[derive(Clone)]
 pub struct SqliteVectorStore {
-    conn: Arc<Mutex<Connection>>,
+    pool: Pool<SqliteConnectionManager>,
 }
 
 impl SqliteVectorStore {
     /// Create a new SQLite vector store wrapping the given connection.
-    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+    pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
+        Self { pool }
     }
 }
 
@@ -1022,10 +975,7 @@ impl VectorStore for SqliteVectorStore {
         _payload: &str,
         _metadata: HashMap<String, serde_json::Value>,
     ) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let bytes = embedding_to_bytes(embedding);
         conn.execute(
             "UPDATE memories SET embedding = ?1 WHERE id = ?2",
@@ -1041,10 +991,7 @@ impl VectorStore for SqliteVectorStore {
         limit: usize,
         filter: Option<librefang_types::memory::MemoryFilter>,
     ) -> LibreFangResult<Vec<VectorSearchResult>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         let fetch_limit = (limit * 10).max(100);
         let mut sql = String::from(
@@ -1130,10 +1077,7 @@ impl VectorStore for SqliteVectorStore {
     }
 
     async fn delete(&self, id: &str) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         conn.execute(
             "UPDATE memories SET embedding = NULL WHERE id = ?1",
             rusqlite::params![id],
@@ -1146,10 +1090,7 @@ impl VectorStore for SqliteVectorStore {
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut map = HashMap::new();
         let mut stmt = conn
             .prepare("SELECT embedding FROM memories WHERE id = ?1 AND deleted = 0")
@@ -1178,9 +1119,12 @@ mod tests {
     use crate::migration::run_migrations;
 
     fn setup() -> SemanticStore {
-        let conn = Connection::open_in_memory().unwrap();
-        run_migrations(&conn).unwrap();
-        SemanticStore::new(Arc::new(Mutex::new(conn)))
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        run_migrations(&pool.get().unwrap()).unwrap();
+        SemanticStore::new(pool)
     }
 
     #[test]

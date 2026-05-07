@@ -352,7 +352,7 @@ pub async fn update_budget(
 
     // Apply updates — accept both config field names (max_hourly_usd) and
     // GET response field names (hourly_limit) so read-modify-write works.
-    state.kernel.update_budget_config(|budget| {
+    state.kernel.update_budget_config(&|budget| {
         if let Some(v) = body["max_hourly_usd"]
             .as_f64()
             .or_else(|| body["hourly_limit"].as_f64())
@@ -421,7 +421,7 @@ pub async fn agent_budget_status(
 
     let quota = &entry.manifest.resources;
     let usage_store =
-        librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().usage_conn());
+        librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().pool());
     let hourly = usage_store.query_hourly(agent_id).unwrap_or(0.0);
     let daily = usage_store.query_daily(agent_id).unwrap_or(0.0);
     let monthly = usage_store.query_monthly(agent_id).unwrap_or(0.0);
@@ -480,7 +480,7 @@ pub async fn agent_budget_status(
 )]
 pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let usage_store =
-        librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().usage_conn());
+        librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().pool());
 
     // Fetch all per-agent daily costs in a single GROUP BY query, then build a
     // lookup map so the registry join below is O(n) not O(n²).

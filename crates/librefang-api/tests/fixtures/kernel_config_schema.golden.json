@@ -445,6 +445,39 @@
       },
       "type": "object"
     },
+    "BackendKind": {
+      "description": "Identifier for a tool-execution backend.\n\n`Local` is the long-standing default — commands run as a subprocess on the daemon host, sandboxed via `subprocess_sandbox`. The other variants select managed or remote hosts; their concrete impls live behind feature flags in the runtime crate.",
+      "oneOf": [
+        {
+          "description": "Local subprocess (default). Always available.",
+          "enum": [
+            "local"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Local Docker container. Routed through the existing `[docker]` sandbox config — kept as a distinct kind so per-agent selection can prefer Docker without needing the global `mode = all` flag.",
+          "enum": [
+            "docker"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Remote SSH host. Requires the runtime to be built with the `ssh-backend` feature.",
+          "enum": [
+            "ssh"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Daytona managed sandbox. Requires the runtime to be built with the `daytona-backend` feature.",
+          "enum": [
+            "daytona"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "BindingMatchRule": {
       "description": "Match rule for agent bindings. All specified (non-None) fields must match.",
       "properties": {
@@ -1992,6 +2025,58 @@
         "content",
         "name"
       ],
+      "type": "object"
+    },
+    "CronCompactionMode": {
+      "description": "Compaction strategy for Persistent cron sessions (#3693).\n\nControls what happens when the session exceeds `cron_session_max_tokens` or `cron_session_max_messages` before a cron fire.\n\nConfigure in config.toml: ```toml cron_session_compaction_mode = \"summarize_trim\" cron_session_compaction_keep_recent = 8 ```",
+      "oneOf": [
+        {
+          "description": "Drop oldest messages from the front of the session until the budget is satisfied. Fast and deterministic, but lossy — dropped context is gone. This is the historical behaviour and remains the default.",
+          "enum": [
+            "prune"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Summarize messages that would be dropped using an LLM call, then keep the summary as a synthetic assistant message followed by the most recent `cron_session_compaction_keep_recent` messages. Preserves semantic continuity at the cost of a lightweight LLM round-trip per fire when the session exceeds the budget. Falls back to `Prune` on LLM failure with a `tracing::warn!`.",
+          "enum": [
+            "summarize_trim"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "DaytonaBackendConfig": {
+      "description": "Daytona-managed-sandbox backend configuration.\n\nDaytona exposes a REST API for ephemeral developer sandboxes. We authenticate with a bearer token stored in an env var (so the daemon never persists the secret), create a workspace per agent session, and execute commands via the workspace's exec endpoint.",
+      "properties": {
+        "api_key_env": {
+          "default": "DAYTONA_API_KEY",
+          "description": "Environment variable holding the API key. Default: `DAYTONA_API_KEY`.",
+          "type": "string"
+        },
+        "api_url": {
+          "default": "https://app.daytona.io",
+          "description": "Daytona API base URL. Default: `https://app.daytona.io`.",
+          "type": "string"
+        },
+        "image": {
+          "default": "ubuntu:22.04",
+          "description": "Default sandbox image. Default: `ubuntu:22.04`.",
+          "type": "string"
+        },
+        "timeout_secs": {
+          "default": 120,
+          "description": "Per-command timeout in seconds. Default: 120.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "workspace_prefix": {
+          "default": "librefang",
+          "description": "Workspace name prefix (Daytona-side). Default: `librefang`.",
+          "type": "string"
+        }
+      },
       "type": "object"
     },
     "DefaultModelConfig": {
@@ -4878,6 +4963,13 @@
             "null"
           ]
         },
+        "pool_size": {
+          "default": 8,
+          "description": "Maximum number of pooled SQLite connections served by the memory substrate (#3378 follow-up). The pre-pool design serialised every SQLite call through a single `Mutex<Connection>`; the r2d2 pool removes that bottleneck but introduces a new ceiling — too low and the trigger lane / channel bridges / cron / audit / idempotency callers contend on `pool.get()`, too high and per-connection page caches add up (each connection holds at most ~2 MiB via `PRAGMA cache_size=-2000`). The default of 8 matches `queue.concurrency.trigger_lane` so the lane semaphore, not the pool, is the limiting factor under typical workloads. Bump in lockstep with `trigger_lane` if you raise that, or lower for memory-constrained deployments. Pool exhaustion is surfaced via the `librefang_memory_pool_get_failed_total{store=...}` counter.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "soft_delete_retention_days": {
           "default": 30,
           "description": "How many days to keep soft-deleted memories (`deleted = 1`) before the periodic retention sweep hard-deletes them and reclaims their embedding BLOB. Default: 30. Set to 0 to disable hard-delete (rows stay forever, leaking embedding storage — see #3467).",
@@ -4943,6 +5035,76 @@
         }
       },
       "type": "object"
+    },
+    "MemoryWikiConfig": {
+      "description": "Memory wiki configuration (issue #3329). **Off by default** — set `enabled = true` to opt in.\n\n```toml [memory_wiki] enabled = false mode = \"isolated\"                    # isolated | bridge | unsafe_local vault_path = \"~/.librefang/wiki/main\" render_mode = \"native\"               # native | obsidian ingest_filter = \"tagged\"             # tagged | all ```",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Master switch. When `false` (default), the wiki is not constructed and the `wiki_*` builtin tools all return a `Disabled` error.",
+          "type": "boolean"
+        },
+        "ingest_filter": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MemoryWikiIngestFilter"
+            }
+          ],
+          "default": "tagged",
+          "description": "Whether the vault accepts every `wiki_write` or only ones with an explicit topic tag."
+        },
+        "mode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MemoryWikiMode"
+            }
+          ],
+          "default": "isolated",
+          "description": "Operating mode (see `MemoryWikiMode`). v1 wires `Isolated`; the other variants return `ModeNotImplemented` until follow-up PRs."
+        },
+        "render_mode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MemoryWikiRenderMode"
+            }
+          ],
+          "default": "native",
+          "description": "Markdown render flavor for cross-references (`[[topic]]` placeholders)."
+        },
+        "vault_path": {
+          "description": "Filesystem location of the vault root. Defaults to `<librefang_home>/wiki/main`. The `~` prefix is honoured.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "MemoryWikiIngestFilter": {
+      "description": "Which `wiki_write` calls actually land on disk.\n\n* `Tagged` (default) — only writes that pass an explicit `topic` tag are accepted, matching v1 acceptance criteria. Other writes are rejected with `WikiError::InvalidTopic`. * `All` — accept every write the kernel forwards. Useful in testing or in `unsafe_local` mode where the agent already speaks vault semantics.",
+      "enum": [
+        "tagged",
+        "all"
+      ],
+      "type": "string"
+    },
+    "MemoryWikiMode": {
+      "description": "Operating mode for the memory wiki (issue #3329).\n\n* `Isolated` (default) — own vault under `vault_path`, populated only by explicit `wiki_write` calls. No coupling to the memory substrate. * `Bridge` — read shared artifacts from the memory substrate through the public seams. Reserved for follow-up; v1 returns `WikiError::ModeNotImplemented`. * `UnsafeLocal` — same-machine escape hatch that points at an existing filesystem path (e.g. an Obsidian vault). Reserved for follow-up.",
+      "enum": [
+        "isolated",
+        "bridge",
+        "unsafe_local"
+      ],
+      "type": "string"
+    },
+    "MemoryWikiRenderMode": {
+      "description": "Markdown render flavor for vault pages (issue #3329).\n\n* `Native` — plain Markdown links: `[topic](topic.md)`. * `Obsidian` — Obsidian / Logseq wiki-link syntax: `[[topic]]`.",
+      "enum": [
+        "native",
+        "obsidian"
+      ],
+      "type": "string"
     },
     "MessengerConfig": {
       "description": "Facebook Messenger Platform channel adapter configuration.",
@@ -5019,6 +5181,41 @@
           "default": 8452,
           "description": "Port for the incoming webhook.",
           "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "ModelRoutingConfig": {
+      "description": "Model routing configuration — auto-selects cheap/mid/expensive models by complexity.",
+      "properties": {
+        "complex_model": {
+          "default": "claude-sonnet-4-20250514",
+          "description": "Model to use for complex queries.",
+          "type": "string"
+        },
+        "complex_threshold": {
+          "default": 500,
+          "description": "Token count threshold: above this = complex.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "medium_model": {
+          "default": "claude-sonnet-4-20250514",
+          "description": "Model to use for medium-complexity queries.",
+          "type": "string"
+        },
+        "simple_model": {
+          "default": "claude-haiku-4-5-20251001",
+          "description": "Model to use for simple queries.",
+          "type": "string"
+        },
+        "simple_threshold": {
+          "default": 100,
+          "description": "Token count threshold: below this = simple.",
+          "format": "uint32",
           "minimum": 0.0,
           "type": "integer"
         }
@@ -11533,6 +11730,65 @@
       },
       "type": "object"
     },
+    "SshBackendConfig": {
+      "description": "SSH backend connection configuration.",
+      "properties": {
+        "host": {
+          "default": "",
+          "description": "Hostname or IP of the remote machine.",
+          "type": "string"
+        },
+        "host_key_sha256": {
+          "description": "SHA-256 hex of the expected server host key. When set, the backend refuses to connect if the server presents a different key (TOFU-style pinning). When empty, the backend falls back to the on-disk known-hosts file at `~/.librefang/ssh_known_hosts.toml` — first connect records the fingerprint there, subsequent connects must match.",
+          "type": "string"
+        },
+        "key_passphrase_env": {
+          "description": "Environment variable holding the passphrase for an encrypted `key_path`. When unset, `key_path` is loaded as if unencrypted — matching the historical behaviour. Setting this lets operators store an encrypted key on disk without passing the passphrase in plaintext through the daemon config.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key_path": {
+          "description": "Path to a private key on disk. Mutually exclusive with `password_env`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "password_env": {
+          "description": "Environment variable holding the SSH password. Falls back to passwordless keyless auth if neither this nor `key_path` is set (useful only for hosts with `~/.ssh/authorized_keys` already holding the daemon's key).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "port": {
+          "default": 22,
+          "description": "SSH port. Default: 22.",
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "timeout_secs": {
+          "default": 60,
+          "description": "Optional command timeout in seconds. Default: 60.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "user": {
+          "default": "",
+          "description": "Login user. Default: empty (must be set when backend is active).",
+          "type": "string"
+        },
+        "workdir": {
+          "description": "Optional working directory on the remote host. Empty = remote `$HOME`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "TaintRuleId": {
       "description": "Identifies a specific taint detection rule.\n\nUsed by [`check_outbound_text_violation_with_skip`] to let callers opt out of individual rules without touching the main code path.  Per-tool, per-path exemptions in `McpTaintPolicy` map directly to these variants.",
       "oneOf": [
@@ -11911,6 +12167,11 @@
           "description": "Auto-start the bundled observability Docker stack (Grafana, Prometheus, Tempo, OTel collector) on daemon boot. Default: `false`.\n\nOff by default because spinning up four containers on every `librefang start` is a strong implicit side-effect — operators usually prefer `librefang start` to leave the host untouched. Existing dashboards / custom OTel collectors keep working as long as `otlp_endpoint` points at them; the stack is only useful for the bundled local view.\n\nIssue #3136.",
           "type": "boolean"
         },
+        "emit_caller_trace_headers": {
+          "default": true,
+          "description": "Emit `x-librefang-{agent,session,step}-id` HTTP headers on outbound OpenAI-compatible LLM requests so observability sidecars (logging gateways, audit proxies, OTel collectors that shape spans from request metadata) can correlate request log records to the originating agent / session / agent-loop iteration without parsing the JSON body. Default: `true`.\n\nSet to `false` to suppress all three headers wire-side regardless of whether the kernel populated `CompletionRequest`'s caller-id fields. Useful for operators with strict zero-egress policies (regulated tenants, EU healthcare) who want no LibreFang-internal identifiers crossing the upstream-provider boundary, even though the IDs are opaque UUIDs / integers and carry no PII.\n\nCurrently consulted only by the OpenAI-compatible driver. Other drivers (Anthropic, Gemini, Bedrock, Vertex, ChatGPT, Copilot, Claude Code, Codex, Gemini CLI, Qwen Code) do not emit these headers today; when they grow per-driver header-emission support, they will honour the same flag.",
+          "type": "boolean"
+        },
         "enabled": {
           "default": true,
           "description": "Enable OpenTelemetry OTLP tracing export.",
@@ -12128,6 +12389,43 @@
         }
       ]
     },
+    "ToolExecConfig": {
+      "description": "Top-level tool-execution backend configuration in `config.toml`.\n\n```toml [tool_exec] kind = \"local\"   # default\n\n# NOTE: setting kind != \"local\" here selects the resolved backend at # boot, but actual tool dispatch through the new ToolExecBackend # trait is wired up in a follow-up PR. Until then, tool calls fall # back to the legacy local/docker path. See # docs/architecture/tool-exec-backends.md \"Status\" section.\n\n# [tool_exec.ssh] # host = \"build.example.com\" # user = \"agent\" # key_path = \"/home/me/.ssh/id_ed25519\"\n\n# [tool_exec.daytona] # api_url = \"https://app.daytona.io\" # api_key_env = \"DAYTONA_API_KEY\" ```\n\n`kind` selects the active backend; the matching sub-table carries the connection knobs. Inactive sub-tables are ignored — keeping stale config around is fine.",
+      "properties": {
+        "daytona": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DaytonaBackendConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Daytona-backend knobs. Required when `kind = \"daytona\"`."
+        },
+        "kind": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/BackendKind"
+            }
+          ],
+          "default": "local",
+          "description": "Active backend kind. Default: `local`."
+        },
+        "ssh": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SshBackendConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "SSH-backend connection knobs. Required when `kind = \"ssh\"`."
+        }
+      },
+      "type": "object"
+    },
     "ToolGroup": {
       "description": "Tool group — named collection of tool patterns.",
       "properties": {
@@ -12231,6 +12529,54 @@
         "effect",
         "pattern"
       ],
+      "type": "object"
+    },
+    "ToolResultsConfig": {
+      "description": "Tool-result context budget and artifact spill configuration.\n\nControls what happens when a tool returns a very large payload.  The primary mechanism shipped in #3347 1/N is **artifact spill**: responses larger than `spill_threshold_bytes` are written to `~/.librefang/data/artifacts/` and the agent receives a compact stub with a handle it can pass to `read_artifact` to retrieve the content in chunks.\n\n`max_bytes_per_turn` enforces a per-turn cumulative byte cap (#3347 2/N). `history_fold_after_turns` triggers tool-result history summarisation via the aux-LLM channel (#3347 3/N) — falls back to byte truncation when no aux-LLM is configured. `artifact_max_age_days` evicts stale spill artifacts at daemon startup (#3347 4/N).  Set to `0` to disable eviction entirely.\n\n```toml [tool_results] spill_threshold_bytes    = 16384        # 16 KB — spill to artifact store above this max_artifact_bytes       = 67108864     # 64 MiB — per-artifact write cap max_bytes_per_turn       = 50000        # cumulative byte cap across all tool results in one turn history_fold_after_turns = 8            # fold stale tool results after this many turns artifact_max_age_days    = 30           # evict spill artifacts older than this on startup; 0 disables ```",
+      "properties": {
+        "artifact_max_age_days": {
+          "default": 30,
+          "description": "Evict spill artifacts older than this many days at daemon startup (#3347 4/N).  The artifact store grows unbounded otherwise — every large tool result writes a content-addressed file under `~/.librefang/data/artifacts/` and the original `read_artifact` handle in the message history is the only thing pinning it.  After history compaction or a long agent lifetime those handles are no longer reachable, but the bytes remain on disk.  GC runs once per daemon boot, fire-and-forget. Set to `0` to disable eviction entirely.  Default: 30 days.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "fold_min_batch_size": {
+          "default": 4,
+          "description": "Minimum number of newly-stale tool-result messages required to trigger a fold pass.  Without a batch threshold a long-running session would drag exactly one new message across the staleness boundary every turn and pay an aux-LLM round-trip per turn just to fold a single message.  Skipping until at least N have accumulated amortises that cost.  Set to `1` to fold every turn (no batching); `0` is treated as `1`.  Default: 4.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "history_fold_after_turns": {
+          "default": 8,
+          "description": "Fold (summarise via aux-LLM) stale tool results after this many turns (#3347 3/N).  Tool-result messages older than this threshold have each `ContentBlock::ToolResult.content` rewritten in place to a compact `[history-fold] <summary>` stub before the next LLM call. `tool_use_id` / `tool_name` / `is_error` / `status` are preserved so every assistant `tool_use` block keeps its matching `tool_result` (provider APIs reject mismatched ids with 400). Falls back to a static `[summarisation unavailable]` stub when no aux-LLM is configured or the aux call fails, so stale payload is always removed from context.  Default: 8 turns.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_artifact_bytes": {
+          "default": 67108864,
+          "description": "Maximum bytes for a single artifact write.  Spill is skipped (falling back to truncation) when a tool result exceeds this cap, preventing a single oversized response from filling the artifact store. Default: 67 108 864 bytes (64 MiB).",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_bytes_per_turn": {
+          "default": 50000,
+          "description": "Cumulative byte cap across all tool results in a single LLM turn (#3347 2/N).  When the running total would exceed this, the next result is escalated to artifact spill (or tail truncation if spill fails).  Resets between assistant turns.  Default: 50 000 bytes.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "spill_threshold_bytes": {
+          "default": 16384,
+          "description": "Spill threshold in bytes.  Tool results larger than this are written to the artifact store; the agent receives a stub with a `read_artifact` handle instead of the raw payload.  Default: 16 384 bytes (16 KB).",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
       "type": "object"
     },
     "TriggersConfig": {
@@ -14144,7 +14490,7 @@
         "email": null,
         "feishu": null,
         "file_download_dir": null,
-        "file_download_max_bytes": 0,
+        "file_download_max_bytes": 52428800,
         "flock": null,
         "gitter": null,
         "google_chat": null,
@@ -14271,6 +14617,22 @@
       },
       "type": "array"
     },
+    "cron_session_compaction_keep_recent": {
+      "default": 8,
+      "description": "Number of recent messages to preserve verbatim after summarization when `cron_session_compaction_mode = \"summarize_trim\"` is active.\n\nThe LLM summary replaces everything older than the kept tail.\n\n**Reasonable range**: `1` – `64`. Values below `1` are clamped to `1` at runtime. Values larger than the current session length are silently clamped to the session length (nothing gets summarized in that case and the code falls back to plain prune). Setting this to a very large number defeats the purpose of summarization. Default: `8`.",
+      "format": "uint",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "cron_session_compaction_mode": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/CronCompactionMode"
+        }
+      ],
+      "default": "prune",
+      "description": "Compaction strategy applied when the cron session exceeds `cron_session_max_tokens` or `cron_session_max_messages` (#3693).\n\n- `\"prune\"` (default) — drop oldest messages from the front until the budget is satisfied. Identical to the pre-#3693 behaviour. - `\"summarize_trim\"` — summarize the messages that would be dropped with a lightweight LLM call, replace them with a single synthetic summary message, then keep the most recent `cron_session_compaction_keep_recent` messages verbatim. Falls back to `prune` (with a `tracing::warn!`) when the LLM call fails.\n\nOnly takes effect when at least one size cap (`cron_session_max_tokens` or `cron_session_max_messages`) is configured. The field is ignored and session-mode-`new` jobs always skip this path entirely."
+    },
     "cron_session_max_messages": {
       "default": null,
       "description": "Maximum number of messages retained in a cron session. When the session exceeds this count the oldest messages are pruned before each cron fire. Applied in addition to `cron_session_max_tokens`.\n\n`None` (default) disables message-count pruning.",
@@ -14284,6 +14646,25 @@
     "cron_session_max_tokens": {
       "default": null,
       "description": "Maximum estimated token count for the cron session before automatic pruning. Oldest messages are removed from the front of the session until the estimated count falls below this threshold.\n\n`None` (default) disables pruning and preserves existing behaviour. Set to e.g. `100000` for a rolling 100k-token window.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "cron_session_warn_fraction": {
+      "default": 0.8,
+      "description": "Fraction of the effective token budget (post-prune) at which the kernel emits a `tracing::warn!` for a Persistent cron session approaching the provider context window. Closes the operator- visibility gap from #3693: pruning prevents the hard 400 from the provider, but without this warn the trend is invisible until a fire actually fails.\n\nApplied against the effective limit: 1. `cron_session_max_tokens` if set, else 2. [`Self::cron_session_warn_total_tokens`] as a fallback ceiling.\n\nSkipped entirely when both are `None`, or when this value is `None` / `<= 0.0` / `> 1.0`.\n\nDefault: `Some(0.8)` — warn at 80% of the budget.",
+      "format": "double",
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "cron_session_warn_total_tokens": {
+      "default": 200000,
+      "description": "Fallback context-window ceiling used by [`Self::cron_session_warn_fraction`] when `cron_session_max_tokens` is unset. Lets operators get growth warnings even on agents that have not opted into pruning.\n\nDefault: `Some(200_000)` — matches the typical Claude / GPT-4 long-context window. Set to `None` to disable the fallback (warn only fires when `cron_session_max_tokens` is explicitly configured).",
       "format": "uint64",
       "minimum": 0.0,
       "type": [
@@ -14325,6 +14706,17 @@
         "provider": "auto"
       },
       "description": "Default LLM provider configuration."
+    },
+    "default_routing": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ModelRoutingConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Kernel-wide Smart Model Router defaults applied to any agent whose `agent.toml` does not set its own `[routing]` block. The `init` wizard writes user-selected tier models here under `[default_routing]` so the chosen routing actually reaches the kernel — see issue #4466. Per-agent `routing` always wins when present."
     },
     "docker": {
       "allOf": [
@@ -14631,12 +15023,27 @@
         "embedding_model": "text-embedding-3-small",
         "embedding_provider": null,
         "fts_only": null,
+        "pool_size": 8,
         "soft_delete_retention_days": 30,
         "sqlite_path": null,
         "vector_backend": null,
         "vector_store_url": null
       },
       "description": "Memory substrate configuration."
+    },
+    "memory_wiki": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/MemoryWikiConfig"
+        }
+      ],
+      "default": {
+        "enabled": false,
+        "ingest_filter": "tagged",
+        "mode": "isolated",
+        "render_mode": "native"
+      },
+      "description": "Memory wiki: durable markdown knowledge vault with provenance and optional Obsidian-friendly export. Off by default; see `librefang-memory-wiki` and issue #3329 for the runbook."
     },
     "mode": {
       "allOf": [
@@ -15036,6 +15443,7 @@
       ],
       "default": {
         "auto_start_observability_stack": false,
+        "emit_caller_trace_headers": true,
         "enabled": true,
         "otlp_endpoint": "http://localhost:4317",
         "prometheus_enabled": true,
@@ -15074,6 +15482,17 @@
       "default": null,
       "description": "Extended thinking configuration."
     },
+    "tool_exec": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ToolExecConfig"
+        }
+      ],
+      "default": {
+        "kind": "local"
+      },
+      "description": "Pluggable tool-execution backend selection (#3332). Default: `local` — keeps the long-standing subprocess-on-daemon behavior. Set to `ssh` / `daytona` (with the matching subtable) to route tool exec to a remote / managed host. Per-agent override available via `agent.toml: tool_exec_backend`."
+    },
     "tool_invoke": {
       "allOf": [
         {
@@ -15099,6 +15518,22 @@
         "subagent_max_depth": 10
       },
       "description": "Tool policy configuration (global deny/allow rules, groups, depth limits)."
+    },
+    "tool_results": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ToolResultsConfig"
+        }
+      ],
+      "default": {
+        "artifact_max_age_days": 30,
+        "fold_min_batch_size": 4,
+        "history_fold_after_turns": 8,
+        "max_artifact_bytes": 67108864,
+        "max_bytes_per_turn": 50000,
+        "spill_threshold_bytes": 16384
+      },
+      "description": "Tool-result context budget and artifact spill configuration. See [`ToolResultsConfig`] for knob descriptions.  The primary active mechanism is artifact spill (responses > `spill_threshold_bytes` are written to disk and replaced with a stub + `read_artifact` handle). The cumulative budget and history fold knobs are wired but deferred — see #3347 2/N and 3/N."
     },
     "tool_timeout_secs": {
       "default": 120,
@@ -15131,6 +15566,10 @@
       },
       "description": "Event-driven trigger system configuration (cooldowns, depth limits, etc.)."
     },
+    "trust_forwarded_for": {
+      "description": "Master switch for forwarding-header trust. Defaults to `false`. When `true` AND the TCP peer matches `trusted_proxies`, the daemon resolves the real client IP from forwarding headers (preference: `CF-Connecting-IP` → `X-Real-IP` → `Forwarded` (RFC 7239) → rightmost-untrusted hop in `X-Forwarded-For`). Without both flags set, header trust stays off and the TCP peer is used everywhere — the safe default for any non-proxied deployment.",
+      "type": "boolean"
+    },
     "trusted_hosts": {
       "description": "Hostnames allowed to drive the OAuth `redirect_uri` when starting an MCP auth flow. The MCP auth-start handler derives the callback URL from the incoming request's `Origin` / `X-Forwarded-Host` / `Host` headers; without an allowlist a spoofed Host header could redirect the authorization code to an attacker-controlled origin. Loopback addresses (`localhost`, `127.0.0.1`, `::1`) are always accepted so local development keeps working with an empty list. Entries are hostnames without port, e.g. `\"dash.example.com\"`.",
       "items": {
@@ -15140,6 +15579,13 @@
     },
     "trusted_manifest_signers": {
       "description": "Hex-encoded Ed25519 public keys (32 bytes → 64 hex chars) allowed to sign agent manifests. `verify_signed_manifest` requires the envelope's `signer_public_key` to be on this list before accepting a signature — without a trust anchor, a self-signed envelope from any attacker passes internal-consistency checks and would be indistinguishable from a legitimate one. When empty, `SignedManifest` JSON payloads are rejected outright (fail-closed). Raw unsigned TOML manifests are unaffected; this list only gates the signed-envelope path.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "trusted_proxies": {
+      "description": "CIDR ranges (or single IPs) of reverse proxies that are trusted to set forwarding headers (`X-Forwarded-For`, `X-Real-IP`, `CF-Connecting-IP`, `Forwarded`). Used together with `trust_forwarded_for`: header trust is **only** applied when the TCP peer matches one of these entries.\n\nWithout this allowlist, trusting forwarding headers lets any internet client forge a per-request source IP and bypass per-IP rate limits and connection caps. The allowlist closes that hole by gating header trust on a verified upstream proxy.\n\nEntries are CIDRs (`\"172.19.0.0/16\"`, `\"10.0.0.0/8\"`, `\"2001:db8::/32\"`) or bare IPs (`\"127.0.0.1\"`, `\"::1\"`). An empty list (default) disables header trust regardless of `trust_forwarded_for`.",
       "items": {
         "type": "string"
       },

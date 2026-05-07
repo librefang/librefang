@@ -41,7 +41,7 @@ async fn start_test_server() -> TestServer {
     let config_path = test.tmp_path().join("config.toml");
     let test = test.with_config_path(config_path);
     let (state, _tmp, _) = test.into_parts();
-    state.kernel.set_self_handle();
+    state.kernel.clone().set_self_handle();
 
     let app = Router::new()
         .route(

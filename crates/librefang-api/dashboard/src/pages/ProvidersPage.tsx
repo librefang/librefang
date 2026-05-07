@@ -1,6 +1,6 @@
 import { useMutation } from "@tanstack/react-query";
 import { formatTime, formatDateTime } from "../lib/datetime";
-import { useMemo, useState, useCallback } from "react";
+import { memo, useMemo, useState, useCallback, useEffect, useReducer } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import type { ApiActionResponse, ProviderItem } from "../api";
@@ -103,12 +103,12 @@ type FilterStatus = "all" | "reachable" | "unreachable";
 
 // ── SetDefaultModelSection — model picker + "set as default" in config modal ──
 
-function SetDefaultModelSection({ providerId, currentDefault, onSetDefault, t }: {
+function SetDefaultModelSection({ providerId, currentDefault, onSetDefault }: {
   providerId: string;
   currentDefault?: string;
   onSetDefault: (id: string, model?: string) => Promise<void>;
-  t: TFunction;
 }) {
+  const { t } = useTranslation();
   const [selectedModel, setSelectedModel] = useState("");
   const [setting, setSetting] = useState(false);
   const isDefault = currentDefault === providerId;
@@ -297,10 +297,10 @@ interface ProviderCardProps {
   onViewDetails: (provider: ProviderItem) => void;
   onConfigure: (provider: ProviderItem) => void;
   onDelete: (provider: ProviderItem) => void;
-  t: (key: string) => string;
 }
 
-function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode, onSelect, onTest, onSetDefault, onViewDetails, onConfigure, onDelete, t }: ProviderCardProps) {
+const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode, onSelect, onTest, onSetDefault, onViewDetails, onConfigure, onDelete }: ProviderCardProps) {
+  const { t } = useTranslation();
   const isConfigured = isProviderAvailable(p.auth_status);
   const isCli = isCliProvider(p);
 
@@ -566,17 +566,17 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
       </div>
     </Card>
   );
-}
+});
 
 // ── Details Modal ────────────────────────────────────────────────
 
-function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
+function DetailsModal({ provider, onClose, onTest, pendingId }: {
   provider: ProviderItem;
   onClose: () => void;
   onTest: (id: string) => void;
   pendingId: string | null;
-  t: TFunction;
 }) {
+  const { t } = useTranslation();
   const isConfigured = isProviderAvailable(provider.auth_status);
   const authBadge = getAuthBadge(provider.auth_status);
 
@@ -606,7 +606,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
           <div className="p-4 rounded-xl bg-main/30">
             <p className="text-[10px] font-black uppercase tracking-wider text-text-dim/70 mb-1">{t("providers.latency")}</p>
             <p className={`text-2xl font-black ${getLatencyColor(provider.latency_ms)}`}>
-              {provider.latency_ms ? `${provider.latency_ms}ms` : "-"}
+              {provider.latency_ms != null ? `${provider.latency_ms}ms` : "-"}
             </p>
           </div>
         </div>
@@ -701,11 +701,11 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
 
 // ── Filter Chips ─────────────────────────────────────────────────
 
-function FilterChips({ activeFilter, onChange, t }: {
+function FilterChips({ activeFilter, onChange }: {
   activeFilter: FilterStatus;
   onChange: (filter: FilterStatus) => void;
-  t: (key: string) => string;
 }) {
+  const { t } = useTranslation();
   const filters: { value: FilterStatus; label: string; icon: React.ReactNode }[] = [
     { value: "all", label: t("providers.filter_all"), icon: <Filter className="w-3 h-3" /> },
     { value: "reachable", label: t("providers.filter_reachable"), icon: <CheckCircle2 className="w-3 h-3 text-success" /> },
@@ -1040,17 +1040,55 @@ function CreateProviderWizard({
   );
 }
 
+// ── Filter/Sort reducer (P8) ─────────────────────────────────────
+
+type FilterState = {
+  search: string;
+  filterStatus: FilterStatus;
+  sortField: SortField;
+  sortOrder: SortOrder;
+};
+
+type FilterAction =
+  | { type: "SEARCH"; value: string }
+  | { type: "FILTER"; status: FilterStatus }
+  | { type: "SORT"; field: SortField };
+
+function filterReducer(state: FilterState, action: FilterAction): FilterState {
+  switch (action.type) {
+    case "SEARCH":
+      return { ...state, search: action.value };
+    case "FILTER":
+      return { ...state, filterStatus: action.status };
+    case "SORT":
+      return {
+        ...state,
+        sortField: action.field,
+        sortOrder: state.sortField === action.field
+          ? (state.sortOrder === "asc" ? "desc" : "asc")
+          : "desc",
+      };
+    default:
+      return state;
+  }
+}
+
+const initialFilterState: FilterState = {
+  search: "",
+  filterStatus: "all",
+  sortField: "name",
+  sortOrder: "asc",
+};
+
 // ── Main Page ────────────────────────────────────────────────────
 
 export function ProvidersPage() {
   const { t } = useTranslation();
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set());
-  const [search, setSearch] = useState("");
-  const [sortField, setSortField] = useState<SortField>("name");
-  const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
+  const [filterState, dispatch] = useReducer(filterReducer, initialFilterState);
+  const { search, sortField, sortOrder, filterStatus } = filterState;
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
-  const [filterStatus, setFilterStatus] = useState<FilterStatus>("all");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [detailsProvider, setDetailsProvider] = useState<ProviderItem | null>(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
@@ -1085,6 +1123,15 @@ export function ProvidersPage() {
   const providers = providersQuery.data ?? [];
   const currentDefaultProvider = statusQuery.data?.default_provider ?? "";
   const configuredCount = useMemo(() => providers.filter(p => isProviderAvailable(p.auth_status)).length, [providers]);
+
+  useEffect(() => {
+    if (!providersQuery.data) return;
+    setDetailsProvider(prev => {
+      if (!prev) return prev;
+      const updated = providersQuery.data.find(p => p.id === prev.id);
+      return updated ?? prev;
+    });
+  }, [providersQuery.data]);
 
   // Configured providers are the main page content. Filter/sort applies
   // to those only; the unconfigured catalog lives behind the Add picker.
@@ -1128,17 +1175,14 @@ export function ProvidersPage() {
     config.open(p);
   };
 
-  const handleSearch = (value: string) => { setSearch(value); setSelectedIds(new Set()); };
-  const handleFilterChange = (filter: FilterStatus) => { setFilterStatus(filter); setSelectedIds(new Set()); };
+  const handleSearch = (value: string) => { dispatch({ type: "SEARCH", value }); setSelectedIds(new Set()); };
+  const handleFilterChange = (filter: FilterStatus) => { dispatch({ type: "FILTER", status: filter }); setSelectedIds(new Set()); };
 
-  const handleSort = (field: SortField) => {
-    if (sortField === field) setSortOrder(sortOrder === "asc" ? "desc" : "asc");
-    else { setSortField(field); setSortOrder("desc"); }
-  };
+  const handleSort = (field: SortField) => { dispatch({ type: "SORT", field }); };
 
-  const handleSelect = (id: string, checked: boolean) => {
+  const handleSelect = useCallback((id: string, checked: boolean) => {
     setSelectedIds(prev => { const next = new Set(prev); if (checked) next.add(id); else next.delete(id); return next; });
-  };
+  }, []);
 
   const handleSelectAll = () => {
     if (selectedIds.size === filteredProviders.length) setSelectedIds(new Set());
@@ -1147,20 +1191,40 @@ export function ProvidersPage() {
 
   const handleBatchTest = async () => {
     const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
     setTestingIds(new Set(ids));
-    await Promise.all(ids.map(async (id) => {
-      try {
-        await testMutation.mutateAsync(id);
-      } catch {
-        // continue
-      } finally {
-        setTestingIds(prev => { const next = new Set(prev); next.delete(id); return next; });
+    let successCount = 0;
+    let failCount = 0;
+    const CONCURRENCY = 4;
+    const queue = [...ids];
+    const worker = async () => {
+      while (queue.length > 0) {
+        const id = queue.shift()!;
+        try {
+          const result = await testMutation.mutateAsync(id);
+          if (result.status === "error") failCount++;
+          else successCount++;
+        } catch {
+          failCount++;
+        } finally {
+          setTestingIds(prev => { const next = new Set(prev); next.delete(id); return next; });
+        }
       }
-    }));
-    addToast(t("common.success"), "success");
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, ids.length) }, () => worker()));
+    if (failCount === 0) {
+      addToast(t("common.success"), "success");
+    } else if (successCount === 0) {
+      addToast(t("providers.batch_test_all_failed", { defaultValue: "All tests failed" }), "error");
+    } else {
+      addToast(
+        t("providers.batch_test_partial", { defaultValue: `${successCount} passed, ${failCount} failed` }),
+        "error",
+      );
+    }
   };
 
-  const handleTest = async (id: string) => {
+  const handleTest = useCallback(async (id: string) => {
     setPendingId(id);
     try {
       const result = await testMutation.mutateAsync(id);
@@ -1171,16 +1235,16 @@ export function ProvidersPage() {
     } finally {
       setPendingId(null);
     }
-  };
+  }, [testMutation, addToast, t]);
 
-  const handleSetDefault = async (id: string, model?: string) => {
+  const handleSetDefault = useCallback(async (id: string, model?: string) => {
     try {
       await defaultProviderMutation.mutateAsync({ id, model });
       addToast(t("providers.default_set"), "success");
     } catch (e: unknown) {
       addToast(getErrorMessage(e) || t("common.error"), "error");
     }
-  };
+  }, [defaultProviderMutation, addToast, t]);
 
   const handleDeleteConfirm = async () => {
     if (!deleteConfirmProvider) return;
@@ -1208,6 +1272,7 @@ export function ProvidersPage() {
     || (config.provider?.key_required !== false
         && !config.hasStoredKey
         && !config.keyInput.trim());
+  const configAuthBadge = config.provider ? getAuthBadge(config.provider.auth_status) : null;
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -1247,7 +1312,7 @@ export function ProvidersPage() {
           <Input value={search} onChange={(e) => handleSearch(e.target.value)} placeholder={t("common.search")}
             leftIcon={<Search className="w-4 h-4" />}
             rightIcon={search && (
-              <button onClick={() => setSearch("")} className="hover:text-text-main" aria-label={t("common.clear_search")}>
+              <button onClick={() => dispatch({ type: "SEARCH", value: "" })} className="hover:text-text-main" aria-label={t("common.clear_search")}>
                 <X className="w-3 h-3" />
               </button>
             )} />
@@ -1280,7 +1345,7 @@ export function ProvidersPage() {
           chips that have no targets. */}
       {configuredCount > 0 && (
         <div className="flex items-center justify-between gap-3 flex-wrap overflow-x-auto">
-          <FilterChips activeFilter={filterStatus} onChange={handleFilterChange} t={t} />
+          <FilterChips activeFilter={filterStatus} onChange={handleFilterChange} />
 
           {selectedIds.size > 0 && (
             <div className="flex items-center gap-2">
@@ -1353,7 +1418,6 @@ export function ProvidersPage() {
                 onViewDetails={setDetailsProvider}
                 onConfigure={config.open}
                 onDelete={setDeleteConfirmProvider}
-                t={t}
               />
             ))}
           </div>
@@ -1368,7 +1432,6 @@ export function ProvidersPage() {
           onClose={() => setDetailsProvider(null)}
           onTest={handleTest}
           pendingId={pendingId}
-          t={t}
         />
       )}
 
@@ -1384,8 +1447,8 @@ export function ProvidersPage() {
                 <p className="text-sm font-bold">{config.provider.display_name || config.provider.id}</p>
                 <p className="text-[10px] text-text-dim font-mono">{config.provider.id}</p>
               </div>
-              <Badge variant={getAuthBadge(config.provider.auth_status).variant} className="ml-auto">
-                {getAuthBadge(config.provider.auth_status).label}
+              <Badge variant={configAuthBadge!.variant} className="ml-auto">
+                {configAuthBadge!.label}
               </Badge>
             </div>
 
@@ -1455,7 +1518,6 @@ export function ProvidersPage() {
                 providerId={config.provider.id}
                 currentDefault={statusQuery.data?.default_provider}
                 onSetDefault={handleSetDefault}
-                t={t}
               />
             )}
           </div>

@@ -68,7 +68,7 @@ export function SkillOutputPanel() {
                   </div>
                   <button
                     onClick={() => dismissSkillOutput(output.id)}
-                    className="p-1 rounded text-text-dim/20 hover:text-text-dim opacity-0 group-hover:opacity-100 transition-[colors,opacity] shrink-0"
+                    className="p-1 rounded text-text-dim/20 hover:text-text-dim opacity-100 sm:pointer-fine:opacity-0 sm:pointer-fine:group-hover:opacity-100 transition-[colors,opacity] shrink-0"
                   >
                     <X className="w-3 h-3" />
                   </button>

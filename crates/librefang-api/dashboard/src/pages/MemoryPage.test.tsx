@@ -5,6 +5,7 @@
 // mock those hooks here and assert the page renders / wires mutations
 // correctly — same convention as UserBudgetPage.test.tsx.
 
+import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -14,7 +15,6 @@ import {
   useMemoryConfig,
   useMemoryHealth,
   useMemorySearchOrList,
-  useAgentKvMemory,
 } from "../lib/queries/memory";
 import { useAgents } from "../lib/queries/agents";
 import {
@@ -30,7 +30,14 @@ vi.mock("../lib/queries/memory", () => ({
   useMemoryConfig: vi.fn(),
   useMemoryHealth: vi.fn(),
   useMemorySearchOrList: vi.fn(),
-  useAgentKvMemory: vi.fn(),
+  // MemoryPage now batches per-agent KV via useQueries(agents.map(...));
+  // this stub is only consulted when the test renders agents in the section.
+  // Key on agentId so a future multi-agent test gets independent cache
+  // entries — a fixed key would silently dedupe into one shared observer.
+  agentKvMemoryQueryOptions: vi.fn((agentId: string) => ({
+    queryKey: ["memory", "agent-kv", agentId],
+    queryFn: async () => [],
+  })),
 }));
 
 vi.mock("../lib/queries/agents", () => ({
@@ -79,6 +86,20 @@ vi.mock("../components/ui/MarkdownContent", () => ({
   ),
 }));
 
+vi.mock("motion/react", () => ({
+  AnimatePresence: ({ children }: { children: React.ReactNode }) => (
+    <>{children}</>
+  ),
+  motion: new Proxy(
+    {},
+    {
+      get: (_target: unknown, prop: string) =>
+        ({ children, ...rest }: { children?: React.ReactNode } & Record<string, unknown>) =>
+          React.createElement(prop, rest, children),
+    },
+  ),
+}));
+
 vi.mock("react-i18next", async () => {
   const actual = await vi.importActual<typeof import("react-i18next")>(
     "react-i18next",
@@ -119,7 +140,6 @@ const useMemoryHealthMock = useMemoryHealth as unknown as ReturnType<typeof vi.f
 const useMemorySearchOrListMock = useMemorySearchOrList as unknown as ReturnType<
   typeof vi.fn
 >;
-const useAgentKvMemoryMock = useAgentKvMemory as unknown as ReturnType<typeof vi.fn>;
 const useAgentsMock = useAgents as unknown as ReturnType<typeof vi.fn>;
 const useAddMemoryMock = useAddMemory as unknown as ReturnType<typeof vi.fn>;
 const useUpdateMemoryMock = useUpdateMemory as unknown as ReturnType<typeof vi.fn>;
@@ -230,11 +250,6 @@ describe("MemoryPage", () => {
       refetch: vi.fn(),
     });
     useAgentsMock.mockReturnValue({ data: [] });
-    useAgentKvMemoryMock.mockReturnValue({
-      data: [],
-      isLoading: false,
-      isError: false,
-    });
   });
 
   it("renders KPI stats from useMemoryStats", () => {
@@ -292,16 +307,15 @@ describe("MemoryPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("calls useDeleteMemory.mutate with the memory id when trash is clicked", async () => {
+  it("calls useDeleteMemory.mutate with the memory id when trash is clicked and confirmed", async () => {
     renderPage();
-    // The first memory card has Edit + Delete ghost buttons. Find delete by
-    // Trash2 icon — easier: query all buttons inside the first card.
     const firstCardId = screen.getByText("mem-aaaaaaaa");
     const card = firstCardId.closest("div.flex")?.parentElement?.parentElement;
     expect(card).toBeTruthy();
     const buttons = within(card as HTMLElement).getAllByRole("button");
-    // Last button in the action row is delete.
     fireEvent.click(buttons[buttons.length - 1]);
+    const confirmBtn = await screen.findByRole("button", { name: "Delete" });
+    fireEvent.click(confirmBtn);
     await waitFor(() => {
       expect(deleteMutate).toHaveBeenCalledTimes(1);
     });

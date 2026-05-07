@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/librefang-types",
     "crates/librefang-memory",
+    "crates/librefang-memory-wiki",
     "crates/librefang-runtime",
     "crates/librefang-runtime-mcp",
     "crates/librefang-runtime-oauth",
@@ -88,6 +89,8 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 # Database
 rusqlite = { version = "0.39.0", features = ["bundled", "serde_json"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.33"
 # SurrealDB — pinned to =3.0.5 so librefang, surreal-memory, and UAR all link the
 # same client crate (see Phase 4b of plan surrealdb-storage-swap).
 surrealdb = { version = "=3.0.5", default-features = false, features = ["kv-rocksdb", "protocol-ws", "protocol-http"] }

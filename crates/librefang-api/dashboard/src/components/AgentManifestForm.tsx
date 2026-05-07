@@ -1,6 +1,7 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AlertTriangle, ChevronDown, Plus, Trash2, X } from "lucide-react";
+import { generateUid } from "../lib/agentManifest";
 import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
 
 interface AgentManifestFormProps {
@@ -46,6 +47,9 @@ export function AgentManifestForm({
     [models, value.model.provider],
   );
 
+  const jsonSchemaFormat =
+    value.response_format.mode === "json_schema" ? value.response_format : null;
+
   return (
     <div className="space-y-4">
       <Section title={t("agents.form.basics")}>
@@ -54,7 +58,7 @@ export function AgentManifestForm({
             type="text"
             value={value.name}
             onChange={(e) => update({ name: e.target.value })}
-            placeholder="researcher"
+            placeholder={t("agents.form.name_placeholder")}
             className={inputClass}
             autoFocus
           />
@@ -92,7 +96,7 @@ export function AgentManifestForm({
               type="text"
               value={value.module}
               onChange={(e) => update({ module: e.target.value })}
-              placeholder="builtin:chat"
+              placeholder={t("agents.form.module_placeholder")}
               className={inputClass}
             />
           </Field>
@@ -146,7 +150,7 @@ export function AgentManifestForm({
                 type="text"
                 value={value.model.model}
                 onChange={(e) => updateModel({ model: e.target.value })}
-                placeholder="gpt-4o"
+                placeholder={t("agents.form.model_id_placeholder")}
                 className={inputClass}
               />
             )}
@@ -170,7 +174,7 @@ export function AgentManifestForm({
               max="2"
               value={value.model.temperature}
               onChange={(e) => updateModel({ temperature: e.target.value })}
-              placeholder="0.7"
+              placeholder={t("agents.form.temperature_placeholder")}
               className={inputClass}
             />
           </Field>
@@ -180,7 +184,7 @@ export function AgentManifestForm({
               min="1"
               value={value.model.max_tokens}
               onChange={(e) => updateModel({ max_tokens: e.target.value })}
-              placeholder="4096"
+              placeholder={t("agents.form.max_tokens_placeholder")}
               className={inputClass}
             />
           </Field>
@@ -191,7 +195,7 @@ export function AgentManifestForm({
               type="text"
               value={value.model.api_key_env}
               onChange={(e) => updateModel({ api_key_env: e.target.value })}
-              placeholder="OPENAI_API_KEY"
+              placeholder={t("agents.form.api_key_env_placeholder")}
               className={inputClass}
             />
           </Field>
@@ -200,7 +204,7 @@ export function AgentManifestForm({
               type="text"
               value={value.model.base_url}
               onChange={(e) => updateModel({ base_url: e.target.value })}
-              placeholder="https://api.openai.com/v1"
+              placeholder={t("agents.form.base_url_placeholder")}
               className={inputClass}
             />
           </Field>
@@ -225,7 +229,7 @@ export function AgentManifestForm({
               min="0"
               value={value.resources.max_tool_calls_per_minute}
               onChange={(e) => updateResources({ max_tool_calls_per_minute: e.target.value })}
-              placeholder="60"
+              placeholder={t("agents.form.tool_calls_per_minute_placeholder")}
               className={inputClass}
             />
           </Field>
@@ -236,7 +240,7 @@ export function AgentManifestForm({
               min="0"
               value={value.resources.max_cost_per_hour_usd}
               onChange={(e) => updateResources({ max_cost_per_hour_usd: e.target.value })}
-              placeholder="0 = unlimited"
+              placeholder={t("agents.form.unlimited_placeholder")}
               className={inputClass}
             />
           </Field>
@@ -247,7 +251,7 @@ export function AgentManifestForm({
               min="0"
               value={value.resources.max_cost_per_day_usd}
               onChange={(e) => updateResources({ max_cost_per_day_usd: e.target.value })}
-              placeholder="0 = unlimited"
+              placeholder={t("agents.form.unlimited_placeholder")}
               className={inputClass}
             />
           </Field>
@@ -258,7 +262,7 @@ export function AgentManifestForm({
               min="0"
               value={value.resources.max_cost_per_month_usd}
               onChange={(e) => updateResources({ max_cost_per_month_usd: e.target.value })}
-              placeholder="0 = unlimited"
+              placeholder={t("agents.form.unlimited_placeholder")}
               className={inputClass}
             />
           </Field>
@@ -268,7 +272,7 @@ export function AgentManifestForm({
               min="0"
               value={value.resources.max_network_bytes_per_hour}
               onChange={(e) => updateResources({ max_network_bytes_per_hour: e.target.value })}
-              placeholder="104857600"
+              placeholder={t("agents.form.network_bytes_placeholder")}
               className={inputClass}
             />
           </Field>
@@ -278,7 +282,7 @@ export function AgentManifestForm({
               min="0"
               value={value.resources.max_memory_bytes}
               onChange={(e) => updateResources({ max_memory_bytes: e.target.value })}
-              placeholder="268435456"
+              placeholder={t("agents.form.memory_bytes_placeholder")}
               className={inputClass}
             />
           </Field>
@@ -288,7 +292,7 @@ export function AgentManifestForm({
               min="0"
               value={value.resources.max_cpu_time_ms}
               onChange={(e) => updateResources({ max_cpu_time_ms: e.target.value })}
-              placeholder="30000"
+              placeholder={t("agents.form.cpu_time_placeholder")}
               className={inputClass}
             />
           </Field>
@@ -300,21 +304,21 @@ export function AgentManifestForm({
           <TagInput
             value={value.capabilities.network}
             onChange={(next) => updateCapabilities({ network: next })}
-            placeholder="api.openai.com:443"
+            placeholder={t("agents.form.network_hosts_placeholder")}
           />
         </Field>
         <Field label={t("agents.form.shell_commands")} hint={t("agents.form.shell_commands_hint")}>
           <TagInput
             value={value.capabilities.shell}
             onChange={(next) => updateCapabilities({ shell: next })}
-            placeholder="ls, cat, grep"
+            placeholder={t("agents.form.shell_commands_placeholder")}
           />
         </Field>
         <Field label={t("agents.form.cap_tools")} hint={t("agents.form.cap_tools_hint")}>
           <TagInput
             value={value.capabilities.tools}
             onChange={(next) => updateCapabilities({ tools: next })}
-            placeholder="file_read, web_fetch"
+            placeholder={t("agents.form.cap_tools_placeholder")}
           />
         </Field>
         <div className="grid grid-cols-2 gap-3">
@@ -322,28 +326,28 @@ export function AgentManifestForm({
             <TagInput
               value={value.capabilities.memory_read}
               onChange={(next) => updateCapabilities({ memory_read: next })}
-              placeholder="user/*"
+              placeholder={t("agents.form.memory_glob_placeholder")}
             />
           </Field>
           <Field label={t("agents.form.memory_write")}>
             <TagInput
               value={value.capabilities.memory_write}
               onChange={(next) => updateCapabilities({ memory_write: next })}
-              placeholder="user/*"
+              placeholder={t("agents.form.memory_glob_placeholder")}
             />
           </Field>
           <Field label={t("agents.form.agent_message")}>
             <TagInput
               value={value.capabilities.agent_message}
               onChange={(next) => updateCapabilities({ agent_message: next })}
-              placeholder="* or agent-name"
+              placeholder={t("agents.form.agent_message_placeholder")}
             />
           </Field>
           <Field label={t("agents.form.ofp_connect")}>
             <TagInput
               value={value.capabilities.ofp_connect}
               onChange={(next) => updateCapabilities({ ofp_connect: next })}
-              placeholder="peer pattern"
+              placeholder={t("agents.form.ofp_connect_placeholder")}
             />
           </Field>
         </div>
@@ -405,12 +409,12 @@ export function AgentManifestForm({
           </select>
         </Field>
         {value.schedule.mode === "periodic" && (
-          <Field label={t("agents.form.cron")} hint="0 9 * * *">
+          <Field label={t("agents.form.cron")} hint={t("agents.form.cron_hint")}>
             <input
               type="text"
               value={value.schedule.cron}
               onChange={(e) => update({ schedule: { mode: "periodic", cron: e.target.value } })}
-              placeholder="0 9 * * *"
+              placeholder={t("agents.form.cron_placeholder")}
               className={inputClass}
             />
           </Field>
@@ -420,7 +424,7 @@ export function AgentManifestForm({
             <TagInput
               value={value.schedule.conditions}
               onChange={(next) => update({ schedule: { mode: "proactive", conditions: next } })}
-              placeholder="cpu > 80"
+              placeholder={t("agents.form.conditions_placeholder")}
             />
           </Field>
         )}
@@ -435,7 +439,7 @@ export function AgentManifestForm({
                   schedule: { mode: "continuous", check_interval_secs: e.target.value },
                 })
               }
-              placeholder="300"
+              placeholder={t("agents.form.check_interval_placeholder")}
               className={inputClass}
             />
           </Field>
@@ -446,7 +450,7 @@ export function AgentManifestForm({
         <p className="text-[10px] text-text-dim/70 mb-2">{t("agents.form.fallback_models_hint")}</p>
         {value.fallback_models.map((fb, idx) => (
           <div
-            key={idx}
+            key={fb._uid}
             className="rounded-lg border border-border-subtle/60 bg-main/40 p-2 mb-2 space-y-2"
           >
             <div className="flex items-center justify-between">
@@ -498,7 +502,7 @@ export function AgentManifestForm({
             update({
               fallback_models: [
                 ...value.fallback_models,
-                { provider: "", model: "", api_key_env: "", base_url: "", extras: {} },
+                { _uid: generateUid(), provider: "", model: "", api_key_env: "", base_url: "", extras: {} },
               ],
             })
           }
@@ -523,7 +527,7 @@ export function AgentManifestForm({
                 min="0"
                 value={value.thinking.budget_tokens}
                 onChange={(e) => updateThinking({ budget_tokens: e.target.value })}
-                placeholder="10000"
+                placeholder={t("agents.form.budget_tokens_placeholder")}
                 className={inputClass}
               />
             </Field>
@@ -552,7 +556,7 @@ export function AgentManifestForm({
                 min="1"
                 value={value.autonomous.max_iterations}
                 onChange={(e) => updateAutonomous({ max_iterations: e.target.value })}
-                placeholder="50"
+                placeholder={t("agents.form.max_iterations_placeholder")}
                 className={inputClass}
               />
             </Field>
@@ -562,7 +566,7 @@ export function AgentManifestForm({
                 min="0"
                 value={value.autonomous.max_restarts}
                 onChange={(e) => updateAutonomous({ max_restarts: e.target.value })}
-                placeholder="10"
+                placeholder={t("agents.form.max_restarts_placeholder")}
                 className={inputClass}
               />
             </Field>
@@ -572,7 +576,7 @@ export function AgentManifestForm({
                 min="1"
                 value={value.autonomous.heartbeat_interval_secs}
                 onChange={(e) => updateAutonomous({ heartbeat_interval_secs: e.target.value })}
-                placeholder="30"
+                placeholder={t("agents.form.heartbeat_interval_placeholder")}
                 className={inputClass}
               />
             </Field>
@@ -582,7 +586,7 @@ export function AgentManifestForm({
                 min="1"
                 value={value.autonomous.heartbeat_timeout_secs}
                 onChange={(e) => updateAutonomous({ heartbeat_timeout_secs: e.target.value })}
-                placeholder="auto"
+                placeholder={t("agents.form.auto_placeholder")}
                 className={inputClass}
               />
             </Field>
@@ -592,7 +596,7 @@ export function AgentManifestForm({
                 min="0"
                 value={value.autonomous.heartbeat_keep_recent}
                 onChange={(e) => updateAutonomous({ heartbeat_keep_recent: e.target.value })}
-                placeholder="auto"
+                placeholder={t("agents.form.auto_placeholder")}
                 className={inputClass}
               />
             </Field>
@@ -601,16 +605,16 @@ export function AgentManifestForm({
                 type="text"
                 value={value.autonomous.heartbeat_channel}
                 onChange={(e) => updateAutonomous({ heartbeat_channel: e.target.value })}
-                placeholder="telegram"
+                placeholder={t("agents.form.heartbeat_channel_placeholder")}
                 className={inputClass}
               />
             </Field>
-            <Field label={t("agents.form.quiet_hours")} hint="0 22 * * *">
+            <Field label={t("agents.form.quiet_hours")} hint={t("agents.form.quiet_hours_hint")}>
               <input
                 type="text"
                 value={value.autonomous.quiet_hours}
                 onChange={(e) => updateAutonomous({ quiet_hours: e.target.value })}
-                placeholder="0 22 * * *"
+                placeholder={t("agents.form.quiet_hours_placeholder")}
                 className={inputClass}
               />
             </Field>
@@ -659,7 +663,7 @@ export function AgentManifestForm({
                   min="0"
                   value={value.routing.simple_threshold}
                   onChange={(e) => updateRouting({ simple_threshold: e.target.value })}
-                  placeholder="100"
+                  placeholder={t("agents.form.simple_threshold_placeholder")}
                   className={inputClass}
                 />
               </Field>
@@ -669,7 +673,7 @@ export function AgentManifestForm({
                   min="0"
                   value={value.routing.complex_threshold}
                   onChange={(e) => updateRouting({ complex_threshold: e.target.value })}
-                  placeholder="500"
+                  placeholder={t("agents.form.complex_threshold_placeholder")}
                   className={inputClass}
                 />
               </Field>
@@ -684,7 +688,7 @@ export function AgentManifestForm({
         </p>
         {value.context_injection.map((ci, idx) => (
           <div
-            key={idx}
+            key={ci._uid}
             className="rounded-lg border border-border-subtle/60 bg-main/40 p-2 mb-2 space-y-2"
           >
             <div className="flex items-center justify-between">
@@ -743,7 +747,7 @@ export function AgentManifestForm({
             update({
               context_injection: [
                 ...value.context_injection,
-                { name: "", content: "", position: "system", condition: "" },
+                { _uid: generateUid(), name: "", content: "", position: "system", condition: "" },
               ],
             })
           }
@@ -774,28 +778,38 @@ export function AgentManifestForm({
             <option value="json_schema">{t("agents.form.response_json_schema")}</option>
           </select>
         </Field>
-        {value.response_format.mode === "json_schema" && (
+        {jsonSchemaFormat && (
           <div className="space-y-2 mt-2">
             <Field label={t("agents.form.schema_name")}>
               <input
                 type="text"
-                value={value.response_format.name}
+                value={jsonSchemaFormat.name}
                 onChange={(e) =>
                   update({
-                    response_format: { ...value.response_format, name: e.target.value },
-                  } as Partial<ManifestFormState>)
+                    response_format: {
+                      mode: "json_schema",
+                      name: e.target.value,
+                      schema: jsonSchemaFormat.schema,
+                      strict: jsonSchemaFormat.strict,
+                    },
+                  })
                 }
-                placeholder="user_response"
+                placeholder={t("agents.form.schema_name_placeholder")}
                 className={inputClass}
               />
             </Field>
             <Field label={t("agents.form.schema_body")}>
               <textarea
-                value={value.response_format.schema}
+                value={jsonSchemaFormat.schema}
                 onChange={(e) =>
                   update({
-                    response_format: { ...value.response_format, schema: e.target.value },
-                  } as Partial<ManifestFormState>)
+                    response_format: {
+                      mode: "json_schema",
+                      name: jsonSchemaFormat.name,
+                      schema: e.target.value,
+                      strict: jsonSchemaFormat.strict,
+                    },
+                  })
                 }
                 rows={6}
                 className={textareaClass}
@@ -803,11 +817,16 @@ export function AgentManifestForm({
             </Field>
             <Toggle
               label={t("agents.form.strict")}
-              checked={value.response_format.strict}
+              checked={jsonSchemaFormat.strict}
               onChange={(checked) =>
                 update({
-                  response_format: { ...value.response_format, strict: checked },
-                } as Partial<ManifestFormState>)
+                  response_format: {
+                    mode: "json_schema",
+                    name: jsonSchemaFormat.name,
+                    schema: jsonSchemaFormat.schema,
+                    strict: checked,
+                  },
+                })
               }
             />
           </div>
@@ -882,7 +901,7 @@ export function AgentManifestForm({
               type="text"
               value={value.workspace}
               onChange={(e) => update({ workspace: e.target.value })}
-              placeholder="auto"
+              placeholder={t("agents.form.auto_placeholder")}
               className={inputClass}
             />
           </Field>
@@ -1048,11 +1067,14 @@ function TagInput({
   onChange: (next: string[]) => void;
   placeholder?: string;
 }) {
+  const [inputValue, setInputValue] = useState("");
+
   const commit = (raw: string): void => {
     const cleaned = raw.trim();
     if (!cleaned) return;
     if (value.includes(cleaned)) return;
     onChange([...value, cleaned]);
+    setInputValue("");
   };
   return (
     <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border-subtle bg-main px-2 py-1.5 focus-within:border-primary">
@@ -1074,20 +1096,20 @@ function TagInput({
       ))}
       <input
         type="text"
+        value={inputValue}
+        onChange={(e) => setInputValue(e.target.value)}
         placeholder={value.length === 0 ? placeholder : undefined}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === ",") {
             e.preventDefault();
-            commit(e.currentTarget.value);
-            e.currentTarget.value = "";
-          } else if (e.key === "Backspace" && !e.currentTarget.value && value.length > 0) {
+            commit(inputValue);
+          } else if (e.key === "Backspace" && !inputValue && value.length > 0) {
             onChange(value.slice(0, -1));
           }
         }}
-        onBlur={(e) => {
-          if (e.currentTarget.value) {
-            commit(e.currentTarget.value);
-            e.currentTarget.value = "";
+        onBlur={() => {
+          if (inputValue) {
+            commit(inputValue);
           }
         }}
         className="flex-1 min-w-[100px] bg-transparent text-xs outline-none placeholder:text-text-dim/40"

@@ -6,31 +6,28 @@
 use chrono::Utc;
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{text_similarity, ConsolidationReport};
-use rusqlite::Connection;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 /// Memory consolidation engine.
 #[derive(Clone)]
 pub struct ConsolidationEngine {
-    conn: Arc<Mutex<Connection>>,
+    pool: Pool<SqliteConnectionManager>,
     /// Decay rate: how much to reduce confidence per consolidation cycle.
     decay_rate: f32,
 }
 
 impl ConsolidationEngine {
     /// Create a new consolidation engine.
-    pub fn new(conn: Arc<Mutex<Connection>>, decay_rate: f32) -> Self {
-        Self { conn, decay_rate }
+    pub fn new(pool: Pool<SqliteConnectionManager>, decay_rate: f32) -> Self {
+        Self { pool, decay_rate }
     }
 
     /// Run a consolidation cycle: decay old memories.
     pub fn consolidate(&self) -> LibreFangResult<ConsolidationReport> {
         let start = std::time::Instant::now();
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         // Decay confidence of memories not accessed in the last 7 days
         let cutoff = (Utc::now() - chrono::Duration::days(7)).to_rfc3339();
@@ -359,11 +356,13 @@ fn merge_embeddings_weighted(
 mod tests {
     use super::*;
     use crate::migration::run_migrations;
+    use rusqlite::Connection;
 
     fn setup() -> ConsolidationEngine {
-        let conn = Connection::open_in_memory().unwrap();
-        run_migrations(&conn).unwrap();
-        ConsolidationEngine::new(Arc::new(Mutex::new(conn)), 0.1)
+        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+        let pool = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
+        run_migrations(&pool.get().unwrap()).unwrap();
+        ConsolidationEngine::new(pool, 0.1)
     }
 
     #[test]
@@ -376,7 +375,7 @@ mod tests {
     #[test]
     fn test_consolidation_decays_old_memories() {
         let engine = setup();
-        let conn = engine.conn.lock().unwrap();
+        let conn = engine.pool.get().expect("consolidation pool get");
         // Insert an old memory
         let old_date = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
         conn.execute(
@@ -390,7 +389,7 @@ mod tests {
         assert_eq!(report.memories_decayed, 1);
 
         // Verify confidence was reduced
-        let conn = engine.conn.lock().unwrap();
+        let conn = engine.pool.get().expect("consolidation pool get");
         let confidence: f64 = conn
             .query_row(
                 "SELECT confidence FROM memories WHERE id = 'test-id'",
@@ -428,7 +427,7 @@ mod tests {
     fn test_merge_similar_memories() {
         let engine = setup();
         {
-            let conn = engine.conn.lock().unwrap();
+            let conn = engine.pool.get().expect("consolidation pool get");
             // Two memories with >90% word overlap (identical content).
             insert_memory(
                 &conn,
@@ -447,7 +446,7 @@ mod tests {
         let report = engine.consolidate().unwrap();
         assert_eq!(report.memories_merged, 1);
 
-        let conn = engine.conn.lock().unwrap();
+        let conn = engine.pool.get().expect("consolidation pool get");
         // Higher-confidence memory (mem-a, 0.8) is kept; lower one is soft-deleted.
         assert!(!is_deleted(&conn, "mem-a"));
         assert!(is_deleted(&conn, "mem-b"));
@@ -457,7 +456,7 @@ mod tests {
     fn test_no_merge_dissimilar_memories() {
         let engine = setup();
         {
-            let conn = engine.conn.lock().unwrap();
+            let conn = engine.pool.get().expect("consolidation pool get");
             // Two completely different memories — Jaccard similarity ≈ 0.
             insert_memory(
                 &conn,
@@ -476,7 +475,7 @@ mod tests {
         let report = engine.consolidate().unwrap();
         assert_eq!(report.memories_merged, 0);
 
-        let conn = engine.conn.lock().unwrap();
+        let conn = engine.pool.get().expect("consolidation pool get");
         assert!(!is_deleted(&conn, "mem-x"));
         assert!(!is_deleted(&conn, "mem-y"));
     }
@@ -485,7 +484,7 @@ mod tests {
     fn test_merge_keeps_higher_confidence() {
         let engine = setup();
         {
-            let conn = engine.conn.lock().unwrap();
+            let conn = engine.pool.get().expect("consolidation pool get");
             // mem-lo has lower confidence but is inserted first.
             // mem-hi has higher confidence.
             // Since rows are sorted by confidence DESC, mem-hi is the keeper
@@ -507,7 +506,7 @@ mod tests {
         let report = engine.consolidate().unwrap();
         assert_eq!(report.memories_merged, 1);
 
-        let conn = engine.conn.lock().unwrap();
+        let conn = engine.pool.get().expect("consolidation pool get");
         // mem-hi (0.9) is sorted first and is the keeper.
         assert!(!is_deleted(&conn, "mem-hi"));
         assert!(is_deleted(&conn, "mem-lo"));
@@ -546,7 +545,7 @@ mod tests {
     fn test_no_cross_tenant_merge() {
         let engine = setup();
         {
-            let conn = engine.conn.lock().unwrap();
+            let conn = engine.pool.get().expect("consolidation pool get");
             // Same content, same high similarity — but different agents.
             insert_memory_for_agent(
                 &conn,
@@ -568,7 +567,7 @@ mod tests {
         // Cross-tenant merge must not happen — 0 merges expected.
         assert_eq!(report.memories_merged, 0);
 
-        let conn = engine.conn.lock().unwrap();
+        let conn = engine.pool.get().expect("consolidation pool get");
         // Both memories from different agents must survive intact.
         assert!(!is_deleted(&conn, "agent-a-mem"));
         assert!(!is_deleted(&conn, "agent-b-mem"));
@@ -605,7 +604,7 @@ mod tests {
     fn test_merge_preserves_metadata_access_count_and_embedding() {
         let engine = setup();
         {
-            let conn = engine.conn.lock().unwrap();
+            let conn = engine.pool.get().expect("consolidation pool get");
             // Same content; keeper has higher confidence so it wins. The
             // loser carries unique metadata, a non-zero access_count, and
             // a real embedding — all of which would be lost pre-fix.
@@ -632,7 +631,7 @@ mod tests {
         let report = engine.consolidate().unwrap();
         assert_eq!(report.memories_merged, 1);
 
-        let conn = engine.conn.lock().unwrap();
+        let conn = engine.pool.get().expect("consolidation pool get");
         assert!(!is_deleted(&conn, "mem-keeper"));
         assert!(is_deleted(&conn, "mem-loser"));
 
@@ -736,7 +735,7 @@ mod tests {
     fn test_merge_embeddings_running_weighted_average_across_multiple_losers() {
         let engine = setup();
         {
-            let conn = engine.conn.lock().unwrap();
+            let conn = engine.pool.get().expect("consolidation pool get");
             // Keeper points along x with high confidence.
             insert_memory_full(
                 &conn,
@@ -772,7 +771,7 @@ mod tests {
         let report = engine.consolidate().unwrap();
         assert_eq!(report.memories_merged, 2);
 
-        let conn = engine.conn.lock().unwrap();
+        let conn = engine.pool.get().expect("consolidation pool get");
         let emb_bytes: Vec<u8> = conn
             .query_row("SELECT embedding FROM memories WHERE id = 'k'", [], |row| {
                 row.get::<_, Option<Vec<u8>>>(0)
@@ -811,7 +810,7 @@ mod tests {
     fn test_merge_embeddings_handles_dim_mismatch_then_same_dim() {
         let engine = setup();
         {
-            let conn = engine.conn.lock().unwrap();
+            let conn = engine.pool.get().expect("consolidation pool get");
             // Sorted by confidence DESC: k → l_bad → l_ok.
             insert_memory_full(
                 &conn,
@@ -845,7 +844,7 @@ mod tests {
         let report = engine.consolidate().unwrap();
         assert_eq!(report.memories_merged, 2, "both losers must be absorbed");
 
-        let conn = engine.conn.lock().unwrap();
+        let conn = engine.pool.get().expect("consolidation pool get");
         // Keeper still holds a 4-dim embedding (no dim corruption from
         // the mismatched loser).
         let emb_bytes: Vec<u8> = conn

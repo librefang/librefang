@@ -2104,11 +2104,16 @@ pub fn ui_sections_overlay() -> serde_json::Value {
                 "cors_origin", "trust_forwarded_for",
                 "cron_session_max_tokens", "cron_session_max_messages",
                 "cron_session_warn_fraction", "cron_session_warn_total_tokens",
+                // Cron session compaction (#3693) — keep alongside the
+                // other cron_session_* knobs so the dashboard renders them
+                // as one cohesive cluster.
+                "cron_session_compaction_mode", "cron_session_compaction_keep_recent",
                 "strict_config"
             ]
         },
         {"key": "default_model", "struct_field": "default_model", "hot_reloadable": true},
         {"key": "memory", "struct_field": "memory"},
+        {"key": "memory_wiki", "struct_field": "memory_wiki"},
         {"key": "proactive_memory", "struct_field": "proactive_memory"},
         {"key": "auto_dream", "struct_field": "auto_dream"},
         {"key": "web", "struct_field": "web"},
@@ -2163,6 +2168,8 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         {"key": "compaction", "struct_field": "compaction"},
         {"key": "azure_openai", "struct_field": "azure_openai"},
         {"key": "proxy", "struct_field": "proxy"},
+        // Tool-exec backend selection (local / docker / daytona / ssh).
+        {"key": "tool_exec", "struct_field": "tool_exec"},
         // ── Newly exposed collection-typed sections (#4678) ──
         {"key": "taint_rules", "struct_field": "taint_rules"},
         {"key": "fallback_providers", "struct_field": "fallback_providers"},

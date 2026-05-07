@@ -240,7 +240,7 @@ pub async fn invoke_tool(
     let workspace_root = cfg.effective_workspaces_dir();
     let exec_policy = cfg.exec_policy.clone();
     let docker_config = cfg.docker.clone();
-    let kernel: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
+    let kernel: Arc<dyn KernelHandle> = state.kernel.clone();
 
     let result = execute_tool(
         "rest-api",

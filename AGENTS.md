@@ -14,25 +14,37 @@ It manages AI agents (LLM-backed), their tools, memory, messaging channels, and 
 
 ## Workspace Structure
 
-The workspace contains 15 crates under `crates/` plus an `xtask` crate:
+The workspace contains 31 crates under `crates/` plus an `xtask` crate:
 
 | Crate | Purpose |
 |---|---|
 | `librefang-types` | Core types, traits, and data models shared across all crates |
-| `librefang-kernel` | Central kernel: agent registry, scheduling, orchestration, event bus, metering |
-| `librefang-runtime` | Agent execution: LLM drivers, tool runner, MCP client, context engine, A2A protocol |
-| `librefang-api` | HTTP/WebSocket API server, route handlers, middleware, dashboard |
-| `librefang-channels` | Channel bridge layer: 40+ messaging integrations (Discord, Slack, Telegram, WeCom, etc.) |
-| `librefang-memory` | Memory substrate: conversation history, vector search, knowledge storage |
+| `librefang-http` | Shared HTTP utilities |
 | `librefang-wire` | OFP (Open Fang Protocol): agent-to-agent P2P networking |
+| `librefang-telemetry` | OpenTelemetry + Prometheus metrics instrumentation |
+| `librefang-testing` | Test infrastructure: mock kernel, mock LLM driver, API route test utilities |
+| `librefang-migrate` | Migration engine: import from other agent frameworks |
+| `librefang-kernel` | Central kernel: agent registry, scheduling, orchestration, event bus, metering |
+| `librefang-kernel-handle` | KernelHandle trait — breaks runtime↔kernel circular dependency |
+| `librefang-kernel-router` | Kernel model routing layer |
+| `librefang-kernel-metering` | Token/cost metering |
+| `librefang-runtime` | Agent execution: LLM drivers, tool runner, MCP client, context engine, A2A protocol |
+| `librefang-runtime-mcp` | MCP client implementation |
+| `librefang-runtime-oauth` | OAuth2 PKCE runtime integration |
+| `librefang-runtime-wasm` | WASM sandbox runtime |
+| `librefang-llm-driver` | LlmDriver trait + error types (interface only) |
+| `librefang-llm-drivers` | Concrete provider impls (anthropic, openai, gemini, uar, …) |
+| `librefang-memory` | Memory substrate: SurrealDB backends + SQLite fallback, conversation history, vector search |
+| `librefang-memory-wiki` | Durable file-based knowledge vault (markdown pages, backlinks, frontmatter) |
+| `librefang-storage` | **BossFang** — SurrealDB storage abstraction layer + 24 SurrealQL migrations |
+| `librefang-api` | HTTP/WebSocket API server, route handlers, middleware, dashboard |
+| `librefang-cli` | CLI binary (interactive TUI with ratatui) |
+| `librefang-desktop` | Native desktop app (Tauri 2.0) |
 | `librefang-skills` | Skill system: registry, loader, marketplace, WASM sandbox |
 | `librefang-hands` | Hands system: curated autonomous capability packages |
 | `librefang-extensions` | Extension system: MCP server setup, credential vault, OAuth2 PKCE |
-| `librefang-cli` | CLI binary (interactive TUI with ratatui) |
-| `librefang-desktop` | Native desktop app (Tauri 2.0) |
-| `librefang-migrate` | Migration engine: import from other agent frameworks |
-| `librefang-telemetry` | OpenTelemetry + Prometheus metrics instrumentation |
-| `librefang-testing` | Test infrastructure: mock kernel, mock LLM driver, API route test utilities |
+| `librefang-channels` | Channel bridge layer: 40+ messaging integrations (Discord, Slack, Telegram, WeCom, etc.) |
+| `librefang-uar-spec` | **BossFang** — UAR-AGENT-MD spec types and AgentManifest translator |
 | `xtask` | Development task runner |
 
 ## Build Commands
@@ -111,6 +123,42 @@ or committed state.
 python3 scripts/enforce-branding.py
 ```
 For detailed conflict-resolution rules see `CLAUDE.md § BossFang Branding`.
+
+## BossFang Fork Additions — Always Present After Upstream Merge
+
+These crates/features exist in BossFang but NOT in upstream LibreFang. They must
+survive every upstream merge intact.
+
+### SurrealDB Storage (`librefang-storage`)
+
+Default storage backend replacing upstream's SQLite-only approach. Contains 24+ SurrealQL
+migration files in `crates/librefang-storage/src/migrations/sql/`. Feature: `surreal-backend`
+(default). After upstream merge, map any new upstream SQLite schema changes to new `.surql`
+migration files and register them in `src/migrations/mod.rs`.
+
+**Version pin**: `surrealdb = "=3.0.5"` in workspace `Cargo.toml`. Do NOT upgrade without
+coordinating surreal-memory and UAR git refs — version drift breaks the build.
+
+### surreal-memory Integration (`librefang-memory` surreal backends)
+
+BossFang memory uses `surreal-memory` from `https://github.com/Prometheus-AGS/surreal-memory-server`.
+Implementation in `crates/librefang-memory/src/backends/surreal*.rs` (9 backend files).
+
+Never remove; never switch to upstream's SQLite memory backend. The `embedded` feature must
+remain active (no external SurrealDB service required).
+
+When upstream changes `librefang-memory`'s storage API (e.g., `Arc<Mutex<Connection>>` →
+r2d2 `Pool`), update the surreal backend dual-path code to use the new API for the
+SQLite fallback path (keep the SurrealDB path first).
+
+### Universal Agent Runtime (`librefang-uar-spec`, `UarDriver`)
+
+- `librefang-uar-spec` crate: AgentManifest ↔ UAR IR translation
+- `librefang-llm-drivers` feature `uar-driver`: wraps UAR's liter-llm for 142+ providers
+- When `uar-driver` is enabled, UAR gets `surreal-backend` to share our SurrealDB version
+
+After upstream merge: update `UarDriver` if `LlmDriver` trait signature changes;
+update `librefang-uar-spec/src/types.rs` if `AgentManifest` shape changes.
 
 ## Important Notes
 

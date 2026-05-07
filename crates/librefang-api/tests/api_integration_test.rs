@@ -82,7 +82,7 @@ async fn start_test_server_with_provider(
     let config_path = test.tmp_path().join("config.toml");
     let test = test.with_config_path(config_path.clone());
     let (state, _tmp, _) = test.into_parts();
-    state.kernel.set_self_handle();
+    state.kernel.clone().set_self_handle();
 
     let app = Router::new()
         .route("/api/health", axum::routing::get(routes::health))
@@ -1596,7 +1596,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
     let config_path = test.tmp_path().join("config.toml");
     let test = test.with_config_path(config_path.clone());
     let (state, _tmp, _) = test.into_parts();
-    state.kernel.set_self_handle();
+    state.kernel.clone().set_self_handle();
 
     let api_key_state = middleware::AuthState {
         api_key_lock: state.api_key_lock.clone(),

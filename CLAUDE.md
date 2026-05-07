@@ -63,7 +63,7 @@ hooks active and keeps them current with `git pull` automatically. The
 yet.
 
 ## Project Overview
-LibreFang is an open-source Agent Operating System written in Rust (24 crates in `crates/`, plus `xtask/`).
+LibreFang is an open-source Agent Operating System written in Rust (31 crates in `crates/`, plus `xtask/`).
 - Config: `~/.librefang/config.toml`
 - Default API: `http://127.0.0.1:4545`
 - CLI binary: `target/release/librefang.exe` (or `target/debug/librefang.exe`)
@@ -72,10 +72,12 @@ LibreFang is an open-source Agent Operating System written in Rust (24 crates in
 - **Core types & utilities**: `librefang-types`, `librefang-http`, `librefang-wire`, `librefang-telemetry`, `librefang-testing`, `librefang-migrate`
 - **Kernel**: `librefang-kernel` (orchestration), `librefang-kernel-handle` (trait used by runtime to call kernel without circular dep), `librefang-kernel-router`, `librefang-kernel-metering`
 - **Runtime**: `librefang-runtime` (agent loop, tools, plugins), `librefang-runtime-mcp`, `librefang-runtime-oauth`, `librefang-runtime-wasm`
-- **LLM drivers**: `librefang-llm-driver` (trait + error types — interface only) and `librefang-llm-drivers` (concrete provider impls: anthropic, openai, gemini, …)
-- **Memory**: `librefang-memory` (SQLite substrate)
+- **LLM drivers**: `librefang-llm-driver` (trait + error types — interface only) and `librefang-llm-drivers` (concrete provider impls: anthropic, openai, gemini, uar, …)
+- **Memory**: `librefang-memory` (SurrealDB + SQLite fallback substrate), `librefang-memory-wiki` (durable file-based knowledge vault)
+- **Storage**: `librefang-storage` (BossFang — SurrealDB abstraction layer + 24 SurrealQL migrations; see BossFang-Exclusive Features below)
 - **Surface**: `librefang-api` (HTTP server + dashboard SPA bundled at `crates/librefang-api/dashboard/`), `librefang-cli`, `librefang-desktop`
 - **Extensibility**: `librefang-skills`, `librefang-hands`, `librefang-extensions`, `librefang-channels`
+- **UAR spec** (BossFang): `librefang-uar-spec` (UAR-AGENT-MD spec types + AgentManifest translator; see BossFang-Exclusive Features below)
 
 ## Build & Verify Workflow
 **Do NOT run `cargo build`, `cargo run`, or `cargo install` locally.**
@@ -254,12 +256,28 @@ Full spec: `docs/branding/branding-guide.html`.
 Upstream's sky-blue tokens (`#0284c7`, `#38bdf8`, `#0ea5e9`) and dark background
 (`#020617`) must **never** appear in dashboard source files.
 
-### After every upstream merge — mandatory step
+### After every upstream merge — mandatory steps
 
-Before committing the resolved merge, run:
+Before committing the resolved merge, run all four steps:
+
 ```bash
+# 1. Fix any upstream sky-blue tokens
 python3 scripts/enforce-branding.py
+
+# 2. Check for new upstream SQLite schema changes and add SurrealDB equivalents
+#    grep the diff for CREATE TABLE / ALTER TABLE / ADD COLUMN
+git diff <last-merge-base> upstream/main -- "*.rs" | grep -A5 "CREATE TABLE\|ALTER TABLE\|ADD COLUMN"
+#    For each new table/column: add a .surql migration in
+#    crates/librefang-storage/src/migrations/sql/NNN_<name>.surql
+#    and register it in crates/librefang-storage/src/migrations/mod.rs
+
+# 3. Compile-check
+cargo check --workspace --lib
+
+# 4. Verify BossFang-exclusive feature crates still compile
+cargo check -p librefang-storage -p librefang-uar-spec
 ```
+
 This script scans every `*.ts`, `*.tsx`, `*.css`, and `*.json` file under
 `crates/librefang-api/dashboard/src/` and `crates/librefang-api/static/` for
 upstream sky-blue tokens and replaces them with BossFang ember equivalents. It is
@@ -282,6 +300,78 @@ idempotent — safe to run multiple times.
   box as the logo — those must be manually replaced with `<img src="/boss-libre.png" alt="BossFang" ...>`.
 - The `card-glow` / `glow-text` CSS helpers if upstream rewrites them with
   hardcoded sky-blue rgba — check `index.css` after running the script.
+
+## BossFang-Exclusive Features — Always Preserved After Upstream Merge
+
+These features exist in BossFang but NOT in upstream LibreFang. They MUST be present
+and functional after every upstream merge.
+
+### 1. SurrealDB as the Default Storage Backend
+
+Upstream LibreFang uses SQLite exclusively. BossFang replaces this with SurrealDB 3.x
+as the default persistent storage, with SQLite retained only as a legacy opt-in feature.
+
+**Crate**: `librefang-storage` (`crates/librefang-storage/`)
+**Migration files**: `crates/librefang-storage/src/migrations/sql/*.surql` (24+ migrations)
+**Feature flags**: `surreal-backend` (default), `sqlite-backend` (opt-in legacy)
+**Version pin**: `surrealdb = { version = "=3.0.5" }` in workspace `Cargo.toml` — NEVER change
+  this without coordinating with surreal-memory and UAR versions.
+
+**After every upstream merge:**
+1. Check if upstream added new SQLite `CREATE TABLE` or `ALTER TABLE` statements
+2. For each, create a matching SurrealDB migration file:
+   `crates/librefang-storage/src/migrations/sql/NNN_<name>.surql`
+3. Register the new migration in `crates/librefang-storage/src/migrations/mod.rs`
+4. If upstream switches a storage call from `Arc<Mutex<Connection>>` to r2d2 `Pool`,
+   update BossFang's SurrealDB dual-path code to use `pool.get()` in the SQLite fallback
+
+### 2. surreal-memory as the Memory Substrate
+
+Upstream LibreFang uses its own SQLite-backed memory layer. BossFang uses the
+`surreal-memory` crate (Prometheus-AGS/surreal-memory-server) which provides a
+SurrealDB-native memory substrate with semantic search, knowledge graphs, and task tracking.
+
+**Crate**: `librefang-memory` (`crates/librefang-memory/`)
+**Backends**: `crates/librefang-memory/src/backends/surreal*.rs` (9 backend files)
+**Dependency**: `surreal-memory = { git = "https://github.com/Prometheus-AGS/surreal-memory-server", branch = "main", features = ["embedded"] }`
+
+**After every upstream merge:**
+1. If upstream changes the `librefang-memory` API surface (e.g., `Arc<Mutex<Connection>>`
+   → r2d2 `Pool`), update BossFang's surreal backend implementations to match
+2. Never remove the `surreal-backend` feature from `librefang-memory/Cargo.toml`
+3. The `embedded` feature on surreal-memory must remain — no external SurrealDB service needed
+
+### 3. Universal Agent Runtime (UAR) as a Runtime Provider
+
+BossFang adds the Universal Agent Runtime (Prometheus-AGS/universal-agent-runtime) as
+a first-class LLM/runtime provider, giving agents access to 142+ LLM providers through
+a unified liter-llm interface.
+
+**Crates**:
+- `librefang-uar-spec` (`crates/librefang-uar-spec/`) — spec types and AgentManifest translator
+- `librefang-llm-drivers/src/drivers/uar.rs` — `UarDriver` LLM driver implementation
+
+**Feature flags**:
+- `librefang-llm-drivers`: `uar-driver` (off by default, opt-in)
+- `librefang-runtime`: `uar-driver` (forwards to llm-drivers)
+- When `uar-driver` is enabled, pass `surreal-backend` to UAR so it shares our SurrealDB version
+
+**After every upstream merge:**
+1. If upstream changes the `LlmDriver` trait signature, update `UarDriver` in
+   `crates/librefang-llm-drivers/src/drivers/uar.rs` to match
+2. If upstream changes `AgentManifest` shape, update `librefang-uar-spec/src/types.rs`
+3. Never remove `librefang-uar-spec` from the workspace
+4. Ensure `provision_uar_namespace()` in `librefang-storage` is still called at boot
+
+### Shared SurrealDB Version Pin
+
+All three systems (librefang-storage, surreal-memory, UAR) must link the same surrealdb
+client. The workspace `Cargo.toml` pins:
+```toml
+surrealdb = { version = "=3.0.5", default-features = false, features = ["kv-rocksdb", "protocol-ws", "protocol-http"] }
+```
+**NEVER** upgrade this without simultaneously updating surreal-memory and UAR git refs.
+Version drift causes duplicate dep link errors that break the entire build.
 
 ## Git Conventions
 **Never include "generated by Claude Code" in commit messages** — omit the Co-Authored-By footer entirely

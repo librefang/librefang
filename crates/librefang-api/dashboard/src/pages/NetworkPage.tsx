@@ -1,6 +1,8 @@
 import { useCallback } from "react";
 import { formatDateTime } from "../lib/datetime";
 import { useTranslation } from "react-i18next";
+import { useUIStore } from "../lib/store";
+import { toastErr } from "../lib/errors";
 import {
   useNetworkStatus,
   usePeers,
@@ -23,6 +25,8 @@ import {
   ShieldCheck,
 } from "lucide-react";
 
+const NETWORK_ICON = <Network className="h-4 w-4" />;
+
 export function NetworkPage() {
   const { t } = useTranslation();
 
@@ -33,15 +37,18 @@ export function NetworkPage() {
   const status = statusQuery.data;
   const peers = peersQuery.data ?? [];
   const trustedPeers = trustedQuery.data ?? [];
-  const isLoading = statusQuery.isPending || peersQuery.isPending;
+  const addToast = useUIStore((s) => s.addToast);
+  const isLoading = statusQuery.isPending || peersQuery.isPending || trustedQuery.isPending;
 
   const handleRefresh = useCallback(() => {
-    void Promise.all([
+    Promise.all([
       statusQuery.refetch(),
       peersQuery.refetch(),
       trustedQuery.refetch(),
-    ]);
-  }, [statusQuery, peersQuery, trustedQuery]);
+    ]).catch((e) => {
+      addToast(toastErr(e, t("common.error")), "error");
+    });
+  }, [statusQuery, peersQuery, trustedQuery, addToast, t]);
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -51,7 +58,7 @@ export function NetworkPage() {
         subtitle={t("network.subtitle")}
         isFetching={statusQuery.isFetching || peersQuery.isFetching}
         onRefresh={handleRefresh}
-        icon={<Network className="h-4 w-4" />}
+        icon={NETWORK_ICON}
         helpText={t("network.help")}
       />
 
@@ -196,7 +203,13 @@ export function NetworkPage() {
                 ))}
               </StaggerList>
             </div>
-          ) : null}
+          ) : (
+            <EmptyState
+              icon={<ShieldCheck className="h-8 w-8" />}
+              title={t("network.no_trusted_peers")}
+              description={t("network.no_trusted_peers_desc")}
+            />
+          )}
 
           {/* Peers list */}
           <div>
@@ -234,14 +247,14 @@ export function NetworkPage() {
                         {peer.status || t("common.unknown")}
                       </Badge>
                     </div>
-                    {(peer.version || peer.last_seen) ? (
+                    {(peer.version != null || peer.last_seen != null) ? (
                       <div className="flex items-center gap-3 mt-3 text-[10px] text-text-dim">
-                        {peer.version ? (
+                        {peer.version != null ? (
                           <span className="flex items-center gap-1">
                             <Globe className="w-3 h-3" /> v{peer.version}
                           </span>
                         ) : null}
-                        {peer.last_seen ? (
+                        {peer.last_seen != null ? (
                           <span className="flex items-center gap-1">
                             <Clock className="w-3 h-3" /> {formatDateTime(peer.last_seen)}
                           </span>

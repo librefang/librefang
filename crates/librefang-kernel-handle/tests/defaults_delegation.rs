@@ -69,6 +69,8 @@ impl MemoryAccess for TrackingSendHandle {
     }
 }
 
+impl WikiAccess for TrackingSendHandle {}
+
 #[async_trait]
 impl TaskQueue for TrackingSendHandle {
     async fn task_post(
@@ -257,6 +259,8 @@ impl MemoryAccess for TrackingSpawnHandle {
         Ok(vec![])
     }
 }
+
+impl WikiAccess for TrackingSpawnHandle {}
 
 #[async_trait]
 impl TaskQueue for TrackingSpawnHandle {
@@ -447,6 +451,8 @@ impl MemoryAccess for TrackingApprovalHandle {
         Ok(vec![])
     }
 }
+
+impl WikiAccess for TrackingApprovalHandle {}
 
 #[async_trait]
 impl TaskQueue for TrackingApprovalHandle {

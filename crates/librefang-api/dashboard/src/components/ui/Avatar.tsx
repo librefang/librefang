@@ -1,4 +1,4 @@
-import { type HTMLAttributes, memo, useState } from "react";
+import { type HTMLAttributes, memo, useEffect, useState } from "react";
 
 type AvatarSize = "sm" | "md" | "lg" | "xl";
 
@@ -16,12 +16,13 @@ const sizeStyles: Record<AvatarSize, string> = {
 };
 
 function getInitials(name: string): string {
-  return name
+  const initials = name
     .split(" ")
     .map((n) => n[0])
     .join("")
     .toUpperCase()
     .slice(0, 2);
+  return initials || "?";
 }
 
 export const Avatar = memo(function Avatar({
@@ -32,6 +33,7 @@ export const Avatar = memo(function Avatar({
   ...props
 }: AvatarProps) {
   const [imgError, setImgError] = useState(false);
+  useEffect(() => setImgError(false), [src]);
 
   return (
     <div
@@ -49,7 +51,7 @@ export const Avatar = memo(function Avatar({
       {src && !imgError ? (
         <img
           src={src}
-          alt={fallback}
+          alt=""
           loading="lazy"
           onError={() => setImgError(true)}
           className="h-full w-full object-cover"

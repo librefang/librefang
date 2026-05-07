@@ -25,6 +25,7 @@ regex-lite = { workspace = true }
 librefang-storage = { path = "../librefang-storage", default-features = false }
 schemars = { version = "0.8", features = ["chrono", "uuid1"] }
 tracing = { workspace = true }
+url = { workspace = true }
 
 [features]
 default = []

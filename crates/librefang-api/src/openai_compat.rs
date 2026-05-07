@@ -330,7 +330,7 @@ pub async fn chat_completions(
     }
 
     // Non-streaming response
-    let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
+    let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
     match state
         .kernel
         .send_message_with_handle(agent_id, &last_user_msg, Some(kernel_handle))
@@ -385,10 +385,11 @@ async fn stream_response(
     request_id: String,
     created: u64,
 ) -> Result<axum::response::Response, String> {
-    let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
+    let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
 
     let (mut rx, _handle) = state
         .kernel
+        .clone()
         .send_message_streaming_with_routing(agent_id, message, Some(kernel_handle))
         .await
         .map_err(|e| format!("Streaming setup failed: {e}"))?;

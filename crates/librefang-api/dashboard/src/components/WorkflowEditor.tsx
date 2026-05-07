@@ -13,11 +13,11 @@ import {
   type Connection,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { useUIStore } from "../lib/store";
+import { useUIStore, createClientId } from "../lib/store";
 import { ChevronLeft } from "lucide-react";
 
 interface CustomNodeProps {
-  data: { label: string; description: string };
+  data: { label: string; description: string; nodeType?: string };
   type: string;
 }
 
@@ -40,7 +40,7 @@ const nodeTypesConfig = [
 ];
 
 const CustomNode = React.memo(function CustomNode({ data, type }: CustomNodeProps) {
-  const config = nodeTypesConfig.find(n => n.type === type) || nodeTypesConfig[2];
+  const config = nodeTypesConfig.find(c => c.type === (data.nodeType ?? type)) ?? nodeTypesConfig[2];
   return (
     <div className="rounded-lg border-2 border-border-subtle bg-surface shadow-lg min-w-[150px] overflow-hidden">
       <div className="flex items-center gap-2 px-3 py-2" style={{ backgroundColor: config.color }}>
@@ -74,16 +74,16 @@ export function WorkflowEditor({ initialNodes = [], initialEdges = [], onSave, o
 
   const addNode = useCallback((type: string) => {
     const newNode: Node = {
-      id: `${type}-${crypto.randomUUID()}`,
+      id: `${type}-${createClientId()}`,
       type: "custom",
-      position: { x: 100 + nodes.length * 40, y: 100 + nodes.length * 40 },
-      data: { label: t(`canvas.nodes.${type}`), description: t(`canvas.nodes.${type}_desc`) }
+      position: { x: 0, y: 0 },
+      data: { label: t(`canvas.nodes.${type}`), description: t(`canvas.nodes.${type}_desc`), nodeType: type }
     };
-    setNodes((nds) => [...nds, newNode]);
-  }, [setNodes, t, nodes.length]);
+    setNodes((nds) => [...nds, { ...newNode, position: { x: 100 + nds.length * 40, y: 100 + nds.length * 40 } }]);
+  }, [setNodes, t]);
 
   return (
-    <div className="fixed inset-0 z-100 flex flex-col bg-main animate-in fade-in duration-300">
+    <div className="fixed inset-0 z-[100] flex flex-col bg-main animate-in fade-in duration-300">
       <header className="flex items-center justify-between border-b border-border-subtle bg-surface px-6 py-4 shadow-sm">
         <div className="flex items-center gap-4">
           <button onClick={onClose} className="p-2 rounded-xl hover:bg-surface-hover text-text-dim transition-colors">

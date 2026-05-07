@@ -8,6 +8,7 @@ use crate::webchat;
 use axum::response::IntoResponse;
 use axum::Router;
 use librefang_kernel::config_reload::HotAction;
+use librefang_kernel::kernel_api::KernelApi;
 use librefang_kernel::kernel_handle::{ApiAuth, ApiAuthSnapshot, DashboardRawConfig};
 use librefang_kernel::LibreFangKernel;
 use std::collections::HashSet;
@@ -1004,7 +1005,7 @@ fn clear_sessions_file(home_dir: &std::path::Path) {
 /// Returns `(router, shared_state)`. The caller can use `state.bridge_manager`
 /// to shut down the bridge on exit.
 pub async fn build_router(
-    kernel: Arc<LibreFangKernel>,
+    kernel: Arc<dyn KernelApi>,
     listen_addr: SocketAddr,
 ) -> (Router<()>, Arc<AppState>) {
     // Start channel bridges (Telegram, etc.)
@@ -1071,7 +1072,7 @@ pub async fn build_router(
     // there's no separate file and no second open call.
     let idempotency_store: Arc<dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync> =
         Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
-            kernel.memory_substrate().usage_conn(),
+            kernel.memory_substrate().pool(),
         ));
 
     let state = Arc::new(AppState {
@@ -1454,7 +1455,10 @@ pub async fn run_daemon(
     let _daemon_lock = acquire_daemon_lock(&lock_path)?;
 
     let kernel = Arc::new(kernel);
-    kernel.set_self_handle();
+    // `set_self_handle` takes `self: Arc<Self>` on the trait, so it
+    // moves the Arc; clone first so subsequent uses on this scope
+    // (`start_background_agents` etc.) keep their handle.
+    kernel.clone().set_self_handle();
     kernel.start_background_agents().await;
 
     // Auto-start observability stack (OTLP collector + Prometheus + Grafana)
@@ -1703,7 +1707,7 @@ pub async fn run_daemon(
                         let home_dir = cfg.home_dir.clone();
                         let provider_regions = cfg.provider_regions.clone();
                         let provider_urls = cfg.provider_urls.clone();
-                        kernel.model_catalog_update(|catalog| {
+                        kernel.model_catalog_update(&mut |catalog| {
                             catalog.load_cached_catalog_for(&home_dir);
                             if !provider_regions.is_empty() {
                                 let region_urls = catalog.resolve_region_urls(&provider_regions);

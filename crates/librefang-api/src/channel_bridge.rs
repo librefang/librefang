@@ -331,7 +331,7 @@ use librefang_kernel::auth::Action as KernelAction;
 use librefang_kernel::config::load_config as kernel_load_config;
 use librefang_kernel::llm_driver::StreamEvent;
 use librefang_kernel::DeliveryTracker;
-use librefang_kernel::LibreFangKernel;
+use librefang_kernel::KernelApi;
 use librefang_types::agent::AgentId;
 use std::sync::Arc;
 #[cfg(feature = "channel-telegram")]
@@ -633,7 +633,7 @@ where
 
 /// Wraps `LibreFangKernel` to implement `ChannelBridgeHandle`.
 pub struct KernelBridgeAdapter {
-    kernel: Arc<LibreFangKernel>,
+    kernel: Arc<dyn KernelApi>,
     started_at: Instant,
 }
 
@@ -706,6 +706,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let language = self.kernel.config_snapshot().language.clone();
         let (event_rx, kernel_handle) = self
             .kernel
+            .clone()
             .send_message_streaming_with_routing(agent_id, message, None)
             .await
             .map_err(|e| format!("{e}"))?;
@@ -733,7 +734,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let language = self.kernel.config_snapshot().language.clone();
         let (event_rx, kernel_handle) = self
             .kernel
-            .send_message_streaming_with_sender_context_and_routing(agent_id, message, None, sender)
+            .clone()
+            .send_message_streaming_with_sender_context_and_routing(
+                agent_id,
+                message,
+                None,
+                sender.clone(),
+            )
             .await
             .map_err(|e| format!("{e}"))?;
         Ok(start_stream_text_bridge(
@@ -766,7 +773,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let language = self.kernel.config_snapshot().language.clone();
         let (event_rx, kernel_handle) = self
             .kernel
-            .send_message_streaming_with_sender_context_and_routing(agent_id, message, None, sender)
+            .clone()
+            .send_message_streaming_with_sender_context_and_routing(
+                agent_id,
+                message,
+                None,
+                sender.clone(),
+            )
             .await
             .map_err(|e| format!("{e}"))?;
         Ok(start_stream_text_bridge_with_status(
@@ -786,7 +799,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     ) -> Result<String, String> {
         let result = self
             .kernel
-            .send_message_with_sender_context(agent_id, message, sender)
+            .send_message_with_sender_context(agent_id, message, sender.clone())
             .await
             .map_err(|e| format!("{e}"))?;
         if result.silent {
@@ -817,7 +830,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         };
         let result = self
             .kernel
-            .send_message_with_blocks_and_sender(agent_id, &text, blocks, sender)
+            .send_message_with_blocks_and_sender(agent_id, &text, blocks, sender.clone())
             .await
             .map_err(|e| format!("{e}"))?;
         if result.silent {
@@ -885,7 +898,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
         let agent_id = self
             .kernel
-            .spawn_agent(manifest)
+            .spawn_agent_typed(manifest)
             .map_err(|e| format!("Failed to spawn agent: {e}"))?;
 
         Ok(agent_id)
@@ -1417,7 +1430,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                 match resolved {
                                     Some(wf_id) => {
                                         let input_text = input.clone().unwrap_or_default();
-                                        match self.kernel.run_workflow(wf_id, input_text).await {
+                                        match self
+                                            .kernel
+                                            .run_workflow_typed(wf_id, input_text)
+                                            .await
+                                        {
                                             Ok((_run_id, output)) => {
                                                 format!(
                                                     "Job [{id_short}] workflow ran:\n{}",
@@ -2152,7 +2169,6 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         message: &str,
         thread_id: Option<&str>,
     ) -> Result<String, String> {
-        use librefang_kernel::kernel_handle::prelude::*;
         self.kernel
             .send_channel_message(channel_type, recipient, message, thread_id, None)
             .await
@@ -2232,7 +2248,7 @@ fn read_token(env_var: &str, adapter_name: &str) -> Option<String> {
 /// (Feishu, Teams, DingTalk, etc.) and should be mounted under `/channels`
 /// on the main API server.
 pub async fn start_channel_bridge(
-    kernel: Arc<LibreFangKernel>,
+    kernel: Arc<dyn KernelApi>,
 ) -> (Option<BridgeManager>, axum::Router) {
     let channels = kernel.config_ref().channels.clone();
     let (bridge, _names, webhook_router) =
@@ -2244,7 +2260,7 @@ pub async fn start_channel_bridge(
 ///
 /// Returns `(Option<BridgeManager>, Vec<started_channel_names>, webhook_router)`.
 pub async fn start_channel_bridge_with_config(
-    kernel: Arc<LibreFangKernel>,
+    kernel: Arc<dyn KernelApi>,
     config: &librefang_types::config::ChannelsConfig,
 ) -> (Option<BridgeManager>, Vec<String>, axum::Router) {
     // Check which channels have config — only consider enabled features
@@ -3676,49 +3692,11 @@ pub async fn reload_channels_from_disk(
     }
 
     // Re-read secrets.env so new API tokens are available in std::env.
-    // `std::env::set_var` is not thread-safe inside an async context; push the
-    // mutation onto a blocking thread where no other tokio worker is racing.
-    let secrets_path = state.kernel.home_dir().join("secrets.env");
-    if secrets_path.exists() {
-        let secrets_path_clone = secrets_path.clone();
-        let set_result = tokio::task::spawn_blocking(move || {
-            if let Ok(content) = std::fs::read_to_string(&secrets_path_clone) {
-                let mut count = 0usize;
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() || trimmed.starts_with('#') {
-                        continue;
-                    }
-                    if let Some(eq_pos) = trimmed.find('=') {
-                        let key = trimmed[..eq_pos].trim();
-                        let mut value = trimmed[eq_pos + 1..].trim().to_string();
-                        if !key.is_empty() {
-                            // Strip matching quotes
-                            if ((value.starts_with('"') && value.ends_with('"'))
-                                || (value.starts_with('\'') && value.ends_with('\'')))
-                                && value.len() >= 2
-                            {
-                                value = value[1..value.len() - 1].to_string();
-                            }
-                            // Always overwrite — the file is the source of truth after dashboard edits
-                            // SAFETY: running on a dedicated blocking thread; no concurrent env
-                            // reads happen here because spawn_blocking serialises the mutation.
-                            unsafe { std::env::set_var(key, &value) };
-                            count += 1;
-                        }
-                    }
-                }
-                count
-            } else {
-                0
-            }
-        })
-        .await;
-        match set_result {
-            Ok(n) if n > 0 => info!("Reloaded secrets.env for channel hot-reload ({n} vars)"),
-            Ok(_) => {}
-            Err(e) => warn!("spawn_blocking for secrets.env reload failed: {e}"),
-        }
+    // Shared with the boot path (#4701) — see `crate::secrets_env` for the
+    // parser + spawn_blocking-guarded mutation.
+    let n = crate::secrets_env::load_into_process_async(state.kernel.home_dir()).await;
+    if n > 0 {
+        info!("Reloaded secrets.env for channel hot-reload ({n} vars)");
     }
 
     // Re-read config from disk

@@ -7,10 +7,10 @@ use librefang_types::approval::{
     RiskLevel, SecondFactor, TimeoutFallback,
 };
 use librefang_types::capability::glob_matches;
-use rusqlite::Connection;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
 use totp_rs::{Algorithm, Secret, TOTP};
@@ -37,7 +37,7 @@ pub struct ApprovalManager {
     pending: DashMap<Uuid, PendingRequest>,
     recent: std::sync::Mutex<VecDeque<ApprovalRecord>>,
     policy: std::sync::RwLock<ApprovalPolicy>,
-    audit_db: Option<Arc<StdMutex<Connection>>>,
+    audit_db: Option<Pool<SqliteConnectionManager>>,
     /// SurrealDB-backed TOTP lockout persistence (surreal-backend).
     /// When present, `persist_totp_lockout_save` / `persist_totp_lockout_clear`
     /// delegate to this backend instead of `audit_db`.
@@ -108,16 +108,16 @@ impl ApprovalManager {
     /// restart (issue #3611). Restored entries have no live `oneshot::Sender`,
     /// so they cannot be auto-resolved by the agent loop — they surface in
     /// the dashboard / API as pending items that require operator action.
-    pub fn new_with_db(policy: ApprovalPolicy, conn: Arc<StdMutex<Connection>>) -> Self {
-        let failures = Self::load_totp_lockout(&conn);
+    pub fn new_with_db(policy: ApprovalPolicy, pool: Pool<SqliteConnectionManager>) -> Self {
+        let failures = Self::load_totp_lockout(&pool);
         let pending: DashMap<Uuid, PendingRequest> = DashMap::new();
         // Restore pending approvals from the previous session.
-        Self::restore_pending_approvals(&conn, &pending);
+        Self::restore_pending_approvals(&pool, &pending);
         Self {
             pending,
             recent: std::sync::Mutex::new(VecDeque::new()),
             policy: std::sync::RwLock::new(policy),
-            audit_db: Some(conn),
+            audit_db: Some(pool),
             totp_store: None,
             used_codes_store: None,
             totp_grace: StdMutex::new(HashMap::new()),
@@ -205,10 +205,10 @@ impl ApprovalManager {
     /// They show up in the API as "needs resubmission" so an operator can
     /// take action rather than losing them silently.
     fn restore_pending_approvals(
-        conn: &Arc<StdMutex<Connection>>,
+        conn: &Pool<SqliteConnectionManager>,
         pending: &DashMap<Uuid, PendingRequest>,
     ) {
-        let Ok(guard) = conn.lock() else { return };
+        let Ok(guard) = conn.get() else { return };
         let Ok(mut stmt) = guard.prepare(
             "SELECT id, agent_id, session_id, tool_name, tool_input, created_at, expires_at \
              FROM pending_approvals",
@@ -275,7 +275,7 @@ impl ApprovalManager {
     /// the daemon dies before resolution (#3611).
     fn db_insert_pending(&self, req: &ApprovalRequest) {
         let Some(db) = &self.audit_db else { return };
-        let Ok(conn) = db.lock() else { return };
+        let Ok(conn) = db.get() else { return };
         let created_unix = req.requested_at.timestamp();
         if let Err(e) = conn.execute(
             "INSERT OR IGNORE INTO pending_approvals \
@@ -336,7 +336,7 @@ impl ApprovalManager {
     /// Remove a resolved/expired pending approval from the database.
     fn db_delete_pending(&self, id: Uuid) {
         let Some(db) = &self.audit_db else { return };
-        let Ok(conn) = db.lock() else { return };
+        let Ok(conn) = db.get() else { return };
         if let Err(e) = conn.execute(
             "DELETE FROM pending_approvals WHERE id = ?1",
             rusqlite::params![id.to_string()],
@@ -351,9 +351,9 @@ impl ApprovalManager {
     /// time so a daemon restart does not extend the lockout beyond the original
     /// 5-minute window.
     fn load_totp_lockout(
-        conn: &Arc<StdMutex<Connection>>,
+        conn: &Pool<SqliteConnectionManager>,
     ) -> HashMap<String, (u32, Option<Instant>)> {
-        let Ok(guard) = conn.lock() else {
+        let Ok(guard) = conn.get() else {
             return HashMap::new();
         };
         let Ok(mut stmt) = guard.prepare("SELECT sender_id, failures, locked_at FROM totp_lockout")
@@ -922,7 +922,7 @@ impl ApprovalManager {
         let Some(db) = &self.audit_db else {
             return Vec::new();
         };
-        let Ok(conn) = db.lock() else {
+        let Ok(conn) = db.get() else {
             return Vec::new();
         };
 
@@ -977,7 +977,7 @@ impl ApprovalManager {
         let Some(db) = &self.audit_db else {
             return 0;
         };
-        let Ok(conn) = db.lock() else {
+        let Ok(conn) = db.get() else {
             return 0;
         };
 
@@ -1018,7 +1018,7 @@ impl ApprovalManager {
         let Some(db) = &self.audit_db else {
             return 0;
         };
-        let Ok(conn) = db.lock() else {
+        let Ok(conn) = db.get() else {
             return 0;
         };
         let cutoff =
@@ -1445,7 +1445,7 @@ impl ApprovalManager {
             // No DB configured — in-memory only, accept the failure record.
             return Ok(());
         };
-        let Ok(conn) = db.lock() else {
+        let Ok(conn) = db.get() else {
             warn!(
                 sender_id,
                 "TOTP lockout DB unavailable; rejecting attempt fail-secure"
@@ -1480,7 +1480,7 @@ impl ApprovalManager {
         }
         // Fall back to SQLite.
         let Some(db) = &self.audit_db else { return };
-        let Ok(conn) = db.lock() else {
+        let Ok(conn) = db.get() else {
             warn!(
                 sender_id,
                 "TOTP lockout DB unavailable; could not clear lockout row \
@@ -1537,7 +1537,7 @@ impl ApprovalManager {
         let Some(db) = &self.audit_db else {
             return false;
         };
-        let Ok(conn) = db.lock() else { return false };
+        let Ok(conn) = db.get() else { return false };
         conn.query_row(
             "SELECT COUNT(*) FROM totp_used_codes WHERE code_hash = ?1 AND used_at >= ?2",
             rusqlite::params![hash, window_start],
@@ -1592,7 +1592,7 @@ impl ApprovalManager {
         let Some(db) = &self.audit_db else {
             return Ok(());
         };
-        let Ok(conn) = db.lock() else { return Ok(()) };
+        let Ok(conn) = db.get() else { return Ok(()) };
         // Upsert the used-code entry. `bound_to` is informational; the unique
         // key is still `code_hash` so any replay of the same code is rejected
         // regardless of which action it claims to authorize.
@@ -1634,7 +1634,7 @@ impl ApprovalManager {
         let Some(db) = &self.audit_db else {
             return false;
         };
-        let Ok(conn) = db.lock() else { return false };
+        let Ok(conn) = db.get() else { return false };
         let hash = Self::oauth_nonce_hash(nonce);
         // OAuth flow lifetime is typically 5–15 min; matching the state
         // signing window at 1 hour is generous and never lets the lookup
@@ -1658,7 +1658,7 @@ impl ApprovalManager {
     /// OAuth-flow window.
     pub fn record_oauth_nonce_used(&self, nonce: &str) {
         let Some(db) = &self.audit_db else { return };
-        let Ok(conn) = db.lock() else { return };
+        let Ok(conn) = db.get() else { return };
         let hash = Self::oauth_nonce_hash(nonce);
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1680,7 +1680,7 @@ impl ApprovalManager {
     /// Write an audit entry to the persistent database.
     fn audit_log_write(&self, entry: &ApprovalAuditEntry) {
         let Some(db) = &self.audit_db else { return };
-        let Ok(conn) = db.lock() else { return };
+        let Ok(conn) = db.get() else { return };
         let result = conn.execute(
             "INSERT OR IGNORE INTO approval_audit (id, request_id, agent_id, tool_name, description, action_summary, risk_level, decision, decided_by, decided_at, requested_at, feedback, second_factor_used) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
@@ -3038,10 +3038,15 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn make_manager_with_db() -> ApprovalManager {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        librefang_memory::migration::run_migrations(&conn).unwrap();
-        let conn = Arc::new(StdMutex::new(conn));
-        ApprovalManager::new_with_db(ApprovalPolicy::default(), conn)
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            librefang_memory::migration::run_migrations(&conn).unwrap();
+        }
+        ApprovalManager::new_with_db(ApprovalPolicy::default(), pool)
     }
 
     #[test]
@@ -3119,12 +3124,17 @@ mod tests {
     /// out from under the manager (e.g. a corrupted/mis-migrated audit DB).
     #[test]
     fn record_totp_code_used_for_surfaces_db_failure() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        librefang_memory::migration::run_migrations(&conn).unwrap();
-        let conn = Arc::new(StdMutex::new(conn));
-        let mgr = ApprovalManager::new_with_db(ApprovalPolicy::default(), conn.clone());
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            librefang_memory::migration::run_migrations(&conn).unwrap();
+        }
+        let mgr = ApprovalManager::new_with_db(ApprovalPolicy::default(), pool.clone());
 
-        conn.lock()
+        pool.get()
             .unwrap()
             .execute("DROP TABLE totp_used_codes", [])
             .unwrap();
@@ -3428,16 +3438,21 @@ mod tests {
 
     #[test]
     fn prune_audit_drops_old_rows_keeps_recent() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        librefang_memory::migration::run_migrations(&conn).unwrap();
-        let conn = Arc::new(StdMutex::new(conn));
-        let mgr = ApprovalManager::new_with_db(ApprovalPolicy::default(), Arc::clone(&conn));
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            librefang_memory::migration::run_migrations(&conn).unwrap();
+        }
+        let mgr = ApprovalManager::new_with_db(ApprovalPolicy::default(), pool.clone());
 
         let now = chrono::Utc::now();
         let old = (now - chrono::Duration::days(120)).to_rfc3339();
         let recent = (now - chrono::Duration::days(10)).to_rfc3339();
         {
-            let g = conn.lock().unwrap();
+            let g = pool.get().unwrap();
             let insert = |id: &str, decided_at: &str| {
                 g.execute(
                     "INSERT INTO approval_audit (id, request_id, agent_id, tool_name, decision, decided_at, requested_at) \
@@ -3454,8 +3469,8 @@ mod tests {
         let pruned = mgr.prune_audit(90);
         assert_eq!(pruned, 2, "two 120-day-old rows should be deleted");
 
-        let remaining: i64 = conn
-            .lock()
+        let remaining: i64 = pool
+            .get()
             .unwrap()
             .query_row("SELECT COUNT(*) FROM approval_audit", [], |row| row.get(0))
             .unwrap();
@@ -3464,10 +3479,15 @@ mod tests {
 
     #[test]
     fn prune_audit_zero_disabled() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        librefang_memory::migration::run_migrations(&conn).unwrap();
-        let mgr =
-            ApprovalManager::new_with_db(ApprovalPolicy::default(), Arc::new(StdMutex::new(conn)));
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            librefang_memory::migration::run_migrations(&conn).unwrap();
+        }
+        let mgr = ApprovalManager::new_with_db(ApprovalPolicy::default(), pool);
         assert_eq!(mgr.prune_audit(0), 0);
     }
 

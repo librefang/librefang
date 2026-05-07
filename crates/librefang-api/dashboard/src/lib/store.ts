@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import i18n from "./i18n";
 
-function createClientId(): string {
+export function createClientId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
@@ -81,17 +81,21 @@ export const useUIStore = create<UIState>()(
       toggleTheme: () =>
         set((state) => ({ theme: state.theme === "light" ? "dark" : "light" })),
       setLanguage: (lang) => {
-        void i18n.changeLanguage(lang);
         set({ language: lang });
+        void i18n.changeLanguage(lang).catch((err) => console.error(err));
       },
       setMobileMenuOpen: (open) => set({ isMobileMenuOpen: open }),
       toggleSidebar: () => set((state) => ({ isSidebarCollapsed: !state.isSidebarCollapsed })),
       setNavLayout: (layout) => set({ navLayout: layout }),
       toggleNavGroup: (key) => set((state) => ({ collapsedNavGroups: { ...state.collapsedNavGroups, [key]: !state.collapsedNavGroups[key] } })),
       addToast: (message, type = "info") =>
-        set((state) => ({
-          toasts: [...state.toasts, { id: createClientId(), message, type }],
-        })),
+        set((state) => {
+          const MAX_TOASTS = 50;
+          const next = [...state.toasts, { id: createClientId(), message, type }];
+          return {
+            toasts: next.length > MAX_TOASTS ? next.slice(-MAX_TOASTS) : next,
+          };
+        }),
       removeToast: (id) =>
         set((state) => ({
           toasts: state.toasts.filter((t) => t.id !== id),

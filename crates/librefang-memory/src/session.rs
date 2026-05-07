@@ -4,6 +4,8 @@ use chrono::Utc;
 use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 
 /// Derive a short display label for a session from its first user message.
 ///
@@ -50,7 +52,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use tracing::warn;
 
 /// Result from a full-text session search.
@@ -180,13 +181,13 @@ pub struct SessionExport {
 /// Session store backed by SQLite.
 #[derive(Clone)]
 pub struct SessionStore {
-    conn: Arc<Mutex<Connection>>,
+    pool: Pool<SqliteConnectionManager>,
 }
 
 impl SessionStore {
     /// Create a new session store wrapping the given connection.
-    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+    pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
+        Self { pool }
     }
 
     /// Best-effort reconcile of the FTS index against `sessions`.
@@ -202,8 +203,8 @@ impl SessionStore {
     /// usable, full-text search just degrades to whatever the index
     /// currently holds.
     pub fn reconcile_fts_index(&self) {
-        let Ok(conn) = self.conn.lock() else {
-            warn!("session FTS reconcile: failed to lock connection");
+        let Ok(conn) = self.pool.get() else {
+            warn!("session FTS reconcile: failed to acquire pool connection");
             return;
         };
 
@@ -247,10 +248,7 @@ impl SessionStore {
 
     /// Load a session from the database.
     pub fn get_session(&self, session_id: SessionId) -> LibreFangResult<Option<Session>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare("SELECT agent_id, messages, context_window_tokens, label FROM sessions WHERE id = ?1")
             .map_err(LibreFangError::memory)?;
@@ -290,10 +288,7 @@ impl SessionStore {
         &self,
         session_id: SessionId,
     ) -> LibreFangResult<Option<(Session, String)>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at FROM sessions WHERE id = ?1")
             .map_err(LibreFangError::memory)?;
@@ -346,10 +341,7 @@ impl SessionStore {
     /// a single transaction so a crash between them cannot leave the session row
     /// and the FTS index inconsistent.
     pub fn save_session(&self, session: &Session) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         // Trim the tail of the message history before serialising so the
         // stored blob never exceeds MAX_PERSISTED_MESSAGES.  We keep the
         // *most recent* messages (slice from the end) so context is preserved.
@@ -371,8 +363,9 @@ impl SessionStore {
 
         // Wrap session upsert + FTS update in a single transaction so a crash
         // between the three statements cannot leave session and FTS data
-        // inconsistent. `unchecked_transaction` is safe here because we hold
-        // the Mutex exclusively (no other thread can access this Connection).
+        // inconsistent. `unchecked_transaction` is safe here because we own
+        // the `PooledConnection` for the duration of the transaction; no
+        // other thread can access this `Connection`.
         let tx = conn
             .unchecked_transaction()
             .map_err(LibreFangError::memory)?;
@@ -447,10 +440,7 @@ impl SessionStore {
     /// the FTS error and roll the parent DELETE back. A subsequent retry
     /// re-attempts the whole pair atomically.
     pub fn delete_session(&self, session_id: SessionId) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let id_str = session_id.0.to_string();
         let tx = conn
             .unchecked_transaction()
@@ -471,10 +461,7 @@ impl SessionStore {
 
     /// Return all session IDs belonging to an agent.
     pub fn get_agent_session_ids(&self, agent_id: AgentId) -> LibreFangResult<Vec<SessionId>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare("SELECT id FROM sessions WHERE agent_id = ?1 ORDER BY created_at DESC")
             .map_err(LibreFangError::memory)?;
@@ -511,10 +498,7 @@ impl SessionStore {
         since_ms: u64,
         exclude_session: Option<SessionId>,
     ) -> LibreFangResult<u32> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         // `updated_at` is stored as RFC3339 strings, not millis — convert
         // the timestamp on the Rust side so the comparison is a simple
         // lexicographic compare (RFC3339 sorts correctly).
@@ -561,10 +545,7 @@ impl SessionStore {
         limit: u32,
         exclude_session: Option<SessionId>,
     ) -> LibreFangResult<Vec<String>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         // Fall back to the epoch (not "now") if the i64 cast somehow
         // produced an out-of-range millis value — the doc comment says
         // `since_ms = 0` means "count all sessions", and an out-of-range
@@ -635,10 +616,7 @@ impl SessionStore {
     /// makes write-side asymmetry a privacy regression, not just a
     /// recoverable hygiene issue.
     pub fn delete_agent_sessions(&self, agent_id: AgentId) -> LibreFangResult<()> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
         let agent_id_str = agent_id.0.to_string();
         let tx = conn.transaction().map_err(LibreFangError::memory)?;
         execute_session_agent_deletes(&tx, &agent_id_str)?;
@@ -648,10 +626,7 @@ impl SessionStore {
 
     /// Delete the canonical (cross-channel) session for an agent.
     pub fn delete_canonical_session(&self, agent_id: AgentId) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         conn.execute(
             "DELETE FROM canonical_sessions WHERE agent_id = ?1",
             rusqlite::params![agent_id.0.to_string()],
@@ -687,10 +662,7 @@ impl SessionStore {
 
     /// Total number of sessions stored.
     pub fn count_sessions(&self) -> LibreFangResult<usize> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let total: i64 = conn
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
             .map_err(LibreFangError::memory)?;
@@ -713,10 +685,7 @@ impl SessionStore {
     /// monotonic. If a writer ever inserts a non-UTC offset (e.g.
     /// `+08:00`), this aggregator will silently miscount.
     pub fn agent_stats_24h(&self, agent_id: &str) -> LibreFangResult<AgentStats24h> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         let now = chrono::Utc::now();
         let cutoff_24h = (now - chrono::Duration::hours(24)).to_rfc3339();
@@ -840,10 +809,7 @@ impl SessionStore {
     pub fn agents_stats_24h_bulk(
         &self,
     ) -> LibreFangResult<std::collections::HashMap<String, (u64, f64)>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let now = chrono::Utc::now();
         let cutoff_24h = (now - chrono::Duration::hours(24)).to_rfc3339();
 
@@ -896,10 +862,7 @@ impl SessionStore {
         limit: Option<usize>,
         offset: usize,
     ) -> LibreFangResult<Vec<serde_json::Value>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         // SQLite uses -1 for "no limit"
         let lim_sql: i64 = limit.map(|n| n as i64).unwrap_or(-1);
         let off_sql: i64 = offset as i64;
@@ -1007,10 +970,7 @@ impl SessionStore {
         session_id: SessionId,
         label: Option<&str>,
     ) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         conn.execute(
             "UPDATE sessions SET label = ?1, updated_at = ?2 WHERE id = ?3",
             rusqlite::params![label, Utc::now().to_rfc3339(), session_id.0.to_string()],
@@ -1025,10 +985,7 @@ impl SessionStore {
         agent_id: AgentId,
         label: &str,
     ) -> LibreFangResult<Option<Session>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, messages, context_window_tokens, label FROM sessions \
@@ -1089,10 +1046,7 @@ impl SessionStore {
         &self,
         agent_id: AgentId,
     ) -> LibreFangResult<Vec<serde_json::Value>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, message_count, created_at, label \
@@ -1175,10 +1129,7 @@ impl SessionStore {
         if retention_days == 0 {
             return Ok(0);
         }
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let cutoff = Utc::now() - chrono::Duration::days(i64::from(retention_days));
         let cutoff_str = cutoff.to_rfc3339();
         let deleted = conn
@@ -1197,10 +1148,7 @@ impl SessionStore {
         if max_per_agent == 0 {
             return Ok(0);
         }
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         // Single-query approach using window functions (SQLite 3.25+).
         // ROW_NUMBER partitions by agent and ranks by recency; rows beyond
@@ -1226,10 +1174,7 @@ impl SessionStore {
     ///
     /// Returns the number of orphan sessions deleted.
     pub fn cleanup_orphan_sessions(&self, live_agent_ids: &[AgentId]) -> LibreFangResult<u64> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         if live_agent_ids.is_empty() {
             return Ok(0);
@@ -1312,10 +1257,7 @@ impl SessionStore {
             .collect::<Vec<_>>()
             .join(" ");
 
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         // SQLite treats LIMIT < 0 as "no limit" — encode `None` that way so
         // the query plan stays a single prepared statement either way.
@@ -1422,10 +1364,7 @@ pub struct CanonicalSession {
 impl SessionStore {
     /// Load the canonical session for an agent, creating one if it doesn't exist.
     pub fn load_canonical(&self, agent_id: AgentId) -> LibreFangResult<CanonicalSession> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         load_canonical_in_tx(&conn, agent_id)
     }
 
@@ -1446,10 +1385,7 @@ impl SessionStore {
         // (canonical_sessions is keyed by agent_id and stored as a single blob).
         // BEGIN IMMEDIATE escalates to a write lock at the SQLite layer too, so
         // any future cross-process caller is also serialized.
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(LibreFangError::memory)?;
@@ -1547,10 +1483,7 @@ impl SessionStore {
 
     /// Persist a canonical session to SQLite.
     fn save_canonical(&self, canonical: &CanonicalSession) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         save_canonical_in_tx(&conn, canonical)
     }
 }
@@ -1768,9 +1701,10 @@ mod tests {
     use crate::migration::run_migrations;
 
     fn setup() -> SessionStore {
-        let conn = Connection::open_in_memory().unwrap();
-        run_migrations(&conn).unwrap();
-        SessionStore::new(Arc::new(Mutex::new(conn)))
+        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+        let pool = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
+        run_migrations(&pool.get().unwrap()).unwrap();
+        SessionStore::new(pool)
     }
 
     #[test]
@@ -2010,7 +1944,7 @@ mod tests {
         let blob = rmp_serde::to_vec(&legacy).unwrap();
         let now = Utc::now().to_rfc3339();
         {
-            let conn = store.conn.lock().unwrap();
+            let conn = store.pool.get().expect("session pool get");
             conn.execute(
                 "INSERT INTO canonical_sessions (agent_id, messages, compaction_cursor, compacted_summary, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -2099,7 +2033,7 @@ mod tests {
 
         // Manually backdate s1 to 60 days ago
         {
-            let conn = store.conn.lock().unwrap();
+            let conn = store.pool.get().expect("session pool get");
             let old_date = (Utc::now() - chrono::Duration::days(60)).to_rfc3339();
             conn.execute(
                 "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
@@ -2137,7 +2071,7 @@ mod tests {
         let mut session_ids = Vec::new();
         for i in 0..5 {
             let s = store.create_session(agent_id).unwrap();
-            let conn = store.conn.lock().unwrap();
+            let conn = store.pool.get().expect("session pool get");
             let date = (Utc::now() + chrono::Duration::seconds(i)).to_rfc3339();
             conn.execute(
                 "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
@@ -2425,7 +2359,7 @@ mod tests {
 
         let id = session.id;
         let count_after_first: i64 = {
-            let conn = store.conn.lock().unwrap();
+            let conn = store.pool.get().expect("session pool get");
             conn.query_row(
                 "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
                 rusqlite::params![id.0.to_string()],
@@ -2438,7 +2372,7 @@ mod tests {
         // Delete the session — FTS row goes too.
         store.delete_session(id).unwrap();
         let count_after_delete: i64 = {
-            let conn = store.conn.lock().unwrap();
+            let conn = store.pool.get().expect("session pool get");
             conn.query_row(
                 "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
                 rusqlite::params![id.0.to_string()],
@@ -2463,7 +2397,7 @@ mod tests {
 
         // Exactly ONE FTS row, not two.
         let count_after_recreate: i64 = {
-            let conn = store.conn.lock().unwrap();
+            let conn = store.pool.get().expect("session pool get");
             conn.query_row(
                 "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
                 rusqlite::params![id.0.to_string()],
@@ -2502,8 +2436,9 @@ mod tests {
     fn test_fts_v33_backfill_then_save_reflows_content() {
         use crate::migration::run_migrations;
 
-        let conn = Connection::open_in_memory().unwrap();
-        run_migrations(&conn).unwrap();
+        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+        let pool = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
+        run_migrations(&pool.get().unwrap()).unwrap();
         // Wipe FTS rows to mimic a pre-v12 / pre-fix DB. Sessions row
         // is inserted manually so we control the agent_id and the
         // messages blob shape.
@@ -2511,39 +2446,42 @@ mod tests {
         let session_id = SessionId::new();
         let messages_blob =
             rmp_serde::to_vec_named(&vec![Message::user("backfill needle alphawombat42")]).unwrap();
-        conn.execute(
-            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
-            rusqlite::params![
-                session_id.0.to_string(),
-                agent_id.0.to_string(),
-                messages_blob,
-            ],
-        )
-        .unwrap();
-        conn.execute("DELETE FROM sessions_fts", []).unwrap();
-
-        // Run v33 explicitly (run_migrations is a no-op since
-        // user_version is already current).
-        crate::migration::__test_only_run_v33(&conn);
-
-        // FTS row is present with empty content.
-        let (count, content): (i64, String) = conn
-            .query_row(
-                "SELECT COUNT(*), COALESCE(MAX(content), '') FROM sessions_fts WHERE session_id = ?1",
-                rusqlite::params![session_id.0.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                rusqlite::params![
+                    session_id.0.to_string(),
+                    agent_id.0.to_string(),
+                    messages_blob,
+                ],
             )
             .unwrap();
-        assert_eq!(count, 1, "backfill must produce exactly one FTS row");
-        assert_eq!(
-            content, "",
-            "backfilled FTS rows have empty content until next save"
-        );
+            conn.execute("DELETE FROM sessions_fts", []).unwrap();
+
+            // Run v33 explicitly (run_migrations is a no-op since
+            // user_version is already current).
+            crate::migration::__test_only_run_v33(&conn);
+
+            // FTS row is present with empty content.
+            let (count, content): (i64, String) = conn
+                .query_row(
+                    "SELECT COUNT(*), COALESCE(MAX(content), '') FROM sessions_fts WHERE session_id = ?1",
+                    rusqlite::params![session_id.0.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "backfill must produce exactly one FTS row");
+            assert_eq!(
+                content, "",
+                "backfilled FTS rows have empty content until next save"
+            );
+        }
 
         // Now drive save_session to reflow the real text into FTS, then
         // search to confirm the index works end-to-end.
-        let store = SessionStore::new(Arc::new(Mutex::new(conn)));
+        let store = SessionStore::new(pool.clone());
         let session = store.get_session(session_id).unwrap().unwrap();
         store.save_session(&session).unwrap();
 
@@ -2565,9 +2503,10 @@ mod tests {
     fn test_fts_v33_backfill_placeholder_survives_empty_content_save() {
         let agent_id = AgentId::new();
         let session_id = SessionId::new();
-        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+        let conn = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
         {
-            let c = conn.lock().unwrap();
+            let c = conn.get().unwrap();
             run_migrations(&c).unwrap();
             // Empty messages vec → extract_text_content returns "".
             let messages_blob = rmp_serde::to_vec_named(&Vec::<Message>::new()).unwrap();
@@ -2589,12 +2528,12 @@ mod tests {
             assert_eq!(count, 1, "v33 backfill must produce a placeholder FTS row");
         }
 
-        let store = SessionStore::new(Arc::clone(&conn));
+        let store = SessionStore::new(conn.clone());
         let session = store.get_session(session_id).unwrap().unwrap();
         store.save_session(&session).unwrap();
 
         let count_after: i64 = conn
-            .lock()
+            .get()
             .unwrap()
             .query_row(
                 "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
@@ -2615,9 +2554,10 @@ mod tests {
     /// is computed from the message timestamps already in the messages blob.
     #[test]
     fn list_sessions_includes_cost_tokens_duration_aggregates() {
-        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
-        run_migrations(&conn.lock().unwrap()).unwrap();
-        let store = SessionStore::new(Arc::clone(&conn));
+        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+        let conn = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
+        run_migrations(&conn.get().unwrap()).unwrap();
+        let store = SessionStore::new(conn.clone());
 
         let agent_id = AgentId::new();
         let mut session = store.create_session(agent_id).unwrap();
@@ -2637,7 +2577,7 @@ mod tests {
         // Two usage_events tagged to this session: one tagged, one NULL.
         // The aggregate must include only the tagged one.
         {
-            let c = conn.lock().unwrap();
+            let c = conn.get().unwrap();
             c.execute(
                 "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms, session_id)
                  VALUES (?1, ?2, datetime('now'), 'm', 'p', 100, 50, 0.012, 0, 0, ?3)",
@@ -2697,7 +2637,7 @@ mod tests {
         // The dedicated column must reflect the persisted count without
         // any blob deserialisation on the reader side.
         let stored: i64 = {
-            let conn = store.conn.lock().unwrap();
+            let conn = store.pool.get().expect("session pool get");
             conn.query_row(
                 "SELECT message_count FROM sessions WHERE id = ?1",
                 rusqlite::params![session.id.0.to_string()],
@@ -2721,7 +2661,7 @@ mod tests {
         store.save_session(&session).unwrap();
 
         let after: i64 = {
-            let conn = store.conn.lock().unwrap();
+            let conn = store.pool.get().expect("session pool get");
             conn.query_row(
                 "SELECT message_count FROM sessions WHERE id = ?1",
                 rusqlite::params![session.id.0.to_string()],
@@ -2758,7 +2698,7 @@ mod tests {
         // unwrap_or_default(), but the dedicated column is the source
         // of truth for the count.
         {
-            let conn = store.conn.lock().unwrap();
+            let conn = store.pool.get().expect("session pool get");
             conn.execute(
                 "UPDATE sessions SET messages = ?1 WHERE id = ?2",
                 rusqlite::params![vec![0xff_u8, 0xff], session.id.0.to_string()],
@@ -2806,9 +2746,10 @@ mod tests {
     ///   - scope every aggregate to the given agent_id.
     #[test]
     fn agent_stats_24h_aggregates_within_window() {
-        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
-        run_migrations(&conn.lock().unwrap()).unwrap();
-        let store = SessionStore::new(Arc::clone(&conn));
+        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+        let conn = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
+        run_migrations(&conn.get().unwrap()).unwrap();
+        let store = SessionStore::new(conn.clone());
 
         let agent_id = AgentId::new();
         let other_agent = AgentId::new();
@@ -2822,7 +2763,7 @@ mod tests {
         let stale = (now - chrono::Duration::hours(48)).to_rfc3339();
 
         let insert_session = |id: &str, agent: &AgentId, created: &str, updated: &str| {
-            let c = conn.lock().unwrap();
+            let c = conn.get().unwrap();
             c.execute(
                 "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at)
                  VALUES (?1, ?2, x'90', 0, ?3, ?4)",
@@ -2843,7 +2784,7 @@ mod tests {
         // (latencies 100/200/300 → P95 nearest-rank = ceil(0.95*3)=3 → 300),
         // one outside the window (must be ignored), one for the other agent.
         let insert_event = |agent: &AgentId, ts: &str, cost: f64, latency: i64| {
-            let c = conn.lock().unwrap();
+            let c = conn.get().unwrap();
             c.execute(
                 "INSERT INTO usage_events (id, agent_id, timestamp, model, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms)
                  VALUES (?1, ?2, ?3, 'm', 10, 20, ?4, 0, ?5)",
@@ -2915,9 +2856,10 @@ mod tests {
     /// - P95 is computed independently per window.
     #[test]
     fn agent_stats_24h_prev_window_boundaries() {
-        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
-        run_migrations(&conn.lock().unwrap()).unwrap();
-        let store = SessionStore::new(Arc::clone(&conn));
+        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+        let conn = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
+        run_migrations(&conn.get().unwrap()).unwrap();
+        let store = SessionStore::new(conn.clone());
         let agent_id = AgentId::new();
 
         let now = chrono::Utc::now();
@@ -2933,7 +2875,7 @@ mod tests {
         let outside = (now - chrono::Duration::hours(72)).to_rfc3339();
 
         let insert_session = |id: &str, created: &str| {
-            let c = conn.lock().unwrap();
+            let c = conn.get().unwrap();
             c.execute(
                 "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at)
                  VALUES (?1, ?2, x'90', 0, ?3, ?3)",
@@ -2949,7 +2891,7 @@ mod tests {
         insert_session(&uuid::Uuid::new_v4().to_string(), &outside);
 
         let insert_event = |ts: &str, cost: f64, latency: i64| {
-            let c = conn.lock().unwrap();
+            let c = conn.get().unwrap();
             c.execute(
                 "INSERT INTO usage_events (id, agent_id, timestamp, model, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms)
                  VALUES (?1, ?2, ?3, 'm', 1, 1, ?4, 0, ?5)",
@@ -2994,9 +2936,10 @@ mod tests {
     /// (sessions-only or events-only agents still appear).
     #[test]
     fn agents_stats_24h_bulk_groups_by_agent() {
-        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
-        run_migrations(&conn.lock().unwrap()).unwrap();
-        let store = SessionStore::new(Arc::clone(&conn));
+        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+        let conn = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
+        run_migrations(&conn.get().unwrap()).unwrap();
+        let store = SessionStore::new(conn.clone());
 
         let agent_a = AgentId::new();
         let agent_b = AgentId::new();
@@ -3007,7 +2950,7 @@ mod tests {
         let stale = (now - chrono::Duration::hours(48)).to_rfc3339();
 
         let insert_session = |agent: &AgentId, created: &str| {
-            let c = conn.lock().unwrap();
+            let c = conn.get().unwrap();
             c.execute(
                 "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at)
                  VALUES (?1, ?2, x'90', 0, ?3, ?3)",
@@ -3019,7 +2962,7 @@ mod tests {
             ).unwrap();
         };
         let insert_event = |agent: &AgentId, ts: &str, cost: f64| {
-            let c = conn.lock().unwrap();
+            let c = conn.get().unwrap();
             c.execute(
                 "INSERT INTO usage_events (id, agent_id, timestamp, model, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms)
                  VALUES (?1, ?2, ?3, 'm', 1, 1, ?4, 0, 0)",

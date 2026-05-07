@@ -117,6 +117,8 @@ impl MemoryAccess for CapturingKernel {
     }
 }
 
+impl WikiAccess for CapturingKernel {}
+
 #[async_trait]
 impl TaskQueue for CapturingKernel {
     async fn task_post(

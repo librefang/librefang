@@ -2682,6 +2682,11 @@ pub struct KernelConfig {
     pub default_model: DefaultModelConfig,
     /// Memory substrate configuration.
     pub memory: MemoryConfig,
+    /// Memory wiki: durable markdown knowledge vault with provenance and
+    /// optional Obsidian-friendly export. Off by default; see
+    /// `librefang-memory-wiki` and issue #3329 for the runbook.
+    #[serde(default)]
+    pub memory_wiki: MemoryWikiConfig,
     /// Network configuration.
     pub network: NetworkConfig,
     /// Channel bridge configuration (Telegram, etc.).
@@ -5017,6 +5022,7 @@ impl Default for KernelConfig {
             default_routing: None,
             default_model: DefaultModelConfig::default(),
             memory: MemoryConfig::default(),
+            memory_wiki: MemoryWikiConfig::default(),
             network: NetworkConfig::default(),
             channels: ChannelsConfig::default(),
             api_key: String::new(),
@@ -5395,10 +5401,29 @@ pub struct MemoryConfig {
     /// stay forever, leaking embedding storage — see #3467).
     #[serde(default = "default_soft_delete_retention_days")]
     pub soft_delete_retention_days: u64,
+    /// Maximum number of pooled SQLite connections served by the memory
+    /// substrate (#3378 follow-up). The pre-pool design serialised every
+    /// SQLite call through a single `Mutex<Connection>`; the r2d2 pool
+    /// removes that bottleneck but introduces a new ceiling — too low and
+    /// the trigger lane / channel bridges / cron / audit / idempotency
+    /// callers contend on `pool.get()`, too high and per-connection page
+    /// caches add up (each connection holds at most ~2 MiB via
+    /// `PRAGMA cache_size=-2000`). The default of 8 matches
+    /// `queue.concurrency.trigger_lane` so the lane semaphore, not the
+    /// pool, is the limiting factor under typical workloads. Bump in
+    /// lockstep with `trigger_lane` if you raise that, or lower for
+    /// memory-constrained deployments. Pool exhaustion is surfaced via
+    /// the `librefang_memory_pool_get_failed_total{store=...}` counter.
+    #[serde(default = "default_memory_pool_size")]
+    pub pool_size: u32,
 }
 
 fn default_soft_delete_retention_days() -> u64 {
     30
+}
+
+fn default_memory_pool_size() -> u32 {
+    8
 }
 
 /// Configuration for splitting long documents into overlapping chunks.
@@ -5444,8 +5469,129 @@ impl Default for MemoryConfig {
             vector_backend: None,
             vector_store_url: None,
             soft_delete_retention_days: default_soft_delete_retention_days(),
+            pool_size: default_memory_pool_size(),
         }
     }
+}
+
+/// Operating mode for the memory wiki (issue #3329).
+///
+/// * `Isolated` (default) — own vault under `vault_path`, populated only by
+///   explicit `wiki_write` calls. No coupling to the memory substrate.
+/// * `Bridge` — read shared artifacts from the memory substrate through the
+///   public seams. Reserved for follow-up; v1 returns
+///   `WikiError::ModeNotImplemented`.
+/// * `UnsafeLocal` — same-machine escape hatch that points at an existing
+///   filesystem path (e.g. an Obsidian vault). Reserved for follow-up.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryWikiMode {
+    #[default]
+    Isolated,
+    Bridge,
+    UnsafeLocal,
+}
+
+/// Markdown render flavor for vault pages (issue #3329).
+///
+/// * `Native` — plain Markdown links: `[topic](topic.md)`.
+/// * `Obsidian` — Obsidian / Logseq wiki-link syntax: `[[topic]]`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryWikiRenderMode {
+    #[default]
+    Native,
+    Obsidian,
+}
+
+/// Which `wiki_write` calls actually land on disk.
+///
+/// * `Tagged` (default) — only writes that pass an explicit `topic` tag are
+///   accepted, matching v1 acceptance criteria. Other writes are rejected
+///   with `WikiError::InvalidTopic`.
+/// * `All` — accept every write the kernel forwards. Useful in testing or
+///   in `unsafe_local` mode where the agent already speaks vault semantics.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryWikiIngestFilter {
+    #[default]
+    Tagged,
+    All,
+}
+
+/// Memory wiki configuration (issue #3329). **Off by default** — set
+/// `enabled = true` to opt in.
+///
+/// ```toml
+/// [memory_wiki]
+/// enabled = false
+/// mode = "isolated"                    # isolated | bridge | unsafe_local
+/// vault_path = "~/.librefang/wiki/main"
+/// render_mode = "native"               # native | obsidian
+/// ingest_filter = "tagged"             # tagged | all
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct MemoryWikiConfig {
+    /// Master switch. When `false` (default), the wiki is not constructed
+    /// and the `wiki_*` builtin tools all return a `Disabled` error.
+    pub enabled: bool,
+    /// Operating mode (see `MemoryWikiMode`). v1 wires `Isolated`; the
+    /// other variants return `ModeNotImplemented` until follow-up PRs.
+    pub mode: MemoryWikiMode,
+    /// Filesystem location of the vault root. Defaults to
+    /// `<librefang_home>/wiki/main`. The `~` prefix is honoured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_path: Option<PathBuf>,
+    /// Markdown render flavor for cross-references (`[[topic]]` placeholders).
+    pub render_mode: MemoryWikiRenderMode,
+    /// Whether the vault accepts every `wiki_write` or only ones with an
+    /// explicit topic tag.
+    pub ingest_filter: MemoryWikiIngestFilter,
+}
+
+impl MemoryWikiConfig {
+    /// Resolve the effective vault root against the kernel's home
+    /// directory. Honours the leading `~` and `~/...` forms (current
+    /// user's home directory) on `vault_path`; falls back to
+    /// `<librefang_home>/wiki/main` when `vault_path` is unset, where
+    /// `<librefang_home>` is the **caller-supplied** `home_dir` rather
+    /// than the env-derived `LIBREFANG_HOME`. That matters for embedded
+    /// or test profiles whose `KernelConfig.home_dir` deliberately
+    /// points somewhere other than `~/.librefang` — the wiki must not
+    /// leak data across profiles.
+    ///
+    /// `~user/...` (POSIX user-name expansion) is **not** honoured —
+    /// only the bare `~` and `~/...` forms are. Set the path explicitly
+    /// with no `~` prefix when targeting another user's home.
+    pub fn resolved_vault_path(&self, home_dir: &std::path::Path) -> PathBuf {
+        if let Some(path) = &self.vault_path {
+            return expand_tilde(path);
+        }
+        home_dir.join("wiki").join("main")
+    }
+}
+
+/// Expand a leading `~` or `~/...` to the current user's home directory.
+/// Other forms (including `~user/...`) are returned unchanged — see
+/// [`MemoryWikiConfig::resolved_vault_path`] for the rationale.
+fn expand_tilde(path: &std::path::Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return dirs::home_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join(rest);
+    }
+    if raw.as_ref() == "~" {
+        return dirs::home_dir().unwrap_or_else(std::env::temp_dir);
+    }
+    path.to_path_buf()
 }
 
 /// Time-based memory decay configuration.

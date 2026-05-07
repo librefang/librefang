@@ -1,0 +1,52 @@
+name: PR Review Sync (collector)
+
+# Captures pull_request_review.submitted events and emits an artifact
+# with the PR number and review state. The companion applier workflow
+# (`pr-review-state-applier.yml`) is keyed off `workflow_run` against
+# this workflow and applies the resulting label changes there.
+#
+# Why split: GitHub downgrades GITHUB_TOKEN to read-only for any
+# pull_request_review-triggered workflow — even on internal (non-fork)
+# PRs and even when the workflow declares `permissions: write`. So a
+# direct `issues.addLabels` call from this trigger 403s with
+# "Resource not accessible by integration". `workflow_run` runs in the
+# default branch's context with the default-write token, which is why
+# the applier can perform the writes.
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    name: Capture review event
+    runs-on: ubuntu-latest
+    # Only the two states the applier acts on need a full collection
+    # run; commented/dismissed/pending events are dropped here so we
+    # don't churn artifacts.
+    if: github.event.review.state == 'changes_requested' || github.event.review.state == 'approved'
+    steps:
+      - name: Write event payload
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_STATE: ${{ github.event.review.state }}
+        run: |
+          mkdir -p ./payload
+          # Use jq to construct JSON safely (avoids shell injection from
+          # any future expansion of the consumed event fields).
+          jq -n \
+            --argjson pr "$PR_NUMBER" \
+            --arg state "$REVIEW_STATE" \
+            '{pr_number: $pr, review_state: $state}' \
+            > ./payload/event.json
+          cat ./payload/event.json
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr-review-event
+          path: ./payload/event.json
+          if-no-files-found: error
+          retention-days: 1

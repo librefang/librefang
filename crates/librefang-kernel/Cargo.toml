@@ -10,6 +10,7 @@ readme = "README.md"
 librefang-types = { path = "../librefang-types" }
 librefang-uar-spec = { path = "../librefang-uar-spec" }
 librefang-memory = { path = "../librefang-memory" }
+librefang-memory-wiki = { path = "../librefang-memory-wiki" }
 librefang-kernel-router = { path = "../librefang-kernel-router" }
 librefang-kernel-metering = { path = "../librefang-kernel-metering" }
 librefang-runtime = { path = "../librefang-runtime", features = ["uar-driver"] }
@@ -28,6 +29,8 @@ toml = { workspace = true }
 serde_yaml = { workspace = true }
 dashmap = { workspace = true }
 rusqlite = { workspace = true }
+r2d2 = { workspace = true }
+r2d2_sqlite = { workspace = true }
 arc-swap = { workspace = true }
 tracing = { workspace = true }
 metrics = { workspace = true }

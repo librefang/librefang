@@ -16,8 +16,8 @@ interface CommandItem {
   external?: boolean;
 }
 
-// Public librefang.ai registry catalog. Keys match the registry categories
-// in librefang-registry, labels are i18n keys already in the dashboard.
+const REGISTRY_BASE_URL = import.meta.env.VITE_REGISTRY_URL ?? "https://librefang.ai";
+
 const REGISTRY_ITEMS: { slug: string; labelKey: string; icon: LucideIcon }[] = [
   { slug: "skills",    labelKey: "nav.skills",    icon: Shield },
   { slug: "hands",     labelKey: "nav.hands",     icon: Hand },
@@ -82,7 +82,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
       categoryKey: "command_palette.registry",
       icon,
       external: true,
-      action: () => window.open(`https://librefang.ai/${slug}`, "_blank", "noopener,noreferrer"),
+      action: () => window.open(`${REGISTRY_BASE_URL}/${slug}`, "_blank", "noopener,noreferrer"),
     })),
   ], [navigate]);
 
@@ -103,6 +103,10 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
       setSelectedIndex(0);
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    setSelectedIndex(i => (filteredCommands.length === 0 ? 0 : Math.min(i, filteredCommands.length - 1)));
+  }, [filteredCommands]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -127,12 +131,18 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, onClose]);
 
-  const groupedCommands = filteredCommands.reduce((acc, cmd) => {
+  const groupedCommands = useMemo(() => filteredCommands.reduce((acc, cmd) => {
     const key = t(cmd.categoryKey);
     if (!acc[key]) acc[key] = [];
     acc[key].push(cmd);
     return acc;
-  }, {} as Record<string, CommandItem[]>);
+  }, {} as Record<string, CommandItem[]>), [filteredCommands, t]);
+
+  const indexMap = useMemo(() => {
+    const m = new Map<string, number>();
+    for (let i = 0; i < filteredCommands.length; i++) m.set(filteredCommands[i].id, i);
+    return m;
+  }, [filteredCommands]);
 
   return (
     <AnimatePresence>
@@ -162,7 +172,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
           <input
             type="text"
             value={search}
-            onChange={(e) => { setSearch(e.target.value); setSelectedIndex(0); }}
+            onChange={(e) => setSearch(e.target.value)}
             placeholder={t("command_palette.search_placeholder")}
             className="flex-1 bg-transparent text-sm font-medium outline-none placeholder:text-text-dim"
             autoFocus
@@ -183,7 +193,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
               <div key={category}>
                 <p className="px-3 py-2 text-[11px] font-bold uppercase tracking-widest text-text-dim">{category}</p>
                 {cmds.map((cmd) => {
-                  const globalIndex = filteredCommands.indexOf(cmd);
+                  const globalIndex = indexMap.get(cmd.id) ?? 0;
                   return (
                     <button
                       key={cmd.id}
