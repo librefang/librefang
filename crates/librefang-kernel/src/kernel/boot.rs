@@ -1230,10 +1230,13 @@ impl LibreFangKernel {
             proactive_memory_extractor: OnceLock::new(),
             prompt_store: OnceLock::new(),
             supervisor,
-            workflows: WorkflowEngine::new_with_persistence(&workflow_home_dir),
-            template_registry: WorkflowTemplateRegistry::new(),
-            triggers: trigger_engine,
-            background,
+            workflows: crate::kernel::subsystems::WorkflowSubsystem::new(
+                WorkflowEngine::new_with_persistence(&workflow_home_dir),
+                trigger_engine,
+                background,
+                cron_scheduler,
+                command_queue,
+            ),
             // ArcSwap lets config_reload rebuild on `[llm.auxiliary]` edits
             // without invalidating any long-lived `Arc<Kernel>` handle.
             llm: crate::kernel::subsystems::LlmSubsystem::new(
@@ -1271,7 +1274,6 @@ impl LibreFangKernel {
             mcp_health,
             effective_mcp_servers: std::sync::RwLock::new(all_mcp_servers),
             delivery_tracker: DeliveryTracker::new(),
-            cron_scheduler,
             approval_manager,
             bindings: std::sync::Mutex::new(initial_bindings),
             broadcast: initial_broadcast,
@@ -1297,7 +1299,6 @@ impl LibreFangKernel {
             assistant_routes: dashmap::DashMap::new(),
             route_divergence: dashmap::DashMap::new(),
             decision_traces: dashmap::DashMap::new(),
-            command_queue,
             context_engine,
             context_engine_config,
             self_handle: OnceLock::new(),
@@ -1982,8 +1983,9 @@ system_prompt = "You are a helpful assistant."
         // Auto-register workflow definitions from ~/.librefang/workflows/
         {
             let workflows_dir = kernel.home_dir_boot.join("workflows");
-            let loaded =
-                tokio::task::block_in_place(|| kernel.workflows.load_from_dir_sync(&workflows_dir));
+            let loaded = tokio::task::block_in_place(|| {
+                kernel.workflows.engine.load_from_dir_sync(&workflows_dir)
+            });
             if loaded > 0 {
                 info!(
                     "Auto-registered {loaded} workflow(s) from {}",
@@ -1994,7 +1996,7 @@ system_prompt = "You are a helpful assistant."
 
         // Load persisted workflow runs (completed/failed) from disk.
         {
-            match tokio::task::block_in_place(|| kernel.workflows.load_runs()) {
+            match tokio::task::block_in_place(|| kernel.workflows.engine.load_runs()) {
                 Ok(count) if count > 0 => {
                     info!("Loaded {count} persisted workflow run(s) from disk");
                 }
@@ -2011,7 +2013,10 @@ system_prompt = "You are a helpful assistant."
             let stale_timeout_mins = kernel.config.load().workflow_stale_timeout_minutes;
             if stale_timeout_mins > 0 {
                 let stale_timeout = std::time::Duration::from_secs(stale_timeout_mins * 60);
-                let recovered = kernel.workflows.recover_stale_running_runs(stale_timeout);
+                let recovered = kernel
+                    .workflows
+                    .engine
+                    .recover_stale_running_runs(stale_timeout);
                 if recovered > 0 {
                     info!(
                         "Recovered {recovered} stale workflow run(s) interrupted by daemon restart"
@@ -2023,7 +2028,10 @@ system_prompt = "You are a helpful assistant."
         // Load workflow templates
         {
             let user_dir = kernel.home_dir_boot.join("workflows").join("templates");
-            let loaded = kernel.template_registry.load_templates_from_dir(&user_dir);
+            let loaded = kernel
+                .workflows
+                .template_registry
+                .load_templates_from_dir(&user_dir);
             if loaded > 0 {
                 info!("Loaded {loaded} workflow template(s)");
             }

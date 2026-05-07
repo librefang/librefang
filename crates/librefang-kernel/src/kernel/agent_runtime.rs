@@ -512,7 +512,7 @@ impl LibreFangKernel {
             .registry
             .remove(agent_id)
             .map_err(KernelError::LibreFang)?;
-        self.background.stop_agent(agent_id);
+        self.workflows.background.stop_agent(agent_id);
         // Abort any per-agent fire-and-forget tasks (skill reviews, …) so
         // they release semaphore permits and stop spending tokens on
         // behalf of a now-deleted agent (#3705).
@@ -520,15 +520,15 @@ impl LibreFangKernel {
         self.scheduler.unregister(agent_id);
         self.capabilities.revoke_all(agent_id);
         self.event_bus.unsubscribe_agent(agent_id);
-        self.triggers.remove_agent_triggers(agent_id);
-        if let Err(e) = self.triggers.persist() {
+        self.workflows.triggers.remove_agent_triggers(agent_id);
+        if let Err(e) = self.workflows.triggers.persist() {
             warn!("Failed to persist trigger jobs after agent deletion: {e}");
         }
 
         // Remove cron jobs so they don't linger as orphans (#504)
-        let cron_removed = self.cron_scheduler.remove_agent_jobs(agent_id);
+        let cron_removed = self.workflows.cron_scheduler.remove_agent_jobs(agent_id);
         if cron_removed > 0 {
-            if let Err(e) = self.cron_scheduler.persist() {
+            if let Err(e) = self.workflows.cron_scheduler.persist() {
                 warn!("Failed to persist cron jobs after agent deletion: {e}");
             }
         }

@@ -335,19 +335,25 @@ impl LibreFangKernel {
             let mut registered = false;
             for condition in conditions {
                 if let Some(pattern) = background::parse_condition(condition) {
-                    if self.triggers.agent_has_pattern(agent_id, &pattern) {
+                    if self
+                        .workflows
+                        .triggers
+                        .agent_has_pattern(agent_id, &pattern)
+                    {
                         continue;
                     }
                     let prompt = format!(
                         "[PROACTIVE ALERT] Condition '{condition}' matched: {{{{event}}}}. \
                          Review and take appropriate action. Agent: {name}"
                     );
-                    self.triggers.register(agent_id, pattern, prompt, 0);
+                    self.workflows
+                        .triggers
+                        .register(agent_id, pattern, prompt, 0);
                     registered = true;
                 }
             }
             if registered {
-                if let Err(e) = self.triggers.persist() {
+                if let Err(e) = self.workflows.triggers.persist() {
                     warn!(agent = %name, "Failed to persist proactive triggers: {e}");
                 }
             }
@@ -364,10 +370,11 @@ impl LibreFangKernel {
         );
         // Evaluate triggers synchronously (we can't await in a sync fn, so just evaluate)
         let (triggered, trigger_state_mutated) = self
+            .workflows
             .triggers
             .evaluate_with_resolver(&event, |id| self.registry.get(id).map(|e| e.name.clone()));
         if !triggered.is_empty() || trigger_state_mutated {
-            if let Err(e) = self.triggers.persist() {
+            if let Err(e) = self.workflows.triggers.persist() {
                 warn!("Failed to persist trigger jobs after spawn event: {e}");
             }
         }

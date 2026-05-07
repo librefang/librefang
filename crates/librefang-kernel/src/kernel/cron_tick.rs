@@ -43,14 +43,15 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
         interval.tick().await;
         if kernel.supervisor.is_shutting_down() {
             // Persist on shutdown
-            let _ = kernel.cron_scheduler.persist();
+            let _ = kernel.workflows.cron_scheduler.persist();
             break;
         }
 
-        let due = kernel.cron_scheduler.due_jobs();
+        let due = kernel.workflows.cron_scheduler.due_jobs();
         // Snapshot the cron_lane semaphore once per tick so we
         // can move an Arc clone into each spawned job task (#3738).
         let cron_sem = kernel
+            .workflows
             .command_queue
             .semaphore_for_lane(librefang_runtime::command_lane::Lane::Cron);
         for job in due {
@@ -73,7 +74,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                         EventPayload::Custom(payload_bytes),
                     );
                     kernel.publish_event(event).await;
-                    kernel.cron_scheduler.record_success(job_id);
+                    kernel.workflows.cron_scheduler.record_success(job_id);
                 }
                 librefang_types::scheduler::CronAction::AgentTurn {
                     message,
@@ -98,7 +99,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                             agent = %agent_id,
                             "Cron: agent is Suspended, skipping fire"
                         );
-                        kernel.cron_scheduler.record_skipped(job_id);
+                        kernel.workflows.cron_scheduler.record_skipped(job_id);
                         continue;
                     }
 
@@ -118,7 +119,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                                 job = %job_name,
                                 "cron: script gate wakeAgent=false, skipping agent"
                             );
-                            kernel.cron_scheduler.record_success(job_id);
+                            kernel.workflows.cron_scheduler.record_success(job_id);
                             continue;
                         }
                     }
@@ -501,11 +502,11 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                         {
                             Ok(Ok(result)) => {
                                 tracing::info!(job = %job_name, "Cron job completed successfully");
-                                kernel_job.cron_scheduler.record_success(job_id);
+                                kernel_job.workflows.cron_scheduler.record_success(job_id);
                                 // Persist last_run before delivery
                                 // so a slow/failed channel push
                                 // can't strand last_run on disk.
-                                if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
                                     tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
                                 }
                                 // Deliver response to configured channel (skip NO_REPLY/silent)
@@ -532,18 +533,21 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                             Ok(Err(e)) => {
                                 let err_msg = format!("{e}");
                                 tracing::warn!(job = %job_name, error = %err_msg, "Cron job failed");
-                                kernel_job.cron_scheduler.record_failure(job_id, &err_msg);
-                                if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                kernel_job
+                                    .workflows
+                                    .cron_scheduler
+                                    .record_failure(job_id, &err_msg);
+                                if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
                                     tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
                                 }
                             }
                             Err(_) => {
                                 tracing::warn!(job = %job_name, timeout_s, "Cron job timed out");
-                                kernel_job.cron_scheduler.record_failure(
+                                kernel_job.workflows.cron_scheduler.record_failure(
                                     job_id,
                                     &format!("timed out after {timeout_s}s"),
                                 );
-                                if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
                                     tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
                                 }
                             }
@@ -589,7 +593,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                                 Some(crate::workflow::WorkflowId(uuid))
                             } else {
                                 // Search by name
-                                let workflows = kernel_job.workflows.list_workflows().await;
+                                let workflows = kernel_job.workflows.engine.list_workflows().await;
                                 workflows
                                     .iter()
                                     .find(|w| w.name == workflow_id_owned)
@@ -606,8 +610,10 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                                 {
                                     Ok(Ok((_run_id, output))) => {
                                         tracing::info!(job = %job_name, "Cron workflow completed successfully");
-                                        kernel_job.cron_scheduler.record_success(job_id);
-                                        if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                        kernel_job.workflows.cron_scheduler.record_success(job_id);
+                                        if let Err(e) =
+                                            kernel_job.workflows.cron_scheduler.persist()
+                                        {
                                             tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
                                         }
                                         cron_deliver_response(
@@ -628,18 +634,25 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                                     Ok(Err(e)) => {
                                         let err_msg = format!("{e}");
                                         tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow failed");
-                                        kernel_job.cron_scheduler.record_failure(job_id, &err_msg);
-                                        if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                        kernel_job
+                                            .workflows
+                                            .cron_scheduler
+                                            .record_failure(job_id, &err_msg);
+                                        if let Err(e) =
+                                            kernel_job.workflows.cron_scheduler.persist()
+                                        {
                                             tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
                                         }
                                     }
                                     Err(_) => {
                                         tracing::warn!(job = %job_name, timeout_s, "Cron workflow timed out");
-                                        kernel_job.cron_scheduler.record_failure(
+                                        kernel_job.workflows.cron_scheduler.record_failure(
                                             job_id,
                                             &format!("workflow timed out after {timeout_s}s"),
                                         );
-                                        if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                        if let Err(e) =
+                                            kernel_job.workflows.cron_scheduler.persist()
+                                        {
                                             tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
                                         }
                                     }
@@ -648,8 +661,11 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                             None => {
                                 let err_msg = format!("workflow not found: {workflow_id_owned}");
                                 tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow lookup failed");
-                                kernel_job.cron_scheduler.record_failure(job_id, &err_msg);
-                                if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                kernel_job
+                                    .workflows
+                                    .cron_scheduler
+                                    .record_failure(job_id, &err_msg);
+                                if let Err(e) = kernel_job.workflows.cron_scheduler.persist() {
                                     tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
                                 }
                             }
@@ -663,7 +679,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
         persist_counter += 1;
         if persist_counter >= 20 {
             persist_counter = 0;
-            if let Err(e) = kernel.cron_scheduler.persist() {
+            if let Err(e) = kernel.workflows.cron_scheduler.persist() {
                 tracing::warn!("Cron persist failed: {e}");
             }
         }

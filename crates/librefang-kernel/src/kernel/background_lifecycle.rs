@@ -114,8 +114,10 @@ impl LibreFangKernel {
                         for (role, old_id) in &old_agent_id {
                             if let Some(&new_id) = inst.agent_ids.get(role) {
                                 if old_id.0 != new_id.0 {
-                                    let migrated =
-                                        self.cron_scheduler.reassign_agent_jobs(*old_id, new_id);
+                                    let migrated = self
+                                        .workflows
+                                        .cron_scheduler
+                                        .reassign_agent_jobs(*old_id, new_id);
                                     if migrated > 0 {
                                         info!(
                                             hand = %hand_id,
@@ -125,14 +127,16 @@ impl LibreFangKernel {
                                             migrated,
                                             "Reassigned cron jobs after restart"
                                         );
-                                        if let Err(e) = self.cron_scheduler.persist() {
+                                        if let Err(e) = self.workflows.cron_scheduler.persist() {
                                             warn!(
                                                 "Failed to persist cron jobs after hand restore: {e}"
                                             );
                                         }
                                     }
-                                    let t_migrated =
-                                        self.triggers.reassign_agent_triggers(*old_id, new_id);
+                                    let t_migrated = self
+                                        .workflows
+                                        .triggers
+                                        .reassign_agent_triggers(*old_id, new_id);
                                     if t_migrated > 0 {
                                         info!(
                                             hand = %hand_id,
@@ -142,7 +146,7 @@ impl LibreFangKernel {
                                             migrated = t_migrated,
                                             "Reassigned triggers after restart"
                                         );
-                                        if let Err(e) = self.triggers.persist() {
+                                        if let Err(e) = self.workflows.triggers.persist() {
                                             warn!(
                                                 "Failed to persist trigger jobs after hand restore: {e}"
                                             );
@@ -864,10 +868,10 @@ impl LibreFangKernel {
             let kernel = Arc::clone(self);
             // #3740: spawn_logged so panics in the cron loop surface in logs.
             spawn_logged("cron_scheduler", cron_tick::run_cron_scheduler_loop(kernel));
-            if self.cron_scheduler.total_jobs() > 0 {
+            if self.workflows.cron_scheduler.total_jobs() > 0 {
                 info!(
                     "Cron scheduler active with {} job(s)",
-                    self.cron_scheduler.total_jobs()
+                    self.workflows.cron_scheduler.total_jobs()
                 );
             }
         }
@@ -1148,19 +1152,25 @@ impl LibreFangKernel {
             let mut registered = false;
             for condition in conditions {
                 if let Some(pattern) = background::parse_condition(condition) {
-                    if self.triggers.agent_has_pattern(agent_id, &pattern) {
+                    if self
+                        .workflows
+                        .triggers
+                        .agent_has_pattern(agent_id, &pattern)
+                    {
                         continue;
                     }
                     let prompt = format!(
                         "[PROACTIVE ALERT] Condition '{condition}' matched: {{{{event}}}}. \
                          Review and take appropriate action. Agent: {name}"
                     );
-                    self.triggers.register(agent_id, pattern, prompt, 0);
+                    self.workflows
+                        .triggers
+                        .register(agent_id, pattern, prompt, 0);
                     registered = true;
                 }
             }
             if registered {
-                if let Err(e) = self.triggers.persist() {
+                if let Err(e) = self.workflows.triggers.persist() {
                     warn!(agent = %name, id = %agent_id, "Failed to persist proactive triggers: {e}");
                 }
                 info!(agent = %name, id = %agent_id, "Registered proactive triggers");
@@ -1178,7 +1188,8 @@ impl LibreFangKernel {
         // `system_call=true` carve-out as cron (see
         // `resolve_user_tool_decision` in this file).
         let kernel = Arc::clone(self);
-        self.background
+        self.workflows
+            .background
             .start_agent(agent_id, name, schedule, move |aid, msg| {
                 let k = Arc::clone(&kernel);
                 tokio::spawn(async move {
@@ -1256,7 +1267,7 @@ impl LibreFangKernel {
         // immediately after this block, and the next-boot
         // `recover_stale_running_runs` sweep is the safety net for any
         // crash-shutdown residue.
-        let drained = self.workflows.drain_on_shutdown();
+        let drained = self.workflows.engine.drain_on_shutdown();
         if drained > 0 {
             tracing::info!(drained, "Paused in-flight workflow runs for shutdown");
         }

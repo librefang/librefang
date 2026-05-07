@@ -155,14 +155,14 @@ impl LibreFangKernel {
                     .find_map(|t| t.strip_prefix("hand_role:"))
                     .unwrap_or("main")
                     .to_string();
-                let taken_triggers = self.triggers.take_agent_triggers(entry.id);
+                let taken_triggers = self.workflows.triggers.take_agent_triggers(entry.id);
                 if !taken_triggers.is_empty() {
                     saved_triggers
                         .entry(old_role.clone())
                         .or_insert_with(Vec::new)
                         .extend(taken_triggers);
                 }
-                let taken_crons = self.cron_scheduler.list_jobs(old_id);
+                let taken_crons = self.workflows.cron_scheduler.list_jobs(old_id);
                 if !taken_crons.is_empty() {
                     // Dedupe by job id within this snapshot: if two registry
                     // entries somehow tag the same role (concurrent activation
@@ -187,9 +187,12 @@ impl LibreFangKernel {
                 // edge cases like out-of-band cron creation between kill and
                 // respawn.
                 let new_id = AgentId::from_hand_agent(hand_id, &old_role, instance_id);
-                let migrated = self.cron_scheduler.reassign_agent_jobs(old_id, new_id);
+                let migrated = self
+                    .workflows
+                    .cron_scheduler
+                    .reassign_agent_jobs(old_id, new_id);
                 if migrated > 0 {
-                    let _ = self.cron_scheduler.persist();
+                    let _ = self.workflows.cron_scheduler.persist();
                 }
             }
         }
@@ -440,7 +443,7 @@ impl LibreFangKernel {
         if !saved_triggers.is_empty() {
             for (role, triggers) in saved_triggers {
                 if let Some(&new_id) = agent_ids_map.get(&role) {
-                    let restored = self.triggers.restore_triggers(new_id, triggers);
+                    let restored = self.workflows.triggers.restore_triggers(new_id, triggers);
                     if restored > 0 {
                         info!(
                             hand = %hand_id,
@@ -458,7 +461,7 @@ impl LibreFangKernel {
                     );
                 }
             }
-            if let Err(e) = self.triggers.persist() {
+            if let Err(e) = self.workflows.triggers.persist() {
                 warn!("Failed to persist trigger jobs after hand reactivation: {e}");
             }
         }
@@ -483,7 +486,7 @@ impl LibreFangKernel {
                         // resilient to future changes in `add_job`.
                         job.next_run = Some(crate::cron::compute_next_run(&job.schedule));
                         job.last_run = None;
-                        if self.cron_scheduler.add_job(job, false).is_ok() {
+                        if self.workflows.cron_scheduler.add_job(job, false).is_ok() {
                             restored += 1;
                         }
                     }
@@ -506,7 +509,7 @@ impl LibreFangKernel {
                 }
             }
             if total_restored > 0 {
-                if let Err(e) = self.cron_scheduler.persist() {
+                if let Err(e) = self.workflows.cron_scheduler.persist() {
                     warn!("Failed to persist cron jobs after restoration: {e}");
                 }
             }
@@ -958,7 +961,7 @@ impl LibreFangKernel {
         // Pause the background loop for all of this hand's agents
         if let Some(instance) = self.hand_registry.get_instance(instance_id) {
             for &agent_id in instance.agent_ids.values() {
-                self.background.pause_agent(agent_id);
+                self.workflows.background.pause_agent(agent_id);
             }
         }
         self.hand_registry
@@ -978,7 +981,7 @@ impl LibreFangKernel {
         // Resume the background loop for all of this hand's agents
         if let Some(instance) = self.hand_registry.get_instance(instance_id) {
             for &agent_id in instance.agent_ids.values() {
-                self.background.resume_agent(agent_id);
+                self.workflows.background.resume_agent(agent_id);
             }
         }
         self.persist_hand_state();

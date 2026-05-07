@@ -12,10 +12,7 @@ use crate::router;
 use crate::scheduler::AgentScheduler;
 use crate::supervisor::Supervisor;
 use crate::triggers::{TriggerEngine, TriggerId, TriggerPattern};
-use crate::workflow::{
-    DryRunStep, StepAgent, Workflow, WorkflowEngine, WorkflowId, WorkflowRunId,
-    WorkflowTemplateRegistry,
-};
+use crate::workflow::{DryRunStep, StepAgent, Workflow, WorkflowEngine, WorkflowId, WorkflowRunId};
 
 use librefang_memory::MemorySubstrate;
 use librefang_runtime::agent_loop::{
@@ -696,14 +693,9 @@ pub struct LibreFangKernel {
     pub(crate) prompt_store: OnceLock<librefang_memory::PromptStore>,
     /// Process supervisor.
     pub(crate) supervisor: Supervisor,
-    /// Workflow engine.
-    pub(crate) workflows: WorkflowEngine,
-    /// Workflow template registry.
-    pub(crate) template_registry: WorkflowTemplateRegistry,
-    /// Event-driven trigger engine.
-    pub(crate) triggers: TriggerEngine,
-    /// Background agent executor.
-    pub(crate) background: BackgroundExecutor,
+    /// Workflow engine + triggers + background + cron + command queue.
+    /// See [`subsystems::WorkflowSubsystem`].
+    pub(crate) workflows: subsystems::WorkflowSubsystem,
     /// LLM drivers + model catalog + embedding fallback. See
     /// [`subsystems::LlmSubsystem`].
     pub(crate) llm: subsystems::LlmSubsystem,
@@ -767,8 +759,6 @@ pub struct LibreFangKernel {
         std::sync::RwLock<Vec<librefang_types::config::McpServerConfigEntry>>,
     /// Delivery receipt tracker (bounded LRU, max 10K entries).
     pub(crate) delivery_tracker: DeliveryTracker,
-    /// Cron job scheduler.
-    pub(crate) cron_scheduler: crate::cron::CronScheduler,
     /// Execution approval manager.
     pub(crate) approval_manager: crate::approval::ApprovalManager,
     /// Agent bindings for multi-account routing (Mutex for runtime add/remove).
@@ -852,8 +842,6 @@ pub struct LibreFangKernel {
     /// Stored for retrieval via `/api/agents/{id}/traces`.
     pub(crate) decision_traces:
         dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>,
-    /// Command queue with lane-based concurrency control.
-    pub(crate) command_queue: librefang_runtime::command_lane::CommandQueue,
     /// Pluggable context engine for memory recall, assembly, and compaction.
     pub(crate) context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>>,
     /// Runtime config passed to context-engine lifecycle hooks.
@@ -1211,7 +1199,9 @@ impl LibreFangKernel {
             .collect();
 
         for agent_id in &hand_agents {
-            self.cron_scheduler.mark_due_now_by_agent(*agent_id);
+            self.workflows
+                .cron_scheduler
+                .mark_due_now_by_agent(*agent_id);
         }
 
         if !hand_agents.is_empty() {

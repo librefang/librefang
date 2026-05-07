@@ -781,7 +781,7 @@ impl LibreFangKernel {
     /// Cron job scheduler.
     #[inline]
     pub fn cron(&self) -> &crate::cron::CronScheduler {
-        &self.cron_scheduler
+        &self.workflows.cron_scheduler
     }
 
     /// Execution approval manager.
@@ -930,13 +930,13 @@ impl LibreFangKernel {
     /// Workflow engine.
     #[inline]
     pub fn workflow_engine(&self) -> &WorkflowEngine {
-        &self.workflows
+        &self.workflows.engine
     }
 
     /// Workflow template registry.
     #[inline]
     pub fn templates(&self) -> &WorkflowTemplateRegistry {
-        &self.template_registry
+        &self.workflows.template_registry
     }
 
     /// Convert a workflow into a reusable template.
@@ -955,7 +955,7 @@ impl LibreFangKernel {
     /// Event-driven trigger engine.
     #[inline]
     pub fn trigger_engine(&self) -> &TriggerEngine {
-        &self.triggers
+        &self.workflows.triggers
     }
 
     /// Process supervisor.
@@ -1140,7 +1140,7 @@ impl LibreFangKernel {
     /// Command queue.
     #[inline]
     pub fn command_queue_ref(&self) -> &librefang_runtime::command_lane::CommandQueue {
-        &self.command_queue
+        &self.workflows.command_queue
     }
 
     /// Resolve the per-agent concurrency semaphore, lazily creating it on

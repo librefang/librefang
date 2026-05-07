@@ -147,7 +147,8 @@ impl LibreFangKernel {
                         "Hot-reload: updating cron config (max_jobs={})",
                         new_config.max_cron_jobs
                     );
-                    self.cron_scheduler
+                    self.workflows
+                        .cron_scheduler
                         .set_max_total_jobs(new_config.max_cron_jobs);
                 }
                 HotAction::ReloadProviderUrls => {
@@ -483,13 +484,17 @@ impl LibreFangKernel {
                     // max_concurrent_invocations) are NOT rebuilt — those
                     // semaphores are owned by individual agents. Operators
                     // need to respawn the agent for those to apply.
-                    self.command_queue
+                    self.workflows
+                        .command_queue
                         .resize_lane(Lane::Main, cc.main_lane as u32);
-                    self.command_queue
+                    self.workflows
+                        .command_queue
                         .resize_lane(Lane::Cron, cc.cron_lane as u32);
-                    self.command_queue
+                    self.workflows
+                        .command_queue
                         .resize_lane(Lane::Subagent, cc.subagent_lane as u32);
-                    self.command_queue
+                    self.workflows
+                        .command_queue
                         .resize_lane(Lane::Trigger, cc.trigger_lane as u32);
                 }
             }
