@@ -309,19 +309,6 @@ async fn capture_one(
             // chance to fail loudly before evolution::create_skill
             // touches the active tree, and leaves an audit trail in
             // case the auto-write surprises the operator.
-            //
-            // Known corner case (tracked as #3328 follow-up): if a
-            // previous `evolution::create_skill` failed and left an
-            // orphan pending file with the same `(source kind, name,
-            // prompt_context)` the dedup check now uses, every future
-            // turn sees `Ok(false)` from `save_candidate` and never
-            // retries the orphan. The fix is to fall back to
-            // `approve_candidate` against the existing pending entry
-            // when dedup blocked the new one. Acceptable for now
-            // because (a) `evolution::create_skill` rarely fails on the
-            // happy path and (b) the operator can run
-            // `librefang skill pending approve <id>` manually to
-            // unstick.
             let written = match storage::save_candidate(
                 &skills_root,
                 &candidate,
@@ -339,7 +326,55 @@ async fn capture_one(
                 }
             };
             if !written {
-                return false;
+                // `Ok(false)` is either `max_pending = 0` or the
+                // dedup short-circuit. The dedup case can mask an
+                // orphan pending file left by a previous
+                // `evolution::create_skill` failure — every future
+                // turn would otherwise dedup-skip and the orphan would
+                // never get retried. Look up the matching pending
+                // entry and try to promote it; if it succeeds the
+                // orphan is cleared and we still trigger a registry
+                // reload, if it fails the orphan stays put for the
+                // operator to inspect via the dashboard or
+                // `librefang skill pending`.
+                let agent_pending_root = skills_root
+                    .join(storage::PENDING_DIRNAME)
+                    .join(agent_id.to_string());
+                match storage::find_duplicate_pending(&agent_pending_root, &candidate) {
+                    Ok(Some(orphan)) => {
+                        match storage::approve_candidate(&skills_root, &skills_root, &orphan.id) {
+                            Ok(_) => {
+                                debug!(
+                                    %agent_id,
+                                    orphan_id = %orphan.id,
+                                    "skill_workshop: auto-promoted previously-orphaned pending candidate"
+                                );
+                                return true;
+                            }
+                            Err(e) => {
+                                warn!(
+                                    %agent_id,
+                                    orphan_id = %orphan.id,
+                                    error = %e,
+                                    "skill_workshop: orphan auto-promote retry failed; pending file kept"
+                                );
+                                return false;
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        // No dup, no orphan — likely `max_pending = 0`.
+                        return false;
+                    }
+                    Err(e) => {
+                        warn!(
+                            %agent_id,
+                            error = %e,
+                            "skill_workshop: failed to scan pending dir for orphan retry"
+                        );
+                        return false;
+                    }
+                }
             }
             match storage::approve_candidate(&skills_root, &skills_root, &candidate.id) {
                 Ok(_) => {

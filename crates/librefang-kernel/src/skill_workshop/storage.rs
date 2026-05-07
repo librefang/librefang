@@ -242,16 +242,30 @@ fn source_kind(source: &crate::skill_workshop::candidate::CaptureSource) -> &'st
 /// is empty after sanitisation, e.g. an emoji-only sentence) do not
 /// false-dedup against each other.
 fn is_duplicate_pending(dir: &Path, candidate: &CandidateSkill) -> io::Result<bool> {
+    Ok(find_duplicate_pending(dir, candidate)?.is_some())
+}
+
+/// Returns the existing pending candidate that matches `candidate`'s
+/// dedup key (`(source kind, name, prompt_context)`), if any. Used by
+/// the auto-promote path to recover from the "orphan pending" corner
+/// case: a previous `evolution::create_skill` that failed leaves the
+/// pending file behind, and the next turn's capture would `dedup` away
+/// without ever retrying the orphan. The auto branch can call
+/// `approve_candidate` against the orphan's id to clear it.
+pub fn find_duplicate_pending(
+    dir: &Path,
+    candidate: &CandidateSkill,
+) -> io::Result<Option<CandidateSkill>> {
     let kind = source_kind(&candidate.source);
     for entry in read_dir_candidates(dir)? {
         if source_kind(&entry.candidate.source) == kind
             && entry.candidate.name == candidate.name
             && entry.candidate.prompt_context == candidate.prompt_context
         {
-            return Ok(true);
+            return Ok(Some(entry.candidate));
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 /// Reap pending candidates whose `captured_at` is older than

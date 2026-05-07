@@ -189,6 +189,27 @@ false-dedup against each other. Two captures of the *same* teaching
 signal produce identical `(source kind, name, prompt_context)` so
 this still catches the duplication case.
 
+### Orphan-pending retry (Auto policy)
+
+`approval_policy = "auto"` calls `save_candidate` then
+`approve_candidate`. If `evolution::create_skill` fails inside
+`approve_candidate` (rare on the happy path; possible after a name
+collision with an active skill, a disk-full, etc.), the pending file
+stays on disk. Without further action, the next turn's capture
+produces the same `(source kind, name, prompt_context)` tuple, gets
+short-circuited by the dedup check, and the orphan never gets
+retried — the auto agent sees no progress until the operator runs
+`librefang skill pending approve <id>` manually.
+
+The Auto branch detects this case: when `save_candidate` returns
+`Ok(false)` (dedup OR `max_pending = 0`), it calls
+`storage::find_duplicate_pending` and, if a matching entry exists,
+runs `approve_candidate` against that entry's id. Success clears the
+orphan and triggers the per-turn registry reload as if the new
+capture had landed; failure leaves the orphan in place for human
+review (logged at WARN with the orphan id). `max_pending = 0` is
+naturally a no-op here because the dedup lookup has nothing to find.
+
 ### Per-turn registry reload
 
 `run_capture` aggregates the auto-promotion outcome of every hit it

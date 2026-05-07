@@ -513,6 +513,157 @@ async fn auto_policy_promotes_to_active_and_reloads_registry() {
     );
 }
 
+/// Regression test for the "orphan-pending death loop" corner: if a
+/// previous `evolution::create_skill` attempt failed and left an
+/// orphan pending file behind, the next turn's auto-promote attempt
+/// hits the dedup short-circuit (same `(source kind, name,
+/// prompt_context)` already on disk) and returns Ok(false) from
+/// `save_candidate`. The auto branch must detect this case and
+/// retry `approve_candidate` against the existing orphan id rather
+/// than silently leaving it stuck for every future turn.
+///
+/// Set up: stage an orphan pending file directly (simulating a prior
+/// failed promotion), then run capture with a session whose teaching
+/// signal would heuristically produce the SAME `(kind, name,
+/// prompt_context)` as the orphan. After `run_capture` returns, the
+/// orphan must be promoted (active skill on disk + visible in the
+/// in-memory registry) and the pending file must be gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_policy_recovers_orphaned_pending_via_retry() {
+    use librefang_kernel::skill_workshop::{self, candidate::CandidateSkill, storage};
+    use librefang_memory::session::Session;
+    use librefang_types::agent::{
+        AgentEntry, AgentId, AgentManifest, AgentMode, AgentState, ApprovalPolicy, ReviewMode,
+        SessionId, SkillWorkshopConfig,
+    };
+    use librefang_types::message::Message;
+
+    let (kernel, _tmp) = MockKernelBuilder::new().build();
+    let skills_root_path = kernel.home_dir().join("skills");
+
+    let agent_id = AgentId::new();
+    let session_id = SessionId::new();
+    let manifest = AgentManifest {
+        name: "orphan_retry_agent".to_string(),
+        description: "test".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        skill_workshop: SkillWorkshopConfig {
+            enabled: true,
+            auto_capture: true,
+            approval_policy: ApprovalPolicy::Auto,
+            review_mode: ReviewMode::Heuristic,
+            max_pending: 20,
+            max_pending_age_days: None,
+        },
+        ..Default::default()
+    };
+    let entry = AgentEntry {
+        id: agent_id,
+        name: "orphan_retry_agent".to_string(),
+        manifest,
+        state: AgentState::Running,
+        mode: AgentMode::default(),
+        created_at: Utc::now(),
+        last_active: Utc::now(),
+        session_id,
+        ..Default::default()
+    };
+    kernel
+        .agent_registry()
+        .register(entry)
+        .expect("register agent");
+
+    // Compute the heuristic-derived candidate from the canonical
+    // teaching signal so the orphan we plant matches the dedup key
+    // the next `run_capture` will produce.
+    let user_msg = "from now on always run cargo fmt before committing.";
+    let hit = librefang_kernel::skill_workshop::heuristic::extract_explicit_instruction(user_msg)
+        .expect("heuristic must match");
+
+    let orphan_id = uuid::Uuid::new_v4().to_string();
+    let orphan = CandidateSkill {
+        id: orphan_id.clone(),
+        agent_id: agent_id.to_string(),
+        session_id: Some(session_id.to_string()),
+        captured_at: Utc::now() - chrono::Duration::seconds(60),
+        source: hit.source.clone(),
+        name: hit.name.clone(),
+        description: hit.description.clone(),
+        prompt_context: hit.prompt_context.clone(),
+        provenance: librefang_kernel::skill_workshop::candidate::Provenance {
+            user_message_excerpt: hit.user_message_excerpt.clone(),
+            assistant_response_excerpt: hit.assistant_response_excerpt.clone(),
+            turn_index: 1,
+        },
+    };
+    storage::save_candidate(&skills_root_path, &orphan, 20, None)
+        .expect("seed orphan pending file");
+
+    // Plant the same teaching signal in the session so `run_capture`
+    // produces an identically-keyed candidate.
+    let session = Session {
+        id: session_id,
+        agent_id,
+        messages: vec![Message::user(user_msg), Message::assistant("Got it.")],
+        context_window_tokens: 0,
+        label: None,
+        messages_generation: 1,
+        last_repaired_generation: None,
+    };
+    kernel
+        .memory_substrate()
+        .save_session(&session)
+        .expect("save_session");
+
+    skill_workshop::run_capture(kernel.clone(), agent_id).await;
+
+    // Active skill must land — the orphan was retried and promoted.
+    let skill_dir = skills_root_path.join(&hit.name);
+    assert!(
+        skill_dir.join("skill.toml").exists(),
+        "orphan retry should promote the existing pending entry; expected skill.toml at {}",
+        skill_dir.display()
+    );
+
+    // Orphan pending file is gone.
+    let pending_dir = skills_root_path.join("pending").join(agent_id.to_string());
+    let leftovers: Vec<_> = std::fs::read_dir(&pending_dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s == "toml")
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        leftovers.is_empty(),
+        "orphan retry should clear the pending file; got {} leftover .toml file(s)",
+        leftovers.len()
+    );
+
+    // Registry sees the new skill.
+    let registry = kernel
+        .skill_registry_ref()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    let registered: Vec<String> = registry
+        .list()
+        .iter()
+        .map(|s| s.manifest.skill.name.clone())
+        .collect();
+    assert!(
+        registered.iter().any(|n| n == &hit.name),
+        "orphan-retry-promoted skill must be visible in registry; got {registered:?}, expected {:?}",
+        hit.name
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pending_list_non_uuid_agent_filter_returns_400() {
     // `?agent=…` with a non-UUID value used to 500 with whatever
