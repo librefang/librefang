@@ -80,6 +80,14 @@ pub fn run_acp_server(config: Option<PathBuf>, agent: Option<String>) {
 /// Look for a daemon-side ACP UDS at the canonical path. Returns the
 /// path only if the daemon is reachable AND the socket file exists —
 /// a stale socket from a crashed daemon falls back to in-process mode.
+/// Look for a daemon-side ACP UDS at the canonical path. Returns the
+/// path only if the daemon is reachable AND the socket file exists —
+/// a stale socket from a crashed daemon falls back to in-process mode.
+///
+/// Unix-only because the daemon-side listener is itself Unix-only;
+/// the sole call site is the `#[cfg(unix)]` fast-path branch in
+/// `run_acp_server`. Windows / non-Unix targets skip straight to the
+/// in-process path, so no stub is needed.
 #[cfg(unix)]
 fn locate_acp_socket() -> Option<PathBuf> {
     super::find_daemon()?;
@@ -89,11 +97,6 @@ fn locate_acp_socket() -> Option<PathBuf> {
     } else {
         None
     }
-}
-
-#[cfg(not(unix))]
-fn locate_acp_socket() -> Option<PathBuf> {
-    None
 }
 
 /// Bidirectional stdin↔socket↔stdout pipe. Returns 0 on clean EOF, 1
@@ -158,11 +161,4 @@ fn run_uds_proxy(sock_path: &std::path::Path) -> i32 {
         }
         0
     })
-}
-
-#[cfg(not(unix))]
-#[allow(dead_code)]
-fn run_uds_proxy(_sock_path: &std::path::Path) -> i32 {
-    eprintln!("daemon-attached ACP not supported on this platform");
-    1
 }
