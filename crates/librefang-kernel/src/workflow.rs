@@ -4427,6 +4427,16 @@ prompt_template = "do {{x}}"
         let completed = make_terminal_run(WorkflowRunState::Completed);
         let completed_id = completed.id;
 
+        // Failed is the other terminal state — drain must skip it just
+        // like Completed. Without an explicit assertion below, a future
+        // edit that loosens the matches!() guard could regress without
+        // a single test failing.
+        let failed = WorkflowRun {
+            state: WorkflowRunState::Failed,
+            ..make_terminal_run(WorkflowRunState::Pending)
+        };
+        let failed_id = failed.id;
+
         let running = WorkflowRun {
             state: WorkflowRunState::Running,
             ..make_terminal_run(WorkflowRunState::Pending)
@@ -4459,6 +4469,7 @@ prompt_template = "do {{x}}"
         {
             let engine = WorkflowEngine::new_with_persistence(tmp.path());
             engine.runs.insert(completed.id, completed);
+            engine.runs.insert(failed.id, failed);
             engine.runs.insert(running.id, running);
             engine.runs.insert(pending.id, pending);
             engine
@@ -4468,19 +4479,27 @@ prompt_template = "do {{x}}"
             let drained = engine.drain_on_shutdown();
             assert_eq!(
                 drained, 2,
-                "drain must transition exactly the Running + Pending pair"
+                "drain must transition exactly the Running + Pending pair \
+                 (Completed / Failed / Paused must be skipped)"
             );
         }
 
         let engine = WorkflowEngine::new_with_persistence(tmp.path());
         let count = engine.load_runs().unwrap();
         assert_eq!(
-            count, 4,
-            "all four runs (Completed + drained pair + preexisting Paused) must reload"
+            count, 5,
+            "all five runs (Completed + Failed + drained pair + preexisting Paused) must reload"
         );
 
         let c = engine.runs.get(&completed_id).expect("completed missing");
         assert!(matches!(c.state, WorkflowRunState::Completed));
+
+        let f = engine.runs.get(&failed_id).expect("failed missing");
+        assert!(
+            matches!(f.state, WorkflowRunState::Failed),
+            "Failed must not be drained: {:?}",
+            f.state
+        );
 
         let r = engine.runs.get(&running_id).expect("running missing");
         match &r.state {
