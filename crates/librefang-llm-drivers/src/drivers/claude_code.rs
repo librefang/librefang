@@ -1005,6 +1005,30 @@ impl LlmDriver for ClaudeCodeDriver {
                             || (l.contains("resets") && l.contains("utc"))
                             || t.trim() == "NO_REPLY"
                             || t.trim().ends_with("NO_REPLY")
+                            // Suppress CLI progress placeholders that leak
+                            // into channel text when the model emits a
+                            // status preamble alone (no real reply). Both
+                            // bracket and paren shapes — observed live as
+                            // `[Reading the conversation context]` and
+                            // `(thinking)` whole-message replies. Narrow
+                            // on purpose so legitimate user content that
+                            // happens to start with a paren or bracket
+                            // (e.g. `[1] First...` lists) is not suppressed.
+                            || {
+                                let trimmed = t.trim();
+                                let bracket_wrapped = (trimmed.starts_with('[')
+                                    && trimmed.ends_with(']'))
+                                    || (trimmed.starts_with('(')
+                                        && trimmed.ends_with(')'));
+                                bracket_wrapped
+                                    && (l.contains("reading")
+                                        || l.contains("thinking")
+                                        || l.contains("loading")
+                                        || l.contains("processing")
+                                        || l.contains("analyzing")
+                                        || l.contains("conversation context")
+                                        || l.contains("still working"))
+                            }
                     };
 
                     match serde_json::from_str::<ClaudeStreamEvent>(&line) {
