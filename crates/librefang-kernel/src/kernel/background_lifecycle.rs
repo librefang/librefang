@@ -25,7 +25,7 @@ impl LibreFangKernel {
     /// By default, NO hands are activated to prevent unexpected token consumption.
     pub async fn start_background_agents(self: &Arc<Self>) {
         // Fire external gateway:startup hook (fire-and-forget) before starting agents.
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::GatewayStartup,
             serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
@@ -519,7 +519,10 @@ impl LibreFangKernel {
                             }
                         }
                         if approval_retention > 0 {
-                            let n = kernel.approval_manager.prune_audit(approval_retention);
+                            let n = kernel
+                                .governance
+                                .approval_manager
+                                .prune_audit(approval_retention);
                             if n > 0 {
                                 info!(
                                     "Approval audit retention: pruned {n} rows \

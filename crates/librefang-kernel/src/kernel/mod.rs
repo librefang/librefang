@@ -733,14 +733,11 @@ pub struct LibreFangKernel {
     /// A2A registry + OFP peers + channel adapters + bindings + broadcast
     /// + delivery tracker. See [`subsystems::MeshSubsystem`].
     pub(crate) mesh: subsystems::MeshSubsystem,
-    /// Execution approval manager.
-    pub(crate) approval_manager: crate::approval::ApprovalManager,
+    /// Approval enforcement + lifecycle hooks + sweeper guards. See
+    /// [`subsystems::GovernanceSubsystem`].
+    pub(crate) governance: subsystems::GovernanceSubsystem,
     /// Auto-reply engine.
     pub(crate) auto_reply_engine: crate::auto_reply::AutoReplyEngine,
-    /// Plugin lifecycle hook registry.
-    pub(crate) hooks: librefang_runtime::hooks::HookRegistry,
-    /// External file-system lifecycle hook system (HOOK.yaml based, fire-and-forget).
-    pub(crate) external_hooks: crate::hooks::ExternalHookSystem,
     /// Persistent + background process registries. See
     /// [`subsystems::ProcessSubsystem`].
     pub(crate) processes: subsystems::ProcessSubsystem,
@@ -813,9 +810,6 @@ pub struct LibreFangKernel {
     self_handle: OnceLock<Weak<LibreFangKernel>>,
     /// Whether we've already logged the "no provider" audit entry (prevents spam).
     pub(crate) provider_unconfigured_logged: std::sync::atomic::AtomicBool,
-    approval_sweep_started: AtomicBool,
-    /// Idempotency guard for the task-board stuck-task sweeper (issue #2923).
-    task_board_sweep_started: AtomicBool,
     /// Idempotency guard for the session-stream-hub idle GC task.
     session_stream_hub_gc_started: AtomicBool,
     /// Config reload barrier — write-locked during `apply_hot_actions_inner` to prevent
@@ -1195,7 +1189,7 @@ impl LibreFangKernel {
         request_id: &str,
     ) {
         let short_id = &request_id[..std::cmp::min(8, request_id.len())];
-        let totp_enabled = self.approval_manager.requires_totp();
+        let totp_enabled = self.governance.approval_manager.requires_totp();
 
         let display_message = if totp_enabled {
             format!("{message}\n\nTOTP required. Reply: /approve {short_id} <6-digit-code>")
@@ -1404,7 +1398,7 @@ impl LibreFangKernel {
     ) {
         use librefang_types::capability::glob_matches;
 
-        let policy = self.approval_manager.policy();
+        let policy = self.governance.approval_manager.policy();
         let cfg = self.config.load_full();
         let targets: Vec<librefang_types::approval::NotificationTarget> =
             if !req.route_to.is_empty() {

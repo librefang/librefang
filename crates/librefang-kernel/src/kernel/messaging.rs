@@ -449,7 +449,7 @@ impl LibreFangKernel {
                     "granted_tools": tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
                 }),
             };
-            let dynamic_sections = self.hooks.collect_prompt_sections(&hook_ctx);
+            let dynamic_sections = self.governance.hooks.collect_prompt_sections(&hook_ctx);
 
             // Re-read context.md per turn by default so external writers
             // (cron jobs, integrations) reach the LLM on the next message.
@@ -1959,7 +1959,7 @@ impl LibreFangKernel {
                     "granted_tools": tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
                 }),
             };
-            let dynamic_sections = self.hooks.collect_prompt_sections(&hook_ctx);
+            let dynamic_sections = self.governance.hooks.collect_prompt_sections(&hook_ctx);
 
             // Re-read context.md per turn (cache_context=true to opt out).
             // NOTE: this site is inside `send_message_streaming_with_sender_and_opts`,
@@ -2324,7 +2324,7 @@ impl LibreFangKernel {
                 } else {
                     None
                 },
-                Some(&kernel_clone.hooks),
+                Some(&kernel_clone.governance.hooks),
                 ctx_window,
                 Some(&kernel_clone.processes.manager),
                 kernel_clone.checkpoint_manager.clone(),

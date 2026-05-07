@@ -139,7 +139,8 @@ impl LibreFangKernel {
             match action {
                 HotAction::UpdateApprovalPolicy => {
                     info!("Hot-reload: updating approval policy");
-                    self.approval_manager
+                    self.governance
+                        .approval_manager
                         .update_policy(new_config.approval.clone());
                 }
                 HotAction::UpdateCronConfig => {

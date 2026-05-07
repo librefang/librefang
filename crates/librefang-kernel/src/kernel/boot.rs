@@ -1274,10 +1274,11 @@ impl LibreFangKernel {
                 initial_bindings,
                 initial_broadcast,
             ),
-            approval_manager,
+            governance: crate::kernel::subsystems::GovernanceSubsystem::new(
+                approval_manager,
+                crate::hooks::ExternalHookSystem::load(hooks_dir),
+            ),
             auto_reply_engine,
-            hooks: librefang_runtime::hooks::HookRegistry::new(),
-            external_hooks: crate::hooks::ExternalHookSystem::load(hooks_dir),
             processes: crate::kernel::subsystems::ProcessSubsystem::new(
                 Arc::new(librefang_runtime::process_manager::ProcessManager::new(5)),
                 Arc::new(librefang_runtime::process_registry::ProcessRegistry::new()),
@@ -1306,8 +1307,6 @@ impl LibreFangKernel {
                 metering,
                 initial_budget,
             ),
-            approval_sweep_started: AtomicBool::new(false),
-            task_board_sweep_started: AtomicBool::new(false),
             session_stream_hub_gc_started: AtomicBool::new(false),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             checkpoint_manager: {

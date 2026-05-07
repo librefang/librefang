@@ -17,7 +17,9 @@ use super::super::{spawn_logged, LibreFangKernel, SYSTEM_CHANNEL_AUTONOMOUS, SYS
 #[async_trait::async_trait]
 impl kernel_handle::ApprovalGate for LibreFangKernel {
     fn requires_approval(&self, tool_name: &str) -> bool {
-        self.approval_manager.requires_approval(tool_name)
+        self.governance
+            .approval_manager
+            .requires_approval(tool_name)
     }
 
     fn requires_approval_with_context(
@@ -26,7 +28,8 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         sender_id: Option<&str>,
         channel: Option<&str>,
     ) -> bool {
-        self.approval_manager
+        self.governance
+            .approval_manager
             .requires_approval_with_context(tool_name, sender_id, channel)
     }
 
@@ -36,7 +39,8 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         sender_id: Option<&str>,
         channel: Option<&str>,
     ) -> bool {
-        self.approval_manager
+        self.governance
+            .approval_manager
             .is_tool_denied_with_context(tool_name, sender_id, channel)
     }
 
@@ -98,7 +102,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             }
         }
 
-        let policy = self.approval_manager.policy();
+        let policy = self.governance.approval_manager.policy();
         let risk_level = crate::approval::ApprovalManager::classify_risk(tool_name);
         let agent_display = self.approval_agent_display(agent_id);
         let description = format!("Agent {} requests to execute {}", agent_display, tool_name);
@@ -147,7 +151,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             use librefang_types::capability::glob_matches;
 
             let cfg = self.config.load_full();
-            let policy = self.approval_manager.policy();
+            let policy = self.governance.approval_manager.policy();
             let targets: Vec<librefang_types::approval::NotificationTarget> =
                 if !req.route_to.is_empty() {
                     // Highest priority: explicitly routed targets on the request itself
@@ -197,7 +201,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             }
         }
 
-        let decision = self.approval_manager.request_approval(req).await;
+        let decision = self.governance.approval_manager.request_approval(req).await;
 
         // Publish resolved event so channel adapters can notify outcome
         {
@@ -253,7 +257,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             );
         }
 
-        let policy = self.approval_manager.policy();
+        let policy = self.governance.approval_manager.policy();
         let risk_level = crate::approval::ApprovalManager::classify_risk(tool_name);
         let agent_display = self.approval_agent_display(agent_id);
         let description = format!("Agent {} requests to execute {}", agent_display, tool_name);
@@ -277,7 +281,8 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             session_id: session_id.map(|s| s.to_string()),
         };
 
-        self.approval_manager
+        self.governance
+            .approval_manager
             .submit_request(req.clone(), deferred)
             .map_err(|e| e.to_string())?;
 
@@ -368,6 +373,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         // check is scoped to the manager's exact "not found or expired"
         // wording. All other error wordings flow through `Internal`.
         let (response, deferred) = self
+            .governance
             .approval_manager
             .resolve(request_id, decision, decided_by, totp_verified, user_id)
             .map_err(|msg| {
@@ -406,11 +412,16 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
     ) -> Result<Option<librefang_types::approval::ApprovalDecision>, kernel_handle::KernelOpError>
     {
         // If still pending, no decision yet.
-        if self.approval_manager.get_pending(request_id).is_some() {
+        if self
+            .governance
+            .approval_manager
+            .get_pending(request_id)
+            .is_some()
+        {
             return Ok(None);
         }
         // Check recent resolved records.
-        let recent = self.approval_manager.list_recent(200);
+        let recent = self.governance.approval_manager.list_recent(200);
         for record in &recent {
             if record.request.id == request_id {
                 return Ok(Some(record.decision.clone()));

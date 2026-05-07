@@ -1534,15 +1534,24 @@ async fn test_spawn_approval_sweep_task_is_idempotent() {
     let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
 
     Arc::clone(&kernel).spawn_approval_sweep_task();
-    assert!(kernel.approval_sweep_started.load(Ordering::Acquire));
+    assert!(kernel
+        .governance
+        .approval_sweep_started
+        .load(Ordering::Acquire));
 
     Arc::clone(&kernel).spawn_approval_sweep_task();
-    assert!(kernel.approval_sweep_started.load(Ordering::Acquire));
+    assert!(kernel
+        .governance
+        .approval_sweep_started
+        .load(Ordering::Acquire));
 
     kernel.shutdown();
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
-    assert!(!kernel.approval_sweep_started.load(Ordering::Acquire));
+    assert!(!kernel
+        .governance
+        .approval_sweep_started
+        .load(Ordering::Acquire));
 }
 
 /// The task-board sweeper must be spawn-idempotent so repeated callers
@@ -1563,17 +1572,26 @@ async fn test_spawn_task_board_sweep_task_is_idempotent() {
     let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
 
     Arc::clone(&kernel).spawn_task_board_sweep_task();
-    assert!(kernel.task_board_sweep_started.load(Ordering::Acquire));
+    assert!(kernel
+        .governance
+        .task_board_sweep_started
+        .load(Ordering::Acquire));
 
     // Re-spawning while already running is a no-op — the atomic guard
     // short-circuits instead of starting a second loop.
     Arc::clone(&kernel).spawn_task_board_sweep_task();
-    assert!(kernel.task_board_sweep_started.load(Ordering::Acquire));
+    assert!(kernel
+        .governance
+        .task_board_sweep_started
+        .load(Ordering::Acquire));
 
     kernel.shutdown();
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
-    assert!(!kernel.task_board_sweep_started.load(Ordering::Acquire));
+    assert!(!kernel
+        .governance
+        .task_board_sweep_started
+        .load(Ordering::Acquire));
 }
 
 /// End-to-end sanity check at the kernel layer: after a worker claims a task

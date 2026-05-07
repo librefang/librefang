@@ -38,7 +38,7 @@ impl LibreFangKernel {
             // exists so the handler can hold a Weak<Self>. Event-driven is
             // the primary trigger; the scheduler loop is a sparse (1-day)
             // backstop for agents that never finish a turn.
-            self.hooks.register(
+            self.governance.hooks.register(
                 librefang_types::agent::HookEvent::AgentLoopEnd,
                 std::sync::Arc::new(crate::auto_dream::AutoDreamTurnEndHook::new(
                     Arc::downgrade(self),

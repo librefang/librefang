@@ -168,7 +168,7 @@ impl LibreFangKernel {
             for sid in session_ids {
                 if let Ok(Some(old_session)) = self.memory.get_session(sid) {
                     // Fire session:end before removing the old session.
-                    self.external_hooks.fire(
+                    self.governance.external_hooks.fire(
                         crate::hooks::ExternalHookEvent::SessionEnd,
                         serde_json::json!({
                             "agent_id": agent_id.to_string(),
@@ -207,7 +207,7 @@ impl LibreFangKernel {
         self.scheduler.reset_usage(agent_id);
 
         // Fire external session:reset hook (fire-and-forget).
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionReset,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),
@@ -216,7 +216,7 @@ impl LibreFangKernel {
         );
 
         // Fire session:start for the newly created session.
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionStart,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),
@@ -240,7 +240,7 @@ impl LibreFangKernel {
         // Emit session:end for each active session before deletion.
         if let Ok(session_ids) = self.memory.get_agent_session_ids(agent_id) {
             for sid in session_ids {
-                self.external_hooks.fire(
+                self.governance.external_hooks.fire(
                     crate::hooks::ExternalHookEvent::SessionEnd,
                     serde_json::json!({
                         "agent_id": agent_id.to_string(),
@@ -272,7 +272,7 @@ impl LibreFangKernel {
         self.scheduler.reset_usage(agent_id);
 
         // Fire external session:reset hook (fire-and-forget).
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionReset,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),
@@ -282,7 +282,7 @@ impl LibreFangKernel {
 
         // Fire session:start for the newly created session to match the
         // behaviour of other new-session flows.
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionStart,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),
@@ -305,7 +305,7 @@ impl LibreFangKernel {
         // Emit session:end for each active session before deletion.
         if let Ok(session_ids) = self.memory.get_agent_session_ids(agent_id) {
             for sid in session_ids {
-                self.external_hooks.fire(
+                self.governance.external_hooks.fire(
                     crate::hooks::ExternalHookEvent::SessionEnd,
                     serde_json::json!({
                         "agent_id": agent_id.to_string(),
@@ -342,7 +342,7 @@ impl LibreFangKernel {
         self.scheduler.reset_usage(agent_id);
 
         // Fire external session:reset hook (fire-and-forget).
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionReset,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),
@@ -351,7 +351,7 @@ impl LibreFangKernel {
         );
 
         // Fire session:start for the newly created session.
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionStart,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),
@@ -420,7 +420,7 @@ impl LibreFangKernel {
             .map_err(KernelError::LibreFang)?;
 
         // Fire external session:start hook for the newly created session.
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionStart,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),

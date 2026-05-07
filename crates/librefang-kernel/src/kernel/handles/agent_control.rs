@@ -200,7 +200,7 @@ impl kernel_handle::AgentControl for LibreFangKernel {
     }
 
     fn fire_agent_step(&self, agent_id: &str, step: u32) {
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::AgentStep,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),

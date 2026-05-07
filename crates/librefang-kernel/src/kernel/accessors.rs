@@ -567,7 +567,11 @@ impl LibreFangKernel {
     /// handles their resolution (e.g., timing out deferred tool executions).
     pub fn spawn_approval_sweep_task(self: Arc<Self>) {
         let handle = tokio::runtime::Handle::current();
-        if self.approval_sweep_started.swap(true, Ordering::AcqRel) {
+        if self
+            .governance
+            .approval_sweep_started
+            .swap(true, Ordering::AcqRel)
+        {
             debug!("Approval expiry sweep task already running");
             return;
         }
@@ -580,7 +584,7 @@ impl LibreFangKernel {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let (escalated, expired) = kernel.approval_manager.expire_pending_requests();
+                        let (escalated, expired) = kernel.governance.approval_manager.expire_pending_requests();
                         for escalated_req in escalated {
                             kernel
                                 .notify_escalated_approval(&escalated_req.request, escalated_req.request_id)
@@ -600,7 +604,7 @@ impl LibreFangKernel {
                 }
             }
             kernel
-                .approval_sweep_started
+                .governance.approval_sweep_started
                 .store(false, Ordering::Release);
             tracing::debug!("Approval expiry sweep task stopped");
         });
@@ -622,7 +626,11 @@ impl LibreFangKernel {
     /// (human-in-the-loop workflows).
     pub fn spawn_task_board_sweep_task(self: Arc<Self>) {
         let handle = tokio::runtime::Handle::current();
-        if self.task_board_sweep_started.swap(true, Ordering::AcqRel) {
+        if self
+            .governance
+            .task_board_sweep_started
+            .swap(true, Ordering::AcqRel)
+        {
             debug!("Task board sweep task already running");
             return;
         }
@@ -675,6 +683,7 @@ impl LibreFangKernel {
             }
 
             kernel
+                .governance
                 .task_board_sweep_started
                 .store(false, Ordering::Release);
             tracing::debug!("Task board sweep task stopped");
@@ -788,7 +797,7 @@ impl LibreFangKernel {
     /// Execution approval manager.
     #[inline]
     pub fn approvals(&self) -> &crate::approval::ApprovalManager {
-        &self.approval_manager
+        &self.governance.approval_manager
     }
 
     /// Lazily open and unlock the credential vault, caching the result for
@@ -1235,7 +1244,7 @@ impl LibreFangKernel {
     /// Hook registry.
     #[inline]
     pub fn hook_registry(&self) -> &librefang_runtime::hooks::HookRegistry {
-        &self.hooks
+        &self.governance.hooks
     }
 
     /// Auto-reply engine.

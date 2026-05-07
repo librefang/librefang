@@ -540,7 +540,7 @@ impl LibreFangKernel {
                     "granted_tools": tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
                 }),
             };
-            let dynamic_sections = self.hooks.collect_prompt_sections(&hook_ctx);
+            let dynamic_sections = self.governance.hooks.collect_prompt_sections(&hook_ctx);
 
             // Re-read context.md per turn (cache_context=true to opt out).
             // Pre-loaded off the runtime worker via tokio::fs — see #3579.
@@ -911,7 +911,7 @@ impl LibreFangKernel {
         // Fire external agent:start hook (fire-and-forget, never blocks execution).
         {
             let preview: String = message.chars().take(200).collect();
-            self.external_hooks.fire(
+            self.governance.external_hooks.fire(
                 crate::hooks::ExternalHookEvent::AgentStart,
                 serde_json::json!({
                     "agent_id": agent_id.to_string(),
@@ -950,7 +950,7 @@ impl LibreFangKernel {
             } else {
                 None
             },
-            Some(&self.hooks),
+            Some(&self.governance.hooks),
             ctx_window,
             Some(&self.processes.manager),
             self.checkpoint_manager.clone(),
@@ -996,7 +996,8 @@ impl LibreFangKernel {
                 "success": false,
             })
         };
-        self.external_hooks
+        self.governance
+            .external_hooks
             .fire(crate::hooks::ExternalHookEvent::AgentEnd, hook_payload);
 
         let result = result.map_err(KernelError::LibreFang)?;

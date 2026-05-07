@@ -301,7 +301,7 @@ impl LibreFangKernel {
         self.inject_reset_prompt(&mut session, agent_id);
 
         // Fire external session:start hook for the newly created session.
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionStart,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),
