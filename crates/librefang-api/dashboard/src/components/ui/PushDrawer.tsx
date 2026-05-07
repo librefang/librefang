@@ -1,7 +1,8 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { X } from "lucide-react";
 import { useDrawerStore, type DrawerSize } from "../../lib/drawerStore";
+import { useFocusTrap } from "../../lib/useFocusTrap";
 
 const DESKTOP_WIDTH: Record<DrawerSize, string> = {
   sm: "lg:w-[360px]",
@@ -25,6 +26,18 @@ const MIN_WIDTH: Record<DrawerSize, string> = {
   "5xl": "lg:min-w-[1280px]",
 };
 
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const mql = window.matchMedia("(max-width: 1023px)");
+    setIsMobile(mql.matches);
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+    mql.addEventListener("change", handler);
+    return () => mql.removeEventListener("change", handler);
+  }, []);
+  return isMobile;
+}
+
 // Push-style global drawer host. Renders as a flex sibling of the main
 // column in App.tsx — its width animates from 0 → target so the main
 // content shrinks to make room (mirrors the left sidebar's collapse).
@@ -39,6 +52,13 @@ export function PushDrawer() {
   const content = useDrawerStore((s) => s.content);
   const close = useDrawerStore((s) => s.close);
 
+  const desktopRef = useRef<HTMLDivElement>(null);
+  const mobileRef = useRef<HTMLDivElement>(null);
+
+  useFocusTrap(isOpen, desktopRef, false, false);
+  const isMobile = useIsMobile();
+  useFocusTrap(isOpen && isMobile, mobileRef, false);
+
   // Single dismissal path — DrawerPanel observes the store flip and calls
   // its own onClose to keep parent state in sync. We don't fire content
   // .onClose here directly; the store-flip-watcher in DrawerPanel does
@@ -49,7 +69,12 @@ export function PushDrawer() {
   useEffect(() => {
     if (!isOpen) return;
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") triggerClose();
+      if (e.defaultPrevented) return;
+      if (e.key !== "Escape") return;
+      const target = e.target as HTMLElement;
+      if (target.closest("[role='dialog']") && !target.closest("[role='dialog'][data-drawer-root]")) return;
+      e.stopImmediatePropagation();
+      triggerClose();
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
@@ -80,6 +105,7 @@ export function PushDrawer() {
           wrapper has a min-width so content doesn't reflow as the outer
           width animates between 0 and target. */}
       <aside
+        ref={desktopRef}
         className={`hidden lg:flex shrink-0 ${desktopWidth} flex-col border-l border-border-subtle bg-surface overflow-hidden transition-[width] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]`}
         aria-hidden={!isOpen}
       >
@@ -98,8 +124,12 @@ export function PushDrawer() {
         <div
           className="fixed inset-0 z-50 lg:hidden bg-black/40 backdrop-blur-sm flex items-stretch justify-end"
           onClick={triggerClose}
+          role="dialog"
+          aria-modal="true"
+          data-drawer-root
         >
           <div
+            ref={mobileRef}
             className="w-full bg-surface flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
