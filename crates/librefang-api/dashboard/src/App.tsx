@@ -1,5 +1,5 @@
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 import { fadeInScale, pageTransition } from "./lib/motion";
@@ -53,6 +53,46 @@ import { useKeyboardShortcuts } from "./lib/useKeyboardShortcuts";
 import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, dashboardLogout, getDashboardUsername, getStatus, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { OfflineBanner } from "./components/OfflineBanner";
+
+const USER_AVATAR_STYLE = { background: "linear-gradient(135deg,#a78bfa,#7c3aed)" } as const;
+const BRAND_MARK_STYLE = { background: "linear-gradient(135deg,#38bdf8,#0ea5e9)" } as const;
+// Tailwind v4: `before:` requires explicit `content-['']` for the pseudo
+// element to render at all.
+const NAV_ACTIVE_CLASS = "bg-brand/10 text-brand font-medium before:content-[''] before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-[2px] before:rounded-full before:bg-brand before:shadow-[0_0_8px_var(--color-brand)]";
+
+type NavIcon = React.ComponentType<{ className?: string }>;
+type DashboardRoute =
+  | "/overview"
+  | "/agents"
+  | "/chat"
+  | "/approvals"
+  | "/analytics"
+  | "/telemetry"
+  | "/audit"
+  | "/logs"
+  | "/terminal"
+  | "/comms"
+  | "/media"
+  | "/sessions"
+  | "/skills"
+  | "/workflows"
+  | "/scheduler"
+  | "/mcp-servers"
+  | "/channels"
+  | "/providers"
+  | "/models"
+  | "/memory"
+  | "/network"
+  | "/a2a"
+  | "/hands"
+  | "/plugins"
+  | "/goals"
+  | "/runtime"
+  | "/config"
+  | "/users"
+  | "/settings";
+type NavItem = { to: DashboardRoute; label: string; icon: NavIcon };
+type NavGroup = { key: string; label: string; items: NavItem[] };
 
 function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
   const { t } = useTranslation();
@@ -258,6 +298,7 @@ const INPUT_CLASS = "w-full rounded-xl border border-border-subtle bg-main px-4 
 
 function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
+  const reloadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [currentUsername, setCurrentUsername] = useState("");
   const [newUsername, setNewUsername] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
@@ -273,7 +314,12 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
       setCurrentUsername(u);
       setNewUsername(u);
     });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (reloadTimeoutRef.current !== null) {
+        clearTimeout(reloadTimeoutRef.current);
+      }
+    };
   }, []);
 
   async function handleSubmit(e: React.FormEvent) {
@@ -307,7 +353,10 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
       const res = await changePassword(currentPassword, changedPassword, changedUsername);
       if (res.ok) {
         setMessage({ type: "success", text: t("settings.pw_success") });
-        setTimeout(() => { clearApiKey(); window.location.reload(); }, 1500);
+        if (reloadTimeoutRef.current !== null) {
+          clearTimeout(reloadTimeoutRef.current);
+        }
+        reloadTimeoutRef.current = setTimeout(() => { clearApiKey(); window.location.reload(); }, 1500);
       } else {
         setMessage({ type: "error", text: res.error || t("settings.pw_failed") });
       }
@@ -476,7 +525,7 @@ function UserMenuPanel({
       <div className="flex items-center gap-2.5 px-2.5 pt-2 pb-2.5">
         <div
           className="h-8 w-8 rounded-full grid place-items-center text-white text-[12px] font-semibold shrink-0"
-          style={{ background: "linear-gradient(135deg,#a78bfa,#7c3aed)" }}
+          style={USER_AVATAR_STYLE}
         >
           {initials}
         </div>
@@ -585,7 +634,14 @@ function UserMenuPanel({
         <>
           <div className="h-px bg-border-subtle mx-1 my-1" />
           <button
-            onClick={async () => { onClose(); await onLogout(); }}
+            onClick={async () => {
+              onClose();
+              try {
+                await onLogout();
+              } catch (err) {
+                console.error("Dashboard logout failed", err);
+              }
+            }}
             className="flex w-full items-center gap-2 px-2.5 py-1.5 rounded-md text-[12.5px] text-rose-400 hover:bg-rose-500/10 transition-colors"
           >
             <LogOut className="h-3.5 w-3.5 shrink-0" />
@@ -646,7 +702,7 @@ function SidebarUserBlock({
       >
         <div
           className="h-[26px] w-[26px] rounded-full grid place-items-center text-white text-[11px] font-semibold shrink-0"
-          style={{ background: "linear-gradient(135deg,#a78bfa,#7c3aed)" }}
+          style={USER_AVATAR_STYLE}
         >
           {initials}
         </div>
@@ -747,9 +803,9 @@ export function App() {
   const { t } = useTranslation();
   const theme = useUIStore((s) => s.theme);
   const toggleTheme = useUIStore((s) => s.toggleTheme);
-  const { location } = useRouterState();
-  const isFullHeightPage = FULL_HEIGHT_ROUTES.has(location.pathname);
-  const isNoAuthRoute = NO_AUTH_ROUTES.has(location.pathname);
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const isFullHeightPage = FULL_HEIGHT_ROUTES.has(pathname);
+  const isNoAuthRoute = NO_AUTH_ROUTES.has(pathname);
   const language = useUIStore((s) => s.language);
   const setLanguage = useUIStore((s) => s.setLanguage);
   const isMobileMenuOpen = useUIStore((s) => s.isMobileMenuOpen);
@@ -862,11 +918,6 @@ export function App() {
   const navBase = `relative flex items-center rounded-md border border-transparent text-[13px] text-text-dim transition-colors duration-200 hover:bg-surface-hover hover:text-brand group ${
     isSidebarCollapsed ? "lg:justify-center lg:px-2 lg:gap-0 h-[30px]" : "px-2.5 gap-2.5 h-[30px]"
   }`;
-  // Tailwind v4: `before:` requires explicit `content-['']` for the pseudo
-  // element to render at all. The bar sits 1px inside the button's left edge
-  // (no negative offset) so it's visible regardless of any clipping ancestor.
-  const navActive = "bg-brand/10 text-brand font-medium before:content-[''] before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-[2px] before:rounded-full before:bg-brand before:shadow-[0_0_8px_var(--color-brand)]";
-
   // Nav structure mirrors the design canvas (data.jsx::NAV_PRIMARY +
   // NAV_SECTIONS). The first group is the unlabeled "primary" rail and
   // the rest fall under three labeled sections: Runtime, Observability,
@@ -874,11 +925,11 @@ export function App() {
   // src/router.tsx — items the design surfaces but the daemon doesn't
   // expose yet (Budget, Policy as standalone pages) are deliberately
   // omitted instead of dead-linked.
-  const navGroups = useMemo(() => {
-    const observabilityItems = [
+  const navGroups = useMemo<NavGroup[]>(() => {
+    const observabilityItems: NavItem[] = [
       { to: "/analytics", label: t("nav.analytics"), icon: BarChart3 },
       { to: "/telemetry", label: t("nav.telemetry"), icon: Gauge },
-      { to: "/audit", label: t("nav.audit", "Audit"), icon: FileText },
+      { to: "/audit", label: t("nav.audit", { defaultValue: "Audit" }), icon: FileText },
       { to: "/logs", label: t("nav.logs"), icon: FileText },
       ...(terminalEnabled ? [{ to: "/terminal" as const, label: t("nav.terminal"), icon: Terminal }] : []),
       // Canvas page is intentionally not in the nav — `/canvas` route is
@@ -932,7 +983,7 @@ export function App() {
         items: [
           { to: "/runtime", label: t("nav.runtime"), icon: Activity },
           { to: "/config", label: t("nav.config", { defaultValue: "Config" }), icon: FileText },
-          { to: "/users", label: t("nav.users", "Users"), icon: User },
+          { to: "/users", label: t("nav.users", { defaultValue: "Users" }), icon: User },
           { to: "/settings", label: t("nav.settings"), icon: Settings },
         ],
       },
@@ -942,9 +993,19 @@ export function App() {
   const currentPageLabel = useMemo(() => {
     const current = navGroups
       .flatMap((group) => group.items)
-      .find((item) => item.to === location.pathname);
+      .find((item) => item.to === pathname);
     return current?.label ?? t("nav.overview", { defaultValue: "Overview" });
-  }, [location.pathname, navGroups, t]);
+  }, [pathname, navGroups, t]);
+
+  async function handleLogout() {
+    try {
+      await dashboardLogout();
+    } catch (err) {
+      console.error("Dashboard logout failed", err);
+    } finally {
+      window.location.reload();
+    }
+  }
 
   // Until auth is confirmed, do NOT mount the shell — `<Outlet />` and
   // `<NotificationCenter />` both fire `useDashboardSnapshot` /
@@ -1003,7 +1064,7 @@ export function App() {
           <div className={`flex items-center gap-2.5 ${isSidebarCollapsed ? "lg:hidden" : ""}`}>
             <div
               className="flex h-[26px] w-[26px] items-center justify-center rounded-[7px] shrink-0 shadow-[0_0_16px_rgba(56,189,248,0.45),inset_0_1px_0_rgba(255,255,255,0.3)]"
-              style={{ background: "linear-gradient(135deg,#38bdf8,#0ea5e9)" }}
+              style={BRAND_MARK_STYLE}
             >
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
                 <path d="M2 2 L7 12 L12 2 L9.5 4 L7 8 L4.5 4 Z" fill="#0c1424" stroke="#0c1424" strokeWidth="0.5" strokeLinejoin="round" />
@@ -1063,9 +1124,9 @@ export function App() {
                     {group.items.map((item) => (
                       <Link
                         key={item.to}
-                        to={item.to as never}
+                        to={item.to}
                         className={navBase}
-                        activeProps={{ className: `${navBase} ${navActive}` }}
+                        activeProps={{ className: `${navBase} ${NAV_ACTIVE_CLASS}` }}
                         onClick={() => setMobileMenuOpen(false)}
                         title={isSidebarCollapsed ? item.label : undefined}
                       >
@@ -1091,7 +1152,7 @@ export function App() {
           username={username}
           onOpenChangePassword={() => setShowChangePassword(true)}
           onOpenShortcuts={() => setShowShortcuts(true)}
-          onLogout={async () => { await dashboardLogout(); window.location.reload(); }}
+          onLogout={handleLogout}
           onToggleTheme={toggleTheme}
           onSwitchLanguage={(lang) => setLanguage(lang)}
           theme={theme}
@@ -1130,7 +1191,7 @@ export function App() {
             <div className="flex items-center gap-2 lg:hidden">
               <div
                 className="flex h-6 w-6 items-center justify-center rounded-md shrink-0 shadow-[0_0_12px_rgba(56,189,248,0.4)]"
-                style={{ background: "linear-gradient(135deg,#38bdf8,#0ea5e9)" }}
+                style={BRAND_MARK_STYLE}
               >
                 <svg width="11" height="11" viewBox="0 0 14 14" fill="none" aria-hidden="true">
                   <path d="M2 2 L7 12 L12 2 L9.5 4 L7 8 L4.5 4 Z" fill="#0c1424" />
@@ -1177,7 +1238,7 @@ export function App() {
                     ? "ring-2 ring-brand/40 ring-offset-1 ring-offset-surface"
                     : "ring-1 ring-border-subtle hover:ring-brand/30"
                 }`}
-                style={{ background: "linear-gradient(135deg,#a78bfa,#7c3aed)" }}
+                style={USER_AVATAR_STYLE}
                 title={t("nav.user_center")}
                 aria-label={t("nav.user_center")}
                 aria-expanded={userMenuOpen}
@@ -1208,7 +1269,7 @@ export function App() {
                       onSwitchLanguage={(lang) => setLanguage(lang)}
                       onOpenChangePassword={() => setShowChangePassword(true)}
                       onOpenShortcuts={() => setShowShortcuts(true)}
-                      onLogout={async () => { await dashboardLogout(); window.location.reload(); }}
+                      onLogout={handleLogout}
                       onClose={() => setUserMenuOpen(false)}
                       t={t}
                     />
@@ -1227,7 +1288,7 @@ export function App() {
           <AnimatePresence mode="wait" initial={false}>
             {isFullHeightPage ? (
               <motion.div
-                key={`full:${location.pathname}`}
+                key={`full:${pathname}`}
                 className="flex flex-col flex-1 min-h-0"
                 variants={pageTransition}
                 initial="initial"
@@ -1238,7 +1299,7 @@ export function App() {
               </motion.div>
             ) : (
               <motion.div
-                key={`std:${location.pathname}`}
+                key={`std:${pathname}`}
                 className="w-full p-3 sm:p-4 lg:p-8"
                 variants={pageTransition}
                 initial="initial"

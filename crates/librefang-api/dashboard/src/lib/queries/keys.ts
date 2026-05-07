@@ -27,8 +27,10 @@ export const agentKeys = {
   // History snapshot for a single (agent, session) pair — hydrates ChatPage
   // when the user navigates to an agent or switches sessions. `sessionId`
   // omitted/null means "the agent's current active session".
+  sessionSnapshots: (agentId: string) =>
+    [...agentKeys.all, "session", agentId] as const,
   session: (agentId: string, sessionId?: string | null) =>
-    [...agentKeys.all, "session", agentId, sessionId ?? null] as const,
+    [...agentKeys.sessionSnapshots(agentId), sessionId ?? null] as const,
   stats: (agentId: string) =>
     [...agentKeys.all, "stats", agentId] as const,
   events: (agentId: string, limit: number) =>
@@ -39,6 +41,13 @@ export const agentKeys = {
     [...agentKeys.all, "experiments", agentId] as const,
   experimentMetrics: (experimentId: string) =>
     [...agentKeys.all, "experimentMetrics", experimentId] as const,
+  tools: (agentId: string) =>
+    [...agentKeys.all, "tools", agentId] as const,
+};
+
+export const toolKeys = {
+  all: ["tools"] as const,
+  list: () => [...toolKeys.all, "list"] as const,
 };
 
 export const modelKeys = {

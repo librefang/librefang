@@ -966,7 +966,7 @@ export interface GoalItem {
   updated_at?: string;
 }
 
-type Json = Record<string, unknown>;
+const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_POST_TIMEOUT_MS = 60_000;
 const LONG_RUNNING_TIMEOUT_MS = 300_000;
 
@@ -1032,56 +1032,34 @@ export function buildAuthenticatedWebSocket(path: string): {
 }
 
 async function parseError(response: Response): Promise<ApiError> {
-  // If 401, trigger global logout (only once to prevent infinite loop)
   if (response.status === 401 && _onUnauthorized && !_unauthorizedFired) {
     _unauthorizedFired = true;
     clearApiKey();
     _onUnauthorized();
   }
-  const text = await response.text();
-  let message = response.statusText;
-  let code = `HTTP_${response.status}`;
+  return ApiError.fromResponse(response);
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<Response> {
+  const signal = AbortSignal.timeout(timeoutMs);
   try {
-    const json = JSON.parse(text) as Json;
-    // #3639 deferred: prefer the nested `error: {code, message, request_id}`
-    // envelope; fall back to the legacy flat shape (`error` as string,
-    // top-level `code`, `detail`) so we keep parsing responses produced by
-    // ad-hoc `Json(json!({"error": "..."}))` route sites during rollout.
-    const nested =
-      typeof json.error === "object" && json.error !== null
-        ? (json.error as Record<string, unknown>)
-        : null;
-
-    if (nested && typeof nested.message === "string") {
-      message = nested.message;
-    } else if (typeof json.detail === "string") {
-      message = json.detail;
-    } else if (typeof json.message === "string") {
-      message = json.message as string;
-    } else if (typeof json.error === "string") {
-      message = json.error;
+    return await fetch(url, { ...init, signal });
+  } catch (error) {
+    if (error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")) {
+      throw new Error(
+        `Request timeout after ${Math.round(timeoutMs / 1000)}s - operation may still be running`,
+      );
     }
-
-    if (nested && typeof nested.code === "string") {
-      code = nested.code;
-    } else if (typeof json.code === "string") {
-      code = json.code as string;
-    } else if (typeof json.error === "string") {
-      // Legacy: flat `error` doubled as both message and code token.
-      code = json.error;
-    }
-  } catch {
-    // ignore parse errors
+    throw error;
   }
-  return new ApiError(response.status, code, message || `HTTP ${response.status}`);
 }
 
 async function get<T>(path: string): Promise<T> {
-  const response = await fetch(path, {
-    headers: buildHeaders({
-      "Content-Type": "application/json",
-    })
-  });
+  const response = await fetchWithTimeout(path, { headers: buildHeaders() });
   if (!response.ok) {
     throw await parseError(response);
   }
@@ -1137,12 +1115,10 @@ async function post<T>(
 }
 
 async function put<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetchWithTimeout(path, {
     method: "PUT",
-    headers: buildHeaders({
-      "Content-Type": "application/json",
-    }),
-    body: JSON.stringify(body)
+    headers: buildHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
     throw await parseError(response);
@@ -1151,12 +1127,10 @@ async function put<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function patch<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetchWithTimeout(path, {
     method: "PATCH",
-    headers: buildHeaders({
-      "Content-Type": "application/json",
-    }),
-    body: JSON.stringify(body)
+    headers: buildHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
     throw await parseError(response);
@@ -1165,25 +1139,24 @@ async function patch<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function del<T>(path: string): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetchWithTimeout(path, {
     method: "DELETE",
-    headers: buildHeaders({
-      "Content-Type": "application/json",
-    })
+    headers: buildHeaders({ "Content-Type": "application/json" }),
   });
   if (!response.ok) {
     throw await parseError(response);
   }
-  if (response.status === 204) {
-    return { status: "ok" } as T;
+  if (response.status === 204 || response.headers.get("content-length") === "0") {
+    // 204 No Content — no JSON body. Return an empty object so callers
+    // that access optional fields (e.g. r.status on ApiActionResponse)
+    // get `undefined` per-field instead of NPE on the root value.
+    return {} as T;
   }
   return (await response.json()) as T;
 }
 
 async function getText(path: string): Promise<string> {
-  const response = await fetch(path, {
-    headers: buildHeaders(),
-  });
+  const response = await fetchWithTimeout(path, { headers: buildHeaders() });
   if (!response.ok) {
     throw await parseError(response);
   }
@@ -1382,13 +1355,11 @@ export async function patchHandAgentRuntimeConfig(
  * shared `del<T>` helper (which assumes a JSON body) and handle the empty
  * response explicitly. */
 export async function clearHandAgentRuntimeConfig(agentId: string): Promise<void> {
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `/api/agents/${encodeURIComponent(agentId)}/hand-runtime-config`,
     {
       method: "DELETE",
-      headers: buildHeaders({
-        "Content-Type": "application/json",
-      }),
+      headers: buildHeaders({ "Content-Type": "application/json" }),
     },
   );
   if (!response.ok) {
@@ -1477,7 +1448,7 @@ export async function clearAgentHistory(agentId: string): Promise<ApiActionRespo
 }
 
 export async function resetAgentSession(agentId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/reset`, {});
+  return post<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/session/reset`, {});
 }
 
 export async function loadAgentSession(
@@ -1629,13 +1600,11 @@ export async function synthesizeSpeech(req: { text: string; provider?: string; m
 }
 
 export async function transcribeAudio(audioBlob: Blob): Promise<{ text: string; provider: string; model: string }> {
-  const response = await fetch("/api/media/transcribe", {
+  const response = await fetchWithTimeout("/api/media/transcribe", {
     method: "POST",
-    headers: buildHeaders({
-      "Content-Type": audioBlob.type || "audio/webm",
-    }),
+    headers: buildHeaders({ "Content-Type": audioBlob.type || "audio/webm" }),
     body: audioBlob,
-  });
+  }, LONG_RUNNING_TIMEOUT_MS);
   if (!response.ok) {
     throw await parseError(response);
   }
@@ -1658,14 +1627,18 @@ function sanitizeFilenameForHeader(name: string): string {
 // original name. Server-side limits: 10MB and an exact MIME allowlist
 // (image/audio/text/pdf) — callers should still pre-validate to fail fast.
 export async function uploadAgentFile(agentId: string, file: File): Promise<AgentFileUploadResult> {
-  const response = await fetch(`/api/agents/${encodeURIComponent(agentId)}/upload`, {
-    method: "POST",
-    headers: buildHeaders({
-      "Content-Type": file.type || "application/octet-stream",
-      "X-Filename": sanitizeFilenameForHeader(file.name),
-    }),
-    body: file,
-  });
+  const response = await fetchWithTimeout(
+    `/api/agents/${encodeURIComponent(agentId)}/upload`,
+    {
+      method: "POST",
+      headers: buildHeaders({
+        "Content-Type": file.type || "application/octet-stream",
+        "X-Filename": sanitizeFilenameForHeader(file.name),
+      }),
+      body: file,
+    },
+    LONG_RUNNING_TIMEOUT_MS,
+  );
   if (!response.ok) {
     throw await parseError(response);
   }
@@ -2592,7 +2565,7 @@ export async function totpStatus(): Promise<TotpStatusResponse> {
 }
 
 export async function totpRevoke(code: string): Promise<ApiActionResponse> {
-  const response = await fetch("/api/approvals/totp/revoke", {
+  const response = await fetchWithTimeout("/api/approvals/totp/revoke", {
     method: "POST",
     headers: buildHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ code }),
@@ -2705,14 +2678,13 @@ export async function createAgentSession(
   return post(`/api/agents/${encodeURIComponent(agentId)}/sessions`, label ? { label } : {});
 }
 
-export async function listSessions(): Promise<SessionListItem[]> {
-  // Bumped past the server's default page size (50) so SessionsPage doesn't
-  // silently clip the global list. Per-agent KPI rollups read from
-  // `GET /api/agents/{id}/stats`; AgentsPage row aggregates read the
-  // `sessions_24h` / `cost_24h` fields embedded on each AgentItem by
-  // `enrich_agent_json`, so this endpoint is no longer used for that path.
+export type ListSessionsResult = { items: SessionListItem[]; truncated: boolean };
+
+export async function listSessions(): Promise<ListSessionsResult> {
   const data = await get<PaginatedResponse<SessionListItem>>("/api/sessions?limit=500");
-  return data.items ?? [];
+  const items = data.items ?? [];
+  const total = data.total ?? 0;
+  return { items, truncated: total > items.length };
 }
 
 export async function getSessionDetails(sessionId: string): Promise<SessionDetailResponse> {
@@ -3219,11 +3191,11 @@ export function clearApiKey() {
  *  Safe to call even when the token is already gone. */
 export async function dashboardLogout(): Promise<void> {
   try {
-    await fetch("/api/auth/logout", {
+    await fetchWithTimeout("/api/auth/logout", {
       method: "POST",
       credentials: "same-origin",
       headers: authHeader(),
-    });
+    }, 10_000);
   } catch {
     // Network failure shouldn't block local cleanup — fall through.
   }
@@ -3239,7 +3211,7 @@ export type AuthMode = "credentials" | "api_key" | "hybrid" | "none";
 
 export async function checkDashboardAuthMode(): Promise<AuthMode> {
   try {
-    const resp = await fetch("/api/auth/dashboard-check");
+    const resp = await fetchWithTimeout("/api/auth/dashboard-check", {}, 5_000);
     if (!resp.ok) return "none";
     const data = await resp.json();
     return (data.mode as AuthMode) || "none";
@@ -3250,7 +3222,7 @@ export async function checkDashboardAuthMode(): Promise<AuthMode> {
 
 export async function getDashboardUsername(): Promise<string> {
   try {
-    const resp = await fetch("/api/auth/dashboard-check");
+    const resp = await fetchWithTimeout("/api/auth/dashboard-check", {}, 5_000);
     if (!resp.ok) return "";
     const data = await resp.json();
     return (data.username as string) || "";
@@ -3263,7 +3235,7 @@ export async function dashboardLogin(username: string, password: string, totpCod
   try {
     const body: Record<string, string> = { username, password };
     if (totpCode) body.totp_code = totpCode;
-    const resp = await fetch("/api/auth/dashboard-login", {
+    const resp = await fetchWithTimeout("/api/auth/dashboard-login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -3285,7 +3257,7 @@ export async function verifyStoredAuth(): Promise<boolean> {
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const response = await fetch("/api/security", {
+      const response = await fetchWithTimeout("/api/security", {
         headers: buildHeaders(),
       });
       if (response.status === 401) {
@@ -3831,16 +3803,14 @@ export async function getTerminalHealth(): Promise<TerminalHealth> {
 }
 
 export async function listTerminalWindows(): Promise<TerminalWindow[]> {
-  const response = await fetch("/api/terminal/windows", {
-    headers: buildHeaders(),
-  });
+  const response = await fetchWithTimeout("/api/terminal/windows", { headers: buildHeaders() });
   if (!response.ok) throw await parseError(response);
   const data = (await response.json()) as { windows?: TerminalWindow[] } | TerminalWindow[];
   return Array.isArray(data) ? data : (data.windows ?? []);
 }
 
 export async function createTerminalWindow(body: { name?: string } = {}): Promise<void> {
-  const response = await fetch("/api/terminal/windows", {
+  const response = await fetchWithTimeout("/api/terminal/windows", {
     method: "POST",
     headers: buildHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
@@ -3849,7 +3819,7 @@ export async function createTerminalWindow(body: { name?: string } = {}): Promis
 }
 
 export async function renameTerminalWindow(windowId: string, name: string): Promise<void> {
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `/api/terminal/windows/${encodeURIComponent(windowId)}`,
     {
       method: "PATCH",
@@ -3861,7 +3831,7 @@ export async function renameTerminalWindow(windowId: string, name: string): Prom
 }
 
 export async function deleteTerminalWindow(windowId: string): Promise<void> {
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `/api/terminal/windows/${encodeURIComponent(windowId)}`,
     { method: "DELETE", headers: buildHeaders() },
   );
