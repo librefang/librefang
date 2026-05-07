@@ -89,9 +89,13 @@ export const useUIStore = create<UIState>()(
       setNavLayout: (layout) => set({ navLayout: layout }),
       toggleNavGroup: (key) => set((state) => ({ collapsedNavGroups: { ...state.collapsedNavGroups, [key]: !state.collapsedNavGroups[key] } })),
       addToast: (message, type = "info") =>
-        set((state) => ({
-          toasts: [...state.toasts, { id: createClientId(), message, type }],
-        })),
+        set((state) => {
+          const MAX_TOASTS = 50;
+          const next = [...state.toasts, { id: createClientId(), message, type }];
+          return {
+            toasts: next.length > MAX_TOASTS ? next.slice(-MAX_TOASTS) : next,
+          };
+        }),
       removeToast: (id) =>
         set((state) => ({
           toasts: state.toasts.filter((t) => t.id !== id),

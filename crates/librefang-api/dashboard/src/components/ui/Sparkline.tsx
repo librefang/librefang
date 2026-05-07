@@ -21,8 +21,8 @@ export function Sparkline({
 }: SparklineProps) {
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
   if (!data || data.length === 0) return null;
-  const max = Math.max(...data);
-  const min = Math.min(...data);
+  const max = data.reduce((a, b) => Math.max(a, b), -Infinity);
+  const min = data.reduce((a, b) => Math.min(a, b), Infinity);
   const range = max - min || 1;
   const stepX = width / (data.length - 1);
   const pts = data.map((v, i) => {

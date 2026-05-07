@@ -35,6 +35,12 @@ const sizeStyles: Record<ButtonSize, string> = {
   lg: "px-4 h-9 text-sm",
 };
 
+const spinnerSizeStyles: Record<ButtonSize, string> = {
+  sm: "h-3 w-3",
+  md: "h-4 w-4",
+  lg: "h-5 w-5",
+};
+
 export const Button = memo(forwardRef<HTMLButtonElement, ButtonProps>(
   (
     {
@@ -69,12 +75,12 @@ export const Button = memo(forwardRef<HTMLButtonElement, ButtonProps>(
         {...props}
       >
         {isLoading ? (
-          <Loader2 className="h-4 w-4 animate-spin" />
+          <Loader2 className={`animate-spin ${spinnerSizeStyles[size]}`} />
         ) : (
           leftIcon
         )}
         {children}
-        {rightIcon}
+        {!isLoading && rightIcon}
       </button>
     );
   }
