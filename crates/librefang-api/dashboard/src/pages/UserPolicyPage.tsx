@@ -6,7 +6,7 @@
 // `useUpdateUserPolicy`. Validation mirrors the daemon's checks so the
 // user sees errors inline before a round-trip.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams, Link } from "@tanstack/react-router";
 import {
@@ -227,6 +227,25 @@ function normalizeChannelKey(raw: string): string {
   return raw.trim().toLowerCase();
 }
 
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== "object" || typeof b !== "object") {
+    return false;
+  }
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
+    if (!deepEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function UserPolicyPage() {
   const { t } = useTranslation();
   const { name } = useParams({ from: "/users/$name/policy" });
@@ -268,7 +287,7 @@ export function UserPolicyPage() {
   // we can enable / disable Discard and surface "Unsaved changes" hint.
   const isDirty = useMemo(() => {
     if (!policyQuery.data) return false;
-    return JSON.stringify(form) !== JSON.stringify(policyToForm(policyQuery.data));
+    return !deepEqual(form, policyToForm(policyQuery.data));
   }, [form, policyQuery.data]);
 
   // Discard: re-seed straight from the last query payload. We keep
@@ -302,7 +321,7 @@ export function UserPolicyPage() {
         "user_policy.add_channel_err_duplicate",
         "Channel '{{key}}' already has a rule slot.",
       );
-      setNewChannelError(tmpl.replace("{{key}}", key));
+      setNewChannelError(tmpl.replace("{{key}}", () => key));
       return;
     }
     editForm(f => ({
@@ -827,12 +846,15 @@ interface TextareaProps {
 }
 
 function Textarea({ label, hint, value, onChange }: TextareaProps) {
+  const reactId = useId();
+  const id = `${reactId}-${label.toLowerCase().replace(/\s+/g, "-")}`;
   return (
     <div className="flex flex-col gap-1.5">
-      <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+      <label htmlFor={id} className="text-[10px] font-black uppercase tracking-widest text-text-dim">
         {label}
       </label>
       <textarea
+        id={id}
         className="w-full min-h-[100px] rounded-xl border border-border-subtle bg-surface px-4 py-2.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:outline-none focus:ring-2 focus:ring-brand/40"
         value={value}
         onChange={e => onChange(e.target.value)}

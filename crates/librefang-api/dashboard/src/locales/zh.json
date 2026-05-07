@@ -159,6 +159,8 @@
     "remove": "移除",
     "discard": "放弃更改",
     "more_actions": "更多操作",
+    "currency_symbol": "$",
+    "unlimited": "无限制",
     "none": "无",
     "metadata": "元数据",
     "size": "大小",
@@ -1212,6 +1214,7 @@
     "timeout": "超时时间（秒）",
     "output_var": "输出变量名",
     "output_var_hint": "（后续步骤用 {{变量名}} 引用）",
+    "example_placeholder": "例如 research_result",
     "create_group": "创建分组",
     "new_group": "分组",
     "unsaved": "有未保存的更改",
@@ -1313,6 +1316,14 @@
     "dry_run_hint": "Dry Run — 验证但不调用 LLM",
     "dry_run": "Dry Run",
     "dry_run_desc": "验证 Agent 并预览解析后的提示词，不调用任何 LLM。",
+    "validate": "校验",
+    "valid": "通过",
+    "issues_found": "发现问题",
+    "skip": "已跳过",
+    "agent_not_found": "未找到 Agent",
+    "resolved_prompt": "解析后 Prompt：",
+    "step_details": "步骤详情",
+    "click_to_expand": "点击展开",
     "fullscreen": "全屏",
     "exit_fullscreen": "退出全屏",
     "browse_templates": "浏览模板",
@@ -2479,6 +2490,13 @@
     "filterPlaceholder": "按智能体、工具或操作筛选…",
     "noFilterMatch": "没有匹配此筛选的请求。",
     "autoRules": "自动规则",
+    "timeAgo": {
+      "seconds": "{{count}}秒",
+      "minutes": "{{count}}分钟",
+      "hours": "{{count}}小时",
+      "days": "{{count}}天"
+    },
+    "totpBadge": "TOTP",
     "requestedAgo": "{{ago}} 前请求",
     "approveWithTotp": "使用 TOTP 批准",
     "editApprove": "编辑并批准",
@@ -2547,7 +2565,9 @@
     "go_overview": "进入总览",
     "start_chat": "开始聊天",
     "skip": "跳过向导",
-    "replace_key_warning": "该供应商已连接一个有效密钥。提交后将覆盖旧密钥——测试失败无法恢复原密钥。勾选以确认。"
+    "replace_key_warning": "该供应商已连接一个有效密钥。提交后将覆盖旧密钥——测试失败无法恢复原密钥。勾选以确认。",
+    "api_key_placeholder": "sk-...",
+    "model_count": "{{count}} 个模型"
   },
   "models": {
     "section": "模型管理",
@@ -2775,6 +2795,10 @@
     "task_placeholder": "描述此智能体要完成的任务...",
     "send": "发送",
     "tracked_tasks": "任务追踪",
+    "status_pending": "等待中",
+    "status_completed": "已完成",
+    "status_failed": "失败",
+    "status_working": "处理中",
     "help": "A2A（Agent-to-Agent）是 Google 推出的开放协议，让不同的 agent 运行时之间可以互相发现并调用。每个 A2A agent 在 /.well-known/agent.json 暴露一张\"agent card\"，描述自己的名字、能做的事（skills）以及如何接受任务。LibreFang 自己也在同一路径暴露 agent card，所以其他 A2A 客户端也能发现这个实例。\n\n使用步骤：\n\n1. 发现（Discover）。点右上角 \"Discover\"（快捷键：n），粘贴对方 agent 的 URL（例如 https://example.com/agents/research-bot）。LibreFang 会拉取 /.well-known/agent.json 并把对方加入\"外部智能体\"列表，显示它的能力和在线状态。\n\n2. 发送任务（Send task）。在任何 agent 卡片上点 \"Send task\"，用自然语言描述任务，提交。LibreFang 通过 JSON-RPC 发出任务并收到 task_id，新任务出现在\"任务追踪\"区。\n\n3. 追踪（Track）。点击任务上的 \"Refresh\" 查询状态：pending → completed / failed。远端完成后返回的结果会内嵌显示。\n\n跟 Channels 和 MCP 的区别：\n\n  · Channels —— 用户通过 Telegram / Slack / 等通讯软件跟你的 agent 聊天。方向：人 → agent。\n  · MCP —— 你的 agent 调用外部工具服务器。方向：agent → 工具。\n  · A2A —— 你的 agent 跟别人的 agent 对等通信。方向：agent ↔ agent。\n\n典型场景：\n\n  · 两台 LibreFang 实例（你 + 同事，或家里 + 公司）互相分发任务。\n  · 订阅某个专精的公开 A2A agent（研究 / 翻译 / 搜索等），把合适的任务转发出去。\n  · 内部多个 LibreFang 实例按领域分工，互相路由任务。\n\n注意事项：\n\n  · \"任务追踪\" 列表只保存在浏览器内存里——刷新页面会丢。远端有自己的任务存储，需要长期查询请记下 task_id。\n  · LibreFang 默认的 SSRF 防护会拦截 localhost / 内网地址的 discover。如果要发现局域网内的 agent，在 config.toml 把对方 host 加到 ssrf_allowed_hosts。\n  · A2A 生态还很年轻，公开的 A2A endpoint 目前很少。最直接的试用方式是再起一台 LibreFang 实例，互相 discover。"
   },
   "plugins": {
@@ -2819,7 +2843,21 @@
     "uninstall_failed": "卸载失败",
     "uninstall_success": "插件已移除",
     "invalid": "无效",
-    "hooks": "钩子"
+    "hooks": "钩子",
+    "hook_ingest": "摄取",
+    "hook_after_turn": "回合后",
+    "hook_invalid": "无效",
+    "runtime_python": "Python",
+    "runtime_node": "Node.js",
+    "runtime_deno": "Deno (TypeScript)",
+    "runtime_bun": "Bun (TypeScript)",
+    "runtime_go": "Go",
+    "runtime_v": "V (vlang)",
+    "runtime_ruby": "Ruby",
+    "runtime_php": "PHP",
+    "runtime_lua": "Lua",
+    "runtime_bash": "Bash",
+    "runtime_native": "原生二进制"
   },
   "telemetry": {
     "badge": "可观测性",
@@ -2860,7 +2898,9 @@
     "output_short": "出",
     "calls": "次调用",
     "tools": "次工具",
-    "last_updated": "更新于"
+    "last_updated": "更新于",
+    "truncated": "...已截断",
+    "unit_tokens": "tok"
   },
   "schema_form": {
     "select_option": "请选择...",
@@ -3136,7 +3176,12 @@
     "detail_copy_hash": "复制 hash",
     "detail_copy_link": "复制永久链接",
     "detail_copied": "已复制",
-    "open_detail": "查看详情"
+    "open_detail": "查看详情",
+    "preset_1h": "1小时",
+    "preset_24h": "24小时",
+    "preset_today": "今天",
+    "preset_7d": "7天",
+    "preset_30d": "30天"
   },
   "users": {
     "title": "用户与权限",
@@ -3499,6 +3544,7 @@
     "error_disabled_title": "设备配对已禁用",
     "error_disabled_body": "请在 <link>配置 → 安全</link> 中启用配对（<code>pairing.enabled = true</code>）。",
     "error_generic_title": "无法生成配对码",
+    "qr_aria_label": "用于与移动设备配对的二维码",
     "btn_try_again": "重试"
   },
   "shortcuts_help": {

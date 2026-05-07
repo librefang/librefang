@@ -691,7 +691,7 @@ export function AgentsPage() {
   useEffect(() => {
     if (detailAgent) return;
     if (filteredAgents.length === 0) return;
-    if (typeof window !== "undefined" && !window.matchMedia("(min-width: 1024px)").matches) return;
+    if (typeof window.matchMedia === "function" && !window.matchMedia("(min-width: 1024px)").matches) return;
     void selectAgent(filteredAgents[0]);
     // selectAgent is recreated each render; depending on filteredAgents+detailAgent is sufficient.
     // eslint-disable-next-line react-hooks/exhaustive-deps
