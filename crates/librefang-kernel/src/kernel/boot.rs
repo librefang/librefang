@@ -139,6 +139,17 @@ impl LibreFangKernel {
             warn!("Config: {}", w);
         }
 
+        // Tool-exec subtable check: missing `[tool_exec.ssh]` /
+        // `[tool_exec.daytona]` is fatal-on-boot rather than a warning,
+        // so an operator typo doesn't silently let the daemon come up
+        // with an unusable backend that fails on first tool call.
+        // Lost during the kernel/mod split; restored here.
+        if let Err(e) = config.tool_exec.validate() {
+            return Err(KernelError::BootFailed(format!(
+                "Invalid [tool_exec] config: {e}"
+            )));
+        }
+
         // Check TOTP configuration consistency
         if config.approval.second_factor == librefang_types::approval::SecondFactor::Totp {
             let vault_path = config.home_dir.join("vault.enc");
@@ -178,10 +189,17 @@ impl LibreFangKernel {
             .sqlite_path
             .clone()
             .unwrap_or_else(|| config.data_dir.join("librefang.db"));
-        let mut substrate = MemorySubstrate::open_with_chunking(
+        // Honour `[memory] pool_size` (#4685). The kernel/mod split
+        // briefly regressed this to `open_with_chunking`, which forces
+        // the r2d2 default pool size of 8 regardless of operator
+        // configuration; the prompt-store init below already used the
+        // configured value, so the two SQLite pools were sized
+        // inconsistently.
+        let mut substrate = MemorySubstrate::open_with_pool_size(
             &db_path,
             config.memory.decay_rate as f32,
             config.memory.chunking.clone(),
+            config.memory.pool_size,
         )
         .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?;
 
@@ -1132,6 +1150,31 @@ impl LibreFangKernel {
             None => config.data_dir.join("audit.anchor"),
         };
         let hooks_dir = config.home_dir.join("hooks");
+        // Optional memory-wiki vault (#3329). Off by default; only
+        // constructed when the operator has flipped `[memory_wiki]
+        // enabled = true`. A construction failure (e.g. unwritable
+        // vault path) logs a warning and disables the vault for this
+        // boot — it must not abort the kernel because the rest of the
+        // daemon is independent of the wiki feature. Lost during the
+        // kernel/mod split; restored here alongside the
+        // `wiki_vault` field on `LibreFangKernel` and the trait
+        // method bodies in `handles/wiki_access.rs`.
+        let wiki_vault: Option<Arc<librefang_memory_wiki::WikiVault>> =
+            if config.memory_wiki.enabled {
+                match librefang_memory_wiki::WikiVault::new(&config.memory_wiki, &config.home_dir) {
+                    Ok(v) => Some(Arc::new(v)),
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "[memory_wiki] enabled but vault construction failed; \
+                             wiki tools will return KernelOpError::unavailable"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
         // Snapshot the initial taint rule registry into a shared
         // `Arc<ArcSwap<...>>`. This swap is the single source of truth read
         // by every connected MCP server's scanner — `Self::reload_config`
@@ -1182,6 +1225,7 @@ impl LibreFangKernel {
             session_stream_hub: Arc::new(crate::session_stream_hub::SessionStreamHub::new()),
             scheduler: AgentScheduler::new(),
             memory: memory.clone(),
+            wiki_vault: wiki_vault.clone(),
             proactive_memory: OnceLock::new(),
             proactive_memory_extractor: OnceLock::new(),
             prompt_store: OnceLock::new(),

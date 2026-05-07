@@ -674,6 +674,13 @@ pub struct LibreFangKernel {
     pub(crate) scheduler: AgentScheduler,
     /// Memory substrate.
     pub(crate) memory: Arc<MemorySubstrate>,
+    /// Memory wiki vault (#3329). `None` when `[memory_wiki] enabled =
+    /// false`, in which case the `WikiAccess` trait methods short-
+    /// circuit to `KernelOpError::unavailable("wiki_*")`. Field
+    /// declaration was lost during the kernel/mod split (#4713) along
+    /// with its boot-time initializer; restored alongside the wiki
+    /// trait method bodies in `handles/wiki_access.rs`.
+    pub(crate) wiki_vault: Option<Arc<librefang_memory_wiki::WikiVault>>,
     /// Proactive memory store (mem0-style auto_retrieve/auto_memorize).
     pub(crate) proactive_memory: OnceLock<Arc<librefang_memory::ProactiveMemoryStore>>,
     /// Concrete handle to the LLM-backed memory extractor used by

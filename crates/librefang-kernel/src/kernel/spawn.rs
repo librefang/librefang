@@ -65,6 +65,28 @@ impl LibreFangKernel {
         // update_manifest).
         validate_manifest_module_path(&manifest, &name)?;
 
+        // tool_exec backend (#3332): if the manifest pins a backend
+        // override, the matching subtable must exist on the global
+        // config — otherwise the agent would fail at the first tool
+        // call, not at spawn. We do this before locking the registry so
+        // a misconfigured override never advances past spawn. Lost
+        // during the kernel/mod split; restored here.
+        if let Some(override_kind) = manifest.tool_exec_backend {
+            if let Err(e) = self
+                .config
+                .load()
+                .tool_exec
+                .validate_override(override_kind)
+            {
+                return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                    format!(
+                        "agent {name:?} tool_exec_backend = {:?} but {e}",
+                        override_kind.as_str()
+                    ),
+                )));
+            }
+        }
+
         // Use a deterministic agent ID derived from the agent name so the
         // same agent gets the same UUID across daemon restarts. This preserves
         // session history associations in SQLite. Child agents spawned at
