@@ -6,8 +6,44 @@
 //! That keeps the ~600 internal call-sites mechanical while shrinking the
 //! kernel struct surface from ~70 fields to a dozen subsystem handles.
 //!
-//! Focused per-subsystem traits and method-body migration are explicit
-//! follow-ups — kept out of this PR so the diff stays reviewable.
+//! ## Status
+//!
+//! - **Field extraction (this PR)**: 13 subsystems, mechanical rename.
+//! - **Focused per-subsystem traits (this PR, follow-ups #2 + #3)**: each
+//!   subsystem exposes an `*SubsystemApi` trait that `LibreFangKernel`
+//!   also implements via [`super::subsystem_forwards`]. New callers can
+//!   bind `&dyn MeteringSubsystemApi` instead of dragging in the entire
+//!   `KernelApi` surface; existing `Arc<dyn KernelApi>` flows are
+//!   unchanged. Trait shapes are exercised by `#[cfg(test)]` boundary
+//!   tests next to each impl (see `processes::tests`,
+//!   `metering::tests`).
+//! - **Method-body migration**: not done; method bodies still live on
+//!   `LibreFangKernel` and read through `self.<sub>.<field>`. Moving
+//!   bodies into per-subsystem `impl` blocks is the next refactor.
+//!
+//! ## Shutdown ordering invariant
+//!
+//! Field reorganization could in principle change the implicit Rust
+//! drop order, but the kernel **does not rely on drop order for graceful
+//! shutdown**. Shutdown is explicit and broadcast-based — see
+//! [`super::LibreFangKernel::shutdown`]:
+//!
+//! 1. `shutdown_tx.send(true)` signals every subscriber (cron tick,
+//!    background sweeps, approval expiry, session-stream-hub GC,
+//!    auto-dream scheduler, inbox watcher) to exit their loops.
+//! 2. `agents.supervisor.shutdown()` stops accepting new work.
+//! 3. `workflows.engine.drain_on_shutdown()` pauses any `Running` /
+//!    `Pending` workflow runs and persists them with a resume token.
+//! 4. Agent state is flushed to the memory substrate (`Suspended`).
+//!
+//! After that explicit dance returns, the daemon process exits and the
+//! kernel struct is dropped. Field declaration order on
+//! `LibreFangKernel` is therefore not load-bearing — every component
+//! that owns long-running tasks (`scheduler`, `cron_scheduler`,
+//! `background`, `triggers`, `peer_node`) has already received the
+//! `shutdown_tx` signal and aborted its tasks before destructors run.
+//! When extending this module, keep new long-running tasks
+//! `shutdown_tx`-aware so this property continues to hold.
 
 pub mod agents;
 pub mod events;

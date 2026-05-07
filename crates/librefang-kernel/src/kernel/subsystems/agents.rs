@@ -51,7 +51,11 @@ pub struct AgentSubsystem {
     pub(crate) supervisor: Supervisor,
     /// Tracks running agent loops for cancellation + observability.
     /// Keyed by `(agent, session)` so concurrent loops on the same
-    /// agent each retain their own abort handle.
+    /// agent (parallel `session_mode = "new"` triggers, `agent_send`
+    /// fan-out, parallel channel chats) each retain their own abort
+    /// handle. Pre-rekey this was `DashMap<AgentId, AbortHandle>`,
+    /// which silently overwrote prior handles when a second loop
+    /// spawned and left earlier loops un-stoppable. See issue #3172.
     pub(crate) running_tasks: DashMap<(AgentId, SessionId), RunningTask>,
     /// Tracks per-(agent, session) interrupts so `stop_*_run` can
     /// signal `cancel()` in addition to aborting the tokio task.

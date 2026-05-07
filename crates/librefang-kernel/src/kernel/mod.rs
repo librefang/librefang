@@ -672,13 +672,6 @@ pub struct LibreFangKernel {
     /// Plugin skill registry + hand registry + skill review bookkeeping.
     /// See [`subsystems::SkillsSubsystem`].
     pub(crate) skills: subsystems::SkillsSubsystem,
-    /// Tracks running agent loops for cancellation + observability. Keyed by
-    /// `(agent, session)` so concurrent loops on the same agent (parallel
-    /// `session_mode = "new"` triggers, `agent_send` fan-out, parallel
-    /// channel chats) each retain their own abort handle. Pre-rekey this
-    /// was `DashMap<AgentId, AbortHandle>`, which silently overwrote prior
-    /// handles when a second loop spawned and left earlier loops un-stoppable.
-    /// See issue #3172.
     /// MCP connection pool + OAuth + tool cache + catalog + health
     /// monitor + summary cache. See [`subsystems::McpSubsystem`].
     pub(crate) mcp: subsystems::McpSubsystem,
