@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use super::subsystems::{
     AgentSubsystemApi, EventSubsystemApi, LlmSubsystemApi, McpSubsystemApi, MediaSubsystemApi,
-    MemorySubsystemApi, MeshSubsystemApi, SkillsSubsystemApi, WorkflowSubsystemApi,
+    MemorySubsystemApi, SkillsSubsystemApi, WorkflowSubsystemApi,
 };
 
 use tracing::{debug, info, warn};
@@ -34,7 +34,7 @@ use crate::triggers::TriggerEngine;
 use crate::workflow::{WorkflowEngine, WorkflowTemplateRegistry};
 
 use super::workspace_setup::migrate_legacy_agent_dirs;
-use super::{DeliveryTracker, LibreFangKernel};
+use super::LibreFangKernel;
 
 impl LibreFangKernel {
     /// Full kernel configuration (atomically loaded snapshot).
@@ -994,26 +994,6 @@ impl LibreFangKernel {
         self.mcp.effective_servers_ref()
     }
 
-    /// A2A task store.
-    #[inline]
-    pub fn a2a_tasks(&self) -> &librefang_runtime::a2a::A2aTaskStore {
-        self.mesh.a2a_tasks()
-    }
-
-    /// Discovered external A2A agent cards.
-    #[inline]
-    pub fn a2a_agents(
-        &self,
-    ) -> &std::sync::Mutex<Vec<(String, librefang_runtime::a2a::AgentCard)>> {
-        self.mesh.a2a_agents()
-    }
-
-    /// Delivery receipt tracker.
-    #[inline]
-    pub fn delivery(&self) -> &DeliveryTracker {
-        self.mesh.delivery()
-    }
-
     /// First currently-active `SessionInterrupt` registered for `agent_id`,
     /// across any of its sessions. Used by fork / subagent paths that just
     /// need a cancellation handle to chain off the parent — they don't care
@@ -1055,26 +1035,6 @@ impl LibreFangKernel {
     #[inline]
     pub fn traces(&self) -> &dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>> {
         self.agents.traces()
-    }
-
-    /// Channel adapters map.
-    #[inline]
-    pub fn channel_adapters_ref(
-        &self,
-    ) -> &dashmap::DashMap<String, Arc<dyn librefang_channels::types::ChannelAdapter>> {
-        self.mesh.channel_adapters_ref()
-    }
-
-    /// Agent bindings for multi-account routing.
-    #[inline]
-    pub fn bindings_ref(&self) -> &std::sync::Mutex<Vec<librefang_types::config::AgentBinding>> {
-        self.mesh.bindings_ref()
-    }
-
-    /// Broadcast configuration.
-    #[inline]
-    pub fn broadcast_ref(&self) -> &librefang_types::config::BroadcastConfig {
-        self.mesh.broadcast_ref()
     }
 
     /// Uptime since kernel boot.
@@ -1156,12 +1116,6 @@ impl LibreFangKernel {
             .clone()
     }
 
-    /// OFP peer registry (set once at startup).
-    #[inline]
-    pub fn peer_registry_ref(&self) -> Option<&librefang_wire::PeerRegistry> {
-        self.mesh.peer_registry_ref()
-    }
-
     /// Test-only: install a `PeerRegistry` without booting the OFP node.
     /// Used by route-handler regression tests for #3644 — never call from
     /// production code; the OFP startup path owns this initialization
@@ -1215,12 +1169,6 @@ impl LibreFangKernel {
     #[inline]
     pub fn session_lifecycle_bus(&self) -> Arc<crate::session_lifecycle::SessionLifecycleBus> {
         self.events.lifecycle_bus()
-    }
-
-    /// OFP peer node (set once at startup).
-    #[inline]
-    pub fn peer_node_ref(&self) -> Option<&Arc<librefang_wire::PeerNode>> {
-        self.mesh.peer_node_ref()
     }
 
     /// Provider unconfigured log flag (atomic).

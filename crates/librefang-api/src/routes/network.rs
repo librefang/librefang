@@ -2070,6 +2070,7 @@ pub(crate) fn remove_toml_section(content: &str, section: &str) -> String {
 mod tests {
     use super::{canonical_ip, is_cloud_metadata_ip, is_private_ip};
     use librefang_kernel::MemorySubsystemApi;
+    use librefang_kernel::MeshSubsystemApi;
     use std::net::{IpAddr, Ipv4Addr};
 
     // -----------------------------------------------------------------

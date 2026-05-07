@@ -561,7 +561,7 @@ impl KernelApi for LibreFangKernel {
         Self::cron(self)
     }
     fn delivery(&self) -> &DeliveryTracker {
-        Self::delivery(self)
+        <Self as crate::MeshSubsystemApi>::delivery(self)
     }
     fn event_bus_ref(&self) -> &EventBus {
         <Self as crate::EventSubsystemApi>::event_bus_ref(self)
@@ -657,10 +657,10 @@ impl KernelApi for LibreFangKernel {
         Self::oauth_provider_ref(self)
     }
     fn peer_node_ref(&self) -> Option<&Arc<librefang_wire::PeerNode>> {
-        Self::peer_node_ref(self)
+        <Self as crate::MeshSubsystemApi>::peer_node_ref(self)
     }
     fn peer_registry_ref(&self) -> Option<&librefang_wire::PeerRegistry> {
-        Self::peer_registry_ref(self)
+        <Self as crate::MeshSubsystemApi>::peer_registry_ref(self)
     }
     fn skill_registry_ref(&self) -> &std::sync::RwLock<librefang_skills::registry::SkillRegistry> {
         Self::skill_registry_ref(self)
@@ -995,10 +995,10 @@ impl KernelApi for LibreFangKernel {
         Self::agent_has_active_session(self, agent_id)
     }
     fn a2a_agents(&self) -> &std::sync::Mutex<Vec<(String, librefang_runtime::a2a::AgentCard)>> {
-        Self::a2a_agents(self)
+        <Self as crate::MeshSubsystemApi>::a2a_agents(self)
     }
     fn a2a_tasks(&self) -> &librefang_runtime::a2a::A2aTaskStore {
-        Self::a2a_tasks(self)
+        <Self as crate::MeshSubsystemApi>::a2a_tasks(self)
     }
     fn context_report(
         &self,
@@ -1190,13 +1190,13 @@ impl KernelApi for LibreFangKernel {
     fn channel_adapters_ref(
         &self,
     ) -> &dashmap::DashMap<String, Arc<dyn librefang_channels::types::ChannelAdapter>> {
-        Self::channel_adapters_ref(self)
+        <Self as crate::MeshSubsystemApi>::channel_adapters_ref(self)
     }
     fn trigger_engine(&self) -> &crate::triggers::TriggerEngine {
         Self::trigger_engine(self)
     }
     fn broadcast_ref(&self) -> &librefang_types::config::BroadcastConfig {
-        Self::broadcast_ref(self)
+        <Self as crate::MeshSubsystemApi>::broadcast_ref(self)
     }
     fn auto_reply(&self) -> &crate::auto_reply::AutoReplyEngine {
         Self::auto_reply(self)
