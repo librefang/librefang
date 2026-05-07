@@ -205,3 +205,40 @@ impl AcpFsClient for FsClientHandle {
 fn acp_to_kernel_err(e: AcpError) -> KernelOpError {
     KernelOpError::Internal(e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::schema::FileSystemCapabilities;
+
+    #[test]
+    fn fs_capabilities_default_is_disabled() {
+        let caps = FsCapabilities::default();
+        assert!(!caps.read_text_file);
+        assert!(!caps.write_text_file);
+    }
+
+    #[test]
+    fn fs_capabilities_from_client_picks_up_both_flags() {
+        let mut client_caps = ClientCapabilities::default();
+        let mut fs = FileSystemCapabilities::default();
+        fs.read_text_file = true;
+        fs.write_text_file = true;
+        client_caps.fs = fs;
+        let caps = FsCapabilities::from_client(&client_caps);
+        assert!(caps.read_text_file);
+        assert!(caps.write_text_file);
+    }
+
+    #[test]
+    fn fs_capabilities_from_client_picks_up_partial() {
+        let mut client_caps = ClientCapabilities::default();
+        let mut fs = FileSystemCapabilities::default();
+        fs.read_text_file = true;
+        fs.write_text_file = false;
+        client_caps.fs = fs;
+        let caps = FsCapabilities::from_client(&client_caps);
+        assert!(caps.read_text_file);
+        assert!(!caps.write_text_file);
+    }
+}
