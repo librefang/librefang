@@ -2805,15 +2805,14 @@ fn named_ws_prefixes_readonly(
     }
 }
 
-/// Validate that an absolute file path stays inside the agent's
-/// allowed workspace set BEFORE the path is forwarded to an ACP
-/// client (#3313 review).
+/// Validate that a file path stays inside the agent's allowed
+/// workspace set BEFORE the path is forwarded to an ACP client
+/// (#3313 review).
 ///
-/// Returns `Some(error_message)` if the path is absolute AND escapes
-/// every allowed prefix. Returns `None` for paths that are either
-/// relative (the editor will resolve them against its declared cwd
-/// — that's the editor user's threat surface, not ours) or absolute
-/// inside the workspace.
+/// Returns `Some(error_message)` if the path is rejected (either
+/// because it contains `..` traversal or because the absolute path
+/// escapes every allowed prefix). Returns `None` for relative paths
+/// without `..` and for absolute paths inside the workspace.
 ///
 /// **Why this is the editor's threat surface but ours too:** ACP
 /// editors faithfully serve whatever path the agent asks for. Without
@@ -2823,6 +2822,17 @@ fn named_ws_prefixes_readonly(
 /// distinguish "agent asked for a file" from "user clicked a file in
 /// the IDE." So the LibreFang side has to enforce the same workspace
 /// jail it applies to the local-fs path.
+///
+/// SECURITY (#3313 follow-up): `Path::starts_with` is component-based
+/// and does NOT collapse `..`, so the previous revision of this fn
+/// accepted `/<workspace_root>/../etc/shadow` because the first
+/// `<workspace_root>` components matched as a prefix and the
+/// `..`/`etc`/`shadow` components were ignored. Reject any `..`
+/// component up front — mirrors the input filter
+/// [`crate::workspace_sandbox::resolve_sandbox_path_ext`] applies on
+/// the local-fs side. Same rejection regardless of absolute-vs-
+/// relative so a relative `../../etc/shadow` (resolved by the editor
+/// against its declared cwd) can't slip past either.
 fn check_absolute_path_inside_workspace(
     raw_path: Option<&str>,
     workspace_root: Option<&Path>,
@@ -2830,6 +2840,15 @@ fn check_absolute_path_inside_workspace(
 ) -> Option<String> {
     let raw = raw_path?;
     let p = Path::new(raw);
+    if p.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Some(format!(
+            "path '{raw}' contains '..' components which are forbidden; \
+             absolute paths must resolve inside the agent's workspace \
+             without traversal"
+        ));
+    }
     if !p.is_absolute() {
         return None;
     }
@@ -2845,6 +2864,98 @@ fn check_absolute_path_inside_workspace(
         "path '{raw}' is outside the agent's workspace and named-workspace allowlist; \
          absolute paths must reside inside the agent's declared filesystem boundary"
     ))
+}
+
+#[cfg(test)]
+mod path_check_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn absolute_inside_workspace_passes() {
+        let root = PathBuf::from("/ws");
+        assert!(
+            check_absolute_path_inside_workspace(Some("/ws/file.txt"), Some(&root), &[]).is_none()
+        );
+    }
+
+    #[test]
+    fn relative_path_passes() {
+        let root = PathBuf::from("/ws");
+        assert!(
+            check_absolute_path_inside_workspace(Some("subdir/file.txt"), Some(&root), &[])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn missing_path_passes() {
+        let root = PathBuf::from("/ws");
+        assert!(check_absolute_path_inside_workspace(None, Some(&root), &[]).is_none());
+    }
+
+    #[test]
+    fn absolute_outside_workspace_blocked() {
+        let root = PathBuf::from("/ws");
+        let err = check_absolute_path_inside_workspace(Some("/etc/passwd"), Some(&root), &[])
+            .expect("path outside workspace must be blocked");
+        assert!(err.contains("outside the agent's workspace"));
+    }
+
+    #[test]
+    fn absolute_inside_named_workspace_passes() {
+        let root = PathBuf::from("/ws");
+        let extra = PathBuf::from("/shared");
+        assert!(check_absolute_path_inside_workspace(
+            Some("/shared/data.txt"),
+            Some(&root),
+            std::slice::from_ref(&extra),
+        )
+        .is_none());
+    }
+
+    /// SECURITY regression test: `Path::starts_with` is component-based
+    /// and does not collapse `..`, so an absolute path of the form
+    /// `<root>/../<elsewhere>` previously bypassed the workspace jail
+    /// and reached the editor's `fs/read_text_file` because the leading
+    /// `<root>` components matched as a prefix and the `..` was ignored
+    /// during the comparison. The fix rejects any `..` component up
+    /// front.
+    #[test]
+    fn absolute_with_dotdot_traversal_blocked_even_under_workspace_root() {
+        let root = PathBuf::from("/ws");
+        let err = check_absolute_path_inside_workspace(Some("/ws/../etc/shadow"), Some(&root), &[])
+            .expect("`..` traversal must be blocked");
+        assert!(
+            err.contains("'..'"),
+            "error must call out the forbidden component, got: {err}"
+        );
+    }
+
+    #[test]
+    fn absolute_with_dotdot_traversal_blocked_under_named_workspace() {
+        let root = PathBuf::from("/ws");
+        let extra = PathBuf::from("/shared");
+        let err = check_absolute_path_inside_workspace(
+            Some("/shared/../etc/shadow"),
+            Some(&root),
+            std::slice::from_ref(&extra),
+        )
+        .expect("`..` traversal under named workspace must also be blocked");
+        assert!(err.contains("'..'"));
+    }
+
+    #[test]
+    fn relative_with_dotdot_traversal_blocked() {
+        // The editor would resolve relative paths against its declared
+        // cwd, but a relative `..` chain still trivially escapes the
+        // editor's own project root. Mirror the local-fs sandbox's
+        // refusal of `..` so neither wire path leaks the difference.
+        let root = PathBuf::from("/ws");
+        let err = check_absolute_path_inside_workspace(Some("../../etc/shadow"), Some(&root), &[])
+            .expect("relative `..` must be blocked");
+        assert!(err.contains("'..'"));
+    }
 }
 
 // ---------------------------------------------------------------------------
