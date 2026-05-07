@@ -794,6 +794,7 @@ impl LibreFangKernel {
 
         // Snapshot skill registry before async call (RwLockReadGuard is !Send)
         let mut skill_snapshot = self
+            .skills
             .skill_registry
             .read()
             .unwrap_or_else(|e| e.into_inner())

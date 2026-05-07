@@ -1146,6 +1146,7 @@ system_prompt = "You are a test worker."
 "#;
 
     kernel
+        .skills
         .hand_registry
         .install_from_content(hand_toml, "")
         .expect("install hand from content");
@@ -1211,6 +1212,7 @@ system_prompt = "You are a test worker."
 "#;
 
     kernel
+        .skills
         .hand_registry
         .install_from_content(hand_toml, "")
         .expect("install hand from content");
@@ -2060,7 +2062,7 @@ fn test_skills_config_disabled_list_filters_at_boot() {
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
 
-    let registry = kernel.skill_registry.read().unwrap();
+    let registry = kernel.skills.skill_registry.read().unwrap();
     assert!(
         registry.get("kept-skill").is_some(),
         "non-disabled skill must load"
@@ -2101,7 +2103,7 @@ fn test_skills_config_extra_dirs_loaded_as_overlay() {
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
 
-    let registry = kernel.skill_registry.read().unwrap();
+    let registry = kernel.skills.skill_registry.read().unwrap();
     assert!(
         registry.get("external-only").is_some(),
         "external skill must load"
@@ -2147,7 +2149,7 @@ fn test_reload_skills_preserves_disabled_and_extra_dirs() {
 
     // Baseline
     {
-        let reg = kernel.skill_registry.read().unwrap();
+        let reg = kernel.skills.skill_registry.read().unwrap();
         assert!(reg.get("keep-me").is_some());
         assert!(reg.get("silence-me").is_none());
         assert!(reg.get("overlay-skill").is_some());
@@ -2157,7 +2159,7 @@ fn test_reload_skills_preserves_disabled_and_extra_dirs() {
     // "silence-me" and drop "overlay-skill".
     kernel.reload_skills();
 
-    let reg = kernel.skill_registry.read().unwrap();
+    let reg = kernel.skills.skill_registry.read().unwrap();
     assert!(
         reg.get("keep-me").is_some(),
         "normal skill must stay loaded across reload"
@@ -2197,7 +2199,7 @@ fn test_stable_mode_freezes_registry_and_skips_review_gate() {
     };
     let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
 
-    let registry = kernel.skill_registry.read().unwrap();
+    let registry = kernel.skills.skill_registry.read().unwrap();
     assert!(
         registry.is_frozen(),
         "Stable mode must freeze the skill registry"
@@ -2689,7 +2691,11 @@ system_prompt = "BASE PROMPT"
 
     // Sanity: the synthetic hand landed in the in-memory registry.
     assert!(
-        kernel.hand_registry.get_definition(hand_id).is_some(),
+        kernel
+            .skills
+            .hand_registry
+            .get_definition(hand_id)
+            .is_some(),
         "synthetic HAND.toml must be loaded from registry/hands/{hand_id}"
     );
 
@@ -2839,7 +2845,11 @@ system_prompt = "WORKER PROMPT"
     let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
 
     assert!(
-        kernel.hand_registry.get_definition(hand_id).is_some(),
+        kernel
+            .skills
+            .hand_registry
+            .get_definition(hand_id)
+            .is_some(),
         "synthetic HAND.toml must be loaded from registry/hands/{hand_id}"
     );
 
@@ -3171,6 +3181,7 @@ fn hand_runtime_override_survives_restart_via_start_background_agents() {
     });
 
     let instance = kernel
+        .skills
         .hand_registry
         .list_instances()
         .into_iter()
@@ -3555,6 +3566,7 @@ fn clear_hand_agent_runtime_override_resets_manifest_and_state() {
 
     // hand_state must no longer carry the per-role entry.
     let restored_instance = kernel
+        .skills
         .hand_registry
         .get_instance(instance.instance_id)
         .expect("instance still active");
@@ -3627,6 +3639,7 @@ fn update_hand_agent_runtime_override_merges_partial_updates_in_state() {
         .expect("apply provider override");
 
     let restored_instance = kernel
+        .skills
         .hand_registry
         .get_instance(instance.instance_id)
         .expect("instance still active");

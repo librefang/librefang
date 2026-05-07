@@ -14,6 +14,7 @@ pub mod media;
 pub mod metering;
 pub mod processes;
 pub mod security;
+pub mod skills;
 pub mod workflow;
 
 pub use llm::LlmSubsystem;
@@ -21,4 +22,5 @@ pub use media::MediaSubsystem;
 pub use metering::MeteringSubsystem;
 pub use processes::ProcessSubsystem;
 pub use security::SecuritySubsystem;
+pub use skills::SkillsSubsystem;
 pub use workflow::WorkflowSubsystem;

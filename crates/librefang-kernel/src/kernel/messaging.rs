@@ -976,6 +976,7 @@ impl LibreFangKernel {
                 // would silently no-op, so all we'd accomplish is to
                 // bill the default driver for nothing.
                 let registry_frozen = self
+                    .skills
                     .skill_registry
                     .read()
                     .map(|r| r.is_frozen())
@@ -1020,7 +1021,12 @@ impl LibreFangKernel {
                 // silently starving agents that happened to finish during
                 // a review stampede.
                 let permit_opt = if budget_ok {
-                    match self.skill_review_concurrency.clone().try_acquire_owned() {
+                    match self
+                        .skills
+                        .skill_review_concurrency
+                        .clone()
+                        .try_acquire_owned()
+                    {
                         Ok(p) => Some(p),
                         Err(_) => {
                             tracing::info!(
@@ -2231,6 +2237,7 @@ impl LibreFangKernel {
             }
 
             let mut skill_snapshot = kernel_clone
+                .skills
                 .skill_registry
                 .read()
                 .unwrap_or_else(|e| e.into_inner())

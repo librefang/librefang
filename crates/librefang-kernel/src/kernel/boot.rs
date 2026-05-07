@@ -1247,7 +1247,11 @@ impl LibreFangKernel {
             ),
             wasm_sandbox,
             security: crate::kernel::subsystems::SecuritySubsystem::new(auth, pairing),
-            skill_registry: std::sync::RwLock::new(skill_registry),
+            skills: crate::kernel::subsystems::SkillsSubsystem::new(
+                skill_registry,
+                hand_registry,
+                Self::MAX_INFLIGHT_SKILL_REVIEWS,
+            ),
             running_tasks: dashmap::DashMap::new(),
             session_interrupts: dashmap::DashMap::new(),
             mcp_connections: tokio::sync::Mutex::new(Vec::new()),
@@ -1269,7 +1273,6 @@ impl LibreFangKernel {
                 tts_engine,
                 media_drivers,
             ),
-            hand_registry,
             mcp_catalog: arc_swap::ArcSwap::from_pointee(mcp_catalog),
             mcp_health,
             effective_mcp_servers: std::sync::RwLock::new(all_mcp_servers),
@@ -1305,11 +1308,6 @@ impl LibreFangKernel {
             provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
             config_reload_lock: tokio::sync::RwLock::new(()),
             prompt_metadata_cache: PromptMetadataCache::new(),
-            skill_generation: std::sync::atomic::AtomicU64::new(0),
-            skill_review_cooldowns: dashmap::DashMap::new(),
-            skill_review_concurrency: std::sync::Arc::new(tokio::sync::Semaphore::new(
-                Self::MAX_INFLIGHT_SKILL_REVIEWS,
-            )),
             agent_watchers: dashmap::DashMap::new(),
             mcp_generation: std::sync::atomic::AtomicU64::new(0),
             metering: crate::kernel::subsystems::MeteringSubsystem::new(
@@ -1553,8 +1551,10 @@ impl LibreFangKernel {
                                                 .find_map(|t| t.strip_prefix("hand:"))
                                                 .map(|s| s.to_string())
                                             {
-                                                if let Some(def) =
-                                                    kernel.hand_registry.get_definition(&hand_id)
+                                                if let Some(def) = kernel
+                                                    .skills
+                                                    .hand_registry
+                                                    .get_definition(&hand_id)
                                                 {
                                                     if !def.settings.is_empty() {
                                                         let empty =

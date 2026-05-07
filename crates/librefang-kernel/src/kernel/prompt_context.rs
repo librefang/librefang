@@ -151,6 +151,7 @@ impl LibreFangKernel {
     /// applies to both call sites at once.
     fn sorted_enabled_skills(&self, allowlist: &[String]) -> Vec<librefang_skills::InstalledSkill> {
         let mut skills: Vec<_> = self
+            .skills
             .skill_registry
             .read()
             .unwrap_or_else(|e| e.into_inner())

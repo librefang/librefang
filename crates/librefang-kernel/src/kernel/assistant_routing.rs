@@ -410,7 +410,8 @@ impl LibreFangKernel {
     }
 
     fn active_hand_agent_id(&self, hand_id: &str) -> Option<AgentId> {
-        self.hand_registry
+        self.skills
+            .hand_registry
             .list_instances()
             .into_iter()
             .find(|instance| {
@@ -421,7 +422,7 @@ impl LibreFangKernel {
     }
 
     fn hand_requirements_met(&self, hand_id: &str) -> bool {
-        match self.hand_registry.check_requirements(hand_id) {
+        match self.skills.hand_registry.check_requirements(hand_id) {
             Ok(results) => {
                 for (req, satisfied) in &results {
                     if !satisfied {

@@ -33,6 +33,7 @@ impl LibreFangKernel {
         // Check the tool list cache first — avoids recomputing builtins, skill tools,
         // and MCP tools on every message for the same agent.
         let skill_gen = self
+            .skills
             .skill_generation
             .load(std::sync::atomic::Ordering::Relaxed);
         let mcp_gen = self
@@ -154,6 +155,7 @@ impl LibreFangKernel {
             vec![]
         } else {
             let registry = self
+                .skills
                 .skill_registry
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
@@ -302,6 +304,7 @@ impl LibreFangKernel {
     /// to agents without restarting the kernel.
     pub fn reload_skills(&self) {
         let mut registry = self
+            .skills
             .skill_registry
             .write()
             .unwrap_or_else(|e| e.into_inner());
@@ -332,7 +335,8 @@ impl LibreFangKernel {
         self.prompt_metadata_cache.skills.clear();
 
         // Bump skill generation so the tool list cache detects staleness
-        self.skill_generation
+        self.skills
+            .skill_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -373,14 +377,16 @@ impl LibreFangKernel {
         // any entry older than 10× the cooldown (well past the point
         // where it could still gate a review). Cheap since DashMap's
         // retain is shard-local.
-        if self.skill_review_cooldowns.len() > Self::SKILL_REVIEW_COOLDOWN_CAP {
+        if self.skills.skill_review_cooldowns.len() > Self::SKILL_REVIEW_COOLDOWN_CAP {
             let cutoff = now_epoch - Self::SKILL_REVIEW_COOLDOWN_SECS.saturating_mul(10);
-            self.skill_review_cooldowns
+            self.skills
+                .skill_review_cooldowns
                 .retain(|_, last| *last >= cutoff);
         }
 
         let mut claimed = false;
-        self.skill_review_cooldowns
+        self.skills
+            .skill_review_cooldowns
             .entry(agent_id.to_string())
             .and_modify(|last| {
                 if now_epoch - *last >= Self::SKILL_REVIEW_COOLDOWN_SECS {
@@ -500,6 +506,7 @@ impl LibreFangKernel {
             .and_then(|w| w.upgrade())
             .map(|kernel| {
                 let reg = kernel
+                    .skills
                     .skill_registry
                     .read()
                     .unwrap_or_else(|e| e.into_inner());
@@ -723,6 +730,7 @@ impl LibreFangKernel {
                     })?;
                 let skill = {
                     let reg = kernel
+                        .skills
                         .skill_registry
                         .read()
                         .unwrap_or_else(|e| e.into_inner());
@@ -786,6 +794,7 @@ impl LibreFangKernel {
                     })?;
                 let skill = {
                     let reg = kernel
+                        .skills
                         .skill_registry
                         .read()
                         .unwrap_or_else(|e| e.into_inner());

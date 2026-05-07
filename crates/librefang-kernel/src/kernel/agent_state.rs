@@ -365,6 +365,7 @@ impl LibreFangKernel {
         // Validate skill names if allowlist is non-empty
         if !skills.is_empty() {
             let registry = self
+                .skills
                 .skill_registry
                 .read()
                 .unwrap_or_else(|e| e.into_inner());

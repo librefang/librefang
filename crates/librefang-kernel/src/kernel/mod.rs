@@ -704,8 +704,9 @@ pub struct LibreFangKernel {
     /// RBAC + device pairing + credential vault. See
     /// [`subsystems::SecuritySubsystem`].
     pub(crate) security: subsystems::SecuritySubsystem,
-    /// Skill registry for plugin skills (RwLock for hot-reload on install/uninstall).
-    pub(crate) skill_registry: std::sync::RwLock<librefang_skills::registry::SkillRegistry>,
+    /// Plugin skill registry + hand registry + skill review bookkeeping.
+    /// See [`subsystems::SkillsSubsystem`].
+    pub(crate) skills: subsystems::SkillsSubsystem,
     /// Tracks running agent loops for cancellation + observability. Keyed by
     /// `(agent, session)` so concurrent loops on the same agent (parallel
     /// `session_mode = "new"` triggers, `agent_send` fan-out, parallel
@@ -742,8 +743,6 @@ pub struct LibreFangKernel {
     /// Web search + browser + media understanding + TTS + media drivers.
     /// See [`subsystems::MediaSubsystem`].
     pub(crate) media: subsystems::MediaSubsystem,
-    /// Hand registry — curated autonomous capability packages.
-    pub(crate) hand_registry: librefang_hands::registry::HandRegistry,
     /// MCP catalog — read-only set of server templates shipped by the
     /// registry. Refreshed by `registry_sync` and re-read on
     /// `POST /api/mcp/reload`. Lock-free reads via `ArcSwap`; writes use
@@ -864,20 +863,6 @@ pub struct LibreFangKernel {
     /// Cache for workspace context, identity files, and skill metadata to avoid
     /// redundant filesystem I/O and registry scans on every message.
     prompt_metadata_cache: PromptMetadataCache,
-    /// Generation counter for skill registry — bumped on every hot-reload.
-    /// Used by the tool list cache to detect staleness.
-    skill_generation: std::sync::atomic::AtomicU64,
-    /// Per-agent cooldown tracker for background skill reviews. Maps agent_id
-    /// to the Unix epoch (seconds) of their last review. This prevents spamming
-    /// LLM calls while allowing different agents to independently trigger reviews.
-    skill_review_cooldowns: dashmap::DashMap<String, i64>,
-    /// Global in-flight review counter — caps how many background skill
-    /// reviews can run concurrently across the whole kernel. Without this,
-    /// many agents finishing complex tasks simultaneously could stampede
-    /// the default driver and blow the global budget before per-agent
-    /// cooldowns catch up. Semaphore starts at
-    /// [`Self::MAX_INFLIGHT_SKILL_REVIEWS`] permits.
-    skill_review_concurrency: std::sync::Arc<tokio::sync::Semaphore>,
     /// Per-agent fire-and-forget background tasks (skill reviews, owner
     /// notifications, …) that hold semaphore permits or spend tokens on
     /// behalf of a specific agent. `kill_agent` drains and aborts these so
@@ -1191,6 +1176,7 @@ impl LibreFangKernel {
 
     pub fn trigger_all_hands(&self) {
         let hand_agents: Vec<AgentId> = self
+            .skills
             .hand_registry
             .list_instances()
             .into_iter()
@@ -1637,6 +1623,7 @@ impl LibreFangKernel {
 
         // Snapshot the skill registry (drops the read lock before the async await).
         let skill_snapshot = self
+            .skills
             .skill_registry
             .read()
             .map_err(|e| format!("skill_registry lock poisoned: {e}"))?

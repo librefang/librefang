@@ -164,7 +164,7 @@ impl LibreFangKernel {
             // registry hands without activating them. Activation (DB entries, session
             // spawning, agent registration) only happens when the user explicitly
             // enables a hand — not unconditionally on every fresh install.
-            let defs = self.hand_registry.list_definitions();
+            let defs = self.skills.hand_registry.list_definitions();
             if !defs.is_empty() {
                 info!(
                     "First boot — scaffolding {} hand workspace(s) (files only, no activation)",
@@ -215,6 +215,7 @@ impl LibreFangKernel {
         // the only surviving hand-agent metadata.
         if saved_hands.status != librefang_hands::registry::LoadStateStatus::ParseFailed {
             let live_hand_agents: std::collections::HashSet<AgentId> = self
+                .skills
                 .hand_registry
                 .list_instances()
                 .iter()

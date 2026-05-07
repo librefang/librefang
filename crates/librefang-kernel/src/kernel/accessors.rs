@@ -733,13 +733,13 @@ impl LibreFangKernel {
     pub fn skill_registry_ref(
         &self,
     ) -> &std::sync::RwLock<librefang_skills::registry::SkillRegistry> {
-        &self.skill_registry
+        &self.skills.skill_registry
     }
 
     /// Hand registry (curated autonomous capability packages).
     #[inline]
     pub fn hands(&self) -> &librefang_hands::registry::HandRegistry {
-        &self.hand_registry
+        &self.skills.hand_registry
     }
 
     /// MCP catalog — returns the `ArcSwap` for lock-free reads.
@@ -1491,6 +1491,7 @@ impl LibreFangKernel {
         // 9. skill_review_cooldowns — remove entries for dead agents
         {
             let stale: Vec<String> = self
+                .skills
                 .skill_review_cooldowns
                 .iter()
                 .filter(|e| {
@@ -1503,7 +1504,7 @@ impl LibreFangKernel {
                 .collect();
             total_removed += stale.len();
             for id in stale {
-                self.skill_review_cooldowns.remove(&id);
+                self.skills.skill_review_cooldowns.remove(&id);
             }
         }
 
