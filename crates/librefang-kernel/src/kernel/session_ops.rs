@@ -56,13 +56,15 @@ impl LibreFangKernel {
             (AgentId, SessionId),
             tokio::sync::mpsc::Sender<AgentLoopSignal>,
         )> = if let Some(sid) = session_id {
-            self.injection_senders
+            self.events
+                .injection_senders
                 .get(&(agent_id, sid))
                 .map(|entry| (*entry.key(), entry.value().clone()))
                 .into_iter()
                 .collect()
         } else {
-            self.injection_senders
+            self.events
+                .injection_senders
                 .iter()
                 .filter(|e| e.key().0 == agent_id)
                 .map(|e| (*e.key(), e.value().clone()))
@@ -103,7 +105,7 @@ impl LibreFangKernel {
             }
         }
         for key in &closed_keys {
-            self.injection_senders.remove(key);
+            self.events.injection_senders.remove(key);
         }
         // If at least one live session accepted the message, the inject is a
         // success from the caller's POV. If every live (non-closed) target
@@ -128,17 +130,24 @@ impl LibreFangKernel {
         session_id: SessionId,
     ) -> Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<AgentLoopSignal>>> {
         let (tx, rx) = tokio::sync::mpsc::channel::<AgentLoopSignal>(8);
-        self.injection_senders.insert((agent_id, session_id), tx);
+        self.events
+            .injection_senders
+            .insert((agent_id, session_id), tx);
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
-        self.injection_receivers
+        self.events
+            .injection_receivers
             .insert((agent_id, session_id), Arc::clone(&rx));
         rx
     }
 
     /// Tears down the `(agent_id, session_id)` injection channel after the loop finishes.
     pub(crate) fn teardown_injection_channel(&self, agent_id: AgentId, session_id: SessionId) {
-        self.injection_senders.remove(&(agent_id, session_id));
-        self.injection_receivers.remove(&(agent_id, session_id));
+        self.events
+            .injection_senders
+            .remove(&(agent_id, session_id));
+        self.events
+            .injection_receivers
+            .remove(&(agent_id, session_id));
     }
 
     /// Resolve a module path relative to the kernel's home directory.

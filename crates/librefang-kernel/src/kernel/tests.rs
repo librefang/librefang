@@ -5833,12 +5833,14 @@ async fn injection_senders_two_sessions_one_agent_do_not_collide() {
     // Both senders must be live concurrently (second insert used to overwrite the first).
     assert!(
         kernel
+            .events
             .injection_senders
             .contains_key(&(agent_id, session_a)),
         "session A sender lost under (agent, session) keying"
     );
     assert!(
         kernel
+            .events
             .injection_senders
             .contains_key(&(agent_id, session_b)),
         "session B sender lost under (agent, session) keying"
@@ -5887,9 +5889,11 @@ async fn injection_teardown_only_removes_target_session() {
     // Tearing down session A must NOT clear session B's sender.
     kernel.teardown_injection_channel(agent_id, session_a);
     assert!(!kernel
+        .events
         .injection_senders
         .contains_key(&(agent_id, session_a)));
     assert!(kernel
+        .events
         .injection_senders
         .contains_key(&(agent_id, session_b)));
 

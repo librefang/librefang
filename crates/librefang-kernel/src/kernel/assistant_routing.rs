@@ -204,13 +204,13 @@ impl LibreFangKernel {
                 AutoRouteStrategy::Off => return Ok(agent_id),
 
                 AutoRouteStrategy::ExplicitOnly => {
-                    if let Some(entry) = self.assistant_routes.get(&cache_key) {
+                    if let Some(entry) = self.events.assistant_routes.get(&cache_key) {
                         let target = entry.value().0.clone();
                         drop(entry);
                         match self.resolve_assistant_route_target(&target) {
                             Ok(routed_id) => return Ok(routed_id),
                             Err(_) => {
-                                self.assistant_routes.remove(&cache_key);
+                                self.events.assistant_routes.remove(&cache_key);
                             }
                         }
                     }
@@ -219,14 +219,14 @@ impl LibreFangKernel {
                 }
 
                 AutoRouteStrategy::StickyTtl => {
-                    if let Some(entry) = self.assistant_routes.get(&cache_key) {
+                    if let Some(entry) = self.events.assistant_routes.get(&cache_key) {
                         if entry.value().1.elapsed() < ttl {
                             let target = entry.value().0.clone();
                             drop(entry);
                             match self.resolve_assistant_route_target(&target) {
                                 Ok(routed_id) => return Ok(routed_id),
                                 Err(_) => {
-                                    self.assistant_routes.remove(&cache_key);
+                                    self.events.assistant_routes.remove(&cache_key);
                                 }
                             }
                         }
@@ -237,55 +237,60 @@ impl LibreFangKernel {
                 AutoRouteStrategy::StickyHeuristic => {
                     let heuristic_target = self.route_assistant_by_metadata(message);
                     if let Some(h_target) = heuristic_target {
-                        if let Some(entry) = self.assistant_routes.get(&cache_key) {
+                        if let Some(entry) = self.events.assistant_routes.get(&cache_key) {
                             let cached = entry.value().0.clone();
                             drop(entry);
 
                             if h_target == cached {
                                 // Heuristic agrees with cache — reset divergence counter.
-                                self.route_divergence.remove(&cache_key);
+                                self.events.route_divergence.remove(&cache_key);
                                 match self.resolve_assistant_route_target(&cached) {
                                     Ok(routed_id) => return Ok(routed_id),
                                     Err(_) => {
-                                        self.assistant_routes.remove(&cache_key);
+                                        self.events.assistant_routes.remove(&cache_key);
                                     }
                                 }
                             } else {
                                 // Disagreement — increment divergence counter.
                                 let count = {
-                                    let mut div_entry =
-                                        self.route_divergence.entry(cache_key.clone()).or_insert(0);
+                                    let mut div_entry = self
+                                        .events
+                                        .route_divergence
+                                        .entry(cache_key.clone())
+                                        .or_insert(0);
                                     *div_entry += 1;
                                     *div_entry
                                 };
                                 if count < ctx.auto_route_divergence_count {
                                     // Not enough divergence yet — stay on cached route.
-                                    if let Some(entry) = self.assistant_routes.get(&cache_key) {
+                                    if let Some(entry) =
+                                        self.events.assistant_routes.get(&cache_key)
+                                    {
                                         let target = entry.value().0.clone();
                                         drop(entry);
                                         match self.resolve_assistant_route_target(&target) {
                                             Ok(routed_id) => return Ok(routed_id),
                                             Err(_) => {
-                                                self.assistant_routes.remove(&cache_key);
+                                                self.events.assistant_routes.remove(&cache_key);
                                             }
                                         }
                                     }
                                 }
                                 // Enough divergence — fall through to LLM re-classification.
-                                self.route_divergence.remove(&cache_key);
+                                self.events.route_divergence.remove(&cache_key);
                             }
                         }
                         // No cached entry — fall through to LLM classification.
                     } else {
                         // Heuristic returned nothing — reuse cache within TTL if available.
-                        if let Some(entry) = self.assistant_routes.get(&cache_key) {
+                        if let Some(entry) = self.events.assistant_routes.get(&cache_key) {
                             if entry.value().1.elapsed() < ttl {
                                 let target = entry.value().0.clone();
                                 drop(entry);
                                 match self.resolve_assistant_route_target(&target) {
                                     Ok(routed_id) => return Ok(routed_id),
                                     Err(_) => {
-                                        self.assistant_routes.remove(&cache_key);
+                                        self.events.assistant_routes.remove(&cache_key);
                                     }
                                 }
                             }
@@ -300,6 +305,7 @@ impl LibreFangKernel {
 
         if Self::should_reuse_cached_route(message) {
             if let Some(target) = self
+                .events
                 .assistant_routes
                 .get(&route_key)
                 .map(|entry| entry.value().0.clone())
@@ -307,7 +313,7 @@ impl LibreFangKernel {
                 match self.resolve_assistant_route_target(&target) {
                     Ok(routed_id) => {
                         // Update last-used timestamp for GC
-                        self.assistant_routes.insert(
+                        self.events.assistant_routes.insert(
                             route_key.clone(),
                             (target.clone(), std::time::Instant::now()),
                         );
@@ -325,7 +331,7 @@ impl LibreFangKernel {
                             error = %e,
                             "Cached assistant route failed — clearing"
                         );
-                        self.assistant_routes.remove(&route_key);
+                        self.events.assistant_routes.remove(&route_key);
                     }
                 }
             }
@@ -333,7 +339,7 @@ impl LibreFangKernel {
 
         if let Some(specialist) = self.llm_classify_intent(message).await {
             let routed_id = self.resolve_or_spawn_specialist(&specialist)?;
-            self.assistant_routes.insert(
+            self.events.assistant_routes.insert(
                 route_key,
                 (
                     AssistantRouteTarget::Specialist(specialist.clone()),
@@ -350,12 +356,13 @@ impl LibreFangKernel {
                 target = %target.name(),
                 "Assistant routed via metadata fallback"
             );
-            self.assistant_routes
+            self.events
+                .assistant_routes
                 .insert(route_key, (target, std::time::Instant::now()));
             return Ok(routed_id);
         }
 
-        self.assistant_routes.remove(&route_key);
+        self.events.assistant_routes.remove(&route_key);
         Ok(agent_id)
     }
 

@@ -519,7 +519,7 @@ impl LibreFangKernel {
         self.abort_agent_watchers(agent_id);
         self.scheduler.unregister(agent_id);
         self.capabilities.revoke_all(agent_id);
-        self.event_bus.unsubscribe_agent(agent_id);
+        self.events.event_bus.unsubscribe_agent(agent_id);
         self.workflows.triggers.remove_agent_triggers(agent_id);
         if let Err(e) = self.workflows.triggers.persist() {
             warn!("Failed to persist trigger jobs after agent deletion: {e}");
@@ -571,7 +571,7 @@ impl LibreFangKernel {
         // to this agent are no longer active. Use the agent name as the
         // best-effort reason — call sites that need richer context can extend
         // the variant in a future change.
-        self.session_lifecycle_bus.publish(
+        self.events.session_lifecycle_bus.publish(
             crate::session_lifecycle::SessionLifecycleEvent::AgentTerminated {
                 agent_id,
                 reason: format!("kill_agent(name={})", entry.name),

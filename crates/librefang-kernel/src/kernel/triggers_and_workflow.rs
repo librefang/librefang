@@ -252,7 +252,7 @@ impl LibreFangKernel {
         }
 
         // Publish to the event bus
-        self.event_bus.publish(event).await;
+        self.events.event_bus.publish(event).await;
 
         // Actually dispatch triggered messages to agents.
         //

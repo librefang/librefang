@@ -1102,7 +1102,7 @@ impl LibreFangKernel {
                                     unresponsive_secs: status.inactive_secs as u64,
                                 }),
                             );
-                            kernel.event_bus.publish(event).await;
+                            kernel.events.event_bus.publish(event).await;
 
                             // Fan out to operator notification channels
                             // (notification.alert_channels and matching

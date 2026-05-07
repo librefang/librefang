@@ -1647,7 +1647,7 @@ impl LibreFangKernel {
             // Fan out to the session hub so attached clients see the
             // synthesized text delta + complete event for non-LLM agents too.
             let (tx, rx) = crate::session_stream_hub::install_stream_fanout(
-                &self.session_stream_hub,
+                &self.events.session_stream_hub,
                 entry.session_id,
             );
             let kernel_clone = Arc::clone(self);
@@ -1831,7 +1831,7 @@ impl LibreFangKernel {
 
         // Lifecycle: emit SessionCreated only when get_session returned None.
         if session_was_new {
-            self.session_lifecycle_bus.publish(
+            self.events.session_lifecycle_bus.publish(
                 crate::session_lifecycle::SessionLifecycleEvent::SessionCreated {
                     agent_id,
                     session_id: effective_session_id,
@@ -1870,7 +1870,7 @@ impl LibreFangKernel {
         });
 
         let (tx, rx) = crate::session_stream_hub::install_stream_fanout(
-            &self.session_stream_hub,
+            &self.events.session_stream_hub,
             effective_session_id,
         );
         let mut manifest = entry.manifest.clone();
@@ -2135,7 +2135,7 @@ impl LibreFangKernel {
 
         // Lifecycle: emit TurnStarted right before the spawn. Cloning the bus
         // Arc separately keeps it usable inside the async block via `kernel_clone`.
-        self.session_lifecycle_bus.publish(
+        self.events.session_lifecycle_bus.publish(
             crate::session_lifecycle::SessionLifecycleEvent::TurnStarted {
                 agent_id,
                 session_id: effective_session_id,
@@ -2408,7 +2408,7 @@ impl LibreFangKernel {
 
                     // Lifecycle: emit TurnCompleted alongside settle_reservation. Use
                     // post-loop session length for message_count.
-                    kernel_clone.session_lifecycle_bus.publish(
+                    kernel_clone.events.session_lifecycle_bus.publish(
                         crate::session_lifecycle::SessionLifecycleEvent::TurnCompleted {
                             agent_id,
                             session_id: effective_session_id,
@@ -2602,7 +2602,7 @@ impl LibreFangKernel {
                     warn!(agent_id = %agent_id, error = %e, "Streaming agent loop failed");
                     // Lifecycle: emit TurnFailed before cleanup so subscribers
                     // see the failure with the live session_id still valid.
-                    kernel_clone.session_lifecycle_bus.publish(
+                    kernel_clone.events.session_lifecycle_bus.publish(
                         crate::session_lifecycle::SessionLifecycleEvent::TurnFailed {
                             agent_id,
                             session_id: effective_session_id,

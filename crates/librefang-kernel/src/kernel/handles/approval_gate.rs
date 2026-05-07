@@ -142,7 +142,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
                     risk_level: format!("{:?}", risk_level),
                 }),
             );
-            self.event_bus.publish(event).await;
+            self.events.event_bus.publish(event).await;
         }
 
         // Push approval notification to configured channels.
@@ -217,7 +217,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
                     decided_by: None,
                 }),
             );
-            self.event_bus.publish(event).await;
+            self.events.event_bus.publish(event).await;
         }
 
         Ok(decision)
@@ -302,7 +302,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
                     risk_level: format!("{:?}", risk_level),
                 }),
             );
-            self.event_bus.publish(event).await;
+            self.events.event_bus.publish(event).await;
         }
         {
             use librefang_types::capability::glob_matches;

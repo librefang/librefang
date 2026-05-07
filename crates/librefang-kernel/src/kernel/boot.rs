@@ -20,7 +20,7 @@ impl LibreFangKernel {
     /// in-flight `StreamEvent` flow. Returns the shared `Arc` so subscribers
     /// outlive any individual turn.
     pub fn session_stream_hub(&self) -> Arc<crate::session_stream_hub::SessionStreamHub> {
-        Arc::clone(&self.session_stream_hub)
+        Arc::clone(&self.events.session_stream_hub)
     }
 
     /// Boot the kernel with configuration from the given path.
@@ -1218,11 +1218,7 @@ impl LibreFangKernel {
             registry: AgentRegistry::new(),
             agent_identities,
             capabilities: CapabilityManager::new(),
-            event_bus: EventBus::new(),
-            session_lifecycle_bus: Arc::new(crate::session_lifecycle::SessionLifecycleBus::new(
-                256,
-            )),
-            session_stream_hub: Arc::new(crate::session_stream_hub::SessionStreamHub::new()),
+            events: crate::kernel::subsystems::EventSubsystem::new(),
             scheduler: AgentScheduler::new(),
             memory: memory.clone(),
             wiki_vault: wiki_vault.clone(),
@@ -1290,10 +1286,6 @@ impl LibreFangKernel {
             session_msg_locks: dashmap::DashMap::new(),
             agent_concurrency: dashmap::DashMap::new(),
             hand_runtime_override_locks: dashmap::DashMap::new(),
-            injection_senders: dashmap::DashMap::new(),
-            injection_receivers: dashmap::DashMap::new(),
-            assistant_routes: dashmap::DashMap::new(),
-            route_divergence: dashmap::DashMap::new(),
             decision_traces: dashmap::DashMap::new(),
             context_engine,
             context_engine_config,
@@ -1307,7 +1299,6 @@ impl LibreFangKernel {
                 metering,
                 initial_budget,
             ),
-            session_stream_hub_gc_started: AtomicBool::new(false),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             checkpoint_manager: {
                 let cp_dir = checkpoint_base_dir

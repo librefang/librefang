@@ -702,6 +702,7 @@ impl LibreFangKernel {
     pub fn spawn_session_stream_hub_gc_task(self: Arc<Self>) {
         let handle = tokio::runtime::Handle::current();
         if self
+            .events
             .session_stream_hub_gc_started
             .swap(true, Ordering::AcqRel)
         {
@@ -719,7 +720,7 @@ impl LibreFangKernel {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let pruned = kernel.session_stream_hub.gc_idle();
+                        let pruned = kernel.events.session_stream_hub.gc_idle();
                         if pruned > 0 {
                             tracing::debug!(pruned, "Session stream hub GC pruned idle sessions");
                         }
@@ -732,6 +733,7 @@ impl LibreFangKernel {
                 }
             }
             kernel
+                .events
                 .session_stream_hub_gc_started
                 .store(false, Ordering::Release);
             tracing::debug!("Session stream hub GC task stopped");
@@ -1280,7 +1282,7 @@ impl LibreFangKernel {
     pub fn injection_senders_ref(
         &self,
     ) -> &dashmap::DashMap<(AgentId, SessionId), tokio::sync::mpsc::Sender<AgentLoopSignal>> {
-        &self.injection_senders
+        &self.events.injection_senders
     }
 
     /// Context engine (pluggable memory recall + assembly).
@@ -1294,14 +1296,14 @@ impl LibreFangKernel {
     /// Event bus.
     #[inline]
     pub fn event_bus_ref(&self) -> &EventBus {
-        &self.event_bus
+        &self.events.event_bus
     }
 
     /// Session lifecycle event bus (clone-shared `Arc` so subscribers can hold
     /// it across tasks).
     #[inline]
     pub fn session_lifecycle_bus(&self) -> Arc<crate::session_lifecycle::SessionLifecycleBus> {
-        Arc::clone(&self.session_lifecycle_bus)
+        Arc::clone(&self.events.session_lifecycle_bus)
     }
 
     /// OFP peer node (set once at startup).
@@ -1412,6 +1414,7 @@ impl LibreFangKernel {
         // 4. injection_senders / injection_receivers — remove for dead agents.
         {
             let stale: Vec<(AgentId, SessionId)> = self
+                .events
                 .injection_senders
                 .iter()
                 .filter(|e| !live_agents.contains(&e.key().0))
@@ -1419,8 +1422,8 @@ impl LibreFangKernel {
                 .collect();
             total_removed += stale.len();
             for key in &stale {
-                self.injection_senders.remove(key);
-                self.injection_receivers.remove(key);
+                self.events.injection_senders.remove(key);
+                self.events.injection_receivers.remove(key);
             }
         }
 
@@ -1428,6 +1431,7 @@ impl LibreFangKernel {
         {
             let ttl = std::time::Duration::from_secs(30 * 60);
             let stale: Vec<String> = self
+                .events
                 .assistant_routes
                 .iter()
                 .filter(|e| e.value().1.elapsed() > ttl)
@@ -1435,7 +1439,7 @@ impl LibreFangKernel {
                 .collect();
             total_removed += stale.len();
             for key in stale {
-                self.assistant_routes.remove(&key);
+                self.events.assistant_routes.remove(&key);
             }
         }
 
@@ -1487,14 +1491,15 @@ impl LibreFangKernel {
         // 8. route_divergence — remove keys no longer present in assistant_routes
         {
             let stale: Vec<String> = self
+                .events
                 .route_divergence
                 .iter()
-                .filter(|e| !self.assistant_routes.contains_key(e.key()))
+                .filter(|e| !self.events.assistant_routes.contains_key(e.key()))
                 .map(|e| e.key().clone())
                 .collect();
             total_removed += stale.len();
             for key in stale {
-                self.route_divergence.remove(&key);
+                self.events.route_divergence.remove(&key);
             }
         }
 
@@ -1522,7 +1527,7 @@ impl LibreFangKernel {
         total_removed += self.mesh.delivery_tracker.gc_stale_agents(&live_agents);
 
         // 11. event_bus agent channels — remove channels for dead agents
-        total_removed += self.event_bus.gc_stale_channels(&live_agents);
+        total_removed += self.events.event_bus.gc_stale_channels(&live_agents);
 
         // 10. sessions — delete orphan sessions for agents no longer in registry
         {

@@ -5,7 +5,6 @@ use crate::background::{self, BackgroundExecutor};
 use crate::capabilities::CapabilityManager;
 use crate::config::load_config;
 use crate::error::{KernelError, KernelResult};
-use crate::event_bus::EventBus;
 use crate::metering::MeteringEngine;
 use crate::registry::AgentRegistry;
 use crate::router;
@@ -51,7 +50,6 @@ use async_trait::async_trait;
 use librefang_channels::types::SenderContext;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 // `Ordering` is no longer used in this file's non-test code (Phase 3a moved
 // the last unprefixed-`Ordering` users into `kernel::accessors`); the
 // remaining mod.rs sites all spell it `std::sync::atomic::Ordering::*`
@@ -515,7 +513,7 @@ impl std::fmt::Debug for RotationKeySpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum AssistantRouteTarget {
+pub(crate) enum AssistantRouteTarget {
     Specialist(String),
     Hand(String),
 }
@@ -662,12 +660,10 @@ pub struct LibreFangKernel {
     pub(crate) agent_identities: Arc<crate::agent_identity_registry::AgentIdentityRegistry>,
     /// Capability manager.
     pub(crate) capabilities: CapabilityManager,
-    /// Event bus.
-    pub(crate) event_bus: EventBus,
-    /// Session lifecycle event bus (push-based pub/sub for session-scoped events).
-    pub(crate) session_lifecycle_bus: Arc<crate::session_lifecycle::SessionLifecycleBus>,
-    /// Per-session stream-event hub for multi-client SSE attach.
-    pub(crate) session_stream_hub: Arc<crate::session_stream_hub::SessionStreamHub>,
+    /// Event buses + mid-turn injection channels + sticky routing
+    /// state + session-stream-hub GC guard. See
+    /// [`subsystems::EventSubsystem`].
+    pub(crate) events: subsystems::EventSubsystem,
     /// Agent scheduler.
     pub(crate) scheduler: AgentScheduler,
     /// Memory substrate.
@@ -782,22 +778,6 @@ pub struct LibreFangKernel {
     /// fresh `instance_id` doesn't accumulate stale mutexes across
     /// activate/deactivate cycles.
     hand_runtime_override_locks: dashmap::DashMap<uuid::Uuid, Arc<std::sync::Mutex<()>>>,
-    /// Per-(agent, session) mid-turn injection senders; keyed by session so concurrent
-    /// sessions on the same agent each get their own channel.
-    pub(crate) injection_senders:
-        dashmap::DashMap<(AgentId, SessionId), tokio::sync::mpsc::Sender<AgentLoopSignal>>,
-    /// Per-(agent, session) injection receivers, created alongside senders
-    /// and consumed by the agent loop.
-    injection_receivers: dashmap::DashMap<
-        (AgentId, SessionId),
-        Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<AgentLoopSignal>>>,
-    >,
-    /// Sticky assistant routing per conversation (assistant + sender/thread).
-    /// Preserves follow-up context for brief messages after a route to a specialist/hand.
-    assistant_routes: dashmap::DashMap<String, (AssistantRouteTarget, std::time::Instant)>,
-    /// Consecutive-mismatch counters for `StickyHeuristic` auto-routing.
-    /// Maps the same cache key as `assistant_routes` to a mismatch count.
-    route_divergence: dashmap::DashMap<String, u32>,
     /// Per-agent decision traces from the most recent message exchange.
     /// Stored for retrieval via `/api/agents/{id}/traces`.
     pub(crate) decision_traces:
@@ -810,8 +790,6 @@ pub struct LibreFangKernel {
     self_handle: OnceLock<Weak<LibreFangKernel>>,
     /// Whether we've already logged the "no provider" audit entry (prevents spam).
     pub(crate) provider_unconfigured_logged: std::sync::atomic::AtomicBool,
-    /// Idempotency guard for the session-stream-hub idle GC task.
-    session_stream_hub_gc_started: AtomicBool,
     /// Config reload barrier — write-locked during `apply_hot_actions_inner` to prevent
     /// concurrent readers from seeing a half-updated configuration (e.g. new provider
     /// URLs but old default model). Read-locked in message hot paths so multiple
@@ -1780,6 +1758,7 @@ impl LibreFangKernel {
             (AgentId, SessionId),
             tokio::sync::mpsc::Sender<AgentLoopSignal>,
         )> = self
+            .events
             .injection_senders
             .iter()
             .filter(|e| e.key().0 == *agent_id)
@@ -1831,7 +1810,7 @@ impl LibreFangKernel {
             }
         }
         for key in closed_keys {
-            self.injection_senders.remove(&key);
+            self.events.injection_senders.remove(&key);
         }
         delivered
     }
