@@ -810,3 +810,128 @@ async fn cron_job_get_response_session_fields_default_zero_when_no_session() {
     assert_eq!(body["session_message_count"].as_u64(), Some(0), "{body:?}");
     assert_eq!(body["session_token_count"].as_u64(), Some(0), "{body:?}");
 }
+
+// =============================================================================
+// SSRF coverage on PUT /api/cron/jobs/{id}  (#4732)
+// =============================================================================
+//
+// `add_job` validates webhook hosts at create-time, but `update_job` and
+// `set_delivery_targets` historically skipped that check — letting an
+// authenticated client install a webhook pointing at the daemon itself,
+// RFC 1918 space, or cloud-metadata services by routing through the PUT
+// path. Validation now runs on every mutation surface; these tests pin
+// the wire-level behaviour so a future refactor can't silently regress
+// the boundary.
+
+/// Helper: seed a cron job directly via the kernel and return its id as
+/// a UUID-string suitable for the `/api/cron/jobs/{id}` path.
+async fn seed_cron_job(h: &Harness) -> String {
+    use chrono::Utc;
+    use librefang_types::agent::AgentId;
+    use librefang_types::scheduler::{CronAction, CronDelivery, CronJob, CronJobId, CronSchedule};
+
+    let job = CronJob {
+        id: CronJobId::new(),
+        agent_id: AgentId::new(),
+        name: "ssrf-fixture".to_string(),
+        enabled: true,
+        schedule: CronSchedule::Every { every_secs: 3600 },
+        action: CronAction::SystemEvent {
+            text: "ping".to_string(),
+        },
+        delivery: CronDelivery::None,
+        delivery_targets: Vec::new(),
+        peer_id: None,
+        session_mode: None,
+        created_at: Utc::now(),
+        last_run: None,
+        next_run: None,
+    };
+    let id = h
+        ._state
+        .kernel
+        .cron()
+        .add_job(job, false)
+        .expect("seed cron add_job");
+    id.0.to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_job_update_rejects_ssrf_webhook_in_delivery() {
+    let h = boot().await;
+    let id = seed_cron_job(&h).await;
+
+    // Link-local cloud-metadata IP — pre-#4732 update path accepted it.
+    let body = serde_json::json!({
+        "delivery": {"kind": "webhook", "url": "http://169.254.169.254/latest/meta-data/"}
+    });
+    let (status, response) =
+        json_request(&h, Method::PUT, &format!("/api/cron/jobs/{id}"), Some(body)).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "must be 400, not 404 (#4732 mapping): {response:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_job_update_rejects_ssrf_webhook_in_delivery_targets() {
+    let h = boot().await;
+    let id = seed_cron_job(&h).await;
+
+    // Hex-form loopback — `0x7f000001` == `127.0.0.1`. The pre-#4732
+    // string-prefix logic missed numeric IPv4 forms entirely.
+    let body = serde_json::json!({
+        "delivery_targets": [
+            {"type": "webhook", "url": "http://0x7f000001/hook"}
+        ]
+    });
+    let (status, response) =
+        json_request(&h, Method::PUT, &format!("/api/cron/jobs/{id}"), Some(body)).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "hex-form loopback must be rejected: {response:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_job_update_rejects_v4_mapped_v6_loopback_in_delivery_targets() {
+    let h = boot().await;
+    let id = seed_cron_job(&h).await;
+
+    // IPv4-mapped IPv6 — bracketed `[::ffff:127.0.0.1]` resolves
+    // (transparently to most syscalls) to plain 127.0.0.1.
+    let body = serde_json::json!({
+        "delivery_targets": [
+            {"type": "webhook", "url": "http://[::ffff:127.0.0.1]/hook"}
+        ]
+    });
+    let (status, response) =
+        json_request(&h, Method::PUT, &format!("/api/cron/jobs/{id}"), Some(body)).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "IPv4-mapped IPv6 loopback must be rejected: {response:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_job_update_accepts_public_webhook_in_delivery_targets() {
+    let h = boot().await;
+    let id = seed_cron_job(&h).await;
+
+    // Sanity check: a public-looking https webhook still succeeds.
+    let body = serde_json::json!({
+        "delivery_targets": [
+            {"type": "webhook", "url": "https://example.com/hook"}
+        ]
+    });
+    let (status, response) =
+        json_request(&h, Method::PUT, &format!("/api/cron/jobs/{id}"), Some(body)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "public webhook must still be accepted: {response:?}"
+    );
+}

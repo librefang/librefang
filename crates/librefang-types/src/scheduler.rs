@@ -6,6 +6,7 @@
 use crate::agent::{AgentId, SessionMode};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 use uuid::Uuid;
 
 /// Maximum number of scheduled jobs per agent.
@@ -656,29 +657,7 @@ impl CronJob {
     }
 
     fn validate_delivery(&self) -> Result<(), String> {
-        match &self.delivery {
-            CronDelivery::Channel { channel, to } => {
-                if channel.is_empty() {
-                    return Err("delivery channel must not be empty".into());
-                }
-                if to.is_empty() {
-                    return Err("delivery recipient must not be empty".into());
-                }
-            }
-            CronDelivery::Webhook { url } => {
-                if !url.starts_with("http://") && !url.starts_with("https://") {
-                    return Err("webhook URL must start with http:// or https://".into());
-                }
-                if url.len() > MAX_WEBHOOK_URL_LEN {
-                    return Err(format!(
-                        "webhook URL too long ({} chars, max {MAX_WEBHOOK_URL_LEN})",
-                        url.len()
-                    ));
-                }
-            }
-            CronDelivery::None | CronDelivery::LastChannel => {}
-        }
-        Ok(())
+        validate_cron_delivery(&self.delivery)
     }
 
     /// Validate the multi-destination `delivery_targets` list. Cron jobs are
@@ -686,137 +665,219 @@ impl CronJob {
     /// path/host restrictions live here at the input boundary — by the
     /// time a target reaches `cron_delivery::deliver_*` we trust it.
     fn validate_delivery_targets(&self) -> Result<(), String> {
-        for (i, target) in self.delivery_targets.iter().enumerate() {
-            match target {
-                CronDeliveryTarget::Channel {
-                    channel_type,
-                    recipient,
-                    ..
-                } => {
-                    if channel_type.trim().is_empty() {
-                        return Err(format!(
-                            "delivery_targets[{i}]: channel_type must not be empty"
-                        ));
-                    }
-                    if recipient.trim().is_empty() {
-                        return Err(format!(
-                            "delivery_targets[{i}]: recipient must not be empty"
-                        ));
-                    }
+        validate_cron_delivery_targets(&self.delivery_targets)
+    }
+}
+
+/// Validate a single [`CronDelivery`]. Exposed as a free function so the
+/// kernel `update_job` / `set_delivery_targets` paths can re-run the same
+/// check on an in-place mutation without cloning the whole job (#4732).
+pub fn validate_cron_delivery(delivery: &CronDelivery) -> Result<(), String> {
+    match delivery {
+        CronDelivery::Channel { channel, to } => {
+            if channel.is_empty() {
+                return Err("delivery channel must not be empty".into());
+            }
+            if to.is_empty() {
+                return Err("delivery recipient must not be empty".into());
+            }
+        }
+        CronDelivery::Webhook { url } => validate_webhook_url(url)?,
+        CronDelivery::None | CronDelivery::LastChannel => {}
+    }
+    Ok(())
+}
+
+/// Validate a slice of [`CronDeliveryTarget`]s for the fan-out list.
+/// Returns `Err` with `"delivery_targets[<i>]: …"` prefix so the caller
+/// can surface which entry failed.
+pub fn validate_cron_delivery_targets(targets: &[CronDeliveryTarget]) -> Result<(), String> {
+    for (i, target) in targets.iter().enumerate() {
+        match target {
+            CronDeliveryTarget::Channel {
+                channel_type,
+                recipient,
+                ..
+            } => {
+                if channel_type.trim().is_empty() {
+                    return Err(format!(
+                        "delivery_targets[{i}]: channel_type must not be empty"
+                    ));
                 }
-                CronDeliveryTarget::Webhook { url, .. } => {
-                    if !url.starts_with("http://") && !url.starts_with("https://") {
-                        return Err(format!(
-                            "delivery_targets[{i}]: webhook URL must start with http:// or https://"
-                        ));
-                    }
-                    if url.len() > MAX_WEBHOOK_URL_LEN {
-                        return Err(format!(
-                            "delivery_targets[{i}]: webhook URL too long ({} chars, max {MAX_WEBHOOK_URL_LEN})",
-                            url.len()
-                        ));
-                    }
-                    // SSRF: refuse hosts that point at the daemon itself or
-                    // at cloud metadata services. Best-effort URL parse —
-                    // malformed URLs were already rejected by the scheme
-                    // prefix check above.
-                    if let Some(host) = extract_url_host(url) {
-                        if is_blocked_webhook_host(&host) {
-                            return Err(format!(
-                                "delivery_targets[{i}]: webhook host '{host}' is not allowed (loopback / link-local / metadata service)"
-                            ));
-                        }
-                    }
+                if recipient.trim().is_empty() {
+                    return Err(format!(
+                        "delivery_targets[{i}]: recipient must not be empty"
+                    ));
                 }
-                CronDeliveryTarget::LocalFile { path, .. } => {
-                    if path.trim().is_empty() {
-                        return Err(format!(
-                            "delivery_targets[{i}]: file path must not be empty"
-                        ));
-                    }
-                    let p = std::path::Path::new(path);
-                    if p.is_absolute() {
-                        return Err(format!(
-                            "delivery_targets[{i}]: LocalFile path must be workspace-relative, not absolute ({path})"
-                        ));
-                    }
-                    // Windows drive-letter form (`C:\...` or `C:/...`) is
-                    // not flagged absolute on Unix — guard explicitly.
-                    let bytes = path.as_bytes();
-                    if bytes.len() >= 3
-                        && bytes[0].is_ascii_alphabetic()
-                        && bytes[1] == b':'
-                        && (bytes[2] == b'\\' || bytes[2] == b'/')
-                    {
-                        return Err(format!(
-                            "delivery_targets[{i}]: LocalFile path must be workspace-relative ({path})"
-                        ));
-                    }
-                    if p.components()
-                        .any(|c| matches!(c, std::path::Component::ParentDir))
-                    {
-                        return Err(format!(
-                            "delivery_targets[{i}]: LocalFile path must not contain '..' ({path})"
-                        ));
-                    }
+            }
+            CronDeliveryTarget::Webhook { url, .. } => {
+                validate_webhook_url(url).map_err(|e| format!("delivery_targets[{i}]: {e}"))?;
+            }
+            CronDeliveryTarget::LocalFile { path, .. } => {
+                if path.trim().is_empty() {
+                    return Err(format!(
+                        "delivery_targets[{i}]: file path must not be empty"
+                    ));
                 }
-                CronDeliveryTarget::Email { to, .. } => {
-                    if to.trim().is_empty() {
-                        return Err(format!(
-                            "delivery_targets[{i}]: email recipient must not be empty"
-                        ));
-                    }
+                let p = std::path::Path::new(path);
+                if p.is_absolute() {
+                    return Err(format!(
+                        "delivery_targets[{i}]: LocalFile path must be workspace-relative, not absolute ({path})"
+                    ));
+                }
+                // Windows drive-letter form (`C:\...` or `C:/...`) is
+                // not flagged absolute on Unix — guard explicitly.
+                let bytes = path.as_bytes();
+                if bytes.len() >= 3
+                    && bytes[0].is_ascii_alphabetic()
+                    && bytes[1] == b':'
+                    && (bytes[2] == b'\\' || bytes[2] == b'/')
+                {
+                    return Err(format!(
+                        "delivery_targets[{i}]: LocalFile path must be workspace-relative ({path})"
+                    ));
+                }
+                if p.components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return Err(format!(
+                        "delivery_targets[{i}]: LocalFile path must not contain '..' ({path})"
+                    ));
+                }
+            }
+            CronDeliveryTarget::Email { to, .. } => {
+                if to.trim().is_empty() {
+                    return Err(format!(
+                        "delivery_targets[{i}]: email recipient must not be empty"
+                    ));
                 }
             }
         }
-        Ok(())
     }
+    Ok(())
 }
 
-/// Extract the lowercased host from a URL string. Returns `None` if the URL
-/// cannot be parsed. Used by webhook SSRF validation.
-fn extract_url_host(url: &str) -> Option<String> {
-    // Strip scheme.
-    let after_scheme = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))?;
-    // Host runs until the next '/', '?', '#', or end-of-string.
-    let host_end = after_scheme
-        .find(['/', '?', '#'])
-        .unwrap_or(after_scheme.len());
-    let host_part = &after_scheme[..host_end];
-    // Strip optional userinfo (user:pass@host).
-    let host_part = host_part.rsplit('@').next().unwrap_or(host_part);
-    // Strip optional port. IPv6 addresses are wrapped in `[...]` so a colon
-    // outside brackets is the port separator.
-    let host = if let Some(stripped) = host_part.strip_prefix('[') {
-        // IPv6 — keep the bracketed form for downstream matching.
-        let close = stripped.find(']')?;
-        &host_part[..=close + 1 - 1] // up to and including ']'
-    } else if let Some(colon) = host_part.find(':') {
-        &host_part[..colon]
-    } else {
-        host_part
-    };
-    if host.is_empty() {
-        None
-    } else {
-        Some(host.to_ascii_lowercase())
+/// Validate a webhook URL against SSRF: scheme must be http/https, length
+/// within `MAX_WEBHOOK_URL_LEN`, and the host (after WHATWG URL
+/// normalisation) must not point at the daemon itself, RFC 1918 / shared
+/// CGNAT / link-local space, IPv6 ULA / link-local, or known cloud-metadata
+/// services.
+///
+/// `url::Url::parse` normalises non-canonical IPv4 forms — hex
+/// `0x7f000001`, single-decimal `2130706433`, octal-dotted `0177.0.0.1` —
+/// and IPv4-mapped IPv6 (`::ffff:127.0.0.1`) before the literal check, so
+/// these bypass surfaces (#4732) collapse to standard `127.0.0.1` /
+/// `::ffff:7f00:1` shapes that `is_blocked_ip` recognises.
+///
+/// DNS-blind: a hostname that resolves to a private IP only at fire-time
+/// (DNS rebind) is NOT caught here; the resolver-time check lives in
+/// `librefang-api::webhook_store::validate_webhook_url_resolved` (#3701).
+pub fn validate_webhook_url(url: &str) -> Result<(), String> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("webhook URL must start with http:// or https://".into());
     }
+    if url.len() > MAX_WEBHOOK_URL_LEN {
+        return Err(format!(
+            "webhook URL too long ({} chars, max {MAX_WEBHOOK_URL_LEN})",
+            url.len()
+        ));
+    }
+    let parsed =
+        ::url::Url::parse(url).map_err(|e| format!("webhook URL is not parseable: {e}"))?;
+    match parsed.host() {
+        Some(::url::Host::Ipv4(v4)) => {
+            let ip = IpAddr::V4(v4);
+            if is_blocked_ip(ip) {
+                return Err(format!(
+                    "webhook host '{v4}' is not allowed (loopback / unspecified / private / link-local / metadata)"
+                ));
+            }
+        }
+        Some(::url::Host::Ipv6(v6)) => {
+            // Canonicalise IPv4-mapped IPv6 before the rule check so a
+            // transparent connect to the embedded IPv4 cannot bypass.
+            let ip = canonical_ip(IpAddr::V6(v6));
+            if is_blocked_ip(ip) {
+                return Err(format!(
+                    "webhook host '{v6}' is not allowed (loopback / unspecified / private / link-local / metadata)"
+                ));
+            }
+        }
+        Some(::url::Host::Domain(host)) => {
+            let lower = host.to_ascii_lowercase();
+            if is_blocked_domain(&lower) {
+                return Err(format!(
+                    "webhook host '{host}' is not allowed (loopback / metadata / .internal)"
+                ));
+            }
+        }
+        None => {
+            // Special schemes always populate `host`; an empty host is
+            // either a bug in url or a malformed input we should refuse.
+            return Err("webhook URL has no host component".into());
+        }
+    }
+    Ok(())
 }
 
-/// Hosts the daemon refuses to webhook to. Mirrors the dashboard editor
-/// so users see a consistent rejection regardless of where the target
-/// was created.
-fn is_blocked_webhook_host(host: &str) -> bool {
+/// Hostnames the daemon refuses to webhook to. Mirrors the dashboard
+/// editor so users see a consistent rejection regardless of which surface
+/// created the target.
+fn is_blocked_domain(lower: &str) -> bool {
     matches!(
-        host,
-        "localhost" | "metadata" | "metadata.google.internal" | "metadata.aws.amazon.com"
-    ) || host.starts_with("127.")
-        || host.starts_with("169.254.")
-        || host == "[::1]"
-        || host.starts_with("[fe80:")
-        || host.starts_with("fe80:")
+        lower,
+        "localhost"
+            | "metadata"
+            | "metadata.google.internal"
+            | "metadata.aws.amazon.com"
+            | "instance-data"
+            | "instance-data.ec2.internal"
+    ) || lower.ends_with(".localhost")
+        || lower.ends_with(".internal")
+}
+
+/// True for IPs that must never be webhooked to: loopback (`127.0.0.0/8`,
+/// `::1`), unspecified (`0.0.0.0`, `::`), RFC 1918 private (`10/8`,
+/// `172.16/12`, `192.168/16`), CGNAT (`100.64/10`), IPv6 ULA (`fc00::/7`),
+/// multicast (`ff00::/8`), and link-local (`169.254/16`, `fe80::/10`).
+/// Always normalises IPv4-mapped IPv6 first.
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    let ip = canonical_ip(ip);
+    ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip) || is_link_local(ip)
+}
+
+/// Unwrap IPv4-mapped IPv6 (`::ffff:X.X.X.X`) to its IPv4 form. All other
+/// addresses are returned unchanged.
+fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(v6),
+        },
+        IpAddr::V4(_) => ip,
+    }
+}
+
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            // RFC 1918 (`10/8`, `172.16/12`, `192.168/16`) plus
+            // `100.64.0.0/10` (CGNAT shared address space, RFC 6598).
+            v4.is_private() || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
+        }
+        IpAddr::V6(v6) => {
+            let segs = v6.segments();
+            // ULA `fc00::/7` (covers `fd00::/8`) plus multicast `ff00::/8`.
+            (segs[0] & 0xfe00) == 0xfc00 || (segs[0] & 0xff00) == 0xff00
+        }
+    }
+}
+
+fn is_link_local(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1260,12 +1321,15 @@ mod tests {
     }
 
     #[test]
-    fn webhook_http_ok() {
+    fn webhook_http_external_ok() {
+        // Public-looking host on plain http is fine — the scheme is
+        // permitted (legacy on-prem systems), only SSRF-prone hosts are
+        // refused.
         let mut job = valid_job();
         job.delivery = CronDelivery::Webhook {
-            url: "http://localhost:8080/hook".into(),
+            url: "http://example.com:8080/hook".into(),
         };
-        assert!(job.validate(0).is_ok());
+        assert!(job.validate(0).is_ok(), "{:?}", job.validate(0));
     }
 
     #[test]
@@ -1275,6 +1339,139 @@ mod tests {
             url: "https://example.com/hook".into(),
         };
         assert!(job.validate(0).is_ok());
+    }
+
+    // -- Webhook SSRF coverage (#4732) -------------------------------------
+    //
+    // Each URL form below either points at a private/loopback/metadata
+    // address directly or relies on a host-form normalisation step
+    // (numeric IPv4, octal/hex octets, IPv4-mapped IPv6) that the
+    // pre-#4732 string-prefix logic missed.
+
+    fn assert_webhook_rejected(url: &str) {
+        let mut job = valid_job();
+        job.delivery = CronDelivery::Webhook { url: url.into() };
+        let err = job
+            .validate(0)
+            .expect_err(&format!("expected SSRF rejection for {url}"));
+        assert!(
+            err.contains("not allowed") || err.contains("not parseable"),
+            "unexpected error for {url}: {err}"
+        );
+    }
+
+    #[test]
+    fn webhook_localhost_name_rejected() {
+        assert_webhook_rejected("http://localhost:8080/hook");
+    }
+
+    #[test]
+    fn webhook_metadata_aws_rejected() {
+        assert_webhook_rejected("http://metadata.aws.amazon.com/latest/meta-data/");
+    }
+
+    #[test]
+    fn webhook_metadata_gcp_rejected() {
+        assert_webhook_rejected("http://metadata.google.internal/");
+    }
+
+    #[test]
+    fn webhook_dotinternal_suffix_rejected() {
+        assert_webhook_rejected("http://kube-apiserver.cluster.internal/");
+    }
+
+    #[test]
+    fn webhook_loopback_dotted_rejected() {
+        assert_webhook_rejected("http://127.0.0.1/");
+        assert_webhook_rejected("http://127.255.255.254/");
+    }
+
+    #[test]
+    fn webhook_unspecified_v4_rejected() {
+        assert_webhook_rejected("http://0.0.0.0/");
+    }
+
+    #[test]
+    fn webhook_private_v4_rejected() {
+        assert_webhook_rejected("http://10.0.0.1/");
+        assert_webhook_rejected("http://10.255.255.255/");
+        assert_webhook_rejected("http://172.16.0.1/");
+        assert_webhook_rejected("http://172.31.255.255/");
+        assert_webhook_rejected("http://192.168.1.1/");
+    }
+
+    #[test]
+    fn webhook_cgnat_rejected() {
+        assert_webhook_rejected("http://100.64.0.1/");
+    }
+
+    #[test]
+    fn webhook_link_local_v4_rejected() {
+        assert_webhook_rejected("http://169.254.169.254/");
+    }
+
+    #[test]
+    fn webhook_loopback_hex_form_rejected() {
+        // 0x7f000001 == 127.0.0.1 — WHATWG URL parser normalises both
+        // single-component hex and decimal.
+        assert_webhook_rejected("http://0x7f000001/");
+    }
+
+    #[test]
+    fn webhook_loopback_decimal_form_rejected() {
+        // 2130706433 == 127.0.0.1.
+        assert_webhook_rejected("http://2130706433/");
+    }
+
+    #[test]
+    fn webhook_loopback_octal_form_rejected() {
+        // 0177.0.0.1 == 127.0.0.1.
+        assert_webhook_rejected("http://0177.0.0.1/");
+    }
+
+    #[test]
+    fn webhook_loopback_v6_rejected() {
+        assert_webhook_rejected("http://[::1]/");
+    }
+
+    #[test]
+    fn webhook_unspecified_v6_rejected() {
+        assert_webhook_rejected("http://[::]/");
+    }
+
+    #[test]
+    fn webhook_v4_mapped_v6_rejected() {
+        // ::ffff:127.0.0.1 — IPv4-mapped IPv6 wrapping loopback.
+        assert_webhook_rejected("http://[::ffff:127.0.0.1]/");
+        // ::ffff:7f00:1 — same address in compact hex form.
+        assert_webhook_rejected("http://[::ffff:7f00:1]/");
+    }
+
+    #[test]
+    fn webhook_link_local_v6_rejected() {
+        assert_webhook_rejected("http://[fe80::1]/");
+    }
+
+    #[test]
+    fn webhook_unique_local_v6_rejected() {
+        assert_webhook_rejected("http://[fc00::1]/");
+        assert_webhook_rejected("http://[fd12:3456:789a::1]/");
+    }
+
+    #[test]
+    fn webhook_delivery_targets_share_host_validation() {
+        // Same blocklist must apply through CronDeliveryTarget::Webhook
+        // (which is what `delivery_targets` fan-out exposes).
+        let mut job = valid_job();
+        job.delivery_targets = vec![CronDeliveryTarget::Webhook {
+            url: "http://0x7f000001/hook".into(),
+            auth_header: None,
+        }];
+        let err = job.validate(0).expect_err("hex-form loopback must reject");
+        assert!(
+            err.starts_with("delivery_targets[0]:") && err.contains("not allowed"),
+            "{err}"
+        );
     }
 
     // -- Delivery: None / LastChannel --

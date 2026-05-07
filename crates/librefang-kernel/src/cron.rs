@@ -284,23 +284,31 @@ impl CronScheduler {
                     meta.job.action = action;
                 }
 
-                // Replace delivery if provided.
+                // Replace delivery if provided. Re-runs the same SSRF /
+                // shape checks `add_job` does so an attacker can't bypass
+                // host-blocklist validation by routing through update
+                // (#4732).
                 if !updates["delivery"].is_null() {
                     let delivery: librefang_types::scheduler::CronDelivery =
                         serde_json::from_value(updates["delivery"].clone()).map_err(|e| {
                             LibreFangError::Internal(format!("Invalid delivery: {e}"))
                         })?;
+                    librefang_types::scheduler::validate_cron_delivery(&delivery)
+                        .map_err(LibreFangError::InvalidInput)?;
                     meta.job.delivery = delivery;
                 }
 
                 // Replace fan-out delivery_targets if provided. Must be an
                 // array of CronDeliveryTarget objects; an empty array clears
-                // all targets.
+                // all targets. Same SSRF revalidation as the `delivery`
+                // arm above (#4732).
                 if !updates["delivery_targets"].is_null() {
                     let targets: Vec<librefang_types::scheduler::CronDeliveryTarget> =
                         serde_json::from_value(updates["delivery_targets"].clone()).map_err(
                             |e| LibreFangError::Internal(format!("Invalid delivery_targets: {e}")),
                         )?;
+                    librefang_types::scheduler::validate_cron_delivery_targets(&targets)
+                        .map_err(LibreFangError::InvalidInput)?;
                     meta.job.delivery_targets = targets;
                 }
 
@@ -320,6 +328,11 @@ impl CronScheduler {
         id: CronJobId,
         targets: Vec<librefang_types::scheduler::CronDeliveryTarget>,
     ) -> LibreFangResult<()> {
+        // Validate before swapping so an SSRF-blocking webhook host or an
+        // absolute LocalFile path is rejected at the same input boundary
+        // `add_job` enforces (#4732).
+        librefang_types::scheduler::validate_cron_delivery_targets(&targets)
+            .map_err(LibreFangError::InvalidInput)?;
         match self.jobs.get_mut(&id) {
             Some(mut meta) => {
                 meta.job.delivery_targets = targets;
@@ -1816,7 +1829,9 @@ mod tests {
         // Initially empty.
         assert!(sched.get_job(id).unwrap().delivery_targets.is_empty());
 
-        // Set two targets.
+        // Set two targets. LocalFile paths must be workspace-relative —
+        // an absolute `/tmp/x.log` would now fail SSRF/path validation
+        // alongside the webhook host check (#4732).
         let targets = vec![
             CronDeliveryTarget::Channel {
                 channel_type: "slack".into(),
@@ -1825,7 +1840,7 @@ mod tests {
                 account_id: None,
             },
             CronDeliveryTarget::LocalFile {
-                path: "/tmp/x.log".into(),
+                path: "out/x.log".into(),
                 append: true,
             },
         ];
@@ -1843,6 +1858,68 @@ mod tests {
         // Clear with an empty Vec.
         sched.set_delivery_targets(id, Vec::new()).unwrap();
         assert!(sched.get_job(id).unwrap().delivery_targets.is_empty());
+    }
+
+    /// SSRF-prone webhook hosts must be rejected on the
+    /// `set_delivery_targets` path, not just on `add_job` (#4732).
+    #[test]
+    fn set_delivery_targets_rejects_ssrf_webhook() {
+        use librefang_types::scheduler::CronDeliveryTarget;
+
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let id = sched.add_job(make_job(agent), false).unwrap();
+
+        // Hex-form loopback (`0x7f000001` == `127.0.0.1`) — the
+        // pre-#4732 prefix-string check missed this entirely.
+        let targets = vec![CronDeliveryTarget::Webhook {
+            url: "http://0x7f000001/hook".into(),
+            auth_header: None,
+        }];
+        let err = sched
+            .set_delivery_targets(id, targets)
+            .expect_err("SSRF webhook must be refused");
+        assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
+
+        // Original (empty) target list must remain — failed validation
+        // must not partially mutate state.
+        assert!(sched.get_job(id).unwrap().delivery_targets.is_empty());
+    }
+
+    /// `update_job` previously skipped delivery / delivery_targets
+    /// validation entirely — an attacker could route through PUT to
+    /// install an SSRF webhook even when `add_job` would have rejected
+    /// the same payload (#4732).
+    #[test]
+    fn update_job_rejects_ssrf_webhook_in_delivery() {
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let id = sched.add_job(make_job(agent), false).unwrap();
+
+        let updates = serde_json::json!({
+            "delivery": {"kind": "webhook", "url": "http://169.254.169.254/latest/meta-data/"}
+        });
+        let err = sched
+            .update_job(id, &updates)
+            .expect_err("link-local metadata IP must be refused");
+        assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
+    }
+
+    #[test]
+    fn update_job_rejects_ssrf_webhook_in_delivery_targets() {
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let id = sched.add_job(make_job(agent), false).unwrap();
+
+        // Numeric/decimal-form loopback — also a #4732 bypass surface
+        // before the WHATWG URL parser was wired in.
+        let updates = serde_json::json!({
+            "delivery_targets": [{"type": "webhook", "url": "http://2130706433/hook"}]
+        });
+        let err = sched
+            .update_job(id, &updates)
+            .expect_err("decimal-form loopback must be refused");
+        assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
     }
 
     #[test]
@@ -1864,7 +1941,7 @@ mod tests {
         let updates = serde_json::json!({
             "delivery_targets": [
                 {"type": "webhook", "url": "https://example.com/hook"},
-                {"type": "local_file", "path": "/tmp/y.log"},
+                {"type": "local_file", "path": "out/y.log"},
             ]
         });
         let updated = sched.update_job(id, &updates).unwrap();
