@@ -231,6 +231,10 @@ impl ApprovalManager {
                 route_to: Vec::new(),
                 escalation_count: 0,
                 session_id,
+                // The deferred payload is in-memory only; restored rows
+                // can't recover the original LLM `tool_use_id`. ACP
+                // adapter falls back to `approval-{req_id}`.
+                tool_use_id: None,
             };
             info!(
                 request_id = %id,
@@ -1813,6 +1817,7 @@ mod tests {
             route_to: Vec::new(),
             escalation_count: 0,
             session_id: None,
+            tool_use_id: None,
         }
     }
 

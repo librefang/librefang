@@ -119,6 +119,11 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             route_to: Vec::new(),
             escalation_count: 0,
             session_id: session_id.map(|s| s.to_string()),
+            // Blocking path is used by tools that wait inline; the
+            // KernelHandle::request_approval signature does not carry
+            // the originating LLM tool_use_id today, so the ACP
+            // adapter falls back to `approval-{req_id}` for these.
+            tool_use_id: None,
         };
 
         // Publish an ApprovalRequested event so channel adapters can notify users
@@ -274,6 +279,11 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             route_to: Vec::new(),
             escalation_count: 0,
             session_id: session_id.map(|s| s.to_string()),
+            // Carry the LLM-assigned tool_use_id forward so the ACP
+            // adapter can attach the editor's permission modal to the
+            // streaming `ToolCall` card the editor already rendered
+            // (#3313). The deferred payload is the canonical source.
+            tool_use_id: Some(deferred.tool_use_id.clone()),
         };
 
         self.approval_manager

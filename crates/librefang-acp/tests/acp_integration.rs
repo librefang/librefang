@@ -69,6 +69,12 @@ impl MockKernel {
             route_to: vec![],
             escalation_count: 0,
             session_id: Some(lf_session_id.0.to_string()),
+            // Pin a non-None tool_use_id so the bridge exercises the
+            // primary path (use the LLM-assigned id as ToolCallId)
+            // rather than the `approval-{req_id}` fallback. The
+            // round-trip assertions don't check the id, so it stays
+            // synthetic.
+            tool_use_id: Some("toolu_acp_integration_test".into()),
         };
         let _ = self.approval_tx.send(ApprovalEvent::Created(req));
         id

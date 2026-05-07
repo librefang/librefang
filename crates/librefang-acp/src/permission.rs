@@ -108,15 +108,19 @@ async fn dispatch_pending<K: AcpKernel>(
     } else {
         format!("{}: {}", approval.tool_name, approval.action_summary)
     };
-    // The ideal `ToolCallId` here is the LLM-assigned `tool_use_id`
-    // emitted by `StreamEvent::ToolUseStart` — the editor would then
-    // attach the permission modal to the streaming "running tool" card
-    // it already rendered. `ApprovalRequest` doesn't carry that id
-    // today (tracked as a follow-up); prefix `approval-` so the
-    // ToolCallId namespace at least doesn't collide with real
-    // tool-call ids the editor has seen.
+    // Prefer the LLM-assigned `tool_use_id` so the editor's permission
+    // modal attaches to the streaming `ToolCall` card it already
+    // rendered (#3313). Fall back to a clearly-namespaced
+    // `approval-{req_id}` for paths that don't carry one — the
+    // synchronous `KernelHandle::request_approval` blocking path,
+    // dashboard-created manual approvals, and pre-existing rows
+    // restored from sqlite after a daemon restart.
+    let tool_call_id = approval
+        .tool_use_id
+        .clone()
+        .unwrap_or_else(|| format!("approval-{req_id}"));
     let tool_call = ToolCallUpdate::new(
-        ToolCallId::new(format!("approval-{req_id}")),
+        ToolCallId::new(tool_call_id),
         ToolCallUpdateFields::new()
             .title(title)
             .kind(infer_tool_kind(&approval.tool_name)),
