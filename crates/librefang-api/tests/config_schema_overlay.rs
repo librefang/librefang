@@ -241,6 +241,8 @@ fn every_kernel_config_struct_field_is_exposed_via_overlay() {
         "cron_session_max_messages",
         "cron_session_warn_fraction",
         "cron_session_warn_total_tokens",
+        "cron_session_compaction_mode",
+        "cron_session_compaction_keep_recent",
         "include",
         "strict_config",
         "qwen_code_path",

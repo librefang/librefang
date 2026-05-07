@@ -8,8 +8,8 @@
 //! Records expire 24h after creation. Lookup deletes expired rows
 //! opportunistically so the table self-trims without a background job.
 
-use rusqlite::Connection;
-use std::sync::{Arc, Mutex};
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 24-hour replay window per #3637.
@@ -59,12 +59,14 @@ pub trait IdempotencyStore: Send + Sync {
 #[derive(Debug)]
 pub enum IdempotencyError {
     Sqlite(rusqlite::Error),
+    Pool(r2d2::Error),
 }
 
 impl std::fmt::Display for IdempotencyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IdempotencyError::Sqlite(e) => write!(f, "sqlite: {}", e),
+            IdempotencyError::Pool(e) => write!(f, "pool: {}", e),
         }
     }
 }
@@ -73,6 +75,7 @@ impl std::error::Error for IdempotencyError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             IdempotencyError::Sqlite(e) => Some(e),
+            IdempotencyError::Pool(e) => Some(e),
         }
     }
 }
@@ -83,19 +86,25 @@ impl From<rusqlite::Error> for IdempotencyError {
     }
 }
 
+impl From<r2d2::Error> for IdempotencyError {
+    fn from(e: r2d2::Error) -> Self {
+        IdempotencyError::Pool(e)
+    }
+}
+
 /// SQLite-backed idempotency store reusing the substrate connection.
 ///
-/// Sharing the `Arc<Mutex<Connection>>` (handed out via
-/// `MemorySubstrate::usage_conn`) keeps every persisted byte under one
+/// Sharing the substrate connection pool (handed out via
+/// `MemorySubstrate::pool()`) keeps every persisted byte under one
 /// WAL pool — no separate file, no second open call.
 #[derive(Clone)]
 pub struct SqliteIdempotencyStore {
-    conn: Arc<Mutex<Connection>>,
+    pool: Pool<SqliteConnectionManager>,
 }
 
 impl SqliteIdempotencyStore {
-    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+    pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
+        Self { pool }
     }
 }
 
@@ -106,9 +115,23 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// Increment the shared pool-exhaustion counter so operators can see
+/// `pool.get()` failures before they cause user-visible request errors.
+fn record_pool_failure(op: &'static str) {
+    metrics::counter!(
+        "librefang_memory_pool_get_failed_total",
+        "store" => "idempotency",
+        "op" => op,
+    )
+    .increment(1);
+}
+
 impl IdempotencyStore for SqliteIdempotencyStore {
     fn lookup(&self, key: &str) -> Result<Option<StoredRecord>, IdempotencyError> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = self
+            .pool
+            .get()
+            .inspect_err(|_| record_pool_failure("lookup"))?;
         let now = now_unix();
         // Drop the row if it's expired so the lookup behaves like a
         // fresh miss; the write path will then re-INSERT cleanly.
@@ -143,7 +166,10 @@ impl IdempotencyStore for SqliteIdempotencyStore {
         body_hash: &str,
         response: &CachedResponse,
     ) -> Result<(), IdempotencyError> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = self
+            .pool
+            .get()
+            .inspect_err(|_| record_pool_failure("put"))?;
         let now = now_unix();
         let expires = now + TTL_SECONDS;
         conn.execute(
@@ -163,7 +189,10 @@ impl IdempotencyStore for SqliteIdempotencyStore {
     }
 
     fn prune_expired(&self) -> Result<(), IdempotencyError> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = self
+            .pool
+            .get()
+            .inspect_err(|_| record_pool_failure("prune_expired"))?;
         let now = now_unix();
         conn.execute(
             "DELETE FROM idempotency_keys WHERE expires_at <= ?1",
@@ -179,9 +208,12 @@ mod tests {
     use crate::migration::run_migrations;
 
     fn make_store() -> SqliteIdempotencyStore {
-        let conn = Connection::open_in_memory().unwrap();
-        run_migrations(&conn).unwrap();
-        SqliteIdempotencyStore::new(Arc::new(Mutex::new(conn)))
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        run_migrations(&pool.get().unwrap()).unwrap();
+        SqliteIdempotencyStore::new(pool)
     }
 
     #[test]
@@ -220,7 +252,7 @@ mod tests {
         let s = make_store();
         // Insert an already-expired row directly.
         {
-            let conn = s.conn.lock().unwrap();
+            let conn = s.pool.get().expect("pool");
             conn.execute(
                 "INSERT INTO idempotency_keys \
                  (key, body_hash, response_status, response_body, created_at, expires_at) \

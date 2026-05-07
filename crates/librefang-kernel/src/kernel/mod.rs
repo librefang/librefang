@@ -2949,10 +2949,11 @@ impl LibreFangKernel {
             .sqlite_path
             .clone()
             .unwrap_or_else(|| config.data_dir.join("librefang.db"));
-        let mut substrate = MemorySubstrate::open_with_chunking(
+        let mut substrate = MemorySubstrate::open_with_pool_size(
             &db_path,
             config.memory.decay_rate as f32,
             config.memory.chunking.clone(),
+            config.memory.pool_size,
         )
         .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?;
 
@@ -3330,13 +3331,14 @@ impl LibreFangKernel {
 
         // Initialize metering engine (shares the same SQLite connection as the memory substrate)
         let metering = Arc::new(MeteringEngine::new(Arc::new(
-            librefang_memory::usage::UsageStore::new(memory.usage_conn()),
+            librefang_memory::usage::UsageStore::new(memory.pool()),
         )));
 
         // Initialize prompt versioning and A/B experiment store with its own connection
         // to avoid conflicts with UsageStore concurrent writes
-        let prompt_store = librefang_memory::PromptStore::new_with_path(&db_path)
-            .map_err(|e| KernelError::BootFailed(format!("Prompt store init failed: {e}")))?;
+        let prompt_store =
+            librefang_memory::PromptStore::new_with_path(&db_path, config.memory.pool_size)
+                .map_err(|e| KernelError::BootFailed(format!("Prompt store init failed: {e}")))?;
 
         let supervisor = Supervisor::new();
         let background = BackgroundExecutor::with_concurrency(
@@ -3811,10 +3813,8 @@ impl LibreFangKernel {
         }
 
         // Initialize execution approval manager
-        let approval_manager = crate::approval::ApprovalManager::new_with_db(
-            config.approval.clone(),
-            memory.usage_conn(),
-        );
+        let approval_manager =
+            crate::approval::ApprovalManager::new_with_db(config.approval.clone(), memory.pool());
 
         // Validate notification config — warn (not error) on unrecognized values
         {
@@ -3962,10 +3962,7 @@ impl LibreFangKernel {
             template_registry: WorkflowTemplateRegistry::new(),
             triggers: trigger_engine,
             background,
-            audit_log: Arc::new(AuditLog::with_db_anchored(
-                memory.usage_conn(),
-                audit_anchor_path,
-            )),
+            audit_log: Arc::new(AuditLog::with_db_anchored(memory.pool(), audit_anchor_path)),
             metering,
             // ArcSwap lets config_reload rebuild on `[llm.auxiliary]` edits
             // without invalidating any long-lived `Arc<Kernel>` handle.
