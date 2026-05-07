@@ -190,7 +190,7 @@ impl ApprovalManager {
     ) {
         let Ok(guard) = conn.get() else { return };
         let Ok(mut stmt) = guard.prepare(
-            "SELECT id, agent_id, session_id, tool_name, tool_input, created_at, expires_at, tool_use_id \
+            "SELECT id, agent_id, session_id, tool_name, tool_input, created_at, expires_at, tool_use_id, deferred_payload \
              FROM pending_approvals",
         ) else {
             return;
@@ -205,6 +205,7 @@ impl ApprovalManager {
                 row.get::<_, i64>(5)?,
                 row.get::<_, Option<i64>>(6)?,
                 row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<Vec<u8>>>(8)?,
             ))
         });
         let Ok(rows) = rows else { return };
@@ -218,6 +219,7 @@ impl ApprovalManager {
                 created_at_unix,
                 _expires_at,
                 tool_use_id,
+                deferred_blob,
             ) = row;
             let Ok(id) = id_str.parse::<Uuid>() else {
                 warn!(id = %id_str, "pending_approvals: skipping row with invalid UUID");
@@ -246,9 +248,29 @@ impl ApprovalManager {
                 // (`request_approval`) and dashboard-manual paths.
                 tool_use_id,
             };
+            // Decode the persisted deferred payload (v36, #3313). NULL
+            // for pre-v36 rows or for the synchronous request path —
+            // restored entries with `deferred = None` still surface
+            // the pending approval to the UI but a post-restart
+            // approval won't run the original tool. Decode failures
+            // (corruption, schema mismatch) log a warning and degrade
+            // to no-resume so a single bad row doesn't lock everyone
+            // else out.
+            let deferred = deferred_blob.and_then(|bytes| {
+                serde_json::from_slice::<DeferredToolExecution>(&bytes)
+                    .map_err(|e| {
+                        warn!(
+                            request_id = %id,
+                            error = %e,
+                            "Failed to decode persisted deferred payload — restored approval cannot resume tool"
+                        );
+                    })
+                    .ok()
+            });
             info!(
                 request_id = %id,
                 tool = %tool_name,
+                deferred = deferred.is_some(),
                 "Restored pending approval from database after restart"
             );
             pending.insert(
@@ -256,7 +278,7 @@ impl ApprovalManager {
                 PendingRequest {
                     request,
                     sender: None,
-                    deferred: None,
+                    deferred,
                     submitted_at: requested_at,
                 },
             );
@@ -267,14 +289,26 @@ impl ApprovalManager {
     ///
     /// Also writes a `pending` audit row so submission is observable even when
     /// the daemon dies before resolution (#3611).
-    fn db_insert_pending(&self, req: &ApprovalRequest) {
+    fn db_insert_pending(&self, req: &ApprovalRequest, deferred: Option<&DeferredToolExecution>) {
         let Some(db) = &self.audit_db else { return };
         let Ok(conn) = db.get() else { return };
         let created_unix = req.requested_at.timestamp();
+        // Serialize the deferred payload as JSON so a daemon restart
+        // can pick the request back up and run the tool when the
+        // human eventually approves (#3313). NULL when the caller
+        // didn't supply one (synchronous `request_approval` path,
+        // dashboard manual approvals).
+        let deferred_blob: Option<Vec<u8>> = deferred.and_then(|d| {
+            serde_json::to_vec(d)
+                .map_err(|e| {
+                    warn!(request_id = %req.id, error = %e, "Failed to serialize deferred payload — restored row will fall back to no-resume");
+                })
+                .ok()
+        });
         if let Err(e) = conn.execute(
             "INSERT OR IGNORE INTO pending_approvals \
-             (id, agent_id, session_id, tool_name, tool_input, created_at, tool_use_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (id, agent_id, session_id, tool_name, tool_input, created_at, tool_use_id, deferred_payload) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 req.id.to_string(),
                 req.agent_id,
@@ -283,6 +317,7 @@ impl ApprovalManager {
                 &req.action_summary,
                 created_unix,
                 req.tool_use_id,
+                deferred_blob,
             ],
         ) {
             warn!(request_id = %req.id, error = %e, "Failed to persist pending approval to database");
@@ -564,7 +599,7 @@ impl ApprovalManager {
             let (tx, rx) = tokio::sync::oneshot::channel();
             // Persist before inserting into the in-memory map so the entry
             // survives a daemon crash/restart (issue #3611).
-            self.db_insert_pending(&req_for_timeout);
+            self.db_insert_pending(&req_for_timeout, None);
             self.pending.insert(
                 id,
                 PendingRequest {
@@ -649,7 +684,7 @@ impl ApprovalManager {
 
         let id = req.id;
         // Persist before inserting so the entry survives a daemon restart (issue #3611).
-        self.db_insert_pending(&req);
+        self.db_insert_pending(&req, Some(&deferred));
         let req_for_event = req.clone();
         self.pending.insert(
             id,

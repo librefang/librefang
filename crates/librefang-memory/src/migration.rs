@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 35;
+const SCHEMA_VERSION: u32 = 36;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -85,6 +85,12 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // ACP adapter can keep correlating restored approvals back to the
     // streaming `ToolCall` card.
     run_step!(35, migrate_v35);
+    // v36 (#3313): persist the full `DeferredToolExecution` payload so
+    // a tool waiting for approval can resume after a daemon restart.
+    // Pre-v36 rows have `NULL` here so restored entries still bypass
+    // the deferred-execution spawn (matching the prior in-memory
+    // behaviour exactly).
+    run_step!(36, migrate_v36);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1294,6 +1300,26 @@ fn migrate_v35(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (35, datetime('now'), 'Add tool_use_id to pending_approvals for ACP adapter cross-restart correlation (#3313)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 36: Persist `DeferredToolExecution` payload so deferred
+/// tool runs can resume after a daemon restart (#3313).
+///
+/// Stored as a `BLOB` containing the JSON serialisation of
+/// `librefang_types::tool::DeferredToolExecution`. NULL on rows from
+/// the synchronous `request_approval` path or from pre-v36 daemons.
+/// On restore, `ApprovalManager::restore_pending_approvals` decodes
+/// the blob and rebuilds the `PendingRequest.deferred` slot so a
+/// post-restart `Allow once` properly triggers
+/// `handle_approval_resolution → execute_deferred_tool`.
+fn migrate_v36(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch("ALTER TABLE pending_approvals ADD COLUMN deferred_payload BLOB;")?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (36, datetime('now'), 'Persist DeferredToolExecution on pending_approvals for cross-restart resume (#3313)')",
         [],
     )?;
     Ok(())
