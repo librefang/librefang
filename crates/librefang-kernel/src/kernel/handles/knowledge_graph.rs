@@ -17,9 +17,13 @@ impl kernel_handle::KnowledgeGraph for LibreFangKernel {
         // The substrate owns the value (it moves into spawn_blocking).
         // Clone here so the trait can take `&Entity` and avoid forcing
         // every caller to give up ownership. See #3553.
-        self.memory.add_entity(entity.clone()).await.map_err(|e| {
-            kernel_handle::KernelOpError::Internal(format!("Knowledge add entity failed: {e}"))
-        })
+        self.memory
+            .substrate
+            .add_entity(entity.clone())
+            .await
+            .map_err(|e| {
+                kernel_handle::KernelOpError::Internal(format!("Knowledge add entity failed: {e}"))
+            })
     }
 
     async fn knowledge_add_relation(
@@ -27,6 +31,7 @@ impl kernel_handle::KnowledgeGraph for LibreFangKernel {
         relation: &librefang_types::memory::Relation,
     ) -> Result<String, kernel_handle::KernelOpError> {
         self.memory
+            .substrate
             .add_relation(relation.clone())
             .await
             .map_err(|e| {
@@ -40,8 +45,12 @@ impl kernel_handle::KnowledgeGraph for LibreFangKernel {
         &self,
         pattern: librefang_types::memory::GraphPattern,
     ) -> Result<Vec<librefang_types::memory::GraphMatch>, kernel_handle::KernelOpError> {
-        self.memory.query_graph(pattern).await.map_err(|e| {
-            kernel_handle::KernelOpError::Internal(format!("Knowledge query failed: {e}"))
-        })
+        self.memory
+            .substrate
+            .query_graph(pattern)
+            .await
+            .map_err(|e| {
+                kernel_handle::KernelOpError::Internal(format!("Knowledge query failed: {e}"))
+            })
     }
 }

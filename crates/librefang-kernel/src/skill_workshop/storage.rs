@@ -245,18 +245,28 @@ fn is_duplicate_pending(dir: &Path, candidate: &CandidateSkill) -> io::Result<bo
     Ok(find_duplicate_pending(dir, candidate)?.is_some())
 }
 
-/// Normalize a free-form string for dedup comparison: lowercase, trim,
+/// Normalize a free-form string for dedup comparison: lowercase,
 /// collapse every whitespace run (incl. newlines / tabs) to a single
-/// space. Without this, `"From now on always run cargo fmt before commit."`
-/// and `"from now on always run cargo fmt before commit"` would land as
-/// distinct candidates despite carrying the same teaching signal — every
-/// turn that re-emits the rule with a slightly different shape would pile
-/// up duplicates against the cap until the LRU eviction caught up.
+/// space, then strip leading / trailing sentence-end punctuation
+/// (`. , ; ! ? :`). Without this, `"From now on always run cargo fmt
+/// before commit."` and `"from now on always run cargo fmt before
+/// commit"` would land as distinct candidates despite carrying the
+/// same teaching signal — every turn that re-emits the rule with a
+/// slightly different shape would pile up duplicates against the cap
+/// until the LRU eviction caught up.
+///
+/// Interior punctuation is intentionally preserved so genuinely
+/// different teaching content does not merge: `"do X. then Y"` and
+/// `"do X"` carry different intent and must remain distinct.
 fn normalize_dedup_field(s: &str) -> String {
-    s.split_whitespace()
+    let collapsed: String = s
+        .split_whitespace()
         .collect::<Vec<&str>>()
         .join(" ")
-        .to_ascii_lowercase()
+        .to_ascii_lowercase();
+    collapsed
+        .trim_matches(|c: char| matches!(c, '.' | ',' | ';' | '!' | '?' | ':'))
+        .to_string()
 }
 
 /// Returns the existing pending candidate that matches `candidate`'s

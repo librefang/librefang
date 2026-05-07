@@ -38,7 +38,7 @@ impl LibreFangKernel {
             // exists so the handler can hold a Weak<Self>. Event-driven is
             // the primary trigger; the scheduler loop is a sparse (1-day)
             // backstop for agents that never finish a turn.
-            self.hooks.register(
+            self.governance.hooks.register(
                 librefang_types::agent::HookEvent::AgentLoopEnd,
                 std::sync::Arc::new(crate::auto_dream::AutoDreamTurnEndHook::new(
                     Arc::downgrade(self),
@@ -51,8 +51,10 @@ impl LibreFangKernel {
             // capture into pending/ (no LLM call, no auto-promote);
             // operators turn it off entirely with
             // `[skill_workshop] enabled = false` in agent.toml — see
-            // `crate::skill_workshop`.
-            self.hooks.register(
+            // `crate::skill_workshop`. Post-#3565: hooks live on the
+            // governance subsystem (same site as the auto_dream
+            // registration above).
+            self.governance.hooks.register(
                 librefang_types::agent::HookEvent::AgentLoopEnd,
                 std::sync::Arc::new(crate::skill_workshop::SkillWorkshopTurnEndHook::new(
                     Arc::downgrade(self),
@@ -100,7 +102,7 @@ impl LibreFangKernel {
             // doesn't need this; it short-circuits before touching the
             // kernel. Safe to no-op when the extractor wasn't configured
             // (OnceLock::get returns None).
-            if let Some(extractor) = self.proactive_memory_extractor.get() {
+            if let Some(extractor) = self.memory.proactive_memory_extractor.get() {
                 let weak: std::sync::Weak<dyn librefang_runtime::kernel_handle::KernelHandle> =
                     Arc::downgrade(self) as _;
                 extractor.install_kernel_handle(weak);
@@ -139,7 +141,8 @@ impl LibreFangKernel {
 
     /// List all agent bindings.
     pub fn list_bindings(&self) -> Vec<librefang_types::config::AgentBinding> {
-        self.bindings
+        self.mesh
+            .bindings
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
@@ -147,7 +150,7 @@ impl LibreFangKernel {
 
     /// Add a binding at runtime.
     pub fn add_binding(&self, binding: librefang_types::config::AgentBinding) {
-        let mut bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut bindings = self.mesh.bindings.lock().unwrap_or_else(|e| e.into_inner());
         bindings.push(binding);
         // Sort by specificity descending
         bindings.sort_by_key(|b| std::cmp::Reverse(b.match_rule.specificity()));
@@ -155,7 +158,7 @@ impl LibreFangKernel {
 
     /// Remove a binding by index, returns the removed binding if valid.
     pub fn remove_binding(&self, index: usize) -> Option<librefang_types::config::AgentBinding> {
-        let mut bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut bindings = self.mesh.bindings.lock().unwrap_or_else(|e| e.into_inner());
         if index < bindings.len() {
             Some(bindings.remove(index))
         } else {

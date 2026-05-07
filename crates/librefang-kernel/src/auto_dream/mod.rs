@@ -779,7 +779,7 @@ pub fn maybe_fire_on_turn_end(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
     // Gate 1 (cheapest): kernel shutdown. The daemon is unwinding; no point
     // spawning a new dream that the runtime will immediately have to cancel.
     // Matches the same check at the head of the scheduler loop body.
-    if kernel.supervisor.is_shutting_down() {
+    if kernel.agents.supervisor.is_shutting_down() {
         return;
     }
     // Gate 2: global auto-dream toggle. `config_snapshot` is an ArcSwap
@@ -805,7 +805,7 @@ pub fn maybe_fire_on_turn_end(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
         // above and this task actually being scheduled. Re-checking all
         // three (rather than just two) keeps the guarantees symmetrical —
         // no gate is "best effort" relative to the others.
-        if kernel.supervisor.is_shutting_down() {
+        if kernel.agents.supervisor.is_shutting_down() {
             return;
         }
         if !kernel.config_snapshot().auto_dream.enabled {
@@ -934,7 +934,7 @@ pub fn spawn_scheduler(kernel: Arc<LibreFangKernel>) {
             };
             tokio::time::sleep(Duration::from_secs(interval_s)).await;
 
-            if kernel.supervisor.is_shutting_down() {
+            if kernel.agents.supervisor.is_shutting_down() {
                 tracing::debug!("auto_dream: shutdown detected, scheduler exiting");
                 return;
             }

@@ -9,6 +9,7 @@ use super::super::LibreFangKernel;
 impl kernel_handle::A2ARegistry for LibreFangKernel {
     fn list_a2a_agents(&self) -> Vec<(String, String)> {
         let agents = self
+            .mesh
             .a2a_external_agents
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -26,6 +27,7 @@ impl kernel_handle::A2ARegistry for LibreFangKernel {
 
     fn get_a2a_agent_url(&self, name: &str) -> Option<String> {
         let agents = self
+            .mesh
             .a2a_external_agents
             .lock()
             .unwrap_or_else(|e| e.into_inner());

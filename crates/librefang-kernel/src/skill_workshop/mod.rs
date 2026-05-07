@@ -130,7 +130,9 @@ impl HookHandler for SkillWorkshopTurnEndHook {
 /// Public for direct invocation from tests / CLI; the `Hook` wires the
 /// async path on every non-fork turn.
 pub async fn run_capture(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
-    if kernel.supervisor.is_shutting_down() {
+    // Post-#3565 refactor: the supervisor moved off the kernel struct
+    // into `AgentSubsystem` and is exposed via `supervisor_ref()`.
+    if kernel.supervisor_ref().is_shutting_down() {
         return;
     }
     let Some(cfg) = read_workshop_config(&kernel, agent_id) else {

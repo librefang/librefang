@@ -22,7 +22,7 @@ impl kernel_handle::ApiAuth for LibreFangKernel {
                 pass_hash: cfg.dashboard_pass_hash.clone(),
             },
             home_dir: self.home_dir().to_path_buf(),
-            device_api_keys: self.pairing.device_api_keys(),
+            device_api_keys: self.security.pairing.device_api_keys(),
             config_users: cfg
                 .users
                 .iter()
