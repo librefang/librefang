@@ -630,7 +630,7 @@ impl LibreFangKernel {
         // that is not persisted in the sessions table.
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
-            provider: manifest.model.provider.clone(),
+            provider: result.actual_provider.clone().unwrap_or_else(|| manifest.model.provider.clone()),
             model: model.clone(),
             input_tokens: result.total_usage.input_tokens,
             output_tokens: result.total_usage.output_tokens,
@@ -793,6 +793,20 @@ impl LibreFangKernel {
             .reserve_global_budget(&self.budget_config(), estimated_usd)
             .map_err(KernelError::LibreFang)?;
 
+        // Pre-dispatch provider budget check — reject early when the
+        // provider's hourly/daily spend is already exhausted so the
+        // caller gets a fast 429 instead of consuming a slow LLM round
+        // trip that would be wasted anyway.
+        {
+            let budget_cfg = self.budget_config();
+            if let Some(pb) = budget_cfg.providers.get(&entry.manifest.model.provider) {
+                if let Err(e) = self.metering.check_provider_budget(&entry.manifest.model.provider, pb) {
+                    usd_reservation.release();
+                    return Err(KernelError::LibreFang(e));
+                }
+            }
+        }
+
         // Enforce quota on the effective target agent (after routing).
         // Use check_quota_and_reserve so the estimated token budget is
         // pre-charged inside the same DashMap write-lock, closing the TOCTOU
@@ -801,7 +815,7 @@ impl LibreFangKernel {
         let estimated_tokens = entry.manifest.model.max_tokens as u64;
         let token_reservation = match self
             .scheduler
-            .check_quota_and_reserve(agent_id, estimated_tokens)
+            .check_quota_and_reserve(agent_id, estimated_tokens, None)
         {
             Ok(r) => r,
             Err(e) => {
@@ -873,7 +887,7 @@ impl LibreFangKernel {
                 // down the call path; releasing the in-memory hold lets
                 // the next reservation pass see a consistent total.
                 self.scheduler
-                    .settle_reservation(agent_id, token_reservation, &result.total_usage);
+                    .settle_reservation(agent_id, token_reservation, &result.total_usage, None);
                 usd_reservation.settle();
                 // Record tool calls for rate limiting
                 let tool_count = result.decision_traces.len() as u32;
@@ -1625,7 +1639,7 @@ impl LibreFangKernel {
         let estimated_tokens = entry.manifest.model.max_tokens as u64;
         let token_reservation = self
             .scheduler
-            .check_quota_and_reserve(agent_id, estimated_tokens)
+            .check_quota_and_reserve(agent_id, estimated_tokens, None)
             .map_err(KernelError::LibreFang)?;
 
         let is_wasm = entry.manifest.module.starts_with("wasm:");
@@ -1673,6 +1687,7 @@ impl LibreFangKernel {
                             agent_id,
                             token_reservation,
                             &result.total_usage,
+                            None,
                         );
                         let _ = kernel_clone
                             .registry
@@ -2385,6 +2400,7 @@ impl LibreFangKernel {
                         agent_id,
                         token_reservation,
                         &result.total_usage,
+                        None,
                     );
                     // Record tool calls for rate limiting
                     let tool_count = result.decision_traces.len() as u32;
@@ -2415,7 +2431,7 @@ impl LibreFangKernel {
                     );
                     let usage_record = librefang_memory::usage::UsageRecord {
                         agent_id,
-                        provider: manifest.model.provider.clone(),
+                        provider: result.actual_provider.clone().unwrap_or_else(|| manifest.model.provider.clone()),
                         model: model.clone(),
                         input_tokens: result.total_usage.input_tokens,
                         output_tokens: result.total_usage.output_tokens,

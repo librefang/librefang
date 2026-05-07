@@ -1946,6 +1946,9 @@ pub struct AgentLoopResult {
     pub experiment_context: Option<ExperimentContext>,
     /// Latency in milliseconds for this request.
     pub latency_ms: u64,
+    /// The LLM provider that actually handled the last successful call.
+    /// Populated by fallback drivers when failover occurs.
+    pub actual_provider: Option<String>,
     /// Index in `session.messages` where messages appended during this turn
     /// begin. Callers use this to slice out the turn's new messages (e.g. for
     /// writing to a canonical cross-channel session) without tracking their
@@ -2347,6 +2350,8 @@ struct FinalizeEndTurnResultData {
     /// Accumulated owner notices captured during this turn via the
     /// `notify_owner` tool. Multiple invocations join with "\n\n".
     owner_notice: Option<String>,
+    /// The LLM provider that actually handled the last successful call.
+    actual_provider: Option<String>,
 }
 
 struct EndTurnRetryContext<'a> {
@@ -2980,6 +2985,7 @@ fn build_silent_agent_loop_result(
         provider_not_configured: false,
         experiment_context,
         latency_ms: 0,
+        actual_provider: None,
         new_messages_start,
         skill_evolution_suggested: false,
         owner_notice: None,
@@ -3225,6 +3231,7 @@ async fn finalize_successful_end_turn(
         provider_not_configured: false,
         experiment_context: end_turn.experiment_context,
         latency_ms: 0,
+        actual_provider: end_turn.actual_provider,
         new_messages_start: end_turn.new_messages_start,
         skill_evolution_suggested: tool_call_count >= 5,
         owner_notice: end_turn.owner_notice.clone(),
@@ -3622,6 +3629,12 @@ pub async fn run_agent_loop(
     let mut tools_cache =
         ResolvedToolsCache::new(available_tools, &session_loaded_tools, lazy_tools);
 
+    // Tracks the provider that handled the last successful LLM call.
+    // Updated on every successful completion; the final value is propagated
+    // into AgentLoopResult so callers can see which provider actually served
+    // the response (useful when a fallback driver switches providers).
+    let mut actual_provider: Option<String> = None;
+
     for iteration in 0..max_iterations {
         debug!(iteration, "Agent loop iteration");
 
@@ -3871,6 +3884,10 @@ pub async fn run_agent_loop(
         let provider_name = manifest.model.provider.as_str();
         let mut response = call_with_retry(&*driver, request, Some(provider_name), None).await?;
 
+        if response.actual_provider.is_some() {
+            actual_provider = response.actual_provider.clone();
+        }
+
         accumulate_token_usage(&mut total_usage, &response.usage);
 
         // Snapshot prompt tokens for the next iteration's should_compress check.
@@ -4098,6 +4115,7 @@ pub async fn run_agent_loop(
                         directives: reply_directives_from_parsed(parsed_directives),
                         new_messages_start,
                         owner_notice: pending_owner_notice.take(),
+                        actual_provider: actual_provider.clone(),
                     },
                 )
                 .await;
@@ -4383,6 +4401,7 @@ pub async fn run_agent_loop(
                         provider_not_configured: false,
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
+                        actual_provider: actual_provider.clone(),
                         new_messages_start,
                         owner_notice: None,
                     });
@@ -5072,6 +5091,9 @@ pub async fn run_agent_loop_streaming(
     let mut tools_cache =
         ResolvedToolsCache::new(available_tools, &session_loaded_tools, lazy_tools);
 
+    // Tracks the provider that handled the last successful LLM call (streaming path).
+    let mut actual_provider: Option<String> = None;
+
     for iteration in 0..max_iterations {
         debug!(iteration, "Streaming agent loop iteration");
 
@@ -5362,6 +5384,10 @@ pub async fn run_agent_loop_streaming(
             }
         };
 
+        if response.actual_provider.is_some() {
+            actual_provider = response.actual_provider.clone();
+        }
+
         accumulate_token_usage(&mut total_usage, &response.usage);
 
         // Snapshot prompt tokens for the next iteration's should_compress check.
@@ -5580,6 +5606,7 @@ pub async fn run_agent_loop_streaming(
                         directives: reply_directives_from_parsed(parsed_directives_s),
                         new_messages_start,
                         owner_notice: pending_owner_notice.take(),
+                        actual_provider: actual_provider.clone(),
                     },
                 )
                 .await;
@@ -5894,6 +5921,7 @@ pub async fn run_agent_loop_streaming(
                         provider_not_configured: false,
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
+                        actual_provider: actual_provider.clone(),
                         new_messages_start,
                         owner_notice: None,
                     });
@@ -8563,6 +8591,7 @@ mod tests {
                         output_tokens: 5,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             } else {
                 // Second call: LLM returns EndTurn with EMPTY text (the bug)
@@ -8575,6 +8604,7 @@ mod tests {
                         output_tokens: 0,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }
@@ -8620,6 +8650,7 @@ mod tests {
                         output_tokens: 5,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             } else {
                 Ok(CompletionResponse {
@@ -8634,6 +8665,7 @@ mod tests {
                         output_tokens: 5,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }
@@ -8667,6 +8699,7 @@ mod tests {
                     output_tokens: 5,
                     ..Default::default()
                 },
+                actual_provider: None,
             })
         }
     }
@@ -8690,6 +8723,7 @@ mod tests {
                     output_tokens: 0,
                     ..Default::default()
                 },
+                actual_provider: None,
             })
         }
     }
@@ -8715,6 +8749,7 @@ mod tests {
                     output_tokens: 8,
                     ..Default::default()
                 },
+                actual_provider: None,
             })
         }
     }
@@ -8742,6 +8777,7 @@ mod tests {
                     output_tokens: 8,
                     ..Default::default()
                 },
+                actual_provider: None,
             })
         }
     }
@@ -9113,6 +9149,7 @@ mod tests {
                         output_tokens: 3,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             } else {
                 Ok(CompletionResponse {
@@ -9127,6 +9164,7 @@ mod tests {
                         output_tokens: 8,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }
@@ -9154,6 +9192,7 @@ mod tests {
                     output_tokens: 8,
                     ..Default::default()
                 },
+                actual_provider: None,
             })
         }
     }
@@ -9504,6 +9543,7 @@ mod tests {
                         output_tokens: 0,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             } else {
                 // Second call (retry): normal response
@@ -9519,6 +9559,7 @@ mod tests {
                         output_tokens: 8,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }
@@ -9543,6 +9584,7 @@ mod tests {
                     output_tokens: 0,
                     ..Default::default()
                 },
+                actual_provider: None,
             })
         }
     }
@@ -10418,6 +10460,7 @@ mod tests {
                         output_tokens: 15,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             } else {
                 // After tool result, return normal response
@@ -10433,6 +10476,7 @@ mod tests {
                         output_tokens: 12,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }

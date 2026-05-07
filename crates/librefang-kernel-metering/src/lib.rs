@@ -1,5 +1,7 @@
 //! Metering engine — tracks LLM cost and enforces spending quotas.
 
+pub mod provider_gate;
+
 use librefang_memory::usage::{ModelUsage, UsageRecord, UsageStore, UsageSummary};
 use librefang_types::agent::{AgentId, ResourceQuota, UserId};
 use librefang_types::error::{LibreFangError, LibreFangResult};

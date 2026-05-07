@@ -60,6 +60,7 @@ impl LlmDriver for FakeDriver {
                 output_tokens: 10,
                 ..Default::default()
             },
+            actual_provider: None,
         })
     }
 }

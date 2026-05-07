@@ -286,6 +286,11 @@ pub struct CompletionResponse {
     pub tool_calls: Vec<ToolCall>,
     /// Token usage statistics.
     pub usage: TokenUsage,
+    /// The provider that actually handled this request.
+    ///
+    /// Set by fallback/chain drivers when failover occurs. `None` means
+    /// the configured primary provider handled the request.
+    pub actual_provider: Option<String>,
 }
 
 impl CompletionResponse {
@@ -652,6 +657,7 @@ mod tests {
             stop_reason: StopReason::EndTurn,
             tool_calls: vec![],
             usage: TokenUsage::default(),
+            actual_provider: None,
         };
         assert_eq!(response.text(), "Hello world!");
     }
@@ -793,6 +799,7 @@ mod tests {
                         output_tokens: 3,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }
@@ -856,6 +863,7 @@ mod tests {
                     stop_reason: StopReason::EndTurn,
                     tool_calls: vec![],
                     usage: TokenUsage::default(),
+                    actual_provider: None,
                 })
             }
         }

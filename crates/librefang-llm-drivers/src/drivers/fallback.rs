@@ -27,6 +27,7 @@ pub struct FallbackDriver {
 struct DriverEntry {
     driver: Arc<dyn LlmDriver>,
     model_name: String,
+    provider_name: String,
     /// Exponentially weighted moving average latency in ms.
     ewma_latency_ms: AtomicU64,
     /// Consecutive error count. Reset to 0 on success or after the
@@ -67,6 +68,7 @@ impl FallbackDriver {
                 .map(|d| DriverEntry {
                     driver: d,
                     model_name: String::new(),
+                    provider_name: String::new(),
                     ewma_latency_ms: AtomicU64::new(0),
                     consecutive_errors: AtomicU64::new(0),
                     last_failure_at_ms: AtomicU64::new(0),
@@ -89,6 +91,7 @@ impl FallbackDriver {
                 .into_iter()
                 .map(|(d, m)| DriverEntry {
                     driver: d,
+                    provider_name: m.clone(),
                     model_name: m,
                     ewma_latency_ms: AtomicU64::new(0),
                     consecutive_errors: AtomicU64::new(0),
@@ -199,7 +202,7 @@ impl LlmDriver for FallbackDriver {
 
             let start = std::time::Instant::now();
             match entry.driver.complete(req).await {
-                Ok(response) => {
+                Ok(mut response) => {
                     let latency = start.elapsed().as_millis() as u64;
                     let prev = entry.ewma_latency_ms.load(Ordering::Relaxed);
                     let new = if prev == 0 {
@@ -209,6 +212,9 @@ impl LlmDriver for FallbackDriver {
                     };
                     entry.ewma_latency_ms.store(new, Ordering::Relaxed);
                     entry.consecutive_errors.store(0, Ordering::Relaxed);
+                    if !entry.provider_name.is_empty() {
+                        response.actual_provider = Some(entry.provider_name.clone());
+                    }
                     return Ok(response);
                 }
                 Err(e) => {
@@ -256,7 +262,7 @@ impl LlmDriver for FallbackDriver {
 
             let start = std::time::Instant::now();
             match entry.driver.stream(req, tx.clone()).await {
-                Ok(response) => {
+                Ok(mut response) => {
                     let latency = start.elapsed().as_millis() as u64;
                     let prev = entry.ewma_latency_ms.load(Ordering::Relaxed);
                     let new = if prev == 0 {
@@ -266,6 +272,9 @@ impl LlmDriver for FallbackDriver {
                     };
                     entry.ewma_latency_ms.store(new, Ordering::Relaxed);
                     entry.consecutive_errors.store(0, Ordering::Relaxed);
+                    if !entry.provider_name.is_empty() {
+                        response.actual_provider = Some(entry.provider_name.clone());
+                    }
                     return Ok(response);
                 }
                 Err(e) => {
@@ -333,6 +342,7 @@ mod tests {
                     output_tokens: 5,
                     ..Default::default()
                 },
+                actual_provider: None,
             })
         }
     }
@@ -571,6 +581,7 @@ mod tests {
                             output_tokens: 1,
                             ..Default::default()
                         },
+                        actual_provider: None,
                     })
                 }
             }

@@ -108,6 +108,7 @@ impl LibreFangKernel {
             provider_not_configured: false,
             experiment_context: None,
             latency_ms: 0,
+            actual_provider: None,
             // WASM agents don't mutate the session; N/A.
             new_messages_start: 0,
             skill_evolution_suggested: false,
@@ -183,6 +184,7 @@ impl LibreFangKernel {
             provider_not_configured: false,
             experiment_context: None,
             latency_ms: 0,
+            actual_provider: None,
             // Python agents don't mutate the session; N/A.
             new_messages_start: 0,
             skill_evolution_suggested: false,
@@ -1104,7 +1106,10 @@ impl LibreFangKernel {
         let attribution_channel: Option<String> = sender_context.map(|sc| sc.channel.clone());
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
-            provider: manifest.model.provider.clone(),
+            provider: result
+                .actual_provider
+                .clone()
+                .unwrap_or_else(|| manifest.model.provider.clone()),
             model: model.clone(),
             input_tokens: result.total_usage.input_tokens,
             output_tokens: result.total_usage.output_tokens,

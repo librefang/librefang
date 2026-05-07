@@ -496,6 +496,7 @@ mod tests {
                     output_tokens: 50,
                     ..Default::default()
                 },
+                actual_provider: None,
             })
         }
     }
