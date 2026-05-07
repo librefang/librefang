@@ -9,6 +9,7 @@ readme = "README.md"
 [dependencies]
 librefang-types = { path = "../librefang-types" }
 librefang-memory = { path = "../librefang-memory" }
+librefang-memory-wiki = { path = "../librefang-memory-wiki" }
 librefang-kernel-router = { path = "../librefang-kernel-router" }
 librefang-kernel-metering = { path = "../librefang-kernel-metering" }
 librefang-runtime = { path = "../librefang-runtime" }

@@ -5036,6 +5036,76 @@
       },
       "type": "object"
     },
+    "MemoryWikiConfig": {
+      "description": "Memory wiki configuration (issue #3329). **Off by default** — set `enabled = true` to opt in.\n\n```toml [memory_wiki] enabled = false mode = \"isolated\"                    # isolated | bridge | unsafe_local vault_path = \"~/.librefang/wiki/main\" render_mode = \"native\"               # native | obsidian ingest_filter = \"tagged\"             # tagged | all ```",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Master switch. When `false` (default), the wiki is not constructed and the `wiki_*` builtin tools all return a `Disabled` error.",
+          "type": "boolean"
+        },
+        "ingest_filter": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MemoryWikiIngestFilter"
+            }
+          ],
+          "default": "tagged",
+          "description": "Whether the vault accepts every `wiki_write` or only ones with an explicit topic tag."
+        },
+        "mode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MemoryWikiMode"
+            }
+          ],
+          "default": "isolated",
+          "description": "Operating mode (see `MemoryWikiMode`). v1 wires `Isolated`; the other variants return `ModeNotImplemented` until follow-up PRs."
+        },
+        "render_mode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MemoryWikiRenderMode"
+            }
+          ],
+          "default": "native",
+          "description": "Markdown render flavor for cross-references (`[[topic]]` placeholders)."
+        },
+        "vault_path": {
+          "description": "Filesystem location of the vault root. Defaults to `<librefang_home>/wiki/main`. The `~` prefix is honoured.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "MemoryWikiIngestFilter": {
+      "description": "Which `wiki_write` calls actually land on disk.\n\n* `Tagged` (default) — only writes that pass an explicit `topic` tag are accepted, matching v1 acceptance criteria. Other writes are rejected with `WikiError::InvalidTopic`. * `All` — accept every write the kernel forwards. Useful in testing or in `unsafe_local` mode where the agent already speaks vault semantics.",
+      "enum": [
+        "tagged",
+        "all"
+      ],
+      "type": "string"
+    },
+    "MemoryWikiMode": {
+      "description": "Operating mode for the memory wiki (issue #3329).\n\n* `Isolated` (default) — own vault under `vault_path`, populated only by explicit `wiki_write` calls. No coupling to the memory substrate. * `Bridge` — read shared artifacts from the memory substrate through the public seams. Reserved for follow-up; v1 returns `WikiError::ModeNotImplemented`. * `UnsafeLocal` — same-machine escape hatch that points at an existing filesystem path (e.g. an Obsidian vault). Reserved for follow-up.",
+      "enum": [
+        "isolated",
+        "bridge",
+        "unsafe_local"
+      ],
+      "type": "string"
+    },
+    "MemoryWikiRenderMode": {
+      "description": "Markdown render flavor for vault pages (issue #3329).\n\n* `Native` — plain Markdown links: `[topic](topic.md)`. * `Obsidian` — Obsidian / Logseq wiki-link syntax: `[[topic]]`.",
+      "enum": [
+        "native",
+        "obsidian"
+      ],
+      "type": "string"
+    },
     "MessengerConfig": {
       "description": "Facebook Messenger Platform channel adapter configuration.",
       "properties": {
@@ -14960,6 +15030,20 @@
         "vector_store_url": null
       },
       "description": "Memory substrate configuration."
+    },
+    "memory_wiki": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/MemoryWikiConfig"
+        }
+      ],
+      "default": {
+        "enabled": false,
+        "ingest_filter": "tagged",
+        "mode": "isolated",
+        "render_mode": "native"
+      },
+      "description": "Memory wiki: durable markdown knowledge vault with provenance and optional Obsidian-friendly export. Off by default; see `librefang-memory-wiki` and issue #3329 for the runbook."
     },
     "mode": {
       "allOf": [

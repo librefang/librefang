@@ -2113,6 +2113,7 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         },
         {"key": "default_model", "struct_field": "default_model", "hot_reloadable": true},
         {"key": "memory", "struct_field": "memory"},
+        {"key": "memory_wiki", "struct_field": "memory_wiki"},
         {"key": "proactive_memory", "struct_field": "proactive_memory"},
         {"key": "auto_dream", "struct_field": "auto_dream"},
         {"key": "web", "struct_field": "web"},

@@ -1,0 +1,23 @@
+[package]
+name = "librefang-memory-wiki"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Durable markdown knowledge vault for the LibreFang Agent OS — provenance frontmatter + Obsidian-friendly export. See issue #3329."
+
+[dependencies]
+librefang-types = { path = "../librefang-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+librefang-kernel-handle = { path = "../librefang-kernel-handle" }
+
+[lints]
+workspace = true
