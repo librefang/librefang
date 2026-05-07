@@ -27,7 +27,12 @@ export interface DrawerPanelProps {
 //   3. Parent-driven close: when the parent flips `isOpen` from true →
 //      false (mutation `onSuccess`, Cancel button, etc.) we tear the
 //      store back down ourselves; otherwise the global slot stays
-//      mounted and the drawer never disappears (#4687).
+//      mounted and the drawer never disappears (#4687). Guarded by
+//      an ownership check (#4714) — only call `close()` while the
+//      slot's body is still the one we last pushed, so a sibling
+//      DrawerPanel that claimed the slot in the same commit (e.g.
+//      the picker → config flow) is not yanked closed underneath
+//      the user.
 //   4. Unmount while open → close the store, so a body referencing this
 //      page's local state never lingers in the global slot.
 export function DrawerPanel({
