@@ -92,7 +92,10 @@ pub(crate) fn cron_resolve_compaction_mode(
 /// Used uniformly by the `Prune` main path, the `SummarizeTrim` fallback
 /// path, and the tool-pair-adjusted skip path so that all three paths
 /// produce identical side effects (`mark_messages_mutated`).
-fn apply_cron_prune(session: &mut librefang_memory::session::Session, drop_count: usize) {
+pub(super) fn apply_cron_prune(
+    session: &mut librefang_memory::session::Session,
+    drop_count: usize,
+) {
     if drop_count == 0 {
         return;
     }
