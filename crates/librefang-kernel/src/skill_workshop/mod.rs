@@ -156,7 +156,15 @@ pub async fn run_capture(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
     }
 
     for hit in hits {
-        capture_one(&kernel, agent_id, &cfg, &recent.session_id, hit).await;
+        capture_one(
+            &kernel,
+            agent_id,
+            &cfg,
+            &recent.session_id,
+            recent.last_user_turn_index,
+            hit,
+        )
+        .await;
     }
 }
 
@@ -165,9 +173,10 @@ async fn capture_one(
     agent_id: AgentId,
     cfg: &SkillWorkshopConfig,
     session_id: &SessionId,
+    turn_index: u32,
     hit: HeuristicHit,
 ) {
-    let mut accepted_hit = match cfg.review_mode {
+    let accepted_hit = match cfg.review_mode {
         ReviewMode::None => return,
         ReviewMode::Heuristic => hit,
         ReviewMode::ThresholdLlm => match run_llm_review(kernel, &hit).await {
@@ -192,13 +201,10 @@ async fn capture_one(
     };
     let now = chrono::Utc::now();
     let id = Uuid::new_v4().to_string();
-    accepted_hit.user_message_excerpt =
-        candidate::truncate_excerpt(&accepted_hit.user_message_excerpt);
-    accepted_hit.assistant_response_excerpt = accepted_hit
-        .assistant_response_excerpt
-        .as_deref()
-        .map(candidate::truncate_excerpt);
-
+    // The heuristic scanners already truncate excerpts to
+    // PROVENANCE_EXCERPT_MAX_CHARS at the boundary they create them
+    // (heuristic.rs::extract_*), so a second pass here would be a
+    // pointless no-op. Move the strings straight into provenance.
     let candidate = CandidateSkill {
         id,
         agent_id: agent_id.to_string(),
@@ -211,7 +217,7 @@ async fn capture_one(
         provenance: Provenance {
             user_message_excerpt: accepted_hit.user_message_excerpt,
             assistant_response_excerpt: accepted_hit.assistant_response_excerpt,
-            turn_index: 0, // best-effort: real turn index would require session walking we already did, but we don't carry it through. Not load-bearing — provenance is descriptive, not structural.
+            turn_index,
         },
     };
 
@@ -332,6 +338,11 @@ struct RecentTurn {
     prev_assistant_response: Option<String>,
     /// Tool names from the last 30 messages, oldest first.
     recent_tool_names: Vec<String>,
+    /// 1-based turn index of `last_user_message` within the session.
+    /// Used for `Provenance.turn_index` so the dashboard / CLI `show`
+    /// output points at the actual conversation location instead of a
+    /// hardcoded zero.
+    last_user_turn_index: u32,
 }
 
 /// Look up an agent's manifest and clone its workshop config out.
@@ -383,12 +394,15 @@ fn load_recent_turn(kernel: &Arc<LibreFangKernel>, agent_id: AgentId) -> Option<
         .map(|m| extract_text(&m.content));
 
     let recent_tool_names = collect_recent_tool_names(messages, 30);
+    // 1-based — turn 1 is the first user message in the session.
+    let last_user_turn_index = u32::try_from(last_user_idx + 1).unwrap_or(u32::MAX);
 
     Some(RecentTurn {
         session_id,
         last_user_message,
         prev_assistant_response,
         recent_tool_names,
+        last_user_turn_index,
     })
 }
 

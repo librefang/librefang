@@ -89,9 +89,20 @@ pub fn extract_explicit_instruction(user_message: &str) -> Option<HeuristicHit> 
         if let Some(m) = re.find(trimmed) {
             let trigger = m.as_str().to_string();
             let sentence = sentence_around(trimmed, m.start(), m.end());
-            // Skip noisy false positives: too short to teach anything,
-            // or trigger appears inside a question.
-            if sentence.chars().count() < 12 || sentence.trim_end().ends_with('?') {
+            // Skip noisy false positives:
+            // - Too short to teach anything.
+            // - Trigger appears inside a question.
+            // - First-person noun-phrase trailer ("I always run into …",
+            //   "We could always do …" — conversational, not imperative).
+            // - Trigger isn't at sentence start (i.e. some other clause
+            //   precedes it within the same sentence) — imperative
+            //   teaching almost always leads with the rule, and
+            //   embedded matches are usually narrative.
+            if sentence.chars().count() < 12
+                || sentence.trim_end().ends_with('?')
+                || is_conversational_filler(&sentence, &trigger)
+                || !trigger_is_at_sentence_start(&sentence, &trigger)
+            {
                 continue;
             }
             let name = synth_name(&sentence, "rule");
@@ -108,6 +119,63 @@ pub fn extract_explicit_instruction(user_message: &str) -> Option<HeuristicHit> 
         }
     }
     None
+}
+
+/// True when no clause separator (`,`, `;`, `:`) precedes the trigger
+/// inside its sentence — i.e. the trigger leads the *first* clause of
+/// the sentence rather than being introduced after a parenthetical
+/// or another clause. "Please remember to X" passes (politeness
+/// modifier, no separator); "I told you, from now on we …" does not
+/// (a comma-bounded prior clause).
+fn trigger_is_at_sentence_start(sentence: &str, trigger: &str) -> bool {
+    let lower_sentence = sentence.to_ascii_lowercase();
+    let lower_trigger = trigger.to_ascii_lowercase();
+    let Some(idx) = lower_sentence.find(&lower_trigger) else {
+        return true;
+    };
+    !lower_sentence[..idx]
+        .chars()
+        .any(|c| matches!(c, ',' | ';' | ':'))
+}
+
+/// Drop matches embedded in conversational shapes like:
+///   - "I always run into …" / "I always do X"
+///   - "We sometimes always …"
+///   - "You could always …" (subjunctive, not imperative)
+///
+/// These are noise classes the broad `\balways …\b` triggers will
+/// otherwise pick up.
+fn is_conversational_filler(sentence: &str, trigger: &str) -> bool {
+    let lower = sentence.to_ascii_lowercase();
+    let trigger_lower = trigger.to_ascii_lowercase();
+    let Some(idx) = lower.find(&trigger_lower) else {
+        return false;
+    };
+    // Look at up to the 2 words preceding the trigger.
+    let prefix = lower[..idx].trim_end();
+    let preceding_words: Vec<&str> = prefix
+        .rsplit(|c: char| c.is_whitespace())
+        .filter(|w| !w.is_empty())
+        .take(3)
+        .collect();
+    // If `trigger` itself starts with the subject ("you should always")
+    // there's no filler to detect — the trigger already includes the
+    // imperative subject.
+    if trigger_lower.starts_with("you ")
+        || trigger_lower.starts_with("we ")
+        || trigger_lower.starts_with("from now on")
+        || trigger_lower.starts_with("please always")
+        || trigger_lower.starts_with("remember to")
+        || trigger_lower.starts_with("the way to")
+    {
+        return false;
+    }
+    // Otherwise, "I/we/you/he/she/they … always run/do" is narrative
+    // ("I always run into this issue") — drop.
+    matches!(
+        preceding_words.last().copied(),
+        Some("i") | Some("we") | Some("you") | Some("he") | Some("she") | Some("they")
+    )
 }
 
 /// Inspect a user message for a correction relative to the previous
@@ -393,6 +461,39 @@ mod tests {
     #[test]
     fn explicit_unrelated_text_returns_none() {
         assert!(extract_explicit_instruction("the weather is nice today").is_none());
+    }
+
+    // Noise classes called out in the #4741 review (M1). These should
+    // NOT be captured even though they contain trigger phrases.
+    #[test]
+    fn explicit_first_person_narrative_dropped() {
+        assert!(
+            extract_explicit_instruction("I always run into this issue when I commit.").is_none(),
+            "first-person narrative must not be captured"
+        );
+        assert!(
+            extract_explicit_instruction("We always check our work, in my opinion.").is_none(),
+            "we-narrative must not be captured"
+        );
+    }
+
+    #[test]
+    fn explicit_embedded_mid_clause_dropped() {
+        // Trigger is mid-sentence after a real clause — narrative, not imperative.
+        assert!(
+            extract_explicit_instruction("Hi there, I told you, from now on we don't do that.")
+                .is_none(),
+            "embedded mid-clause trigger must not be captured"
+        );
+    }
+
+    #[test]
+    fn explicit_subjunctive_dropped() {
+        // "You could always X" is a suggestion-shaped narrative, not an imperative.
+        assert!(
+            extract_explicit_instruction("You could always check the docs first.").is_none(),
+            "subjunctive trigger must not be captured"
+        );
     }
 
     #[test]

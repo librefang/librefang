@@ -62,10 +62,10 @@ Decide whether the candidate captures a *reusable* workflow that another turn of
 - The body restates a single tool call already documented elsewhere.
 - The triggering message was small-talk, frustration, or off-topic.
 
-When accepting you may optionally refine `name` (snake_case, ≤64 chars) or `description` (one line, ≤200 chars) — leave them out to keep the heuristic's choice.
+When accepting you may optionally refine `name` (snake_case, ≤64 chars) or `description` (one line, ≤200 chars). Include `refined_name` and `refined_description` only when refining; otherwise omit them entirely (do not emit empty strings or null).
 
-Respond with a single JSON object and nothing else:
-{"accept": true|false, "refined_name": "..."?, "refined_description": "..."?, "reason": "one short sentence"}
+Respond with a single JSON object and nothing else. Required keys: `accept` (bool), `reason` (one short sentence). Optional keys: `refined_name` (string), `refined_description` (string). Example:
+{"accept": true, "reason": "useful rule, kept the heuristic name"}
 "#;
 
 /// Run the LLM review pass.
