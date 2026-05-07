@@ -10,6 +10,7 @@ pub mod widgets;
 
 use event::{AppEvent, BackendRef, StreamCancelToken};
 use librefang_kernel::LibreFangKernel;
+use librefang_kernel::SkillsSubsystemApi;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
 use screens::{
@@ -2243,12 +2244,12 @@ impl App {
             }
             "/hands" => match &self.backend {
                 Backend::InProcess { kernel } => {
-                    let defs = kernel.hands().list_definitions();
-                    let instances = kernel.hands().list_instances();
+                    let defs = kernel.hand_registry_ref().list_definitions();
+                    let instances = kernel.hand_registry_ref().list_instances();
                     let mut msg = format!("Available hands ({}):\n", defs.len());
                     for d in &defs {
                         let reqs_met = kernel
-                            .hands()
+                            .hand_registry_ref()
                             .check_requirements(&d.id)
                             .map(|r| r.iter().all(|(_, ok)| *ok))
                             .unwrap_or(false);

@@ -1,6 +1,7 @@
 //! Event system: crossterm polling, tick timer, streaming bridges.
 
 use librefang_kernel::LibreFangKernel;
+use librefang_kernel::SkillsSubsystemApi;
 use librefang_runtime::agent_loop::AgentLoopResult;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
@@ -2314,12 +2315,12 @@ pub fn spawn_fetch_hands(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             }
         }
         BackendRef::InProcess(kernel) => {
-            let defs = kernel.hands().list_definitions();
+            let defs = kernel.hand_registry_ref().list_definitions();
             let hands: Vec<HandInfo> = defs
                 .iter()
                 .map(|d| {
                     let reqs_met = kernel
-                        .hands()
+                        .hand_registry_ref()
                         .check_requirements(&d.id)
                         .map(|r| r.iter().all(|(_, ok)| *ok))
                         .unwrap_or(false);
@@ -2372,7 +2373,7 @@ pub fn spawn_fetch_active_hands(backend: BackendRef, tx: mpsc::Sender<AppEvent>)
         }
         BackendRef::InProcess(kernel) => {
             let instances: Vec<HandInstanceInfo> = kernel
-                .hands()
+                .hand_registry_ref()
                 .list_instances()
                 .iter()
                 .map(|i| HandInstanceInfo {

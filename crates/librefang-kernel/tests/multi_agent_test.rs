@@ -6,6 +6,7 @@
 
 use librefang_kernel::triggers::TriggerPattern;
 use librefang_kernel::LibreFangKernel;
+use librefang_kernel::SkillsSubsystemApi;
 use librefang_types::agent::{AgentId, AgentManifest};
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
 use std::collections::HashMap;
@@ -36,7 +37,7 @@ fn test_config(name: &str) -> KernelConfig {
 /// Install a hand from TOML content into the kernel's hand registry.
 fn install_hand(kernel: &LibreFangKernel, toml_content: &str) {
     kernel
-        .hands()
+        .hand_registry_ref()
         .install_from_content(toml_content, "")
         .unwrap_or_else(|e| panic!("Failed to install hand: {e}"));
 }
@@ -193,7 +194,7 @@ fn test_deterministic_id_stable_across_reactivation() {
 
     // Re-install (since deactivate doesn't remove the definition, but it may
     // already be registered — wrap in allow-already-active)
-    let _ = kernel.hands().install_from_content(HAND_A, "");
+    let _ = kernel.hand_registry_ref().install_from_content(HAND_A, "");
 
     // Second activation gets a new instance_id and therefore a new unique agent ID.
     let inst2 = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
@@ -248,7 +249,10 @@ fn test_pause_and_resume_hand() {
 
     // Pause
     kernel.pause_hand(instance_id).unwrap();
-    let paused = kernel.hands().get_instance(instance_id).unwrap();
+    let paused = kernel
+        .hand_registry_ref()
+        .get_instance(instance_id)
+        .unwrap();
     assert_eq!(paused.status.to_string(), "Paused");
 
     // Agent should still exist (paused, not killed)
@@ -259,7 +263,10 @@ fn test_pause_and_resume_hand() {
 
     // Resume
     kernel.resume_hand(instance_id).unwrap();
-    let resumed = kernel.hands().get_instance(instance_id).unwrap();
+    let resumed = kernel
+        .hand_registry_ref()
+        .get_instance(instance_id)
+        .unwrap();
     assert_eq!(resumed.status.to_string(), "Active");
 
     kernel.shutdown();
@@ -612,13 +619,16 @@ fn test_find_instance_by_agent_id() {
     let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
     let agent_id = instance.agent_id().unwrap();
 
-    let found = kernel.hands().find_by_agent(agent_id);
+    let found = kernel.hand_registry_ref().find_by_agent(agent_id);
     assert!(found.is_some(), "Should find instance by agent ID");
     assert_eq!(found.unwrap().instance_id, instance.instance_id);
 
     // Random agent ID should not find any instance
     let random_id = AgentId::from_hand_id("nonexistent");
-    assert!(kernel.hands().find_by_agent(random_id).is_none());
+    assert!(kernel
+        .hand_registry_ref()
+        .find_by_agent(random_id)
+        .is_none());
 
     kernel.shutdown();
 }
@@ -740,7 +750,10 @@ fn test_reactivation_restores_triggers_to_original_roles() {
 
     // Remove the instance entry without killing the agents to force the
     // activation path to clean up and migrate the stale hand agents.
-    kernel.hands().deactivate(instance.instance_id).unwrap();
+    kernel
+        .hand_registry_ref()
+        .deactivate(instance.instance_id)
+        .unwrap();
 
     let reactivated = kernel
         .activate_hand("test-research", HashMap::new())

@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use super::subsystems::{
     AgentSubsystemApi, EventSubsystemApi, LlmSubsystemApi, McpSubsystemApi, MediaSubsystemApi,
-    MemorySubsystemApi, SkillsSubsystemApi, WorkflowSubsystemApi,
+    MemorySubsystemApi, WorkflowSubsystemApi,
 };
 
 use tracing::{debug, info, warn};
@@ -692,20 +692,6 @@ impl LibreFangKernel {
                 .store(false, Ordering::Release);
             tracing::debug!("Session stream hub GC task stopped");
         });
-    }
-
-    /// Skill registry (RwLock — hot-reload on install/uninstall).
-    #[inline]
-    pub fn skill_registry_ref(
-        &self,
-    ) -> &std::sync::RwLock<librefang_skills::registry::SkillRegistry> {
-        self.skills.skill_registry_ref()
-    }
-
-    /// Hand registry (curated autonomous capability packages).
-    #[inline]
-    pub fn hands(&self) -> &librefang_hands::registry::HandRegistry {
-        self.skills.hand_registry_ref()
     }
 
     /// MCP catalog — returns the `ArcSwap` for lock-free reads.

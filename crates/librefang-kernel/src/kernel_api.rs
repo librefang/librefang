@@ -567,7 +567,7 @@ impl KernelApi for LibreFangKernel {
         <Self as crate::EventSubsystemApi>::event_bus_ref(self)
     }
     fn hands(&self) -> &librefang_hands::registry::HandRegistry {
-        Self::hands(self)
+        <Self as crate::SkillsSubsystemApi>::hand_registry_ref(self)
     }
     fn home_dir(&self) -> &Path {
         Self::home_dir(self)
@@ -663,7 +663,7 @@ impl KernelApi for LibreFangKernel {
         <Self as crate::MeshSubsystemApi>::peer_registry_ref(self)
     }
     fn skill_registry_ref(&self) -> &std::sync::RwLock<librefang_skills::registry::SkillRegistry> {
-        Self::skill_registry_ref(self)
+        <Self as crate::SkillsSubsystemApi>::skill_registry_ref(self)
     }
 
     // -- Config / lifecycle --
