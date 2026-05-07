@@ -172,19 +172,36 @@ is per-agent `fs2::FileExt::lock_exclusive`, mirroring
 ### Dedup
 
 `save_candidate` skips the write when a pending candidate with the
-same `(source kind, name)` already exists for this agent. Critical for
-default-on with `RepeatedToolPattern`: the same recent-window pattern
-matches every turn until a new tool sequence pushes it out of the
-window, so without dedup the operator would accumulate one duplicate
-candidate per turn against the cap. The check is `O(N)` over at most
-`max_pending` parsed TOML files — microseconds in practice.
+same `(source kind, name, prompt_context)` already exists for this
+agent. Critical for default-on with `RepeatedToolPattern`: the same
+recent-window pattern matches every turn until a new tool sequence
+pushes it out of the window, so without dedup the operator would
+accumulate one duplicate candidate per turn against the cap. The
+check is `O(N)` over at most `max_pending` parsed TOML files —
+microseconds in practice.
 
-The dedup key intentionally does NOT include `prompt_context` or
-`description` — those fields are derived deterministically from the
-matching trigger inside the heuristic, so equality on `(source kind,
-name)` already implies equality of the rest of the candidate body.
-Different teaching signals that happen to produce the same name
-collision are extremely rare; the cap LRU eventually flushes them.
+`prompt_context` is part of the key (rather than just `(source kind,
+name)`) so two genuinely-distinct teaching signals that happen to
+hit `synth_name`'s degenerate fallback path — `captured_rule` /
+`captured_correction` / `captured_repeat`, emitted when the head is
+empty after sanitisation (e.g. an emoji-only sentence) — do not
+false-dedup against each other. Two captures of the *same* teaching
+signal produce identical `(source kind, name, prompt_context)` so
+this still catches the duplication case.
+
+### Per-turn registry reload
+
+`run_capture` aggregates the auto-promotion outcome of every hit it
+produced and calls `kernel.reload_skills()` at most once per turn.
+A turn that triggers all three scanners (explicit instruction +
+correction + repeated tool pattern) under `approval_policy = "auto"`
+would otherwise pay three `RwLock + read_dir` reloads back-to-back;
+the agent loop only consults the registry once at the next turn's
+prompt build, so collapsing to one reload is correct and cheap. The
+reload runs through `Handle::spawn_blocking` so the supervised
+capture task suspends on disk IO rather than blocking the tokio
+worker; a `JoinError` (panic / cancel inside the reload) is logged
+at WARN with the agent id but does not propagate.
 
 ### Aging (optional TTL)
 

@@ -113,9 +113,10 @@ pub fn agent_pending_dir(skills_root: &Path, agent_id: &str) -> io::Result<PathB
 ///    same gate that blocks marketplace skills, so a malicious draft
 ///    cannot sit in `pending/` waiting to trick a sleepy reviewer.
 /// 2. **Dedup:** if a pending candidate with the same `(source kind,
-///    name)` already exists for this agent, the write is skipped —
-///    a deterministic heuristic that fires every turn for the same
-///    teaching signal would otherwise pile up duplicate candidates.
+///    name, prompt_context)` already exists for this agent, the write
+///    is skipped — a deterministic heuristic that fires every turn
+///    for the same teaching signal would otherwise pile up duplicate
+///    candidates.
 /// 3. **Cap:** if writing this candidate would exceed `max_pending`,
 ///    the oldest candidate (by `captured_at`) is deleted first.
 ///    `max_pending = 0` is treated as a hard "do not store" signal —
@@ -228,16 +229,25 @@ fn source_kind(source: &crate::skill_workshop::candidate::CaptureSource) -> &'st
     }
 }
 
-/// True if a pending candidate with the same `(source kind, name)`
-/// tuple already exists in `dir`. Same teaching signal scanned by the
-/// same heuristic produces the same name, so this catches the
-/// "RepeatedToolPattern fires every turn" / "user keeps saying the
-/// same `from now on …` rule" duplication cases without needing
-/// content-hashing the prompt body.
+/// True if a pending candidate with the same `(source kind, name,
+/// prompt_context)` tuple already exists in `dir`. Same teaching
+/// signal scanned by the same heuristic produces all three identical,
+/// so this catches the "RepeatedToolPattern fires every turn" / "user
+/// keeps saying the same `from now on …` rule" duplication cases.
+///
+/// `prompt_context` is part of the key (rather than just `(kind,
+/// name)`) so two genuinely-distinct teaching signals that happen to
+/// hit `synth_name`'s degenerate fallback path (`captured_rule`,
+/// `captured_correction`, `captured_repeat` — emitted when the head
+/// is empty after sanitisation, e.g. an emoji-only sentence) do not
+/// false-dedup against each other.
 fn is_duplicate_pending(dir: &Path, candidate: &CandidateSkill) -> io::Result<bool> {
     let kind = source_kind(&candidate.source);
     for entry in read_dir_candidates(dir)? {
-        if source_kind(&entry.candidate.source) == kind && entry.candidate.name == candidate.name {
+        if source_kind(&entry.candidate.source) == kind
+            && entry.candidate.name == candidate.name
+            && entry.candidate.prompt_context == candidate.prompt_context
+        {
             return Ok(true);
         }
     }
@@ -867,29 +877,31 @@ mod tests {
     }
 
     #[test]
-    fn save_dedups_same_source_kind_and_name() {
+    fn save_dedups_same_source_kind_and_name_and_prompt_context() {
         // RepeatedToolPattern fires every turn the recent window still
         // contains the matching sequence; without dedup the operator
         // would accumulate one duplicate candidate per turn until cap
-        // LRU evicted older work. Verify the second save returns
-        // Ok(false) and the queue stays at one entry.
+        // LRU evicted older work. Two captures of the same teaching
+        // signal produce identical (source, name, prompt_context) — id
+        // and captured_at differ — so the second save must skip.
         let tmp = tempdir().unwrap();
+        let body = "# Always run cargo clippy before commit\n";
         let mut a = fixture(
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             "11111111-0000-0000-0000-000000000001",
-            "# body a",
+            body,
         );
         a.name = "always_clippy".to_string();
         let mut b = fixture(
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             "11111111-0000-0000-0000-000000000002",
-            "# body b — different body",
+            body,
         );
-        b.name = "always_clippy".to_string(); // same name → dup
+        b.name = "always_clippy".to_string();
         assert!(save_candidate(tmp.path(), &a, 20, None).unwrap());
         assert!(
             !save_candidate(tmp.path(), &b, 20, None).unwrap(),
-            "second save with same (source kind, name) must skip"
+            "second save with same (source kind, name, prompt_context) must skip"
         );
         let listed = list_pending(tmp.path(), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
         assert_eq!(listed.len(), 1);
@@ -897,20 +909,54 @@ mod tests {
     }
 
     #[test]
+    fn save_does_not_dedup_when_prompt_context_differs() {
+        // Synthetic edge case: `synth_name` falls back to
+        // `captured_rule` for empty / non-alphanumeric heads, which
+        // could otherwise produce false dedup between distinct
+        // teaching signals. Including `prompt_context` in the dedup
+        // key means two candidates with the same name but different
+        // bodies stay separate — both reach disk.
+        let tmp = tempdir().unwrap();
+        let mut a = fixture(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "11111111-0000-0000-0000-000000000005",
+            "# rule about cargo fmt\n",
+        );
+        a.name = "captured_rule".to_string();
+        let mut b = fixture(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "11111111-0000-0000-0000-000000000006",
+            "# completely unrelated rule about logging\n",
+        );
+        b.name = "captured_rule".to_string();
+        assert!(save_candidate(tmp.path(), &a, 20, None).unwrap());
+        assert!(
+            save_candidate(tmp.path(), &b, 20, None).unwrap(),
+            "different prompt_context must not be deduped"
+        );
+        assert_eq!(
+            list_pending(tmp.path(), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
     fn save_does_not_dedup_across_source_kinds() {
-        // Same name, different source — distinct teaching signals,
-        // both kept.
+        // Same name + same prompt_context but different source kind —
+        // dedup key includes source kind so both stay.
         let tmp = tempdir().unwrap();
         let mut a = fixture(
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             "11111111-0000-0000-0000-000000000003",
-            "# a",
+            "# shared body",
         );
         a.name = "shared_name".to_string();
         let mut b = fixture(
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             "11111111-0000-0000-0000-000000000004",
-            "# b",
+            "# shared body",
         );
         b.name = "shared_name".to_string();
         b.source = CaptureSource::UserCorrection {

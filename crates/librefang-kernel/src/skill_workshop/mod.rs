@@ -166,8 +166,15 @@ pub async fn run_capture(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
         return;
     }
 
+    // Track whether ANY auto-promotion landed this turn so we can
+    // collapse the registry reload to a single call. Per-turn reload is
+    // O(read_dir + N parses + RwLock write); doing it three times in a
+    // turn that hits all three scanners (explicit + correction +
+    // repeated_tool) is wasted work, and the agent loop only consults
+    // the registry once at the next turn's prompt build either way.
+    let mut auto_promoted_any = false;
     for hit in hits {
-        capture_one(
+        let promoted = capture_one(
             &kernel,
             agent_id,
             &cfg,
@@ -176,9 +183,50 @@ pub async fn run_capture(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
             hit,
         )
         .await;
+        auto_promoted_any |= promoted;
+    }
+
+    if auto_promoted_any {
+        // `reload_skills` takes a synchronous `RwLock` write lock and
+        // walks the skills directory. Defer to `spawn_blocking` so the
+        // tokio worker is not stalled on disk IO + lock contention; the
+        // supervised-spawn task that hosts this hook is detached from
+        // the agent loop, so awaiting the JoinHandle just suspends that
+        // task — a concurrent next turn that consults the registry
+        // observes the freshly-promoted skills, not a stale snapshot.
+        let kernel_for_reload = Arc::clone(&kernel);
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                if let Err(e) = handle
+                    .spawn_blocking(move || kernel_for_reload.reload_skills())
+                    .await
+                {
+                    // panic / cancel inside reload_skills surfaces as
+                    // JoinError; the rest of the kernel does not crash
+                    // on a single hot-reload failure (`reload_skills`
+                    // already swallows poisoned `RwLock`s), but a
+                    // structured warn lets the operator notice if the
+                    // background reload is misbehaving in a tight loop.
+                    warn!(
+                        %agent_id,
+                        error = %e,
+                        "skill_workshop: reload_skills task panicked or was cancelled after auto-promote"
+                    );
+                }
+            }
+            Err(_) => kernel_for_reload.reload_skills(),
+        }
     }
 }
 
+/// Returns `true` iff a candidate was auto-promoted into the active
+/// skill registry by this call. The caller (`run_capture`) aggregates
+/// these flags so the registry reload can happen at most once per turn
+/// rather than once per hit. Returning `false` covers every non-promote
+/// branch — `ReviewMode::None` discard, LLM reject, security block,
+/// `ApprovalPolicy::Pending` (write goes to `pending/` but does NOT
+/// require a registry reload), `save_candidate` returning `Ok(false)`
+/// (cap zero / dedup), `approve_candidate` failure.
 async fn capture_one(
     kernel: &Arc<LibreFangKernel>,
     agent_id: AgentId,
@@ -186,9 +234,9 @@ async fn capture_one(
     session_id: &SessionId,
     turn_index: u32,
     hit: HeuristicHit,
-) {
+) -> bool {
     let accepted_hit = match cfg.review_mode {
-        ReviewMode::None => return,
+        ReviewMode::None => return false,
         ReviewMode::Heuristic => hit,
         ReviewMode::ThresholdLlm => match run_llm_review(kernel, &hit).await {
             ReviewDecision::Accept {
@@ -198,7 +246,7 @@ async fn capture_one(
             } => apply_refinements(hit, refined_name, refined_description),
             ReviewDecision::Reject { reason } => {
                 debug!(%agent_id, reason, "skill_workshop: LLM review rejected candidate");
-                return;
+                return false;
             }
             ReviewDecision::Indeterminate { reason } => {
                 debug!(
@@ -252,6 +300,8 @@ async fn capture_one(
                     warn!(%agent_id, error = %e, "skill_workshop: failed to write pending candidate");
                 }
             }
+            // Pending policy never reloads the active registry.
+            false
         }
         ApprovalPolicy::Auto => {
             // Auto policy promotes directly to active. We still write
@@ -259,6 +309,19 @@ async fn capture_one(
             // chance to fail loudly before evolution::create_skill
             // touches the active tree, and leaves an audit trail in
             // case the auto-write surprises the operator.
+            //
+            // Known corner case (tracked as #3328 follow-up): if a
+            // previous `evolution::create_skill` failed and left an
+            // orphan pending file with the same `(source kind, name,
+            // prompt_context)` the dedup check now uses, every future
+            // turn sees `Ok(false)` from `save_candidate` and never
+            // retries the orphan. The fix is to fall back to
+            // `approve_candidate` against the existing pending entry
+            // when dedup blocked the new one. Acceptable for now
+            // because (a) `evolution::create_skill` rarely fails on the
+            // happy path and (b) the operator can run
+            // `librefang skill pending approve <id>` manually to
+            // unstick.
             let written = match storage::save_candidate(
                 &skills_root,
                 &candidate,
@@ -268,54 +331,28 @@ async fn capture_one(
                 Ok(b) => b,
                 Err(WorkshopError::SecurityBlocked(msg)) => {
                     warn!(%agent_id, msg, "skill_workshop: auto candidate blocked by security scan");
-                    return;
+                    return false;
                 }
                 Err(e) => {
                     warn!(%agent_id, error = %e, "skill_workshop: failed to stage auto candidate");
-                    return;
+                    return false;
                 }
             };
             if !written {
-                return;
+                return false;
             }
             match storage::approve_candidate(&skills_root, &skills_root, &candidate.id) {
                 Ok(_) => {
-                    // Refresh the in-memory skill registry so the next
-                    // turn's prompt build sees the auto-promoted skill.
-                    // The HTTP `approve_pending_candidate` route already
-                    // does this; without it here, an `auto`-policy hit
-                    // would write the active skill but the agent would
-                    // not see it until daemon restart.
-                    //
-                    // `reload_skills` takes a `RwLock` write lock and
-                    // walks the skills directory synchronously. Defer to
-                    // `spawn_blocking` so this hook does not stall the
-                    // tokio worker thread on disk IO + lock contention
-                    // (every other future on the same worker would
-                    // queue behind it).
-                    //
-                    // We `.await` the JoinHandle so a concurrent next
-                    // turn that consults the skill registry observes
-                    // the new skill, not a stale snapshot. The hook
-                    // itself runs inside `supervised_spawn` already
-                    // (detached from the agent loop), so awaiting the
-                    // reload here just suspends the supervised task —
-                    // it does not push back on the agent loop's return
-                    // path. Tests rely on the await to make the
-                    // post-promotion registry visible deterministically.
-                    let kernel_for_reload = Arc::clone(kernel);
-                    match tokio::runtime::Handle::try_current() {
-                        Ok(handle) => {
-                            let _ = handle
-                                .spawn_blocking(move || kernel_for_reload.reload_skills())
-                                .await;
-                        }
-                        Err(_) => kernel_for_reload.reload_skills(),
-                    }
-                    debug!(%agent_id, id = %candidate.id, "skill_workshop: auto-promoted candidate")
+                    debug!(%agent_id, id = %candidate.id, "skill_workshop: auto-promoted candidate");
+                    // Caller (`run_capture`) batches the registry
+                    // reload across all hits in this turn so a turn
+                    // that triggers all three scanners only pays one
+                    // reload instead of three.
+                    true
                 }
                 Err(e) => {
                     warn!(%agent_id, error = %e, "skill_workshop: auto promotion failed; candidate left in pending/");
+                    false
                 }
             }
         }
