@@ -23,10 +23,12 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
             .map(|aid| format!("{channel}:{aid}"))
             .unwrap_or_else(|| channel.to_string());
         let adapter = self
+            .mesh
             .channel_adapters
             .get(&lookup_key)
             .ok_or_else(|| {
                 let available: Vec<String> = self
+                    .mesh
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
@@ -97,10 +99,12 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
             .map(|aid| format!("{channel}:{aid}"))
             .unwrap_or_else(|| channel.to_string());
         let adapter = self
+            .mesh
             .channel_adapters
             .get(&lookup_key)
             .ok_or_else(|| {
                 let available: Vec<String> = self
+                    .mesh
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
@@ -175,10 +179,12 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
             .map(|aid| format!("{channel}:{aid}"))
             .unwrap_or_else(|| channel.to_string());
         let adapter = self
+            .mesh
             .channel_adapters
             .get(&lookup_key)
             .ok_or_else(|| {
                 let available: Vec<String> = self
+                    .mesh
                     .channel_adapters
                     .iter()
                     .map(|e| e.key().clone())
@@ -248,6 +254,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
             .map(|aid| format!("{channel}:{aid}"))
             .unwrap_or_else(|| channel.to_string());
         let adapter = self
+            .mesh
             .channel_adapters
             .get(&lookup_key)
             .ok_or_else(|| match account_id.filter(|s| !s.is_empty()) {

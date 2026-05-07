@@ -891,7 +891,7 @@ impl LibreFangKernel {
                 spawn_logged("a2a_discover_external", async move {
                     let discovered =
                         librefang_runtime::a2a::discover_external_agents(&agents).await;
-                    if let Ok(mut store) = kernel.a2a_external_agents.lock() {
+                    if let Ok(mut store) = kernel.mesh.a2a_external_agents.lock() {
                         *store = discovered;
                     }
                 });
@@ -1003,8 +1003,8 @@ impl LibreFangKernel {
                 );
 
                 // Safe one-time initialization via OnceLock (replaces previous unsafe pointer mutation).
-                let _ = self.peer_registry.set(registry.clone());
-                let _ = self.peer_node.set(node.clone());
+                let _ = self.mesh.peer_registry.set(registry.clone());
+                let _ = self.mesh.peer_node.set(node.clone());
 
                 // Connect to bootstrap peers
                 for peer_addr_str in &cfg.network.bootstrap_peers {

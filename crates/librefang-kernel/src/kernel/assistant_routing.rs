@@ -40,7 +40,7 @@ impl LibreFangKernel {
             };
             drop(cfg);
             for (channel, platform_id) in &bindings {
-                if kernel.channel_adapters.contains_key(channel.as_str()) {
+                if kernel.mesh.channel_adapters.contains_key(channel.as_str()) {
                     if let Err(e) = kernel
                         .send_channel_message(channel, platform_id, &message, None, None)
                         .await

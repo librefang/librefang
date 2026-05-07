@@ -198,7 +198,10 @@ async fn test_notify_escalated_approval_prefers_request_route_to() {
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel.channel_adapters.insert("test".to_string(), adapter);
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
 
     let req = ApprovalRequest {
         id: uuid::Uuid::new_v4(),
@@ -4369,7 +4372,10 @@ async fn test_push_notification_health_check_failed_falls_back_to_alert_channels
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel.channel_adapters.insert("test".to_string(), adapter);
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
 
     kernel
         .push_notification(
@@ -4423,7 +4429,10 @@ async fn test_push_notification_health_check_failed_agent_rule_overrides_alert_c
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel.channel_adapters.insert("test".to_string(), adapter);
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
 
     kernel
         .push_notification(
@@ -4462,7 +4471,10 @@ async fn test_push_notification_health_check_failed_no_targets_when_unconfigured
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel.channel_adapters.insert("test".to_string(), adapter);
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
 
     kernel
         .push_notification(
@@ -4513,7 +4525,10 @@ async fn test_push_notification_unknown_event_type_yields_no_targets() {
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel.channel_adapters.insert("test".to_string(), adapter);
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
 
     kernel
         .push_notification(
@@ -4561,7 +4576,10 @@ async fn test_push_notification_appends_session_suffix_when_provided() {
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel.channel_adapters.insert("test".to_string(), adapter);
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
 
     let session_id = SessionId::new();
     kernel
@@ -4613,7 +4631,10 @@ async fn test_push_notification_omits_session_suffix_for_agent_level_alerts() {
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let adapter = Arc::new(RecordingChannelAdapter::new("test"));
     let sent = adapter.sent.clone();
-    kernel.channel_adapters.insert("test".to_string(), adapter);
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
 
     kernel
         .push_notification(

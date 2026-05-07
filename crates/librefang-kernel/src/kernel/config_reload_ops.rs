@@ -239,9 +239,9 @@ impl LibreFangKernel {
                     info!(
                         "Hot-reload: channel config updated — clearing {} adapter(s), \
                          will reinitialize on next bridge cycle",
-                        self.channel_adapters.len()
+                        self.mesh.channel_adapters.len()
                     );
-                    self.channel_adapters.clear();
+                    self.mesh.channel_adapters.clear();
                 }
                 HotAction::ReloadSkills => {
                     self.reload_skills();

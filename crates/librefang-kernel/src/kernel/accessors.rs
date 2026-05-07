@@ -1046,7 +1046,7 @@ impl LibreFangKernel {
     /// A2A task store.
     #[inline]
     pub fn a2a_tasks(&self) -> &librefang_runtime::a2a::A2aTaskStore {
-        &self.a2a_task_store
+        &self.mesh.a2a_task_store
     }
 
     /// Discovered external A2A agent cards.
@@ -1054,13 +1054,13 @@ impl LibreFangKernel {
     pub fn a2a_agents(
         &self,
     ) -> &std::sync::Mutex<Vec<(String, librefang_runtime::a2a::AgentCard)>> {
-        &self.a2a_external_agents
+        &self.mesh.a2a_external_agents
     }
 
     /// Delivery receipt tracker.
     #[inline]
     pub fn delivery(&self) -> &DeliveryTracker {
-        &self.delivery_tracker
+        &self.mesh.delivery_tracker
     }
 
     /// First currently-active `SessionInterrupt` registered for `agent_id`,
@@ -1109,19 +1109,19 @@ impl LibreFangKernel {
     pub fn channel_adapters_ref(
         &self,
     ) -> &dashmap::DashMap<String, Arc<dyn librefang_channels::types::ChannelAdapter>> {
-        &self.channel_adapters
+        &self.mesh.channel_adapters
     }
 
     /// Agent bindings for multi-account routing.
     #[inline]
     pub fn bindings_ref(&self) -> &std::sync::Mutex<Vec<librefang_types::config::AgentBinding>> {
-        &self.bindings
+        &self.mesh.bindings
     }
 
     /// Broadcast configuration.
     #[inline]
     pub fn broadcast_ref(&self) -> &librefang_types::config::BroadcastConfig {
-        &self.broadcast
+        &self.mesh.broadcast
     }
 
     /// Uptime since kernel boot.
@@ -1217,19 +1217,19 @@ impl LibreFangKernel {
     /// OFP peer registry (set once at startup).
     #[inline]
     pub fn peer_registry_ref(&self) -> Option<&librefang_wire::PeerRegistry> {
-        self.peer_registry.get()
+        self.mesh.peer_registry.get()
     }
 
     /// Test-only: install a `PeerRegistry` without booting the OFP node.
     /// Used by route-handler regression tests for #3644 — never call from
     /// production code; the OFP startup path owns this initialization
-    /// (see `start_peer_node` -> `self.peer_registry.set(...)`).
+    /// (see `start_peer_node` -> `self.mesh.peer_registry.set(...)`).
     #[doc(hidden)]
     pub fn install_peer_registry_for_test(
         &self,
         registry: librefang_wire::PeerRegistry,
     ) -> Result<(), librefang_wire::PeerRegistry> {
-        self.peer_registry.set(registry)
+        self.mesh.peer_registry.set(registry)
     }
 
     /// Hook registry.
@@ -1298,7 +1298,7 @@ impl LibreFangKernel {
     /// OFP peer node (set once at startup).
     #[inline]
     pub fn peer_node_ref(&self) -> Option<&Arc<librefang_wire::PeerNode>> {
-        self.peer_node.get()
+        self.mesh.peer_node.get()
     }
 
     /// Provider unconfigured log flag (atomic).
@@ -1510,7 +1510,7 @@ impl LibreFangKernel {
         }
 
         // 10. delivery_tracker — remove receipts for dead agents
-        total_removed += self.delivery_tracker.gc_stale_agents(&live_agents);
+        total_removed += self.mesh.delivery_tracker.gc_stale_agents(&live_agents);
 
         // 11. event_bus agent channels — remove channels for dead agents
         total_removed += self.event_bus.gc_stale_channels(&live_agents);

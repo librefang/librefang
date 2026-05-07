@@ -12,6 +12,7 @@
 pub mod llm;
 pub mod mcp;
 pub mod media;
+pub mod mesh;
 pub mod metering;
 pub mod processes;
 pub mod security;
@@ -21,6 +22,7 @@ pub mod workflow;
 pub use llm::LlmSubsystem;
 pub use mcp::McpSubsystem;
 pub use media::MediaSubsystem;
+pub use mesh::MeshSubsystem;
 pub use metering::MeteringSubsystem;
 pub use processes::ProcessSubsystem;
 pub use security::SecuritySubsystem;

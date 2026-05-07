@@ -727,21 +727,14 @@ pub struct LibreFangKernel {
     /// MCP connection pool + OAuth + tool cache + catalog + health
     /// monitor + summary cache. See [`subsystems::McpSubsystem`].
     pub(crate) mcp: subsystems::McpSubsystem,
-    /// A2A task store for tracking task lifecycle.
-    pub a2a_task_store: librefang_runtime::a2a::A2aTaskStore,
-    /// Discovered external A2A agent cards.
-    pub a2a_external_agents: std::sync::Mutex<Vec<(String, librefang_runtime::a2a::AgentCard)>>,
     /// Web search + browser + media understanding + TTS + media drivers.
     /// See [`subsystems::MediaSubsystem`].
     pub(crate) media: subsystems::MediaSubsystem,
-    /// Delivery receipt tracker (bounded LRU, max 10K entries).
-    pub(crate) delivery_tracker: DeliveryTracker,
+    /// A2A registry + OFP peers + channel adapters + bindings + broadcast
+    /// + delivery tracker. See [`subsystems::MeshSubsystem`].
+    pub(crate) mesh: subsystems::MeshSubsystem,
     /// Execution approval manager.
     pub(crate) approval_manager: crate::approval::ApprovalManager,
-    /// Agent bindings for multi-account routing (Mutex for runtime add/remove).
-    pub(crate) bindings: std::sync::Mutex<Vec<librefang_types::config::AgentBinding>>,
-    /// Broadcast configuration.
-    pub(crate) broadcast: librefang_types::config::BroadcastConfig,
     /// Auto-reply engine.
     pub(crate) auto_reply_engine: crate::auto_reply::AutoReplyEngine,
     /// Plugin lifecycle hook registry.
@@ -751,17 +744,10 @@ pub struct LibreFangKernel {
     /// Persistent + background process registries. See
     /// [`subsystems::ProcessSubsystem`].
     pub(crate) processes: subsystems::ProcessSubsystem,
-    /// OFP peer registry — tracks connected peers (set once during OFP startup).
-    pub(crate) peer_registry: OnceLock<librefang_wire::PeerRegistry>,
-    /// OFP peer node — the local networking node (set once during OFP startup).
-    pub(crate) peer_node: OnceLock<Arc<librefang_wire::PeerNode>>,
     /// Boot timestamp for uptime calculation.
     pub(crate) booted_at: std::time::Instant,
     /// WhatsApp Web gateway child process PID (for shutdown cleanup).
     pub(crate) whatsapp_gateway_pid: Arc<std::sync::Mutex<Option<u32>>>,
-    /// Channel adapters registered at bridge startup (for proactive `channel_send` tool).
-    pub(crate) channel_adapters:
-        dashmap::DashMap<String, Arc<dyn librefang_channels::types::ChannelAdapter>>,
     /// Hot-reloadable tool policy override (set via config hot-reload, read in available_tools).
     pub(crate) tool_policy_override:
         std::sync::RwLock<Option<librefang_types::tool_policy::ToolPolicy>>,
@@ -1247,7 +1233,7 @@ impl LibreFangKernel {
             buttons,
         };
 
-        if let Some(adapter) = self.channel_adapters.get(&target.channel_type) {
+        if let Some(adapter) = self.mesh.channel_adapters.get(&target.channel_type) {
             let user = librefang_channels::types::ChannelUser {
                 platform_id: target.recipient.clone(),
                 display_name: target.recipient.clone(),

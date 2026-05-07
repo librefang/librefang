@@ -90,7 +90,8 @@ impl LibreFangKernel {
 
     /// List all agent bindings.
     pub fn list_bindings(&self) -> Vec<librefang_types::config::AgentBinding> {
-        self.bindings
+        self.mesh
+            .bindings
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
@@ -98,7 +99,7 @@ impl LibreFangKernel {
 
     /// Add a binding at runtime.
     pub fn add_binding(&self, binding: librefang_types::config::AgentBinding) {
-        let mut bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut bindings = self.mesh.bindings.lock().unwrap_or_else(|e| e.into_inner());
         bindings.push(binding);
         // Sort by specificity descending
         bindings.sort_by_key(|b| std::cmp::Reverse(b.match_rule.specificity()));
@@ -106,7 +107,7 @@ impl LibreFangKernel {
 
     /// Remove a binding by index, returns the removed binding if valid.
     pub fn remove_binding(&self, index: usize) -> Option<librefang_types::config::AgentBinding> {
-        let mut bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut bindings = self.mesh.bindings.lock().unwrap_or_else(|e| e.into_inner());
         if index < bindings.len() {
             Some(bindings.remove(index))
         } else {
