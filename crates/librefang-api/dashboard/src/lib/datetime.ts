@@ -28,12 +28,23 @@ export function formatTime(value: string | number | Date | undefined | null): st
 /**
  * Format a timestamp as relative time ("just now", "3m ago", "2h ago", "5d ago").
  */
+const rtfCache = new Map<string, Intl.RelativeTimeFormat>();
+
+function getRtf(locale: string): Intl.RelativeTimeFormat {
+  let rtf = rtfCache.get(locale);
+  if (!rtf) {
+    rtf = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
+    rtfCache.set(locale, rtf);
+  }
+  return rtf;
+}
+
 export function formatRelativeTime(value: string | number | Date | undefined | null, locale?: string, nowMs?: number): string {
   if (!value) return "-";
   const now = nowMs ?? Date.now();
   const diff = now - new Date(value).getTime();
   const seconds = Math.floor(diff / 1000);
-  const rtf = new Intl.RelativeTimeFormat(locale ?? "en", { numeric: "auto" });
+  const rtf = getRtf(locale ?? "en");
   if (seconds < 60) return rtf.format(-seconds, "second");
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return rtf.format(-minutes, "minute");

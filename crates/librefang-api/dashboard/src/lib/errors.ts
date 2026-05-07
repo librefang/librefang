@@ -18,6 +18,15 @@ function deepestCauseMessage(err: Error): string | undefined {
   return found;
 }
 
+/**
+ * Extract a user-facing error message from an unknown thrown value.
+ *
+ * Priority order (highest → lowest):
+ *  1. ApiError — includes status code + deepest cause message
+ *  2. Error instance — message + deepest cause message
+ *  3. Raw string — returned as-is
+ *  4. Fallback — caller-provided default
+ */
 export function toastErr(err: unknown, fallback: string): string {
   if (import.meta.env.DEV) {
     console.error("[toastErr]", err);
