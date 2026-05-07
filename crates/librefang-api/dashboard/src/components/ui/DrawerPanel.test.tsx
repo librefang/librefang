@@ -91,4 +91,90 @@ describe("DrawerPanel", () => {
 
     expect(calls).toBe(1);
   });
+
+  // Regression test for #4714: the picker → config flow.
+  //
+  // ProvidersPage and ChannelsPage both use a pattern where clicking an
+  // item in an "Add" picker drawer closes the picker and opens a
+  // configuration drawer in the same React commit:
+  //
+  //     handlePick = (item) => {
+  //       setPickerOpen(false);     // → picker DrawerPanel isOpen=true → false
+  //       setConfiguringItem(item); // → mounts config DrawerPanel (isOpen=true)
+  //     };
+  //
+  // Before the ownership check, the picker's parent-driven close watcher
+  // would unconditionally call `store.close()` after the config drawer
+  // had already pushed its own body into the slot. The slot then went
+  // `{isOpen=false, content=config_body}`, the existing external-close
+  // watcher saw `!drawerOpen && wasOpen` for the config drawer and fired
+  // ITS `onClose`, which made the parent unmount the config drawer.
+  // Net visible effect: clicking a picker item closed the picker AND
+  // immediately closed the configuration window the user was trying
+  // to reach. See https://github.com/librefang/librefang/issues/4714.
+  //
+  // Fix: each DrawerPanel only fires `close()` when the slot's content
+  // is still the body it pushed. A freshly-mounted DrawerPanel that
+  // pushed in the same commit "wins" the slot.
+  it("does not collateral-close the freshly-mounted drawer when a sibling drawer's parent flips isOpen=false in the same commit", () => {
+    // Step 1: picker drawer is open and owns the slot.
+    let pickerOnCloseCalls = 0;
+    const PickerOnClose = () => {
+      pickerOnCloseCalls += 1;
+    };
+    let configOnCloseCalls = 0;
+    const ConfigOnClose = () => {
+      configOnCloseCalls += 1;
+    };
+
+    function Harness({
+      pickerOpen,
+      configMounted,
+    }: {
+      pickerOpen: boolean;
+      configMounted: boolean;
+    }) {
+      return (
+        <>
+          {/* Conditionally-mounted config drawer with isOpen literal true,
+              same shape as ChannelsPage::ConfigDialog. */}
+          {configMounted && (
+            <DrawerPanel isOpen onClose={ConfigOnClose} title="config">
+              <p data-testid="config-body">config body</p>
+            </DrawerPanel>
+          )}
+          {/* Always-mounted picker drawer with toggling isOpen, same shape
+              as ChannelsPage's Add picker. */}
+          <DrawerPanel isOpen={pickerOpen} onClose={PickerOnClose} title="picker">
+            <p data-testid="picker-body">picker body</p>
+          </DrawerPanel>
+        </>
+      );
+    }
+
+    const { rerender } = render(<Harness pickerOpen={true} configMounted={false} />);
+    expect(useDrawerStore.getState().isOpen).toBe(true);
+    expect(useDrawerStore.getState().content?.title).toBe("picker");
+
+    // Step 2: simulate the picker's onClick handler running:
+    //   setPickerOpen(false);     // picker DrawerPanel isOpen → false
+    //   setConfiguringItem(item); // mounts config DrawerPanel
+    act(() => {
+      rerender(<Harness pickerOpen={false} configMounted={true} />);
+    });
+
+    // Slot must hold the config drawer, not be closed by the picker's
+    // parent-driven close watcher.
+    expect(useDrawerStore.getState().isOpen).toBe(true);
+    expect(useDrawerStore.getState().content?.title).toBe("config");
+
+    // The config drawer's onClose must NOT have fired — the user
+    // didn't dismiss it.
+    expect(configOnCloseCalls).toBe(0);
+
+    // The picker's onClose must NOT have fired either — its parent
+    // flipped `isOpen=false` itself, so the parent-driven close path
+    // applies (silent), not the external-close bubble-up.
+    expect(pickerOnCloseCalls).toBe(0);
+  });
 });

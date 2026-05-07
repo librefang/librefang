@@ -47,17 +47,25 @@ export function DrawerPanel({
     onCloseRef.current = onClose;
   }, [onClose]);
 
+  // Track the body identity we last pushed into the slot. The
+  // parent-driven close watcher uses this to skip `close()` when another
+  // DrawerPanel has taken over the slot in the same commit — see
+  // ownership check below (#4714).
+  const lastPushedBodyRef = useRef<ReactNode>(null);
+
   // Push children into the slot whenever we're open. Re-runs on every
   // re-render that changes any of the deps — including `children`, which
   // gets a fresh identity each render. That's intended: the body should
   // mirror the parent's current state.
   useEffect(() => {
     if (!isOpen) return;
+    const body = children;
+    lastPushedBodyRef.current = body;
     open({
       title,
       size,
       hideCloseButton,
-      body: children,
+      body,
       onClose: () => onCloseRef.current(),
     });
   }, [isOpen, title, size, hideCloseButton, children, open]);
@@ -70,15 +78,32 @@ export function DrawerPanel({
   // dismissals from the parent silently no-op'd, leaving the form
   // visible with a perpetually spinning submit button (#4687).
   //
-  // The watcher above guards on `isOpen && wasOpen && !drawerOpen` and
-  // therefore won't double-fire `onClose` on this path: by the time the
-  // store flip lands, `isOpen` is already false.
+  // Ownership check (#4714): only fire `close()` when our body still
+  // owns the slot. In a picker → config / "select item closes one
+  // drawer and opens another" flow, the picker DrawerPanel transitions
+  // isOpen=true → false in the same commit that the config DrawerPanel
+  // mounts and pushes its own body. If we close() unconditionally here
+  // we yank the slot closed underneath the freshly-mounted config
+  // drawer, and the existing external-close watcher then fires its
+  // onClose, which makes the parent unmount the config drawer — net
+  // result: user picks an item and the configuration window vanishes
+  // immediately. Comparing against `lastPushedBodyRef` lets the
+  // late-mounting drawer's push "win" the slot without the previous
+  // owner clobbering it.
+  //
+  // The external-close watcher below guards on
+  // `isOpen && wasOpen && !drawerOpen` and therefore won't double-fire
+  // `onClose` on this path: by the time the store flip lands, `isOpen`
+  // is already false.
   const prevIsOpenRef = useRef(isOpen);
   useEffect(() => {
     const wasOpen = prevIsOpenRef.current;
     prevIsOpenRef.current = isOpen;
     if (wasOpen && !isOpen && drawerOpen) {
-      close();
+      const currentBody = useDrawerStore.getState().content?.body;
+      if (currentBody === lastPushedBodyRef.current) {
+        close();
+      }
     }
   }, [isOpen, drawerOpen, close]);
 
