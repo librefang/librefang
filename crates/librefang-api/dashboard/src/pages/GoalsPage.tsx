@@ -99,7 +99,10 @@ export function GoalsPage() {
     setEditDraft({
       title: goal.title || "",
       description: goal.description || "",
-      status: goal.status || "pending",
+      status:
+        goal.status === "in_progress" || goal.status === "completed"
+          ? goal.status
+          : "pending",
       progress: goal.progress || 0
     });
   };
@@ -356,7 +359,7 @@ export function GoalsPage() {
                           <textarea id="goal-edit-description" value={editDraft.description} onChange={e => setEditDraft({...editDraft, description: e.target.value})} className={`${inputClass} resize-none`} rows={2} placeholder={t("goals.desc_label")} />
                           <div className="flex flex-wrap gap-2">
                             <label htmlFor="goal-edit-status" className="sr-only">{t("goals.status")}</label>
-                            <select id="goal-edit-status" value={editDraft.status} onChange={e => setEditDraft({...editDraft, status: e.target.value})} className={`${inputClass} flex-1 min-w-[120px]`}>
+                            <select id="goal-edit-status" value={editDraft.status} onChange={e => setEditDraft({...editDraft, status: e.target.value as "pending" | "in_progress" | "completed"})} className={`${inputClass} flex-1 min-w-[120px]`}>
                               <option value="pending">{t("goals.pending")}</option>
                               <option value="in_progress">{t("goals.in_progress")}</option>
                               <option value="completed">{t("goals.completed")}</option>

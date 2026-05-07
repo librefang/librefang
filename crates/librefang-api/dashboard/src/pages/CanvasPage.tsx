@@ -783,7 +783,7 @@ function NodeConfigPanel({
                 {t("canvas.output_var")} <span className="text-text-dim/50 normal-case font-normal">{t("canvas.output_var_hint")}</span>
               </label>
               <input type="text" value={outputVar} onChange={e => setOutputVar(e.target.value)}
-                placeholder={t("canvas.example_placeholder", "e.g. research_result")} className={inputClass} />
+                placeholder={t("canvas.example_placeholder")} className={inputClass} />
             </div>
             {/* Depends On — multi-select other step nodes */}
             {(() => {

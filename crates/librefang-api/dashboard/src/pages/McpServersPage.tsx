@@ -711,7 +711,7 @@ function ServerDetailBody({
             >
               <Icon className="w-3.5 h-3.5" />
               {td.label}
-              {td.count !== undefined && (
+              {"count" in td && (
                 <span
                   className={`font-mono text-[10px] px-1.5 py-px rounded-full ${
                     active ? "bg-brand/15 text-brand" : "bg-text-dim/10 text-text-dim"

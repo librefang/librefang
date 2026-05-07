@@ -293,7 +293,7 @@ export function A2APage() {
                             task.status === "failed" ? "error" : "brand"
                           }
                         >
-                          {t(`a2a.status_${task.status}`, task.status)}
+                          {t(`a2a.status_${task.status}`, { defaultValue: task.status ?? "" })}
                         </Badge>
                       </div>
                       <div className="flex items-center gap-2">
