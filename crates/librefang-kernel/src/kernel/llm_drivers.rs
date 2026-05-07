@@ -164,7 +164,7 @@ impl LibreFangKernel {
             };
 
             match self.driver_cache.get_or_create(&driver_config) {
-                Ok(d) => d,
+                Ok(d) => (d, false),
                 Err(e) => {
                     // If fresh driver creation fails (e.g. key not yet set for this
                     // provider), fall back to the boot-time default driver. This
@@ -176,7 +176,12 @@ impl LibreFangKernel {
                             error = %e,
                             "Fresh driver creation failed, falling back to boot-time default"
                         );
-                        Arc::clone(&self.default_driver)
+                        // The boot-time default chain already wraps each
+                        // leaf in BudgetGatedDriver — re-wrapping at this
+                        // outer layer would block fallback leaves on the
+                        // primary's budget (#4757). Mark `already_gated`
+                        // so the assembly below skips the outer wrap.
+                        (Arc::clone(&self.default_driver), true)
                     } else {
                         return Err(KernelError::BootFailed(format!(
                             "Agent LLM driver init failed: {e}"
@@ -185,6 +190,7 @@ impl LibreFangKernel {
                 }
             }
         };
+        let (primary, primary_already_gated) = primary;
 
         // Build effective fallback list: agent-level fallbacks + global fallback_providers.
         // Resolve "default" provider in fallback entries to the actual default provider.
@@ -209,13 +215,29 @@ impl LibreFangKernel {
             }
         }
 
-        // If fallback models are configured, wrap in FallbackDriver
+        // If fallback models are configured, wrap in FallbackDriver. Each
+        // leaf is wrapped in BudgetGatedDriver so an exhausted provider
+        // returns RateLimit before its network round-trip and the chain
+        // skips to the next entry (#4757). When the primary IS the boot
+        // default chain (`primary_already_gated`), its leaves are already
+        // gated — wrapping again would block fallback leaves on the
+        // primary's budget.
         if !effective_fallbacks.is_empty() {
             // Primary driver uses the agent's own model name (already set in request)
+            let gated_primary: Arc<dyn LlmDriver> = if primary_already_gated {
+                primary.clone()
+            } else {
+                Arc::new(crate::budget_gated::BudgetGatedDriver::new(
+                    primary.clone(),
+                    self.provider_budget_gate.clone(),
+                    agent_provider.clone(),
+                ))
+            };
             let mut chain: Vec<(
                 std::sync::Arc<dyn librefang_runtime::llm_driver::LlmDriver>,
                 String,
-            )> = vec![(primary.clone(), String::new())];
+                String,
+            )> = vec![(gated_primary, agent_provider.clone(), String::new())];
             for fb in &effective_fallbacks {
                 // Resolve "default" to the actual default provider, but if the
                 // model name implies a specific provider (e.g. "gemini-2.0-flash"
@@ -253,7 +275,19 @@ impl LibreFangKernel {
                     emit_caller_trace_headers: cfg.telemetry.emit_caller_trace_headers,
                 };
                 match self.driver_cache.get_or_create(&config) {
-                    Ok(d) => chain.push((d, strip_provider_prefix(&fb.model, &fb_provider))),
+                    Ok(d) => {
+                        let gated: Arc<dyn LlmDriver> =
+                            Arc::new(crate::budget_gated::BudgetGatedDriver::new(
+                                d,
+                                self.provider_budget_gate.clone(),
+                                fb_provider.clone(),
+                            ));
+                        chain.push((
+                            gated,
+                            fb_provider.clone(),
+                            strip_provider_prefix(&fb.model, &fb_provider),
+                        ));
+                    }
                     Err(e) => {
                         warn!("Fallback driver '{}' failed to init: {e}", fb_provider);
                     }
@@ -266,6 +300,17 @@ impl LibreFangKernel {
             }
         }
 
-        Ok(primary)
+        // No fallback chain — return the primary, gated so per-provider
+        // budgets still short-circuit the dispatch (#4757). Skip when the
+        // primary is already the boot default chain (already gated).
+        if primary_already_gated {
+            Ok(primary)
+        } else {
+            Ok(Arc::new(crate::budget_gated::BudgetGatedDriver::new(
+                primary,
+                self.provider_budget_gate.clone(),
+                agent_provider.clone(),
+            )))
+        }
     }
 }

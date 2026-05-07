@@ -227,6 +227,21 @@ impl LibreFangKernel {
 
         let memory = Arc::new(substrate);
 
+        // Initialize metering + provider budget gate up-front so the driver
+        // chain construction below can wrap each leaf in BudgetGatedDriver
+        // (#4757). Pre-fix this lived after the chain was assembled, leaving
+        // the gate dead code with no way to short-circuit a per-provider
+        // budget at dispatch time.
+        let metering = Arc::new(MeteringEngine::new(Arc::new(
+            librefang_memory::usage::UsageStore::new(memory.pool()),
+        )));
+        let provider_budget_gate = Arc::new(
+            librefang_kernel_metering::provider_gate::ProviderBudgetGate::new(
+                metering.clone(),
+                config.budget.providers.clone(),
+            ),
+        );
+
         // Check if Ollama is reachable on localhost:11434 (TCP probe, 500ms timeout).
         fn is_ollama_reachable() -> bool {
             std::net::TcpStream::connect_timeout(
@@ -510,11 +525,19 @@ impl LibreFangKernel {
             }
         }
 
-        // Add fallback providers to the chain (with model names for cross-provider fallback)
-        let mut model_chain: Vec<(Arc<dyn LlmDriver>, String)> = Vec::new();
+        // Add fallback providers to the chain (with provider+model names so
+        // cross-provider fallback attributes correctly and so each leaf can
+        // be gated by ProviderBudgetGate before the network round-trip).
+        let primary_provider = config.default_model.provider.clone();
+        let mut model_chain: Vec<(Arc<dyn LlmDriver>, String, String)> = Vec::new();
         // Primary driver uses empty model name (uses the request's model field as-is)
         for d in &driver_chain {
-            model_chain.push((d.clone(), String::new()));
+            let gated: Arc<dyn LlmDriver> = Arc::new(crate::budget_gated::BudgetGatedDriver::new(
+                d.clone(),
+                provider_budget_gate.clone(),
+                primary_provider.clone(),
+            ));
+            model_chain.push((gated, primary_provider.clone(), String::new()));
         }
         for fb in &config.fallback_providers {
             let fb_api_key = if !fb.api_key_env.is_empty() {
@@ -550,8 +573,18 @@ impl LibreFangKernel {
                         model = %fb.model,
                         "Fallback provider configured"
                     );
-                    driver_chain.push(d.clone());
-                    model_chain.push((d, strip_provider_prefix(&fb.model, &fb.provider)));
+                    let gated: Arc<dyn LlmDriver> =
+                        Arc::new(crate::budget_gated::BudgetGatedDriver::new(
+                            d.clone(),
+                            provider_budget_gate.clone(),
+                            fb.provider.clone(),
+                        ));
+                    driver_chain.push(d);
+                    model_chain.push((
+                        gated,
+                        fb.provider.clone(),
+                        strip_provider_prefix(&fb.model, &fb.provider),
+                    ));
                 }
                 Err(e) => {
                     warn!(
@@ -563,11 +596,18 @@ impl LibreFangKernel {
             }
         }
 
-        // Use the chain, or create a stub driver if everything failed
+        // Use the chain, or create a stub driver if everything failed.
+        // Multi-driver path uses `model_chain` whose entries are already
+        // wrapped in BudgetGatedDriver. Single-driver path wraps inline so
+        // every dispatch goes through the gate (#4757 / L3).
         let driver: Arc<dyn LlmDriver> = if driver_chain.len() > 1 {
             Arc::new(librefang_runtime::drivers::fallback::FallbackDriver::with_models(model_chain))
         } else if let Some(single) = driver_chain.into_iter().next() {
-            single
+            Arc::new(crate::budget_gated::BudgetGatedDriver::new(
+                single,
+                provider_budget_gate.clone(),
+                primary_provider.clone(),
+            ))
         } else {
             // All drivers failed — use a stub that returns a helpful error.
             // The kernel boots, dashboard is accessible, users can fix their config.
@@ -575,10 +615,10 @@ impl LibreFangKernel {
             Arc::new(StubDriver) as Arc<dyn LlmDriver>
         };
 
-        // Initialize metering engine (shares the same SQLite connection as the memory substrate)
-        let metering = Arc::new(MeteringEngine::new(Arc::new(
-            librefang_memory::usage::UsageStore::new(memory.pool()),
-        )));
+        // Metering engine + provider budget gate were initialized earlier
+        // (right after `memory`) so the driver chain construction above
+        // could wrap each leaf in BudgetGatedDriver. See the metering+gate
+        // block at the top of `boot()`.
 
         // Initialize prompt versioning and A/B experiment store with its own connection
         // to avoid conflicts with UsageStore concurrent writes
@@ -1236,6 +1276,7 @@ impl LibreFangKernel {
             background,
             audit_log: Arc::new(AuditLog::with_db_anchored(memory.pool(), audit_anchor_path)),
             metering,
+            provider_budget_gate,
             // ArcSwap lets config_reload rebuild on `[llm.auxiliary]` edits
             // without invalidating any long-lived `Arc<Kernel>` handle.
             aux_client: arc_swap::ArcSwap::from_pointee(initial_aux_client),

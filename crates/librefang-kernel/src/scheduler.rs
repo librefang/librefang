@@ -806,4 +806,93 @@ mod tests {
         );
         assert_eq!(after_settle.llm_calls, 2);
     }
+
+    // ── Per-provider burst window tests (#4757 / B3) ──────────────────────
+
+    /// `tokens_in_last_minute_for_provider` must return zero for a provider
+    /// the tracker has never seen, and a non-zero count for a provider
+    /// that just settled. The two providers' counters must be independent
+    /// — settling against `anthropic` must NOT add to `openai`'s window.
+    #[test]
+    fn test_per_provider_burst_window_is_independent_across_providers() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        let quota = ResourceQuota {
+            max_llm_tokens_per_hour: Some(1_000_000),
+            ..Default::default()
+        };
+        scheduler.register(id, quota);
+
+        // Anthropic spends 60k tokens in the last minute.
+        let reserved = scheduler
+            .check_quota_and_reserve(id, 60_000, Some("anthropic"))
+            .unwrap();
+        scheduler.settle_reservation(
+            id,
+            reserved,
+            &TokenUsage {
+                input_tokens: 30_000,
+                output_tokens: 30_000,
+                ..Default::default()
+            },
+            Some("anthropic"),
+        );
+
+        // Inspect the tracker via reserve+release semantics: a fresh
+        // reservation against `anthropic` of 1k tokens against a 65k
+        // burst cap should be the LAST one that fits (60k+1k <= 65k).
+        let mut tracker = scheduler.usage.get_mut(&id).unwrap();
+        let anthropic_window = tracker.tokens_in_last_minute_for_provider("anthropic");
+        assert!(
+            anthropic_window >= 60_000,
+            "anthropic window must include the 60k just settled, got {anthropic_window}"
+        );
+        let openai_window = tracker.tokens_in_last_minute_for_provider("openai");
+        assert_eq!(
+            openai_window, 0,
+            "openai window must be untouched by anthropic activity"
+        );
+        drop(tracker);
+    }
+
+    /// Settling against a provider on the per-LLM path adds to that
+    /// provider's sliding window even though `total_tokens` is the
+    /// per-agent aggregate. (Regression for the dead-code finding in the
+    /// review of PR #4757 — the parameter existed pre-fix but every
+    /// production call passed `None`.)
+    #[test]
+    fn test_settle_with_provider_records_per_provider_window() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(
+            id,
+            ResourceQuota {
+                max_llm_tokens_per_hour: Some(1_000_000),
+                ..Default::default()
+            },
+        );
+
+        let reserved = scheduler
+            .check_quota_and_reserve(id, 1000, Some("openai"))
+            .unwrap();
+        scheduler.settle_reservation(
+            id,
+            reserved,
+            &TokenUsage {
+                input_tokens: 400,
+                output_tokens: 100,
+                ..Default::default()
+            },
+            Some("openai"),
+        );
+
+        let mut tracker = scheduler.usage.get_mut(&id).unwrap();
+        let openai_total = tracker.tokens_in_last_minute_for_provider("openai");
+        assert_eq!(
+            openai_total, 500,
+            "settle_reservation must update the provider window"
+        );
+        let unknown = tracker.tokens_in_last_minute_for_provider("anthropic");
+        assert_eq!(unknown, 0);
+    }
 }

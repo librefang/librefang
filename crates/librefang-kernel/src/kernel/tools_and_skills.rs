@@ -643,7 +643,15 @@ impl LibreFangKernel {
             );
             let usage_record = librefang_memory::usage::UsageRecord {
                 agent_id: triggering_agent_id,
-                provider: default_model.provider.clone(),
+                // Honor `actual_provider` so background-review usage records
+                // attribute to the provider that actually served (e.g.
+                // when the default chain failed over). Pre-#4757 this
+                // hardcoded `default_model.provider`, silently mis-billing
+                // every fallback request to the configured primary.
+                provider: response
+                    .actual_provider
+                    .clone()
+                    .unwrap_or_else(|| default_model.provider.clone()),
                 model: default_model.model.clone(),
                 input_tokens: response.usage.input_tokens,
                 output_tokens: response.usage.output_tokens,

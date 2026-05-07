@@ -109,6 +109,7 @@ impl LibreFangKernel {
             experiment_context: None,
             latency_ms: 0,
             actual_provider: None,
+            provider_usage: std::collections::BTreeMap::new(),
             // WASM agents don't mutate the session; N/A.
             new_messages_start: 0,
             skill_evolution_suggested: false,
@@ -185,6 +186,7 @@ impl LibreFangKernel {
             experiment_context: None,
             latency_ms: 0,
             actual_provider: None,
+            provider_usage: std::collections::BTreeMap::new(),
             // Python agents don't mutate the session; N/A.
             new_messages_start: 0,
             skill_evolution_suggested: false,

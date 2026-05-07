@@ -76,6 +76,12 @@ impl LibreFangKernel {
             f(&mut next);
             std::sync::Arc::new(next)
         });
+        // Sync the per-provider gate so dispatch-path checks reflect the
+        // edit immediately. Without this, the inline driver wrappers keep
+        // gating against the boot-time snapshot until the daemon restarts
+        // (#4757).
+        self.provider_budget_gate
+            .update_budgets(self.budget_config.load().providers.clone());
     }
 
     /// LibreFang home directory path (boot-time immutable).

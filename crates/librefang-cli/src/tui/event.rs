@@ -519,6 +519,7 @@ pub fn spawn_daemon_stream(
             new_messages_start: 0,
             skill_evolution_suggested: false,
             actual_provider: None,
+            provider_usage: std::collections::BTreeMap::new(),
             owner_notice: None,
         })));
     });
@@ -567,6 +568,7 @@ fn daemon_fallback(
             new_messages_start: 0,
             skill_evolution_suggested: false,
             actual_provider: None,
+            provider_usage: std::collections::BTreeMap::new(),
             owner_notice: None,
         })
     } else {

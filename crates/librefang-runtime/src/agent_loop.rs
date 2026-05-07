@@ -1947,8 +1947,21 @@ pub struct AgentLoopResult {
     /// Latency in milliseconds for this request.
     pub latency_ms: u64,
     /// The LLM provider that actually handled the last successful call.
-    /// Populated by fallback drivers when failover occurs.
+    /// Populated by fallback drivers when failover occurs. Kept for
+    /// debugging / quick attribution; the authoritative per-provider
+    /// breakdown lives in [`Self::provider_usage`].
     pub actual_provider: Option<String>,
+    /// Per-provider token usage for the turn. Populated by the agent loop
+    /// when at least one LLM call succeeded. Sums across iterations using
+    /// `response.actual_provider` as the key (or the manifest's primary
+    /// provider when the driver did not attribute the call). Empty when
+    /// the loop never made an LLM call (silent / WASM / Python paths).
+    ///
+    /// Kernel callers use this to emit one [`librefang_memory::usage::UsageRecord`]
+    /// per provider — without this, mid-loop failovers attributed the
+    /// entire turn's spend to whichever provider served the last call,
+    /// silently corrupting per-provider budget enforcement (#4757).
+    pub provider_usage: std::collections::BTreeMap<String, TokenUsage>,
     /// Index in `session.messages` where messages appended during this turn
     /// begin. Callers use this to slice out the turn's new messages (e.g. for
     /// writing to a canonical cross-channel session) without tracking their
@@ -2352,6 +2365,8 @@ struct FinalizeEndTurnResultData {
     owner_notice: Option<String>,
     /// The LLM provider that actually handled the last successful call.
     actual_provider: Option<String>,
+    /// Per-provider token usage accumulated across the turn (#4757).
+    provider_usage: std::collections::BTreeMap<String, TokenUsage>,
 }
 
 struct EndTurnRetryContext<'a> {
@@ -2986,6 +3001,7 @@ fn build_silent_agent_loop_result(
         experiment_context,
         latency_ms: 0,
         actual_provider: None,
+        provider_usage: std::collections::BTreeMap::new(),
         new_messages_start,
         skill_evolution_suggested: false,
         owner_notice: None,
@@ -3232,6 +3248,7 @@ async fn finalize_successful_end_turn(
         experiment_context: end_turn.experiment_context,
         latency_ms: 0,
         actual_provider: end_turn.actual_provider,
+        provider_usage: end_turn.provider_usage,
         new_messages_start: end_turn.new_messages_start,
         skill_evolution_suggested: tool_call_count >= 5,
         owner_notice: end_turn.owner_notice.clone(),
@@ -3634,6 +3651,13 @@ pub async fn run_agent_loop(
     // into AgentLoopResult so callers can see which provider actually served
     // the response (useful when a fallback driver switches providers).
     let mut actual_provider: Option<String> = None;
+    // Per-provider token tally — populated on every successful call so the
+    // kernel can emit one UsageRecord per provider when failover splits a
+    // turn across providers (#4757). Pre-fix, the loop kept only the
+    // last-call provider, which silently mis-attributed the entire turn's
+    // spend to whichever provider happened to serve the final iteration.
+    let mut provider_usage: std::collections::BTreeMap<String, TokenUsage> =
+        std::collections::BTreeMap::new();
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Agent loop iteration");
@@ -3884,9 +3908,23 @@ pub async fn run_agent_loop(
         let provider_name = manifest.model.provider.as_str();
         let mut response = call_with_retry(&*driver, request, Some(provider_name), None).await?;
 
+        // Provider attribution: prefer the driver-supplied name (set by the
+        // fallback chain / BudgetGatedDriver wrapper to identify the leaf
+        // that actually served), fall back to the manifest's primary
+        // provider when the driver chose not to attribute. Per-iteration
+        // tally goes into `provider_usage` so the kernel can split the
+        // turn's spend across providers when failover fires (#4757).
+        let iter_provider = response
+            .actual_provider
+            .clone()
+            .unwrap_or_else(|| provider_name.to_string());
         if response.actual_provider.is_some() {
             actual_provider = response.actual_provider.clone();
         }
+        accumulate_token_usage(
+            provider_usage.entry(iter_provider).or_default(),
+            &response.usage,
+        );
 
         accumulate_token_usage(&mut total_usage, &response.usage);
 
@@ -4116,6 +4154,7 @@ pub async fn run_agent_loop(
                         new_messages_start,
                         owner_notice: pending_owner_notice.take(),
                         actual_provider: actual_provider.clone(),
+                        provider_usage: provider_usage.clone(),
                     },
                 )
                 .await;
@@ -4402,6 +4441,7 @@ pub async fn run_agent_loop(
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
                         actual_provider: actual_provider.clone(),
+                        provider_usage: provider_usage.clone(),
                         new_messages_start,
                         owner_notice: None,
                     });
@@ -5093,6 +5133,10 @@ pub async fn run_agent_loop_streaming(
 
     // Tracks the provider that handled the last successful LLM call (streaming path).
     let mut actual_provider: Option<String> = None;
+    // Per-provider token tally for the streaming path (#4757). Mirrors the
+    // non-streaming loop's accumulator — see the longer comment there.
+    let mut provider_usage: std::collections::BTreeMap<String, TokenUsage> =
+        std::collections::BTreeMap::new();
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Streaming agent loop iteration");
@@ -5384,9 +5428,19 @@ pub async fn run_agent_loop_streaming(
             }
         };
 
+        // Provider attribution for the streaming path — see the
+        // non-streaming loop for the rationale (#4757).
+        let iter_provider = response
+            .actual_provider
+            .clone()
+            .unwrap_or_else(|| provider_name.to_string());
         if response.actual_provider.is_some() {
             actual_provider = response.actual_provider.clone();
         }
+        accumulate_token_usage(
+            provider_usage.entry(iter_provider).or_default(),
+            &response.usage,
+        );
 
         accumulate_token_usage(&mut total_usage, &response.usage);
 
@@ -5607,6 +5661,7 @@ pub async fn run_agent_loop_streaming(
                         new_messages_start,
                         owner_notice: pending_owner_notice.take(),
                         actual_provider: actual_provider.clone(),
+                        provider_usage: provider_usage.clone(),
                     },
                 )
                 .await;
@@ -5922,6 +5977,7 @@ pub async fn run_agent_loop_streaming(
                         experiment_context: experiment_context.clone(),
                         latency_ms: 0,
                         actual_provider: actual_provider.clone(),
+                        provider_usage: provider_usage.clone(),
                         new_messages_start,
                         owner_notice: None,
                     });

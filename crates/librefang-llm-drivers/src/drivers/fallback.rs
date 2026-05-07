@@ -77,11 +77,17 @@ impl FallbackDriver {
         }
     }
 
-    /// Create a new fallback driver with explicit model names for each driver.
+    /// Create a new fallback driver with explicit (provider, model) names for each driver.
+    ///
+    /// `provider` is the provider id used for budget attribution and `actual_provider`
+    /// propagation; `model` is the request-time model override (empty string keeps
+    /// the caller-supplied model). Pre-#4757 this constructor took only a model
+    /// string and quietly aliased it as `provider_name`, which poisoned per-provider
+    /// budget records with model strings — keep the two distinct.
     ///
     /// # Panics
     /// Panics if `drivers` is empty — at least one driver must be provided.
-    pub fn with_models(drivers: Vec<(Arc<dyn LlmDriver>, String)>) -> Self {
+    pub fn with_models(drivers: Vec<(Arc<dyn LlmDriver>, String, String)>) -> Self {
         assert!(
             !drivers.is_empty(),
             "FallbackDriver requires at least one driver"
@@ -89,10 +95,10 @@ impl FallbackDriver {
         Self {
             drivers: drivers
                 .into_iter()
-                .map(|(d, m)| DriverEntry {
-                    driver: d,
-                    provider_name: m.clone(),
-                    model_name: m,
+                .map(|(driver, provider, model)| DriverEntry {
+                    driver,
+                    provider_name: provider,
+                    model_name: model,
                     ewma_latency_ms: AtomicU64::new(0),
                     consecutive_errors: AtomicU64::new(0),
                     last_failure_at_ms: AtomicU64::new(0),
@@ -356,9 +362,14 @@ mod tests {
         let fb = FallbackDriver::with_models(vec![
             (
                 Arc::new(FailDriver) as Arc<dyn LlmDriver>,
+                "fail-provider".to_string(),
                 "fail".to_string(),
             ),
-            (Arc::new(OkDriver) as Arc<dyn LlmDriver>, "ok".to_string()),
+            (
+                Arc::new(OkDriver) as Arc<dyn LlmDriver>,
+                "ok-provider".to_string(),
+                "ok".to_string(),
+            ),
         ]);
 
         let primary = &fb.drivers[0];
@@ -396,9 +407,14 @@ mod tests {
         let fb = FallbackDriver::with_models(vec![
             (
                 Arc::new(FailDriver) as Arc<dyn LlmDriver>,
+                "fail-provider".to_string(),
                 "fail".to_string(),
             ),
-            (Arc::new(OkDriver) as Arc<dyn LlmDriver>, "ok".to_string()),
+            (
+                Arc::new(OkDriver) as Arc<dyn LlmDriver>,
+                "ok-provider".to_string(),
+                "ok".to_string(),
+            ),
         ]);
         let _ = fb.complete(test_request()).await;
         let primary = &fb.drivers[0];
@@ -721,7 +737,40 @@ mod tests {
     #[test]
     #[should_panic(expected = "FallbackDriver requires at least one driver")]
     fn test_with_models_empty_drivers_panics() {
-        let _driver = FallbackDriver::with_models(vec![]);
+        let _driver: FallbackDriver = FallbackDriver::with_models(vec![]);
+    }
+
+    /// Regression for the B2 finding in the review of PR #4757.
+    /// `with_models` previously set `provider_name = model_name`, so a
+    /// successful failover would write the model string (e.g.
+    /// "claude-3-5-sonnet") into `actual_provider` and downstream
+    /// per-provider budget records would be poisoned with model strings.
+    /// After the fix `with_models` takes explicit `(driver, provider, model)`
+    /// triples and the served entry's provider name is propagated.
+    #[tokio::test]
+    async fn test_with_models_attributes_to_served_provider() {
+        let fb = FallbackDriver::with_models(vec![
+            (
+                Arc::new(FailDriver) as Arc<dyn LlmDriver>,
+                "anthropic".to_string(),
+                "claude-3-5-sonnet".to_string(),
+            ),
+            (
+                Arc::new(OkDriver) as Arc<dyn LlmDriver>,
+                "openai".to_string(),
+                "gpt-4o".to_string(),
+            ),
+        ]);
+
+        let resp = fb
+            .complete(test_request())
+            .await
+            .expect("fallback should succeed via openai");
+        assert_eq!(
+            resp.actual_provider.as_deref(),
+            Some("openai"),
+            "fallback must attribute to the provider id, not the model name"
+        );
     }
 
     #[tokio::test]

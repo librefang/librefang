@@ -460,6 +460,11 @@ mod tests {
         let chain = FallbackChain::new(vec![entry(Arc::new(OkDriver("primary")), "p1")]);
         let r = chain.complete(test_request()).await.unwrap();
         assert_eq!(r.text(), "primary");
+        assert_eq!(
+            r.actual_provider.as_deref(),
+            Some("p1"),
+            "even on primary success, actual_provider should reflect the served entry (#4757)"
+        );
     }
 
     #[tokio::test]
@@ -470,6 +475,11 @@ mod tests {
         ]);
         let r = chain.complete(test_request()).await.unwrap();
         assert_eq!(r.text(), "fallback");
+        assert_eq!(
+            r.actual_provider.as_deref(),
+            Some("p2"),
+            "after failover, actual_provider must name the entry that served (#4757)"
+        );
     }
 
     #[tokio::test]

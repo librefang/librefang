@@ -630,7 +630,10 @@ impl LibreFangKernel {
         // that is not persisted in the sessions table.
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
-            provider: result.actual_provider.clone().unwrap_or_else(|| manifest.model.provider.clone()),
+            provider: result
+                .actual_provider
+                .clone()
+                .unwrap_or_else(|| manifest.model.provider.clone()),
             model: model.clone(),
             input_tokens: result.total_usage.input_tokens,
             output_tokens: result.total_usage.output_tokens,
@@ -793,19 +796,15 @@ impl LibreFangKernel {
             .reserve_global_budget(&self.budget_config(), estimated_usd)
             .map_err(KernelError::LibreFang)?;
 
-        // Pre-dispatch provider budget check — reject early when the
-        // provider's hourly/daily spend is already exhausted so the
-        // caller gets a fast 429 instead of consuming a slow LLM round
-        // trip that would be wasted anyway.
-        {
-            let budget_cfg = self.budget_config();
-            if let Some(pb) = budget_cfg.providers.get(&entry.manifest.model.provider) {
-                if let Err(e) = self.metering.check_provider_budget(&entry.manifest.model.provider, pb) {
-                    usd_reservation.release();
-                    return Err(KernelError::LibreFang(e));
-                }
-            }
-        }
+        // Per-provider pre-dispatch budget gating now lives inside the LLM
+        // driver chain (`BudgetGatedDriver` — see kernel/llm_drivers.rs and
+        // kernel/boot.rs). Wrapping each provider leaf gives the gate
+        // visibility into fallbacks: an exhausted primary returns RateLimit
+        // before its network call, the chain skips to the next provider,
+        // and the call still succeeds. The pre-PR inline check at this
+        // site only saw the manifest's primary provider, so an exhausted
+        // primary aborted the whole dispatch even when a healthy fallback
+        // could have served (#4757 / L3).
 
         // Enforce quota on the effective target agent (after routing).
         // Use check_quota_and_reserve so the estimated token budget is
@@ -813,10 +812,14 @@ impl LibreFangKernel {
         // race where N concurrent callers all pass the check before any of
         // them calls record_usage (#3736).
         let estimated_tokens = entry.manifest.model.max_tokens as u64;
-        let token_reservation = match self
-            .scheduler
-            .check_quota_and_reserve(agent_id, estimated_tokens, None)
-        {
+        // Reservation is sized against the manifest's primary provider —
+        // failover to a different leaf rebalances the per-provider window
+        // at settle time using `result.actual_provider`. (#4757 / B3)
+        let token_reservation = match self.scheduler.check_quota_and_reserve(
+            agent_id,
+            estimated_tokens,
+            Some(&entry.manifest.model.provider),
+        ) {
             Ok(r) => r,
             Err(e) => {
                 // Roll back the USD reservation — the call never dispatched.
@@ -886,8 +889,16 @@ impl LibreFangKernel {
                 // cost will be recorded by `check_all_and_record` further
                 // down the call path; releasing the in-memory hold lets
                 // the next reservation pass see a consistent total.
-                self.scheduler
-                    .settle_reservation(agent_id, token_reservation, &result.total_usage, None);
+                let settle_provider = result
+                    .actual_provider
+                    .as_deref()
+                    .unwrap_or(entry.manifest.model.provider.as_str());
+                self.scheduler.settle_reservation(
+                    agent_id,
+                    token_reservation,
+                    &result.total_usage,
+                    Some(settle_provider),
+                );
                 usd_reservation.settle();
                 // Record tool calls for rate limiting
                 let tool_count = result.decision_traces.len() as u32;
@@ -1639,7 +1650,11 @@ impl LibreFangKernel {
         let estimated_tokens = entry.manifest.model.max_tokens as u64;
         let token_reservation = self
             .scheduler
-            .check_quota_and_reserve(agent_id, estimated_tokens, None)
+            .check_quota_and_reserve(
+                agent_id,
+                estimated_tokens,
+                Some(&entry.manifest.model.provider),
+            )
             .map_err(KernelError::LibreFang)?;
 
         let is_wasm = entry.manifest.module.starts_with("wasm:");
@@ -1682,7 +1697,9 @@ impl LibreFangKernel {
                                 usage: result.total_usage,
                             })
                             .await;
-                        // Settle pre-charged reservation (#3736)
+                        // Settle pre-charged reservation (#3736). WASM /
+                        // Python agents do not bill a provider, so the
+                        // per-provider burst window stays untouched (#4757).
                         kernel_clone.scheduler.settle_reservation(
                             agent_id,
                             token_reservation,
@@ -2396,11 +2413,19 @@ impl LibreFangKernel {
                     // Settle the pre-charged token reservation with actual usage
                     // (#3736). This replaces record_usage for the token counters
                     // while still correctly accounting for the burst window.
+                    // Provider attribution prefers `actual_provider` (the leaf
+                    // that served, set by the fallback chain) and falls back
+                    // to the manifest's primary when the driver did not
+                    // attribute the call (#4757 / B3).
+                    let settle_provider = result
+                        .actual_provider
+                        .as_deref()
+                        .unwrap_or(manifest.model.provider.as_str());
                     kernel_clone.scheduler.settle_reservation(
                         agent_id,
                         token_reservation,
                         &result.total_usage,
-                        None,
+                        Some(settle_provider),
                     );
                     // Record tool calls for rate limiting
                     let tool_count = result.decision_traces.len() as u32;
@@ -2431,7 +2456,10 @@ impl LibreFangKernel {
                     );
                     let usage_record = librefang_memory::usage::UsageRecord {
                         agent_id,
-                        provider: result.actual_provider.clone().unwrap_or_else(|| manifest.model.provider.clone()),
+                        provider: result
+                            .actual_provider
+                            .clone()
+                            .unwrap_or_else(|| manifest.model.provider.clone()),
                         model: model.clone(),
                         input_tokens: result.total_usage.input_tokens,
                         output_tokens: result.total_usage.output_tokens,

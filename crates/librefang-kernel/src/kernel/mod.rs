@@ -707,6 +707,15 @@ pub struct LibreFangKernel {
     pub(crate) audit_log: Arc<AuditLog>,
     /// Cost metering engine.
     pub(crate) metering: Arc<MeteringEngine>,
+    /// Pre-dispatch provider budget gate (#4757). Wrapped around every
+    /// primary/fallback LLM driver leaf in [`Self::resolve_driver`] (and at
+    /// boot for the default chain) so a provider whose hourly/daily/monthly
+    /// budget is already exhausted returns `RateLimit` *before* the network
+    /// call, letting the fallback chain skip it. Hot-reloadable via
+    /// [`ProviderBudgetGate::update_budgets`] when `provider_budgets`
+    /// changes — see [`HotAction::ReloadProviderBudgets`].
+    pub(crate) provider_budget_gate:
+        Arc<librefang_kernel_metering::provider_gate::ProviderBudgetGate>,
     /// Default LLM driver (from kernel config).
     default_driver: Arc<dyn LlmDriver>,
     /// Auxiliary LLM client — resolves cheap-tier fallback chains for side
