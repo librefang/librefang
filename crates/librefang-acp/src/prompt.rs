@@ -52,18 +52,19 @@ pub(crate) async fn handle<K: AcpKernel>(
         ));
     };
 
-    let (message, dropped) = concat_text_blocks(&req.prompt);
-    // Surface dropped multimodal blocks to the user so they aren't
-    // left guessing where their attachment went. The build's
-    // `PromptCapabilities` already declares image / audio /
-    // embedded_context as unsupported, but defensive editors may
-    // still send them — be loud, not silent.
-    if dropped > 0 {
+    let (message, converted) = concat_text_blocks(&req.prompt);
+    // Surface converted multimodal blocks so the user knows the
+    // attachment landed but didn't reach the LLM verbatim — the
+    // agent only saw a bracketed placeholder. True multimodal
+    // support is tracked as a separate epic in `librefang-llm-drivers`.
+    if converted > 0 {
         let warning = format!(
-            "[note: dropped {dropped} non-text content block{} — \
-             image / audio / embedded resource not yet supported by \
-             this LibreFang build]\n\n",
-            if dropped == 1 { "" } else { "s" }
+            "[note: {converted} non-text content block{} converted to \
+             text placeholder{} — true multimodal pipeline (image / \
+             audio bytes reaching the LLM) is tracked as a separate \
+             follow-up]\n\n",
+            if converted == 1 { "" } else { "s" },
+            if converted == 1 { "" } else { "s" }
         );
         cx.send_notification(SessionNotification::new(
             req.session_id.clone(),
@@ -129,33 +130,62 @@ pub(crate) async fn handle<K: AcpKernel>(
     responder.respond(PromptResponse::new(stop))
 }
 
-/// Concatenate the text body of a prompt and count any non-text
-/// content blocks (image / audio / embedded resource) the build
-/// can't yet pipe to the agent loop. The caller surfaces a
-/// `dropped > 0` count to the user via a `session/update` message
-/// chunk so they're not left wondering why their attachment
-/// vanished.
+/// Fold a prompt's content blocks into a single text body. Non-text
+/// blocks (image / audio / resource link / embedded resource) are
+/// converted to bracketed placeholders inline with the text so the
+/// agent at least sees *that* an attachment was sent, even though
+/// the build doesn't yet plumb the binary payload through to the
+/// LLM driver.
+///
+/// Returns `(text, converted)` — `converted` is the count of
+/// non-text blocks that were folded in as placeholders. The caller
+/// surfaces a non-zero count via a `session/update` notice so the
+/// user knows the attachment landed but didn't reach the LLM
+/// verbatim.
+///
+/// True multimodal — image / audio bytes actually reaching the
+/// LLM — is tracked as an independent epic in `librefang-llm-drivers`
+/// because it requires a `ContentBlock::Image` variant on
+/// `librefang_types::message` plus per-driver wire-format support
+/// (Anthropic inline base64, OpenAI image_url, Gemini base64, …).
 fn concat_text_blocks(blocks: &[ContentBlock]) -> (String, usize) {
     let mut out = String::new();
-    let mut dropped = 0usize;
+    let mut converted = 0usize;
     for block in blocks {
-        match block {
+        let placeholder = match block {
             ContentBlock::Text(tc) => {
                 if !out.is_empty() && !out.ends_with(char::is_whitespace) {
                     out.push(' ');
                 }
                 out.push_str(&tc.text);
+                continue;
             }
-            // Anything non-text — image / audio / embedded resource /
-            // future block types — counts as dropped. The runtime
-            // doesn't yet plumb these through to the LLM driver, and
-            // we already declared `image: false` / `audio: false` /
-            // `embedded_context: false` in `PromptCapabilities` so
-            // conformant editors won't send them.
-            _ => dropped += 1,
+            ContentBlock::Image(img) => format!(
+                "[image attachment: {} ({} base64 bytes)]",
+                img.mime_type,
+                img.data.len()
+            ),
+            ContentBlock::Audio(aud) => format!(
+                "[audio attachment: {} ({} base64 bytes)]",
+                aud.mime_type,
+                aud.data.len()
+            ),
+            ContentBlock::ResourceLink(rl) => {
+                format!("[resource link: {}]", rl.uri)
+            }
+            ContentBlock::Resource(_) => "[embedded resource]".to_string(),
+            // Future ACP content variants — render as a generic
+            // placeholder so the agent still sees that *something*
+            // was sent.
+            _ => "[unsupported content block]".to_string(),
+        };
+        if !out.is_empty() && !out.ends_with(char::is_whitespace) {
+            out.push('\n');
         }
+        out.push_str(&placeholder);
+        converted += 1;
     }
-    (out, dropped)
+    (out, converted)
 }
 
 fn map_stop_reason(reason: LfStopReason) -> StopReason {
@@ -207,11 +237,42 @@ mod tests {
     }
 
     #[test]
-    fn concat_text_only_text_block_no_drops() {
+    fn concat_text_only_text_block_no_conversions() {
         let blocks = vec![ContentBlock::Text(TextContent::new("only text"))];
-        let (text, dropped) = concat_text_blocks(&blocks);
+        let (text, converted) = concat_text_blocks(&blocks);
         assert_eq!(text, "only text");
-        assert_eq!(dropped, 0);
+        assert_eq!(converted, 0);
+    }
+
+    #[test]
+    fn concat_text_image_block_converts_to_placeholder() {
+        use agent_client_protocol::schema::ImageContent;
+        let blocks = vec![
+            ContentBlock::Text(TextContent::new("look at this:")),
+            ContentBlock::Image(ImageContent::new("AAAA", "image/png")),
+        ];
+        let (text, converted) = concat_text_blocks(&blocks);
+        assert_eq!(converted, 1);
+        assert!(text.starts_with("look at this:"));
+        assert!(
+            text.contains("[image attachment: image/png"),
+            "image placeholder missing in {text:?}"
+        );
+    }
+
+    #[test]
+    fn concat_text_audio_block_converts_to_placeholder() {
+        use agent_client_protocol::schema::AudioContent;
+        let blocks = vec![ContentBlock::Audio(AudioContent::new(
+            "BBBBCCCC",
+            "audio/wav",
+        ))];
+        let (text, converted) = concat_text_blocks(&blocks);
+        assert_eq!(converted, 1);
+        assert!(
+            text.contains("[audio attachment: audio/wav"),
+            "audio placeholder missing in {text:?}"
+        );
     }
 
     #[test]
