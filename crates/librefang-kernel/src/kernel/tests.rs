@@ -1,6 +1,7 @@
 use super::*;
 use crate::registry::AgentRegistry;
 use crate::GovernanceSubsystemApi;
+use crate::McpSubsystemApi;
 use crate::MemorySubsystemApi;
 use crate::MeteringSubsystemApi;
 use futures::stream;
@@ -5148,7 +5149,7 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
 
     // Order A: connect filesystem before github before weather.
     {
-        let mut tools = kernel.mcp_tools_ref().lock().unwrap();
+        let mut tools = kernel.tools_ref().lock().unwrap();
         tools.clear();
         tools.push(librefang_types::tool::ToolDefinition {
             name: "mcp_filesystem_read_file".to_string(),
@@ -5179,7 +5180,7 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
 
     // Order B: same set, scrambled connect order.
     {
-        let mut tools = kernel.mcp_tools_ref().lock().unwrap();
+        let mut tools = kernel.tools_ref().lock().unwrap();
         tools.clear();
         tools.push(librefang_types::tool::ToolDefinition {
             name: "mcp_weather_forecast".to_string(),

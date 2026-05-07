@@ -636,15 +636,15 @@ impl KernelApi for LibreFangKernel {
         <Self as crate::LlmSubsystemApi>::default_model_override_ref(self)
     }
     fn mcp_auth_states_ref(&self) -> &librefang_runtime::mcp_oauth::McpAuthStates {
-        Self::mcp_auth_states_ref(self)
+        <Self as crate::McpSubsystemApi>::auth_states_ref(self)
     }
     fn mcp_connections_ref(
         &self,
     ) -> &tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>> {
-        Self::mcp_connections_ref(self)
+        <Self as crate::McpSubsystemApi>::connections_ref(self)
     }
     fn mcp_tools_ref(&self) -> &std::sync::Mutex<Vec<ToolDefinition>> {
-        Self::mcp_tools_ref(self)
+        <Self as crate::McpSubsystemApi>::tools_ref(self)
     }
     fn model_catalog_ref(
         &self,
@@ -654,7 +654,7 @@ impl KernelApi for LibreFangKernel {
     fn oauth_provider_ref(
         &self,
     ) -> Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync> {
-        Self::oauth_provider_ref(self)
+        Arc::clone(<Self as crate::McpSubsystemApi>::oauth_provider_ref(self))
     }
     fn peer_node_ref(&self) -> Option<&Arc<librefang_wire::PeerNode>> {
         <Self as crate::MeshSubsystemApi>::peer_node_ref(self)
@@ -869,10 +869,10 @@ impl KernelApi for LibreFangKernel {
 
     // -- MCP --
     fn mcp_health(&self) -> &librefang_extensions::health::HealthMonitor {
-        Self::mcp_health(self)
+        <Self as crate::McpSubsystemApi>::health(self)
     }
     fn mcp_catalog_load(&self) -> arc_swap::Guard<Arc<librefang_extensions::catalog::McpCatalog>> {
-        Self::mcp_catalog_load(self)
+        <Self as crate::McpSubsystemApi>::mcp_catalog_load(self)
     }
     async fn connect_mcp_servers(self: Arc<Self>) {
         LibreFangKernel::connect_mcp_servers(&self).await;
@@ -1009,7 +1009,7 @@ impl KernelApi for LibreFangKernel {
     fn effective_mcp_servers_ref(
         &self,
     ) -> &std::sync::RwLock<Vec<librefang_types::config::McpServerConfigEntry>> {
-        Self::effective_mcp_servers_ref(self)
+        <Self as crate::McpSubsystemApi>::effective_servers_ref(self)
     }
     fn embedding(
         &self,

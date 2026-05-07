@@ -23,7 +23,6 @@ use tracing::{debug, info, warn};
 use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::config::KernelConfig;
 use librefang_types::error::LibreFangError;
-use librefang_types::tool::ToolDefinition;
 
 use crate::error::{KernelError, KernelResult};
 use crate::registry::AgentRegistry;
@@ -336,7 +335,13 @@ impl LibreFangKernel {
                 timeout_secs: server_config.timeout_secs,
                 env: server_config.env.clone(),
                 headers: server_config.headers.clone(),
-                oauth_provider: Some(self.oauth_provider_ref()),
+                oauth_provider: Some({
+                    let with_bounds: Arc<
+                        dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync,
+                    > = Arc::clone(self.oauth_provider_ref());
+                    let p: Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider> = with_bounds;
+                    p
+                }),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
                 taint_policy: server_config.taint_policy.clone(),
@@ -666,26 +671,6 @@ impl LibreFangKernel {
         });
     }
 
-    /// MCP catalog — returns the `ArcSwap` for lock-free reads.
-    ///
-    /// Prefer [`mcp_catalog_load`] for simple single-snapshot reads;
-    /// use this accessor when you need the `ArcSwap` handle directly.
-    #[inline]
-    pub fn mcp_catalog(&self) -> &arc_swap::ArcSwap<librefang_extensions::catalog::McpCatalog> {
-        self.mcp.mcp_catalog_swap()
-    }
-
-    /// Load a snapshot of the MCP catalog — lock-free, no blocking.
-    ///
-    /// The returned `Guard` holds a reference-counted snapshot; the catalog
-    /// can be swapped concurrently without invalidating it.
-    #[inline]
-    pub fn mcp_catalog_load(
-        &self,
-    ) -> arc_swap::Guard<std::sync::Arc<librefang_extensions::catalog::McpCatalog>> {
-        self.mcp.mcp_catalog_load()
-    }
-
     /// Reload the MCP catalog from disk, replacing the current snapshot
     /// atomically via RCU. Readers in flight keep the old snapshot until
     /// they drop their `Guard`.
@@ -694,12 +679,6 @@ impl LibreFangKernel {
         let count = fresh.load(home_dir);
         self.mcp.mcp_catalog.store(std::sync::Arc::new(fresh));
         count
-    }
-
-    /// MCP server health monitor.
-    #[inline]
-    pub fn mcp_health(&self) -> &librefang_extensions::health::HealthMonitor {
-        self.mcp.health()
     }
 
     /// Lazily open and unlock the credential vault, caching the result for
@@ -856,42 +835,6 @@ impl LibreFangKernel {
     #[inline]
     pub fn supervisor_ref(&self) -> &Supervisor {
         self.agents.supervisor_ref()
-    }
-
-    /// MCP server connections (Mutex — lazily initialized).
-    #[inline]
-    pub fn mcp_connections_ref(
-        &self,
-    ) -> &tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>> {
-        self.mcp.connections_ref()
-    }
-
-    /// Per-server MCP OAuth authentication states.
-    #[inline]
-    pub fn mcp_auth_states_ref(&self) -> &librefang_runtime::mcp_oauth::McpAuthStates {
-        self.mcp.auth_states_ref()
-    }
-
-    /// Pluggable OAuth provider for MCP server auth flows.
-    #[inline]
-    pub fn oauth_provider_ref(
-        &self,
-    ) -> Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync> {
-        Arc::clone(self.mcp.oauth_provider_ref())
-    }
-
-    /// MCP tool definitions cache.
-    #[inline]
-    pub fn mcp_tools_ref(&self) -> &std::sync::Mutex<Vec<ToolDefinition>> {
-        self.mcp.tools_ref()
-    }
-
-    /// Effective MCP server list (config + extensions merged).
-    #[inline]
-    pub fn effective_mcp_servers_ref(
-        &self,
-    ) -> &std::sync::RwLock<Vec<librefang_types::config::McpServerConfigEntry>> {
-        self.mcp.effective_servers_ref()
     }
 
     /// First currently-active `SessionInterrupt` registered for `agent_id`,
