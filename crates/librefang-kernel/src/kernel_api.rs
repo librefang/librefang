@@ -546,7 +546,7 @@ impl KernelApi for LibreFangKernel {
         Self::agent_identities(self)
     }
     fn approvals(&self) -> &ApprovalManager {
-        Self::approvals(self)
+        <Self as crate::GovernanceSubsystemApi>::approvals(self)
     }
     fn audit(&self) -> &Arc<AuditLog> {
         <Self as crate::MeteringSubsystemApi>::audit_log(self)
@@ -564,7 +564,7 @@ impl KernelApi for LibreFangKernel {
         Self::delivery(self)
     }
     fn event_bus_ref(&self) -> &EventBus {
-        Self::event_bus_ref(self)
+        <Self as crate::EventSubsystemApi>::event_bus_ref(self)
     }
     fn hands(&self) -> &librefang_hands::registry::HandRegistry {
         Self::hands(self)
@@ -591,10 +591,10 @@ impl KernelApi for LibreFangKernel {
         Self::proactive_memory_store(self)
     }
     fn processes(&self) -> &Arc<librefang_runtime::process_manager::ProcessManager> {
-        Self::processes(self)
+        <Self as crate::ProcessSubsystemApi>::process_manager_ref(self)
     }
     fn process_registry(&self) -> &Arc<librefang_runtime::process_registry::ProcessRegistry> {
-        Self::process_registry(self)
+        <Self as crate::ProcessSubsystemApi>::process_registry_ref(self)
     }
     fn scheduler_ref(&self) -> &AgentScheduler {
         Self::scheduler_ref(self)

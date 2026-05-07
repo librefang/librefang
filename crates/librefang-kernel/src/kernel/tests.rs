@@ -1,5 +1,6 @@
 use super::*;
 use crate::registry::AgentRegistry;
+use crate::GovernanceSubsystemApi;
 use crate::MeteringSubsystemApi;
 use futures::stream;
 use librefang_channels::types::{ChannelAdapter, ChannelContent, ChannelType, ChannelUser};

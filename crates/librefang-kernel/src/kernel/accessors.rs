@@ -15,9 +15,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::subsystems::{
-    AgentSubsystemApi, EventSubsystemApi, GovernanceSubsystemApi, LlmSubsystemApi, McpSubsystemApi,
-    MediaSubsystemApi, MemorySubsystemApi, MeshSubsystemApi, ProcessSubsystemApi,
-    SkillsSubsystemApi, WorkflowSubsystemApi,
+    AgentSubsystemApi, EventSubsystemApi, LlmSubsystemApi, McpSubsystemApi, MediaSubsystemApi,
+    MemorySubsystemApi, MeshSubsystemApi, SkillsSubsystemApi, WorkflowSubsystemApi,
 };
 
 use tracing::{debug, info, warn};
@@ -26,10 +25,9 @@ use librefang_memory::MemorySubstrate;
 use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::config::KernelConfig;
 use librefang_types::error::LibreFangError;
-use librefang_types::tool::{AgentLoopSignal, ToolDefinition};
+use librefang_types::tool::ToolDefinition;
 
 use crate::error::{KernelError, KernelResult};
-use crate::event_bus::EventBus;
 use crate::registry::AgentRegistry;
 use crate::scheduler::AgentScheduler;
 use crate::supervisor::Supervisor;
@@ -767,12 +765,6 @@ impl LibreFangKernel {
         self.workflows.cron_ref()
     }
 
-    /// Execution approval manager.
-    #[inline]
-    pub fn approvals(&self) -> &crate::approval::ApprovalManager {
-        self.governance.approvals()
-    }
-
     /// Lazily open and unlock the credential vault, caching the result for
     /// the lifetime of this kernel (#3598).
     ///
@@ -1179,20 +1171,6 @@ impl LibreFangKernel {
             .clone()
     }
 
-    /// Persistent process manager. Delegates to
-    /// [`ProcessSubsystem::manager`].
-    #[inline]
-    pub fn processes(&self) -> &Arc<librefang_runtime::process_manager::ProcessManager> {
-        self.processes.process_manager_ref()
-    }
-
-    /// Background process registry for fire-and-forget shell_exec
-    /// processes. Delegates to [`ProcessSubsystem::registry`].
-    #[inline]
-    pub fn process_registry(&self) -> &Arc<librefang_runtime::process_registry::ProcessRegistry> {
-        self.processes.process_registry_ref()
-    }
-
     /// OFP peer registry (set once at startup).
     #[inline]
     pub fn peer_registry_ref(&self) -> Option<&librefang_wire::PeerRegistry> {
@@ -1209,12 +1187,6 @@ impl LibreFangKernel {
         registry: librefang_wire::PeerRegistry,
     ) -> Result<(), librefang_wire::PeerRegistry> {
         self.mesh.peer_registry.set(registry)
-    }
-
-    /// Hook registry.
-    #[inline]
-    pub fn hook_registry(&self) -> &librefang_runtime::hooks::HookRegistry {
-        self.governance.hook_registry()
     }
 
     /// Auto-reply engine.
@@ -1245,26 +1217,12 @@ impl LibreFangKernel {
         &self.whatsapp_gateway_pid
     }
 
-    /// Per-(agent, session) message injection senders.
-    #[inline]
-    pub fn injection_senders_ref(
-        &self,
-    ) -> &dashmap::DashMap<(AgentId, SessionId), tokio::sync::mpsc::Sender<AgentLoopSignal>> {
-        self.events.injection_senders_ref()
-    }
-
     /// Context engine (pluggable memory recall + assembly).
     #[inline]
     pub fn context_engine_ref(
         &self,
     ) -> Option<&dyn librefang_runtime::context_engine::ContextEngine> {
         self.context_engine.as_deref()
-    }
-
-    /// Event bus.
-    #[inline]
-    pub fn event_bus_ref(&self) -> &EventBus {
-        self.events.event_bus_ref()
     }
 
     /// Session lifecycle event bus (clone-shared `Arc` so subscribers can hold
