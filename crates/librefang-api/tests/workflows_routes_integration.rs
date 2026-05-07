@@ -858,8 +858,11 @@ async fn seed_cron_job(h: &Harness) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cron_job_update_rejects_ssrf_webhook_in_delivery() {
+    use librefang_types::scheduler::{CronDelivery, CronJobId};
+
     let h = boot().await;
     let id = seed_cron_job(&h).await;
+    let job_id = id.parse::<uuid::Uuid>().map(CronJobId).unwrap();
 
     // Link-local cloud-metadata IP — pre-#4732 update path accepted it.
     let body = serde_json::json!({
@@ -872,12 +875,24 @@ async fn cron_job_update_rejects_ssrf_webhook_in_delivery() {
         StatusCode::BAD_REQUEST,
         "must be 400, not 404 (#4732 mapping): {response:?}"
     );
+
+    // State invariant (#4739 review): rejected update must not partially
+    // overwrite `delivery`. Seed sets `CronDelivery::None`.
+    let job = h._state.kernel.cron().get_job(job_id).expect("job exists");
+    assert!(
+        matches!(job.delivery, CronDelivery::None),
+        "delivery must remain None after rejection, got {:?}",
+        job.delivery
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cron_job_update_rejects_ssrf_webhook_in_delivery_targets() {
+    use librefang_types::scheduler::CronJobId;
+
     let h = boot().await;
     let id = seed_cron_job(&h).await;
+    let job_id = id.parse::<uuid::Uuid>().map(CronJobId).unwrap();
 
     // Hex-form loopback — `0x7f000001` == `127.0.0.1`. The pre-#4732
     // string-prefix logic missed numeric IPv4 forms entirely.
@@ -892,6 +907,53 @@ async fn cron_job_update_rejects_ssrf_webhook_in_delivery_targets() {
         status,
         StatusCode::BAD_REQUEST,
         "hex-form loopback must be rejected: {response:?}"
+    );
+
+    // State invariant (#4739 review): targets must remain empty.
+    let job = h._state.kernel.cron().get_job(job_id).expect("job exists");
+    assert!(
+        job.delivery_targets.is_empty(),
+        "delivery_targets must remain empty after rejection, got {:?}",
+        job.delivery_targets
+    );
+}
+
+/// Two-phase mutation guarantee at the wire level (#4739 review):
+/// a request mixing a valid `delivery` and an SSRF-laden
+/// `delivery_targets` must reject as 400 AND must not smuggle the
+/// (in-isolation valid) `delivery` change into stored state.
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_job_update_partial_mutation_is_atomic() {
+    use librefang_types::scheduler::{CronDelivery, CronJobId};
+
+    let h = boot().await;
+    let id = seed_cron_job(&h).await;
+    let job_id = id.parse::<uuid::Uuid>().map(CronJobId).unwrap();
+
+    let body = serde_json::json!({
+        "delivery": {"kind": "webhook", "url": "https://example.com/hook"},
+        "delivery_targets": [
+            {"type": "webhook", "url": "http://0x7f000001/hook"}
+        ]
+    });
+    let (status, response) =
+        json_request(&h, Method::PUT, &format!("/api/cron/jobs/{id}"), Some(body)).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "mixed valid+SSRF must reject: {response:?}"
+    );
+
+    let job = h._state.kernel.cron().get_job(job_id).expect("job exists");
+    assert!(
+        matches!(job.delivery, CronDelivery::None),
+        "valid `delivery` must NOT be smuggled in when later phase fails, got {:?}",
+        job.delivery
+    );
+    assert!(
+        job.delivery_targets.is_empty(),
+        "delivery_targets must remain empty, got {:?}",
+        job.delivery_targets
     );
 }
 

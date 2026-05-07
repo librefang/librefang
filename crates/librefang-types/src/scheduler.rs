@@ -760,22 +760,21 @@ pub fn validate_cron_delivery_targets(targets: &[CronDeliveryTarget]) -> Result<
 /// Validate a webhook URL against SSRF: scheme must be http/https, length
 /// within `MAX_WEBHOOK_URL_LEN`, and the host (after WHATWG URL
 /// normalisation) must not point at the daemon itself, RFC 1918 / shared
-/// CGNAT / link-local space, IPv6 ULA / link-local, or known cloud-metadata
-/// services.
+/// CGNAT / link-local space, IPv6 ULA / link-local, RFC 1122 "this network"
+/// 0.0.0.0/8, or known cloud-metadata services.
 ///
 /// `url::Url::parse` normalises non-canonical IPv4 forms — hex
 /// `0x7f000001`, single-decimal `2130706433`, octal-dotted `0177.0.0.1` —
 /// and IPv4-mapped IPv6 (`::ffff:127.0.0.1`) before the literal check, so
 /// these bypass surfaces (#4732) collapse to standard `127.0.0.1` /
-/// `::ffff:7f00:1` shapes that `is_blocked_ip` recognises.
+/// `::ffff:7f00:1` shapes that `is_blocked_ip` recognises. The parser
+/// also lowercases the scheme, so `HTTPS://…` is accepted (was rejected
+/// by the pre-#4739 prefix check).
 ///
 /// DNS-blind: a hostname that resolves to a private IP only at fire-time
 /// (DNS rebind) is NOT caught here; the resolver-time check lives in
 /// `librefang-api::webhook_store::validate_webhook_url_resolved` (#3701).
 pub fn validate_webhook_url(url: &str) -> Result<(), String> {
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err("webhook URL must start with http:// or https://".into());
-    }
     if url.len() > MAX_WEBHOOK_URL_LEN {
         return Err(format!(
             "webhook URL too long ({} chars, max {MAX_WEBHOOK_URL_LEN})",
@@ -784,6 +783,17 @@ pub fn validate_webhook_url(url: &str) -> Result<(), String> {
     }
     let parsed =
         ::url::Url::parse(url).map_err(|e| format!("webhook URL is not parseable: {e}"))?;
+    // Use the parsed scheme rather than a raw `starts_with` check so
+    // upper-case forms (`HTTPS://…`) and other case-mixed inputs are
+    // canonicalised to lowercase before the comparison.
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(format!(
+                "webhook URL scheme '{other}' is not allowed, only http/https"
+            ));
+        }
+    }
     match parsed.host() {
         Some(::url::Host::Ipv4(v4)) => {
             let ip = IpAddr::V4(v4);
@@ -812,8 +822,15 @@ pub fn validate_webhook_url(url: &str) -> Result<(), String> {
             }
         }
         None => {
-            // Special schemes always populate `host`; an empty host is
-            // either a bug in url or a malformed input we should refuse.
+            // `url::Url::parse` populates `host` for every "special"
+            // scheme (http/https/ftp/ws/wss/file). Reaching this arm
+            // means the input is malformed in a way the parser tolerated
+            // but we cannot safely route — refuse explicitly.
+            //
+            // Note: `librefang-api::webhook_store::validate_webhook_url`
+            // historically returns `Ok(())` here; the stricter behaviour
+            // is mirrored back in `webhook_store` for consistency
+            // (#4739 review).
             return Err("webhook URL has no host component".into());
         }
     }
@@ -823,6 +840,17 @@ pub fn validate_webhook_url(url: &str) -> Result<(), String> {
 /// Hostnames the daemon refuses to webhook to. Mirrors the dashboard
 /// editor so users see a consistent rejection regardless of which surface
 /// created the target.
+///
+/// `url::Url::parse` already converts IDN forms (Unicode hostnames) to
+/// ASCII punycode (`xn--…`), so the literal-match below operates on the
+/// canonical ASCII form. A Unicode homoglyph that punycode-encodes to a
+/// string other than `"localhost"` etc. WILL slip through this layer; the
+/// resolver-time check at fire-time (#3701, runtime side) is the second
+/// line of defence.
+///
+/// `*.localhost` is reserved by RFC 6761 §6.3 — some loopback adapters and
+/// browsers answer for any subdomain of `.localhost`, so we block the
+/// whole tree rather than just the literal name.
 fn is_blocked_domain(lower: &str) -> bool {
     matches!(
         lower,
@@ -837,13 +865,27 @@ fn is_blocked_domain(lower: &str) -> bool {
 }
 
 /// True for IPs that must never be webhooked to: loopback (`127.0.0.0/8`,
-/// `::1`), unspecified (`0.0.0.0`, `::`), RFC 1918 private (`10/8`,
-/// `172.16/12`, `192.168/16`), CGNAT (`100.64/10`), IPv6 ULA (`fc00::/7`),
-/// multicast (`ff00::/8`), and link-local (`169.254/16`, `fe80::/10`).
-/// Always normalises IPv4-mapped IPv6 first.
+/// `::1`), unspecified (`0.0.0.0`, `::`), RFC 1122 §3.2.1.3 "this network"
+/// (`0.0.0.0/8` — historically rewritten to `127.0.0.0/8` by some stacks),
+/// RFC 1918 private (`10/8`, `172.16/12`, `192.168/16`), CGNAT (`100.64/10`),
+/// IPv6 ULA (`fc00::/7`), multicast (`ff00::/8`), and link-local
+/// (`169.254/16`, `fe80::/10`). Always normalises IPv4-mapped IPv6 first.
 fn is_blocked_ip(ip: IpAddr) -> bool {
     let ip = canonical_ip(ip);
-    ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip) || is_link_local(ip)
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || is_zeronet_v4(ip)
+        || is_private_ip(ip)
+        || is_link_local(ip)
+}
+
+/// RFC 1122 §3.2.1.3 reserves `0.0.0.0/8` as "this network". Modern Linux
+/// stacks reject outbound traffic to this range, but historically (and on
+/// some embedded TCP/IP stacks) `0.x.y.z` was rewritten to `127.x.y.z`,
+/// which would make the entire prefix an SSRF surface to localhost.
+/// Blocking explicitly is cheap and removes the platform dependency.
+fn is_zeronet_v4(ip: IpAddr) -> bool {
+    matches!(ip, IpAddr::V4(v4) if v4.octets()[0] == 0)
 }
 
 /// Unwrap IPv4-mapped IPv6 (`::ffff:X.X.X.X`) to its IPv4 form. All other
@@ -876,6 +918,12 @@ fn is_private_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// IPv4 link-local is `169.254.0.0/16` per RFC 3927; IPv6 link-local is
+/// `fe80::/10` per RFC 4291. We use `Ipv4Addr::is_link_local()` for the
+/// V4 arm rather than checking `octets()[0] == 169` to keep the matcher
+/// narrow to the actual link-local range — `169.0.0.0 – 169.253.255.255`
+/// and `169.255.0.0 – 169.255.255.255` are routable globally and must
+/// not be rejected here.
 fn is_link_local(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_link_local(),
@@ -1310,7 +1358,13 @@ mod tests {
             url: "ftp://example.com/hook".into(),
         };
         let err = job.validate(0).unwrap_err();
-        assert!(err.contains("http://"), "{err}");
+        // Post-#4739: scheme is checked after `Url::parse` via
+        // `parsed.scheme()` rather than a raw `starts_with`, so the error
+        // message names the scheme rather than the prefix.
+        assert!(
+            err.contains("http/https") && err.contains("not allowed"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1392,6 +1446,48 @@ mod tests {
     #[test]
     fn webhook_unspecified_v4_rejected() {
         assert_webhook_rejected("http://0.0.0.0/");
+    }
+
+    /// RFC 1122 §3.2.1.3 reserves `0.0.0.0/8` ("this network"). Some
+    /// legacy stacks rewrote `0.x.y.z` to `127.x.y.z`, so the whole
+    /// prefix is treated as loopback-equivalent here (#4739 review).
+    #[test]
+    fn webhook_zeronet_v4_rejected() {
+        assert_webhook_rejected("http://0.1.2.3/");
+        assert_webhook_rejected("http://0.255.255.255/");
+    }
+
+    /// `Ipv4Addr::is_link_local` matches `169.254.0.0/16` per RFC 3927.
+    /// Addresses outside that range (e.g. `169.10.0.1`) are globally
+    /// routable and must NOT be rejected — an over-broad
+    /// `octets()[0] == 169` check would block public IPs by accident.
+    #[test]
+    fn webhook_169_outside_link_local_accepted() {
+        // Caller is responsible for clearing webhook fields it does not
+        // want to set; here we just exercise validate_webhook_url.
+        assert!(super::validate_webhook_url("http://169.10.0.1/").is_ok());
+        assert!(super::validate_webhook_url("http://169.255.0.1/").is_ok());
+    }
+
+    /// `url::Url::parse` lowercases the scheme, so mixed-case forms must
+    /// be accepted (the pre-#4739 `starts_with("http://")` check would
+    /// have refused these).
+    #[test]
+    fn webhook_mixed_case_scheme_accepted() {
+        assert!(super::validate_webhook_url("HTTPS://example.com/").is_ok());
+        assert!(super::validate_webhook_url("Http://example.com/").is_ok());
+    }
+
+    /// Non-http(s) schemes must be rejected with the new
+    /// `parsed.scheme()`-based check (#4739 review).
+    #[test]
+    fn webhook_non_http_scheme_rejected() {
+        let mut job = valid_job();
+        job.delivery = CronDelivery::Webhook {
+            url: "ftp://example.com/file".into(),
+        };
+        let err = job.validate(0).expect_err("ftp scheme must be refused");
+        assert!(err.contains("not allowed"), "unexpected error: {err}");
     }
 
     #[test]

@@ -243,14 +243,77 @@ impl CronScheduler {
         id: CronJobId,
         updates: &serde_json::Value,
     ) -> LibreFangResult<CronJob> {
+        // Two-phase pattern: parse and validate every provided field into
+        // a local first, mutate the live `meta.job` only after the last
+        // validation passes. The pre-#4739 in-place pattern would
+        // partially mutate state on later-field failure — e.g. a request
+        // carrying both a valid `delivery` and an SSRF-laden
+        // `delivery_targets` would have its `delivery` overwrite already
+        // committed before the targets check failed and the route
+        // returned 400, leaving cron state half-updated and divergent
+        // from the wire response. With staged updates an `Err` from any
+        // phase leaves `meta.job` untouched, so a subsequent successful
+        // PUT can't smuggle the abandoned half-mutation forward.
+        let new_name = updates["name"].as_str().map(str::to_string);
+        let new_enabled = updates["enabled"].as_bool();
+        let new_agent_id = if let Some(s) = updates["agent_id"].as_str() {
+            Some(
+                s.parse::<AgentId>()
+                    .map_err(|e| LibreFangError::Internal(format!("Invalid agent_id: {e}")))?,
+            )
+        } else {
+            None
+        };
+        let new_schedule = if !updates["schedule"].is_null() {
+            Some(
+                serde_json::from_value::<CronSchedule>(updates["schedule"].clone())
+                    .map_err(|e| LibreFangError::Internal(format!("Invalid schedule: {e}")))?,
+            )
+        } else {
+            None
+        };
+        let new_action = if !updates["action"].is_null() {
+            Some(
+                serde_json::from_value::<librefang_types::scheduler::CronAction>(
+                    updates["action"].clone(),
+                )
+                .map_err(|e| LibreFangError::Internal(format!("Invalid action: {e}")))?,
+            )
+        } else {
+            None
+        };
+        // SSRF / shape checks (`validate_cron_delivery*`) also run in
+        // `add_job`; running them again on the update boundary closes
+        // the bypass route flagged in #4732.
+        let new_delivery = if !updates["delivery"].is_null() {
+            let d: librefang_types::scheduler::CronDelivery =
+                serde_json::from_value(updates["delivery"].clone())
+                    .map_err(|e| LibreFangError::Internal(format!("Invalid delivery: {e}")))?;
+            librefang_types::scheduler::validate_cron_delivery(&d)
+                .map_err(LibreFangError::InvalidInput)?;
+            Some(d)
+        } else {
+            None
+        };
+        let new_targets = if !updates["delivery_targets"].is_null() {
+            let t: Vec<librefang_types::scheduler::CronDeliveryTarget> =
+                serde_json::from_value(updates["delivery_targets"].clone()).map_err(|e| {
+                    LibreFangError::Internal(format!("Invalid delivery_targets: {e}"))
+                })?;
+            librefang_types::scheduler::validate_cron_delivery_targets(&t)
+                .map_err(LibreFangError::InvalidInput)?;
+            Some(t)
+        } else {
+            None
+        };
+
         match self.jobs.get_mut(&id) {
             Some(mut entry) => {
                 let meta = entry.value_mut();
-
-                if let Some(name) = updates["name"].as_str() {
-                    meta.job.name = name.to_string();
+                if let Some(name) = new_name {
+                    meta.job.name = name;
                 }
-                if let Some(enabled) = updates["enabled"].as_bool() {
+                if let Some(enabled) = new_enabled {
                     meta.job.enabled = enabled;
                     // Explicit update from user clears the auto_disabled flag.
                     meta.auto_disabled = false;
@@ -259,59 +322,22 @@ impl CronScheduler {
                         meta.job.next_run = Some(compute_next_run(&meta.job.schedule));
                     }
                 }
-                if let Some(agent_id_str) = updates["agent_id"].as_str() {
-                    meta.job.agent_id = agent_id_str
-                        .parse::<AgentId>()
-                        .map_err(|e| LibreFangError::Internal(format!("Invalid agent_id: {e}")))?;
+                if let Some(agent_id) = new_agent_id {
+                    meta.job.agent_id = agent_id;
                 }
-
-                // Replace schedule if provided (must be a valid CronSchedule object).
-                if !updates["schedule"].is_null() {
-                    let schedule: CronSchedule =
-                        serde_json::from_value(updates["schedule"].clone()).map_err(|e| {
-                            LibreFangError::Internal(format!("Invalid schedule: {e}"))
-                        })?;
+                if let Some(schedule) = new_schedule {
                     meta.job.next_run = Some(compute_next_run(&schedule));
                     meta.job.schedule = schedule;
                 }
-
-                // Replace action if provided.
-                if !updates["action"].is_null() {
-                    let action: librefang_types::scheduler::CronAction =
-                        serde_json::from_value(updates["action"].clone()).map_err(|e| {
-                            LibreFangError::Internal(format!("Invalid action: {e}"))
-                        })?;
+                if let Some(action) = new_action {
                     meta.job.action = action;
                 }
-
-                // Replace delivery if provided. Re-runs the same SSRF /
-                // shape checks `add_job` does so an attacker can't bypass
-                // host-blocklist validation by routing through update
-                // (#4732).
-                if !updates["delivery"].is_null() {
-                    let delivery: librefang_types::scheduler::CronDelivery =
-                        serde_json::from_value(updates["delivery"].clone()).map_err(|e| {
-                            LibreFangError::Internal(format!("Invalid delivery: {e}"))
-                        })?;
-                    librefang_types::scheduler::validate_cron_delivery(&delivery)
-                        .map_err(LibreFangError::InvalidInput)?;
+                if let Some(delivery) = new_delivery {
                     meta.job.delivery = delivery;
                 }
-
-                // Replace fan-out delivery_targets if provided. Must be an
-                // array of CronDeliveryTarget objects; an empty array clears
-                // all targets. Same SSRF revalidation as the `delivery`
-                // arm above (#4732).
-                if !updates["delivery_targets"].is_null() {
-                    let targets: Vec<librefang_types::scheduler::CronDeliveryTarget> =
-                        serde_json::from_value(updates["delivery_targets"].clone()).map_err(
-                            |e| LibreFangError::Internal(format!("Invalid delivery_targets: {e}")),
-                        )?;
-                    librefang_types::scheduler::validate_cron_delivery_targets(&targets)
-                        .map_err(LibreFangError::InvalidInput)?;
+                if let Some(targets) = new_targets {
                     meta.job.delivery_targets = targets;
                 }
-
                 Ok(meta.job.clone())
             }
             None => Err(LibreFangError::Internal(format!("Cron job {id} not found"))),
@@ -1892,9 +1918,16 @@ mod tests {
     /// the same payload (#4732).
     #[test]
     fn update_job_rejects_ssrf_webhook_in_delivery() {
+        use librefang_types::scheduler::CronDelivery;
+
         let (sched, _tmp) = make_scheduler(100);
         let agent = AgentId::new();
         let id = sched.add_job(make_job(agent), false).unwrap();
+        // make_job() sets `CronDelivery::None`; pin that as the invariant.
+        assert!(matches!(
+            sched.get_job(id).unwrap().delivery,
+            CronDelivery::None
+        ));
 
         let updates = serde_json::json!({
             "delivery": {"kind": "webhook", "url": "http://169.254.169.254/latest/meta-data/"}
@@ -1903,6 +1936,12 @@ mod tests {
             .update_job(id, &updates)
             .expect_err("link-local metadata IP must be refused");
         assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
+
+        // State invariant: failed validation must leave delivery untouched.
+        assert!(matches!(
+            sched.get_job(id).unwrap().delivery,
+            CronDelivery::None
+        ));
     }
 
     #[test]
@@ -1910,6 +1949,8 @@ mod tests {
         let (sched, _tmp) = make_scheduler(100);
         let agent = AgentId::new();
         let id = sched.add_job(make_job(agent), false).unwrap();
+        // Seeded job has no targets; that's the state we expect to keep.
+        assert!(sched.get_job(id).unwrap().delivery_targets.is_empty());
 
         // Numeric/decimal-form loopback — also a #4732 bypass surface
         // before the WHATWG URL parser was wired in.
@@ -1920,6 +1961,71 @@ mod tests {
             .update_job(id, &updates)
             .expect_err("decimal-form loopback must be refused");
         assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
+
+        // State invariant: targets must not have been partially written.
+        assert!(sched.get_job(id).unwrap().delivery_targets.is_empty());
+    }
+
+    /// Two-phase mutation guarantee (#4739 review): if any field in a
+    /// multi-field update fails validation, no field may be applied to
+    /// `meta.job`. The pre-#4739 in-place pattern would have committed
+    /// `delivery` (a benign public webhook) before failing on
+    /// `delivery_targets` (the SSRF target), leaving cron state half
+    /// updated and divergent from the 400 the route returned.
+    #[test]
+    fn update_job_partial_mutation_is_atomic() {
+        use librefang_types::scheduler::CronDelivery;
+
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let id = sched.add_job(make_job(agent), false).unwrap();
+
+        // Valid `delivery` would succeed in isolation. The SSRF-laden
+        // `delivery_targets` must roll the whole transaction back.
+        let updates = serde_json::json!({
+            "delivery": {"kind": "webhook", "url": "https://example.com/hook"},
+            "delivery_targets": [
+                {"type": "webhook", "url": "http://0x7f000001/hook"}
+            ]
+        });
+        let err = sched
+            .update_job(id, &updates)
+            .expect_err("update with mixed valid + SSRF must fail");
+        assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
+
+        // `delivery` must NOT have been smuggled in despite passing its
+        // own check — atomicity is the property we care about.
+        let after = sched.get_job(id).unwrap();
+        assert!(
+            matches!(after.delivery, CronDelivery::None),
+            "delivery must remain None (the seeded value), got {:?}",
+            after.delivery
+        );
+        assert!(after.delivery_targets.is_empty());
+    }
+
+    /// Same atomicity guarantee in the other direction: failure in the
+    /// `delivery` phase must not leak the would-be `delivery_targets` mutation.
+    #[test]
+    fn update_job_partial_mutation_targets_not_smuggled_on_delivery_failure() {
+        let (sched, _tmp) = make_scheduler(100);
+        let agent = AgentId::new();
+        let id = sched.add_job(make_job(agent), false).unwrap();
+        // Seeded targets are empty; that's the invariant.
+        assert!(sched.get_job(id).unwrap().delivery_targets.is_empty());
+
+        let updates = serde_json::json!({
+            "delivery": {"kind": "webhook", "url": "http://10.0.0.1/hook"},
+            "delivery_targets": [{"type": "webhook", "url": "https://example.com/hook"}]
+        });
+        let err = sched
+            .update_job(id, &updates)
+            .expect_err("RFC 1918 delivery must reject");
+        assert!(matches!(err, LibreFangError::InvalidInput(_)), "{err:?}");
+
+        // Atomicity: the would-be valid targets must not survive when
+        // `delivery` (which the parser sees first) gets rejected.
+        assert!(sched.get_job(id).unwrap().delivery_targets.is_empty());
     }
 
     #[test]
