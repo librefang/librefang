@@ -13,13 +13,13 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::{
     ContentBlock, CreateTerminalRequest, CreateTerminalResponse, InitializeRequest,
-    InitializeResponse, NewSessionRequest, NewSessionResponse, PermissionOptionId, PromptRequest,
-    PromptResponse, ProtocolVersion, ReadTextFileRequest, ReadTextFileResponse,
-    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionNotification, SessionUpdate, StopReason, TerminalExitStatus, TerminalId,
-    TerminalOutputRequest, TerminalOutputResponse, TextContent, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse,
+    InitializeResponse, LoadSessionRequest, NewSessionRequest, NewSessionResponse,
+    PermissionOptionId, PromptRequest, PromptResponse, ProtocolVersion, ReadTextFileRequest,
+    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionNotification, SessionUpdate, StopReason, TerminalExitStatus,
+    TerminalId, TerminalOutputRequest, TerminalOutputResponse, TextContent,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse,
 };
 use agent_client_protocol::{ConnectionTo, JsonRpcResponse, Responder, SentRequest};
 use async_trait::async_trait;
@@ -47,6 +47,9 @@ struct MockKernel {
     /// directly.
     fs_client: std::sync::Mutex<Option<FsClientHandle>>,
     terminal_client: std::sync::Mutex<Option<TerminalClientHandle>>,
+    /// Optional canned history for `fetch_session_history` to return —
+    /// drives the session/load history-replay test.
+    canned_history: AsyncMutex<Vec<(librefang_types::message::Role, String)>>,
 }
 
 impl MockKernel {
@@ -59,7 +62,12 @@ impl MockKernel {
             last_session_id: AsyncMutex::new(None),
             fs_client: std::sync::Mutex::new(None),
             terminal_client: std::sync::Mutex::new(None),
+            canned_history: AsyncMutex::new(Vec::new()),
         })
+    }
+
+    async fn set_history(&self, history: Vec<(librefang_types::message::Role, String)>) {
+        *self.canned_history.lock().await = history;
     }
 
     fn fs_client_handle(&self) -> Option<FsClientHandle> {
@@ -150,6 +158,13 @@ impl AcpKernel for MockKernel {
         if let Ok(mut guard) = self.terminal_client.lock() {
             *guard = Some(handle);
         }
+    }
+
+    async fn fetch_session_history(
+        &self,
+        _lf_session_id: LfSessionId,
+    ) -> Vec<(librefang_types::message::Role, String)> {
+        self.canned_history.lock().await.clone()
     }
 }
 
@@ -625,6 +640,117 @@ async fn terminal_run_command_round_trip() {
                         assert!(!result.truncated);
                         assert_eq!(result.exit_code, Some(0));
                         assert_eq!(result.signal, None);
+                        Ok(())
+                    },
+                )
+                .await;
+            assert!(result.is_ok(), "client driver failed: {result:?}");
+        })
+        .await;
+}
+
+/// `session/load` history replay: when an editor reconnects to a
+/// previously-used ACP session id, the kernel-supplied message
+/// history is emitted back as a sequence of `session/update`
+/// notifications so the editor's chat panel rehydrates immediately
+/// (#3313).
+#[tokio::test(flavor = "current_thread")]
+async fn session_load_replays_history_to_client() {
+    use tokio::task::LocalSet;
+
+    let local = LocalSet::new();
+    local
+        .run_until(async {
+            let kernel = MockKernel::new(vec![]);
+            // Stage two persisted turns the kernel will hand back when
+            // session/load asks for history.
+            kernel
+                .set_history(vec![
+                    (
+                        librefang_types::message::Role::User,
+                        "previous question".to_string(),
+                    ),
+                    (
+                        librefang_types::message::Role::Assistant,
+                        "previous answer".to_string(),
+                    ),
+                ])
+                .await;
+
+            let (server_reader, server_writer, client_reader, client_writer) = duplex_pair();
+            let server_transport =
+                agent_client_protocol::ByteStreams::new(server_writer, server_reader);
+            let client_transport =
+                agent_client_protocol::ByteStreams::new(client_writer, client_reader);
+
+            let kernel_for_server = kernel.clone();
+            tokio::task::spawn_local(async move {
+                let _ = librefang_acp::run_with_transport(
+                    kernel_for_server,
+                    AgentId(Uuid::nil()),
+                    server_transport,
+                )
+                .await;
+            });
+
+            let updates: Arc<AsyncMutex<Vec<SessionNotification>>> =
+                Arc::new(AsyncMutex::new(Vec::new()));
+            let updates_capture = updates.clone();
+            let client = agent_client_protocol::Client.builder().on_receive_notification(
+                async move |notif: SessionNotification, _cx| {
+                    updates_capture.lock().await.push(notif);
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_notification!(),
+            );
+
+            let result = client
+                .connect_with(
+                    client_transport,
+                    async move |cx: ConnectionTo<agent_client_protocol::Agent>| -> Result<(), agent_client_protocol::Error> {
+                        let _: InitializeResponse =
+                            recv(cx.send_request(InitializeRequest::new(ProtocolVersion::LATEST)))
+                                .await?;
+
+                        // Reconnect with a stable id; the server-side
+                        // SessionState::for_acp_id derives the same
+                        // LibreFang session id we'd see across restarts.
+                        let session_id =
+                            agent_client_protocol::schema::SessionId::new("reconnecting-session");
+                        let _ = recv(cx.send_request(LoadSessionRequest::new(
+                            session_id.clone(),
+                            PathBuf::from("/tmp/proj"),
+                        )))
+                        .await?;
+
+                        // Wait for both replay notifications to land.
+                        for _ in 0..40 {
+                            if updates.lock().await.len() >= 2 {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(25)).await;
+                        }
+
+                        let captured = updates.lock().await.clone();
+                        assert_eq!(
+                            captured.len(),
+                            2,
+                            "expected 2 history notifications, got {captured:?}"
+                        );
+                        match &captured[0].update {
+                            SessionUpdate::UserMessageChunk(chunk) => match &chunk.content {
+                                ContentBlock::Text(tc) => assert_eq!(tc.text, "previous question"),
+                                other => panic!("expected text content, got {other:?}"),
+                            },
+                            other => panic!("expected UserMessageChunk first, got {other:?}"),
+                        }
+                        match &captured[1].update {
+                            SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
+                                ContentBlock::Text(tc) => assert_eq!(tc.text, "previous answer"),
+                                other => panic!("expected text content, got {other:?}"),
+                            },
+                            other => panic!("expected AgentMessageChunk second, got {other:?}"),
+                        }
                         Ok(())
                     },
                 )
