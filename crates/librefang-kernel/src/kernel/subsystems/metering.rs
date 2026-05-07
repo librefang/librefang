@@ -82,3 +82,58 @@ impl MeteringSubsystemApi for MeteringSubsystem {
         (*self.budget_config.load_full()).clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Boundary tests for `MeteringSubsystemApi`. The trait returns
+    //! both a borrowed `&Arc<...>` (`audit_log`, `metering_engine`) and
+    //! an owned snapshot (`current_budget`), so this also exercises
+    //! that mixed-shape contract — important because trait methods
+    //! cannot return `impl Trait` and any future change to the return
+    //! shape would have to break this test first.
+    use super::*;
+    use librefang_memory::usage::UsageStore;
+    use librefang_memory::MemorySubstrate;
+
+    fn read_budget_via_trait(api: &dyn MeteringSubsystemApi) -> BudgetConfig {
+        api.current_budget()
+    }
+
+    #[test]
+    fn metering_subsystem_routes_through_focused_trait() {
+        // Build with the same wiring `boot.rs` uses: in-memory pool ⇒
+        // `UsageStore` ⇒ `MeteringEngine`, plus a parameter-less
+        // `AuditLog`.
+        let substrate = MemorySubstrate::open_in_memory(0.01).expect("in-memory substrate");
+        let engine = Arc::new(MeteringEngine::new(Arc::new(UsageStore::new(
+            substrate.pool(),
+        ))));
+        let audit = Arc::new(AuditLog::new());
+        let initial = BudgetConfig::default();
+        let sub = MeteringSubsystem::new(Arc::clone(&audit), Arc::clone(&engine), initial.clone());
+
+        // Borrowed-handle methods: trait dispatch returns the same Arc
+        // the constructor stored — no hidden clone or rewrapping.
+        assert!(Arc::ptr_eq(MeteringSubsystemApi::audit_log(&sub), &audit));
+        assert!(Arc::ptr_eq(
+            MeteringSubsystemApi::metering_engine(&sub),
+            &engine
+        ));
+
+        // Owned-snapshot method: round-trips through `&dyn` cleanly.
+        let snap = read_budget_via_trait(&sub);
+        assert_eq!(snap.max_daily_usd, initial.max_daily_usd);
+
+        // Inherent (non-trait) RCU mutator still works alongside the
+        // trait-dispatched read path.
+        sub.update_budget(|c| c.max_daily_usd = 42.0);
+        let after = read_budget_via_trait(&sub);
+        assert_eq!(after.max_daily_usd, 42.0);
+    }
+
+    #[test]
+    fn metering_trait_is_object_safe_and_thread_safe() {
+        fn assert_send_sync<T: Send + Sync + ?Sized>() {}
+        assert_send_sync::<dyn MeteringSubsystemApi>();
+    }
+}
