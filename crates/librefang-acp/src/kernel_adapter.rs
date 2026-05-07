@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use librefang_kernel::kernel_handle::KernelHandle;
 use librefang_kernel::LibreFangKernel;
 use librefang_llm_driver::StreamEvent;
 use librefang_types::agent::{AgentId, SessionId as LfSessionId};
@@ -22,13 +23,28 @@ use crate::{AcpError, AcpKernel, AcpResult};
 ///
 /// Construct via [`KernelAdapter::new`]; consume the `Arc<KernelAdapter>`
 /// through [`crate::run`] / [`crate::run_with_transport`].
+///
+/// Holds the kernel both as the concrete type (for `Arc<LibreFangKernel>`
+/// methods like `send_message_streaming_*` that aren't on `KernelHandle`)
+/// and as a `KernelHandle` trait object (for `resolve_tool_approval`,
+/// which must go through the trait so the kernel-side
+/// `handle_approval_resolution` spawn fires — see the long comment on
+/// `resolve_approval` below).
 pub struct KernelAdapter {
     kernel: Arc<LibreFangKernel>,
+    kernel_handle: Arc<dyn KernelHandle>,
 }
 
 impl KernelAdapter {
     pub fn new(kernel: Arc<LibreFangKernel>) -> Self {
-        Self { kernel }
+        // `kernel_handle()` panics if `set_self_handle` hasn't run, but
+        // `LibreFangKernel::boot` wires that up before returning, so by
+        // here it's safe.
+        let kernel_handle = kernel.kernel_handle();
+        Self {
+            kernel,
+            kernel_handle,
+        }
     }
 
     /// Borrow the underlying kernel — useful for daemon-side bookkeeping
@@ -42,8 +58,18 @@ impl KernelAdapter {
 #[async_trait]
 impl AcpKernel for KernelAdapter {
     async fn resolve_agent(&self, name_or_id: &str) -> AcpResult<AgentId> {
+        // Accept either a UUID (the kernel's canonical form) or a
+        // human-readable agent name (resolved via the registry's name
+        // index). UUIDs go through the registry too so a typo doesn't
+        // surface as a vague "kernel send_prompt: …" later.
         if let Ok(uuid) = Uuid::parse_str(name_or_id) {
-            return Ok(AgentId(uuid));
+            let id = AgentId(uuid);
+            return self
+                .kernel
+                .agent_registry()
+                .get(id)
+                .map(|_| id)
+                .ok_or_else(|| AcpError::AgentNotFound(name_or_id.to_string()));
         }
         if let Some(entry) = self.kernel.agent_registry().find_by_name(name_or_id) {
             return Ok(entry.id);
@@ -86,10 +112,28 @@ impl AcpKernel for KernelAdapter {
         decision: ApprovalDecision,
         decided_by: Option<String>,
     ) -> AcpResult<()> {
-        self.kernel
-            .approvals()
-            .resolve(request_id, decision, decided_by, false, None)
-            .map_err(AcpError::internal)?;
+        // Route through the trait, NOT `kernel.approvals().resolve()`
+        // directly. Tools that hit the deferred-approval path (the
+        // `submit_request` branch of `ApprovalManager`) are queued and
+        // only execute when `kernel.handle_approval_resolution(...)` is
+        // spawned alongside the resolve. `ApprovalManager::resolve` by
+        // itself just clears the pending entry — it explicitly does not
+        // run the deferred tool (see the doc on
+        // `ApprovalManager::resolve_all_for_session` in
+        // `librefang-kernel/src/approval.rs`).
+        //
+        // `KernelHandle::resolve_tool_approval` (impl in
+        // `kernel/handles/approval_gate.rs`) wraps both: it calls
+        // `ApprovalManager::resolve`, then on `Approved + Some(deferred)`
+        // it spawns a background task that runs the queued tool and
+        // resumes the agent loop. Without this routing, `Allow once`
+        // from the editor modal would clear the approval record but the
+        // agent loop would hang forever waiting for the tool result
+        // that never lands.
+        self.kernel_handle
+            .resolve_tool_approval(request_id, decision, decided_by, false, None)
+            .await
+            .map_err(|e| AcpError::internal(e.to_string()))?;
         Ok(())
     }
 

@@ -16,10 +16,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use librefang_acp::KernelAdapter;
+use librefang_acp::{AcpKernel, KernelAdapter};
 use librefang_kernel::LibreFangKernel;
 
-/// Phase-1 default agent name when the CLI is invoked without `--agent`.
+/// Default agent name when the CLI is invoked without `--agent`.
+/// Mirrors the dashboard / TUI default so editor users land on the
+/// same agent they see elsewhere.
 const DEFAULT_AGENT_NAME: &str = "assistant";
 
 /// Boot an in-process kernel and run the ACP server on stdio until
@@ -80,9 +82,7 @@ pub fn run_acp_server(config: Option<PathBuf>, agent: Option<String>) {
 /// a stale socket from a crashed daemon falls back to in-process mode.
 #[cfg(unix)]
 fn locate_acp_socket() -> Option<PathBuf> {
-    if super::find_daemon().is_none() {
-        return None;
-    }
+    super::find_daemon()?;
     let path = dirs::home_dir()?.join(".librefang").join("acp.sock");
     if path.exists() {
         Some(path)
