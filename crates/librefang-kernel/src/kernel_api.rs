@@ -552,7 +552,7 @@ impl KernelApi for LibreFangKernel {
         <Self as crate::MeteringSubsystemApi>::audit_log(self)
     }
     fn auth_manager(&self) -> &AuthManager {
-        Self::auth_manager(self)
+        <Self as crate::SecuritySubsystemApi>::auth_ref(self)
     }
     fn browser(&self) -> &librefang_runtime::browser::BrowserManager {
         Self::browser(self)
@@ -585,7 +585,7 @@ impl KernelApi for LibreFangKernel {
         <Self as crate::MeteringSubsystemApi>::metering_engine(self)
     }
     fn pairing_ref(&self) -> &PairingManager {
-        Self::pairing_ref(self)
+        <Self as crate::SecuritySubsystemApi>::pairing_ref(self)
     }
     fn proactive_memory_store(&self) -> Option<&Arc<librefang_memory::ProactiveMemoryStore>> {
         Self::proactive_memory_store(self)

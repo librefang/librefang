@@ -17,7 +17,7 @@ use std::sync::Arc;
 use super::subsystems::{
     AgentSubsystemApi, EventSubsystemApi, GovernanceSubsystemApi, LlmSubsystemApi, McpSubsystemApi,
     MediaSubsystemApi, MemorySubsystemApi, MeshSubsystemApi, ProcessSubsystemApi,
-    SecuritySubsystemApi, SkillsSubsystemApi, WorkflowSubsystemApi,
+    SkillsSubsystemApi, WorkflowSubsystemApi,
 };
 
 use tracing::{debug, info, warn};
@@ -28,7 +28,6 @@ use librefang_types::config::KernelConfig;
 use librefang_types::error::LibreFangError;
 use librefang_types::tool::{AgentLoopSignal, ToolDefinition};
 
-use crate::auth::AuthManager;
 use crate::error::{KernelError, KernelResult};
 use crate::event_bus::EventBus;
 use crate::registry::AgentRegistry;
@@ -946,18 +945,6 @@ impl LibreFangKernel {
     #[inline]
     pub fn supervisor_ref(&self) -> &Supervisor {
         self.agents.supervisor_ref()
-    }
-
-    /// RBAC authentication manager.
-    #[inline]
-    pub fn auth_manager(&self) -> &AuthManager {
-        self.security.auth_ref()
-    }
-
-    /// Device pairing manager.
-    #[inline]
-    pub fn pairing_ref(&self) -> &crate::pairing::PairingManager {
-        self.security.pairing_ref()
     }
 
     /// Web tools context (search + fetch). Delegates to
