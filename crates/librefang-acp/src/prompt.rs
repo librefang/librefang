@@ -18,7 +18,8 @@
 use std::sync::Arc;
 
 use agent_client_protocol::schema::{
-    ContentBlock, PromptRequest, PromptResponse, SessionNotification, StopReason,
+    ContentBlock, ContentChunk, PromptRequest, PromptResponse, SessionNotification, SessionUpdate,
+    StopReason, TextContent,
 };
 use agent_client_protocol::Client;
 use agent_client_protocol::ConnectionTo;
@@ -51,7 +52,26 @@ pub(crate) async fn handle<K: AcpKernel>(
         ));
     };
 
-    let message = concat_text_blocks(&req.prompt);
+    let (message, dropped) = concat_text_blocks(&req.prompt);
+    // Surface dropped multimodal blocks to the user so they aren't
+    // left guessing where their attachment went. The build's
+    // `PromptCapabilities` already declares image / audio /
+    // embedded_context as unsupported, but defensive editors may
+    // still send them — be loud, not silent.
+    if dropped > 0 {
+        let warning = format!(
+            "[note: dropped {dropped} non-text content block{} — \
+             image / audio / embedded resource not yet supported by \
+             this LibreFang build]\n\n",
+            if dropped == 1 { "" } else { "s" }
+        );
+        cx.send_notification(SessionNotification::new(
+            req.session_id.clone(),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new(warning),
+            ))),
+        ))?;
+    }
     if message.is_empty() {
         // Nothing to send — return immediately with an end-turn so the
         // editor doesn't spin on an empty user message.
@@ -109,17 +129,33 @@ pub(crate) async fn handle<K: AcpKernel>(
     responder.respond(PromptResponse::new(stop))
 }
 
-fn concat_text_blocks(blocks: &[ContentBlock]) -> String {
+/// Concatenate the text body of a prompt and count any non-text
+/// content blocks (image / audio / embedded resource) the build
+/// can't yet pipe to the agent loop. The caller surfaces a
+/// `dropped > 0` count to the user via a `session/update` message
+/// chunk so they're not left wondering why their attachment
+/// vanished.
+fn concat_text_blocks(blocks: &[ContentBlock]) -> (String, usize) {
     let mut out = String::new();
+    let mut dropped = 0usize;
     for block in blocks {
-        if let ContentBlock::Text(tc) = block {
-            if !out.is_empty() && !out.ends_with(char::is_whitespace) {
-                out.push(' ');
+        match block {
+            ContentBlock::Text(tc) => {
+                if !out.is_empty() && !out.ends_with(char::is_whitespace) {
+                    out.push(' ');
+                }
+                out.push_str(&tc.text);
             }
-            out.push_str(&tc.text);
+            // Anything non-text — image / audio / embedded resource /
+            // future block types — counts as dropped. The runtime
+            // doesn't yet plumb these through to the LLM driver, and
+            // we already declared `image: false` / `audio: false` /
+            // `embedded_context: false` in `PromptCapabilities` so
+            // conformant editors won't send them.
+            _ => dropped += 1,
         }
     }
-    out
+    (out, dropped)
 }
 
 fn map_stop_reason(reason: LfStopReason) -> StopReason {
@@ -147,7 +183,9 @@ mod tests {
             ContentBlock::Text(TextContent::new("hello")),
             ContentBlock::Text(TextContent::new("world")),
         ];
-        assert_eq!(concat_text_blocks(&blocks), "hello world");
+        let (text, dropped) = concat_text_blocks(&blocks);
+        assert_eq!(text, "hello world");
+        assert_eq!(dropped, 0);
     }
 
     #[test]
@@ -156,20 +194,24 @@ mod tests {
             ContentBlock::Text(TextContent::new("hello ")),
             ContentBlock::Text(TextContent::new("world")),
         ];
-        assert_eq!(concat_text_blocks(&blocks), "hello world");
+        let (text, dropped) = concat_text_blocks(&blocks);
+        assert_eq!(text, "hello world");
+        assert_eq!(dropped, 0);
     }
 
     #[test]
     fn concat_text_empty_input_returns_empty() {
-        assert_eq!(concat_text_blocks(&[]), "");
+        let (text, dropped) = concat_text_blocks(&[]);
+        assert_eq!(text, "");
+        assert_eq!(dropped, 0);
     }
 
     #[test]
-    fn concat_text_skips_non_text_blocks() {
-        // Only text blocks contribute; a future image block would be
-        // ignored by this Phase 1 implementation.
+    fn concat_text_only_text_block_no_drops() {
         let blocks = vec![ContentBlock::Text(TextContent::new("only text"))];
-        assert_eq!(concat_text_blocks(&blocks), "only text");
+        let (text, dropped) = concat_text_blocks(&blocks);
+        assert_eq!(text, "only text");
+        assert_eq!(dropped, 0);
     }
 
     #[test]
