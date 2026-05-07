@@ -277,11 +277,26 @@ fn next_session_id() -> agent_client_protocol::schema::SessionId {
     agent_client_protocol::schema::SessionId::new(uuid.to_string())
 }
 
+/// Maximum number of history turns we replay back to the editor on
+/// `session/load` / `session/resume`. A long-running session can
+/// accumulate thousands of messages, and dumping all of them as a
+/// flood of `session/update` notifications would (a) delay the
+/// load response, (b) drown the editor's UI thread, (c) potentially
+/// exceed the JSON-RPC peer's incoming buffer. Cap at the most
+/// recent 50 turns — enough for the user to recall context, not
+/// enough to flood. A future settings knob can lift this if a
+/// deployment needs a longer rehydration window.
+const MAX_REPLAY_TURNS: usize = 50;
+
 /// Pull the session's persisted message history from the kernel and
 /// emit it back to the editor as a sequence of `session/update`
-/// notifications, so the editor's chat panel rehydrates immediately
-/// on `session/load` / `session/resume` (#3313). Empty history (new
+/// notifications, so the editor's chat panel rehydrates on
+/// `session/load` / `session/resume` (#3313). Empty history (new
 /// session, missing kernel side, etc.) is a no-op.
+///
+/// Capped at the most recent [`MAX_REPLAY_TURNS`] entries so a long
+/// session doesn't flood the editor's incoming buffer or block the
+/// load response.
 ///
 /// User turns map to `SessionUpdate::UserMessageChunk`, assistant
 /// turns to `AgentMessageChunk`. Tool-call detail isn't replayed
@@ -300,12 +315,21 @@ async fn replay_session_history<K: AcpKernel>(
     }
     use agent_client_protocol::schema::{ContentBlock, ContentChunk, TextContent};
     use librefang_types::message::Role;
+    let total = history.len();
+    // Trim from the front so the user sees the *most recent* turns,
+    // not the oldest ones that scrolled off long ago.
+    let to_replay: Vec<(Role, String)> = if total > MAX_REPLAY_TURNS {
+        history.into_iter().skip(total - MAX_REPLAY_TURNS).collect()
+    } else {
+        history
+    };
     debug!(
         session_id = %acp_id.0,
-        turns = history.len(),
+        total,
+        replayed = to_replay.len(),
         "ACP session/load: replaying persisted history"
     );
-    for (role, text) in history {
+    for (role, text) in to_replay {
         let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
         let update = match role {
             Role::User => agent_client_protocol::schema::SessionUpdate::UserMessageChunk(chunk),

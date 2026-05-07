@@ -160,16 +160,18 @@ fn concat_text_blocks(blocks: &[ContentBlock]) -> (String, usize) {
                 out.push_str(&tc.text);
                 continue;
             }
-            ContentBlock::Image(img) => format!(
-                "[image attachment: {} ({} base64 bytes)]",
-                img.mime_type,
-                img.data.len()
-            ),
-            ContentBlock::Audio(aud) => format!(
-                "[audio attachment: {} ({} base64 bytes)]",
-                aud.mime_type,
-                aud.data.len()
-            ),
+            // Don't include the base64-encoded size in the placeholder
+            // — leaking the byte length to the LLM is a small but
+            // unnecessary signal (a prompt-injection probe could use
+            // it to sniff what was attached). Mime-type alone is
+            // enough for the agent to know to ask the user to paste
+            // the relevant text.
+            ContentBlock::Image(img) => {
+                format!("[image attachment: {}]", img.mime_type)
+            }
+            ContentBlock::Audio(aud) => {
+                format!("[audio attachment: {}]", aud.mime_type)
+            }
             ContentBlock::ResourceLink(rl) => {
                 format!("[resource link: {}]", rl.uri)
             }
@@ -255,8 +257,14 @@ mod tests {
         assert_eq!(converted, 1);
         assert!(text.starts_with("look at this:"));
         assert!(
-            text.contains("[image attachment: image/png"),
+            text.contains("[image attachment: image/png]"),
             "image placeholder missing in {text:?}"
+        );
+        // Don't leak base64 size — the placeholder must not contain
+        // the raw byte count.
+        assert!(
+            !text.contains("bytes"),
+            "placeholder should not include byte count: {text:?}"
         );
     }
 
@@ -270,8 +278,12 @@ mod tests {
         let (text, converted) = concat_text_blocks(&blocks);
         assert_eq!(converted, 1);
         assert!(
-            text.contains("[audio attachment: audio/wav"),
+            text.contains("[audio attachment: audio/wav]"),
             "audio placeholder missing in {text:?}"
+        );
+        assert!(
+            !text.contains("bytes"),
+            "placeholder should not include byte count: {text:?}"
         );
     }
 

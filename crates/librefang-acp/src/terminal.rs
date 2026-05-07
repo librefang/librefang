@@ -16,6 +16,20 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Hard upper bound on most `terminal/*` reverse-RPCs. Mirrors the
+/// `fs/*` and `permission` cap so a hung / disconnected editor
+/// doesn't freeze the runtime indefinitely.
+const TERMINAL_RPC_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Long-running cap on `terminal/wait_for_exit` — the call legitimately
+/// blocks while the user's command runs. 10 minutes mirrors the
+/// upper bound `shell_exec`'s subprocess fallback respects on most
+/// platforms (gives long compiles / lints time to finish, but caps
+/// the worst-case agent-loop freeze if a command hangs and the
+/// editor never sends `terminal/kill`).
+const TERMINAL_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
 use agent_client_protocol::schema::{
     ClientCapabilities, CreateTerminalRequest, EnvVariable, KillTerminalRequest,
@@ -93,12 +107,13 @@ impl TerminalClientHandle {
             Ok(())
         })
         .map_err(AcpError::Transport)?;
-        match rx.await {
-            Ok(Ok(resp)) => Ok(resp.terminal_id),
-            Ok(Err(e)) => Err(AcpError::Transport(e)),
-            Err(_) => Err(AcpError::internal(
+        match tokio::time::timeout(TERMINAL_RPC_TIMEOUT, rx).await {
+            Ok(Ok(Ok(resp))) => Ok(resp.terminal_id),
+            Ok(Ok(Err(e))) => Err(AcpError::Transport(e)),
+            Ok(Err(_)) => Err(AcpError::internal(
                 "terminal/create response channel dropped",
             )),
+            Err(_) => Err(AcpError::internal("terminal/create timed out")),
         }
     }
 
@@ -116,12 +131,13 @@ impl TerminalClientHandle {
             Ok(())
         })
         .map_err(AcpError::Transport)?;
-        match rx.await {
-            Ok(Ok(resp)) => Ok(resp.exit_status),
-            Ok(Err(e)) => Err(AcpError::Transport(e)),
-            Err(_) => Err(AcpError::internal(
+        match tokio::time::timeout(TERMINAL_WAIT_TIMEOUT, rx).await {
+            Ok(Ok(Ok(resp))) => Ok(resp.exit_status),
+            Ok(Ok(Err(e))) => Err(AcpError::Transport(e)),
+            Ok(Err(_)) => Err(AcpError::internal(
                 "terminal/wait_for_exit response channel dropped",
             )),
+            Err(_) => Err(AcpError::internal("terminal/wait_for_exit timed out")),
         }
     }
 
@@ -139,12 +155,13 @@ impl TerminalClientHandle {
             Ok(())
         })
         .map_err(AcpError::Transport)?;
-        match rx.await {
-            Ok(Ok(resp)) => Ok((resp.output, resp.truncated, resp.exit_status)),
-            Ok(Err(e)) => Err(AcpError::Transport(e)),
-            Err(_) => Err(AcpError::internal(
+        match tokio::time::timeout(TERMINAL_RPC_TIMEOUT, rx).await {
+            Ok(Ok(Ok(resp))) => Ok((resp.output, resp.truncated, resp.exit_status)),
+            Ok(Ok(Err(e))) => Err(AcpError::Transport(e)),
+            Ok(Err(_)) => Err(AcpError::internal(
                 "terminal/output response channel dropped",
             )),
+            Err(_) => Err(AcpError::internal("terminal/output timed out")),
         }
     }
 
@@ -163,10 +180,11 @@ impl TerminalClientHandle {
             Ok(())
         })
         .map_err(AcpError::Transport)?;
-        match rx.await {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(e)) => Err(AcpError::Transport(e)),
-            Err(_) => Err(AcpError::internal("terminal/kill response channel dropped")),
+        match tokio::time::timeout(TERMINAL_RPC_TIMEOUT, rx).await {
+            Ok(Ok(Ok(_))) => Ok(()),
+            Ok(Ok(Err(e))) => Err(AcpError::Transport(e)),
+            Ok(Err(_)) => Err(AcpError::internal("terminal/kill response channel dropped")),
+            Err(_) => Err(AcpError::internal("terminal/kill timed out")),
         }
     }
 
@@ -185,12 +203,13 @@ impl TerminalClientHandle {
             Ok(())
         })
         .map_err(AcpError::Transport)?;
-        match rx.await {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(e)) => Err(AcpError::Transport(e)),
-            Err(_) => Err(AcpError::internal(
+        match tokio::time::timeout(TERMINAL_RPC_TIMEOUT, rx).await {
+            Ok(Ok(Ok(_))) => Ok(()),
+            Ok(Ok(Err(e))) => Err(AcpError::Transport(e)),
+            Ok(Err(_)) => Err(AcpError::internal(
                 "terminal/release response channel dropped",
             )),
+            Err(_) => Err(AcpError::internal("terminal/release timed out")),
         }
     }
 

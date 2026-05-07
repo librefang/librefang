@@ -27,6 +27,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use agent_client_protocol::schema::{
     ClientCapabilities, ReadTextFileRequest, WriteTextFileRequest,
@@ -37,6 +38,15 @@ use async_trait::async_trait;
 use librefang_kernel_handle::{AcpFsClient, KernelOpError, KernelResult};
 
 use crate::AcpError;
+
+/// Hard upper bound on every `fs/*` reverse-RPC. The runtime tool that
+/// triggered this call is blocking the agent loop while it awaits;
+/// without a cap a hung / disconnected editor would freeze the session
+/// indefinitely. 60s mirrors `permission::PERMISSION_TIMEOUT` (60s) so
+/// the failure mode is consistent across reverse-RPC families. On
+/// timeout the caller falls back to local-fs (matching the
+/// `Unavailable` semantics).
+const FS_RPC_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Editor-declared filesystem capabilities, captured at `initialize` time.
 ///
@@ -117,12 +127,13 @@ impl FsClientHandle {
             Ok(())
         })
         .map_err(AcpError::Transport)?;
-        match rx.await {
-            Ok(Ok(resp)) => Ok(resp.content),
-            Ok(Err(e)) => Err(AcpError::Transport(e)),
-            Err(_) => Err(AcpError::internal(
+        match tokio::time::timeout(FS_RPC_TIMEOUT, rx).await {
+            Ok(Ok(Ok(resp))) => Ok(resp.content),
+            Ok(Ok(Err(e))) => Err(AcpError::Transport(e)),
+            Ok(Err(_)) => Err(AcpError::internal(
                 "fs/read_text_file response channel dropped",
             )),
+            Err(_) => Err(AcpError::internal("fs/read_text_file timed out")),
         }
     }
 
@@ -141,12 +152,13 @@ impl FsClientHandle {
             Ok(())
         })
         .map_err(AcpError::Transport)?;
-        match rx.await {
-            Ok(Ok(_resp)) => Ok(()),
-            Ok(Err(e)) => Err(AcpError::Transport(e)),
-            Err(_) => Err(AcpError::internal(
+        match tokio::time::timeout(FS_RPC_TIMEOUT, rx).await {
+            Ok(Ok(Ok(_resp))) => Ok(()),
+            Ok(Ok(Err(e))) => Err(AcpError::Transport(e)),
+            Ok(Err(_)) => Err(AcpError::internal(
                 "fs/write_text_file response channel dropped",
             )),
+            Err(_) => Err(AcpError::internal("fs/write_text_file timed out")),
         }
     }
 
