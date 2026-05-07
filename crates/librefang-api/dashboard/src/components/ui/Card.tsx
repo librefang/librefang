@@ -32,7 +32,7 @@ export function Card({
     ? (e: React.KeyboardEvent<HTMLDivElement>) => {
         if (e.key === " ") e.preventDefault();
         if (e.key === "Enter" || e.key === " ") {
-          props.onClick?.();
+          props.onClick?.({} as React.MouseEvent<HTMLDivElement>);
         }
       }
     : undefined;
