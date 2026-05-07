@@ -658,7 +658,7 @@ impl LibreFangKernel {
                 channel: Some("system".to_string()),
                 session_id: None,
             };
-            if let Err(e) = kernel.metering.record(&usage_record) {
+            if let Err(e) = kernel.metering.engine.record(&usage_record) {
                 tracing::debug!(error = %e, "Failed to record background review usage");
             }
         }

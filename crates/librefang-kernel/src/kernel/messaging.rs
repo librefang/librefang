@@ -641,7 +641,7 @@ impl LibreFangKernel {
             channel: None,
             session_id: None,
         };
-        if let Err(e) = self.metering.check_all_and_record(
+        if let Err(e) = self.metering.engine.check_all_and_record(
             &usage_record,
             &manifest.resources,
             &self.budget_config(),
@@ -651,7 +651,7 @@ impl LibreFangKernel {
                 error = %e,
                 "Post-call quota check failed (ephemeral); recording usage anyway"
             );
-            let _ = self.metering.record(&usage_record);
+            let _ = self.metering.engine.record(&usage_record);
         }
 
         // Record experiment metrics if running an experiment (kernel has cost info)
@@ -790,6 +790,7 @@ impl LibreFangKernel {
         };
         let usd_reservation = self
             .metering
+            .engine
             .reserve_global_budget(&self.budget_config(), estimated_usd)
             .map_err(KernelError::LibreFang)?;
 
@@ -893,7 +894,7 @@ impl LibreFangKernel {
                         .provider_unconfigured_logged
                         .swap(true, std::sync::atomic::Ordering::Relaxed)
                     {
-                        self.audit_log.record(
+                        self.metering.audit_log.record(
                             agent_id.to_string(),
                             librefang_runtime::audit::AuditAction::AgentMessage,
                             "agent loop skipped",
@@ -904,7 +905,7 @@ impl LibreFangKernel {
                 }
 
                 // SECURITY: Record successful message in audit trail
-                self.audit_log.record(
+                self.metering.audit_log.record(
                     agent_id.to_string(),
                     librefang_runtime::audit::AuditAction::AgentMessage,
                     format!(
@@ -994,7 +995,11 @@ impl LibreFangKernel {
                 // or rollover) can re-try immediately. Checking before
                 // claim is the whole point here.
                 let budget_ok = if eligible {
-                    match self.metering.check_global_budget(&self.budget_config()) {
+                    match self
+                        .metering
+                        .engine
+                        .check_global_budget(&self.budget_config())
+                    {
                         Ok(()) => true,
                         Err(e) => {
                             tracing::debug!(
@@ -1050,7 +1055,7 @@ impl LibreFangKernel {
                     let trace_summary = Self::summarize_traces_for_review(&result.decision_traces);
                     let response_summary = result.response.chars().take(2000).collect::<String>();
                     let kernel_weak = self.self_handle.get().cloned();
-                    let audit_log = self.audit_log.clone();
+                    let audit_log = self.metering.audit_log.clone();
                     let agent_id_for_task = agent_id_str.clone();
                     // Cost-attribution model: use the agent's own model
                     // so review spend rolls up under the same line the
@@ -1172,7 +1177,7 @@ impl LibreFangKernel {
                 usd_reservation.release();
 
                 // SECURITY: Record failed message in audit trail
-                self.audit_log.record(
+                self.metering.audit_log.record(
                     agent_id.to_string(),
                     librefang_runtime::audit::AuditAction::AgentMessage,
                     "agent loop failed",
@@ -2428,7 +2433,7 @@ impl LibreFangKernel {
                         channel: attribution_channel.clone(),
                         session_id: Some(effective_session_id),
                     };
-                    if let Err(e) = kernel_clone.metering.check_all_and_record(
+                    if let Err(e) = kernel_clone.metering.engine.check_all_and_record(
                         &usage_record,
                         &manifest.resources,
                         &kernel_clone.budget_config(),
@@ -2440,7 +2445,7 @@ impl LibreFangKernel {
                         );
                         // Hash-chain audit: record BudgetExceeded so the
                         // operator can correlate denied calls with spend.
-                        kernel_clone.audit_log.record_with_context(
+                        kernel_clone.metering.audit_log.record_with_context(
                             agent_id.to_string(),
                             librefang_runtime::audit::AuditAction::BudgetExceeded,
                             format!("{e}"),
@@ -2448,7 +2453,7 @@ impl LibreFangKernel {
                             attribution_user_id,
                             attribution_channel.clone(),
                         );
-                        let _ = kernel_clone.metering.record(&usage_record);
+                        let _ = kernel_clone.metering.engine.record(&usage_record);
                     } else if let Some(uid) = attribution_user_id {
                         // RBAC M5: per-user budget enforcement, post-call.
                         // `check_all_and_record` already persisted the row,
@@ -2458,8 +2463,10 @@ impl LibreFangKernel {
                         // so the next call from this user gets denied at
                         // the gate.
                         if let Some(user_budget) = kernel_clone.auth.budget_for(uid) {
-                            if let Err(e) =
-                                kernel_clone.metering.check_user_budget(uid, &user_budget)
+                            if let Err(e) = kernel_clone
+                                .metering
+                                .engine
+                                .check_user_budget(uid, &user_budget)
                             {
                                 tracing::warn!(
                                     agent_id = %agent_id,
@@ -2467,7 +2474,7 @@ impl LibreFangKernel {
                                     error = %e,
                                     "Per-user budget check failed (streaming)"
                                 );
-                                kernel_clone.audit_log.record_with_context(
+                                kernel_clone.metering.audit_log.record_with_context(
                                     agent_id.to_string(),
                                     librefang_runtime::audit::AuditAction::BudgetExceeded,
                                     format!("{e}"),

@@ -113,6 +113,7 @@ mod provider_probe;
 mod reviewer_sanitize;
 mod session_ops;
 mod spawn;
+pub(crate) mod subsystems;
 mod tools_and_skills;
 mod triggers_and_workflow;
 
@@ -703,10 +704,6 @@ pub struct LibreFangKernel {
     pub(crate) triggers: TriggerEngine,
     /// Background agent executor.
     pub(crate) background: BackgroundExecutor,
-    /// Merkle hash chain audit trail.
-    pub(crate) audit_log: Arc<AuditLog>,
-    /// Cost metering engine.
-    pub(crate) metering: Arc<MeteringEngine>,
     /// Default LLM driver (from kernel config).
     default_driver: Arc<dyn LlmDriver>,
     /// Auxiliary LLM client — resolves cheap-tier fallback chains for side
@@ -934,12 +931,9 @@ pub struct LibreFangKernel {
     /// Lazy-loading driver cache — avoids recreating HTTP clients for the same
     /// provider/key/url combination on every agent message.
     driver_cache: librefang_runtime::drivers::DriverCache,
-    /// Hot-reloadable budget configuration. Initialised from `config.budget` at
-    /// boot and mutated atomically via [`update_budget_config`] from the API
-    /// layer. Backed by `ArcSwap` so the LLM hot path (which reads it on every
-    /// turn for budget enforcement) never parks a tokio worker thread on a
-    /// blocking lock — see #3579.
-    budget_config: arc_swap::ArcSwap<librefang_types::config::BudgetConfig>,
+    /// Audit trail + cost metering + hot-reloadable budget. See
+    /// [`subsystems::MeteringSubsystem`].
+    pub(crate) metering: subsystems::MeteringSubsystem,
     /// Shutdown signal sender for background tasks (e.g., approval expiry sweep).
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     /// Checkpoint manager — takes automatic shadow-git snapshots before every

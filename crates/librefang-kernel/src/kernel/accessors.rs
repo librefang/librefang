@@ -56,7 +56,7 @@ impl LibreFangKernel {
     pub fn budget_config(&self) -> librefang_types::config::BudgetConfig {
         // `load_full()` returns `Arc<BudgetConfig>` cheaply; we then clone
         // the inner value to keep the existing owned-return contract.
-        (*self.budget_config.load_full()).clone()
+        (*self.metering.budget_config.load_full()).clone()
     }
 
     /// Safely mutate the runtime budget configuration.
@@ -71,7 +71,7 @@ impl LibreFangKernel {
     /// idempotent and side-effect free; `Fn` rather than `FnOnce` enforces
     /// that at the type level.
     pub fn update_budget_config(&self, f: impl Fn(&mut librefang_types::config::BudgetConfig)) {
-        self.budget_config.rcu(|current| {
+        self.metering.budget_config.rcu(|current| {
             let mut next = (**current).clone();
             f(&mut next);
             std::sync::Arc::new(next)
@@ -434,13 +434,13 @@ impl LibreFangKernel {
     /// Merkle hash chain audit trail.
     #[inline]
     pub fn audit(&self) -> &Arc<AuditLog> {
-        &self.audit_log
+        &self.metering.audit_log
     }
 
     /// Cost metering engine.
     #[inline]
     pub fn metering_ref(&self) -> &Arc<MeteringEngine> {
-        &self.metering
+        &self.metering.engine
     }
 
     /// Agent scheduler.

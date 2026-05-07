@@ -558,7 +558,7 @@ impl LibreFangKernel {
         }
 
         // SECURITY: Record agent kill in audit trail
-        self.audit_log.record(
+        self.metering.audit_log.record(
             agent_id.to_string(),
             librefang_runtime::audit::AuditAction::AgentKill,
             format!("name={}, purge_identity={}", entry.name, purge_identity),

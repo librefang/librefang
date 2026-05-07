@@ -1234,8 +1234,6 @@ impl LibreFangKernel {
             template_registry: WorkflowTemplateRegistry::new(),
             triggers: trigger_engine,
             background,
-            audit_log: Arc::new(AuditLog::with_db_anchored(memory.pool(), audit_anchor_path)),
-            metering,
             // ArcSwap lets config_reload rebuild on `[llm.auxiliary]` edits
             // without invalidating any long-lived `Arc<Kernel>` handle.
             aux_client: arc_swap::ArcSwap::from_pointee(initial_aux_client),
@@ -1310,7 +1308,11 @@ impl LibreFangKernel {
             agent_watchers: dashmap::DashMap::new(),
             mcp_generation: std::sync::atomic::AtomicU64::new(0),
             driver_cache: librefang_runtime::drivers::DriverCache::new(),
-            budget_config: arc_swap::ArcSwap::from_pointee(initial_budget),
+            metering: crate::kernel::subsystems::MeteringSubsystem::new(
+                Arc::new(AuditLog::with_db_anchored(memory.pool(), audit_anchor_path)),
+                metering,
+                initial_budget,
+            ),
             approval_sweep_started: AtomicBool::new(false),
             task_board_sweep_started: AtomicBool::new(false),
             session_stream_hub_gc_started: AtomicBool::new(false),

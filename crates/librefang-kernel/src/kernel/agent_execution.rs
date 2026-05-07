@@ -243,6 +243,7 @@ impl LibreFangKernel {
         let cfg = self.config.load_full();
         // Check metering quota before starting
         self.metering
+            .engine
             .check_quota(agent_id, &entry.manifest.resources)
             .map_err(KernelError::LibreFang)?;
 
@@ -1115,7 +1116,7 @@ impl LibreFangKernel {
             channel: attribution_channel.clone(),
             session_id: Some(effective_session_id),
         };
-        if let Err(e) = self.metering.check_all_and_record(
+        if let Err(e) = self.metering.engine.check_all_and_record(
             &usage_record,
             &manifest.resources,
             &self.budget_config(),
@@ -1129,7 +1130,7 @@ impl LibreFangKernel {
             );
             // Hash-chain audit: BudgetExceeded surfaces in `/api/audit/query`
             // so an operator can correlate the denial with the user / channel.
-            self.audit_log.record_with_context(
+            self.metering.audit_log.record_with_context(
                 agent_id.to_string(),
                 librefang_runtime::audit::AuditAction::BudgetExceeded,
                 format!("{e}"),
@@ -1138,7 +1139,7 @@ impl LibreFangKernel {
                 attribution_channel.clone(),
             );
             // Fall back to plain record so the cost is not lost from tracking
-            let _ = self.metering.record(&usage_record);
+            let _ = self.metering.engine.record(&usage_record);
         } else if let Some(uid) = attribution_user_id {
             // RBAC M5: per-user budget enforcement, post-call (matches the
             // global / per-agent / per-provider semantics — the row was
@@ -1147,14 +1148,14 @@ impl LibreFangKernel {
             // and dashboard visibility; the current response is returned
             // unchanged because the tokens are already billed.
             if let Some(user_budget) = self.auth.budget_for(uid) {
-                if let Err(e) = self.metering.check_user_budget(uid, &user_budget) {
+                if let Err(e) = self.metering.engine.check_user_budget(uid, &user_budget) {
                     tracing::warn!(
                         agent_id = %agent_id,
                         user = %uid,
                         error = %e,
                         "Per-user budget check failed"
                     );
-                    self.audit_log.record_with_context(
+                    self.metering.audit_log.record_with_context(
                         agent_id.to_string(),
                         librefang_runtime::audit::AuditAction::BudgetExceeded,
                         format!("{e}"),

@@ -458,7 +458,7 @@ impl LibreFangKernel {
                     if kernel.supervisor.is_shutting_down() {
                         break;
                     }
-                    match kernel.metering.cleanup(90) {
+                    match kernel.metering.engine.cleanup(90) {
                         Ok(removed) if removed > 0 => {
                             info!("Metering cleanup: removed {removed} old usage records");
                         }
@@ -546,7 +546,7 @@ impl LibreFangKernel {
                         if kernel.supervisor.is_shutting_down() {
                             break;
                         }
-                        let pruned = kernel.audit_log.prune(retention);
+                        let pruned = kernel.metering.audit_log.prune(retention);
                         if pruned > 0 {
                             info!("Audit log pruning: removed {pruned} entries older than {retention} days");
                         }
@@ -579,7 +579,10 @@ impl LibreFangKernel {
                         if kernel.supervisor.is_shutting_down() {
                             break;
                         }
-                        let report = kernel.audit_log.trim(&retention, chrono::Utc::now());
+                        let report = kernel
+                            .metering
+                            .audit_log
+                            .trim(&retention, chrono::Utc::now());
                         if !report.is_empty() {
                             // Detail is JSON of the per-action drop counts.
                             // Keeping it small + structured so a downstream
@@ -591,7 +594,7 @@ impl LibreFangKernel {
                                 "new_chain_anchor": report.new_chain_anchor,
                             })
                             .to_string();
-                            kernel.audit_log.record(
+                            kernel.metering.audit_log.record(
                                 "system",
                                 librefang_runtime::audit::AuditAction::RetentionTrim,
                                 detail,
