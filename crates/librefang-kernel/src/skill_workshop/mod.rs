@@ -270,6 +270,13 @@ async fn capture_one(
             }
             match storage::approve_candidate(&skills_root, &skills_root, &candidate.id) {
                 Ok(_) => {
+                    // Refresh the in-memory skill registry so the next
+                    // turn's prompt build sees the auto-promoted skill.
+                    // The HTTP `approve_pending_candidate` route already
+                    // does this; without it here, an `auto`-policy hit
+                    // would write the active skill but the agent would
+                    // not see it until daemon restart.
+                    kernel.reload_skills();
                     debug!(%agent_id, id = %candidate.id, "skill_workshop: auto-promoted candidate")
                 }
                 Err(e) => {

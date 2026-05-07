@@ -1145,12 +1145,13 @@ pub struct SkillWorkshopConfig {
     /// Master switch. When `false`, the after-turn hook is a no-op for
     /// this agent (no scanning, no LLM call, no disk write).
     pub enabled: bool,
-    /// When `true`, run the heuristic / LLM capture pass after each
-    /// turn. When `false`, the workshop module is loaded but only
-    /// `librefang skill pending capture <agent>` (manual capture) can
-    /// produce candidates. Independent of `enabled`: turning
-    /// `auto_capture` off without disabling the workshop keeps the
-    /// approval-side CLI usable.
+    /// When `true`, the after-turn hook runs the heuristic / LLM
+    /// capture pass. When `false`, the hook short-circuits before
+    /// scanning, so no new candidates are produced — the
+    /// approval-side CLI / dashboard / API still work over whatever
+    /// is already in `pending/`. Independent of `enabled` so an
+    /// operator can pause capture on a single agent during a busy
+    /// session without flipping the master switch.
     pub auto_capture: bool,
     /// What the workshop does with a positively-classified candidate.
     pub approval_policy: ApprovalPolicy,
@@ -1227,8 +1228,11 @@ pub enum ReviewMode {
         alias = "Both"
     )]
     ThresholdLlm,
-    /// Disable automatic classification entirely. Manual capture (CLI)
-    /// still works.
+    /// Run the heuristic scanners but drop every hit before writing
+    /// to disk. No new candidates are produced. Use `auto_capture =
+    /// false` instead if you want to also skip the regex scan; this
+    /// variant exists for the test path that wants the scanner code
+    /// exercised without polluting the pending tree.
     None,
 }
 

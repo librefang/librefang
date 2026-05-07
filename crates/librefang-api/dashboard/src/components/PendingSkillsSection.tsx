@@ -194,7 +194,7 @@ export function PendingSkillsSection() {
       {candidates.length === 0 ? (
         <EmptyState
           title="No pending candidates"
-          description="The skill workshop captures reusable workflows from successful agent conversations. Enable per-agent via [skill_workshop] in agent.toml."
+          description="Skill workshop is on by default and captures reusable workflows when you teach the agent something durable (e.g. \"from now on always run cargo fmt\"). Candidates land here for review. To opt out per agent, set [skill_workshop] enabled = false in agent.toml."
         />
       ) : (
         <ul className="mt-3">

@@ -102,7 +102,10 @@ any subset; serde fills the rest from `Default`.
 enabled         = true             # default true
 auto_capture    = true             # default true
 approval_policy = "pending"        # "pending" | "auto"
-review_mode     = "heuristic"      # "heuristic" | "threshold_llm" | "both"
+review_mode     = "heuristic"      # "heuristic" | "threshold_llm" | "none"
+                                   #   ("both" is a serde alias for
+                                   #   threshold_llm, kept for openclaw
+                                   #   vocabulary compat)
 max_pending     = 20               # 0 disables writes (pipeline still runs)
 
 # To turn the feature off entirely:
@@ -117,7 +120,7 @@ max_pending     = 20               # 0 disables writes (pipeline still runs)
 | `enabled` | `true` | Master switch. With `false`, the hook returns before scanners run. |
 | `auto_capture` | `true` | Lets an enabled agent skip capture without disabling the whole hook (useful for live debugging of an agent that you don't want to disturb). |
 | `approval_policy` | `"pending"` | `"pending"` parks candidates in `~/.librefang/skills/pending/<agent>/`. `"auto"` immediately promotes through `evolution::create_skill`, with the same security scan applied. |
-| `review_mode` | `"heuristic"` | `"heuristic"` is regex-only (no LLM cost). `"threshold_llm"` ALSO consults the cheap-tier LLM after the heuristic accepts; `"both"` runs LLM review even when heuristics say drop. |
+| `review_mode` | `"heuristic"` | `"heuristic"` is regex-only (no LLM cost). `"threshold_llm"` ALSO consults the cheap-tier LLM after the heuristic accepts. `"none"` runs the regex scan but discards every hit (testing path). `"both"` is a serde alias for `"threshold_llm"`. |
 | `max_pending` | `20` | Per-agent cap. `0` is honoured as "do not store" — the pipeline still runs but `save_candidate` returns `Ok(false)`. |
 
 The hook re-reads the config from `AgentRegistry` on every fire, so
