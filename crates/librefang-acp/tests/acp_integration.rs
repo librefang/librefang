@@ -13,13 +13,14 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::{
     ContentBlock, InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse,
-    PermissionOptionId, PromptRequest, PromptResponse, ProtocolVersion, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionNotification, SessionUpdate, StopReason, TextContent,
+    PermissionOptionId, PromptRequest, PromptResponse, ProtocolVersion, ReadTextFileRequest,
+    ReadTextFileResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
+    StopReason, TextContent,
 };
 use agent_client_protocol::{ConnectionTo, JsonRpcResponse, Responder, SentRequest};
 use async_trait::async_trait;
-use librefang_acp::{AcpKernel, AcpResult};
+use librefang_acp::{AcpKernel, AcpResult, FsClientHandle};
 use librefang_llm_driver::StreamEvent;
 use librefang_types::agent::{AgentId, SessionId as LfSessionId};
 use librefang_types::approval::{ApprovalDecision, ApprovalEvent, ApprovalRequest, RiskLevel};
@@ -37,6 +38,10 @@ struct MockKernel {
     approval_tx: broadcast::Sender<ApprovalEvent>,
     resolves: AsyncMutex<Vec<(Uuid, ApprovalDecision)>>,
     last_session_id: AsyncMutex<Option<LfSessionId>>,
+    /// Captured at `initialize` time so tests can pull the handle
+    /// out and exercise the reverse-RPC against the live connection
+    /// directly.
+    fs_client: std::sync::Mutex<Option<FsClientHandle>>,
 }
 
 impl MockKernel {
@@ -47,7 +52,12 @@ impl MockKernel {
             approval_tx,
             resolves: AsyncMutex::new(Vec::new()),
             last_session_id: AsyncMutex::new(None),
+            fs_client: std::sync::Mutex::new(None),
         })
+    }
+
+    fn fs_client_handle(&self) -> Option<FsClientHandle> {
+        self.fs_client.lock().ok().and_then(|g| g.clone())
     }
 
     /// Inject an approval into the broadcast as if the kernel had just
@@ -118,6 +128,12 @@ impl AcpKernel for MockKernel {
     ) -> AcpResult<()> {
         self.resolves.lock().await.push((request_id, decision));
         Ok(())
+    }
+
+    fn set_fs_client(&self, handle: FsClientHandle) {
+        if let Ok(mut guard) = self.fs_client.lock() {
+            *guard = Some(handle);
+        }
     }
 }
 
@@ -407,4 +423,91 @@ async fn unknown_session_id_returns_invalid_params() {
             assert!(result.is_ok(), "client driver failed: {result:?}");
         })
         .await;
+}
+
+/// `fs/read_text_file` round-trip: the server-side `FsClientHandle`
+/// (set on the mock kernel at `initialize` time) issues a
+/// `fs/read_text_file` request; the client builder's
+/// `on_receive_request` handler answers with a canned body; the
+/// kernel-side helper returns it back to the test driver. Verifies
+/// the reverse-RPC path end-to-end without booting a real LibreFang
+/// kernel.
+#[tokio::test(flavor = "current_thread")]
+async fn fs_read_text_file_round_trip() {
+    use tokio::task::LocalSet;
+
+    let local = LocalSet::new();
+    local
+        .run_until(async {
+            let kernel = MockKernel::new(vec![]);
+            let (server_reader, server_writer, client_reader, client_writer) = duplex_pair();
+            let server_transport =
+                agent_client_protocol::ByteStreams::new(server_writer, server_reader);
+            let client_transport =
+                agent_client_protocol::ByteStreams::new(client_writer, client_reader);
+
+            let kernel_for_server = kernel.clone();
+            tokio::task::spawn_local(async move {
+                let _ = librefang_acp::run_with_transport(
+                    kernel_for_server,
+                    AgentId(Uuid::nil()),
+                    server_transport,
+                )
+                .await;
+            });
+
+            // Client side: declare fs.read_text_file capability and
+            // answer with a canned body when the server asks for it.
+            let client = agent_client_protocol::Client.builder().on_receive_request(
+                async move |req: ReadTextFileRequest,
+                            responder: Responder<ReadTextFileResponse>,
+                            _cx| {
+                    assert_eq!(req.path, PathBuf::from("/tmp/hello.txt"));
+                    responder.respond(ReadTextFileResponse::new("canned editor content"))
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+
+            let kernel_for_driver = kernel.clone();
+            let result = client
+                .connect_with(
+                    client_transport,
+                    async move |cx: ConnectionTo<agent_client_protocol::Agent>| -> Result<(), agent_client_protocol::Error> {
+                        // Initialize with read_text_file capability so the
+                        // server-side FsCapabilities snapshot reports it.
+                        let mut init_req = InitializeRequest::new(ProtocolVersion::LATEST);
+                        init_req.client_capabilities.fs.read_text_file = true;
+                        let _: InitializeResponse = recv(cx.send_request(init_req)).await?;
+
+                        // Pull the FsClientHandle the server stashed at
+                        // initialize-time and exercise it directly.
+                        let handle = poll_for(|| kernel_for_driver.fs_client_handle()).await;
+                        assert!(handle.capabilities().read_text_file);
+                        let content = handle
+                            .read_text_file(
+                                agent_client_protocol::schema::SessionId::new("test-session"),
+                                PathBuf::from("/tmp/hello.txt"),
+                                None,
+                                None,
+                            )
+                            .await
+                            .expect("read_text_file should succeed");
+                        assert_eq!(content, "canned editor content");
+                        Ok(())
+                    },
+                )
+                .await;
+            assert!(result.is_ok(), "client driver failed: {result:?}");
+        })
+        .await;
+}
+
+async fn poll_for<T, F: FnMut() -> Option<T>>(mut f: F) -> T {
+    for _ in 0..40 {
+        if let Some(v) = f() {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("poll_for: condition never satisfied within 1s");
 }
