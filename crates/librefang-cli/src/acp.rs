@@ -2,144 +2,41 @@
 //! over stdio so editors like Zed / VS Code / JetBrains can embed
 //! LibreFang as a native agent (#3313).
 //!
-//! Phase 1 is **in-process only**: each invocation boots its own
-//! [`LibreFangKernel`] in the same process, runs the ACP server, and
-//! tears the kernel down on stdin EOF. This matches the
-//! "spawn-per-workspace" model Zed expects from ACP child processes.
-//! Daemon-attached mode (multiple editors talking to one long-running
-//! daemon) is Phase 2.
+//! Two modes:
 //!
-//! The actual ACP wire protocol + handler chain lives in the
-//! `librefang-acp` crate; this module is the kernel-binding glue.
+//! * **In-process** (no daemon): boot a fresh kernel in this process,
+//!   serve ACP on stdio until stdin EOF.
+//! * **Daemon-attached** (UDS proxy): when the daemon is running and
+//!   has the ACP UDS listener up at `~/.librefang/acp.sock`, this
+//!   binary becomes a thin bidirectional pipe — stdin → socket,
+//!   socket → stdout. The daemon-side ACP server uses its own
+//!   long-running kernel, so multiple editors can share state, agent
+//!   history, and remembered approval decisions.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use librefang_acp::{AcpError, AcpKernel, AcpResult};
+use librefang_acp::KernelAdapter;
 use librefang_kernel::LibreFangKernel;
-use librefang_llm_driver::StreamEvent;
-use librefang_types::agent::{AgentId, SessionId as LfSessionId};
-use librefang_types::approval::{ApprovalDecision, ApprovalEvent};
-use tokio::sync::{broadcast, mpsc};
-use uuid::Uuid;
-
-/// Wraps an `Arc<LibreFangKernel>` to implement [`AcpKernel`].
-///
-/// Splitting this glue out of `librefang-acp` keeps the protocol crate
-/// independent of the heavy `librefang-kernel` dependency tree —
-/// integration tests in `librefang-acp` use a mock impl, and the real
-/// binding only links here in the CLI.
-struct KernelAdapter {
-    kernel: Arc<LibreFangKernel>,
-}
-
-#[async_trait]
-impl AcpKernel for KernelAdapter {
-    async fn resolve_agent(&self, name_or_id: &str) -> AcpResult<AgentId> {
-        // Accept either a UUID (the kernel's canonical form) or a
-        // human-readable agent name (resolved via the registry's name
-        // index).
-        if let Ok(uuid) = Uuid::parse_str(name_or_id) {
-            return Ok(AgentId(uuid));
-        }
-        if let Some(entry) = self.kernel.agent_registry().find_by_name(name_or_id) {
-            return Ok(entry.id);
-        }
-        Err(AcpError::AgentNotFound(name_or_id.to_string()))
-    }
-
-    async fn send_prompt(
-        &self,
-        agent_id: AgentId,
-        message: String,
-        librefang_session_id: LfSessionId,
-    ) -> AcpResult<mpsc::Receiver<StreamEvent>> {
-        // The kernel surfaces this method's failures as
-        // `librefang_kernel::error::KernelError` rather than the
-        // workspace-canonical `LibreFangError`, so we have to flatten
-        // through `to_string` instead of `?`. Phase 2 (#3541 follow-up)
-        // will narrow the kernel error type and lift this back to a
-        // typed `From` conversion.
-        let (rx, _join) = self
-            .kernel
-            .send_message_streaming_with_routing_and_session_override(
-                agent_id,
-                &message,
-                None,
-                Some(librefang_session_id),
-            )
-            .await
-            .map_err(|e| AcpError::internal(format!("kernel send_prompt: {e}")))?;
-        // We deliberately drop the `JoinHandle`. The agent loop's final
-        // `StopReason` is delivered via `StreamEvent::ContentComplete`
-        // on the receiver, and the receiver closing is the unambiguous
-        // "turn over" signal. The kernel manages its own task lifecycle
-        // — there's no orphan-task risk because the spawned future
-        // shuts down when the receiver is dropped.
-        Ok(rx)
-    }
-
-    fn subscribe_approvals(&self) -> broadcast::Receiver<ApprovalEvent> {
-        self.kernel.approvals().subscribe()
-    }
-
-    async fn resolve_approval(
-        &self,
-        request_id: Uuid,
-        decision: ApprovalDecision,
-        decided_by: Option<String>,
-    ) -> AcpResult<()> {
-        // `ApprovalManager::resolve` returns `Result<_, String>` for
-        // legacy reasons; map to `AcpError::Internal` so transport
-        // errors and kernel errors share one variant.
-        self.kernel
-            .approvals()
-            .resolve(request_id, decision, decided_by, false, None)
-            .map_err(AcpError::internal)?;
-        Ok(())
-    }
-
-    async fn remember_decision(
-        &self,
-        agent_id: &str,
-        tool_name: &str,
-        decision: ApprovalDecision,
-    ) -> AcpResult<()> {
-        // Persist into the kernel's in-memory remembered-decisions
-        // cache (#3313). Future calls of `requires_approval_with_context_for`
-        // / `is_tool_denied_with_context_for` for the same
-        // `(agent_id, tool_name)` will short-circuit on this entry.
-        self.kernel
-            .approvals()
-            .remember(agent_id, tool_name, decision);
-        Ok(())
-    }
-}
 
 /// Phase-1 default agent name when the CLI is invoked without `--agent`.
-///
-/// Mirrors the dashboard / TUI default so editor users land on the same
-/// agent they see in the rest of LibreFang's surfaces.
 const DEFAULT_AGENT_NAME: &str = "assistant";
 
 /// Boot an in-process kernel and run the ACP server on stdio until
-/// stdin EOF.
-///
-/// Exits the process with a non-zero status on hard failures (kernel
-/// boot, agent resolution, transport setup). Successful completion
-/// (editor disconnects cleanly) returns 0.
+/// stdin EOF. Or, if the daemon is up and the UDS listener is
+/// available, switch to proxy mode.
 pub fn run_acp_server(config: Option<PathBuf>, agent: Option<String>) {
-    // Phase 1 runs in-process even when a daemon is up — the daemon
-    // would need an ACP-over-RPC gateway to host editor sessions on
-    // behalf of multiple `librefang acp` clients, which is Phase 2
-    // scope. Warn so users notice if they expected daemon-attached
-    // behaviour.
-    if super::find_daemon().is_some() {
-        tracing::warn!(
-            "librefang acp Phase 1 runs in-process even with a daemon present; \
-             daemon-attached mode will land in a follow-up to #3313"
-        );
+    // Fast path: daemon already hosting an ACP listener — just be a
+    // transparent stdio↔UDS proxy. The daemon-side kernel is shared
+    // across every concurrent `librefang acp` client, so editor tabs
+    // see a consistent agent state.
+    #[cfg(unix)]
+    if let Some(sock) = locate_acp_socket() {
+        let exit_code = run_uds_proxy(&sock);
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+        return;
     }
 
     let kernel = match LibreFangKernel::boot(config.as_deref()) {
@@ -152,15 +49,10 @@ pub fn run_acp_server(config: Option<PathBuf>, agent: Option<String>) {
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
     let exit_code = rt.block_on(async {
-        // Background task: periodically expire timed-out approvals, the
-        // same way the daemon does. Without this, deferred approvals
-        // would never time out in an `acp` session.
         kernel.clone().spawn_approval_sweep_task();
 
         let agent_name = agent.as_deref().unwrap_or(DEFAULT_AGENT_NAME);
-        let adapter = KernelAdapter {
-            kernel: Arc::clone(&kernel),
-        };
+        let adapter = KernelAdapter::new(Arc::clone(&kernel));
         let agent_id = match adapter.resolve_agent(agent_name).await {
             Ok(id) => id,
             Err(e) => {
@@ -181,4 +73,96 @@ pub fn run_acp_server(config: Option<PathBuf>, agent: Option<String>) {
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
+}
+
+/// Look for a daemon-side ACP UDS at the canonical path. Returns the
+/// path only if the daemon is reachable AND the socket file exists —
+/// a stale socket from a crashed daemon falls back to in-process mode.
+#[cfg(unix)]
+fn locate_acp_socket() -> Option<PathBuf> {
+    if super::find_daemon().is_none() {
+        return None;
+    }
+    let path = dirs::home_dir()?.join(".librefang").join("acp.sock");
+    if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(unix))]
+fn locate_acp_socket() -> Option<PathBuf> {
+    None
+}
+
+/// Bidirectional stdin↔socket↔stdout pipe. Returns 0 on clean EOF, 1
+/// otherwise.
+#[cfg(unix)]
+fn run_uds_proxy(sock_path: &std::path::Path) -> i32 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+    rt.block_on(async {
+        let stream = match UnixStream::connect(sock_path).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ACP UDS connect failed at {}: {e}", sock_path.display());
+                return 1;
+            }
+        };
+        let (mut sock_read, mut sock_write) = stream.into_split();
+        let mut stdin = tokio::io::stdin();
+        let mut stdout = tokio::io::stdout();
+
+        // Inbound: stdin → socket
+        let inbound = async move {
+            let mut buf = vec![0u8; 8192];
+            loop {
+                match stdin.read(&mut buf).await {
+                    Ok(0) => break, // EOF on stdin
+                    Ok(n) => {
+                        if sock_write.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = sock_write.shutdown().await;
+        };
+
+        // Outbound: socket → stdout
+        let outbound = async move {
+            let mut buf = vec![0u8; 8192];
+            loop {
+                match sock_read.read(&mut buf).await {
+                    Ok(0) => break, // socket closed
+                    Ok(n) => {
+                        if stdout.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                        let _ = stdout.flush().await;
+                    }
+                    Err(_) => break,
+                }
+            }
+        };
+
+        // Either direction closing ends the session. Use `tokio::join!`
+        // to allow the slower side to drain before we exit.
+        tokio::select! {
+            _ = inbound => {}
+            _ = outbound => {}
+        }
+        0
+    })
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+fn run_uds_proxy(_sock_path: &std::path::Path) -> i32 {
+    eprintln!("daemon-attached ACP not supported on this platform");
+    1
 }

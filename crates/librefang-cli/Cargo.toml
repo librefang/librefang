@@ -56,8 +56,7 @@ chrono = { workspace = true }
 walkdir = { workspace = true }
 base64 = { workspace = true }
 librefang-runtime = { path = "../librefang-runtime" }
-librefang-acp = { path = "../librefang-acp" }
-librefang-llm-driver = { path = "../librefang-llm-driver" }
+librefang-acp = { path = "../librefang-acp", features = ["kernel-adapter"] }
 async-trait = { workspace = true }
 rusqlite = { workspace = true }
 uuid = { workspace = true }

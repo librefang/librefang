@@ -10,6 +10,9 @@ readme = "README.md"
 librefang-types = { path = "../librefang-types" }
 schemars = { version = "0.8", features = ["chrono", "uuid1"] }
 librefang-kernel = { path = "../librefang-kernel" }
+librefang-acp = { path = "../librefang-acp", features = ["kernel-adapter"] }
+agent-client-protocol = { workspace = true }
+tokio-util = { workspace = true }
 librefang-kernel-handle = { path = "../librefang-kernel-handle" }
 librefang-llm-drivers = { path = "../librefang-llm-drivers" }
 librefang-memory = { path = "../librefang-memory" }

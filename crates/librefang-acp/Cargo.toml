@@ -5,9 +5,21 @@ edition.workspace = true
 license.workspace = true
 description = "Agent Client Protocol (ACP) adapter for LibreFang — embeds LibreFang agents in Zed/VSCode/JetBrains via stdio JSON-RPC (#3313)"
 
+[features]
+default = []
+# Pulls in the heavy `librefang-kernel` dep tree to provide a
+# `KernelAdapter` that wraps `Arc<LibreFangKernel>` and implements
+# [`AcpKernel`]. Enabled by `librefang-cli` and `librefang-api` so they
+# can host the ACP server (in-process and daemon-attached respectively)
+# without duplicating the binding layer. Pure-protocol consumers
+# (integration tests in this crate, theoretical alternative kernels)
+# leave this off and impl `AcpKernel` directly.
+kernel-adapter = ["dep:librefang-kernel"]
+
 [dependencies]
 librefang-types = { path = "../librefang-types" }
 librefang-llm-driver = { path = "../librefang-llm-driver" }
+librefang-kernel = { path = "../librefang-kernel", optional = true }
 
 agent-client-protocol = { workspace = true }
 agent-client-protocol-tokio = { workspace = true }

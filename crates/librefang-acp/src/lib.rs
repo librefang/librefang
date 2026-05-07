@@ -33,10 +33,15 @@
 
 pub mod error;
 pub mod events;
+#[cfg(feature = "kernel-adapter")]
+pub mod kernel_adapter;
 pub mod permission;
 pub mod prompt;
 pub mod server;
 pub mod session;
+
+#[cfg(feature = "kernel-adapter")]
+pub use kernel_adapter::KernelAdapter;
 
 pub use error::{AcpError, AcpResult};
 pub use server::{run, run_with_transport};
