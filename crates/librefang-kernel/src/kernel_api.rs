@@ -555,7 +555,7 @@ impl KernelApi for LibreFangKernel {
         <Self as crate::SecuritySubsystemApi>::auth_ref(self)
     }
     fn browser(&self) -> &librefang_runtime::browser::BrowserManager {
-        Self::browser(self)
+        <Self as crate::MediaSubsystemApi>::browser(self)
     }
     fn cron(&self) -> &CronScheduler {
         <Self as crate::WorkflowSubsystemApi>::cron_ref(self)
@@ -573,10 +573,10 @@ impl KernelApi for LibreFangKernel {
         Self::home_dir(self)
     }
     fn media(&self) -> &librefang_runtime::media_understanding::MediaEngine {
-        Self::media(self)
+        <Self as crate::MediaSubsystemApi>::media_engine(self)
     }
     fn media_drivers(&self) -> &librefang_runtime::media::MediaDriverCache {
-        Self::media_drivers(self)
+        <Self as crate::MediaSubsystemApi>::drivers(self)
     }
     fn memory_substrate(&self) -> &Arc<MemorySubstrate> {
         <Self as crate::MemorySubsystemApi>::substrate_ref(self)
@@ -609,10 +609,10 @@ impl KernelApi for LibreFangKernel {
         <Self as crate::WorkflowSubsystemApi>::templates_ref(self)
     }
     fn tts(&self) -> &librefang_runtime::tts::TtsEngine {
-        Self::tts(self)
+        <Self as crate::MediaSubsystemApi>::tts(self)
     }
     fn web_tools(&self) -> &librefang_runtime::web_search::WebToolsContext {
-        Self::web_tools(self)
+        <Self as crate::MediaSubsystemApi>::web_tools(self)
     }
     fn workflow_engine(&self) -> &WorkflowEngine {
         <Self as crate::WorkflowSubsystemApi>::engine_ref(self)

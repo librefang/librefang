@@ -15,8 +15,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::subsystems::{
-    AgentSubsystemApi, EventSubsystemApi, LlmSubsystemApi, McpSubsystemApi, MediaSubsystemApi,
-    MemorySubsystemApi,
+    AgentSubsystemApi, EventSubsystemApi, LlmSubsystemApi, McpSubsystemApi, MemorySubsystemApi,
 };
 
 use tracing::{debug, info, warn};
@@ -883,40 +882,6 @@ impl LibreFangKernel {
     #[inline]
     pub fn supervisor_ref(&self) -> &Supervisor {
         self.agents.supervisor_ref()
-    }
-
-    /// Web tools context (search + fetch). Delegates to
-    /// [`MediaSubsystem::web_tools`].
-    #[inline]
-    pub fn web_tools(&self) -> &librefang_runtime::web_search::WebToolsContext {
-        self.media.web_tools()
-    }
-
-    /// Browser automation manager. Delegates to
-    /// [`MediaSubsystem::browser`].
-    #[inline]
-    pub fn browser(&self) -> &librefang_runtime::browser::BrowserManager {
-        self.media.browser()
-    }
-
-    /// Media understanding engine. Delegates to
-    /// [`MediaSubsystem::engine`].
-    #[inline]
-    pub fn media(&self) -> &librefang_runtime::media_understanding::MediaEngine {
-        self.media.media_engine()
-    }
-
-    /// Text-to-speech engine. Delegates to [`MediaSubsystem::tts`].
-    #[inline]
-    pub fn tts(&self) -> &librefang_runtime::tts::TtsEngine {
-        self.media.tts()
-    }
-
-    /// Media generation driver cache (video, music, etc.). Delegates to
-    /// [`MediaSubsystem::drivers`].
-    #[inline]
-    pub fn media_drivers(&self) -> &librefang_runtime::media::MediaDriverCache {
-        self.media.drivers()
     }
 
     /// MCP server connections (Mutex — lazily initialized).
