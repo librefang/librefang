@@ -11,8 +11,8 @@ use super::super::{router, LibreFangKernel};
 #[async_trait::async_trait]
 impl kernel_handle::HandsControl for LibreFangKernel {
     async fn hand_list(&self) -> Result<Vec<serde_json::Value>, kernel_handle::KernelOpError> {
-        let defs = self.hand_registry.list_definitions();
-        let instances = self.hand_registry.list_instances();
+        let defs = self.skills.hand_registry.list_definitions();
+        let instances = self.skills.hand_registry.list_instances();
 
         let mut result = Vec::new();
         for def in defs {
@@ -53,6 +53,7 @@ impl kernel_handle::HandsControl for LibreFangKernel {
         skill_content: &str,
     ) -> Result<serde_json::Value, kernel_handle::KernelOpError> {
         let def = self
+            .skills
             .hand_registry
             .install_from_content_persisted(&self.home_dir_boot, toml_content, skill_content)
             .map_err(|e| format!("{e}"))?;
@@ -88,13 +89,13 @@ impl kernel_handle::HandsControl for LibreFangKernel {
         &self,
         hand_id: &str,
     ) -> Result<serde_json::Value, kernel_handle::KernelOpError> {
-        let instances = self.hand_registry.list_instances();
+        let instances = self.skills.hand_registry.list_instances();
         let instance = instances
             .iter()
             .find(|i| i.hand_id == hand_id)
             .ok_or_else(|| format!("No active instance found for hand '{hand_id}'"))?;
 
-        let def = self.hand_registry.get_definition(hand_id);
+        let def = self.skills.hand_registry.get_definition(hand_id);
         let def_name = def.as_ref().map(|d| d.name.clone()).unwrap_or_default();
         let def_icon = def.as_ref().map(|d| d.icon.clone()).unwrap_or_default();
 

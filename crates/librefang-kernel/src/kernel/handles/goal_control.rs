@@ -13,16 +13,19 @@ impl kernel_handle::GoalControl for LibreFangKernel {
         agent_id_filter: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, kernel_handle::KernelOpError> {
         let shared_id = shared_memory_agent_id();
-        let goals: Vec<serde_json::Value> =
-            match self.memory.structured_get(shared_id, "__librefang_goals") {
-                Ok(Some(serde_json::Value::Array(arr))) => arr,
-                Ok(_) => return Ok(Vec::new()),
-                Err(e) => {
-                    return Err(kernel_handle::KernelOpError::Internal(format!(
-                        "Failed to load goals: {e}"
-                    )))
-                }
-            };
+        let goals: Vec<serde_json::Value> = match self
+            .memory
+            .substrate
+            .structured_get(shared_id, "__librefang_goals")
+        {
+            Ok(Some(serde_json::Value::Array(arr))) => arr,
+            Ok(_) => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(kernel_handle::KernelOpError::Internal(format!(
+                    "Failed to load goals: {e}"
+                )))
+            }
+        };
         let active: Vec<serde_json::Value> = goals
             .into_iter()
             .filter(|g| {
@@ -47,20 +50,23 @@ impl kernel_handle::GoalControl for LibreFangKernel {
         progress: Option<u8>,
     ) -> Result<serde_json::Value, kernel_handle::KernelOpError> {
         let shared_id = shared_memory_agent_id();
-        let mut goals: Vec<serde_json::Value> =
-            match self.memory.structured_get(shared_id, "__librefang_goals") {
-                Ok(Some(serde_json::Value::Array(arr))) => arr,
-                Ok(_) => {
-                    return Err(kernel_handle::KernelOpError::Internal(format!(
-                        "goal `{goal_id}` not found"
-                    )))
-                }
-                Err(e) => {
-                    return Err(kernel_handle::KernelOpError::Internal(format!(
-                        "Failed to load goals: {e}"
-                    )))
-                }
-            };
+        let mut goals: Vec<serde_json::Value> = match self
+            .memory
+            .substrate
+            .structured_get(shared_id, "__librefang_goals")
+        {
+            Ok(Some(serde_json::Value::Array(arr))) => arr,
+            Ok(_) => {
+                return Err(kernel_handle::KernelOpError::Internal(format!(
+                    "goal `{goal_id}` not found"
+                )))
+            }
+            Err(e) => {
+                return Err(kernel_handle::KernelOpError::Internal(format!(
+                    "Failed to load goals: {e}"
+                )))
+            }
+        };
 
         let mut updated_goal = None;
         for g in goals.iter_mut() {
@@ -82,6 +88,7 @@ impl kernel_handle::GoalControl for LibreFangKernel {
         })?;
 
         self.memory
+            .substrate
             .structured_set(
                 shared_id,
                 "__librefang_goals",

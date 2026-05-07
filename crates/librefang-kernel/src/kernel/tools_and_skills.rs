@@ -33,9 +33,11 @@ impl LibreFangKernel {
         // Check the tool list cache first — avoids recomputing builtins, skill tools,
         // and MCP tools on every message for the same agent.
         let skill_gen = self
+            .skills
             .skill_generation
             .load(std::sync::atomic::Ordering::Relaxed);
         let mcp_gen = self
+            .mcp
             .mcp_generation
             .load(std::sync::atomic::Ordering::Relaxed);
         if let Some(cached) = self.prompt_metadata_cache.tools.get(&agent_id) {
@@ -56,7 +58,7 @@ impl LibreFangKernel {
         };
 
         // Look up agent entry for profile, skill/MCP allowlists, and declared tools
-        let entry = self.registry.get(agent_id);
+        let entry = self.agents.registry.get(agent_id);
         if entry.as_ref().is_some_and(|e| e.manifest.tools_disabled) {
             return Arc::new(Vec::new());
         }
@@ -88,7 +90,7 @@ impl LibreFangKernel {
         // Step 1: Filter builtin tools.
         // Priority: declared tools > ToolProfile > all builtins.
         let has_tool_all = entry.as_ref().is_some_and(|_| {
-            let caps = self.capabilities.list(agent_id);
+            let caps = self.agents.capabilities.list(agent_id);
             caps.iter().any(|c| matches!(c, Capability::ToolAll))
         });
 
@@ -154,6 +156,7 @@ impl LibreFangKernel {
             vec![]
         } else {
             let registry = self
+                .skills
                 .skill_registry
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
@@ -181,8 +184,9 @@ impl LibreFangKernel {
 
         // Step 3: Add MCP tools (filtered by agent's MCP server allowlist,
         // then by declared tools).
-        if let Ok(mcp_tools) = self.mcp_tools.lock() {
+        if let Ok(mcp_tools) = self.mcp.mcp_tools.lock() {
             let configured_servers: Vec<String> = self
+                .mcp
                 .effective_mcp_servers
                 .read()
                 .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
@@ -302,6 +306,7 @@ impl LibreFangKernel {
     /// to agents without restarting the kernel.
     pub fn reload_skills(&self) {
         let mut registry = self
+            .skills
             .skill_registry
             .write()
             .unwrap_or_else(|e| e.into_inner());
@@ -332,7 +337,8 @@ impl LibreFangKernel {
         self.prompt_metadata_cache.skills.clear();
 
         // Bump skill generation so the tool list cache detects staleness
-        self.skill_generation
+        self.skills
+            .skill_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -373,14 +379,16 @@ impl LibreFangKernel {
         // any entry older than 10× the cooldown (well past the point
         // where it could still gate a review). Cheap since DashMap's
         // retain is shard-local.
-        if self.skill_review_cooldowns.len() > Self::SKILL_REVIEW_COOLDOWN_CAP {
+        if self.skills.skill_review_cooldowns.len() > Self::SKILL_REVIEW_COOLDOWN_CAP {
             let cutoff = now_epoch - Self::SKILL_REVIEW_COOLDOWN_SECS.saturating_mul(10);
-            self.skill_review_cooldowns
+            self.skills
+                .skill_review_cooldowns
                 .retain(|_, last| *last >= cutoff);
         }
 
         let mut claimed = false;
-        self.skill_review_cooldowns
+        self.skills
+            .skill_review_cooldowns
             .entry(agent_id.to_string())
             .and_modify(|last| {
                 if now_epoch - *last >= Self::SKILL_REVIEW_COOLDOWN_SECS {
@@ -500,6 +508,7 @@ impl LibreFangKernel {
             .and_then(|w| w.upgrade())
             .map(|kernel| {
                 let reg = kernel
+                    .skills
                     .skill_registry
                     .read()
                     .unwrap_or_else(|e| e.into_inner());
@@ -634,7 +643,7 @@ impl LibreFangKernel {
         // failures are logged but don't abort the review.
         if let Some(kernel) = kernel_weak.as_ref().and_then(|w| w.upgrade()) {
             let cost = MeteringEngine::estimate_cost_with_catalog(
-                &kernel.model_catalog.load(),
+                &kernel.llm.model_catalog.load(),
                 &default_model.model,
                 response.usage.input_tokens,
                 response.usage.output_tokens,
@@ -658,7 +667,7 @@ impl LibreFangKernel {
                 channel: Some("system".to_string()),
                 session_id: None,
             };
-            if let Err(e) = kernel.metering.record(&usage_record) {
+            if let Err(e) = kernel.metering.engine.record(&usage_record) {
                 tracing::debug!(error = %e, "Failed to record background review usage");
             }
         }
@@ -723,6 +732,7 @@ impl LibreFangKernel {
                     })?;
                 let skill = {
                     let reg = kernel
+                        .skills
                         .skill_registry
                         .read()
                         .unwrap_or_else(|e| e.into_inner());
@@ -786,6 +796,7 @@ impl LibreFangKernel {
                     })?;
                 let skill = {
                     let reg = kernel
+                        .skills
                         .skill_registry
                         .read()
                         .unwrap_or_else(|e| e.into_inner());

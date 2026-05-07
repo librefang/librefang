@@ -92,3 +92,6 @@ result
 *.swo
 *~
 .gitnexus
+
+# graphify knowledge-graph output (local-only, regenerable).
+graphify-out/

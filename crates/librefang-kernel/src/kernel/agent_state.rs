@@ -33,7 +33,7 @@ impl LibreFangKernel {
     /// This is best-effort: a failure to write is logged but does not
     /// propagate as an error — the authoritative copy lives in SQLite.
     pub fn persist_manifest_to_disk(&self, agent_id: AgentId) {
-        let Some(entry) = self.registry.get(agent_id) else {
+        let Some(entry) = self.agents.registry.get(agent_id) else {
             return;
         };
         let toml_path = match entry.source_toml_path.clone() {
@@ -86,6 +86,7 @@ impl LibreFangKernel {
             // a user-configured provider endpoint. In that case, preserve the
             // current provider name instead of overriding it with auto-detection.
             let has_custom_url = self
+                .agents
                 .registry
                 .get(agent_id)
                 .map(|e| e.manifest.model.base_url.is_some())
@@ -98,6 +99,7 @@ impl LibreFangKernel {
             } else {
                 // No custom base_url: safe to auto-detect from catalog / model name
                 let resolved_provider = self
+                    .llm
                     .model_catalog
                     .load()
                     .find_model(model)
@@ -114,7 +116,7 @@ impl LibreFangKernel {
         };
 
         // Snapshot the full model state for rollback on DB persist failure (#3499).
-        let prev_model_state = self.registry.get(agent_id).map(|e| {
+        let prev_model_state = self.agents.registry.get(agent_id).map(|e| {
             (
                 e.manifest.model.model.clone(),
                 e.manifest.model.provider.clone(),
@@ -134,12 +136,14 @@ impl LibreFangKernel {
             // leave the override fields alone so that genuine per-agent
             // overrides on the same provider are preserved.
             let prev_provider = self
+                .agents
                 .registry
                 .get(agent_id)
                 .map(|e| e.manifest.model.provider.clone());
             let provider_changed = prev_provider.as_deref() != Some(provider.as_str());
             if provider_changed {
-                self.registry
+                self.agents
+                    .registry
                     .update_model_provider_config(
                         agent_id,
                         normalized_model.clone(),
@@ -149,13 +153,15 @@ impl LibreFangKernel {
                     )
                     .map_err(KernelError::LibreFang)?;
             } else {
-                self.registry
+                self.agents
+                    .registry
                     .update_model_and_provider(agent_id, normalized_model.clone(), provider.clone())
                     .map_err(KernelError::LibreFang)?;
             }
             info!(agent_id = %agent_id, model = %normalized_model, provider = %provider, "Agent model+provider updated");
         } else {
-            self.registry
+            self.agents
+                .registry
                 .update_model(agent_id, normalized_model.clone())
                 .map_err(KernelError::LibreFang)?;
             info!(agent_id = %agent_id, model = %normalized_model, "Agent model updated (provider unchanged)");
@@ -164,10 +170,10 @@ impl LibreFangKernel {
         // Persist the updated entry. On DB failure, roll back the in-memory model
         // mutation and propagate the error so the API caller sees a 500 instead of
         // silently drifting registry vs. disk (#3499).
-        if let Some(entry) = self.registry.get(agent_id) {
-            if let Err(e) = self.memory.save_agent(&entry) {
+        if let Some(entry) = self.agents.registry.get(agent_id) {
+            if let Err(e) = self.memory.substrate.save_agent(&entry) {
                 if let Some((p_model, p_provider, p_api_key_env, p_base_url)) = prev_model_state {
-                    let _ = self.registry.update_model_provider_config(
+                    let _ = self.agents.registry.update_model_provider_config(
                         agent_id,
                         p_model,
                         p_provider,
@@ -183,7 +189,7 @@ impl LibreFangKernel {
         self.persist_manifest_to_disk(agent_id);
 
         // Clear canonical session to prevent memory poisoning from old model's responses
-        let _ = self.memory.delete_canonical_session(agent_id);
+        let _ = self.memory.substrate.delete_canonical_session(agent_id);
         debug!(agent_id = %agent_id, "Cleared canonical session after model switch");
 
         Ok(())
@@ -199,7 +205,7 @@ impl LibreFangKernel {
     /// to the DB, and invalidates the tool cache so the updated skill / MCP
     /// allowlists take effect on the next message.
     pub fn reload_agent_from_disk(&self, agent_id: AgentId) -> KernelResult<()> {
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
@@ -275,24 +281,26 @@ impl LibreFangKernel {
         // tag index used by `find_by_tag()`.
         disk_manifest.tags = entry.manifest.tags.clone();
 
-        self.registry
+        self.agents
+            .registry
             .replace_manifest(agent_id, disk_manifest)
             .map_err(KernelError::LibreFang)?;
 
-        if let Some(refreshed) = self.registry.get(agent_id) {
+        if let Some(refreshed) = self.agents.registry.get(agent_id) {
             // Re-grant capabilities in case caps/profile changed in the TOML.
             // Uses insert() so it replaces any existing grants for this agent.
             let caps = manifest_to_capabilities(&refreshed.manifest);
-            self.capabilities.grant(agent_id, caps);
+            self.agents.capabilities.grant(agent_id, caps);
             // Refresh the scheduler's quota cache so changes to
             // `max_llm_tokens_per_hour` and friends take effect on the
             // next message instead of waiting for daemon restart.
             // Uses `update_quota` (not `register`) to preserve the
             // accumulated usage tracker — switching the limit shouldn't
             // wipe the running window. Issue #2317.
-            self.scheduler
+            self.agents
+                .scheduler
                 .update_quota(agent_id, refreshed.manifest.resources.clone());
-            let _ = self.memory.save_agent(&refreshed);
+            let _ = self.memory.substrate.save_agent(&refreshed);
         }
 
         // Invalidate the per-agent tool cache so the new skill/MCP allowlist
@@ -320,7 +328,7 @@ impl LibreFangKernel {
         agent_id: AgentId,
         mut new_manifest: librefang_types::agent::AgentManifest,
     ) -> KernelResult<()> {
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
@@ -336,16 +344,18 @@ impl LibreFangKernel {
         new_manifest.name = entry.manifest.name.clone();
         new_manifest.tags = entry.manifest.tags.clone();
 
-        self.registry
+        self.agents
+            .registry
             .replace_manifest(agent_id, new_manifest)
             .map_err(KernelError::LibreFang)?;
 
-        if let Some(refreshed) = self.registry.get(agent_id) {
+        if let Some(refreshed) = self.agents.registry.get(agent_id) {
             let caps = manifest_to_capabilities(&refreshed.manifest);
-            self.capabilities.grant(agent_id, caps);
-            self.scheduler
+            self.agents.capabilities.grant(agent_id, caps);
+            self.agents
+                .scheduler
                 .update_quota(agent_id, refreshed.manifest.resources.clone());
-            let _ = self.memory.save_agent(&refreshed);
+            let _ = self.memory.substrate.save_agent(&refreshed);
         }
 
         // Invalidate the per-agent tool cache so skill/MCP allowlist changes
@@ -364,6 +374,7 @@ impl LibreFangKernel {
         // Validate skill names if allowlist is non-empty
         if !skills.is_empty() {
             let registry = self
+                .skills
                 .skill_registry
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
@@ -384,18 +395,21 @@ impl LibreFangKernel {
         // `skills_disabled = false`, so a rollback that only restored `skills`
         // would silently leave the disabled flag flipped on persist failure.
         let prev_skills_state = self
+            .agents
             .registry
             .get(agent_id)
             .map(|e| (e.manifest.skills.clone(), e.manifest.skills_disabled));
 
-        self.registry
+        self.agents
+            .registry
             .update_skills(agent_id, skills.clone())
             .map_err(KernelError::LibreFang)?;
 
-        if let Some(entry) = self.registry.get(agent_id) {
-            if let Err(e) = self.memory.save_agent(&entry) {
+        if let Some(entry) = self.agents.registry.get(agent_id) {
+            if let Err(e) = self.memory.substrate.save_agent(&entry) {
                 if let Some((p_skills, p_disabled)) = prev_skills_state {
                     let _ = self
+                        .agents
                         .registry
                         .restore_skills_state(agent_id, p_skills, p_disabled);
                 }
@@ -418,10 +432,11 @@ impl LibreFangKernel {
     ) -> KernelResult<()> {
         // Validate server names if allowlist is non-empty
         if !servers.is_empty() {
-            if let Ok(mcp_tools) = self.mcp_tools.lock() {
+            if let Ok(mcp_tools) = self.mcp.mcp_tools.lock() {
                 let mut known_servers: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
                 let configured_servers: Vec<String> = self
+                    .mcp
                     .effective_mcp_servers
                     .read()
                     .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
@@ -447,18 +462,20 @@ impl LibreFangKernel {
 
         // Snapshot previous MCP server allowlist for rollback on DB persist failure (#3499).
         let prev_servers = self
+            .agents
             .registry
             .get(agent_id)
             .map(|e| e.manifest.mcp_servers.clone());
 
-        self.registry
+        self.agents
+            .registry
             .update_mcp_servers(agent_id, servers.clone())
             .map_err(KernelError::LibreFang)?;
 
-        if let Some(entry) = self.registry.get(agent_id) {
-            if let Err(e) = self.memory.save_agent(&entry) {
+        if let Some(entry) = self.agents.registry.get(agent_id) {
+            if let Err(e) = self.memory.substrate.save_agent(&entry) {
                 if let Some(p_servers) = prev_servers {
-                    let _ = self.registry.update_mcp_servers(agent_id, p_servers);
+                    let _ = self.agents.registry.update_mcp_servers(agent_id, p_servers);
                 }
                 return Err(KernelError::LibreFang(e));
             }
@@ -496,7 +513,7 @@ impl LibreFangKernel {
         // `update_tool_config` always sets `tools_disabled = false`, so a
         // rollback that only restored the lists would silently leave the
         // disabled flag flipped on persist failure.
-        let prev_tool_state = self.registry.get(agent_id).map(|e| {
+        let prev_tool_state = self.agents.registry.get(agent_id).map(|e| {
             (
                 e.manifest.capabilities.tools.clone(),
                 e.manifest.tool_allowlist.clone(),
@@ -505,14 +522,16 @@ impl LibreFangKernel {
             )
         });
 
-        self.registry
+        self.agents
+            .registry
             .update_tool_config(agent_id, capabilities_tools, allowlist, blocklist)
             .map_err(KernelError::LibreFang)?;
 
-        if let Some(entry) = self.registry.get(agent_id) {
-            if let Err(e) = self.memory.save_agent(&entry) {
+        if let Some(entry) = self.agents.registry.get(agent_id) {
+            if let Err(e) = self.memory.substrate.save_agent(&entry) {
                 if let Some((p_caps, p_allow, p_block, p_disabled)) = prev_tool_state {
                     let _ = self
+                        .agents
                         .registry
                         .restore_tool_state(agent_id, p_caps, p_allow, p_block, p_disabled);
                 }
