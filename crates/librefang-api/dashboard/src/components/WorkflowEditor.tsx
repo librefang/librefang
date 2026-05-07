@@ -39,7 +39,7 @@ const nodeTypesConfig = [
   { type: "channel", color: "var(--accent-color)", icon: "M" },
 ];
 
-const CustomNode = React.memo(function CustomNode({ data, type }: CustomNodeProps) {
+const CustomNode = React.memo(function CustomNode({ data }: CustomNodeProps) {
   const config = nodeTypesConfig.find(n => n.type === data.nodeType) || nodeTypesConfig[2];
   return (
     <div className="rounded-lg border-2 border-border-subtle bg-surface shadow-lg min-w-[150px] overflow-hidden">
@@ -76,6 +76,7 @@ export function WorkflowEditor({ initialNodes = [], initialEdges = [], onSave, o
     const newNode: Node = {
       id: `${type}-${crypto.randomUUID()}`,
       type: "custom",
+      position: { x: 0, y: 0 },
       data: { label: t(`canvas.nodes.${type}`), description: t(`canvas.nodes.${type}_desc`), nodeType: type }
     };
     setNodes((nds) => [{ ...newNode, position: { x: 100 + nds.length * 40, y: 100 + nds.length * 40 } }, ...nds]);
