@@ -1031,8 +1031,7 @@ async fn handle_text_message(
             .await;
 
             // Send message to agent with streaming
-            let kernel_handle: Arc<dyn KernelHandle> =
-                state.kernel.clone() as Arc<dyn KernelHandle>;
+            let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
             let sender_ctx = SenderContext {
                 channel: "webui".to_string(),
                 // Behaviour change (`trusted_proxies` + `trust_forwarded_for`):
@@ -1056,11 +1055,12 @@ async fn handle_text_message(
             };
             match state
                 .kernel
+                .clone()
                 .send_message_streaming_with_sender_context_routing_thinking_and_session(
                     agent_id,
                     &content,
                     Some(kernel_handle),
-                    &sender_ctx,
+                    sender_ctx.clone(),
                     thinking_override,
                     explicit_session,
                 )

@@ -1236,6 +1236,28 @@ impl LibreFangKernel {
 
         self.supervisor.shutdown();
 
+        // Drain in-flight workflow runs (#3335). `Running` / `Pending`
+        // are deliberately not persisted by `persist_runs` (no durable
+        // boundary), so without this the dashboard would silently lose
+        // every workflow that happened to be mid-flight at stop time.
+        // Transition them to `Paused` with a fresh resume_token so the
+        // operator (or the stale-timeout sweep at next boot) can decide
+        // whether to resume or fail them.
+        //
+        // Run *after* `supervisor.shutdown()` has signalled the
+        // supervisor to stop accepting new work. Concurrent in-flight
+        // agent loops may still mutate runs during this drain — DashMap
+        // per-entry locks keep individual writes coherent, but the
+        // final on-disk state reflects whichever side wrote last.
+        // Best-effort by design; the daemon process is exiting
+        // immediately after this block, and the next-boot
+        // `recover_stale_running_runs` sweep is the safety net for any
+        // crash-shutdown residue.
+        let drained = self.workflows.drain_on_shutdown();
+        if drained > 0 {
+            tracing::info!(drained, "Paused in-flight workflow runs for shutdown");
+        }
+
         // Update agent states to Suspended in persistent storage (not delete).
         // Track failures so we can emit a single critical summary if any
         // agent could not be persisted — without this, a partial-shutdown

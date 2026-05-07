@@ -885,6 +885,73 @@ impl WorkflowEngine {
         recovered
     }
 
+    /// Pause every in-flight workflow run on graceful shutdown so it
+    /// survives the restart, then flush the result to disk.
+    ///
+    /// Pre-fix (#3335): `Running` and `Pending` runs lived in
+    /// memory only. `persist_runs` deliberately skips both states (no
+    /// durable boundary to roll forward across), so the last `O_TRUNC +
+    /// rename` cycle of `workflow_runs.json` did not include them. On
+    /// graceful daemon stop the runs vanished — `load_runs` reloads only
+    /// what was on disk, and the dashboard's `list_runs` call after
+    /// restart no longer surfaces the in-flight workload.
+    ///
+    /// Reasoning behind transitioning to `Paused` rather than `Failed`:
+    /// a graceful shutdown is a clean process boundary — the daemon
+    /// reached this code without a mid-write crash, and the in-memory
+    /// step results / paused-variables snapshot is internally
+    /// consistent. `Paused` carries a fresh `resume_token` so the
+    /// operator can either resume via the existing
+    /// `WorkflowEngine::resume_run` API or, depending on policy, the
+    /// stale-timeout sweep at next boot
+    /// ([`Self::recover_stale_running_runs`]) eventually demotes them
+    /// to `Failed`. Either way, the run is *visible* in the dashboard
+    /// after restart instead of silently disappearing.
+    ///
+    /// Crash shutdown (SIGKILL / OOM / power loss) is **not** addressed
+    /// by this method: the daemon never reaches `shutdown` in those
+    /// paths, so the only durable state is whatever `persist_runs`
+    /// already flushed. The stale-running-runs recovery sweep on the
+    /// next boot is the existing safety net for that case.
+    ///
+    /// Returns the number of runs whose state was changed. The caller
+    /// is expected to invoke this once during the shutdown sequence,
+    /// after the agent supervisor has stopped accepting new work.
+    pub fn drain_on_shutdown(&self) -> usize {
+        let now = Utc::now();
+        let mut drained = 0usize;
+        // DashMap's `iter_mut` takes a per-shard write lock as the
+        // iterator visits each entry — no global write lock and no
+        // awaiting required, mirroring `recover_stale_running_runs`.
+        for mut entry in self.runs.iter_mut() {
+            let run = entry.value_mut();
+            if !matches!(
+                run.state,
+                WorkflowRunState::Running | WorkflowRunState::Pending
+            ) {
+                continue;
+            }
+            info!(
+                run_id = %run.id,
+                state = ?run.state,
+                "Pausing in-flight workflow run for shutdown"
+            );
+            run.state = WorkflowRunState::Paused {
+                resume_token: Uuid::new_v4(),
+                reason: "Interrupted by daemon shutdown".to_string(),
+                paused_at: now,
+            };
+            drained += 1;
+        }
+        // Flush only when something actually changed — `persist_runs`
+        // is a full O_TRUNC + rename of `workflow_runs.json`, no point
+        // in paying that I/O if there's nothing to add.
+        if drained > 0 {
+            self.persist_runs();
+        }
+        drained
+    }
+
     /// List all workflow runs (optionally filtered by state).
     pub async fn list_runs(&self, state_filter: Option<&str>) -> Vec<WorkflowRun> {
         self.runs
@@ -4343,6 +4410,153 @@ prompt_template = "do {{x}}"
             assert!(engine.runs.contains_key(&completed_id));
             assert!(!engine.runs.contains_key(&running_id));
         }
+    }
+
+    /// Regression for #3335: graceful shutdown must transition every
+    /// in-flight run to `Paused` and persist the change so the dashboard
+    /// still surfaces them after a restart.
+    ///
+    /// Pre-fix the same scenario produced an empty list on the second
+    /// boot — `persist_runs` filters out Running/Pending, so a daemon
+    /// stop with three in-flight runs left only the unrelated Completed
+    /// row in `workflow_runs.json`.
+    #[test]
+    fn drain_on_shutdown_pauses_running_and_pending_and_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let completed = make_terminal_run(WorkflowRunState::Completed);
+        let completed_id = completed.id;
+
+        // Failed is the other terminal state — drain must skip it just
+        // like Completed. Without an explicit assertion below, a future
+        // edit that loosens the matches!() guard could regress without
+        // a single test failing.
+        let failed = WorkflowRun {
+            state: WorkflowRunState::Failed,
+            ..make_terminal_run(WorkflowRunState::Pending)
+        };
+        let failed_id = failed.id;
+
+        let running = WorkflowRun {
+            state: WorkflowRunState::Running,
+            ..make_terminal_run(WorkflowRunState::Pending)
+        };
+        let running_id = running.id;
+
+        let pending = WorkflowRun {
+            state: WorkflowRunState::Pending,
+            ..make_terminal_run(WorkflowRunState::Pending)
+        };
+        let pending_id = pending.id;
+
+        // Pre-existing Paused run must survive untouched (drain only
+        // touches Running/Pending) — proves we don't clobber an
+        // already-paused workflow's resume_token.
+        let preexisting_paused_token = Uuid::new_v4();
+        let preexisting_paused = WorkflowRun {
+            state: WorkflowRunState::Paused {
+                resume_token: preexisting_paused_token,
+                reason: "user pause".to_string(),
+                paused_at: Utc::now(),
+            },
+            ..make_terminal_run(WorkflowRunState::Pending)
+        };
+        let preexisting_paused_id = preexisting_paused.id;
+
+        // Drive shutdown drain on one engine, then reload from the
+        // persisted JSON to prove durability across the restart
+        // boundary.
+        {
+            let engine = WorkflowEngine::new_with_persistence(tmp.path());
+            engine.runs.insert(completed.id, completed);
+            engine.runs.insert(failed.id, failed);
+            engine.runs.insert(running.id, running);
+            engine.runs.insert(pending.id, pending);
+            engine
+                .runs
+                .insert(preexisting_paused.id, preexisting_paused);
+
+            let drained = engine.drain_on_shutdown();
+            assert_eq!(
+                drained, 2,
+                "drain must transition exactly the Running + Pending pair \
+                 (Completed / Failed / Paused must be skipped)"
+            );
+        }
+
+        let engine = WorkflowEngine::new_with_persistence(tmp.path());
+        let count = engine.load_runs().unwrap();
+        assert_eq!(
+            count, 5,
+            "all five runs (Completed + Failed + drained pair + preexisting Paused) must reload"
+        );
+
+        let c = engine.runs.get(&completed_id).expect("completed missing");
+        assert!(matches!(c.state, WorkflowRunState::Completed));
+
+        let f = engine.runs.get(&failed_id).expect("failed missing");
+        assert!(
+            matches!(f.state, WorkflowRunState::Failed),
+            "Failed must not be drained: {:?}",
+            f.state
+        );
+
+        let r = engine.runs.get(&running_id).expect("running missing");
+        match &r.state {
+            WorkflowRunState::Paused { reason, .. } => {
+                assert_eq!(reason, "Interrupted by daemon shutdown");
+            }
+            other => panic!("running run not paused: {:?}", other),
+        }
+
+        let p = engine.runs.get(&pending_id).expect("pending missing");
+        match &p.state {
+            WorkflowRunState::Paused { reason, .. } => {
+                assert_eq!(reason, "Interrupted by daemon shutdown");
+            }
+            other => panic!("pending run not paused: {:?}", other),
+        }
+
+        let pre = engine
+            .runs
+            .get(&preexisting_paused_id)
+            .expect("preexisting paused missing");
+        match &pre.state {
+            WorkflowRunState::Paused {
+                resume_token,
+                reason,
+                ..
+            } => {
+                assert_eq!(*resume_token, preexisting_paused_token);
+                assert_eq!(reason, "user pause");
+            }
+            other => panic!("preexisting paused was rewritten: {:?}", other),
+        }
+    }
+
+    /// `drain_on_shutdown` returns 0 and does not touch disk when there
+    /// is nothing to drain — important so an idle daemon's stop sequence
+    /// does not gratuitously rewrite `workflow_runs.json` on every shutdown.
+    #[test]
+    fn drain_on_shutdown_is_a_noop_when_no_in_flight_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = WorkflowEngine::new_with_persistence(tmp.path());
+        engine.runs.insert(
+            WorkflowRunId::new(),
+            make_terminal_run(WorkflowRunState::Completed),
+        );
+
+        let drained = engine.drain_on_shutdown();
+        assert_eq!(drained, 0);
+
+        // No persistence write happened — `workflow_runs.json` should
+        // still be absent because nothing in the engine triggered the
+        // write path.
+        let runs_json = tmp.path().join("data").join("workflow_runs.json");
+        assert!(
+            !runs_json.exists(),
+            "drain_on_shutdown must not write when nothing was drained"
+        );
     }
 
     #[test]

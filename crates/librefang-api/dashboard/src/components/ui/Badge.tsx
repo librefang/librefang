@@ -44,7 +44,7 @@ export function Badge({
       `}
       {...props}
     >
-      {dot ? <span className={`w-1.5 h-1.5 rounded-full ${dotColors[variant]}`} /> : null}
+      {dot ? <span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full ${dotColors[variant]}`} /> : null}
       {children}
     </span>
   );

@@ -257,9 +257,10 @@ pub async fn create_alias(
         return ApiErrorResponse::bad_request("Missing required field: model_id").into_json_tuple();
     }
 
-    let added: bool = state
-        .kernel
-        .model_catalog_update(|catalog| catalog.add_alias(&alias, &model_id));
+    let mut added = false;
+    state.kernel.model_catalog_update(&mut |catalog| {
+        added = catalog.add_alias(&alias, &model_id);
+    });
     if !added {
         return ApiErrorResponse::conflict(format!("Alias '{}' already exists", alias))
             .into_json_tuple();
@@ -281,9 +282,10 @@ pub async fn delete_alias(
     State(state): State<Arc<AppState>>,
     Path(alias): Path<String>,
 ) -> impl IntoResponse {
-    let removed: bool = state
-        .kernel
-        .model_catalog_update(|catalog| catalog.remove_alias(&alias));
+    let mut removed = false;
+    state.kernel.model_catalog_update(&mut |catalog| {
+        removed = catalog.remove_alias(&alias);
+    });
     if !removed {
         return ApiErrorResponse::not_found(format!("Alias '{}' not found", alias))
             .into_json_tuple();
@@ -363,10 +365,10 @@ pub async fn set_model_overrides(
     // attempt that won the CAS.
     let id_for_closure = id.clone();
     let body_for_closure = body.clone();
-    let previous = state.kernel.model_catalog_update(move |catalog| {
-        let prev = catalog.get_overrides(&id_for_closure).cloned();
+    let mut previous = None;
+    state.kernel.model_catalog_update(&mut |catalog| {
+        previous = catalog.get_overrides(&id_for_closure).cloned();
         catalog.set_overrides(id_for_closure.clone(), body_for_closure.clone());
-        prev
     });
     // Persist outside the RCU loop (disk IO must happen exactly once).
     let snapshot = state.kernel.model_catalog_load();
@@ -379,7 +381,7 @@ pub async fn set_model_overrides(
         let id_for_rollback = id.clone();
         state
             .kernel
-            .model_catalog_update(move |catalog| match &previous {
+            .model_catalog_update(&mut move |catalog| match &previous {
                 Some(prev) => {
                     catalog.set_overrides(id_for_rollback.clone(), prev.clone());
                 }
@@ -410,9 +412,9 @@ pub async fn delete_model_overrides(
         .join("data")
         .join("model_overrides.json");
     let id_for_closure = id.clone();
-    state
-        .kernel
-        .model_catalog_update(move |catalog| catalog.remove_overrides(&id_for_closure));
+    state.kernel.model_catalog_update(&mut |catalog| {
+        let _ = catalog.remove_overrides(&id_for_closure);
+    });
     if let Err(e) = state
         .kernel
         .model_catalog_load()
@@ -429,7 +431,7 @@ fn attach_probe_result(
     entry: &mut serde_json::Value,
     probe: &librefang_kernel::provider_health::ProbeResult,
     provider_id: &str,
-    kernel: &librefang_kernel::LibreFangKernel,
+    kernel: &dyn librefang_kernel::KernelApi,
 ) {
     entry["is_local"] = serde_json::json!(true);
     entry["reachable"] = serde_json::json!(probe.reachable);
@@ -458,7 +460,7 @@ fn attach_probe_result(
             } else {
                 probe.discovered_model_info.clone()
             };
-        kernel.model_catalog_update(|cat| {
+        kernel.model_catalog_update(&mut |cat| {
             cat.merge_discovered_models(provider_id, &info);
         });
     }
@@ -584,7 +586,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
         // auth_status when the service is not reachable so the dashboard
         // shows "needs setup" instead of "configured".
         if let Some(probe) = probe_map.remove(&i) {
-            attach_probe_result(&mut entry, &probe, &p.id, &state.kernel);
+            attach_probe_result(&mut entry, &probe, &p.id, &*state.kernel);
             if !probe.reachable {
                 entry["auth_status"] = serde_json::json!("missing");
             }
@@ -682,7 +684,7 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
             "is_custom": p.is_custom,
         });
         if let Some(probe) = probe_map.remove(&i) {
-            attach_probe_result(&mut entry, &probe, &p.id, &state.kernel);
+            attach_probe_result(&mut entry, &probe, &p.id, &*state.kernel);
             if !probe.reachable {
                 entry["auth_status"] = serde_json::json!("missing");
             }
@@ -779,7 +781,7 @@ pub async fn get_provider(
         )
         .await;
 
-        attach_probe_result(&mut entry, &probe, &provider.id, &state.kernel);
+        attach_probe_result(&mut entry, &probe, &provider.id, &*state.kernel);
         if !probe.reachable {
             entry["auth_status"] = serde_json::json!("missing");
         }
@@ -883,9 +885,10 @@ pub async fn add_custom_model(
     }
 
     let entry_for_closure = entry.clone();
-    let added: bool = state
-        .kernel
-        .model_catalog_update(move |catalog| catalog.add_custom_model(entry_for_closure.clone()));
+    let mut added = false;
+    state.kernel.model_catalog_update(&mut |catalog| {
+        added = catalog.add_custom_model(entry_for_closure.clone());
+    });
     if !added {
         return ApiErrorResponse::conflict(format!(
             "Model '{}' already exists for provider '{}'",
@@ -909,7 +912,7 @@ pub async fn add_custom_model(
     {
         tracing::warn!("Failed to persist custom models: {e}");
         let id_for_rollback = id.clone();
-        state.kernel.model_catalog_update(move |catalog| {
+        state.kernel.model_catalog_update(&mut move |catalog| {
             catalog.remove_custom_model(&id_for_rollback);
         });
         return ApiErrorResponse::internal(format!("Failed to persist custom model: {e}"))
@@ -936,10 +939,11 @@ pub async fn remove_custom_model(
     // subsequent persist fails — keeps the in-memory catalog consistent
     // with disk across failure paths.
     let model_id_for_closure = model_id.clone();
-    let (snapshot, removed) = state.kernel.model_catalog_update(move |catalog| {
-        let snap = catalog.find_model(&model_id_for_closure).cloned();
-        let ok = catalog.remove_custom_model(&model_id_for_closure);
-        (snap, ok)
+    let mut snapshot = None;
+    let mut removed = false;
+    state.kernel.model_catalog_update(&mut |catalog| {
+        snapshot = catalog.find_model(&model_id_for_closure).cloned();
+        removed = catalog.remove_custom_model(&model_id_for_closure);
     });
     if !removed {
         return ApiErrorResponse::not_found(format!("Custom model '{}' not found", model_id))
@@ -958,7 +962,7 @@ pub async fn remove_custom_model(
     {
         tracing::warn!("Failed to persist custom models: {e}");
         if let Some(entry) = snapshot {
-            state.kernel.model_catalog_update(move |catalog| {
+            state.kernel.model_catalog_update(&mut move |catalog| {
                 catalog.add_custom_model(entry.clone());
             });
         }
@@ -1026,7 +1030,7 @@ pub async fn set_provider_key(
             .join("data")
             .join("suppressed_providers.json");
         let name_for_closure = name.clone();
-        state.kernel.model_catalog_update(move |catalog| {
+        state.kernel.model_catalog_update(&mut move |catalog| {
             catalog.unsuppress_provider(&name_for_closure);
             catalog.save_suppressed(&suppressed_path);
             catalog.detect_auth();
@@ -1214,7 +1218,7 @@ pub async fn delete_provider_key(
             .join("data")
             .join("suppressed_providers.json");
         let name_for_closure = name.clone();
-        state.kernel.model_catalog_update(move |catalog| {
+        state.kernel.model_catalog_update(&mut move |catalog| {
             catalog.suppress_provider(&name_for_closure);
             catalog.save_suppressed(&suppressed_path);
             catalog.detect_auth();
@@ -1282,6 +1286,7 @@ pub async fn test_provider(
     if librefang_kernel::provider_health::is_local_provider(&name) {
         let result = state
             .kernel
+            .clone()
             .probe_local_provider(
                 &name, &base_url, false, // user-triggered test — don't escalate to warn!
             )
@@ -1529,7 +1534,7 @@ pub async fn set_provider_url(
         let name_for_closure = name.clone();
         let base_url_for_closure = base_url.clone();
         let proxy_url_for_closure = proxy_url.clone();
-        state.kernel.model_catalog_update(move |catalog| {
+        state.kernel.model_catalog_update(&mut move |catalog| {
             catalog.set_provider_url(&name_for_closure, &base_url_for_closure);
             if let Some(ref pu) = proxy_url_for_closure {
                 catalog.set_provider_proxy_url(&name_for_closure, pu);
@@ -1591,7 +1596,7 @@ pub async fn set_provider_url(
             } else {
                 probe.discovered_model_info.clone()
             };
-        state.kernel.model_catalog_update(|catalog| {
+        state.kernel.model_catalog_update(&mut |catalog| {
             catalog.merge_discovered_models(&name, &info);
         });
     }
@@ -2056,7 +2061,7 @@ pub async fn copilot_oauth_poll(
             }
 
             // Refresh auth detection
-            state.kernel.model_catalog_update(|catalog| {
+            state.kernel.model_catalog_update(&mut |catalog| {
                 catalog.detect_auth();
             });
 
@@ -2120,7 +2125,7 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
                 let provider_regions = cfg.provider_regions.clone();
                 let provider_urls = cfg.provider_urls.clone();
                 drop(cfg);
-                state.kernel.model_catalog_update(move |catalog| {
+                state.kernel.model_catalog_update(&mut move |catalog| {
                     catalog.load_cached_catalog_for(&home_dir);
                     if !provider_regions.is_empty() {
                         let region_urls = catalog.resolve_region_urls(&provider_regions);

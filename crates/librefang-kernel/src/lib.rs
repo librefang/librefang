@@ -1,3 +1,7 @@
+// `KernelApi`'s `async_trait`-expanded methods nest pinned futures deeply
+// enough that the default 128-step layout pass tips over (#3566).
+#![recursion_limit = "256"]
+
 //! Core kernel for the LibreFang Agent Operating System.
 //!
 //! The kernel manages agent lifecycles, memory, permissions, scheduling,
@@ -20,6 +24,7 @@ pub mod heartbeat;
 pub mod hooks;
 pub mod inbox;
 pub mod kernel;
+pub mod kernel_api;
 pub mod log_reload;
 pub mod mcp_oauth_provider;
 pub use librefang_kernel_metering as metering;
@@ -41,6 +46,7 @@ pub mod workflow;
 
 pub use kernel::DeliveryTracker;
 pub use kernel::LibreFangKernel;
+pub use kernel_api::KernelApi;
 
 // ---------------------------------------------------------------------------
 // Runtime re-exports (refs #3596 — API → Kernel → Runtime layering)

@@ -2746,7 +2746,7 @@ async fn activate_hand_inner(
                         entry.manifest.schedule,
                         librefang_types::agent::ScheduleMode::Reactive
                     ) {
-                        state.kernel.start_background_for_agent(
+                        state.kernel.clone().start_background_for_agent(
                             agent_id,
                             &entry.name,
                             &entry.manifest.schedule,
@@ -5474,7 +5474,7 @@ pub async fn reconnect_mcp_server_handler(
             .into_json_tuple();
     }
 
-    match state.kernel.reconnect_mcp_server(&name).await {
+    match state.kernel.clone().reconnect_mcp_server(&name).await {
         Ok(tool_count) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -5547,7 +5547,7 @@ pub async fn reload_mcp_handler(State(state): State<Arc<AppState>>) -> impl Into
         tracing::warn!("Failed to reload config before MCP reload: {e}");
     }
 
-    match state.kernel.reload_mcp_servers().await {
+    match state.kernel.clone().reload_mcp_servers().await {
         Ok(connected) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -5797,7 +5797,7 @@ pub async fn install_extension(
     }
 
     state.kernel.mcp_health().register(&result.server.name);
-    let connected = state.kernel.reload_mcp_servers().await.unwrap_or(0);
+    let connected = state.kernel.clone().reload_mcp_servers().await.unwrap_or(0);
 
     (
         StatusCode::OK,
@@ -5861,7 +5861,7 @@ pub async fn uninstall_extension(
 
     state.kernel.mcp_health().unregister(&server_name);
     state.kernel.disconnect_mcp_server(&server_name).await;
-    if let Err(e) = state.kernel.reload_mcp_servers().await {
+    if let Err(e) = state.kernel.clone().reload_mcp_servers().await {
         tracing::warn!("Failed to reload MCP servers after uninstall: {e}");
     }
 
