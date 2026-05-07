@@ -24,7 +24,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use librefang_api::server::read_daemon_info;
 use librefang_extensions::dotenv;
-use librefang_kernel::{config::load_config, LibreFangKernel, LlmSubsystemApi};
+use librefang_kernel::{config::load_config, AgentSubsystemApi, LibreFangKernel, LlmSubsystemApi};
 use librefang_types::agent::{AgentId, AgentManifest};
 use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
@@ -3678,7 +3678,7 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
         let daemon_info_path = kernel.home_dir().join("daemon.json");
         let provider = cfg.default_model.provider.clone();
         let model = cfg.default_model.model.clone();
-        let agent_count = kernel.agent_registry().count();
+        let agent_count = kernel.agent_registry_ref().count();
         let model_count = kernel.model_catalog_swap().load().list_models().len();
 
         ui::success(&i18n::t_args(
@@ -4151,7 +4151,7 @@ fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
         }
     } else {
         let kernel = boot_kernel(config);
-        let agents = kernel.agent_registry().list();
+        let agents = kernel.agent_registry_ref().list();
 
         if json {
             let list: Vec<serde_json::Value> = agents
@@ -4296,7 +4296,7 @@ fn cmd_agent_delete(config: Option<PathBuf>, name: &str, yes: bool) {
         }
     } else {
         let kernel = boot_kernel(config);
-        let canonical_uuid = match kernel.agent_identities().get(name) {
+        let canonical_uuid = match kernel.identities_ref().get(name) {
             Some(id) => id,
             None => {
                 eprintln!(
@@ -4357,7 +4357,7 @@ fn cmd_agent_reset_uuid(config: Option<PathBuf>, name: &str, yes: bool) {
         }
     } else {
         let kernel = boot_kernel(config);
-        match kernel.agent_identities().purge(name) {
+        match kernel.identities_ref().purge(name) {
             Some(prev) => println!("Canonical UUID for \"{name}\" reset (was {prev})."),
             None => {
                 eprintln!("No canonical UUID recorded for agent name '{name}'.");
@@ -5186,7 +5186,7 @@ fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> 
     }
 
     let kernel = boot_kernel(config);
-    let agent_count = kernel.agent_registry().count();
+    let agent_count = kernel.agent_registry_ref().count();
     let cfg = kernel.config_ref();
 
     if json {
@@ -5235,7 +5235,7 @@ fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> 
     if agent_count > 0 {
         ui::blank();
         ui::section(&i18n::t("section-persisted-agents"));
-        for entry in kernel.agent_registry().list() {
+        for entry in kernel.agent_registry_ref().list() {
             println!("    {} ({}) -- {:?}", entry.name, entry.id, entry.state);
         }
     }

@@ -540,10 +540,10 @@ pub trait KernelApi: KernelHandle + Send + Sync {
 impl KernelApi for LibreFangKernel {
     // -- Subsystem accessors --
     fn agent_registry(&self) -> &AgentRegistry {
-        Self::agent_registry(self)
+        <Self as crate::AgentSubsystemApi>::agent_registry_ref(self)
     }
     fn agent_identities(&self) -> &Arc<crate::agent_identity_registry::AgentIdentityRegistry> {
-        Self::agent_identities(self)
+        <Self as crate::AgentSubsystemApi>::identities_ref(self)
     }
     fn approvals(&self) -> &ApprovalManager {
         <Self as crate::GovernanceSubsystemApi>::approvals(self)
@@ -597,13 +597,13 @@ impl KernelApi for LibreFangKernel {
         <Self as crate::ProcessSubsystemApi>::process_registry_ref(self)
     }
     fn scheduler_ref(&self) -> &AgentScheduler {
-        Self::scheduler_ref(self)
+        <Self as crate::AgentSubsystemApi>::scheduler_ref(self)
     }
     fn session_stream_hub(&self) -> Arc<SessionStreamHub> {
         Self::session_stream_hub(self)
     }
     fn supervisor_ref(&self) -> &Supervisor {
-        Self::supervisor_ref(self)
+        <Self as crate::AgentSubsystemApi>::supervisor_ref(self)
     }
     fn templates(&self) -> &crate::workflow::WorkflowTemplateRegistry {
         <Self as crate::WorkflowSubsystemApi>::templates_ref(self)
@@ -1046,7 +1046,7 @@ impl KernelApi for LibreFangKernel {
         Self::sync_default_model_agents(self, old_provider, dm);
     }
     fn traces(&self) -> &dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>> {
-        Self::traces(self)
+        <Self as crate::AgentSubsystemApi>::traces(self)
     }
     fn update_hand_agent_runtime_override(
         &self,

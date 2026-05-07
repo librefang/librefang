@@ -1,5 +1,6 @@
 //! Event system: crossterm polling, tick timer, streaming bridges.
 
+use librefang_kernel::AgentSubsystemApi;
 use librefang_kernel::LibreFangKernel;
 use librefang_kernel::McpSubsystemApi;
 use librefang_kernel::SkillsSubsystemApi;
@@ -715,7 +716,7 @@ pub fn spawn_fetch_dashboard(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             }
         }
         BackendRef::InProcess(kernel) => {
-            let count = kernel.agent_registry().count() as u64;
+            let count = kernel.agent_registry_ref().count() as u64;
             let _ = tx.send(AppEvent::DashboardData {
                 agent_count: count,
                 uptime_secs: 0,
@@ -1192,7 +1193,7 @@ pub fn spawn_fetch_agent_skills(backend: BackendRef, agent_id: String, tx: mpsc:
             if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
                 let aid = librefang_types::agent::AgentId(uuid);
                 let assigned = kernel
-                    .agent_registry()
+                    .agent_registry_ref()
                     .get(aid)
                     .map(|e| e.manifest.skills.clone())
                     .unwrap_or_default();
@@ -1255,7 +1256,7 @@ pub fn spawn_fetch_agent_mcp_servers(
             if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
                 let aid = librefang_types::agent::AgentId(uuid);
                 let assigned = kernel
-                    .agent_registry()
+                    .agent_registry_ref()
                     .get(aid)
                     .map(|e| e.manifest.mcp_servers.clone())
                     .unwrap_or_default();
@@ -1480,7 +1481,7 @@ pub fn spawn_fetch_memory_agents(backend: BackendRef, tx: mpsc::Sender<AppEvent>
         }
         BackendRef::InProcess(kernel) => {
             let agents: Vec<AgentEntry> = kernel
-                .agent_registry()
+                .agent_registry_ref()
                 .list()
                 .iter()
                 .map(|e| AgentEntry {

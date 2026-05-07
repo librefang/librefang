@@ -28,6 +28,7 @@
 //! A failed, aborted, or timed-out dream rolls back the lock mtime so the
 //! time gate reopens on the next tick.
 
+use crate::AgentSubsystemApi;
 use crate::MemorySubsystemApi;
 use crate::MeteringSubsystemApi;
 use std::path::PathBuf;
@@ -279,7 +280,7 @@ enum AgentGateResult {
 fn effective_thresholds(kernel: &LibreFangKernel, agent_id: AgentId) -> (f64, u32) {
     let cfg = kernel.config_snapshot();
     let (hours, sessions) = kernel
-        .agent_registry()
+        .agent_registry_ref()
         .get(agent_id)
         .map(|e| {
             (
@@ -731,7 +732,7 @@ async fn finalize_abort(kernel: &LibreFangKernel, target: AgentId, prior_mtime: 
 
 fn enrolled_agents(kernel: &LibreFangKernel) -> Vec<(AgentId, String)> {
     kernel
-        .agent_registry()
+        .agent_registry_ref()
         .list()
         .into_iter()
         .filter(|e| e.manifest.auto_dream_enabled)
@@ -743,7 +744,7 @@ fn enrolled_agents(kernel: &LibreFangKernel) -> Vec<(AgentId, String)> {
 /// list. The scheduler uses `enrolled_agents` — this is UI-only.
 fn all_agents_dream_state(kernel: &LibreFangKernel) -> Vec<(AgentId, String, bool)> {
     kernel
-        .agent_registry()
+        .agent_registry_ref()
         .list()
         .into_iter()
         .map(|e| (e.id, e.name, e.manifest.auto_dream_enabled))
@@ -758,7 +759,7 @@ pub fn set_agent_enabled(
     enabled: bool,
 ) -> LibreFangResult<()> {
     kernel
-        .agent_registry()
+        .agent_registry_ref()
         .update_auto_dream_enabled(agent_id, enabled)?;
     kernel.audit_log().record(
         agent_id.to_string(),
@@ -797,7 +798,7 @@ pub fn maybe_fire_on_turn_end(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
     // avoid cloning the full AgentEntry (manifest Strings/Vecs) on the hot
     // path. A missing agent returns false so freshly-deleted agents don't
     // attempt a dream.
-    if !kernel.agent_registry().is_auto_dream_enabled(agent_id) {
+    if !kernel.agent_registry_ref().is_auto_dream_enabled(agent_id) {
         return;
     }
 
@@ -815,7 +816,7 @@ pub fn maybe_fire_on_turn_end(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
             tracing::debug!(agent = %agent_id, "auto_dream: global toggled off between hook and spawn, skipping");
             return;
         }
-        if !kernel.agent_registry().is_auto_dream_enabled(agent_id) {
+        if !kernel.agent_registry_ref().is_auto_dream_enabled(agent_id) {
             tracing::debug!(agent = %agent_id, "auto_dream: agent toggled off between hook and spawn, skipping");
             return;
         }
@@ -1133,7 +1134,7 @@ pub async fn trigger_manual(kernel: Arc<LibreFangKernel>, agent_id: AgentId) -> 
         };
     }
 
-    match kernel.agent_registry().get(agent_id) {
+    match kernel.agent_registry_ref().get(agent_id) {
         None => {
             return TriggerOutcome {
                 fired: false,

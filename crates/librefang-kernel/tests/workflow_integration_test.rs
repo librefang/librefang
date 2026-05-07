@@ -16,6 +16,7 @@
 use librefang_kernel::workflow::{
     ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep,
 };
+use librefang_kernel::AgentSubsystemApi;
 use librefang_kernel::LibreFangKernel;
 use librefang_kernel::WorkflowSubsystemApi;
 use librefang_testing::MockKernelBuilder;
@@ -151,11 +152,11 @@ memory_write = ["self.*"]
     assert_eq!(workflows[0].name, "alpha-beta-pipeline");
 
     // Verify agents can be found by name
-    let alpha = kernel.agent_registry().find_by_name("agent-alpha");
+    let alpha = kernel.agent_registry_ref().find_by_name("agent-alpha");
     assert!(alpha.is_some());
     assert_eq!(alpha.unwrap().id, alpha_id);
 
-    let beta = kernel.agent_registry().find_by_name("agent-beta");
+    let beta = kernel.agent_registry_ref().find_by_name("agent-beta");
     assert!(beta.is_some());
     assert_eq!(beta.unwrap().id, beta_id);
 

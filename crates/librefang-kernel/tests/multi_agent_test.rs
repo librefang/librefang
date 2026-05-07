@@ -5,6 +5,7 @@
 //! that only runs when GROQ_API_KEY is set.
 
 use librefang_kernel::triggers::TriggerPattern;
+use librefang_kernel::AgentSubsystemApi;
 use librefang_kernel::LibreFangKernel;
 use librefang_kernel::SkillsSubsystemApi;
 use librefang_types::agent::{AgentId, AgentManifest};
@@ -128,7 +129,7 @@ fn test_activate_hand_spawns_agent() {
 
     let agent_id = instance.agent_id().unwrap();
     assert!(
-        kernel.agent_registry().get(agent_id).is_some(),
+        kernel.agent_registry_ref().get(agent_id).is_some(),
         "Agent should exist in registry"
     );
 
@@ -225,13 +226,13 @@ fn test_deactivate_kills_agent() {
     let agent_id = instance.agent_id().unwrap();
 
     // Agent should exist before deactivation
-    assert!(kernel.agent_registry().get(agent_id).is_some());
+    assert!(kernel.agent_registry_ref().get(agent_id).is_some());
 
     kernel.deactivate_hand(instance.instance_id).unwrap();
 
     // Agent should be gone after deactivation
     assert!(
-        kernel.agent_registry().get(agent_id).is_none(),
+        kernel.agent_registry_ref().get(agent_id).is_none(),
         "Agent should be killed after deactivation"
     );
 
@@ -257,7 +258,7 @@ fn test_pause_and_resume_hand() {
 
     // Agent should still exist (paused, not killed)
     assert!(
-        kernel.agent_registry().get(agent_id).is_some(),
+        kernel.agent_registry_ref().get(agent_id).is_some(),
         "Paused agent should still exist"
     );
 
@@ -280,7 +281,7 @@ fn test_agent_tagged_with_hand_metadata() {
     let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
     let agent_id = instance.agent_id().unwrap();
 
-    let entry = kernel.agent_registry().get(agent_id).unwrap();
+    let entry = kernel.agent_registry_ref().get(agent_id).unwrap();
     assert!(
         entry.tags.contains(&"hand:test-clip".to_string()),
         "Agent should be tagged with hand ID"
@@ -303,7 +304,7 @@ fn test_hand_tools_applied_to_agent() {
     let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
     let agent_id = instance.agent_id().unwrap();
 
-    let entry = kernel.agent_registry().get(agent_id).unwrap();
+    let entry = kernel.agent_registry_ref().get(agent_id).unwrap();
     // HAND_A defines tools = ["file_read", "file_write", "shell_exec"]
     for tool in &["file_read", "file_write", "shell_exec"] {
         assert!(
@@ -578,11 +579,11 @@ fn test_multiple_hands_coexist() {
 
     // Both agents exist
     assert!(kernel
-        .agent_registry()
+        .agent_registry_ref()
         .get(clip.agent_id().unwrap())
         .is_some());
     assert!(kernel
-        .agent_registry()
+        .agent_registry_ref()
         .get(devops.agent_id().unwrap())
         .is_some());
 
@@ -604,7 +605,7 @@ fn test_deactivate_one_hand_preserves_other() {
 
     // Devops agent should still be alive
     assert!(
-        kernel.agent_registry().get(devops_agent_id).is_some(),
+        kernel.agent_registry_ref().get(devops_agent_id).is_some(),
         "DevOps agent should survive clip deactivation"
     );
 
@@ -652,7 +653,7 @@ fn test_system_prompt_preserved() {
     let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
     let agent_id = instance.agent_id().unwrap();
 
-    let entry = kernel.agent_registry().get(agent_id).unwrap();
+    let entry = kernel.agent_registry_ref().get(agent_id).unwrap();
     assert!(
         entry.manifest.model.system_prompt.contains("clip agent"),
         "System prompt should contain the hand's prompt"
@@ -670,7 +671,7 @@ fn test_default_provider_resolved_to_kernel_default() {
     let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
     let agent_id = instance.agent_id().unwrap();
 
-    let entry = kernel.agent_registry().get(agent_id).unwrap();
+    let entry = kernel.agent_registry_ref().get(agent_id).unwrap();
     // Activation resolves the default provider sentinel against the effective
     // kernel config. The effective provider may differ from the test config's
     // initial value when the primary driver fails and auto-detect kicks in
@@ -921,7 +922,11 @@ memory_write = ["self.*"]
         agent_ids.push(id);
     }
 
-    assert_eq!(kernel.agent_registry().count(), 6, "Should have 6 agents");
+    assert_eq!(
+        kernel.agent_registry_ref().count(),
+        6,
+        "Should have 6 agents"
+    );
     println!(
         "\n  All {} agents spawned. Sending messages...\n",
         agents.len()

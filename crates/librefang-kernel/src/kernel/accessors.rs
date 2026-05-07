@@ -14,9 +14,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use super::subsystems::{
-    AgentSubsystemApi, EventSubsystemApi, McpSubsystemApi, MemorySubsystemApi,
-};
+use super::subsystems::{EventSubsystemApi, McpSubsystemApi, MemorySubsystemApi};
 
 use tracing::{debug, info, warn};
 
@@ -25,9 +23,6 @@ use librefang_types::config::KernelConfig;
 use librefang_types::error::LibreFangError;
 
 use crate::error::{KernelError, KernelResult};
-use crate::registry::AgentRegistry;
-use crate::scheduler::AgentScheduler;
-use crate::supervisor::Supervisor;
 use crate::workflow::WorkflowEngine;
 
 use super::workspace_setup::migrate_legacy_agent_dirs;
@@ -385,25 +380,6 @@ impl LibreFangKernel {
     #[inline]
     pub fn default_model(&self) -> librefang_types::config::DefaultModelConfig {
         self.config.load().default_model.clone()
-    }
-
-    /// Agent registry. Delegates to [`AgentSubsystem::registry_ref`].
-    #[inline]
-    pub fn agent_registry(&self) -> &AgentRegistry {
-        self.agents.agent_registry_ref()
-    }
-
-    /// Canonical agent UUID registry (refs #4614). Delegates to
-    /// [`AgentSubsystem::identities_ref`].
-    #[inline]
-    pub fn agent_identities(&self) -> &Arc<crate::agent_identity_registry::AgentIdentityRegistry> {
-        self.agents.identities_ref()
-    }
-
-    /// Agent scheduler. Delegates to [`AgentSubsystem::scheduler_ref`].
-    #[inline]
-    pub fn scheduler_ref(&self) -> &AgentScheduler {
-        self.agents.scheduler_ref()
     }
 
     /// Atomically mutate the model catalog using the RCU pattern: clone the
@@ -831,12 +807,6 @@ impl LibreFangKernel {
         WorkflowEngine::workflow_to_template(workflow)
     }
 
-    /// Process supervisor.
-    #[inline]
-    pub fn supervisor_ref(&self) -> &Supervisor {
-        self.agents.supervisor_ref()
-    }
-
     /// First currently-active `SessionInterrupt` registered for `agent_id`,
     /// across any of its sessions. Used by fork / subagent paths that just
     /// need a cancellation handle to chain off the parent — they don't care
@@ -872,12 +842,6 @@ impl LibreFangKernel {
             .iter()
             .find(|e| e.key().0 == agent_id)
             .map(|e| (e.key().1, e.value().clone()))
-    }
-
-    /// Per-agent decision traces.
-    #[inline]
-    pub fn traces(&self) -> &dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>> {
-        self.agents.traces()
     }
 
     /// Uptime since kernel boot.

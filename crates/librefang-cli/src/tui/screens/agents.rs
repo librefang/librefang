@@ -4,6 +4,7 @@
 use crate::templates::{self, AgentTemplate};
 use crate::tui::theme;
 use crate::tui::widgets;
+use librefang_kernel::AgentSubsystemApi;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -241,7 +242,7 @@ impl AgentSelectState {
     /// Load in-process agents from the kernel.
     pub fn load_inprocess_agents(&mut self, kernel: &librefang_kernel::LibreFangKernel) {
         self.inprocess_agents.clear();
-        for entry in kernel.agent_registry().list() {
+        for entry in kernel.agent_registry_ref().list() {
             self.inprocess_agents.push(InProcessAgent {
                 id: entry.id,
                 name: entry.name.clone(),
