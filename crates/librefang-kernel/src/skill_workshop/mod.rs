@@ -21,14 +21,22 @@
 //!    scanners, optionally consults the auxiliary LLM, and persists
 //!    accepted candidates under `<home_dir>/skills/pending/<agent>/`.
 //!
-//! # Default-off philosophy
+//! # Default behaviour
 //!
-//! The whole subsystem is off by default. An agent only sees capture
-//! when its `agent.toml` carries `[skill_workshop] enabled = true`, and
-//! even then candidates land in `pending/` unless `approval_policy =
-//! "auto"`. The `auto` policy still gates writes through the same
-//! prompt-injection scanner that protects marketplace skills — see
-//! [`storage::save_candidate`].
+//! `SkillWorkshopConfig::default()` (and therefore every agent that
+//! omits the `[skill_workshop]` block in `agent.toml`) is on with the
+//! conservative knob set: `review_mode = "heuristic"` (no LLM call),
+//! `approval_policy = "pending"` (every candidate waits for human
+//! review), `max_pending = 20`. Heuristic-only review is microseconds
+//! of regex per turn plus a small toml file when a candidate lands.
+//!
+//! Operators that want LLM refinement set
+//! `[skill_workshop] review_mode = "threshold_llm"`. Operators that
+//! want to disable the feature wholesale set `enabled = false`.
+//!
+//! Auto-promotion (`approval_policy = "auto"`) still gates writes
+//! through the same prompt-injection scanner that protects marketplace
+//! skills — see [`storage::save_candidate`].
 
 pub mod candidate;
 pub mod heuristic;

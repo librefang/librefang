@@ -97,10 +97,12 @@ pub fn agent_pending_dir(skills_root: &Path, agent_id: &str) -> io::Result<PathB
 /// (`max_concurrent_invocations > 1` plus `session_mode = "new"`),
 /// in which case the cap check below can transiently observe a stale
 /// directory listing and write one extra candidate before evicting.
-/// The breach is bounded by the number of concurrent invocations,
-/// self-heals on the next save, and is acceptable for a feature that
-/// is opt-in and default off. If parallel-invocation usage grows, swap
-/// to a per-agent `fs2::FileExt::lock_exclusive` along the lines of
+/// The breach is bounded by the number of concurrent invocations and
+/// self-heals on the next save. Parallel-invocation agents are rare
+/// (`max_concurrent_invocations > 1` is opt-in) and the worst-case
+/// outcome is one extra pending candidate that ages out on the next
+/// turn — acceptable. If parallel-invocation usage grows, swap to a
+/// per-agent `fs2::FileExt::lock_exclusive` along the lines of
 /// `librefang_skills::evolution::acquire_skill_lock`.
 ///
 /// Enforces three invariants before touching disk:

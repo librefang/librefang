@@ -47,8 +47,10 @@ impl LibreFangKernel {
             // Skill workshop (#3328) — same wiring shape as auto_dream:
             // registers a Weak<Self>-holding handler on AgentLoopEnd so the
             // captured workflow's pending file write happens off the agent
-            // loop's return path. Default-off; per-agent opt-in via
-            // `[skill_workshop] enabled` in agent.toml — see
+            // loop's return path. Default behaviour is heuristic-only
+            // capture into pending/ (no LLM call, no auto-promote);
+            // operators turn it off entirely with
+            // `[skill_workshop] enabled = false` in agent.toml — see
             // `crate::skill_workshop`.
             self.hooks.register(
                 librefang_types::agent::HookEvent::AgentLoopEnd,
@@ -58,10 +60,11 @@ impl LibreFangKernel {
             );
             // Best-effort cleanup of `.toml.tmp` orphans left over from
             // crashes mid-write between previous daemon runs. Pushed to
-            // a background task so kernel boot stays off the FS path
-            // entirely when no agent has skill_workshop enabled — the
-            // public contract is "default-off, ~zero hot-path cost",
-            // which includes startup, not just per-turn work.
+            // a background task so kernel boot does not block on a
+            // `read_dir` walk of `~/.librefang/skills/pending/` —
+            // matters more now that the workshop is on by default and
+            // the directory is reliably non-empty after the first
+            // candidate lands.
             //
             // `set_self_handle` has historically been a sync call that
             // does not require a tokio runtime; we only spawn when one

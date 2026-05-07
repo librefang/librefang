@@ -1165,16 +1165,20 @@ pub struct SkillWorkshopConfig {
 
 impl Default for SkillWorkshopConfig {
     fn default() -> Self {
-        // Every dimension defaults to "no work performed" so a future
-        // refactor that materialises `SkillWorkshopConfig::default()`
-        // for an unconfigured agent (test fixture, hot-reload fallback,
-        // forgotten manifest field) cannot accidentally activate
-        // capture even if some other code path skipped the `enabled`
-        // gate. Operators that opt in via `agent.toml` set
-        // `auto_capture = true` explicitly alongside `enabled = true`.
+        // Default-on with the conservative knob set: heuristic-only
+        // review (no LLM cost), pending policy (no auto-promote into
+        // the active registry, every candidate waits for human approve
+        // / reject), 20-candidate cap (oldest evicts on overflow).
+        // Heuristic mode is microseconds of regex per turn plus a small
+        // toml file when a candidate lands, so the cost regression vs
+        // pre-#3328 is well under the noise floor.
+        //
+        // Operators who want the LLM refinement pass set
+        // `review_mode = "threshold_llm"`; operators who want to
+        // disable the feature wholesale set `enabled = false`.
         Self {
-            enabled: false,
-            auto_capture: false,
+            enabled: true,
+            auto_capture: true,
             approval_policy: ApprovalPolicy::Pending,
             review_mode: ReviewMode::Heuristic,
             max_pending: 20,
