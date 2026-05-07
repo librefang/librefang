@@ -113,6 +113,7 @@ fn make_request(agent: &str, tool: &str, session_id: Option<&str>) -> ApprovalRe
         route_to: Vec::new(),
         escalation_count: 0,
         session_id: session_id.map(str::to_string),
+        tool_use_id: None,
     }
 }
 

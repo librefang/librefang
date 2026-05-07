@@ -78,7 +78,13 @@ impl LibreFangKernel {
     /// (`send_message_with_handle`, etc.) keep the `Option` for test stubs;
     /// they call this helper to materialize a handle when the caller passes
     /// `None`.
-    pub(crate) fn kernel_handle(&self) -> Arc<dyn KernelHandle> {
+    ///
+    /// Visibility: `pub` so external surfaces (the ACP adapter, future
+    /// daemon-attached transports) can route `resolve_tool_approval`
+    /// through the trait — that's the only path that spawns
+    /// `handle_approval_resolution`, which is required for deferred tool
+    /// executions to actually run after approval (#3313).
+    pub fn kernel_handle(&self) -> Arc<dyn KernelHandle> {
         self.self_handle
             .get()
             .and_then(|w| w.upgrade())

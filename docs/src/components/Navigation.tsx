@@ -502,6 +502,7 @@ export const enNavigation: Array<NavGroup> = [
 			{ title: "CLI Examples", href: withPrefix("/integrations/cli/examples") },
 			{ title: "Android / Termux", href: withPrefix("/integrations/android-termux") },
 			{ title: "MCP/A2A", href: withPrefix("/integrations/mcp-a2a") },
+			{ title: "Editor (ACP)", href: withPrefix("/integrations/acp") },
 			{ title: "Migration", href: withPrefix("/integrations/migration") },
 			{ title: "Desktop", href: withPrefix("/integrations/desktop") },
 			{ title: "Development Guide", href: withPrefix("/integrations/development") },

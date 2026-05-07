@@ -1,0 +1,208 @@
+//! ACP session state map.
+//!
+//! ACP sessions are created via `session/new`. Each ACP session is a
+//! distinct conversation surface even when multiple sessions multiplex
+//! over the same stdio connection. We map each ACP `SessionId` (a string
+//! arc on the wire) to:
+//!
+//! 1. The LibreFang [`librefang_types::agent::SessionId`] that backs the
+//!    underlying agent loop. Phase 1 derives one fresh per ACP session
+//!    via `SessionId::new()` so prior chat history doesn't leak across
+//!    `librefang acp` invocations.
+//! 2. The cwd the editor declared at `session/new` time, surfaced to the
+//!    agent loop so file-relative paths in tool calls resolve against
+//!    the editor's project root.
+//! 3. A [`tokio_util::sync::CancellationToken`] used by `session/cancel`
+//!    notifications to interrupt the active prompt pump.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use agent_client_protocol::schema::SessionId as AcpSessionId;
+use dashmap::DashMap;
+use librefang_types::agent::SessionId as LfSessionId;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+/// Per-ACP-session state.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionState {
+    pub librefang_session_id: LfSessionId,
+    #[allow(dead_code)] // surfaced to the agent loop in Phase 2 via SenderContext
+    pub cwd: PathBuf,
+    /// Cancelled by the `session/cancel` notification. Cloned by the
+    /// prompt pump so a tokio `select!` can short-circuit on cancel.
+    pub cancel: CancellationToken,
+}
+
+/// Namespace UUID used to derive a stable LibreFang `SessionId` from
+/// an ACP session id string. Same string ⇒ same kernel-side session,
+/// so a `session/load` after the editor reopens picks up the same
+/// LibreFang session — and therefore the same persisted message
+/// history — that the previous `session/new` minted.
+const ACP_SESSION_NS: Uuid = Uuid::from_bytes([
+    0xa3, 0x0c, 0x71, 0x3a, 0x4b, 0x1c, 0x4f, 0x6e, 0xb5, 0x12, 0x9c, 0x7f, 0x88, 0xd0, 0xa1, 0x42,
+]);
+
+impl SessionState {
+    /// Build a `SessionState` for the given ACP session id with a
+    /// `Uuid::new_v5`-derived LibreFang session id. Stable: same input
+    /// always produces the same kernel-side id, so a reconnecting
+    /// editor's `session/load` rejoins the existing session.
+    pub(crate) fn for_acp_id(acp_id: &AcpSessionId, cwd: PathBuf) -> Self {
+        let lf_uuid = Uuid::new_v5(&ACP_SESSION_NS, acp_id.0.as_bytes());
+        Self {
+            librefang_session_id: LfSessionId(lf_uuid),
+            cwd,
+            cancel: CancellationToken::new(),
+        }
+    }
+
+    /// Random-id constructor kept for tests that don't care about
+    /// cross-restart stability. Production paths should use
+    /// [`Self::for_acp_id`].
+    #[cfg(test)]
+    pub(crate) fn new(cwd: PathBuf) -> Self {
+        Self {
+            librefang_session_id: LfSessionId(Uuid::new_v4()),
+            cwd,
+            cancel: CancellationToken::new(),
+        }
+    }
+}
+
+/// Concurrent map of ACP `SessionId` -> `SessionState`.
+///
+/// `Arc<SessionStore>` is cloned into every handler closure so all
+/// handlers see the same map.
+#[derive(Debug, Default)]
+pub(crate) struct SessionStore {
+    inner: DashMap<AcpSessionId, SessionState>,
+}
+
+impl SessionStore {
+    pub(crate) fn new_arc() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub(crate) fn insert(&self, id: AcpSessionId, state: SessionState) {
+        self.inner.insert(id, state);
+    }
+
+    pub(crate) fn get(&self, id: &AcpSessionId) -> Option<SessionState> {
+        self.inner.get(id).map(|r| r.value().clone())
+    }
+
+    /// Reverse lookup used by the permission bridge to translate a kernel
+    /// `ApprovalRequest.session_id` (LibreFang `SessionId` serialised as
+    /// a UUID string) back to the ACP `SessionId` we should target.
+    pub(crate) fn find_by_librefang_id(&self, lf_id: &LfSessionId) -> Option<AcpSessionId> {
+        self.inner
+            .iter()
+            .find(|entry| entry.value().librefang_session_id == *lf_id)
+            .map(|entry| entry.key().clone())
+    }
+
+    /// Enumerate `(acp_id, cwd)` for every active session. Used by the
+    /// `session/list` handler. Cheap enough to do un-paginated for Phase 1
+    /// — daemon-attached mode in Phase 2 will need a real cursor scheme.
+    pub(crate) fn list(&self) -> Vec<(AcpSessionId, std::path::PathBuf)> {
+        self.inner
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().cwd.clone()))
+            .collect()
+    }
+
+    /// Remove a session by id. Returns the removed state if it
+    /// existed so callers (`session/close`) can pull the
+    /// LibreFang session id back out for downstream cleanup.
+    pub(crate) fn remove(&self, id: &AcpSessionId) -> Option<SessionState> {
+        self.inner.remove(id).map(|(_, state)| state)
+    }
+
+    /// Trigger the cancel token for `id` if it exists. Returns `true`
+    /// if a session was found, regardless of whether it was already
+    /// cancelled — ACP `session/cancel` is fire-and-forget.
+    pub(crate) fn cancel(&self, id: &AcpSessionId) -> bool {
+        match self.inner.get(id) {
+            Some(state) => {
+                state.value().cancel.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Empty the store, returning every `(acp_id, librefang_session_id)`
+    /// pair that was active. Used by `run_with_transport`'s cleanup
+    /// path: when the JSON-RPC loop ends without `session/close` for
+    /// every session (editor crash, network drop, kill -9), we still
+    /// need to unregister the per-session `fs/*` and `terminal/*`
+    /// clients in the kernel registry. Otherwise a subsequent
+    /// `register_session_fs` against a recycled `SessionId` would land
+    /// alongside the dead handle and tool calls would race against a
+    /// closed transport for `FS_RPC_TIMEOUT` (60s) before falling
+    /// back. Returning the LibreFang ids — not just the ACP ids —
+    /// lets the caller drive `unregister_session_fs` /
+    /// `unregister_session_terminal` directly without re-looking-up
+    /// each entry.
+    pub(crate) fn drain_active(&self) -> Vec<(AcpSessionId, LfSessionId)> {
+        let mut out = Vec::with_capacity(self.inner.len());
+        // `DashMap` doesn't expose `drain`; we iterate keys, then
+        // remove each. The shard locking is per-key so no deadlock
+        // hazard with concurrent handlers — by the time `drain_active`
+        // runs the connection is dead and no handler closure will
+        // observe the store again.
+        let keys: Vec<AcpSessionId> = self.inner.iter().map(|e| e.key().clone()).collect();
+        for k in keys {
+            if let Some((id, state)) = self.inner.remove(&k) {
+                out.push((id, state.librefang_session_id));
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_get_remove_roundtrip() {
+        let store = SessionStore::default();
+        let id: AcpSessionId = "sess-1".into();
+        let state = SessionState::new(PathBuf::from("/tmp/proj"));
+        let lf_id = state.librefang_session_id;
+        store.insert(id.clone(), state.clone());
+        let fetched = store.get(&id).expect("session should exist");
+        assert_eq!(fetched.cwd, PathBuf::from("/tmp/proj"));
+        let reverse = store.find_by_librefang_id(&lf_id).expect("reverse lookup");
+        assert_eq!(reverse, id);
+    }
+
+    #[test]
+    fn cancel_flips_token() {
+        let store = SessionStore::default();
+        let id: AcpSessionId = "sess-2".into();
+        let state = SessionState::new(PathBuf::from("/tmp"));
+        let token = state.cancel.clone();
+        store.insert(id.clone(), state);
+        assert!(!token.is_cancelled());
+        assert!(store.cancel(&id));
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn cancel_unknown_session_returns_false() {
+        let store = SessionStore::default();
+        let unknown: AcpSessionId = "nope".into();
+        assert!(!store.cancel(&unknown));
+    }
+
+    #[test]
+    fn reverse_lookup_misses_when_unknown() {
+        let store = SessionStore::default();
+        let phantom = LfSessionId(Uuid::new_v4());
+        assert!(store.find_by_librefang_id(&phantom).is_none());
+    }
+}
