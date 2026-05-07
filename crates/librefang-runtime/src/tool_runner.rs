@@ -698,7 +698,13 @@ pub async fn execute_tool_raw(
             if let (Some(k), Some(sid)) = (kernel, session_id) {
                 if let Some(client) = k.acp_terminal_client(*sid) {
                     if client.capabilities() {
-                        let cwd = workspace_root.map(|p| p.to_path_buf());
+                        // Pass `cwd: None` so the editor honours the
+                        // `cwd` it declared at `session/new` time (the
+                        // user's project root) rather than LibreFang's
+                        // agent workspace. The agent workspace path is
+                        // typically opaque to the editor anyway, so
+                        // forcing it would break relative paths in the
+                        // editor's terminal panel.
                         // shell_exec on the local path runs the command
                         // through `sh -c <command>`; mirror that here so
                         // multi-token / pipeline commands behave the same
@@ -708,7 +714,7 @@ pub async fn execute_tool_raw(
                                 "sh".to_string(),
                                 vec!["-c".to_string(), command.to_string()],
                                 Vec::new(),
-                                cwd,
+                                None,
                                 Some(64 * 1024),
                             )
                             .await;
