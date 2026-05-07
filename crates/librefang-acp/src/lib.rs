@@ -150,6 +150,19 @@ pub trait AcpKernel: Send + Sync + 'static {
 
     /// Drop the runtime-side `terminal/*` registration on close.
     fn unregister_session_terminal(&self, _lf_session_id: LfSessionId) {}
+
+    /// Pull the persisted message history for a session so the editor's
+    /// chat panel can rehydrate immediately on reconnect (#3313).
+    /// Returned tuples are `(role, text)` — system messages are filtered
+    /// out at the boundary since the editor is interested in the
+    /// human-visible turns. Default impl returns empty for
+    /// pure-protocol consumers (integration tests).
+    async fn fetch_session_history(
+        &self,
+        _lf_session_id: LfSessionId,
+    ) -> Vec<(librefang_types::message::Role, String)> {
+        Vec::new()
+    }
 }
 
 /// Convenience type alias for `Arc<dyn AcpKernel>`. Most call sites pass

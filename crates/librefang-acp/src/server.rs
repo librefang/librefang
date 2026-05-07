@@ -145,14 +145,16 @@ where
         // replay (including past `session/update` notifications) is
         // tracked separately under #3313 phase 2.
         .on_receive_request(
-            async move |req: LoadSessionRequest, responder, _cx| {
+            async move |req: LoadSessionRequest, responder, cx: agent_client_protocol::ConnectionTo<Client>| {
                 let state = SessionState::for_acp_id(&req.session_id, req.cwd);
                 let lf_id = state.librefang_session_id;
                 debug!(session_id = %req.session_id.0, librefang_id = %lf_id.0,
-                       "ACP session/load (no history replay yet)");
+                       "ACP session/load");
+                let acp_id = req.session_id.clone();
                 sessions_for_load.insert(req.session_id, state);
                 kernel_for_load.register_session_fs(lf_id);
                 kernel_for_load.register_session_terminal(lf_id);
+                replay_session_history(&kernel_for_load, &cx, &acp_id, lf_id).await;
                 responder.respond(LoadSessionResponse::default())
             },
             agent_client_protocol::on_receive_request!(),
@@ -162,14 +164,16 @@ where
         // mapping. The protocol distinction (resume MUST NOT replay
         // history) is moot until we have history to replay.
         .on_receive_request(
-            async move |req: ResumeSessionRequest, responder, _cx| {
+            async move |req: ResumeSessionRequest, responder, cx: agent_client_protocol::ConnectionTo<Client>| {
                 let state = SessionState::for_acp_id(&req.session_id, req.cwd);
                 let lf_id = state.librefang_session_id;
                 debug!(session_id = %req.session_id.0, librefang_id = %lf_id.0,
                        "ACP session/resume");
+                let acp_id = req.session_id.clone();
                 sessions_for_resume.insert(req.session_id, state);
                 kernel_for_resume.register_session_fs(lf_id);
                 kernel_for_resume.register_session_terminal(lf_id);
+                replay_session_history(&kernel_for_resume, &cx, &acp_id, lf_id).await;
                 responder.respond(ResumeSessionResponse::default())
             },
             agent_client_protocol::on_receive_request!(),
@@ -263,11 +267,61 @@ where
     Ok(())
 }
 
-/// Mint a fresh ACP `SessionId`. UUID v4; we don't derive
-/// deterministic ids because session-history replay across daemon
-/// restarts (which would benefit from a stable id) is tracked as a
-/// follow-up — see the doc on `session/load` in the handler chain.
+/// Mint a fresh ACP `SessionId`. UUID v4 — `session/load` /
+/// `session/resume` derive the kernel-side LibreFang session id
+/// deterministically from this string, so a reconnecting editor
+/// rejoins the same persisted session without an explicit mapping
+/// table.
 fn next_session_id() -> agent_client_protocol::schema::SessionId {
     let uuid = uuid::Uuid::new_v4();
     agent_client_protocol::schema::SessionId::new(uuid.to_string())
+}
+
+/// Pull the session's persisted message history from the kernel and
+/// emit it back to the editor as a sequence of `session/update`
+/// notifications, so the editor's chat panel rehydrates immediately
+/// on `session/load` / `session/resume` (#3313). Empty history (new
+/// session, missing kernel side, etc.) is a no-op.
+///
+/// User turns map to `SessionUpdate::UserMessageChunk`, assistant
+/// turns to `AgentMessageChunk`. Tool-call detail isn't replayed
+/// today — the goal is to give the user enough context to continue
+/// the conversation, not to reconstruct every wire frame from the
+/// original turn.
+async fn replay_session_history<K: AcpKernel>(
+    kernel: &std::sync::Arc<K>,
+    cx: &agent_client_protocol::ConnectionTo<Client>,
+    acp_id: &agent_client_protocol::schema::SessionId,
+    lf_id: librefang_types::agent::SessionId,
+) {
+    let history = kernel.fetch_session_history(lf_id).await;
+    if history.is_empty() {
+        return;
+    }
+    use agent_client_protocol::schema::{ContentBlock, ContentChunk, TextContent};
+    use librefang_types::message::Role;
+    debug!(
+        session_id = %acp_id.0,
+        turns = history.len(),
+        "ACP session/load: replaying persisted history"
+    );
+    for (role, text) in history {
+        let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+        let update = match role {
+            Role::User => agent_client_protocol::schema::SessionUpdate::UserMessageChunk(chunk),
+            Role::Assistant => {
+                agent_client_protocol::schema::SessionUpdate::AgentMessageChunk(chunk)
+            }
+            // System messages are filtered upstream by `fetch_session_history`,
+            // but be defensive — fall back to AgentMessageChunk so a
+            // forwarded system message at least shows in the panel.
+            Role::System => agent_client_protocol::schema::SessionUpdate::AgentMessageChunk(chunk),
+        };
+        if let Err(e) = cx.send_notification(
+            agent_client_protocol::schema::SessionNotification::new(acp_id.clone(), update),
+        ) {
+            tracing::warn!(error = %e, "ACP session/load: failed to emit history chunk");
+            break;
+        }
+    }
 }

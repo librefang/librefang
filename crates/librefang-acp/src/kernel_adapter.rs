@@ -227,4 +227,56 @@ impl AcpKernel for KernelAdapter {
     fn unregister_session_terminal(&self, lf_session_id: LfSessionId) {
         self.kernel.unregister_acp_terminal_client(lf_session_id);
     }
+
+    async fn fetch_session_history(
+        &self,
+        lf_session_id: LfSessionId,
+    ) -> Vec<(librefang_types::message::Role, String)> {
+        // Pull the persisted session out of the memory substrate. A
+        // brand-new session id (never seen by the kernel) returns
+        // `Ok(None)` — empty history is the right fallback. Any error
+        // path also degrades to empty so the editor's `session/load`
+        // succeeds rather than failing on a transient sqlite glitch.
+        let Ok(Some(session)) = self.kernel.memory_substrate().get_session(lf_session_id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(session.messages.len());
+        for msg in &session.messages {
+            // Skip system prompts — the editor's chat panel is for
+            // user-visible turns. The agent's system context is
+            // already in the kernel's prompt assembly path.
+            if matches!(msg.role, librefang_types::message::Role::System) {
+                continue;
+            }
+            let text = extract_text(&msg.content);
+            if text.is_empty() {
+                continue;
+            }
+            out.push((msg.role, text));
+        }
+        out
+    }
+}
+
+/// Concatenate all text blocks of a `MessageContent`, ignoring tool
+/// calls / images / other non-text payload. Surfaces enough to seed
+/// the editor's chat panel without dragging the protocol crate into
+/// `librefang-types::message`'s ContentBlock taxonomy.
+fn extract_text(content: &librefang_types::message::MessageContent) -> String {
+    use librefang_types::message::{ContentBlock as MsgBlock, MessageContent};
+    match content {
+        MessageContent::Text(s) => s.clone(),
+        MessageContent::Blocks(blocks) => {
+            let mut s = String::new();
+            for b in blocks {
+                if let MsgBlock::Text { text, .. } = b {
+                    if !s.is_empty() && !s.ends_with('\n') {
+                        s.push('\n');
+                    }
+                    s.push_str(text);
+                }
+            }
+            s
+        }
+    }
 }
