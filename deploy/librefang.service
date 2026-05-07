@@ -15,6 +15,7 @@ TimeoutStopSec=30
 
 # Environment
 EnvironmentFile=-/etc/librefang/env
+EnvironmentFile=-/var/lib/librefang/secrets.env
 WorkingDirectory=/var/lib/librefang
 
 # Security hardening

@@ -3692,49 +3692,11 @@ pub async fn reload_channels_from_disk(
     }
 
     // Re-read secrets.env so new API tokens are available in std::env.
-    // `std::env::set_var` is not thread-safe inside an async context; push the
-    // mutation onto a blocking thread where no other tokio worker is racing.
-    let secrets_path = state.kernel.home_dir().join("secrets.env");
-    if secrets_path.exists() {
-        let secrets_path_clone = secrets_path.clone();
-        let set_result = tokio::task::spawn_blocking(move || {
-            if let Ok(content) = std::fs::read_to_string(&secrets_path_clone) {
-                let mut count = 0usize;
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() || trimmed.starts_with('#') {
-                        continue;
-                    }
-                    if let Some(eq_pos) = trimmed.find('=') {
-                        let key = trimmed[..eq_pos].trim();
-                        let mut value = trimmed[eq_pos + 1..].trim().to_string();
-                        if !key.is_empty() {
-                            // Strip matching quotes
-                            if ((value.starts_with('"') && value.ends_with('"'))
-                                || (value.starts_with('\'') && value.ends_with('\'')))
-                                && value.len() >= 2
-                            {
-                                value = value[1..value.len() - 1].to_string();
-                            }
-                            // Always overwrite — the file is the source of truth after dashboard edits
-                            // SAFETY: running on a dedicated blocking thread; no concurrent env
-                            // reads happen here because spawn_blocking serialises the mutation.
-                            unsafe { std::env::set_var(key, &value) };
-                            count += 1;
-                        }
-                    }
-                }
-                count
-            } else {
-                0
-            }
-        })
-        .await;
-        match set_result {
-            Ok(n) if n > 0 => info!("Reloaded secrets.env for channel hot-reload ({n} vars)"),
-            Ok(_) => {}
-            Err(e) => warn!("spawn_blocking for secrets.env reload failed: {e}"),
-        }
+    // Shared with the boot path (#4701) — see `crate::secrets_env` for the
+    // parser + spawn_blocking-guarded mutation.
+    let n = crate::secrets_env::load_into_process_async(state.kernel.home_dir()).await;
+    if n > 0 {
+        info!("Reloaded secrets.env for channel hot-reload ({n} vars)");
     }
 
     // Re-read config from disk
