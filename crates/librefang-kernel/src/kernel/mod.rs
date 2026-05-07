@@ -84,6 +84,12 @@ mod handles;
 // inherent methods on `LibreFangKernel` remain visible without surgery.
 mod accessors;
 mod cron_bridge;
+// Cron session compaction helpers (#4683 / #3693). Cherry-picked into
+// this file from upstream main so `kernel::tests` resolves the helper
+// fns it asserts on. Long-term these belong inside the cron-tick body
+// rewrite that the rebase-on-main work will do.
+#[allow(dead_code)]
+mod cron_compaction;
 mod cron_script;
 // Phase 3b: cron scheduler tick loop — formerly the longest closure in
 // this file (#4683 landing zone). Extracted as `pub(super) async fn`
@@ -97,6 +103,13 @@ mod reviewer_sanitize;
 // are now consumed by `kernel::cron_tick` after Phase 3b lifted the cron
 // tick loop body out of mod.rs. They are still imported by `cron_tick`
 // directly via the `super::` path, so no re-export is needed here.
+// Re-export cron_compaction helpers so `kernel::tests`'s `super::*`
+// references continue to resolve byte-for-byte.
+#[allow(unused_imports)]
+use cron_compaction::{
+    cron_clamp_keep_recent, cron_compute_keep_count, cron_resolve_compaction_mode,
+    try_summarize_trim,
+};
 use cron_script::atomic_write_toml;
 use mcp_summary::{mcp_summary_cache_key, render_mcp_summary};
 use provider_probe::probe_all_local_providers_once;
@@ -1674,13 +1687,14 @@ impl LibreFangKernel {
 
         // Initialize metering engine (shares the same SQLite connection as the memory substrate)
         let metering = Arc::new(MeteringEngine::new(Arc::new(
-            librefang_memory::usage::UsageStore::new(memory.usage_conn()),
+            librefang_memory::usage::UsageStore::new(memory.pool()),
         )));
 
         // Initialize prompt versioning and A/B experiment store with its own connection
         // to avoid conflicts with UsageStore concurrent writes
-        let prompt_store = librefang_memory::PromptStore::new_with_path(&db_path)
-            .map_err(|e| KernelError::BootFailed(format!("Prompt store init failed: {e}")))?;
+        let prompt_store =
+            librefang_memory::PromptStore::new_with_path(&db_path, config.memory.pool_size)
+                .map_err(|e| KernelError::BootFailed(format!("Prompt store init failed: {e}")))?;
 
         let supervisor = Supervisor::new();
         let background = BackgroundExecutor::with_concurrency(
@@ -2155,10 +2169,8 @@ impl LibreFangKernel {
         }
 
         // Initialize execution approval manager
-        let approval_manager = crate::approval::ApprovalManager::new_with_db(
-            config.approval.clone(),
-            memory.usage_conn(),
-        );
+        let approval_manager =
+            crate::approval::ApprovalManager::new_with_db(config.approval.clone(), memory.pool());
 
         // Validate notification config — warn (not error) on unrecognized values
         {
@@ -2306,10 +2318,7 @@ impl LibreFangKernel {
             template_registry: WorkflowTemplateRegistry::new(),
             triggers: trigger_engine,
             background,
-            audit_log: Arc::new(AuditLog::with_db_anchored(
-                memory.usage_conn(),
-                audit_anchor_path,
-            )),
+            audit_log: Arc::new(AuditLog::with_db_anchored(memory.pool(), audit_anchor_path)),
             metering,
             // ArcSwap lets config_reload rebuild on `[llm.auxiliary]` edits
             // without invalidating any long-lived `Arc<Kernel>` handle.
