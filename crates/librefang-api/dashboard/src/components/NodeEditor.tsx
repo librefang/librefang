@@ -9,14 +9,16 @@ interface NodeEditorProps {
 export const NodeEditor = React.memo(function NodeEditor({ node, onUpdate }: NodeEditorProps) {
   const { t } = useTranslation();
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [localLabel, setLocalLabel] = useState("");
+  const [localLabel, setLocalLabel] = useState(node?.data?.label ?? "");
   const prevNodeId = useRef<string | null>(null);
 
-  if (node && node.id !== prevNodeId.current) {
-    if (timerRef.current) clearTimeout(timerRef.current);
-    prevNodeId.current = node.id;
-    setLocalLabel(node.data?.label ?? "");
-  }
+  useEffect(() => {
+    if (node) {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      prevNodeId.current = node.id;
+      setLocalLabel(node.data?.label ?? "");
+    }
+  }, [node?.id]);
 
   useEffect(() => {
     return () => {

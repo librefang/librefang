@@ -38,7 +38,7 @@ interface TerminalTabsProps {
   tmuxAvailable: boolean;
   maxWindows: number;
   displayedActiveWindowId: string | null;
-  onSwitchWindow: (windowId: string) => void;
+  onSwitchWindow: (windowId: string | null) => void;
   terminalRef: RefObject<Terminal | null>;
   fitAddonRef: RefObject<FitAddon | null>;
 }
@@ -211,7 +211,7 @@ export function TerminalTabs({
             }
             onSwitchWindow(next.id);
           } else {
-            onSwitchWindow(""); // FIXME: prop type is `(windowId: string) => void` but semantic intent is null
+            onSwitchWindow(null);
           }
         }
       } catch {
