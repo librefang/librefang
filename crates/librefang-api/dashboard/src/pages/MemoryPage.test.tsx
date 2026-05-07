@@ -32,8 +32,10 @@ vi.mock("../lib/queries/memory", () => ({
   useMemorySearchOrList: vi.fn(),
   // MemoryPage now batches per-agent KV via useQueries(agents.map(...));
   // this stub is only consulted when the test renders agents in the section.
-  agentKvMemoryQueryOptions: vi.fn(() => ({
-    queryKey: ["memory", "agent-kv", "stub"],
+  // Key on agentId so a future multi-agent test gets independent cache
+  // entries — a fixed key would silently dedupe into one shared observer.
+  agentKvMemoryQueryOptions: vi.fn((agentId: string) => ({
+    queryKey: ["memory", "agent-kv", agentId],
     queryFn: async () => [],
   })),
 }));
