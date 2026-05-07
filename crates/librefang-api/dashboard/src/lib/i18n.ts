@@ -15,8 +15,15 @@ i18n
     },
     fallbackLng: "en",
     interpolation: {
+      // React already escapes interpolated values; double-escaping would break output
       escapeValue: false,
     },
+    ...(import.meta.env.DEV && {
+      saveMissing: true,
+      missingKeyHandler: (_lngs: readonly string[], ns: string, key: string) => {
+        console.warn(`[i18n] missing key: ${ns}:${key}`);
+      },
+    }),
   });
 
 export default i18n;

@@ -28,17 +28,30 @@ export function formatTime(value: string | number | Date | undefined | null): st
 /**
  * Format a timestamp as relative time ("just now", "3m ago", "2h ago", "5d ago").
  */
-export function formatRelativeTime(value: string | number | Date | undefined | null): string {
+const rtfCache = new Map<string, Intl.RelativeTimeFormat>();
+
+function getRtf(locale: string): Intl.RelativeTimeFormat {
+  let rtf = rtfCache.get(locale);
+  if (!rtf) {
+    rtf = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
+    rtfCache.set(locale, rtf);
+  }
+  return rtf;
+}
+
+export function formatRelativeTime(value: string | number | Date | undefined | null, locale?: string, nowMs?: number): string {
   if (!value) return "-";
-  const diff = Date.now() - new Date(value).getTime();
+  const now = nowMs ?? Date.now();
+  const diff = now - new Date(value).getTime();
   const seconds = Math.floor(diff / 1000);
-  if (seconds < 60) return "just now";
+  const rtf = getRtf(locale ?? "en");
+  if (seconds < 60) return rtf.format(-seconds, "second");
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return rtf.format(-minutes, "minute");
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return rtf.format(-hours, "hour");
   const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  return rtf.format(-days, "day");
 }
 
 /**

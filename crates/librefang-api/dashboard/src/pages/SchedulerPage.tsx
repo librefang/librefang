@@ -1,4 +1,4 @@
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { useAgents } from "../lib/queries/agents";
@@ -86,13 +86,15 @@ export function SchedulerPage() {
   const [triggerMaxFires, setTriggerMaxFires] = useState<number>(0);
   const [triggerTargetAgent, setTriggerTargetAgent] = useState("");
 
-  // Trigger-edit state
-  const [editTrigger, setEditTrigger] = useState<TriggerItem | null>(null);
-  const [editPrompt, setEditPrompt] = useState("");
-  const [editMaxFires, setEditMaxFires] = useState<number>(0);
-  const [editCooldown, setEditCooldown] = useState<string>("");
-  const [editSessionMode, setEditSessionMode] = useState<string>("");
-  const [editTargetAgent, setEditTargetAgent] = useState<string>("");
+  // Trigger-edit state (grouped: all fields belong to the same edit form)
+  const [triggerEdit, setTriggerEdit] = useState({
+    trigger: null as TriggerItem | null,
+    prompt: "",
+    maxFires: 0,
+    cooldown: "",
+    sessionMode: "",
+    targetAgent: "",
+  });
 
   const agentsQuery = useAgents();
   const schedulesQuery = useSchedules();
@@ -118,16 +120,13 @@ export function SchedulerPage() {
     : targetType === "agent" ? !!agentId
     : !!workflowId;
 
-  const handleCreate = async (e: FormEvent) => {
+  const handleCreate = useCallback(async (e: FormEvent) => {
     e.preventDefault();
     if (!canSubmit) return;
     try {
       await createMut.mutateAsync({
         name, cron, tz: cronTz, message, enabled: true,
         ...(targetType === "agent" ? { agent_id: agentId } : { workflow_id: workflowId }),
-        // Only send delivery_targets when the user actually configured
-        // some — otherwise leave the field absent so the backend default
-        // (empty) applies and we don't ship a noisy `[]` on every create.
         ...(createDeliveryTargets.length > 0 ? { delivery_targets: createDeliveryTargets } : {}),
       });
       setShowCreate(false); setName(""); setMessage(""); setCron("0 9 * * *"); setCronTz(undefined); setAgentId(""); setWorkflowId(""); setTargetType("agent");
@@ -136,7 +135,7 @@ export function SchedulerPage() {
       const msg = err instanceof Error ? err.message : String(err);
       addToast(msg || t("common.error"), "error");
     }
-  };
+  }, [canSubmit, createMut, name, cron, cronTz, message, targetType, agentId, workflowId, createDeliveryTargets, addToast, t]);
 
   const openEditTargets = (s: ScheduleItem) => {
     setEditTargetsSchedule(s);
@@ -144,7 +143,7 @@ export function SchedulerPage() {
     setEditTargetsDraft((s.delivery_targets ?? []).map((t) => ({ ...t })));
   };
 
-  const handleSaveTargets = async () => {
+  const handleSaveTargets = useCallback(async () => {
     if (!editTargetsSchedule) return;
     try {
       await setDeliveryTargetsMut.mutateAsync({
@@ -158,9 +157,9 @@ export function SchedulerPage() {
       const msg = err instanceof Error ? err.message : String(err);
       addToast(msg || t("common.error"), "error");
     }
-  };
+  }, [editTargetsSchedule, setDeliveryTargetsMut, editTargetsDraft, addToast, t]);
 
-  const handleCreateTrigger = async (e: FormEvent) => {
+  const handleCreateTrigger = useCallback(async (e: FormEvent) => {
     e.preventDefault();
     if (!triggerAgentId) return;
     const patternStr = triggerPatternPreset === "custom" ? triggerPatternCustom : triggerPatternPreset;
@@ -185,32 +184,35 @@ export function SchedulerPage() {
       const msg = err instanceof Error ? err.message : String(err);
       addToast(msg || t("common.error"), "error");
     }
-  };
+  }, [triggerAgentId, triggerPatternPreset, triggerPatternCustom, triggerPrompt, triggerMaxFires, triggerTargetAgent, createTriggerMut, addToast, t]);
 
   const openEditTrigger = (tr: TriggerItem) => {
-    setEditTrigger(tr);
-    setEditPrompt(tr.prompt_template ?? "");
-    setEditMaxFires(tr.max_fires ?? 0);
-    setEditCooldown(tr.cooldown_secs != null ? String(tr.cooldown_secs) : "");
-    setEditSessionMode(tr.session_mode ?? "");
-    setEditTargetAgent(tr.target_agent_id ?? "");
+    setTriggerEdit({
+      trigger: tr,
+      prompt: tr.prompt_template ?? "",
+      maxFires: tr.max_fires ?? 0,
+      cooldown: tr.cooldown_secs != null ? String(tr.cooldown_secs) : "",
+      sessionMode: tr.session_mode ?? "",
+      targetAgent: tr.target_agent_id ?? "",
+    });
   };
 
-  const handleEditTrigger = async (e: FormEvent) => {
+  const handleEditTrigger = useCallback(async (e: FormEvent) => {
     e.preventDefault();
-    if (!editTrigger) return;
-    const patch: TriggerPatch = { prompt_template: editPrompt, max_fires: editMaxFires };
-    patch.cooldown_secs = editCooldown === "" ? null : Number(editCooldown);
-    patch.session_mode = editSessionMode === "" ? null : editSessionMode;
-    patch.target_agent_id = editTargetAgent === "" ? null : editTargetAgent;
+    const te = triggerEdit;
+    if (!te.trigger) return;
+    const patch: TriggerPatch = { prompt_template: te.prompt, max_fires: te.maxFires };
+    patch.cooldown_secs = te.cooldown === "" ? null : Number(te.cooldown);
+    patch.session_mode = te.sessionMode === "" ? null : te.sessionMode;
+    patch.target_agent_id = te.targetAgent === "" ? null : te.targetAgent;
     try {
-      await updateTriggerMut.mutateAsync({ id: editTrigger.id, data: patch, agentId: editTrigger.agent_id });
-      setEditTrigger(null);
+      await updateTriggerMut.mutateAsync({ id: te.trigger.id, data: patch, agentId: te.trigger.agent_id });
+      setTriggerEdit(prev => ({ ...prev, trigger: null }));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       addToast(msg || t("common.error"), "error");
     }
-  };
+  }, [triggerEdit, updateTriggerMut, addToast, t]);
 
   const handleDeleteSchedule = async (id: string) => {
     if (!confirmDelete || confirmDelete.type !== "schedule" || confirmDelete.id !== id) {
@@ -324,8 +326,8 @@ export function SchedulerPage() {
                     {(s.delivery_targets ?? []).length > 0 ? (
                       <>
                         {(s.delivery_targets ?? []).map((target, ti) => {
-                          // 业务说明: 列出每条 fan-out target 的简短摘要,
-                          // 详细编辑走 modal,这里只做展示。
+                        // Brief label per fan-out target. Full editing
+                        // happens in the modal; display-only here.
                           const label =
                             target.type === "channel"
                               ? `${target.channel_type}: ${target.recipient}`
@@ -666,19 +668,19 @@ export function SchedulerPage() {
       </DrawerPanel>
 
       {/* Edit Trigger Modal */}
-      <DrawerPanel isOpen={!!editTrigger} onClose={() => setEditTrigger(null)} title="Edit trigger" size="md">
+      <DrawerPanel isOpen={!!triggerEdit.trigger} onClose={() => setTriggerEdit(prev => ({ ...prev, trigger: null }))} title="Edit trigger" size="md">
         <form onSubmit={handleEditTrigger} className="p-5 space-y-4">
-          {editTrigger && (
+          {triggerEdit.trigger && (
             <div className="rounded-xl bg-warning/5 border border-warning/20 px-3 py-2 text-[10px] text-text-dim/60">
               <span className="font-bold text-warning/80">Pattern: </span>
-              {formatTriggerPattern(editTrigger.pattern) || String(editTrigger.pattern)}
+              {formatTriggerPattern(triggerEdit.trigger.pattern) || String(triggerEdit.trigger.pattern)}
             </div>
           )}
           <div>
             <label className="text-[10px] font-bold text-text-dim uppercase">Prompt template</label>
             <textarea
-              value={editPrompt}
-              onChange={e => setEditPrompt(e.target.value)}
+              value={triggerEdit.prompt}
+              onChange={e => setTriggerEdit(prev => ({ ...prev, prompt: e.target.value }))}
               rows={3}
               placeholder="Prompt sent to the agent when the event fires…"
               className={`${INPUT_CLASS} resize-none`}
@@ -688,16 +690,16 @@ export function SchedulerPage() {
             <div>
               <label className="text-[10px] font-bold text-text-dim uppercase">Max fires (0 = unlimited)</label>
               <input
-                type="number" min={0} value={editMaxFires}
-                onChange={e => setEditMaxFires(Number(e.target.value))}
+                type="number" min={0} value={triggerEdit.maxFires}
+                onChange={e => setTriggerEdit(prev => ({ ...prev, maxFires: Number(e.target.value) }))}
                 className={INPUT_CLASS}
               />
             </div>
             <div>
               <label className="text-[10px] font-bold text-text-dim uppercase">Cooldown (seconds, blank = none)</label>
               <input
-                type="number" min={0} value={editCooldown}
-                onChange={e => setEditCooldown(e.target.value)}
+                type="number" min={0} value={triggerEdit.cooldown}
+                onChange={e => setTriggerEdit(prev => ({ ...prev, cooldown: e.target.value }))}
                 placeholder="none"
                 className={INPUT_CLASS}
               />
@@ -705,7 +707,7 @@ export function SchedulerPage() {
           </div>
           <div>
             <label className="text-[10px] font-bold text-text-dim uppercase">Session mode (blank = agent default)</label>
-            <select value={editSessionMode} onChange={e => setEditSessionMode(e.target.value)} className={INPUT_CLASS}>
+            <select value={triggerEdit.sessionMode} onChange={e => setTriggerEdit(prev => ({ ...prev, sessionMode: e.target.value }))} className={INPUT_CLASS}>
               <option value="">agent default</option>
               <option value="persistent">persistent</option>
               <option value="new">new</option>
@@ -713,7 +715,7 @@ export function SchedulerPage() {
           </div>
           <div>
             <label className="text-[10px] font-bold text-text-dim uppercase">Target agent (blank = owner)</label>
-            <select value={editTargetAgent} onChange={e => setEditTargetAgent(e.target.value)} className={INPUT_CLASS}>
+            <select value={triggerEdit.targetAgent} onChange={e => setTriggerEdit(prev => ({ ...prev, targetAgent: e.target.value }))} className={INPUT_CLASS}>
               <option value="">owner (default)</option>
               {agents.map(a => (
                 <option key={a.id} value={a.id}>{a.name}</option>
@@ -728,7 +730,7 @@ export function SchedulerPage() {
               {updateTriggerMut.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Pencil className="w-4 h-4 mr-1" />}
               Save changes
             </Button>
-            <Button type="button" variant="secondary" onClick={() => setEditTrigger(null)}>{t("common.cancel")}</Button>
+            <Button type="button" variant="secondary" onClick={() => setTriggerEdit(prev => ({ ...prev, trigger: null }))}>{t("common.cancel")}</Button>
           </div>
         </form>
       </DrawerPanel>

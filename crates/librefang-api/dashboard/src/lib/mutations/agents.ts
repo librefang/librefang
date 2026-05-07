@@ -23,8 +23,12 @@ import {
   resolveApproval,
   uploadAgentFile,
   sendAgentMessage,
+  resetAgentSession,
+  updateAgentTools,
+  getAgentTemplateToml,
 } from "../http/client";
 import type { PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
+import { clearChatSessionCacheForAgent } from "../chatSessionCache";
 import { agentKeys, approvalKeys, handKeys, overviewKeys, sessionKeys } from "../queries/keys";
 
 /**
@@ -471,5 +475,43 @@ export function useResolveApproval() {
     mutationFn: ({ id, approved }: { id: string; approved: boolean }) =>
       resolveApproval(id, approved),
     onSuccess: () => qc.invalidateQueries({ queryKey: approvalKeys.all }),
+  });
+}
+
+export function useResetAgentSession() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: resetAgentSession,
+    onSuccess: (_data, agentId) => {
+      clearChatSessionCacheForAgent(agentId);
+      qc.invalidateQueries({ queryKey: agentKeys.detail(agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.sessionSnapshots(agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.sessions(agentId) });
+      qc.invalidateQueries({ queryKey: sessionKeys.lists() });
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
+    },
+  });
+}
+
+export function useUpdateAgentTools() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      payload,
+    }: {
+      agentId: string;
+      payload: { capabilities_tools?: string[]; tool_allowlist?: string[]; tool_blocklist?: string[] };
+    }) => updateAgentTools(agentId, payload),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.tools(variables.agentId) });
+    },
+  });
+}
+
+export function useAgentTemplateToml() {
+  return useMutation({
+    mutationFn: getAgentTemplateToml,
   });
 }

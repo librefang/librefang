@@ -203,6 +203,7 @@ impl SetupWizard {
             max_concurrent_invocations: None,
             cache_context: false,
             tool_exec_backend: None,
+            skill_workshop: librefang_types::agent::SkillWorkshopConfig::default(),
         };
 
         let skills_to_install: Vec<String> = intent

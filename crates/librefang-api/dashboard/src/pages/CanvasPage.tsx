@@ -386,7 +386,7 @@ function GroupNodeComponent({ data, id }: { data: CanvasNodeData; id: string }) 
       </div>
       {!expanded && (
         <div className="px-3 py-2">
-          <p className="text-[9px] text-text-dim">Click to expand</p>
+          <p className="text-[9px] text-text-dim">{t("canvas.click_to_expand")}</p>
         </div>
       )}
       <Handle type="source" position={Position.Bottom} className="w-3! h-3! rounded-full! bg-brand! border-2! border-surface!" />
@@ -783,7 +783,7 @@ function NodeConfigPanel({
                 {t("canvas.output_var")} <span className="text-text-dim/50 normal-case font-normal">{t("canvas.output_var_hint")}</span>
               </label>
               <input type="text" value={outputVar} onChange={e => setOutputVar(e.target.value)}
-                placeholder="e.g. research_result" className={inputClass} />
+                placeholder={t("canvas.example_placeholder")} className={inputClass} />
             </div>
             {/* Depends On — multi-select other step nodes */}
             {(() => {
@@ -884,14 +884,20 @@ function CanvasPageInner() {
   const historyRef = useRef<{ nodes: CanvasNode[]; edges: Edge[] }[]>([]);
   const historyIndexRef = useRef(-1);
   const clipboardRef = useRef<{ nodes: CanvasNode[]; edges: Edge[] } | null>(null);
+  const [hasClipboard, setHasClipboard] = useState(false);
+  const nodesRef = useRef(nodes);
+  const edgesRef = useRef(edges);
+
+  useEffect(() => { nodesRef.current = nodes; }, [nodes]);
+  useEffect(() => { edgesRef.current = edges; }, [edges]);
 
   const pushHistory = useCallback(() => {
-    const snapshot = { nodes: JSON.parse(JSON.stringify(nodes)), edges: JSON.parse(JSON.stringify(edges)) };
+    const snapshot = { nodes: structuredClone(nodesRef.current), edges: structuredClone(edgesRef.current) };
     historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1);
     historyRef.current.push(snapshot);
     if (historyRef.current.length > 50) historyRef.current.shift();
     historyIndexRef.current = historyRef.current.length - 1;
-  }, [nodes, edges]);
+  }, []);
 
   const undo = useCallback(() => {
     if (historyIndexRef.current <= 0) return;
@@ -930,7 +936,8 @@ function CanvasPageInner() {
     if (selNodes.length === 0) return;
     const selIds = new Set(selNodes.map(n => n.id));
     const selEdges = edges.filter(e => selIds.has(e.source) && selIds.has(e.target));
-    clipboardRef.current = { nodes: JSON.parse(JSON.stringify(selNodes)), edges: JSON.parse(JSON.stringify(selEdges)) };
+    clipboardRef.current = { nodes: structuredClone(selNodes), edges: structuredClone(selEdges) };
+    setHasClipboard(true);
   }, [nodes, edges, selectedNodeIds]);
 
   // Paste
@@ -1244,9 +1251,9 @@ function CanvasPageInner() {
       });
     });
 
-    // Handle edges
+    // Handle edges — read groupNode from nodesRef inside functional update
     setEdges(eds => {
-      const groupNode = nodes.find(n => n.id === groupId);
+      const groupNode = nodesRef.current.find(n => n.id === groupId);
       const gd = groupNode?.data;
       const isExpanded = gd?._expanded !== false;
       const willCollapse = isExpanded;
@@ -1261,24 +1268,18 @@ function CanvasPageInner() {
           return { ...e, hidden: willCollapse };
         }
         if (willCollapse) {
-          // External edges: redirect to group node, save original endpoints
           if (srcChild) return { ...e, data: { ...e.data, _origSource: e.source }, source: groupId };
           if (tgtChild) return { ...e, data: { ...e.data, _origTarget: e.target }, target: groupId };
         } else {
-          // Expand: restore original endpoints. Edge.data is unstructured
-          // (xyflow's `Edge<T>` defaults to `Record<string, unknown>`); we
-          // attach `_origSource`/`_origTarget` ourselves on collapse, so
-          // narrow them locally rather than carrying a typed edge generic.
           const ed = e.data as { _origSource?: string; _origTarget?: string } | undefined;
           if (ed?._origSource) return { ...e, source: ed._origSource, data: { ...e.data, _origSource: undefined }, hidden: false };
           if (ed?._origTarget) return { ...e, target: ed._origTarget, data: { ...e.data, _origTarget: undefined }, hidden: false };
-          // Restore internal edge visibility
           if (srcChild && tgtChild) return { ...e, hidden: false };
         }
         return e;
       });
     });
-  }, [nodes, setNodes, setEdges]);
+  }, [setNodes, setEdges]);
 
   // Ungroup: remove group node, keep child nodes and clear _groupId
   const ungroupNodes = useCallback((groupId: string) => {
@@ -1309,14 +1310,14 @@ function CanvasPageInner() {
       childIds.add(groupId);
       return nds.filter(n => !childIds.has(n.id));
     });
-    // Delete edges involving child nodes
+    // Delete edges involving child nodes — read group from nodesRef
     setEdges(eds => {
-      const group = nodes.find(n => n.id === groupId);
+      const group = nodesRef.current.find(n => n.id === groupId);
       const childIds = new Set<string>(group?.data._childIds || []);
       childIds.add(groupId);
       return eds.filter(e => !childIds.has(e.source) && !childIds.has(e.target));
     });
-  }, [nodes, setNodes, setEdges]);
+  }, [setNodes, setEdges]);
 
   // IMPORTANT: nodeTypes must be referentially stable to prevent ReactFlow from
   // unmounting/remounting all nodes on every render, which breaks click handlers.
@@ -1570,7 +1571,8 @@ function CanvasPageInner() {
 
   // Add node
   const addNode = useCallback((type: string) => {
-    const config = NODE_TYPES.find(n => n.type === type) || NODE_TYPES[10];
+    const DEFAULT_NODE_TYPE = NODE_TYPES.find(n => n.type === "agent") || NODE_TYPES[0];
+    const config = NODE_TYPES.find(n => n.type === type) || DEFAULT_NODE_TYPE;
     const defaultMode = NODE_MODE_MAP[type];
     // Use functional update to read latest nodes, avoiding stale closures.
     // Nodes added from the palette extend the pipeline to the right —
@@ -2140,7 +2142,7 @@ function CanvasPageInner() {
               disabled={(!selectedWorkflow && agentStepCount === 0) || !!runningWorkflowId || isDryRunning}
               title={t("canvas.dry_run_hint")}>
               {isDryRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <FlaskConical className="w-4 h-4" />}
-              <span className="hidden sm:inline ml-1">Dry Run</span>
+              <span className="hidden sm:inline ml-1">{t("canvas.dry_run")}</span>
             </Button>
             <Button variant="primary" onClick={() => handleRunClick()}
               disabled={(!selectedWorkflow && agentStepCount === 0) || !!runningWorkflowId || isDryRunning}>
@@ -2235,7 +2237,7 @@ function CanvasPageInner() {
                     ? <FlaskConical className="w-3.5 h-3.5 text-brand" />
                     : <Play className="w-3.5 h-3.5 text-success" />}
                   <span className={`text-xs font-bold ${showRunInput === "dry" ? "text-brand" : "text-success"}`}>
-                    {showRunInput === "dry" ? "Dry Run" : t("canvas.run_input_title")}
+                    {showRunInput === "dry" ? t("canvas.dry_run") : t("canvas.run_input_title")}
                   </span>
                 </div>
                 <button onClick={() => setShowRunInput(false)} className="p-1 rounded hover:bg-main"><X className="w-3.5 h-3.5" /></button>
@@ -2257,7 +2259,7 @@ function CanvasPageInner() {
                     <Button variant="primary" size="sm" className="flex-1" onClick={() => handleDryRun()}
                       disabled={isDryRunning}>
                       {isDryRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <FlaskConical className="w-3.5 h-3.5 mr-1" />}
-                      Validate
+                      {t("canvas.validate")}
                     </Button>
                   ) : (
                     <>
@@ -2348,46 +2350,48 @@ function CanvasPageInner() {
 
           {/* Right-click context menu */}
           {contextMenu && (
-            <div className="fixed z-50 rounded-xl border border-border-subtle bg-surface shadow-2xl py-1 min-w-[160px]"
-              style={{ left: contextMenu.x, top: contextMenu.y }}>
+            <div role="menu" tabIndex={-1} autoFocus aria-label={t("canvas.ctx_menu_label", { defaultValue: "Context menu" })}
+              className="fixed z-50 rounded-xl border border-border-subtle bg-surface shadow-2xl py-1 min-w-[160px]"
+              style={{ left: contextMenu.x, top: contextMenu.y }}
+              onKeyDown={e => { if (e.key === "Escape") setContextMenu(null); }}>
               {contextMenu.nodeId ? (
                 <>
-                  <button className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
+                  <button role="menuitem" className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
                     onClick={() => { setEditingNode(nodes.find(n => n.id === contextMenu.nodeId) || null); setContextMenu(null); }}>
                     {t("canvas.ctx_edit")}
                   </button>
-                  <button className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
+                  <button role="menuitem" className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
                     onClick={() => { copySelected(); setContextMenu(null); }}>
                     <Copy className="w-3 h-3" /> {t("canvas.ctx_copy")}
                   </button>
-                  <button className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
+                  <button role="menuitem" className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
                     onClick={() => { duplicate(); setContextMenu(null); }}>
                     {t("canvas.ctx_duplicate")}
                   </button>
-                  <div className="h-px bg-border-subtle my-1" />
-                  <button className="w-full px-3 py-1.5 text-xs text-left hover:bg-error/10 text-error flex items-center gap-2"
+                  <div className="h-px bg-border-subtle my-1" role="separator" />
+                  <button role="menuitem" className="w-full px-3 py-1.5 text-xs text-left hover:bg-error/10 text-error flex items-center gap-2"
                     onClick={() => { setNodes(nds => nds.filter(n => n.id !== contextMenu.nodeId)); setContextMenu(null); }}>
                     <Trash2 className="w-3 h-3" /> {t("common.delete")}
                   </button>
                 </>
               ) : (
                 <>
-                  <button className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
+                  <button role="menuitem" className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
                     onClick={() => { addNode("agent"); setContextMenu(null); }}>
                     <Plus className="w-3 h-3" /> {t("canvas.ctx_add_agent")}
                   </button>
-                  {clipboardRef.current && (
-                    <button className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
+                  {hasClipboard && (
+                    <button role="menuitem" className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
                       onClick={() => { paste(); setContextMenu(null); }}>
                       <ClipboardPaste className="w-3 h-3" /> {t("canvas.ctx_paste")}
                     </button>
                   )}
-                  <button className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
+                  <button role="menuitem" className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
                     onClick={() => { selectAll(); setContextMenu(null); }}>
                     {t("canvas.ctx_select_all")}
                   </button>
-                  <div className="h-px bg-border-subtle my-1" />
-                  <button className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
+                  <div className="h-px bg-border-subtle my-1" role="separator" />
+                  <button role="menuitem" className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
                     onClick={() => { autoLayout(); setContextMenu(null); }}>
                     <LayoutGrid className="w-3 h-3" /> {t("canvas.ctx_auto_layout")}
                   </button>
@@ -2402,10 +2406,10 @@ function CanvasPageInner() {
               <div className="flex items-center justify-between px-3 py-2 bg-brand/10 border-b border-border-subtle shrink-0">
                 <div className="flex items-center gap-2">
                   <FlaskConical className="w-3.5 h-3.5 text-brand" />
-                  <span className="text-xs font-bold text-brand">Dry Run</span>
+                  <span className="text-xs font-bold text-brand">{t("canvas.dry_run")}</span>
                   {dryRunResult.valid
-                    ? <Badge variant="success">valid</Badge>
-                    : <Badge variant="error">issues found</Badge>}
+                    ? <Badge variant="success">{t("canvas.valid")}</Badge>
+                    : <Badge variant="error">{t("canvas.issues_found")}</Badge>}
                 </div>
                 <button onClick={() => setDryRunResult(null)} className="p-1 rounded hover:bg-main"><X className="w-3.5 h-3.5" /></button>
               </div>
@@ -2422,16 +2426,16 @@ function CanvasPageInner() {
                           : <AlertCircle className="w-3 h-3 text-warning shrink-0" />}
                       <span className="text-[10px] font-bold truncate flex-1">{step.step_name}</span>
                       {step.agent_name && <span className="text-[9px] text-text-dim/50 shrink-0">{step.agent_name}</span>}
-                      {step.skipped && <span className="text-[9px] px-1 rounded bg-main border border-border-subtle text-text-dim/40 shrink-0">skip</span>}
+                      {step.skipped && <span className="text-[9px] px-1 rounded bg-main border border-border-subtle text-text-dim/40 shrink-0">{t("canvas.skip")}</span>}
                       {expandedDryStep === i
                         ? <ChevronUp className="w-3 h-3 text-text-dim/30 shrink-0" />
                         : <ChevronDown className="w-3 h-3 text-text-dim/30 shrink-0" />}
                     </button>
                     {expandedDryStep === i && (
                       <div className="px-3 pb-3 space-y-1.5 border-t border-border-subtle">
-                        {!step.agent_found && <p className="text-[10px] text-warning mt-2">Agent not found</p>}
+                        {!step.agent_found && <p className="text-[10px] text-warning mt-2">{t("canvas.agent_not_found")}</p>}
                         {step.skip_reason && <p className="text-[10px] text-text-dim mt-2">{step.skip_reason}</p>}
-                        <p className="text-[9px] font-bold text-text-dim/50 mt-2">Resolved prompt:</p>
+                        <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("canvas.resolved_prompt")}</p>
                         <pre className="text-[10px] text-text whitespace-pre-wrap max-h-20 overflow-y-auto bg-surface rounded-lg p-2">
                           {step.resolved_prompt || "(empty)"}
                         </pre>
@@ -2459,7 +2463,7 @@ function CanvasPageInner() {
                 {/* Step-level I/O */}
                 {runResult.step_results && runResult.step_results.length > 0 && (
                   <div className="px-3 pb-3 space-y-1.5 border-t border-border-subtle">
-                    <p className="text-[9px] font-bold text-text-dim/50 pt-2">Step details</p>
+                    <p className="text-[9px] font-bold text-text-dim/50 pt-2">{t("canvas.step_details")}</p>
                     {runResult.step_results.map((s, i) => (
                       <div key={i} className="rounded-lg border border-border-subtle bg-main overflow-hidden">
                         <button
@@ -2475,13 +2479,13 @@ function CanvasPageInner() {
                         {expandedRunStep === i && (
                           <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
                             <div>
-                              <p className="text-[9px] font-bold text-text-dim/50 mt-2">Prompt sent:</p>
+                              <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("canvas.prompt_sent")}</p>
                               <pre className="text-[10px] text-text whitespace-pre-wrap max-h-20 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
                                 {s.prompt || "(empty)"}
                               </pre>
                             </div>
                             <div>
-                              <p className="text-[9px] font-bold text-text-dim/50">Output:</p>
+                              <p className="text-[9px] font-bold text-text-dim/50">{t("canvas.output")}</p>
                               <pre className="text-[10px] text-text whitespace-pre-wrap max-h-20 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
                                 {s.output || "(empty)"}
                               </pre>

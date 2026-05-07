@@ -684,6 +684,24 @@ pub struct LibreFangKernel {
     /// Approval enforcement + lifecycle hooks + sweeper guards. See
     /// [`subsystems::GovernanceSubsystem`].
     pub(crate) governance: subsystems::GovernanceSubsystem,
+    /// Per-LibreFang-session ACP `fs/*` clients, populated by the ACP
+    /// adapter at `session/new` time so runtime tools can route file
+    /// reads/writes back through the editor instead of the local
+    /// filesystem (#3313). Lookup is per-tool-call so we keep this as a
+    /// top-level field rather than wrapping it in a subsystem — there's
+    /// no other coupled state, and the runtime accesses the map via
+    /// `kernel.acp_fs_clients` at the deepest tool path.
+    pub(crate) acp_fs_clients: dashmap::DashMap<
+        librefang_types::agent::SessionId,
+        std::sync::Arc<dyn librefang_runtime::kernel_handle::AcpFsClient>,
+    >,
+    /// Per-LibreFang-session ACP `terminal/*` clients (#3313).
+    /// Same shape as `acp_fs_clients`; lets `shell_exec` route
+    /// commands through the editor's terminal panel.
+    pub(crate) acp_terminal_clients: dashmap::DashMap<
+        librefang_types::agent::SessionId,
+        std::sync::Arc<dyn librefang_runtime::kernel_handle::AcpTerminalClient>,
+    >,
     /// Auto-reply engine.
     pub(crate) auto_reply_engine: crate::auto_reply::AutoReplyEngine,
     /// Persistent + background process registries. See
@@ -1428,6 +1446,14 @@ impl LibreFangKernel {
             process_manager: Some(&self.processes.manager),
             sender_id: deferred.sender_id.as_deref(),
             channel: deferred.channel.as_deref(),
+            // Restore the originating SessionId from v36's persisted
+            // `deferred_payload` so a post-restart `Allow once` resumes
+            // through the *original* editor's `acp_fs_client` /
+            // `acp_terminal_client` rather than silently falling back
+            // to local fs / shell. `None` for deferred rows written
+            // before this field existed (pre-#3313 H1) — those still
+            // resume, just without ACP routing.
+            session_id: deferred.session_id,
             spill_threshold_bytes: cfg.tool_results.spill_threshold_bytes,
             max_artifact_bytes: cfg.tool_results.max_artifact_bytes,
             checkpoint_manager: self.checkpoint_manager.as_ref(),

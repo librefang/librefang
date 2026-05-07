@@ -1,6 +1,7 @@
 import { formatRelativeTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { AlertCircle, RefreshCw } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useAgents } from "../lib/queries/agents";
 import { useSessions } from "../lib/queries/sessions";
@@ -19,7 +20,7 @@ import { truncateId } from "../lib/string";
 import { StaggerList } from "../components/ui/StaggerList";
 
 export function SessionsPage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -81,13 +82,13 @@ export function SessionsPage() {
     } finally { setPendingId(null); }
   }
 
+  const nowMs = Date.now();
+  const locale = i18n.language ?? "en";
   const formatTime = (ts: string) => {
     if (!ts) return "-";
-    const d = new Date(ts);
-    const now = new Date();
-    const diff = now.getTime() - d.getTime();
+    const diff = nowMs - new Date(ts).getTime();
     if (diff < 60000) return t("sessions.just_now");
-    return formatRelativeTime(ts);
+    return formatRelativeTime(ts, locale, nowMs);
   };
 
   return (
@@ -119,9 +120,25 @@ export function SessionsPage() {
         />
       )}
 
+      {agentsQuery.isError && !agentsQuery.isLoading && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-xl border border-warning/30 bg-warning/5 text-warning text-xs">
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          <span>{t("sessions.agents_load_warning", { defaultValue: "Could not load agent names — session list may show unknown agents." })}</span>
+        </div>
+      )}
+
       {/* Sessions */}
       {sessionsQuery.isLoading ? (
         <ListSkeleton rows={3} />
+      ) : sessionsQuery.isError ? (
+        <div className="flex flex-col items-center justify-center gap-3 py-12 text-text-dim">
+          <AlertCircle className="w-8 h-8 text-error" />
+          <p className="text-sm">{t("sessions.load_error", { defaultValue: "Failed to load sessions." })}</p>
+          <p className="text-xs text-text-dim/60">{String(sessionsQuery.error)}</p>
+          <Button variant="secondary" size="sm" onClick={() => sessionsQuery.refetch()}>
+            <RefreshCw className="w-3.5 h-3.5" /> {t("common.retry", { defaultValue: "Retry" })}
+          </Button>
+        </div>
       ) : sessions.length === 0 ? (
         <EmptyState
           icon={<MessageCircle className="w-7 h-7" />}

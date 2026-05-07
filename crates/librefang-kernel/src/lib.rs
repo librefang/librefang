@@ -36,6 +36,7 @@ pub mod scheduler;
 pub mod session_lifecycle;
 pub mod session_policy;
 pub mod session_stream_hub;
+pub mod skill_workshop;
 pub mod supervised_spawn;
 pub mod supervisor;
 pub mod trajectory;

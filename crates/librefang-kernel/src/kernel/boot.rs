@@ -1279,6 +1279,8 @@ impl LibreFangKernel {
             context_engine,
             context_engine_config,
             self_handle: OnceLock::new(),
+            acp_fs_clients: dashmap::DashMap::new(),
+            acp_terminal_clients: dashmap::DashMap::new(),
             provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
             config_reload_lock: tokio::sync::RwLock::new(()),
             prompt_metadata_cache: PromptMetadataCache::new(),
