@@ -15,7 +15,6 @@ import {
   useMemoryConfig,
   useMemoryHealth,
   useMemorySearchOrList,
-  useAgentKvMemory,
 } from "../lib/queries/memory";
 import { useAgents } from "../lib/queries/agents";
 import {
@@ -31,7 +30,12 @@ vi.mock("../lib/queries/memory", () => ({
   useMemoryConfig: vi.fn(),
   useMemoryHealth: vi.fn(),
   useMemorySearchOrList: vi.fn(),
-  useAgentKvMemory: vi.fn(),
+  // MemoryPage now batches per-agent KV via useQueries(agents.map(...));
+  // this stub is only consulted when the test renders agents in the section.
+  agentKvMemoryQueryOptions: vi.fn(() => ({
+    queryKey: ["memory", "agent-kv", "stub"],
+    queryFn: async () => [],
+  })),
 }));
 
 vi.mock("../lib/queries/agents", () => ({
@@ -134,7 +138,6 @@ const useMemoryHealthMock = useMemoryHealth as unknown as ReturnType<typeof vi.f
 const useMemorySearchOrListMock = useMemorySearchOrList as unknown as ReturnType<
   typeof vi.fn
 >;
-const useAgentKvMemoryMock = useAgentKvMemory as unknown as ReturnType<typeof vi.fn>;
 const useAgentsMock = useAgents as unknown as ReturnType<typeof vi.fn>;
 const useAddMemoryMock = useAddMemory as unknown as ReturnType<typeof vi.fn>;
 const useUpdateMemoryMock = useUpdateMemory as unknown as ReturnType<typeof vi.fn>;
@@ -245,11 +248,6 @@ describe("MemoryPage", () => {
       refetch: vi.fn(),
     });
     useAgentsMock.mockReturnValue({ data: [] });
-    useAgentKvMemoryMock.mockReturnValue({
-      data: [],
-      isLoading: false,
-      isError: false,
-    });
   });
 
   it("renders KPI stats from useMemoryStats", () => {

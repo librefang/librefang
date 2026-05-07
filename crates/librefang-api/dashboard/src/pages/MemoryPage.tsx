@@ -1,8 +1,15 @@
 import { formatDateTime } from "../lib/datetime";
 import { useState, useEffect, useMemo, useDeferredValue } from "react";
 import { useTranslation } from "react-i18next";
+import { useQueries, type UseQueryResult } from "@tanstack/react-query";
 import { type MemoryStatsResponse } from "../api";
-import { useMemoryStats, useMemoryConfig, useMemoryHealth, useMemorySearchOrList, useAgentKvMemory } from "../lib/queries/memory";
+import {
+  useMemoryStats,
+  useMemoryConfig,
+  useMemoryHealth,
+  useMemorySearchOrList,
+  agentKvMemoryQueryOptions,
+} from "../lib/queries/memory";
 import { useAgents } from "../lib/queries/agents";
 import { useAddMemory, useUpdateMemory, useDeleteMemory, useCleanupMemories, useUpdateMemoryConfig } from "../lib/mutations/memory";
 import type { AgentItem, AgentKvPair } from "../api";
@@ -339,12 +346,11 @@ const KV_VALUE_TRUNCATE = 200;
 // inflating page memory for what's only meant to be a quick peek.
 const KV_TITLE_TRUNCATE = 2000;
 
-// TODO(perf): N+1 queries — each AgentKvRows issues its own useAgentKvMemory(agentId).
-// Replace with useQueries (tanstack-query v5) in AgentKvSection to batch all agent
-// KV lookups into a single observer array and pass data as props.
-function AgentKvRows({ agentId }: { agentId: string }) {
+// Receives the per-agent KV query result from AgentKvSection (a single
+// `useQueries` observer batches all agents) so this row component stays
+// presentational — no per-row hook subscription, no N+1 churn.
+function AgentKvRows({ kvQuery }: { kvQuery: UseQueryResult<AgentKvPair[]> }) {
   const { t } = useTranslation();
-  const kvQuery = useAgentKvMemory(agentId);
 
   if (kvQuery.isLoading) {
     return (
@@ -408,6 +414,15 @@ function AgentKvRows({ agentId }: { agentId: string }) {
 function AgentKvSection({ agents }: { agents: AgentItem[] }) {
   const { t } = useTranslation();
 
+  // Batch every per-agent KV lookup into a single useQueries observer instead
+  // of mounting one `useAgentKvMemory` hook per row. Same number of network
+  // requests (the API has no batch endpoint), but only one subscription point
+  // — no N+1 React-Query churn, fewer re-renders, query results flow down as
+  // props.
+  const kvQueries = useQueries({
+    queries: agents.map((agent) => agentKvMemoryQueryOptions(agent.id)),
+  });
+
   return (
     <div className="flex flex-col gap-3">
       <h3 className="text-sm font-bold">
@@ -420,7 +435,7 @@ function AgentKvSection({ agents }: { agents: AgentItem[] }) {
         />
       ) : (
         <div className="grid gap-4">
-          {agents.map((agent) => (
+          {agents.map((agent, idx) => (
             <Card key={agent.id} padding="md">
               <div className="flex items-center gap-2 mb-3 flex-wrap">
                 <h4 className="text-xs font-bold">{agent.name}</h4>
@@ -437,7 +452,7 @@ function AgentKvSection({ agents }: { agents: AgentItem[] }) {
                     </tr>
                   </thead>
                   <tbody>
-                    <AgentKvRows agentId={agent.id} />
+                    <AgentKvRows kvQuery={kvQueries[idx]} />
                   </tbody>
                 </table>
               </div>
