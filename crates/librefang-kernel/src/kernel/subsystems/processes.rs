@@ -14,9 +14,9 @@ use librefang_runtime::process_registry::ProcessRegistry;
 /// Focused process-management API.
 pub trait ProcessSubsystemApi: Send + Sync {
     /// Persistent process manager handle.
-    fn manager(&self) -> &Arc<ProcessManager>;
+    fn process_manager_ref(&self) -> &Arc<ProcessManager>;
     /// Background process registry handle.
-    fn registry(&self) -> &Arc<ProcessRegistry>;
+    fn process_registry_ref(&self) -> &Arc<ProcessRegistry>;
 }
 
 /// Process management cluster — see module docs.
@@ -37,12 +37,12 @@ impl ProcessSubsystem {
 
 impl ProcessSubsystemApi for ProcessSubsystem {
     #[inline]
-    fn manager(&self) -> &Arc<ProcessManager> {
+    fn process_manager_ref(&self) -> &Arc<ProcessManager> {
         &self.manager
     }
 
     #[inline]
-    fn registry(&self) -> &Arc<ProcessRegistry> {
+    fn process_registry_ref(&self) -> &Arc<ProcessRegistry> {
         &self.registry
     }
 }

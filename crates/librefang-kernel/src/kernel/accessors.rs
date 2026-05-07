@@ -395,7 +395,7 @@ impl LibreFangKernel {
     /// Agent registry. Delegates to [`AgentSubsystem::registry_ref`].
     #[inline]
     pub fn agent_registry(&self) -> &AgentRegistry {
-        self.agents.registry_ref()
+        self.agents.agent_registry_ref()
     }
 
     /// Canonical agent UUID registry (refs #4614). Delegates to
@@ -429,7 +429,7 @@ impl LibreFangKernel {
     /// [`MeteringSubsystem::engine`].
     #[inline]
     pub fn metering_ref(&self) -> &Arc<MeteringEngine> {
-        self.metering.engine()
+        self.metering.metering_engine()
     }
 
     /// Agent scheduler. Delegates to [`AgentSubsystem::scheduler_ref`].
@@ -444,7 +444,7 @@ impl LibreFangKernel {
     pub fn model_catalog_ref(
         &self,
     ) -> &arc_swap::ArcSwap<librefang_runtime::model_catalog::ModelCatalog> {
-        self.llm.catalog_swap()
+        self.llm.model_catalog_swap()
     }
 
     /// Snapshot the current model catalog. Delegates to
@@ -453,7 +453,7 @@ impl LibreFangKernel {
     pub fn model_catalog_load(
         &self,
     ) -> arc_swap::Guard<Arc<librefang_runtime::model_catalog::ModelCatalog>> {
-        self.llm.catalog_load()
+        self.llm.model_catalog_load()
     }
 
     /// Atomically mutate the model catalog using the RCU pattern: clone the
@@ -734,7 +734,7 @@ impl LibreFangKernel {
     pub fn skill_registry_ref(
         &self,
     ) -> &std::sync::RwLock<librefang_skills::registry::SkillRegistry> {
-        self.skills.registry_ref()
+        self.skills.skill_registry_ref()
     }
 
     /// Hand registry (curated autonomous capability packages).
@@ -749,7 +749,7 @@ impl LibreFangKernel {
     /// use this accessor when you need the `ArcSwap` handle directly.
     #[inline]
     pub fn mcp_catalog(&self) -> &arc_swap::ArcSwap<librefang_extensions::catalog::McpCatalog> {
-        self.mcp.catalog_swap()
+        self.mcp.mcp_catalog_swap()
     }
 
     /// Load a snapshot of the MCP catalog — lock-free, no blocking.
@@ -760,7 +760,7 @@ impl LibreFangKernel {
     pub fn mcp_catalog_load(
         &self,
     ) -> arc_swap::Guard<std::sync::Arc<librefang_extensions::catalog::McpCatalog>> {
-        self.mcp.catalog_load()
+        self.mcp.mcp_catalog_load()
     }
 
     /// Reload the MCP catalog from disk, replacing the current snapshot
@@ -995,7 +995,7 @@ impl LibreFangKernel {
     /// [`MediaSubsystem::engine`].
     #[inline]
     pub fn media(&self) -> &librefang_runtime::media_understanding::MediaEngine {
-        self.media.engine()
+        self.media.media_engine()
     }
 
     /// Text-to-speech engine. Delegates to [`MediaSubsystem::tts`].
@@ -1213,14 +1213,14 @@ impl LibreFangKernel {
     /// [`ProcessSubsystem::manager`].
     #[inline]
     pub fn processes(&self) -> &Arc<librefang_runtime::process_manager::ProcessManager> {
-        self.processes.manager()
+        self.processes.process_manager_ref()
     }
 
     /// Background process registry for fire-and-forget shell_exec
     /// processes. Delegates to [`ProcessSubsystem::registry`].
     #[inline]
     pub fn process_registry(&self) -> &Arc<librefang_runtime::process_registry::ProcessRegistry> {
-        self.processes.registry()
+        self.processes.process_registry_ref()
     }
 
     /// OFP peer registry (set once at startup).

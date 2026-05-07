@@ -63,8 +63,8 @@ use librefang_skills::registry::SkillRegistry;
 
 impl AgentSubsystemApi for LibreFangKernel {
     #[inline]
-    fn registry_ref(&self) -> &AgentRegistry {
-        self.agents.registry_ref()
+    fn agent_registry_ref(&self) -> &AgentRegistry {
+        self.agents.agent_registry_ref()
     }
     #[inline]
     fn identities_ref(&self) -> &Arc<AgentIdentityRegistry> {
@@ -114,12 +114,12 @@ impl GovernanceSubsystemApi for LibreFangKernel {
 
 impl LlmSubsystemApi for LibreFangKernel {
     #[inline]
-    fn catalog_swap(&self) -> &ArcSwap<ModelCatalog> {
-        self.llm.catalog_swap()
+    fn model_catalog_swap(&self) -> &ArcSwap<ModelCatalog> {
+        self.llm.model_catalog_swap()
     }
     #[inline]
-    fn catalog_load(&self) -> arc_swap::Guard<Arc<ModelCatalog>> {
-        self.llm.catalog_load()
+    fn model_catalog_load(&self) -> arc_swap::Guard<Arc<ModelCatalog>> {
+        self.llm.model_catalog_load()
     }
     #[inline]
     fn clear_driver_cache(&self) {
@@ -137,12 +137,12 @@ impl LlmSubsystemApi for LibreFangKernel {
 
 impl McpSubsystemApi for LibreFangKernel {
     #[inline]
-    fn catalog_swap(&self) -> &ArcSwap<McpCatalog> {
-        McpSubsystemApi::catalog_swap(&self.mcp)
+    fn mcp_catalog_swap(&self) -> &ArcSwap<McpCatalog> {
+        self.mcp.mcp_catalog_swap()
     }
     #[inline]
-    fn catalog_load(&self) -> arc_swap::Guard<Arc<McpCatalog>> {
-        McpSubsystemApi::catalog_load(&self.mcp)
+    fn mcp_catalog_load(&self) -> arc_swap::Guard<Arc<McpCatalog>> {
+        self.mcp.mcp_catalog_load()
     }
     #[inline]
     fn health(&self) -> &HealthMonitor {
@@ -180,8 +180,8 @@ impl MediaSubsystemApi for LibreFangKernel {
         self.media.browser()
     }
     #[inline]
-    fn engine(&self) -> &MediaEngine {
-        self.media.engine()
+    fn media_engine(&self) -> &MediaEngine {
+        self.media.media_engine()
     }
     #[inline]
     fn tts(&self) -> &TtsEngine {
@@ -245,8 +245,8 @@ impl MeteringSubsystemApi for LibreFangKernel {
         self.metering.audit_log()
     }
     #[inline]
-    fn engine(&self) -> &Arc<crate::metering::MeteringEngine> {
-        MeteringSubsystemApi::engine(&self.metering)
+    fn metering_engine(&self) -> &Arc<crate::metering::MeteringEngine> {
+        self.metering.metering_engine()
     }
     #[inline]
     fn current_budget(&self) -> BudgetConfig {
@@ -256,12 +256,12 @@ impl MeteringSubsystemApi for LibreFangKernel {
 
 impl ProcessSubsystemApi for LibreFangKernel {
     #[inline]
-    fn manager(&self) -> &Arc<librefang_runtime::process_manager::ProcessManager> {
-        self.processes.manager()
+    fn process_manager_ref(&self) -> &Arc<librefang_runtime::process_manager::ProcessManager> {
+        self.processes.process_manager_ref()
     }
     #[inline]
-    fn registry(&self) -> &Arc<librefang_runtime::process_registry::ProcessRegistry> {
-        self.processes.registry()
+    fn process_registry_ref(&self) -> &Arc<librefang_runtime::process_registry::ProcessRegistry> {
+        self.processes.process_registry_ref()
     }
 }
 
@@ -278,8 +278,8 @@ impl SecuritySubsystemApi for LibreFangKernel {
 
 impl SkillsSubsystemApi for LibreFangKernel {
     #[inline]
-    fn registry_ref(&self) -> &std::sync::RwLock<SkillRegistry> {
-        self.skills.registry_ref()
+    fn skill_registry_ref(&self) -> &std::sync::RwLock<SkillRegistry> {
+        self.skills.skill_registry_ref()
     }
     #[inline]
     fn hand_registry_ref(&self) -> &HandRegistry {

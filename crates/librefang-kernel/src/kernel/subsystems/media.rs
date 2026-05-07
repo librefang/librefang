@@ -19,7 +19,7 @@ pub trait MediaSubsystemApi: Send + Sync {
     /// Browser automation manager.
     fn browser(&self) -> &BrowserManager;
     /// Media understanding engine.
-    fn engine(&self) -> &MediaEngine;
+    fn media_engine(&self) -> &MediaEngine;
     /// Text-to-speech engine.
     fn tts(&self) -> &TtsEngine;
     /// Media generation driver cache.
@@ -70,7 +70,7 @@ impl MediaSubsystemApi for MediaSubsystem {
     }
 
     #[inline]
-    fn engine(&self) -> &MediaEngine {
+    fn media_engine(&self) -> &MediaEngine {
         &self.media_engine
     }
 

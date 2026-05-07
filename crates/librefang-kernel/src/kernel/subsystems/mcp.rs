@@ -21,9 +21,9 @@ use std::sync::atomic::AtomicU64;
 /// Focused MCP API.
 pub trait McpSubsystemApi: Send + Sync {
     /// `ArcSwap`-backed catalog handle.
-    fn catalog_swap(&self) -> &ArcSwap<McpCatalog>;
+    fn mcp_catalog_swap(&self) -> &ArcSwap<McpCatalog>;
     /// Cheap atomic snapshot of the catalog.
-    fn catalog_load(&self) -> arc_swap::Guard<Arc<McpCatalog>>;
+    fn mcp_catalog_load(&self) -> arc_swap::Guard<Arc<McpCatalog>>;
     /// MCP server health monitor.
     fn health(&self) -> &HealthMonitor;
     /// MCP connection pool.
@@ -90,12 +90,12 @@ impl McpSubsystem {
 
 impl McpSubsystemApi for McpSubsystem {
     #[inline]
-    fn catalog_swap(&self) -> &ArcSwap<McpCatalog> {
+    fn mcp_catalog_swap(&self) -> &ArcSwap<McpCatalog> {
         &self.mcp_catalog
     }
 
     #[inline]
-    fn catalog_load(&self) -> arc_swap::Guard<Arc<McpCatalog>> {
+    fn mcp_catalog_load(&self) -> arc_swap::Guard<Arc<McpCatalog>> {
         self.mcp_catalog.load()
     }
 

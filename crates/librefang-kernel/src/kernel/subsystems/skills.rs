@@ -17,7 +17,7 @@ use tokio::sync::Semaphore;
 /// Focused skills + hands API.
 pub trait SkillsSubsystemApi: Send + Sync {
     /// Plugin skill registry handle.
-    fn registry_ref(&self) -> &std::sync::RwLock<SkillRegistry>;
+    fn skill_registry_ref(&self) -> &std::sync::RwLock<SkillRegistry>;
     /// Curated hand registry.
     fn hand_registry_ref(&self) -> &HandRegistry;
 }
@@ -58,7 +58,7 @@ impl SkillsSubsystem {
 
 impl SkillsSubsystemApi for SkillsSubsystem {
     #[inline]
-    fn registry_ref(&self) -> &std::sync::RwLock<SkillRegistry> {
+    fn skill_registry_ref(&self) -> &std::sync::RwLock<SkillRegistry> {
         &self.skill_registry
     }
 

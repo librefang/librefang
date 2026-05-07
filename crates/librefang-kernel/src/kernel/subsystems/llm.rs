@@ -26,9 +26,9 @@ use librefang_types::config::DefaultModelConfig;
 /// inherent methods on `LlmSubsystem`.
 pub trait LlmSubsystemApi: Send + Sync {
     /// `ArcSwap`-backed model catalog handle.
-    fn catalog_swap(&self) -> &ArcSwap<ModelCatalog>;
+    fn model_catalog_swap(&self) -> &ArcSwap<ModelCatalog>;
     /// Cheap atomic snapshot of the model catalog.
-    fn catalog_load(&self) -> arc_swap::Guard<Arc<ModelCatalog>>;
+    fn model_catalog_load(&self) -> arc_swap::Guard<Arc<ModelCatalog>>;
     /// Drop every cached driver client.
     fn clear_driver_cache(&self);
     /// Optional embedding driver handle.
@@ -99,12 +99,12 @@ impl LlmSubsystem {
 
 impl LlmSubsystemApi for LlmSubsystem {
     #[inline]
-    fn catalog_swap(&self) -> &ArcSwap<ModelCatalog> {
+    fn model_catalog_swap(&self) -> &ArcSwap<ModelCatalog> {
         &self.model_catalog
     }
 
     #[inline]
-    fn catalog_load(&self) -> arc_swap::Guard<Arc<ModelCatalog>> {
+    fn model_catalog_load(&self) -> arc_swap::Guard<Arc<ModelCatalog>> {
         self.model_catalog.load()
     }
 

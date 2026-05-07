@@ -22,7 +22,7 @@ pub trait MeteringSubsystemApi: Send + Sync {
     /// Audit log handle.
     fn audit_log(&self) -> &Arc<AuditLog>;
     /// Metering engine handle.
-    fn engine(&self) -> &Arc<MeteringEngine>;
+    fn metering_engine(&self) -> &Arc<MeteringEngine>;
     /// Snapshot the current `BudgetConfig`.
     fn current_budget(&self) -> BudgetConfig;
 }
@@ -73,7 +73,7 @@ impl MeteringSubsystemApi for MeteringSubsystem {
     }
 
     #[inline]
-    fn engine(&self) -> &Arc<MeteringEngine> {
+    fn metering_engine(&self) -> &Arc<MeteringEngine> {
         &self.engine
     }
 

@@ -25,7 +25,7 @@ use crate::supervisor::Supervisor;
 /// Focused agent-registry API.
 pub trait AgentSubsystemApi: Send + Sync {
     /// Agent registry handle.
-    fn registry_ref(&self) -> &AgentRegistry;
+    fn agent_registry_ref(&self) -> &AgentRegistry;
     /// Canonical agent UUID registry.
     fn identities_ref(&self) -> &Arc<AgentIdentityRegistry>;
     /// Agent scheduler handle.
@@ -102,7 +102,7 @@ impl AgentSubsystem {
 
 impl AgentSubsystemApi for AgentSubsystem {
     #[inline]
-    fn registry_ref(&self) -> &AgentRegistry {
+    fn agent_registry_ref(&self) -> &AgentRegistry {
         &self.registry
     }
 
