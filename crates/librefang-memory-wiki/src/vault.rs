@@ -522,6 +522,21 @@ fn read_page_if_present(path: &Path, topic: &str) -> WikiResult<Option<WikiPage>
         return Ok(None);
     }
     let raw = fs::read_to_string(path).map_err(|e| WikiError::io(path.display().to_string(), e))?;
+    // CRLF tolerance: editors on Windows (and `git config core.autocrlf=true`
+    // checkouts) save Markdown with `\r\n` line endings. Our delimiter
+    // matcher in `frontmatter::split` is LF-only — without normalising the
+    // raw bytes, a hand-authored `---\r\n` header is treated as the file
+    // having no frontmatter, the entire YAML block leaks into `body`, and
+    // a subsequent `wiki_write` (with `force = true`) wraps that into a
+    // new frontmatter — corrupting the page instead of preserving the
+    // edit. Normalise once on read so split sees the same shape regardless
+    // of how the file was saved. The vault's own `render()` always emits
+    // `\n`, so this only affects on-disk content authored externally.
+    let raw = if raw.contains("\r\n") {
+        raw.replace("\r\n", "\n")
+    } else {
+        raw
+    };
     let (yaml, body) = frontmatter::split(&raw);
     let frontmatter = match yaml {
         Some(y) => match frontmatter::parse(y, topic) {
@@ -916,5 +931,33 @@ mod tests {
         let page = vault.get("shared").unwrap();
         // Provenance is monotonic: surviving writes appended their entries.
         assert_eq!(page.frontmatter.provenance.len(), ok_count);
+    }
+
+    #[test]
+    fn crlf_authored_pages_are_parsed_not_treated_as_bodyless() {
+        let (vault, dir) = fresh_vault(RenderMode::Native);
+        // Land a clean page first so the file exists with LF.
+        vault
+            .write("notepad", "original body", provenance("a"), false)
+            .unwrap();
+        // Simulate Windows / git autocrlf re-saving the file with CRLF
+        // line endings. This is the failure mode the LF-only delimiter
+        // matcher used to corrupt: the entire YAML header would leak into
+        // the body and a subsequent forced write would re-wrap it.
+        let path = dir.path().join("notepad.md");
+        let lf = fs::read_to_string(&path).unwrap();
+        fs::write(&path, lf.replace('\n', "\r\n")).unwrap();
+
+        // wiki_get must still parse the frontmatter, not return the YAML
+        // header as part of the body.
+        let page = vault.get("notepad").unwrap();
+        assert_eq!(page.frontmatter.topic, "notepad");
+        assert!(
+            !page.body.contains("topic:"),
+            "frontmatter must not leak into body: {:?}",
+            page.body
+        );
+        assert!(page.body.contains("original body"));
+        assert_eq!(page.frontmatter.provenance.len(), 1);
     }
 }
