@@ -142,6 +142,15 @@ async fn get_status(app: axum::Router, path: &str) -> StatusCode {
     app.oneshot(req).await.unwrap().status()
 }
 
+async fn method_status(app: axum::Router, method: Method, path: &str) -> StatusCode {
+    let req = Request::builder()
+        .method(method)
+        .uri(path)
+        .body(Body::empty())
+        .unwrap();
+    app.oneshot(req).await.unwrap().status()
+}
+
 // ---------------------------------------------------------------------------
 // The route table under test.
 //
@@ -266,6 +275,15 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/api/tools/file_read", Expect::Authed),
     re("/api/peers", Expect::Authed),
     re("/api/skills/my-skill", Expect::Authed),
+    // Skill workshop pending review (#3328) — sensitive: list / show
+    // expose user-input excerpts up to 800 chars per candidate, and
+    // approve/reject (separately covered by the POST allowlist test
+    // below) mutate the active skill registry. Must NOT leak past auth.
+    re("/api/skills/pending", Expect::Authed),
+    re(
+        "/api/skills/pending/00000000-0000-0000-0000-000000000001",
+        Expect::Authed,
+    ),
     re("/api/a2a/tasks/some-task/status", Expect::Authed),
     re("/api/extensions", Expect::Authed),
 ];
@@ -465,4 +483,35 @@ async fn mcp_servers_prefix_does_not_leak_protected_paths() {
         StatusCode::UNAUTHORIZED,
         "/api/mcp/servers/test-srv/auth/callback must be reachable without a token (OAuth callback)"
     );
+}
+
+/// Skill workshop pending review (#3328): the four `/api/skills/pending*`
+/// routes are sensitive — list/show expose user-input excerpts, and
+/// approve/reject mutate the active skill registry. Confirm all four
+/// return 401 without a token when an api_key is configured.
+///
+/// The GET cases are also exercised through `authed_routes_require_token`
+/// via the `REGISTERED_GET_ROUTES` catalog. This test additionally pins
+/// the two POST endpoints, which the GET-only catalog does not cover.
+#[tokio::test(flavor = "multi_thread")]
+async fn skill_workshop_pending_endpoints_require_token() {
+    let harness = boot_router_with_api_key("test-secret-key").await;
+    let id = "00000000-0000-0000-0000-000000000001";
+
+    let cases: &[(Method, String)] = &[
+        (Method::GET, "/api/skills/pending".to_string()),
+        (Method::GET, format!("/api/skills/pending/{id}")),
+        (Method::POST, format!("/api/skills/pending/{id}/approve")),
+        (Method::POST, format!("/api/skills/pending/{id}/reject")),
+    ];
+
+    for (method, path) in cases {
+        let status = method_status(harness.app.clone(), method.clone(), path).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{method} {path} must return 401 without a token \
+             (the skill-workshop pending surface is sensitive)"
+        );
+    }
 }

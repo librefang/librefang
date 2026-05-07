@@ -1844,13 +1844,28 @@ export interface PendingCandidate {
   provenance: PendingProvenance;
 }
 
-export interface PendingApprovalResult {
-  status: "approved";
-  candidate_id: string;
-  skill_name: string;
-  version?: string;
-  message: string;
-}
+// Discriminated on `status`:
+//   * `approved` — fresh promotion; `version` carries the new skill's
+//     initial version string.
+//   * `already_promoted` — the active skill already existed (a previous
+//     approve promoted it but the pending-file cleanup failed). The
+//     server idempotently dropped the phantom pending row and returned
+//     200; no `version` field, since this call did not perform a write.
+//     UI should treat both as a successful resolution of the candidate.
+export type PendingApprovalResult =
+  | {
+      status: "approved";
+      candidate_id: string;
+      skill_name: string;
+      version?: string;
+      message: string;
+    }
+  | {
+      status: "already_promoted";
+      candidate_id: string;
+      skill_name: string;
+      message: string;
+    };
 
 export async function listPendingCandidates(agent?: string): Promise<PendingCandidate[]> {
   const query = agent ? `?agent=${encodeURIComponent(agent)}` : "";

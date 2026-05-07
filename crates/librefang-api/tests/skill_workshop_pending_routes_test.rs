@@ -296,6 +296,56 @@ async fn pending_approve_non_uuid_id_returns_400() {
     assert!(body["error"].as_str().unwrap_or("").contains("UUID"));
 }
 
+/// Phantom-pending recovery: when the active skill already exists (e.g.
+/// a previous approve promoted the candidate but the pending-file
+/// cleanup failed for transient reasons), a re-approve must idempotently
+/// drop the pending row and return 200 instead of 409-ing forever — the
+/// reviewer otherwise has no UI action to clear the entry.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_approve_already_installed_clears_pending_and_returns_200() {
+    let h = boot().await;
+    let agent = "11111111-1111-1111-1111-111111111111";
+    let first_id = "abababab-0000-0000-0000-000000000001";
+    let second_id = "abababab-0000-0000-0000-000000000002";
+    let root = skills_root(&h);
+
+    // First approve plants the active skill and clears its pending file.
+    storage::save_candidate(&root, &fixture_candidate(agent, first_id), 20, None).unwrap();
+    let (status, _) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{first_id}/approve"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "first approve must succeed");
+    assert!(
+        root.join("fmt_before_commit").join("skill.toml").exists(),
+        "active skill seeded"
+    );
+
+    // Re-stage a pending file with the same skill name to mimic the
+    // phantom case (write succeeded; cleanup never ran).
+    storage::save_candidate(&root, &fixture_candidate(agent, second_id), 20, None).unwrap();
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{second_id}/approve"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "phantom-pending must clear: {body:?}"
+    );
+    assert_eq!(body["status"], "already_promoted");
+    assert_eq!(body["candidate_id"], second_id);
+    assert_eq!(body["skill_name"], "fmt_before_commit");
+    assert!(
+        storage::load_candidate(&root, second_id).is_err(),
+        "phantom pending file must be removed after recovery"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/skills/pending/{id}/reject
 // ---------------------------------------------------------------------------

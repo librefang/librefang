@@ -640,6 +640,45 @@ pub async fn approve_pending_candidate(
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": e.to_string()})),
         ),
+        Err(librefang_kernel::skill_workshop::WorkshopError::Skill(
+            librefang_skills::SkillError::AlreadyInstalled(skill_name),
+        )) => {
+            // Phantom pending: a previous approve promoted this candidate
+            // (active dir exists, version history has an entry) but the
+            // pending file removal failed (e.g. Windows AV held a handle,
+            // read-only mount mid-clean-up). Without this branch the user
+            // sees a 409 forever and has no UI action to clear it. Drop
+            // the pending row idempotently and return 200 — the active
+            // skill is already what the user asked for.
+            //
+            // `NotFound` from the nested reject is the desired terminal
+            // state, not a failure: it just means a concurrent reject /
+            // CLI cleanup beat us to the row. Treating it as a 500 would
+            // surface a confusing "active skill exists, but failed to
+            // clear pending entry: not found" — both halves of which are
+            // the success state.
+            match librefang_kernel::skill_workshop::storage::reject_candidate(&skills_root, &id) {
+                Ok(()) | Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "status": "already_promoted",
+                        "candidate_id": id,
+                        "skill_name": skill_name,
+                        "message": format!(
+                            "Active skill '{skill_name}' already exists; pending entry cleared.",
+                        ),
+                    })),
+                ),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "Active skill '{skill_name}' already exists, but failed to clear pending entry: {e}"
+                        ),
+                    })),
+                ),
+            }
+        }
         Err(librefang_kernel::skill_workshop::WorkshopError::Skill(e)) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": format!("promotion rejected: {e}")})),

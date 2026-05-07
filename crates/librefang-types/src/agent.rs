@@ -1145,7 +1145,7 @@ pub struct ManifestCapabilities {
 /// pending file. Either way the active skill goes through the same
 /// `SkillVerifier::scan_prompt_content` gate that guards marketplace
 /// skills.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SkillWorkshopConfig {
     /// Master switch. When `false`, the after-turn hook is a no-op for

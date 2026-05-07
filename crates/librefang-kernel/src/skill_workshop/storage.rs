@@ -245,22 +245,44 @@ fn is_duplicate_pending(dir: &Path, candidate: &CandidateSkill) -> io::Result<bo
     Ok(find_duplicate_pending(dir, candidate)?.is_some())
 }
 
+/// Normalize a free-form string for dedup comparison: lowercase, trim,
+/// collapse every whitespace run (incl. newlines / tabs) to a single
+/// space. Without this, `"From now on always run cargo fmt before commit."`
+/// and `"from now on always run cargo fmt before commit"` would land as
+/// distinct candidates despite carrying the same teaching signal — every
+/// turn that re-emits the rule with a slightly different shape would pile
+/// up duplicates against the cap until the LRU eviction caught up.
+fn normalize_dedup_field(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
 /// Returns the existing pending candidate that matches `candidate`'s
-/// dedup key (`(source kind, name, prompt_context)`), if any. Used by
-/// the auto-promote path to recover from the "orphan pending" corner
-/// case: a previous `evolution::create_skill` that failed leaves the
-/// pending file behind, and the next turn's capture would `dedup` away
-/// without ever retrying the orphan. The auto branch can call
-/// `approve_candidate` against the orphan's id to clear it.
+/// dedup key (`(source kind, normalized name, normalized prompt_context)`),
+/// if any. Used by the auto-promote path to recover from the "orphan
+/// pending" corner case: a previous `evolution::create_skill` that failed
+/// leaves the pending file behind, and the next turn's capture would
+/// `dedup` away without ever retrying the orphan. The auto branch can
+/// call `approve_candidate` against the orphan's id to clear it.
+///
+/// Both `name` and `prompt_context` are compared after `normalize_dedup_field`
+/// so case-only and whitespace-only variants of the same signal collapse
+/// correctly; the comparison stays linear in `O(pending_count *
+/// max_field_len)` because the field cap is bounded by the same
+/// `MAX_PROMPT_CONTEXT_CHARS` that the verifier enforces upstream.
 pub fn find_duplicate_pending(
     dir: &Path,
     candidate: &CandidateSkill,
 ) -> io::Result<Option<CandidateSkill>> {
     let kind = source_kind(&candidate.source);
+    let target_name = normalize_dedup_field(&candidate.name);
+    let target_body = normalize_dedup_field(&candidate.prompt_context);
     for entry in read_dir_candidates(dir)? {
         if source_kind(&entry.candidate.source) == kind
-            && entry.candidate.name == candidate.name
-            && entry.candidate.prompt_context == candidate.prompt_context
+            && normalize_dedup_field(&entry.candidate.name) == target_name
+            && normalize_dedup_field(&entry.candidate.prompt_context) == target_body
         {
             return Ok(Some(entry.candidate));
         }
@@ -920,6 +942,40 @@ mod tests {
         let listed = list_pending(tmp.path(), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, a.id);
+    }
+
+    #[test]
+    fn save_dedups_after_normalising_case_and_whitespace() {
+        // Two captures of the same teaching signal whose prompt_context
+        // differs only in case / trailing whitespace / line-break shape
+        // must collapse to a single candidate. The heuristic emits the
+        // user's literal sentence, so the same rule re-said with a
+        // capital "F" or trailing period would otherwise pile up
+        // duplicates every turn until LRU caught up.
+        let tmp = tempdir().unwrap();
+        let mut a = fixture(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "11111111-0000-0000-0000-00000000aa01",
+            "From now on always run cargo fmt before commit.",
+        );
+        a.name = "always_fmt".to_string();
+        let mut b = fixture(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "11111111-0000-0000-0000-00000000aa02",
+            "from now on   always run cargo fmt before commit",
+        );
+        b.name = "ALWAYS_FMT".to_string();
+        assert!(save_candidate(tmp.path(), &a, 20, None).unwrap());
+        assert!(
+            !save_candidate(tmp.path(), &b, 20, None).unwrap(),
+            "case + whitespace variant must dedup against the canonical form"
+        );
+        assert_eq!(
+            list_pending(tmp.path(), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

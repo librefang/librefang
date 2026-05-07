@@ -68,6 +68,20 @@ Respond with a single JSON object and nothing else. Required keys: `accept` (boo
 {"accept": true, "reason": "useful rule, kept the heuristic name"}
 "#;
 
+/// Attribution metadata forwarded into the driver's [`CompletionRequest`]
+/// so per-agent budgets and trace correlation work for workshop LLM
+/// reviews. `agent_id` is required (every review is on behalf of a real
+/// agent); `session_id` and `candidate_id` are optional because the
+/// surrounding capture pipeline does not always have both — the candidate
+/// id is generated up-front in `capture_one`, the session id falls back to
+/// `None` only in the test path.
+#[derive(Debug, Clone, Copy)]
+pub struct ReviewAttribution<'a> {
+    pub agent_id: &'a str,
+    pub session_id: Option<&'a str>,
+    pub candidate_id: Option<&'a str>,
+}
+
 /// Run the LLM review pass.
 ///
 /// `driver` is typically the resolved [`librefang_runtime::aux_client::AuxClient`]
@@ -75,10 +89,17 @@ Respond with a single JSON object and nothing else. Required keys: `accept` (boo
 /// `model` is the model name passed to the driver — kept separate from
 /// the driver so the same kernel-level driver pool can be queried for
 /// any model.
+///
+/// `attribution` plumbs `(agent_id, session_id, candidate_id)` through to
+/// the driver's `CompletionRequest` so the metering / budget layer can
+/// charge the call against the right agent. Without this the call shows
+/// up as anonymous spend and per-agent budget caps for the workshop
+/// pipeline never bind.
 pub async fn review_candidate(
     driver: Arc<dyn LlmDriver>,
     model: &str,
     hit: &HeuristicHit,
+    attribution: ReviewAttribution<'_>,
 ) -> ReviewDecision {
     let user_prompt = build_user_prompt(hit);
     let request = CompletionRequest {
@@ -103,9 +124,9 @@ pub async fn review_candidate(
         response_format: None,
         timeout_secs: Some(30),
         extra_body: None,
-        agent_id: None,
-        session_id: None,
-        step_id: None,
+        agent_id: Some(attribution.agent_id.to_string()),
+        session_id: attribution.session_id.map(str::to_string),
+        step_id: attribution.candidate_id.map(str::to_string),
     };
 
     let response = match driver.complete(request).await {
@@ -212,6 +233,18 @@ mod tests {
     use librefang_llm_driver::{CompletionResponse, LlmError};
     use librefang_types::message::{StopReason, TokenUsage};
 
+    /// Test fixture for the new attribution argument. The metering
+    /// pipeline is not exercised in these tests (we use `ScriptedDriver`,
+    /// which ignores the `CompletionRequest`'s agent_id), but the call
+    /// sites still need to compile against the production signature.
+    fn test_attribution() -> ReviewAttribution<'static> {
+        ReviewAttribution {
+            agent_id: "11111111-1111-1111-1111-111111111111",
+            session_id: Some("test-session"),
+            candidate_id: Some("test-candidate"),
+        }
+    }
+
     fn fixture_hit() -> HeuristicHit {
         HeuristicHit {
             name: "fmt_before_commit".to_string(),
@@ -269,7 +302,7 @@ mod tests {
     #[tokio::test]
     async fn accept_plain_json() {
         let raw = r#"{"accept": true, "reason": "useful rule"}"#;
-        let dec = review_candidate(driver(raw), "haiku", &fixture_hit()).await;
+        let dec = review_candidate(driver(raw), "haiku", &fixture_hit(), test_attribution()).await;
         match dec {
             ReviewDecision::Accept {
                 refined_name,
@@ -286,7 +319,7 @@ mod tests {
     #[tokio::test]
     async fn accept_with_refinements() {
         let raw = r#"{"accept": true, "refined_name": "always_fmt", "refined_description": "Run cargo fmt before staging.", "reason": "ok"}"#;
-        let dec = review_candidate(driver(raw), "haiku", &fixture_hit()).await;
+        let dec = review_candidate(driver(raw), "haiku", &fixture_hit(), test_attribution()).await;
         match dec {
             ReviewDecision::Accept {
                 refined_name,
@@ -306,7 +339,7 @@ mod tests {
     #[tokio::test]
     async fn reject_returns_reason() {
         let raw = r#"{"accept": false, "reason": "too situational"}"#;
-        let dec = review_candidate(driver(raw), "haiku", &fixture_hit()).await;
+        let dec = review_candidate(driver(raw), "haiku", &fixture_hit(), test_attribution()).await;
         match dec {
             ReviewDecision::Reject { reason } => {
                 assert_eq!(reason, "too situational");
@@ -317,14 +350,20 @@ mod tests {
 
     #[tokio::test]
     async fn driver_error_is_indeterminate() {
-        let dec = review_candidate(failing_driver(), "haiku", &fixture_hit()).await;
+        let dec = review_candidate(
+            failing_driver(),
+            "haiku",
+            &fixture_hit(),
+            test_attribution(),
+        )
+        .await;
         assert!(matches!(dec, ReviewDecision::Indeterminate { .. }));
     }
 
     #[tokio::test]
     async fn handles_json_fences() {
         let raw = "```json\n{\"accept\": true, \"reason\": \"ok\"}\n```";
-        let dec = review_candidate(driver(raw), "haiku", &fixture_hit()).await;
+        let dec = review_candidate(driver(raw), "haiku", &fixture_hit(), test_attribution()).await;
         assert!(matches!(dec, ReviewDecision::Accept { .. }));
     }
 
@@ -332,13 +371,19 @@ mod tests {
     async fn handles_preamble_then_object() {
         let raw =
             "Sure, here is the result:\n{\"accept\": false, \"reason\": \"trivial\"}\nLet me know.";
-        let dec = review_candidate(driver(raw), "haiku", &fixture_hit()).await;
+        let dec = review_candidate(driver(raw), "haiku", &fixture_hit(), test_attribution()).await;
         assert!(matches!(dec, ReviewDecision::Reject { .. }));
     }
 
     #[tokio::test]
     async fn malformed_response_is_indeterminate() {
-        let dec = review_candidate(driver("not even json"), "haiku", &fixture_hit()).await;
+        let dec = review_candidate(
+            driver("not even json"),
+            "haiku",
+            &fixture_hit(),
+            test_attribution(),
+        )
+        .await;
         assert!(matches!(dec, ReviewDecision::Indeterminate { .. }));
     }
 
@@ -354,7 +399,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_json_blocks_does_not_promote_reject_to_accept() {
         let raw = r#"{"accept": false, "reason": "trivial"} btw {"accept": true, "reason": "ok"}"#;
-        let dec = review_candidate(driver(raw), "haiku", &fixture_hit()).await;
+        let dec = review_candidate(driver(raw), "haiku", &fixture_hit(), test_attribution()).await;
         assert!(
             !matches!(dec, ReviewDecision::Accept { .. }),
             "must never accept on multi-JSON output (got {dec:?})"

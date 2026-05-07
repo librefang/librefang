@@ -353,6 +353,18 @@ fn sentence_around(text: &str, start: usize, end: usize) -> String {
     text[lo..hi].trim().to_string()
 }
 
+/// Minimum length of the *head* component of a synthesised skill name.
+/// A head shorter than this (e.g. produced from a sentence that starts
+/// with a single short word like `"a from now on always …"`) yields
+/// names like `a_rule` — technically passes
+/// `librefang_skills::evolution::validate_name` but is useless to a
+/// reviewer, false-anchors the dedup key, and any future
+/// length-tightening of `validate_name` would orphan it. Falling back
+/// to the bare `captured_{kind}` form for sub-threshold heads keeps the
+/// candidate approvable and lets the dedup key (which includes
+/// `prompt_context`) carry the disambiguation instead.
+const MIN_SYNTH_NAME_HEAD_LEN: usize = 3;
+
 /// Build a short snake_case name from the captured sentence. `kind` is a
 /// disambiguator suffix so two captures from the same conversation don't
 /// collide with the same name.
@@ -368,7 +380,7 @@ fn synth_name(sentence: &str, kind: &str) -> String {
         .join("_")
         .to_lowercase();
     let head = sanitise_name_segment(&head);
-    if head.is_empty() {
+    if head.len() < MIN_SYNTH_NAME_HEAD_LEN {
         format!("captured_{kind}")
     } else {
         format!("{head}_{kind}")
@@ -640,5 +652,31 @@ mod tests {
     fn sanitise_name_segment_strips_punctuation() {
         assert_eq!(sanitise_name_segment("hello, world!"), "hello_world");
         assert_eq!(sanitise_name_segment("__foo__bar__"), "foo__bar");
+    }
+
+    #[test]
+    fn synth_name_floors_short_head_to_captured_kind() {
+        // Sentence whose first 40 chars sanitise to a head shorter than
+        // MIN_SYNTH_NAME_HEAD_LEN must fall through to `captured_{kind}`
+        // — emitting `a_rule` (or `_rule` after trimming) would be
+        // useless to a reviewer and would false-anchor the dedup key.
+        assert_eq!(synth_name("a", "rule"), "captured_rule");
+        assert_eq!(synth_name("!!!", "correction"), "captured_correction");
+        // Empty sentence is the obvious degenerate case.
+        assert_eq!(synth_name("", "repeat"), "captured_repeat");
+    }
+
+    #[test]
+    fn synth_name_keeps_real_head_above_floor() {
+        // Sanity-check: the existing happy path that gates issue #3328's
+        // canonical example must still produce a meaningful name when
+        // the head clears the floor.
+        let name = synth_name("from now on always run cargo fmt before commit", "rule");
+        assert!(
+            name.ends_with("_rule")
+                && name.len() > "captured_rule".len()
+                && name != "captured_rule",
+            "head should clear floor and produce a richer name, got {name}"
+        );
     }
 }

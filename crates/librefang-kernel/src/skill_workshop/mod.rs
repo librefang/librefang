@@ -235,31 +235,37 @@ async fn capture_one(
     turn_index: u32,
     hit: HeuristicHit,
 ) -> bool {
+    // Generate the candidate id up-front so the LLM-review path can forward
+    // it to metering as `step_id` for trace correlation. The id is opaque
+    // and uniformly random, so emitting it before the review verdict is
+    // resolved costs nothing if the verdict turns out to be Reject.
+    let id = Uuid::new_v4().to_string();
     let accepted_hit = match cfg.review_mode {
         ReviewMode::None => return false,
         ReviewMode::Heuristic => hit,
-        ReviewMode::ThresholdLlm => match run_llm_review(kernel, &hit).await {
-            ReviewDecision::Accept {
-                refined_name,
-                refined_description,
-                ..
-            } => apply_refinements(hit, refined_name, refined_description),
-            ReviewDecision::Reject { reason } => {
-                debug!(%agent_id, reason, "skill_workshop: LLM review rejected candidate");
-                return false;
+        ReviewMode::ThresholdLlm => {
+            match run_llm_review(kernel, &hit, agent_id, session_id, &id).await {
+                ReviewDecision::Accept {
+                    refined_name,
+                    refined_description,
+                    ..
+                } => apply_refinements(hit, refined_name, refined_description),
+                ReviewDecision::Reject { reason } => {
+                    debug!(%agent_id, reason, "skill_workshop: LLM review rejected candidate");
+                    return false;
+                }
+                ReviewDecision::Indeterminate { reason } => {
+                    debug!(
+                        %agent_id,
+                        reason,
+                        "skill_workshop: LLM review indeterminate; falling back to heuristic verdict"
+                    );
+                    hit
+                }
             }
-            ReviewDecision::Indeterminate { reason } => {
-                debug!(
-                    %agent_id,
-                    reason,
-                    "skill_workshop: LLM review indeterminate; falling back to heuristic verdict"
-                );
-                hit
-            }
-        },
+        }
     };
     let now = chrono::Utc::now();
-    let id = Uuid::new_v4().to_string();
     // The heuristic scanners already truncate excerpts to
     // PROVENANCE_EXCERPT_MAX_CHARS at the boundary they create them
     // (heuristic.rs::extract_*), so a second pass here would be a
@@ -423,7 +429,13 @@ fn apply_refinements(
     hit
 }
 
-async fn run_llm_review(kernel: &Arc<LibreFangKernel>, hit: &HeuristicHit) -> ReviewDecision {
+async fn run_llm_review(
+    kernel: &Arc<LibreFangKernel>,
+    hit: &HeuristicHit,
+    agent_id: AgentId,
+    session_id: &SessionId,
+    candidate_id: &str,
+) -> ReviewDecision {
     let aux: Arc<AuxClient> = kernel.aux_client();
     // Use the dedicated `SkillWorkshopReview` slot, NOT `SkillReview`
     // — the latter is owned by `kernel::messaging::background_skill_review`,
@@ -448,7 +460,14 @@ async fn run_llm_review(kernel: &Arc<LibreFangKernel>, hit: &HeuristicHit) -> Re
         .first()
         .map(|entry: &(String, String)| entry.1.clone())
         .unwrap_or_else(|| "haiku".to_string());
-    llm_review::review_candidate(resolution.driver, &model, hit).await
+    let agent_id_str = agent_id.to_string();
+    let session_id_str = session_id.to_string();
+    let attribution = llm_review::ReviewAttribution {
+        agent_id: agent_id_str.as_str(),
+        session_id: Some(session_id_str.as_str()),
+        candidate_id: Some(candidate_id),
+    };
+    llm_review::review_candidate(resolution.driver, &model, hit, attribution).await
 }
 
 /// Per-turn snapshot of the conversation needed by the heuristic
@@ -470,19 +489,19 @@ struct RecentTurn {
     last_user_turn_index: u32,
 }
 
-/// Look up an agent's manifest and clone its workshop config out.
-/// Returns `None` for missing agents.
+/// Look up an agent's workshop config without cloning the whole
+/// `AgentEntry`. The config is `Copy`, so reading it through the Arc'd
+/// entry costs only an `Arc::clone` of the entry pointer plus a struct
+/// copy of six scalar fields — vs the previous deep-clone of every
+/// manifest Vec / HashMap on every non-fork turn for every default-on
+/// agent. Returns `None` for missing agents.
 fn read_workshop_config(
     kernel: &Arc<LibreFangKernel>,
     agent_id: AgentId,
 ) -> Option<SkillWorkshopConfig> {
-    kernel
-        .agent_registry()
-        .get(agent_id)
-        .map(|entry: librefang_types::agent::AgentEntry| {
-            let _: &AgentManifest = &entry.manifest;
-            entry.manifest.skill_workshop
-        })
+    let entry = kernel.agent_registry().get_arc(agent_id)?;
+    let _: &AgentManifest = &entry.manifest;
+    Some(entry.manifest.skill_workshop)
 }
 
 /// Pull the most recently touched session for `agent_id` and walk it

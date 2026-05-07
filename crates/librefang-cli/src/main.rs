@@ -766,7 +766,8 @@ enum SkillCommands {
 
 #[derive(Subcommand)]
 enum PendingCommands {
-    /// List pending candidates (newest captured first).
+    /// List pending candidates (oldest captured first — same order the
+    /// dashboard's pending review section renders).
     List {
         /// Show only candidates from the given agent UUID.
         #[arg(long)]
