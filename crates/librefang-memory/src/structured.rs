@@ -3,27 +3,24 @@
 use chrono::Utc;
 use librefang_types::agent::{AgentEntry, AgentId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
-use rusqlite::Connection;
-use std::sync::{Arc, Mutex};
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 
 /// Structured store backed by SQLite for key-value operations and agent storage.
 #[derive(Clone)]
 pub struct StructuredStore {
-    conn: Arc<Mutex<Connection>>,
+    pool: Pool<SqliteConnectionManager>,
 }
 
 impl StructuredStore {
-    /// Create a new structured store wrapping the given connection.
-    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+    /// Create a new structured store wrapping the given connection pool.
+    pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
+        Self { pool }
     }
 
     /// Get a value from the key-value store.
     pub fn get(&self, agent_id: AgentId, key: &str) -> LibreFangResult<Option<serde_json::Value>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare("SELECT value FROM kv_store WHERE agent_id = ?1 AND key = ?2")
             .map_err(LibreFangError::memory)?;
@@ -49,10 +46,7 @@ impl StructuredStore {
         key: &str,
         value: serde_json::Value,
     ) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let blob = serde_json::to_vec(&value).map_err(LibreFangError::serialization)?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
@@ -66,10 +60,7 @@ impl StructuredStore {
 
     /// Delete a value from the key-value store.
     pub fn delete(&self, agent_id: AgentId, key: &str) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         conn.execute(
             "DELETE FROM kv_store WHERE agent_id = ?1 AND key = ?2",
             rusqlite::params![agent_id.0.to_string(), key],
@@ -126,10 +117,7 @@ impl StructuredStore {
 
     /// List all key-value pairs for an agent.
     pub fn list_kv(&self, agent_id: AgentId) -> LibreFangResult<Vec<(String, serde_json::Value)>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare("SELECT key, value FROM kv_store WHERE agent_id = ?1 ORDER BY key")
             .map_err(LibreFangError::memory)?;
@@ -157,10 +145,7 @@ impl StructuredStore {
 
     /// List only keys for an agent (without values).
     pub fn list_keys(&self, agent_id: AgentId) -> LibreFangResult<Vec<String>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare("SELECT key FROM kv_store WHERE agent_id = ?1 ORDER BY key")
             .map_err(LibreFangError::memory)?;
@@ -181,10 +166,7 @@ impl StructuredStore {
 
     /// Save an agent entry to the database.
     pub fn save_agent(&self, entry: &AgentEntry) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         // Use named-field encoding so new fields with #[serde(default)] are
         // handled gracefully when the struct evolves between versions.
         let manifest_blob =
@@ -238,10 +220,7 @@ impl StructuredStore {
 
     /// Load an agent entry from the database.
     pub fn load_agent(&self, agent_id: AgentId) -> LibreFangResult<Option<AgentEntry>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         let mut stmt = conn
             .prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path FROM agents WHERE id = ?1")
@@ -369,10 +348,7 @@ impl StructuredStore {
     /// dependent experiment_variants and experiment_metrics rows), and
     /// events via source_agent.
     pub fn remove_agent(&self, agent_id: AgentId) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let id = agent_id.0.to_string();
         let tx = conn
             .unchecked_transaction()
@@ -389,10 +365,7 @@ impl StructuredStore {
     /// automatically re-saved to upgrade the stored blob. Duplicate agent names
     /// are deduplicated (first occurrence wins).
     pub fn load_all_agents(&self) -> LibreFangResult<Vec<AgentEntry>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         // Try with identity+session_id columns first, fall back gracefully
         let mut stmt = conn
@@ -579,10 +552,7 @@ impl StructuredStore {
 
     /// List all agents in the database.
     pub fn list_agents(&self) -> LibreFangResult<Vec<(String, String, String)>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare("SELECT id, name, state FROM agents")
             .map_err(LibreFangError::memory)?;
@@ -647,9 +617,12 @@ mod tests {
     use crate::migration::run_migrations;
 
     fn setup() -> StructuredStore {
-        let conn = Connection::open_in_memory().unwrap();
-        run_migrations(&conn).unwrap();
-        StructuredStore::new(Arc::new(Mutex::new(conn)))
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        run_migrations(&pool.get().unwrap()).unwrap();
+        StructuredStore::new(pool)
     }
 
     #[test]
