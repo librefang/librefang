@@ -346,6 +346,74 @@ async fn pending_approve_already_installed_clears_pending_and_returns_200() {
     );
 }
 
+/// Name collision (NOT a phantom): the user already has an unrelated
+/// active skill with the same name (manual install / marketplace /
+/// prior `evolve` / `synth_name` fallback collision). A re-approve must
+/// NOT silently drop the pending row — the reviewer would lose the
+/// candidate they actually wanted promoted. Returns 409 with
+/// `kind: "name_collision"` and keeps the pending file so the user can
+/// rename and retry.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_approve_name_collision_with_different_body_returns_409() {
+    let h = boot().await;
+    let agent = "11111111-1111-1111-1111-111111111111";
+    let id = "abababab-0000-0000-0000-000000000005";
+    let root = skills_root(&h);
+
+    // Plant an unrelated active skill named `fmt_before_commit` whose
+    // body is NOT what the workshop captured — emulates the user
+    // having installed / written this skill via another path.
+    let active_dir = root.join("fmt_before_commit");
+    std::fs::create_dir_all(&active_dir).unwrap();
+    std::fs::write(
+        active_dir.join("skill.toml"),
+        "name = \"fmt_before_commit\"\n\
+         description = \"a totally different rule\"\n\
+         version = \"1.0.0\"\n\
+         allowed_tools = []\n\
+         is_workspace_skill = false\n\
+         allow_hot_reload = true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        active_dir.join("prompt_context.md"),
+        "# A totally different rule\n\nThis is NOT what the candidate carries.\n",
+    )
+    .unwrap();
+
+    // Stage a pending candidate with the standard fixture body — body
+    // differs from the planted active skill above.
+    storage::save_candidate(&root, &fixture_candidate(agent, id), 20, None).unwrap();
+    let pending_path = root.join("pending").join(agent).join(format!("{id}.toml"));
+    assert!(pending_path.exists(), "pending file must be staged");
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/skills/pending/{id}/approve"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "real name collision must surface as 409, not silent 200: {body:?}"
+    );
+    assert_eq!(body["kind"], "name_collision");
+    assert_eq!(body["skill_name"], "fmt_before_commit");
+    assert_eq!(body["candidate_id"], id);
+    // Critical invariant: the pending file MUST survive a 409 collision
+    // so the reviewer can rename and retry — silently dropping it would
+    // be a data-loss bug.
+    assert!(
+        pending_path.exists(),
+        "pending file must NOT be dropped on a real name collision"
+    );
+    assert!(
+        storage::load_candidate(&root, id).is_ok(),
+        "candidate must still be loadable after a collision response"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/skills/pending/{id}/reject
 // ---------------------------------------------------------------------------

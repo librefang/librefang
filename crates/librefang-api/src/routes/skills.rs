@@ -643,40 +643,106 @@ pub async fn approve_pending_candidate(
         Err(librefang_kernel::skill_workshop::WorkshopError::Skill(
             librefang_skills::SkillError::AlreadyInstalled(skill_name),
         )) => {
-            // Phantom pending: a previous approve promoted this candidate
-            // (active dir exists, version history has an entry) but the
-            // pending file removal failed (e.g. Windows AV held a handle,
-            // read-only mount mid-clean-up). Without this branch the user
-            // sees a 409 forever and has no UI action to clear it. Drop
-            // the pending row idempotently and return 200 — the active
-            // skill is already what the user asked for.
+            // `AlreadyInstalled` from `evolution::create_skill` is
+            // ambiguous and we MUST NOT collapse the two cases:
             //
-            // `NotFound` from the nested reject is the desired terminal
-            // state, not a failure: it just means a concurrent reject /
-            // CLI cleanup beat us to the row. Treating it as a 500 would
-            // surface a confusing "active skill exists, but failed to
-            // clear pending entry: not found" — both halves of which are
-            // the success state.
-            match librefang_kernel::skill_workshop::storage::reject_candidate(&skills_root, &id) {
-                Ok(()) | Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "status": "already_promoted",
-                        "candidate_id": id,
-                        "skill_name": skill_name,
-                        "message": format!(
-                            "Active skill '{skill_name}' already exists; pending entry cleared.",
-                        ),
-                    })),
-                ),
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
+            //   * Phantom pending — a previous approve of THIS candidate
+            //     promoted the skill but the pending-file cleanup failed
+            //     transiently (Windows AV holding a handle, read-only
+            //     mount mid-clean-up). The active body is byte-identical
+            //     to the candidate's `prompt_context`. Idempotent
+            //     recovery: drop the pending row, return 200
+            //     `already_promoted`.
+            //   * Name collision — the user already has an unrelated
+            //     skill with the same name (manual install, marketplace,
+            //     prior `evolve`, or a `synth_name` fallback collision).
+            //     The active body differs from the candidate body.
+            //     Silently dropping the pending row in this case would
+            //     destroy the candidate the user wanted reviewed without
+            //     them ever seeing it — a real data-loss bug. Return 409
+            //     and KEEP the pending file so the reviewer can rename
+            //     and retry.
+            //
+            // Decide by reading the active skill's `prompt_context.md`
+            // and comparing byte-for-byte against the candidate's stored
+            // `prompt_context` (`evolution::create_skill` writes the
+            // string verbatim — no trim, no normalisation — so equality
+            // is well-defined). If we cannot load the candidate (e.g.
+            // it was already cleaned up by a concurrent reject), the
+            // recovery target state is reached anyway → 200.
+            let candidate = match librefang_kernel::skill_workshop::storage::load_candidate(
+                &skills_root,
+                &id,
+            ) {
+                Ok(c) => Some(c),
+                Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => None,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "error": format!(
+                                "Active skill '{skill_name}' already exists; failed to read candidate to disambiguate phantom vs collision: {e}"
+                            ),
+                        })),
+                    );
+                }
+            };
+            let bodies_match = match &candidate {
+                None => true, // Concurrent cleanup beat us — terminal state already reached.
+                Some(cand) => {
+                    let active_body_path = skills_root.join(&skill_name).join("prompt_context.md");
+                    match std::fs::read_to_string(&active_body_path) {
+                        Ok(active) => active == cand.prompt_context,
+                        // If we can't read the active body we cannot prove
+                        // it's a phantom — fall through to the collision
+                        // branch so we never drop the pending file.
+                        Err(_) => false,
+                    }
+                }
+            };
+            if bodies_match {
+                // Phantom recovery. `NotFound` from the nested reject is
+                // the desired terminal state (a concurrent reject / CLI
+                // cleanup beat us to the row), not a failure.
+                match librefang_kernel::skill_workshop::storage::reject_candidate(&skills_root, &id)
+                {
+                    Ok(()) | Err(librefang_kernel::skill_workshop::WorkshopError::NotFound(_)) => (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "status": "already_promoted",
+                            "candidate_id": id,
+                            "skill_name": skill_name,
+                            "message": format!(
+                                "Active skill '{skill_name}' already exists with the same body; pending entry cleared.",
+                            ),
+                        })),
+                    ),
+                    Err(e) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "error": format!(
+                                "Active skill '{skill_name}' already exists, but failed to clear pending entry: {e}"
+                            ),
+                        })),
+                    ),
+                }
+            } else {
+                // Real name collision. Pending file is intentionally
+                // left in place so the reviewer can rename and retry
+                // without losing their candidate.
+                (
+                    StatusCode::CONFLICT,
                     Json(serde_json::json!({
                         "error": format!(
-                            "Active skill '{skill_name}' already exists, but failed to clear pending entry: {e}"
+                            "Skill '{skill_name}' already exists with different content. \
+                             Edit the candidate's `name` field in its pending TOML \
+                             (or reject it and capture again under a different rule) and retry."
                         ),
+                        "kind": "name_collision",
+                        "candidate_id": id,
+                        "skill_name": skill_name,
                     })),
-                ),
+                )
             }
         }
         Err(librefang_kernel::skill_workshop::WorkshopError::Skill(e)) => (
