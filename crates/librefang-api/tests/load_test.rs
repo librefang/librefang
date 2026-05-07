@@ -77,7 +77,7 @@ impl Drop for TestServer {
 
 async fn start_test_server() -> TestServer {
     let test = TestAppState::new();
-    test.state.kernel.set_self_handle();
+    test.state.kernel.clone().set_self_handle();
     let state = test.state.clone();
 
     let app = Router::new()

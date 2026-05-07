@@ -267,7 +267,7 @@ async fn create_registry_content(
         }
 
         let target_for_closure = target.clone();
-        state.kernel.model_catalog_update(move |catalog| {
+        state.kernel.model_catalog_update(&mut move |catalog| {
             if let Err(e) = catalog.load_catalog_file(&target_for_closure) {
                 tracing::warn!("Failed to merge provider file into catalog: {e}");
             }
