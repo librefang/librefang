@@ -138,7 +138,7 @@ export function GoalsPage() {
     const status = nextStatus(current);
     try {
       const goal = goals.find(g => g.id === id);
-      const progress = status === "completed" ? 100 : goal?.progress ?? 0;
+      const progress = status === "completed" ? 100 : status === "in_progress" ? Math.max(goal?.progress ?? 0, 50) : 0;
       await updateMutation.mutateAsync({ id, data: { status, progress } });
     } catch (err) {
       addToast(toastErr(err, t("common.error")), "error");
@@ -187,6 +187,7 @@ export function GoalsPage() {
       if (expandedById[goal.id]) for (const child of children) walk(child, depth + 1);
     }
     for (const root of roots) walk(root, 0);
+    for (const goal of goals) walk(goal, 0);
     return result;
   }, [expandedById, goals]);
 
