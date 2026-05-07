@@ -262,3 +262,27 @@ impl TerminalClientHandle {
 fn map_err(e: AcpError) -> KernelOpError {
     KernelOpError::Internal(e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_capabilities_default_is_disabled() {
+        let caps = TerminalCapabilities::default();
+        assert!(!caps.terminal);
+    }
+
+    #[test]
+    fn terminal_capabilities_from_client_picks_up_flag() {
+        let mut client_caps = ClientCapabilities::default();
+        client_caps.terminal = true;
+        assert!(TerminalCapabilities::from_client(&client_caps).terminal);
+    }
+
+    #[test]
+    fn terminal_capabilities_from_client_off_by_default() {
+        let client_caps = ClientCapabilities::default();
+        assert!(!TerminalCapabilities::from_client(&client_caps).terminal);
+    }
+}
