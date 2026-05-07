@@ -292,13 +292,23 @@ async fn capture_one(
                     // `spawn_blocking` so this hook does not stall the
                     // tokio worker thread on disk IO + lock contention
                     // (every other future on the same worker would
-                    // queue behind it). Same shape as the boot-time
-                    // `prune_orphan_temp_files` dispatch in
-                    // `bindings_and_handle.rs::set_self_handle`.
+                    // queue behind it).
+                    //
+                    // We `.await` the JoinHandle so a concurrent next
+                    // turn that consults the skill registry observes
+                    // the new skill, not a stale snapshot. The hook
+                    // itself runs inside `supervised_spawn` already
+                    // (detached from the agent loop), so awaiting the
+                    // reload here just suspends the supervised task —
+                    // it does not push back on the agent loop's return
+                    // path. Tests rely on the await to make the
+                    // post-promotion registry visible deterministically.
                     let kernel_for_reload = Arc::clone(kernel);
                     match tokio::runtime::Handle::try_current() {
                         Ok(handle) => {
-                            handle.spawn_blocking(move || kernel_for_reload.reload_skills());
+                            let _ = handle
+                                .spawn_blocking(move || kernel_for_reload.reload_skills())
+                                .await;
                         }
                         Err(_) => kernel_for_reload.reload_skills(),
                     }

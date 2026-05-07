@@ -351,6 +351,138 @@ async fn pending_reject_non_uuid_id_returns_400() {
     assert!(body["error"].as_str().unwrap_or("").contains("UUID"));
 }
 
+// ---------------------------------------------------------------------------
+// ApprovalPolicy::Auto end-to-end
+// ---------------------------------------------------------------------------
+
+/// Auto-policy hits go through `save → approve → reload_skills` without
+/// human review. This test boots a real kernel, registers an agent with
+/// `[skill_workshop] approval_policy = "auto"`, plants a session
+/// containing a canonical `from now on …` user message, and runs the
+/// workshop's `run_capture` pipeline directly. Asserts the resulting
+/// active skill landed at `<skills_root>/<name>/skill.toml` (which only
+/// happens when `evolution::create_skill` ran end-to-end after the
+/// pending stage). The `kernel.reload_skills()` call inside the auto
+/// branch is `.await`-ed so the assertion is deterministic.
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_policy_promotes_to_active_and_reloads_registry() {
+    use librefang_kernel::skill_workshop;
+    use librefang_memory::session::Session;
+    use librefang_types::agent::{
+        AgentEntry, AgentId, AgentManifest, AgentMode, AgentState, ApprovalPolicy, ReviewMode,
+        SessionId, SkillWorkshopConfig,
+    };
+    use librefang_types::message::Message;
+
+    // Direct `MockKernelBuilder::build()` rather than TestAppState —
+    // `run_capture` takes a concrete `Arc<LibreFangKernel>` (it pokes
+    // at private kernel internals that aren't in the `KernelApi`
+    // trait), and TestAppState would only hand us `Arc<dyn KernelApi>`.
+    // Hold the TempDir for the duration so the temp pending tree is
+    // not deleted out from under the test.
+    let (kernel, _tmp) = MockKernelBuilder::new().build();
+    let skills_root_path = kernel.home_dir().join("skills");
+
+    // Register an agent whose manifest opts the workshop into auto-promote.
+    let agent_id = AgentId::new();
+    let session_id = SessionId::new();
+    let manifest = AgentManifest {
+        name: "auto_workshop_agent".to_string(),
+        description: "test".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        skill_workshop: SkillWorkshopConfig {
+            enabled: true,
+            auto_capture: true,
+            approval_policy: ApprovalPolicy::Auto,
+            review_mode: ReviewMode::Heuristic,
+            max_pending: 20,
+            max_pending_age_days: None,
+        },
+        ..Default::default()
+    };
+    let entry = AgentEntry {
+        id: agent_id,
+        name: "auto_workshop_agent".to_string(),
+        manifest,
+        state: AgentState::Running,
+        mode: AgentMode::default(),
+        created_at: Utc::now(),
+        last_active: Utc::now(),
+        session_id,
+        ..Default::default()
+    };
+    kernel
+        .agent_registry()
+        .register(entry)
+        .expect("register agent");
+
+    // Plant a session with a teaching signal the heuristic must capture.
+    let session = Session {
+        id: session_id,
+        agent_id,
+        messages: vec![
+            Message::user("from now on always run cargo fmt before committing."),
+            Message::assistant("Got it, I'll run cargo fmt first."),
+        ],
+        context_window_tokens: 0,
+        label: None,
+        messages_generation: 1,
+        last_repaired_generation: None,
+    };
+    kernel
+        .memory_substrate()
+        .save_session(&session)
+        .expect("save_session");
+
+    // Compute the expected name via the same heuristic the hook uses —
+    // pinning the literal would tie the test to whatever
+    // `synth_name` happens to produce today, while the contract under
+    // test is "auto branch promotes whatever the heuristic captured".
+    let expected_name = librefang_kernel::skill_workshop::heuristic::extract_explicit_instruction(
+        "from now on always run cargo fmt before committing.",
+    )
+    .expect("explicit_instruction must match the canonical example")
+    .name;
+
+    // Run the capture pipeline. Inside, the auto branch saves the
+    // pending file, promotes via `evolution::create_skill`, then awaits
+    // `reload_skills` via `spawn_blocking` — when this future resolves
+    // the active skill is on disk and the in-memory registry has been
+    // refreshed.
+    skill_workshop::run_capture(kernel.clone(), agent_id).await;
+
+    let skill_dir = skills_root_path.join(&expected_name);
+    assert!(
+        skill_dir.join("skill.toml").exists(),
+        "auto-promoted skill.toml must land under skills_root/{}; got skills_root={}",
+        expected_name,
+        skills_root_path.display()
+    );
+
+    // Pending file must have been removed by `approve_candidate` after
+    // promotion succeeded.
+    let pending_dir = skills_root_path.join("pending").join(agent_id.to_string());
+    if pending_dir.exists() {
+        let leftovers: Vec<_> = std::fs::read_dir(&pending_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s == "toml")
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "auto-promotion should drop the pending file; found {} leftover .toml file(s)",
+            leftovers.len()
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pending_list_non_uuid_agent_filter_returns_400() {
     // `?agent=…` with a non-UUID value used to 500 with whatever
