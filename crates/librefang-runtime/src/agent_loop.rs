@@ -2097,11 +2097,11 @@ fn build_sender_prefix(manifest: &AgentManifest, sender_user_id: Option<&str>) -
         .and_then(|v| v.as_str())
         .unwrap_or("");
     // Keep these literals in sync with the kernel-side synthetic channel
-    // sentinels: `librefang_kernel::SYSTEM_CHANNEL_CRON`,
-    // `librefang_kernel::SYSTEM_CHANNEL_AUTONOMOUS`, and the `"webui"` string
-    // hard-coded at `crates/librefang-api/src/ws.rs` (the dashboard
-    // SenderContext synthesis site). Runtime can't import from kernel
-    // (circular dep), so a grep-pointer is the best we can do.
+    // sentinels: `librefang_kernel::SYSTEM_CHANNEL_{CRON,AUTONOMOUS,WEBUI}`.
+    // Runtime can't import the constants directly (circular dep — runtime
+    // is below kernel), so a grep-pointer is the best we can do; api / cli
+    // / kernel sites reference the kernel constants by name and stay in
+    // lock-step.
     if matches!(channel, "webui" | "cron" | "autonomous") {
         return None;
     }
