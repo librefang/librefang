@@ -126,6 +126,29 @@ stripping brackets emitted by `url::Url::host_str` for IPv6), only Rule
   (pins the carve-out specifically)
 - `token_endpoint_ip_does_not_match_domain` (mixed shapes)
 
+## Discovery-layer gate (`librefang-runtime-mcp::mcp_oauth::validate_metadata_endpoints`)
+
+The same two-rule policy is enforced a second time at OAuth metadata
+discovery (Tier 1 / Tier 2) before any auth flow begins:
+
+1. **Rule 1**: every endpoint URL declared by the AS metadata
+   (`authorization_endpoint`, `token_endpoint`, `registration_endpoint`)
+   must share its origin (scheme + host + port) with the configured MCP
+   server URL.
+2. **Rule 2** (#4665): or share the same registrable domain (eTLD+1) per
+   the Public Suffix List.
+
+The rationale is identical to the api-layer gate documented above —
+sibling subdomains within the same registered domain are operator-trusted
+by virtue of the configured server URL; cross-registrable-domain
+declarations are refused. The IP-literal carve-out and PSL private-domain
+protection apply here too.
+
+On a Rule 2 accept, an `info!` audit line is emitted with the fields
+`endpoint`, `endpoint_host`, `server_url`, `server_host`,
+`registrable_domain`, and `label` so operators can confirm or investigate
+cross-subdomain delegation in their logs.
+
 ## What this policy does not cover
 
 - **SSRF on metadata / token fetch.** That is a separate policy in
@@ -149,8 +172,15 @@ stripping brackets emitted by `url::Url::host_str` for IPv6), only Rule
   `auth_callback`. Doc comment on the helper carries the inline version
   of this trade-off so a future maintainer touching the function does
   not need to find this file first.
+- `crates/librefang-runtime-mcp/src/mcp_oauth.rs` —
+  `validate_metadata_endpoints`, `shares_registrable_domain`. The
+  discovery-layer gate; applies the identical two-rule policy before
+  any OAuth flow is initiated.
 - `Cargo.toml` (workspace) and
   `crates/librefang-api/Cargo.toml` — the `psl = "2"` dependency is
   pinned at the workspace level with a comment explaining why `psl`
   was picked over `publicsuffix` (compile-time-baked data, no runtime
   fetch).
+- `crates/librefang-runtime-mcp/Cargo.toml` — adds `psl = "2"` so the
+  discovery-layer gate can call `psl::domain_str` directly; cargo
+  deduplicates the crate with the workspace pin.
