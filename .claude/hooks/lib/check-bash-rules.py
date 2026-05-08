@@ -428,11 +428,17 @@ def rule_broad_git_add(toks, ctx):
 
 
 # `credentials` / `secrets` are restricted to credential-STORAGE extensions
-# (data formats) so that source files that *handle* credentials — e.g.
-# `crates/librefang-extensions/src/credentials.rs` — don't trip the guard.
-# The earlier `(\.[a-z]+)?` form swept in `.rs` / `.py` / `.go` and forced a
-# manual user override on every legitimate code-edit commit.
-_DATA_EXT = r"(json|toml|yaml|yml|txt|csv|ini|conf|env|cfg)"
+# (data formats + common backup / DB suffixes) so that source files that
+# *handle* credentials — e.g. `crates/librefang-extensions/src/credentials.rs`
+# — don't trip the guard. The earlier `(\.[a-z]+)?` form swept in `.rs` /
+# `.py` / `.go` and forced a manual user override on every legitimate
+# code-edit commit.
+#
+# Whitelisted suffixes:
+#   - data formats: json toml yaml yml txt csv ini conf env cfg
+#   - credential DBs: kdbx (KeePass), dat (generic credential blob)
+#   - backups: bak old (`credentials.bak` / `credentials.old` still hold real keys)
+_DATA_EXT = r"(json|toml|yaml|yml|txt|csv|ini|conf|env|cfg|kdbx|dat|bak|old)"
 _SENSITIVE_RE = re.compile(
     r"^("
     r"\.env(\.[a-z0-9._-]+)?"
