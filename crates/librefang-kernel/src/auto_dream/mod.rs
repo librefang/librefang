@@ -28,6 +28,9 @@
 //! A failed, aborted, or timed-out dream rolls back the lock mtime so the
 //! time gate reopens on the next tick.
 
+use crate::AgentSubsystemApi;
+use crate::MemorySubsystemApi;
+use crate::MeteringSubsystemApi;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
@@ -277,7 +280,7 @@ enum AgentGateResult {
 fn effective_thresholds(kernel: &LibreFangKernel, agent_id: AgentId) -> (f64, u32) {
     let cfg = kernel.config_snapshot();
     let (hours, sessions) = kernel
-        .agent_registry()
+        .agent_registry_ref()
         .get(agent_id)
         .map(|e| {
             (
@@ -324,10 +327,11 @@ async fn check_agent_gates(
         // Exclude the synthetic dream session itself — otherwise the
         // previous dream's own turn registers as post-dream activity and
         // the gate re-opens with nothing new to consolidate.
-        match kernel
-            .memory_substrate()
-            .count_agent_sessions_touched_since(agent_id, last_at, Some(dream_session_id(agent_id)))
-        {
+        match kernel.substrate_ref().count_agent_sessions_touched_since(
+            agent_id,
+            last_at,
+            Some(dream_session_id(agent_id)),
+        ) {
             Ok(count) if count < effective_min_sessions => {
                 return AgentGateResult::NoActivity {
                     sessions_since: count,
@@ -462,7 +466,7 @@ async fn run_dream(
             usage: None,
         },
     );
-    kernel.audit().record(
+    kernel.audit_log().record(
         target.to_string(),
         librefang_runtime::audit::AuditAction::DreamConsolidation,
         format!("phase=start task_id={task_id}"),
@@ -478,7 +482,7 @@ async fn run_dream(
     const MAX_SESSION_IDS_IN_PROMPT: u32 = 50;
     let dream_sid = dream_session_id(target);
     let session_ids = kernel
-        .memory_substrate()
+        .substrate_ref()
         .list_agent_sessions_touched_since(
             target,
             prior_mtime,
@@ -487,7 +491,7 @@ async fn run_dream(
         )
         .unwrap_or_default();
     let total_sessions = kernel
-        .memory_substrate()
+        .substrate_ref()
         .count_agent_sessions_touched_since(target, prior_mtime, Some(dream_sid))
         .unwrap_or(session_ids.len() as u32);
 
@@ -622,7 +626,7 @@ async fn run_dream(
                 cost_usd = ?usage.cost_usd,
                 "auto_dream: consolidation completed",
             );
-            kernel.audit().record(
+            kernel.audit_log().record(
                 target.to_string(),
                 librefang_runtime::audit::AuditAction::DreamConsolidation,
                 format!(
@@ -687,7 +691,7 @@ async fn finalize_failure(
         p.phase = "failed".to_string();
         p.error = Some(reason.clone());
     });
-    kernel.audit().record(
+    kernel.audit_log().record(
         target.to_string(),
         librefang_runtime::audit::AuditAction::DreamConsolidation,
         format!("phase=fail task_id={task_id} reason={reason}"),
@@ -709,7 +713,7 @@ async fn finalize_abort(kernel: &LibreFangKernel, target: AgentId, prior_mtime: 
         p.phase = "aborted".to_string();
         p.error.get_or_insert_with(|| "aborted by user".to_string());
     });
-    kernel.audit().record(
+    kernel.audit_log().record(
         target.to_string(),
         librefang_runtime::audit::AuditAction::DreamConsolidation,
         format!("phase=abort task_id={task_id}"),
@@ -728,7 +732,7 @@ async fn finalize_abort(kernel: &LibreFangKernel, target: AgentId, prior_mtime: 
 
 fn enrolled_agents(kernel: &LibreFangKernel) -> Vec<(AgentId, String)> {
     kernel
-        .agent_registry()
+        .agent_registry_ref()
         .list()
         .into_iter()
         .filter(|e| e.manifest.auto_dream_enabled)
@@ -740,7 +744,7 @@ fn enrolled_agents(kernel: &LibreFangKernel) -> Vec<(AgentId, String)> {
 /// list. The scheduler uses `enrolled_agents` — this is UI-only.
 fn all_agents_dream_state(kernel: &LibreFangKernel) -> Vec<(AgentId, String, bool)> {
     kernel
-        .agent_registry()
+        .agent_registry_ref()
         .list()
         .into_iter()
         .map(|e| (e.id, e.name, e.manifest.auto_dream_enabled))
@@ -755,9 +759,9 @@ pub fn set_agent_enabled(
     enabled: bool,
 ) -> LibreFangResult<()> {
     kernel
-        .agent_registry()
+        .agent_registry_ref()
         .update_auto_dream_enabled(agent_id, enabled)?;
-    kernel.audit().record(
+    kernel.audit_log().record(
         agent_id.to_string(),
         librefang_runtime::audit::AuditAction::ConfigChange,
         format!("auto_dream_enabled={enabled}"),
@@ -779,7 +783,7 @@ pub fn maybe_fire_on_turn_end(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
     // Gate 1 (cheapest): kernel shutdown. The daemon is unwinding; no point
     // spawning a new dream that the runtime will immediately have to cancel.
     // Matches the same check at the head of the scheduler loop body.
-    if kernel.supervisor.is_shutting_down() {
+    if kernel.agents.supervisor.is_shutting_down() {
         return;
     }
     // Gate 2: global auto-dream toggle. `config_snapshot` is an ArcSwap
@@ -794,7 +798,7 @@ pub fn maybe_fire_on_turn_end(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
     // avoid cloning the full AgentEntry (manifest Strings/Vecs) on the hot
     // path. A missing agent returns false so freshly-deleted agents don't
     // attempt a dream.
-    if !kernel.agent_registry().is_auto_dream_enabled(agent_id) {
+    if !kernel.agent_registry_ref().is_auto_dream_enabled(agent_id) {
         return;
     }
 
@@ -805,14 +809,14 @@ pub fn maybe_fire_on_turn_end(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
         // above and this task actually being scheduled. Re-checking all
         // three (rather than just two) keeps the guarantees symmetrical —
         // no gate is "best effort" relative to the others.
-        if kernel.supervisor.is_shutting_down() {
+        if kernel.agents.supervisor.is_shutting_down() {
             return;
         }
         if !kernel.config_snapshot().auto_dream.enabled {
             tracing::debug!(agent = %agent_id, "auto_dream: global toggled off between hook and spawn, skipping");
             return;
         }
-        if !kernel.agent_registry().is_auto_dream_enabled(agent_id) {
+        if !kernel.agent_registry_ref().is_auto_dream_enabled(agent_id) {
             tracing::debug!(agent = %agent_id, "auto_dream: agent toggled off between hook and spawn, skipping");
             return;
         }
@@ -934,7 +938,7 @@ pub fn spawn_scheduler(kernel: Arc<LibreFangKernel>) {
             };
             tokio::time::sleep(Duration::from_secs(interval_s)).await;
 
-            if kernel.supervisor.is_shutting_down() {
+            if kernel.agents.supervisor.is_shutting_down() {
                 tracing::debug!("auto_dream: shutdown detected, scheduler exiting");
                 return;
             }
@@ -1049,7 +1053,7 @@ pub async fn current_status(kernel: &LibreFangKernel) -> AutoDreamStatus {
             let lock = lock_for_agent(kernel, agent_id);
             let last = lock.read_last_consolidated_at().await.unwrap_or(0);
             let sessions_since = kernel
-                .memory_substrate()
+                .substrate_ref()
                 .count_agent_sessions_touched_since(
                     agent_id,
                     last,
@@ -1130,7 +1134,7 @@ pub async fn trigger_manual(kernel: Arc<LibreFangKernel>, agent_id: AgentId) -> 
         };
     }
 
-    match kernel.agent_registry().get(agent_id) {
+    match kernel.agent_registry_ref().get(agent_id) {
         None => {
             return TriggerOutcome {
                 fired: false,

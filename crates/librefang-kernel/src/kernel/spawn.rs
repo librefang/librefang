@@ -13,6 +13,7 @@
 //! visibility surgery.
 
 use super::*;
+use crate::MeteringSubsystemApi;
 
 impl LibreFangKernel {
     /// Spawn a new agent from a manifest, optionally linking to a parent agent.
@@ -102,7 +103,7 @@ impl LibreFangKernel {
         // it as the canonical UUID for this name (first-spawn wins).
         let agent_id = predetermined_id.unwrap_or_else(|| {
             if parent.is_none() {
-                if let Some(existing) = self.agent_identities.get(&name) {
+                if let Some(existing) = self.agents.agent_identities.get(&name) {
                     debug!(
                         agent = %name,
                         id = %existing,
@@ -111,7 +112,10 @@ impl LibreFangKernel {
                     existing
                 } else {
                     let derived = AgentId::from_name(&name);
-                    let recorded = self.agent_identities.register_if_absent(&name, derived);
+                    let recorded = self
+                        .agents
+                        .agent_identities
+                        .register_if_absent(&name, derived);
                     if recorded != derived {
                         // Someone else won the race; honor their UUID.
                         debug!(
@@ -132,6 +136,7 @@ impl LibreFangKernel {
         // database, so conversation history survives daemon restarts.
         let session_id = self
             .memory
+            .substrate
             .get_agent_session_ids(agent_id)
             .ok()
             .and_then(|ids| ids.into_iter().next())
@@ -149,7 +154,7 @@ impl LibreFangKernel {
         // channel bootstrap) pass `parent = None` and are unaffected —
         // they're an owner action, not a privilege inheritance.
         if let Some(parent_id) = parent {
-            if let Some(parent_entry) = self.registry.get(parent_id) {
+            if let Some(parent_entry) = self.agents.registry.get(parent_id) {
                 let parent_caps = manifest_to_capabilities(&parent_entry.manifest);
                 let child_caps = manifest_to_capabilities(&manifest);
                 if let Err(violation) = librefang_types::capability::validate_capability_inheritance(
@@ -188,6 +193,7 @@ impl LibreFangKernel {
         // registration so agent-scoped metadata is visible.
         let mut session = self
             .memory
+            .substrate
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
 
@@ -234,7 +240,7 @@ impl LibreFangKernel {
         }
 
         // Apply global budget defaults to agent resource quotas
-        apply_budget_defaults(&self.budget_config(), &mut manifest.resources);
+        apply_budget_defaults(&self.current_budget(), &mut manifest.resources);
 
         // Create workspace directory for the agent.
         // Hand agents set a relative workspace path (hands/<hand>/<role>) resolved
@@ -264,10 +270,11 @@ impl LibreFangKernel {
 
         // Register capabilities
         let caps = manifest_to_capabilities(&manifest);
-        self.capabilities.grant(agent_id, caps);
+        self.agents.capabilities.grant(agent_id, caps);
 
         // Register with scheduler
-        self.scheduler
+        self.agents
+            .scheduler
             .register(agent_id, manifest.resources.clone());
 
         // Create registry entry
@@ -292,7 +299,8 @@ impl LibreFangKernel {
             is_hand,
             ..Default::default()
         };
-        self.registry
+        self.agents
+            .registry
             .register(entry.clone())
             .map_err(KernelError::LibreFang)?;
 
@@ -301,7 +309,7 @@ impl LibreFangKernel {
         self.inject_reset_prompt(&mut session, agent_id);
 
         // Fire external session:start hook for the newly created session.
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionStart,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),
@@ -311,18 +319,19 @@ impl LibreFangKernel {
 
         // Update parent's children list
         if let Some(parent_id) = parent {
-            self.registry.add_child(parent_id, agent_id);
+            self.agents.registry.add_child(parent_id, agent_id);
         }
 
         // Persist agent to SQLite so it survives restarts
         self.memory
+            .substrate
             .save_agent(&entry)
             .map_err(KernelError::LibreFang)?;
 
         info!(agent = %name, id = %agent_id, "Agent spawned");
 
         // SECURITY: Record agent spawn in audit trail
-        self.audit_log.record(
+        self.metering.audit_log.record(
             agent_id.to_string(),
             librefang_runtime::audit::AuditAction::AgentSpawn,
             format!("name={name}, parent={parent:?}"),
@@ -335,19 +344,25 @@ impl LibreFangKernel {
             let mut registered = false;
             for condition in conditions {
                 if let Some(pattern) = background::parse_condition(condition) {
-                    if self.triggers.agent_has_pattern(agent_id, &pattern) {
+                    if self
+                        .workflows
+                        .triggers
+                        .agent_has_pattern(agent_id, &pattern)
+                    {
                         continue;
                     }
                     let prompt = format!(
                         "[PROACTIVE ALERT] Condition '{condition}' matched: {{{{event}}}}. \
                          Review and take appropriate action. Agent: {name}"
                     );
-                    self.triggers.register(agent_id, pattern, prompt, 0);
+                    self.workflows
+                        .triggers
+                        .register(agent_id, pattern, prompt, 0);
                     registered = true;
                 }
             }
             if registered {
-                if let Err(e) = self.triggers.persist() {
+                if let Err(e) = self.workflows.triggers.persist() {
                     warn!(agent = %name, "Failed to persist proactive triggers: {e}");
                 }
             }
@@ -364,10 +379,13 @@ impl LibreFangKernel {
         );
         // Evaluate triggers synchronously (we can't await in a sync fn, so just evaluate)
         let (triggered, trigger_state_mutated) = self
+            .workflows
             .triggers
-            .evaluate_with_resolver(&event, |id| self.registry.get(id).map(|e| e.name.clone()));
+            .evaluate_with_resolver(&event, |id| {
+                self.agents.registry.get(id).map(|e| e.name.clone())
+            });
         if !triggered.is_empty() || trigger_state_mutated {
-            if let Err(e) = self.triggers.persist() {
+            if let Err(e) = self.workflows.triggers.persist() {
                 warn!("Failed to persist trigger jobs after spawn event: {e}");
             }
         }

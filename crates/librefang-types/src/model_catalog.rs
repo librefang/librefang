@@ -313,6 +313,21 @@ pub struct ModelOverrides {
     /// Force the max_tokens parameter even when the provider doesn't require it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub force_max_tokens: Option<bool>,
+    /// User override for `supports_tools`. `None` defers to the catalog entry's
+    /// own value; `Some(true|false)` forces capability on/off regardless of
+    /// what the provider's catalog declares (refs #4745). Useful when a
+    /// provider's `capabilities` field is wrong, missing, or non-standard.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_tools: Option<bool>,
+    /// User override for `supports_vision`. See [`Self::supports_tools`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_vision: Option<bool>,
+    /// User override for `supports_streaming`. See [`Self::supports_tools`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_streaming: Option<bool>,
+    /// User override for `supports_thinking`. See [`Self::supports_tools`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_thinking: Option<bool>,
 }
 
 impl ModelOverrides {
@@ -328,7 +343,24 @@ impl ModelOverrides {
             && self.use_max_completion_tokens.is_none()
             && self.no_system_role.is_none()
             && self.force_max_tokens.is_none()
+            && self.supports_tools.is_none()
+            && self.supports_vision.is_none()
+            && self.supports_streaming.is_none()
+            && self.supports_thinking.is_none()
     }
+}
+
+/// Effective capabilities for a model after applying user overrides on top of
+/// the catalog entry's declared capabilities. Returned by
+/// `ModelCatalog::effective_capabilities` and consumed by callers that gate
+/// runtime behaviour (tool gating, vision input validation, …) on capability
+/// truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveCapabilities {
+    pub supports_tools: bool,
+    pub supports_vision: bool,
+    pub supports_streaming: bool,
+    pub supports_thinking: bool,
 }
 
 /// Per-region endpoint configuration.

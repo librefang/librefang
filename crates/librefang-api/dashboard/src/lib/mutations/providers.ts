@@ -107,3 +107,33 @@ export function useSetDefaultProvider() {
     },
   });
 }
+
+const TEST_SUCCESS_STATUSES = new Set(["ok", "success"]);
+
+export function useValidateProviderKey() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      providerId,
+      apiKey,
+      requiresKey,
+    }: {
+      providerId: string;
+      apiKey: string;
+      requiresKey: boolean;
+    }) => {
+      if (!providerId) throw new Error("no_provider");
+      if (requiresKey && apiKey.trim()) {
+        await setProviderKey(providerId, apiKey.trim());
+      }
+      const test = await testProvider(providerId);
+      if (!TEST_SUCCESS_STATUSES.has(test.status ?? "")) {
+        throw new Error(test.message || "test_failed");
+      }
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: providerKeys.all });
+      qc.invalidateQueries({ queryKey: modelKeys.lists() });
+    },
+  });
+}

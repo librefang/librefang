@@ -169,6 +169,8 @@ pub async fn list_models(
                 .get_provider(&m.provider)
                 .map(|p| p.auth_status.is_available())
                 .unwrap_or(m.tier == librefang_types::model_catalog::ModelTier::Custom);
+            // Effective `supports_*` reflects user overrides; `capabilities_catalog` ships the raw default for revert-target UIs. Refs #4745.
+            let eff = catalog.effective_capabilities(m);
             serde_json::json!({
                 "id": m.id,
                 "display_name": m.display_name,
@@ -181,10 +183,16 @@ pub async fn list_models(
                 "output_cost_per_m": m.output_cost_per_m,
                 "image_input_cost_per_m": m.image_input_cost_per_m,
                 "image_output_cost_per_m": m.image_output_cost_per_m,
-                "supports_tools": m.supports_tools,
-                "supports_vision": m.supports_vision,
-                "supports_streaming": m.supports_streaming,
-                "supports_thinking": m.supports_thinking,
+                "supports_tools": eff.supports_tools,
+                "supports_vision": eff.supports_vision,
+                "supports_streaming": eff.supports_streaming,
+                "supports_thinking": eff.supports_thinking,
+                "capabilities_catalog": {
+                    "supports_tools": m.supports_tools,
+                    "supports_vision": m.supports_vision,
+                    "supports_streaming": m.supports_streaming,
+                    "supports_thinking": m.supports_thinking,
+                },
                 "aliases": m.aliases,
                 "available": available,
             })
@@ -308,6 +316,8 @@ pub async fn get_model(
                 .unwrap_or(m.tier == librefang_types::model_catalog::ModelTier::Custom);
             let override_key = format!("{}:{}", m.provider, m.id);
             let overrides = catalog.get_overrides(&override_key);
+            // Effective `supports_*` reflects user overrides; `capabilities_catalog` ships the raw default for revert-target UIs. Refs #4745.
+            let eff = catalog.effective_capabilities(m);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -322,9 +332,16 @@ pub async fn get_model(
                     "output_cost_per_m": m.output_cost_per_m,
                     "image_input_cost_per_m": m.image_input_cost_per_m,
                     "image_output_cost_per_m": m.image_output_cost_per_m,
-                    "supports_tools": m.supports_tools,
-                    "supports_vision": m.supports_vision,
-                    "supports_streaming": m.supports_streaming,
+                    "supports_tools": eff.supports_tools,
+                    "supports_vision": eff.supports_vision,
+                    "supports_streaming": eff.supports_streaming,
+                    "supports_thinking": eff.supports_thinking,
+                    "capabilities_catalog": {
+                        "supports_tools": m.supports_tools,
+                        "supports_vision": m.supports_vision,
+                        "supports_streaming": m.supports_streaming,
+                        "supports_thinking": m.supports_thinking,
+                    },
                     "aliases": m.aliases,
                     "available": available,
                     "overrides": overrides,
@@ -720,6 +737,8 @@ pub async fn get_provider(
                     .models_by_provider(&name)
                     .iter()
                     .map(|m| {
+                        // Effective `supports_*` reflects user overrides; `capabilities_catalog` ships the raw default for revert-target UIs. Refs #4745.
+                        let eff = catalog.effective_capabilities(m);
                         serde_json::json!({
                             "id": m.id,
                             "display_name": m.display_name,
@@ -731,9 +750,16 @@ pub async fn get_provider(
                             "output_cost_per_m": m.output_cost_per_m,
                             "image_input_cost_per_m": m.image_input_cost_per_m,
                             "image_output_cost_per_m": m.image_output_cost_per_m,
-                            "supports_tools": m.supports_tools,
-                            "supports_vision": m.supports_vision,
-                            "supports_streaming": m.supports_streaming,
+                            "supports_tools": eff.supports_tools,
+                            "supports_vision": eff.supports_vision,
+                            "supports_streaming": eff.supports_streaming,
+                            "supports_thinking": eff.supports_thinking,
+                            "capabilities_catalog": {
+                                "supports_tools": m.supports_tools,
+                                "supports_vision": m.supports_vision,
+                                "supports_streaming": m.supports_streaming,
+                                "supports_thinking": m.supports_thinking,
+                            },
                         })
                     })
                     .collect();

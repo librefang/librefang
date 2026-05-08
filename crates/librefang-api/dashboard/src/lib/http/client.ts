@@ -96,6 +96,9 @@ export {
   listSkills,
   getSkillDetail,
   getSupportingFile,
+  // skill workshop pending review (#3328)
+  listPendingCandidates,
+  getPendingCandidate,
   clawhubBrowse,
   clawhubSearch,
   clawhubGetSkill,
@@ -119,6 +122,10 @@ export {
   listTerminalWindows,
   // auto-dream
   getAutoDreamStatus,
+  // tools
+  listTools,
+  getAgentTools,
+  getAgentTemplateToml,
   // overview
   loadDashboardSnapshot,
   getVersionInfo,
@@ -149,6 +156,7 @@ export type {
   UserBudgetResponse,
   UserBudgetWindow,
   UserBudgetPayload,
+  ListSessionsResult,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -167,6 +175,8 @@ export {
   patchAgentConfig,
   patchHandAgentRuntimeConfig,
   clearHandAgentRuntimeConfig,
+  resetAgentSession,
+  updateAgentTools,
   createAgentSession,
   switchAgentSession,
   deleteSession,
@@ -268,6 +278,9 @@ export {
   evolveRemoveFile,
   installSkill,
   uninstallSkill,
+  // skill workshop pending review (#3328)
+  approvePendingCandidate,
+  rejectPendingCandidate,
   clawhubInstall,
   clawhubCnInstall,
   skillhubInstall,

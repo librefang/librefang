@@ -7,7 +7,7 @@
 //! `[[mcp_servers]]` with an optional `template_id` pointing back into the
 //! catalog.
 
-use crate::{McpCatalogEntry, McpCategory};
+use librefang_types::mcp::{McpCatalogEntry, McpCategory};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};

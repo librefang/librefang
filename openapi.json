@@ -8326,6 +8326,177 @@
         }
       }
     },
+    "/api/skills/pending": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "GET /api/skills/pending — list skill-workshop pending candidates,\noldest captured first. Optionally filtered by agent.",
+        "operationId": "list_pending_candidates",
+        "parameters": [
+          {
+            "name": "agent",
+            "in": "query",
+            "description": "Optional agent UUID filter. When set, only candidates from that\nagent are returned. Omit for a workspace-wide list.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List pending workshop candidates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/skills/pending/{id}": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "GET /api/skills/pending/{id} — return a single pending candidate by id.",
+        "operationId": "show_pending_candidate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Candidate UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pending candidate detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Candidate not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/skills/pending/{id}/approve": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "POST /api/skills/pending/{id}/approve — promote a pending candidate\ninto the active skill registry via `evolution::create_skill`.",
+        "operationId": "approve_pending_candidate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Candidate UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Candidate promoted to active skill",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Candidate not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Promotion blocked (security scan or naming collision)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/skills/pending/{id}/reject": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "POST /api/skills/pending/{id}/reject — drop a pending candidate\nwithout promoting.",
+        "operationId": "reject_pending_candidate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Candidate UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Candidate dropped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Candidate not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/skills/uninstall": {
       "post": {
         "tags": [

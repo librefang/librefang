@@ -158,6 +158,20 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn vault_redeem_recovery_code(&self, code: &str) -> Result<bool, String>;
 
     // ====================================================================
+    // MCP install façade — routes through the kernel's cached vault and
+    // catalog so HTTP request handlers don't open vault.enc and run the
+    // unlock-time Argon2id KDF on every install request (#3598). The trait
+    // exposes the high-level installer; the underlying `vault_handle` stays
+    // an inherent method to keep the trait surface small.
+    // ====================================================================
+
+    fn install_integration(
+        &self,
+        template_id: &str,
+        provided_keys: &std::collections::HashMap<String, String>,
+    ) -> librefang_extensions::ExtensionResult<librefang_extensions::installer::InstallResult>;
+
+    // ====================================================================
     // Inbox / auto-dream observability
     // ====================================================================
 
@@ -540,86 +554,86 @@ pub trait KernelApi: KernelHandle + Send + Sync {
 impl KernelApi for LibreFangKernel {
     // -- Subsystem accessors --
     fn agent_registry(&self) -> &AgentRegistry {
-        Self::agent_registry(self)
+        <Self as crate::AgentSubsystemApi>::agent_registry_ref(self)
     }
     fn agent_identities(&self) -> &Arc<crate::agent_identity_registry::AgentIdentityRegistry> {
-        Self::agent_identities(self)
+        <Self as crate::AgentSubsystemApi>::identities_ref(self)
     }
     fn approvals(&self) -> &ApprovalManager {
-        Self::approvals(self)
+        <Self as crate::GovernanceSubsystemApi>::approvals(self)
     }
     fn audit(&self) -> &Arc<AuditLog> {
-        Self::audit(self)
+        <Self as crate::MeteringSubsystemApi>::audit_log(self)
     }
     fn auth_manager(&self) -> &AuthManager {
-        Self::auth_manager(self)
+        <Self as crate::SecuritySubsystemApi>::auth_ref(self)
     }
     fn browser(&self) -> &librefang_runtime::browser::BrowserManager {
-        Self::browser(self)
+        <Self as crate::MediaSubsystemApi>::browser(self)
     }
     fn cron(&self) -> &CronScheduler {
-        Self::cron(self)
+        <Self as crate::WorkflowSubsystemApi>::cron_ref(self)
     }
     fn delivery(&self) -> &DeliveryTracker {
-        Self::delivery(self)
+        <Self as crate::MeshSubsystemApi>::delivery(self)
     }
     fn event_bus_ref(&self) -> &EventBus {
-        Self::event_bus_ref(self)
+        <Self as crate::EventSubsystemApi>::event_bus_ref(self)
     }
     fn hands(&self) -> &librefang_hands::registry::HandRegistry {
-        Self::hands(self)
+        <Self as crate::SkillsSubsystemApi>::hand_registry_ref(self)
     }
     fn home_dir(&self) -> &Path {
         Self::home_dir(self)
     }
     fn media(&self) -> &librefang_runtime::media_understanding::MediaEngine {
-        Self::media(self)
+        <Self as crate::MediaSubsystemApi>::media_engine(self)
     }
     fn media_drivers(&self) -> &librefang_runtime::media::MediaDriverCache {
-        Self::media_drivers(self)
+        <Self as crate::MediaSubsystemApi>::drivers(self)
     }
     fn memory_substrate(&self) -> &Arc<MemorySubstrate> {
-        Self::memory_substrate(self)
+        <Self as crate::MemorySubsystemApi>::substrate_ref(self)
     }
     fn metering_ref(&self) -> &Arc<MeteringEngine> {
-        Self::metering_ref(self)
+        <Self as crate::MeteringSubsystemApi>::metering_engine(self)
     }
     fn pairing_ref(&self) -> &PairingManager {
-        Self::pairing_ref(self)
+        <Self as crate::SecuritySubsystemApi>::pairing_ref(self)
     }
     fn proactive_memory_store(&self) -> Option<&Arc<librefang_memory::ProactiveMemoryStore>> {
-        Self::proactive_memory_store(self)
+        <Self as crate::MemorySubsystemApi>::proactive_store(self)
     }
     fn processes(&self) -> &Arc<librefang_runtime::process_manager::ProcessManager> {
-        Self::processes(self)
+        <Self as crate::ProcessSubsystemApi>::process_manager_ref(self)
     }
     fn process_registry(&self) -> &Arc<librefang_runtime::process_registry::ProcessRegistry> {
-        Self::process_registry(self)
+        <Self as crate::ProcessSubsystemApi>::process_registry_ref(self)
     }
     fn scheduler_ref(&self) -> &AgentScheduler {
-        Self::scheduler_ref(self)
+        <Self as crate::AgentSubsystemApi>::scheduler_ref(self)
     }
     fn session_stream_hub(&self) -> Arc<SessionStreamHub> {
         Self::session_stream_hub(self)
     }
     fn supervisor_ref(&self) -> &Supervisor {
-        Self::supervisor_ref(self)
+        <Self as crate::AgentSubsystemApi>::supervisor_ref(self)
     }
     fn templates(&self) -> &crate::workflow::WorkflowTemplateRegistry {
-        Self::templates(self)
+        <Self as crate::WorkflowSubsystemApi>::templates_ref(self)
     }
     fn tts(&self) -> &librefang_runtime::tts::TtsEngine {
-        Self::tts(self)
+        <Self as crate::MediaSubsystemApi>::tts(self)
     }
     fn web_tools(&self) -> &librefang_runtime::web_search::WebToolsContext {
-        Self::web_tools(self)
+        <Self as crate::MediaSubsystemApi>::web_tools(self)
     }
     fn workflow_engine(&self) -> &WorkflowEngine {
-        Self::workflow_engine(self)
+        <Self as crate::WorkflowSubsystemApi>::engine_ref(self)
     }
 
     fn command_queue_ref(&self) -> &librefang_runtime::command_lane::CommandQueue {
-        Self::command_queue_ref(self)
+        <Self as crate::WorkflowSubsystemApi>::command_queue_ref(self)
     }
     fn config_ref(&self) -> arc_swap::Guard<Arc<KernelConfig>> {
         Self::config_ref(self)
@@ -633,42 +647,42 @@ impl KernelApi for LibreFangKernel {
     fn default_model_override_ref(
         &self,
     ) -> &std::sync::RwLock<Option<librefang_types::config::DefaultModelConfig>> {
-        Self::default_model_override_ref(self)
+        <Self as crate::LlmSubsystemApi>::default_model_override_ref(self)
     }
     fn mcp_auth_states_ref(&self) -> &librefang_runtime::mcp_oauth::McpAuthStates {
-        Self::mcp_auth_states_ref(self)
+        <Self as crate::McpSubsystemApi>::auth_states_ref(self)
     }
     fn mcp_connections_ref(
         &self,
     ) -> &tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>> {
-        Self::mcp_connections_ref(self)
+        <Self as crate::McpSubsystemApi>::connections_ref(self)
     }
     fn mcp_tools_ref(&self) -> &std::sync::Mutex<Vec<ToolDefinition>> {
-        Self::mcp_tools_ref(self)
+        <Self as crate::McpSubsystemApi>::tools_ref(self)
     }
     fn model_catalog_ref(
         &self,
     ) -> &arc_swap::ArcSwap<librefang_runtime::model_catalog::ModelCatalog> {
-        Self::model_catalog_ref(self)
+        <Self as crate::LlmSubsystemApi>::model_catalog_swap(self)
     }
     fn oauth_provider_ref(
         &self,
     ) -> Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync> {
-        Self::oauth_provider_ref(self)
+        Arc::clone(<Self as crate::McpSubsystemApi>::oauth_provider_ref(self))
     }
     fn peer_node_ref(&self) -> Option<&Arc<librefang_wire::PeerNode>> {
-        Self::peer_node_ref(self)
+        <Self as crate::MeshSubsystemApi>::peer_node_ref(self)
     }
     fn peer_registry_ref(&self) -> Option<&librefang_wire::PeerRegistry> {
-        Self::peer_registry_ref(self)
+        <Self as crate::MeshSubsystemApi>::peer_registry_ref(self)
     }
     fn skill_registry_ref(&self) -> &std::sync::RwLock<librefang_skills::registry::SkillRegistry> {
-        Self::skill_registry_ref(self)
+        <Self as crate::SkillsSubsystemApi>::skill_registry_ref(self)
     }
 
     // -- Config / lifecycle --
     fn budget_config(&self) -> BudgetConfig {
-        Self::budget_config(self)
+        <Self as crate::MeteringSubsystemApi>::current_budget(self)
     }
     fn update_budget_config(&self, f: &dyn Fn(&mut BudgetConfig)) {
         Self::update_budget_config(self, f);
@@ -677,7 +691,7 @@ impl KernelApi for LibreFangKernel {
         Self::shutdown(self);
     }
     fn clear_driver_cache(&self) {
-        Self::clear_driver_cache(self);
+        <Self as crate::LlmSubsystemApi>::clear_driver_cache(self);
     }
     fn relocate_legacy_agent_dirs(&self) {
         Self::relocate_legacy_agent_dirs(self);
@@ -698,6 +712,15 @@ impl KernelApi for LibreFangKernel {
     }
     fn vault_redeem_recovery_code(&self, code: &str) -> Result<bool, String> {
         Self::vault_redeem_recovery_code(self, code)
+    }
+
+    // -- MCP install façade --
+    fn install_integration(
+        &self,
+        template_id: &str,
+        provided_keys: &std::collections::HashMap<String, String>,
+    ) -> librefang_extensions::ExtensionResult<librefang_extensions::installer::InstallResult> {
+        Self::install_integration(self, template_id, provided_keys)
     }
 
     // -- Inbox / auto-dream --
@@ -869,10 +892,10 @@ impl KernelApi for LibreFangKernel {
 
     // -- MCP --
     fn mcp_health(&self) -> &librefang_extensions::health::HealthMonitor {
-        Self::mcp_health(self)
+        <Self as crate::McpSubsystemApi>::health(self)
     }
     fn mcp_catalog_load(&self) -> arc_swap::Guard<Arc<librefang_extensions::catalog::McpCatalog>> {
-        Self::mcp_catalog_load(self)
+        <Self as crate::McpSubsystemApi>::mcp_catalog_load(self)
     }
     async fn connect_mcp_servers(self: Arc<Self>) {
         LibreFangKernel::connect_mcp_servers(&self).await;
@@ -971,7 +994,7 @@ impl KernelApi for LibreFangKernel {
     fn model_catalog_load(
         &self,
     ) -> arc_swap::Guard<Arc<librefang_runtime::model_catalog::ModelCatalog>> {
-        Self::model_catalog_load(self)
+        <Self as crate::LlmSubsystemApi>::model_catalog_load(self)
     }
     fn model_catalog_update(
         &self,
@@ -995,10 +1018,10 @@ impl KernelApi for LibreFangKernel {
         Self::agent_has_active_session(self, agent_id)
     }
     fn a2a_agents(&self) -> &std::sync::Mutex<Vec<(String, librefang_runtime::a2a::AgentCard)>> {
-        Self::a2a_agents(self)
+        <Self as crate::MeshSubsystemApi>::a2a_agents(self)
     }
     fn a2a_tasks(&self) -> &librefang_runtime::a2a::A2aTaskStore {
-        Self::a2a_tasks(self)
+        <Self as crate::MeshSubsystemApi>::a2a_tasks(self)
     }
     fn context_report(
         &self,
@@ -1009,12 +1032,12 @@ impl KernelApi for LibreFangKernel {
     fn effective_mcp_servers_ref(
         &self,
     ) -> &std::sync::RwLock<Vec<librefang_types::config::McpServerConfigEntry>> {
-        Self::effective_mcp_servers_ref(self)
+        <Self as crate::McpSubsystemApi>::effective_servers_ref(self)
     }
     fn embedding(
         &self,
     ) -> Option<&Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>> {
-        Self::embedding(self)
+        <Self as crate::LlmSubsystemApi>::embedding(self)
     }
     async fn inject_message_for_session(
         &self,
@@ -1046,7 +1069,7 @@ impl KernelApi for LibreFangKernel {
         Self::sync_default_model_agents(self, old_provider, dm);
     }
     fn traces(&self) -> &dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>> {
-        Self::traces(self)
+        <Self as crate::AgentSubsystemApi>::traces(self)
     }
     fn update_hand_agent_runtime_override(
         &self,
@@ -1190,13 +1213,13 @@ impl KernelApi for LibreFangKernel {
     fn channel_adapters_ref(
         &self,
     ) -> &dashmap::DashMap<String, Arc<dyn librefang_channels::types::ChannelAdapter>> {
-        Self::channel_adapters_ref(self)
+        <Self as crate::MeshSubsystemApi>::channel_adapters_ref(self)
     }
     fn trigger_engine(&self) -> &crate::triggers::TriggerEngine {
-        Self::trigger_engine(self)
+        <Self as crate::WorkflowSubsystemApi>::triggers_ref(self)
     }
     fn broadcast_ref(&self) -> &librefang_types::config::BroadcastConfig {
-        Self::broadcast_ref(self)
+        <Self as crate::MeshSubsystemApi>::broadcast_ref(self)
     }
     fn auto_reply(&self) -> &crate::auto_reply::AutoReplyEngine {
         Self::auto_reply(self)

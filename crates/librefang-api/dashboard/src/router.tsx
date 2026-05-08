@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState, type ComponentType } from "react";
-import { Navigate, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
+import { Link, Navigate, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { App } from "./App";
 
 // Matches chunk load failures across browsers:
@@ -7,6 +7,8 @@ import { App } from "./App";
 // Firefox: "error loading dynamically imported module: ..."
 // Safari:  "Importing a module script failed"
 // Webpack: "Loading chunk ... failed"
+const CHUNK_RELOAD_KEY = "__chunk_reload";
+
 const CHUNK_ERROR_RE = /dynamically imported module|importing a module script|Loading chunk .* failed/i;
 
 // Matches the transient React 19 + Vite HMR failure mode where the dispatcher
@@ -26,10 +28,9 @@ function shouldAutoReload(err: unknown): boolean {
 // infinite reload loops.
 function tryAutoReload(err: unknown): boolean {
   if (!shouldAutoReload(err)) return false;
-  const key = "__chunk_reload";
-  const last = Number(sessionStorage.getItem(key) || "0");
+  const last = Number(sessionStorage.getItem(CHUNK_RELOAD_KEY) || "0");
   if (Date.now() - last <= 10_000) return false;
-  sessionStorage.setItem(key, String(Date.now()));
+  sessionStorage.setItem(CHUNK_RELOAD_KEY, String(Date.now()));
   window.location.reload();
   return true;
 }
@@ -92,9 +93,18 @@ const UserPolicyPage = lazyWithReload(() => import("./pages/UserPolicyPage").the
 const ConnectWizardPage = lazyWithReload(() => import("./pages/ConnectWizardPage").then(m => ({ default: m.ConnectWizardPage })));
 const MobilePairingPage = lazyWithReload(() => import("./pages/MobilePairingPage").then(m => ({ default: m.MobilePairingPage })));
 
-// Suspense wrapper — shows nothing briefly while chunk loads (page transition animation covers it)
-function L({ children }: { children: React.ReactNode }) {
-  return <Suspense fallback={null}>{children}</Suspense>;
+function LazyRouteBoundary({ children }: { children: React.ReactNode }) {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-32 items-center justify-center">
+          <div className="h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-sky-500" />
+        </div>
+      }
+    >
+      {children}
+    </Suspense>
+  );
 }
 
 const rootRoute = createRootRoute({
@@ -110,7 +120,7 @@ const indexRoute = createRoute({
 const overviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/overview",
-  component: () => <L><OverviewPage /></L>
+  component: () => <LazyRouteBoundary><OverviewPage /></LazyRouteBoundary>
 });
 
 const canvasRoute = createRoute({
@@ -120,31 +130,31 @@ const canvasRoute = createRoute({
     t: search.t as number | undefined,
     wf: search.wf as string | undefined,
   }),
-  component: () => <L><CanvasPage /></L>
+  component: () => <LazyRouteBoundary><CanvasPage /></LazyRouteBoundary>
 });
 
 const agentsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/agents",
-  component: () => <L><AgentsPage /></L>
+  component: () => <LazyRouteBoundary><AgentsPage /></LazyRouteBoundary>
 });
 
 const sessionsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/sessions",
-  component: () => <L><SessionsPage /></L>
+  component: () => <LazyRouteBoundary><SessionsPage /></LazyRouteBoundary>
 });
 
 const providersRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/providers",
-  component: () => <L><ProvidersPage /></L>
+  component: () => <LazyRouteBoundary><ProvidersPage /></LazyRouteBoundary>
 });
 
 const channelsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/channels",
-  component: () => <L><ChannelsPage /></L>
+  component: () => <LazyRouteBoundary><ChannelsPage /></LazyRouteBoundary>
 });
 
 const chatRoute = createRoute({
@@ -158,132 +168,132 @@ const chatRoute = createRoute({
     if (typeof search.handName === "string") out.handName = search.handName;
     return out;
   },
-  component: () => <L><ChatPage /></L>
+  component: () => <LazyRouteBoundary><ChatPage /></LazyRouteBoundary>
 });
 
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
-  component: () => <L><SettingsPage /></L>
+  component: () => <LazyRouteBoundary><SettingsPage /></LazyRouteBoundary>
 });
 
 const skillsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/skills",
-  component: () => <L><SkillsPage /></L>
+  component: () => <LazyRouteBoundary><SkillsPage /></LazyRouteBoundary>
 });
 
 const wizardRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/wizard",
-  component: () => <L><WizardPage /></L>
+  component: () => <LazyRouteBoundary><WizardPage /></LazyRouteBoundary>
 });
 
 const workflowsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/workflows",
-  component: () => <L><WorkflowsPage /></L>
+  component: () => <LazyRouteBoundary><WorkflowsPage /></LazyRouteBoundary>
 });
 
 const schedulerRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/scheduler",
-  component: () => <L><SchedulerPage /></L>
+  component: () => <LazyRouteBoundary><SchedulerPage /></LazyRouteBoundary>
 });
 
 const goalsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/goals",
-  component: () => <L><GoalsPage /></L>
+  component: () => <LazyRouteBoundary><GoalsPage /></LazyRouteBoundary>
 });
 
 const analyticsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/analytics",
-  component: () => <L><AnalyticsPage /></L>
+  component: () => <LazyRouteBoundary><AnalyticsPage /></LazyRouteBoundary>
 });
 
 const memoryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/memory",
-  component: () => <L><MemoryPage /></L>
+  component: () => <LazyRouteBoundary><MemoryPage /></LazyRouteBoundary>
 });
 
 const commsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/comms",
-  component: () => <L><CommsPage /></L>
+  component: () => <LazyRouteBoundary><CommsPage /></LazyRouteBoundary>
 });
 
 const runtimeRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/runtime",
-  component: () => <L><RuntimePage /></L>
+  component: () => <LazyRouteBoundary><RuntimePage /></LazyRouteBoundary>
 });
 
 const logsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/logs",
-  component: () => <L><LogsPage /></L>
+  component: () => <LazyRouteBoundary><LogsPage /></LazyRouteBoundary>
 });
 
 const approvalsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/approvals",
-  component: () => <L><ApprovalsPage /></L>
+  component: () => <LazyRouteBoundary><ApprovalsPage /></LazyRouteBoundary>
 });
 
 const handsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/hands",
-  component: () => <L><HandsPage /></L>
+  component: () => <LazyRouteBoundary><HandsPage /></LazyRouteBoundary>
 });
 
 const pluginsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/plugins",
-  component: () => <L><PluginsPage /></L>
+  component: () => <LazyRouteBoundary><PluginsPage /></LazyRouteBoundary>
 });
 
 const modelsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/models",
-  component: () => <L><ModelsPage /></L>
+  component: () => <LazyRouteBoundary><ModelsPage /></LazyRouteBoundary>
 });
 
 const mediaRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/media",
-  component: () => <L><MediaPage /></L>
+  component: () => <LazyRouteBoundary><MediaPage /></LazyRouteBoundary>
 });
 
 const networkRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/network",
-  component: () => <L><NetworkPage /></L>
+  component: () => <LazyRouteBoundary><NetworkPage /></LazyRouteBoundary>
 });
 
 const a2aRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/a2a",
-  component: () => <L><A2APage /></L>
+  component: () => <LazyRouteBoundary><A2APage /></LazyRouteBoundary>
 });
 
 const telemetryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/telemetry",
-  component: () => <L><TelemetryPage /></L>
+  component: () => <LazyRouteBoundary><TelemetryPage /></LazyRouteBoundary>
 });
 
 const terminalRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/terminal",
-  component: () => <L><TerminalPage /></L>
+  component: () => <LazyRouteBoundary><TerminalPage /></LazyRouteBoundary>
 });
 const mcpServersRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/mcp-servers",
-  component: () => <L><McpServersPage /></L>
+  component: () => <LazyRouteBoundary><McpServersPage /></LazyRouteBoundary>
 });
 
 // RBAC M6 — users, identity wizard, permission simulator. Per-user budget
@@ -292,39 +302,39 @@ const mcpServersRoute = createRoute({
 const usersRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/users",
-  component: () => <L><UsersPage /></L>
+  component: () => <LazyRouteBoundary><UsersPage /></LazyRouteBoundary>
 });
 const usersSimulatorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/users/simulator",
-  component: () => <L><PermissionSimulatorPage /></L>
+  component: () => <LazyRouteBoundary><PermissionSimulatorPage /></LazyRouteBoundary>
 });
 const userBudgetRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/users/$name/budget",
-  component: () => <L><UserBudgetPage /></L>
+  component: () => <LazyRouteBoundary><UserBudgetPage /></LazyRouteBoundary>
 });
 const userPolicyRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/users/$name/policy",
-  component: () => <L><UserPolicyPage /></L>
+  component: () => <LazyRouteBoundary><UserPolicyPage /></LazyRouteBoundary>
 });
 const auditRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/audit",
-  component: () => <L><AuditPage /></L>
+  component: () => <LazyRouteBoundary><AuditPage /></LazyRouteBoundary>
 });
 
 const connectRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/connect",
-  component: () => <L><ConnectWizardPage /></L>
+  component: () => <LazyRouteBoundary><ConnectWizardPage /></LazyRouteBoundary>
 });
 
 const mobilePairingRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings/mobile-pairing",
-  component: () => <L><MobilePairingPage /></L>
+  component: () => <LazyRouteBoundary><MobilePairingPage /></LazyRouteBoundary>
 });
 
 const configIndexRoute = createRoute({
@@ -335,37 +345,37 @@ const configIndexRoute = createRoute({
 const configGeneralRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config/general",
-  component: () => <L><ConfigPage category="general" /></L>
+  component: () => <LazyRouteBoundary><ConfigPage category="general" /></LazyRouteBoundary>
 });
 const configMemoryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config/memory",
-  component: () => <L><ConfigPage category="memory" /></L>
+  component: () => <LazyRouteBoundary><ConfigPage category="memory" /></LazyRouteBoundary>
 });
 const configToolsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config/tools",
-  component: () => <L><ConfigPage category="tools" /></L>
+  component: () => <LazyRouteBoundary><ConfigPage category="tools" /></LazyRouteBoundary>
 });
 const configChannelsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config/channels",
-  component: () => <L><ConfigPage category="channels" /></L>
+  component: () => <LazyRouteBoundary><ConfigPage category="channels" /></LazyRouteBoundary>
 });
 const configSecurityRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config/security",
-  component: () => <L><ConfigPage category="security" /></L>
+  component: () => <LazyRouteBoundary><ConfigPage category="security" /></LazyRouteBoundary>
 });
 const configNetworkRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config/network",
-  component: () => <L><ConfigPage category="network" /></L>
+  component: () => <LazyRouteBoundary><ConfigPage category="network" /></LazyRouteBoundary>
 });
 const configInfraRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config/infra",
-  component: () => <L><ConfigPage category="infra" /></L>
+  component: () => <LazyRouteBoundary><ConfigPage category="infra" /></LazyRouteBoundary>
 });
 
 const routeTree = rootRoute.addChildren([
@@ -452,7 +462,7 @@ function ChunkErrorBoundary({ error }: { error: Error }) {
           </button>
           <button
             onClick={() => {
-              sessionStorage.removeItem("__chunk_reload");
+              sessionStorage.removeItem(CHUNK_RELOAD_KEY);
               window.location.reload();
             }}
             className="rounded-xl bg-red-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-red-600 transition-colors"
@@ -479,11 +489,28 @@ function ChunkErrorBoundary({ error }: { error: Error }) {
   );
 }
 
+function NotFound() {
+  return (
+    <div className="flex h-[60vh] items-center justify-center">
+      <div className="max-w-xl text-center space-y-4 px-4">
+        <p className="text-lg font-semibold">Page not found</p>
+        <Link
+          to="/overview"
+          className="inline-block rounded-xl bg-sky-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-sky-600 transition-colors"
+        >
+          Go to Overview
+        </Link>
+      </div>
+    </div>
+  );
+}
+
 export const router = createRouter({
   routeTree,
   basepath: "/dashboard",
   defaultPreload: "intent",
   defaultErrorComponent: ChunkErrorBoundary,
+  defaultNotFoundComponent: NotFound,
 });
 
 declare module "@tanstack/react-router" {

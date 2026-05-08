@@ -1252,6 +1252,22 @@ impl SkillsResource {
         do_req(&self.client, &self.base_url, reqwest::Method::POST, &"/api/skills/install".to_string(), Some(data), &[]).await
     }
 
+    pub async fn list_pending_candidates(&self, agent: Option<&str>) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/skills/pending".to_string(), None, &[("agent", agent)]).await
+    }
+
+    pub async fn show_pending_candidate(&self, id: &str) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/skills/pending/{}", id), None, &[]).await
+    }
+
+    pub async fn approve_pending_candidate(&self, id: &str) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::POST, &format!("/api/skills/pending/{}/approve", id), None, &[]).await
+    }
+
+    pub async fn reject_pending_candidate(&self, id: &str) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::POST, &format!("/api/skills/pending/{}/reject", id), None, &[]).await
+    }
+
     pub async fn uninstall_skill(&self, data: Value) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::POST, &"/api/skills/uninstall".to_string(), Some(data), &[]).await
     }

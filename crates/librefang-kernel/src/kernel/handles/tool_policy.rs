@@ -62,7 +62,7 @@ impl kernel_handle::ToolPolicy for LibreFangKernel {
         let Ok(aid) = agent_id.parse::<AgentId>() else {
             return vec![];
         };
-        let Some(entry) = self.registry.get(aid) else {
+        let Some(entry) = self.agents.registry.get(aid) else {
             return vec![];
         };
         if entry.manifest.workspaces.is_empty() {

@@ -6,6 +6,7 @@ import {
   listTools,
   patchAgentConfig,
   patchHandAgentRuntimeConfig,
+  resetAgentSession,
   setApiKey,
   updateAgentTools,
   verifyStoredAuth,
@@ -236,6 +237,23 @@ describe("dashboard auth helpers", () => {
       tool_allowlist: ["bash", "webfetch"],
       tool_blocklist: ["rm"],
     });
+  });
+
+  it("resetAgentSession requests the session reset endpoint", async () => {
+    setApiKey("secret-token");
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ status: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await expect(resetAgentSession("agent-123")).resolves.toEqual({ status: "ok" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/agents/agent-123/session/reset");
+    expect(options.method).toBe("POST");
   });
 
   it("listTools supports both wrapped and direct array responses", async () => {

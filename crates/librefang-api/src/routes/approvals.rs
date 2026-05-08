@@ -294,6 +294,10 @@ pub async fn create_approval(
         route_to: Vec::new(),
         escalation_count: 0,
         session_id: req.session_id,
+        // Manual approvals created via the dashboard / API have no
+        // originating tool_use_id — operators are creating them
+        // directly, not in response to an LLM tool_use block.
+        tool_use_id: None,
     };
 
     // Spawn the request in the background (it will block until resolved or timed out)

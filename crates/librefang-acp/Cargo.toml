@@ -1,0 +1,48 @@
+[package]
+name = "librefang-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent Client Protocol (ACP) adapter for LibreFang — embeds LibreFang agents in Zed/VSCode/JetBrains via stdio JSON-RPC (#3313)"
+
+[features]
+default = []
+# Pulls in the heavy `librefang-kernel` dep tree to provide a
+# `KernelAdapter` that wraps `Arc<LibreFangKernel>` and implements
+# [`AcpKernel`]. Enabled by `librefang-cli` and `librefang-api` so they
+# can host the ACP server (in-process and daemon-attached respectively)
+# without duplicating the binding layer. Pure-protocol consumers
+# (integration tests in this crate, theoretical alternative kernels)
+# leave this off and impl `AcpKernel` directly.
+kernel-adapter = ["dep:librefang-kernel"]
+
+[dependencies]
+librefang-types = { path = "../librefang-types" }
+librefang-llm-driver = { path = "../librefang-llm-driver" }
+librefang-kernel-handle = { path = "../librefang-kernel-handle" }
+librefang-kernel = { path = "../librefang-kernel", optional = true }
+
+agent-client-protocol = { workspace = true }
+agent-client-protocol-tokio = { workspace = true }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+dashmap = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+# Used by `tests/acp_integration.rs` for the duplex transport's
+# `AsyncRead` / `AsyncWrite` bounds and for stamping `ApprovalRequest`
+# fixtures. Production code in this crate doesn't touch them directly
+# — keep them as dev-deps so the release dep tree stays minimal.
+futures = { workspace = true }
+chrono = { workspace = true }
+
+[lints]
+workspace = true

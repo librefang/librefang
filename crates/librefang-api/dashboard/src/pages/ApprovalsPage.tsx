@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "@tanstack/react-router";
 import { type ApprovalAuditEntry, type ApprovalItem } from "../api";
@@ -68,17 +68,21 @@ const riskHex: Record<Risk, string> = {
 /*  Helpers                                                           */
 /* ------------------------------------------------------------------ */
 
-function timeAgo(iso: string | undefined, now: number): string {
+function timeAgo(
+  iso: string | undefined,
+  now: number,
+  t: (key: string, opts?: Record<string, unknown>) => string,
+): string {
   if (!iso) return "—";
-  const t = new Date(iso).getTime();
-  if (!Number.isFinite(t)) return "—";
-  const sec = Math.max(0, Math.floor((now - t) / 1000));
-  if (sec < 60) return `${sec}s`;
+  const ts = new Date(iso).getTime();
+  if (!Number.isFinite(ts)) return "—";
+  const sec = Math.max(0, Math.floor((now - ts) / 1000));
+  if (sec < 60) return t("approvals.timeAgo.seconds", { count: sec });
   const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m`;
+  if (min < 60) return t("approvals.timeAgo.minutes", { count: min });
   const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h`;
-  return `${Math.floor(hr / 24)}d`;
+  if (hr < 24) return t("approvals.timeAgo.hours", { count: hr });
+  return t("approvals.timeAgo.days", { count: Math.floor(hr / 24) });
 }
 
 function useNow(intervalMs = 30_000) {
@@ -305,6 +309,87 @@ function TotpModal({
 }
 
 /* ------------------------------------------------------------------ */
+/*  History row (memoised)                                            */
+/* ------------------------------------------------------------------ */
+
+const HistoryRow = React.memo(function HistoryRow({
+  h,
+  isLast,
+  t,
+}: {
+  h: ApprovalAuditEntry;
+  isLast: boolean;
+  t: (key: string) => string;
+}) {
+  const risk = normalizeRisk(h.risk_level);
+  const decision = h.decision;
+  const isApprove = decision === "approved" || decision === "approve";
+  const isDeny = decision === "rejected" || decision === "reject";
+  const decisionColor = isApprove
+    ? "var(--color-success)"
+    : isDeny
+      ? "var(--color-error)"
+      : "var(--color-warning)";
+  const DecisionIcon = isApprove ? CheckCircle : isDeny ? XCircle : Edit3;
+  const decisionLabel = isApprove
+    ? t("approvals.history.decisions.approved")
+    : isDeny
+      ? t("approvals.history.decisions.denied")
+      : t("approvals.history.decisions.edited");
+  const dt = h.decided_at ? new Date(h.decided_at) : null;
+  const auto = (h.decided_by ?? "").startsWith("auto");
+
+  return (
+    <div
+      role="row"
+      className={`grid grid-cols-[1fr_80px] lg:grid-cols-[100px_140px_1fr_80px_160px_110px] items-center px-4 py-2.5 text-[12.5px] ${
+        isLast ? "" : "border-b border-border-subtle"
+      }`}
+    >
+      <span
+        role="cell"
+        className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider"
+        style={{ color: decisionColor }}
+      >
+        <DecisionIcon className="w-3 h-3" />
+        {decisionLabel}
+      </span>
+
+      <span role="cell" className="hidden lg:inline font-mono text-[12px] truncate pr-2">
+        {h.agent_id}
+      </span>
+
+      <span role="cell" className="hidden lg:inline truncate pr-3">
+        {h.action_summary || h.tool_name}
+      </span>
+
+      <span
+        role="cell"
+        className="hidden lg:inline-flex items-center justify-self-start text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border"
+        style={{
+          background: `color-mix(in oklab, ${riskHex[risk]} 15%, transparent)`,
+          borderColor: `color-mix(in oklab, ${riskHex[risk]} 30%, transparent)`,
+          color: riskHex[risk],
+        }}
+      >
+        {risk}
+      </span>
+
+      <span role="cell" className="hidden lg:inline-flex items-center gap-1 font-mono text-[11px] text-text-dim truncate pr-2">
+        {auto ? <Zap className="w-2.5 h-2.5 text-accent" /> : null}
+        {h.decided_by ?? "—"}
+      </span>
+
+      <span role="cell" className="font-mono text-[11px] text-text-dim text-right">
+        {dt
+          ? dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+          : "—"}
+      </span>
+    </div>
+  );
+});
+
+/* ------------------------------------------------------------------ */
 /*  History tab                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -341,82 +426,18 @@ function HistoryTab() {
 
   return (
     <div className="flex flex-col gap-4">
-      <Card padding="none" className="overflow-hidden">
-        {/* Header row — only visible on lg */}
-        <div className="hidden lg:grid grid-cols-[100px_140px_1fr_80px_160px_110px] items-center px-4 py-2 border-b border-border-subtle bg-main/40 text-[10px] font-bold uppercase tracking-wider text-text-dim">
-          <span>{t("approvals.history.cols.decision")}</span>
-          <span>{t("approvals.history.cols.agent")}</span>
-          <span>{t("approvals.history.cols.action")}</span>
-          <span>{t("approvals.history.cols.risk")}</span>
-          <span>{t("approvals.history.cols.resolvedBy")}</span>
-          <span className="text-right">{t("approvals.history.cols.when")}</span>
+      <Card padding="none" className="overflow-hidden" role="table" aria-label={t("approvals.tabHistory")}>
+        <div role="row" className="hidden lg:grid grid-cols-[100px_140px_1fr_80px_160px_110px] items-center px-4 py-2 border-b border-border-subtle bg-main/40 text-[10px] font-bold uppercase tracking-wider text-text-dim">
+          <span role="columnheader">{t("approvals.history.cols.decision")}</span>
+          <span role="columnheader">{t("approvals.history.cols.agent")}</span>
+          <span role="columnheader">{t("approvals.history.cols.action")}</span>
+          <span role="columnheader">{t("approvals.history.cols.risk")}</span>
+          <span role="columnheader">{t("approvals.history.cols.resolvedBy")}</span>
+          <span role="columnheader" className="text-right">{t("approvals.history.cols.when")}</span>
         </div>
-        {entries.map((h, i) => {
-          const risk = normalizeRisk(h.risk_level);
-          const decision = h.decision;
-          const isApprove = decision === "approved" || decision === "approve";
-          const isDeny = decision === "rejected" || decision === "reject";
-          const decisionColor = isApprove
-            ? "var(--color-success)"
-            : isDeny
-              ? "var(--color-error)"
-              : "var(--color-warning)";
-          const DecisionIcon = isApprove ? CheckCircle : isDeny ? XCircle : Edit3;
-          const decisionLabel = isApprove
-            ? t("approvals.history.decisions.approved")
-            : isDeny
-              ? t("approvals.history.decisions.denied")
-              : t("approvals.history.decisions.edited");
-          const dt = h.decided_at ? new Date(h.decided_at) : null;
-          const auto = (h.decided_by ?? "").startsWith("auto");
-
-          return (
-            <div
-              key={h.id}
-              className={`grid grid-cols-[1fr_80px] lg:grid-cols-[100px_140px_1fr_80px_160px_110px] items-center px-4 py-2.5 text-[12.5px] ${
-                i < entries.length - 1 ? "border-b border-border-subtle" : ""
-              }`}
-            >
-              <span
-                className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider"
-                style={{ color: decisionColor }}
-              >
-                <DecisionIcon className="w-3 h-3" />
-                {decisionLabel}
-              </span>
-
-              <span className="hidden lg:inline font-mono text-[12px] truncate pr-2">
-                {h.agent_id}
-              </span>
-
-              <span className="hidden lg:inline truncate pr-3">
-                {h.action_summary || h.tool_name}
-              </span>
-
-              <span
-                className="hidden lg:inline-flex items-center justify-self-start text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border"
-                style={{
-                  background: `color-mix(in oklab, ${riskHex[risk]} 15%, transparent)`,
-                  borderColor: `color-mix(in oklab, ${riskHex[risk]} 30%, transparent)`,
-                  color: riskHex[risk],
-                }}
-              >
-                {risk}
-              </span>
-
-              <span className="hidden lg:inline-flex items-center gap-1 font-mono text-[11px] text-text-dim truncate pr-2">
-                {auto ? <Zap className="w-2.5 h-2.5 text-accent" /> : null}
-                {h.decided_by ?? "—"}
-              </span>
-
-              <span className="font-mono text-[11px] text-text-dim text-right">
-                {dt
-                  ? dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-                  : "—"}
-              </span>
-            </div>
-          );
-        })}
+        {entries.map((h, i) => (
+          <HistoryRow key={h.id} h={h} isLast={i === entries.length - 1} t={t} />
+        ))}
       </Card>
 
       <div className="flex items-center justify-between text-sm text-text-dim">
@@ -482,7 +503,7 @@ function PendingCard({
   const now = useNow(30_000);
   const risk = normalizeRisk(approval.risk_level);
   const color = riskHex[risk];
-  const ago = timeAgo(approval.requested_at || approval.created_at, now);
+  const ago = timeAgo(approval.requested_at || approval.created_at, now, t);
   const action = approval.action_summary || approval.action || approval.tool_name || "—";
   const description = approval.description ?? "";
   const tools = approval.tool_name ? [approval.tool_name] : [];
@@ -523,7 +544,7 @@ function PendingCard({
           </span>
           {totpEnforced && (
             <span className="font-mono text-[10px] px-1.5 py-0.5 rounded border border-accent/30 bg-accent/10 text-accent">
-              TOTP
+              {t("approvals.totpBadge")}
             </span>
           )}
         </span>
@@ -759,7 +780,6 @@ export function ApprovalsPage() {
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
               placeholder={t("approvals.filterPlaceholder")}
-              autoFocus
               className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-border-subtle bg-main text-[13px] focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none"
             />
           </div>

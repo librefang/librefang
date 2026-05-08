@@ -112,6 +112,10 @@ pub(crate) fn atomic_write(path: &std::path::Path, content: &[u8]) -> std::io::R
     Ok(())
 }
 
+#[cfg(windows)]
+pub mod acp_pipe;
+#[cfg(unix)]
+pub mod acp_uds;
 pub mod approval;
 pub mod channel_bridge;
 pub mod client_ip;

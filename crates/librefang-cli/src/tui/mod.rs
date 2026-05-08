@@ -9,7 +9,10 @@ pub mod theme;
 pub mod widgets;
 
 use event::{AppEvent, BackendRef, StreamCancelToken};
+use librefang_kernel::AgentSubsystemApi;
 use librefang_kernel::LibreFangKernel;
+use librefang_kernel::LlmSubsystemApi;
+use librefang_kernel::SkillsSubsystemApi;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
 use screens::{
@@ -1858,7 +1861,7 @@ impl App {
         self.chat.mode_label = "in-process".to_string();
 
         if let Backend::InProcess { ref kernel } = self.backend {
-            if let Some(entry) = kernel.agent_registry().get(id) {
+            if let Some(entry) = kernel.agent_registry_ref().get(id) {
                 self.chat.model_label = format!(
                     "{}/{}",
                     entry.manifest.model.provider, entry.manifest.model.model
@@ -1974,7 +1977,7 @@ impl App {
             }
             Backend::InProcess { kernel } => {
                 let models = {
-                    let catalog = kernel.model_catalog_ref().load();
+                    let catalog = kernel.model_catalog_swap().load();
                     catalog
                         .available_models()
                         .into_iter()
@@ -2046,26 +2049,26 @@ impl App {
             (Backend::InProcess { kernel }, Some(target)) => {
                 if let Some(id) = target.agent_id_inprocess {
                     let provider = kernel
-                        .model_catalog_ref()
+                        .model_catalog_swap()
                         .load()
                         .find_model(model_id)
                         .map(|e| e.provider.clone());
                     let result = if let Some(ref prov) = provider {
-                        kernel.agent_registry().update_model_and_provider(
+                        kernel.agent_registry_ref().update_model_and_provider(
                             id,
                             model_id.to_string(),
                             prov.clone(),
                         )
                     } else {
                         kernel
-                            .agent_registry()
+                            .agent_registry_ref()
                             .update_model(id, model_id.to_string())
                     };
                     match result {
                         Ok(()) => {
                             let prov_label = provider.unwrap_or_else(|| {
                                 kernel
-                                    .agent_registry()
+                                    .agent_registry_ref()
                                     .get(id)
                                     .map(|e| e.manifest.model.provider.clone())
                                     .unwrap_or_else(|| "?".to_string())
@@ -2123,7 +2126,7 @@ impl App {
                     }
                     Backend::InProcess { kernel } => {
                         s.push("Mode: in-process".to_string());
-                        s.push(format!("Agents: {}", kernel.agent_registry().count()));
+                        s.push(format!("Agents: {}", kernel.agent_registry_ref().count()));
                         if let Some(ref t) = self.chat_target {
                             s.push(format!("Agent: {}", t.agent_name));
                         }
@@ -2145,7 +2148,7 @@ impl App {
                     }
                     Backend::InProcess { kernel } => {
                         let lines: Vec<String> = kernel
-                            .agent_registry()
+                            .agent_registry_ref()
                             .list()
                             .into_iter()
                             .map(|e| {
@@ -2243,12 +2246,12 @@ impl App {
             }
             "/hands" => match &self.backend {
                 Backend::InProcess { kernel } => {
-                    let defs = kernel.hands().list_definitions();
-                    let instances = kernel.hands().list_instances();
+                    let defs = kernel.hand_registry_ref().list_definitions();
+                    let instances = kernel.hand_registry_ref().list_instances();
                     let mut msg = format!("Available hands ({}):\n", defs.len());
                     for d in &defs {
                         let reqs_met = kernel
-                            .hands()
+                            .hand_registry_ref()
                             .check_requirements(&d.id)
                             .map(|r| r.iter().all(|(_, ok)| *ok))
                             .unwrap_or(false);

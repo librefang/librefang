@@ -1,0 +1,86 @@
+//! Media subsystem — web search, browser automation, audio/video media.
+//!
+//! Bundles five engines that all sit behind the agent's media-related
+//! tool calls: web search + SSRF-protected fetch (`web_ctx`), Playwright
+//! sessions (`browser_ctx`), image/audio understanding (`media_engine`),
+//! text-to-speech (`tts_engine`), and the media-generation driver cache
+//! (`media_drivers`).
+
+use librefang_runtime::browser::BrowserManager;
+use librefang_runtime::media::MediaDriverCache;
+use librefang_runtime::media_understanding::MediaEngine;
+use librefang_runtime::tts::TtsEngine;
+use librefang_runtime::web_search::WebToolsContext;
+
+/// Focused media API.
+pub trait MediaSubsystemApi: Send + Sync {
+    /// Web tools context.
+    fn web_tools(&self) -> &WebToolsContext;
+    /// Browser automation manager.
+    fn browser(&self) -> &BrowserManager;
+    /// Media understanding engine.
+    fn media_engine(&self) -> &MediaEngine;
+    /// Text-to-speech engine.
+    fn tts(&self) -> &TtsEngine;
+    /// Media generation driver cache.
+    fn drivers(&self) -> &MediaDriverCache;
+}
+
+/// Web + browser + media + TTS cluster — see module docs.
+pub struct MediaSubsystem {
+    /// Web tools context (multi-provider search + SSRF-protected fetch + caching).
+    pub(crate) web_ctx: WebToolsContext,
+    /// Browser automation manager (Playwright bridge sessions).
+    pub(crate) browser_ctx: BrowserManager,
+    /// Media understanding engine (image description, audio transcription).
+    pub(crate) media_engine: MediaEngine,
+    /// Text-to-speech engine.
+    pub(crate) tts_engine: TtsEngine,
+    /// Media generation driver cache (video, music, etc.).
+    pub(crate) media_drivers: MediaDriverCache,
+}
+
+impl MediaSubsystem {
+    pub(crate) fn new(
+        web_ctx: WebToolsContext,
+        browser_ctx: BrowserManager,
+        media_engine: MediaEngine,
+        tts_engine: TtsEngine,
+        media_drivers: MediaDriverCache,
+    ) -> Self {
+        Self {
+            web_ctx,
+            browser_ctx,
+            media_engine,
+            tts_engine,
+            media_drivers,
+        }
+    }
+}
+
+impl MediaSubsystemApi for MediaSubsystem {
+    #[inline]
+    fn web_tools(&self) -> &WebToolsContext {
+        &self.web_ctx
+    }
+
+    #[inline]
+    fn browser(&self) -> &BrowserManager {
+        &self.browser_ctx
+    }
+
+    #[inline]
+    fn media_engine(&self) -> &MediaEngine {
+        &self.media_engine
+    }
+
+    #[inline]
+    fn tts(&self) -> &TtsEngine {
+        &self.tts_engine
+    }
+
+    #[inline]
+    fn drivers(&self) -> &MediaDriverCache {
+        &self.media_drivers
+    }
+}
