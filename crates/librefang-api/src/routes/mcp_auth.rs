@@ -682,7 +682,7 @@ pub async fn auth_callback(
             token_endpoint = %token_endpoint,
             issuer_host = %issuer_host,
             token_host = %token_host,
-            "token_endpoint host is neither an exact match nor on the same registrable domain as the authorization server — refusing token exchange (possible metadata-tamper attack, #3713; cross-domain policy refs #4665)"
+            "token_endpoint host failed both exact and same-eTLD+1 checks vs authorization server — refusing token exchange (possible metadata-tamper attack; refs #3713 #4665)"
         );
         let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
         auth_states.insert(
@@ -1001,7 +1001,13 @@ fn url_host_lower(raw: &str) -> Option<String> {
 ///    `slack.com/api/oauth.v2.user.access`; Notion: `mcp.notion.com` →
 ///    `api.notion.com`). Refs #4665. The eTLD+1 is computed via the
 ///    Public Suffix List so multi-label suffixes (`*.co.uk`,
-///    `*.com.cn`, …) don't false-match across organizations.
+///    `*.com.cn`, …) don't false-match across organizations. Rule 2 is
+///    symmetric: the operator-typed host and the metadata-declared host
+///    can be in either parent/child arrangement under the same eTLD+1
+///    (sub→root, root→sub, sibling→sibling) — the trust boundary is the
+///    registrable domain itself, not its hierarchy. The attacker still
+///    needs to tamper with HTTPS-validated discovery metadata before any
+///    of those shapes become exploitable.
 ///
 /// **Threat-model trade-off (#4665 vs #3713).** The strict #3713 pin
 /// rejected even sibling subdomains under the same registrable domain;
@@ -1351,6 +1357,26 @@ mod tests {
         assert!(!token_endpoint_host_matches(
             "https://attacker.co.uk/oauth/token",
             "auth.victim.co.uk"
+        ));
+    }
+
+    /// PSL's private section treats things like `*.github.io`,
+    /// `*.herokuapp.com`, `*.s3.amazonaws.com` as public suffixes, so
+    /// each tenant's site is its own registrable domain. This is
+    /// load-bearing for the threat model: without it, anyone who can
+    /// register `attacker.github.io` could false-match an issuer on
+    /// `victim.github.io` via the eTLD+1 rule. Pin the property so a
+    /// future swap of the PSL crate or `domain_str` → `domain` cannot
+    /// regress it silently.
+    #[test]
+    fn token_endpoint_psl_private_domain_does_not_false_match() {
+        assert!(!token_endpoint_host_matches(
+            "https://attacker.github.io/oauth/token",
+            "victim.github.io"
+        ));
+        assert!(!token_endpoint_host_matches(
+            "https://evil-tenant.s3.amazonaws.com/oauth/token",
+            "good-tenant.s3.amazonaws.com"
         ));
     }
 
