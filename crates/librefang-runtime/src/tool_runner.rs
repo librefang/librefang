@@ -2922,8 +2922,14 @@ mod path_check_tests {
 
     #[test]
     fn absolute_outside_workspace_blocked() {
-        let root = PathBuf::from("/ws");
-        let err = check_absolute_path_inside_workspace(Some("/etc/passwd"), Some(&root), &[])
+        // Windows treats `/etc/passwd` as relative (no drive letter), so
+        // pick a path that `Path::is_absolute()` agrees with on the host.
+        let (root, outside) = if cfg!(windows) {
+            (PathBuf::from(r"C:\ws"), r"D:\etc\passwd")
+        } else {
+            (PathBuf::from("/ws"), "/etc/passwd")
+        };
+        let err = check_absolute_path_inside_workspace(Some(outside), Some(&root), &[])
             .expect("path outside workspace must be blocked");
         assert!(err.contains("outside the agent's workspace"));
     }
@@ -8678,7 +8684,7 @@ mod tests {
         .await;
         assert!(result.is_error);
         assert!(
-            result.content.contains("Access denied"),
+            result.content.contains("outside the agent's workspace"),
             "expected sandbox denial, got: {}",
             result.content
         );
@@ -10079,11 +10085,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_read_no_workspace_root_returns_error() {
-        // SECURITY: file_read must fail when workspace_root is None
+        // SECURITY: file_read must fail when workspace_root is None.
+        // Use a relative path so the inner sandbox resolver is the rejecter
+        // (the absolute-path pre-ACP guard has its own coverage above —
+        // and Windows treats `/etc/passwd` as relative, which would also
+        // mask the inner-resolver path we want to exercise here).
         let result = execute_tool(
             "test-id",
             "file_read",
-            &serde_json::json!({"path": "/etc/passwd"}),
+            &serde_json::json!({"path": "etc/passwd"}),
             None,
             None,
             None,
@@ -10123,11 +10133,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_write_no_workspace_root_returns_error() {
-        // SECURITY: file_write must fail when workspace_root is None
+        // SECURITY: file_write must fail when workspace_root is None.
+        // Relative path so the inner resolver — not the absolute-path
+        // pre-ACP guard — is what rejects the call (cross-platform: on
+        // Windows `/tmp/test.txt` is relative anyway).
         let result = execute_tool(
             "test-id",
             "file_write",
-            &serde_json::json!({"path": "/tmp/test.txt", "content": "pwned"}),
+            &serde_json::json!({"path": "tmp/test.txt", "content": "pwned"}),
             None,
             None,
             None,
