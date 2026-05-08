@@ -2090,10 +2090,7 @@ fn sanitize_sender_label(name: &str) -> String {
 ///
 /// The prefix is applied AFTER PII filtering to prevent display names that look like emails
 /// or phone numbers from being redacted into the message content.
-fn build_sender_prefix(
-    manifest: &AgentManifest,
-    sender_user_id: Option<&str>,
-) -> Option<String> {
+fn build_sender_prefix(manifest: &AgentManifest, sender_user_id: Option<&str>) -> Option<String> {
     let channel = manifest
         .metadata
         .get("sender_channel")
