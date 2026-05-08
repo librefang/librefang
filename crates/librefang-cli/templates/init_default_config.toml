@@ -221,3 +221,24 @@ debounce_ms = 500
 # network_enabled = false
 # [network]
 # shared_secret = ""           # Required for P2P auth
+
+# ── Editor Integration (ACP) ─────────────────────────────────
+# LibreFang exposes an Agent Client Protocol (ACP) server so editors
+# like Zed, VS Code, and JetBrains can embed a LibreFang agent
+# natively. Editors spawn `librefang acp` as a child process.
+#
+# Two modes auto-select based on whether `librefang start` is running:
+#   * In-process — fresh kernel per invocation, suitable for one-off use.
+#   * Daemon-attached (Unix) — proxies stdio to ~/.librefang/acp.sock,
+#     so multiple editor tabs share one kernel + agent state.
+#
+# No config keys are required. To configure your editor, see:
+#   https://librefang.com/integrations/acp
+#
+# Zed (`~/.config/zed/settings.json`):
+#   "agent_servers": {
+#     "librefang": {
+#       "command": "librefang",
+#       "args": ["acp"]
+#     }
+#   }

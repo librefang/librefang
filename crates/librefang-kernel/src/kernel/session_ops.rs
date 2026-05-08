@@ -43,7 +43,7 @@ impl LibreFangKernel {
         message: &str,
     ) -> KernelResult<bool> {
         // Verify the agent exists
-        if self.registry.get(agent_id).is_none() {
+        if self.agents.registry.get(agent_id).is_none() {
             return Err(KernelError::LibreFang(LibreFangError::AgentNotFound(
                 agent_id.to_string(),
             )));
@@ -56,13 +56,15 @@ impl LibreFangKernel {
             (AgentId, SessionId),
             tokio::sync::mpsc::Sender<AgentLoopSignal>,
         )> = if let Some(sid) = session_id {
-            self.injection_senders
+            self.events
+                .injection_senders
                 .get(&(agent_id, sid))
                 .map(|entry| (*entry.key(), entry.value().clone()))
                 .into_iter()
                 .collect()
         } else {
-            self.injection_senders
+            self.events
+                .injection_senders
                 .iter()
                 .filter(|e| e.key().0 == agent_id)
                 .map(|e| (*e.key(), e.value().clone()))
@@ -103,7 +105,7 @@ impl LibreFangKernel {
             }
         }
         for key in &closed_keys {
-            self.injection_senders.remove(key);
+            self.events.injection_senders.remove(key);
         }
         // If at least one live session accepted the message, the inject is a
         // success from the caller's POV. If every live (non-closed) target
@@ -128,17 +130,24 @@ impl LibreFangKernel {
         session_id: SessionId,
     ) -> Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<AgentLoopSignal>>> {
         let (tx, rx) = tokio::sync::mpsc::channel::<AgentLoopSignal>(8);
-        self.injection_senders.insert((agent_id, session_id), tx);
+        self.events
+            .injection_senders
+            .insert((agent_id, session_id), tx);
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
-        self.injection_receivers
+        self.events
+            .injection_receivers
             .insert((agent_id, session_id), Arc::clone(&rx));
         rx
     }
 
     /// Tears down the `(agent_id, session_id)` injection channel after the loop finishes.
     pub(crate) fn teardown_injection_channel(&self, agent_id: AgentId, session_id: SessionId) {
-        self.injection_senders.remove(&(agent_id, session_id));
-        self.injection_receivers.remove(&(agent_id, session_id));
+        self.events
+            .injection_senders
+            .remove(&(agent_id, session_id));
+        self.events
+            .injection_receivers
+            .remove(&(agent_id, session_id));
     }
 
     /// Resolve a module path relative to the kernel's home directory.
@@ -157,18 +166,18 @@ impl LibreFangKernel {
     /// Reset an agent's session — auto-saves a summary to memory, then clears messages
     /// and creates a fresh session ID.
     pub fn reset_session(&self, agent_id: AgentId) -> KernelResult<()> {
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
         // Auto-save session summaries for ALL sessions (default + per-channel)
         // before clearing, so no channel's conversation history is silently lost.
         // Also emit session:end for each active session before deletion.
-        if let Ok(session_ids) = self.memory.get_agent_session_ids(agent_id) {
+        if let Ok(session_ids) = self.memory.substrate.get_agent_session_ids(agent_id) {
             for sid in session_ids {
-                if let Ok(Some(old_session)) = self.memory.get_session(sid) {
+                if let Ok(Some(old_session)) = self.memory.substrate.get_session(sid) {
                     // Fire session:end before removing the old session.
-                    self.external_hooks.fire(
+                    self.governance.external_hooks.fire(
                         crate::hooks::ExternalHookEvent::SessionEnd,
                         serde_json::json!({
                             "agent_id": agent_id.to_string(),
@@ -188,26 +197,29 @@ impl LibreFangKernel {
         // (#3470). The deletion itself is transactional inside
         // `delete_agent_sessions`.
         self.memory
+            .substrate
             .delete_agent_sessions(agent_id)
             .map_err(KernelError::LibreFang)?;
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
             .memory
+            .substrate
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
         self.inject_reset_prompt(&mut new_session, agent_id);
 
         // Update registry with new session ID
-        self.registry
+        self.agents
+            .registry
             .update_session_id(agent_id, new_session.id)
             .map_err(KernelError::LibreFang)?;
 
         // Reset quota tracking so /new clears "token quota exceeded"
-        self.scheduler.reset_usage(agent_id);
+        self.agents.scheduler.reset_usage(agent_id);
 
         // Fire external session:reset hook (fire-and-forget).
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionReset,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),
@@ -216,7 +228,7 @@ impl LibreFangKernel {
         );
 
         // Fire session:start for the newly created session.
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionStart,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),
@@ -233,14 +245,14 @@ impl LibreFangKernel {
     /// More aggressive than `reset_session` (which auto-saves a summary) but less
     /// destructive than `clear_agent_history` (which wipes ALL sessions).
     pub fn reboot_session(&self, agent_id: AgentId) -> KernelResult<()> {
-        let _entry = self.registry.get(agent_id).ok_or_else(|| {
+        let _entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
         // Emit session:end for each active session before deletion.
-        if let Ok(session_ids) = self.memory.get_agent_session_ids(agent_id) {
+        if let Ok(session_ids) = self.memory.substrate.get_agent_session_ids(agent_id) {
             for sid in session_ids {
-                self.external_hooks.fire(
+                self.governance.external_hooks.fire(
                     crate::hooks::ExternalHookEvent::SessionEnd,
                     serde_json::json!({
                         "agent_id": agent_id.to_string(),
@@ -254,25 +266,28 @@ impl LibreFangKernel {
         // Propagate so a failed reboot is visible instead of silently
         // leaving the old history in place (#3470).
         self.memory
+            .substrate
             .delete_agent_sessions(agent_id)
             .map_err(KernelError::LibreFang)?;
 
         // Create a fresh session
         let new_session = self
             .memory
+            .substrate
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
 
         // Update registry with new session ID
-        self.registry
+        self.agents
+            .registry
             .update_session_id(agent_id, new_session.id)
             .map_err(KernelError::LibreFang)?;
 
         // Reset quota tracking
-        self.scheduler.reset_usage(agent_id);
+        self.agents.scheduler.reset_usage(agent_id);
 
         // Fire external session:reset hook (fire-and-forget).
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionReset,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),
@@ -282,7 +297,7 @@ impl LibreFangKernel {
 
         // Fire session:start for the newly created session to match the
         // behaviour of other new-session flows.
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionStart,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),
@@ -298,14 +313,14 @@ impl LibreFangKernel {
     ///
     /// Creates a fresh empty session afterward so the agent is still usable.
     pub fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()> {
-        let _entry = self.registry.get(agent_id).ok_or_else(|| {
+        let _entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
         // Emit session:end for each active session before deletion.
-        if let Ok(session_ids) = self.memory.get_agent_session_ids(agent_id) {
+        if let Ok(session_ids) = self.memory.substrate.get_agent_session_ids(agent_id) {
             for sid in session_ids {
-                self.external_hooks.fire(
+                self.governance.external_hooks.fire(
                     crate::hooks::ExternalHookEvent::SessionEnd,
                     serde_json::json!({
                         "agent_id": agent_id.to_string(),
@@ -320,29 +335,33 @@ impl LibreFangKernel {
         // orphan rows in `sessions` / `sessions_fts` / `canonical_sessions`
         // and is the silent-data-loss vector behind #3470.
         self.memory
+            .substrate
             .delete_agent_sessions(agent_id)
             .map_err(KernelError::LibreFang)?;
         self.memory
+            .substrate
             .delete_canonical_session(agent_id)
             .map_err(KernelError::LibreFang)?;
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
             .memory
+            .substrate
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
         self.inject_reset_prompt(&mut new_session, agent_id);
 
         // Update registry with new session ID
-        self.registry
+        self.agents
+            .registry
             .update_session_id(agent_id, new_session.id)
             .map_err(KernelError::LibreFang)?;
 
         // Reset quota tracking
-        self.scheduler.reset_usage(agent_id);
+        self.agents.scheduler.reset_usage(agent_id);
 
         // Fire external session:reset hook (fire-and-forget).
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionReset,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),
@@ -351,7 +370,7 @@ impl LibreFangKernel {
         );
 
         // Fire session:start for the newly created session.
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionStart,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),
@@ -366,12 +385,13 @@ impl LibreFangKernel {
     /// List all sessions for a specific agent.
     pub fn list_agent_sessions(&self, agent_id: AgentId) -> KernelResult<Vec<serde_json::Value>> {
         // Verify agent exists
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
         let mut sessions = self
             .memory
+            .substrate
             .list_agent_sessions(agent_id)
             .map_err(KernelError::LibreFang)?;
 
@@ -404,23 +424,25 @@ impl LibreFangKernel {
         label: Option<&str>,
     ) -> KernelResult<serde_json::Value> {
         // Verify agent exists
-        let _entry = self.registry.get(agent_id).ok_or_else(|| {
+        let _entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
         let mut session = self
             .memory
+            .substrate
             .create_session_with_label(agent_id, label)
             .map_err(KernelError::LibreFang)?;
         self.inject_reset_prompt(&mut session, agent_id);
 
         // Switch to the new session
-        self.registry
+        self.agents
+            .registry
             .update_session_id(agent_id, session.id)
             .map_err(KernelError::LibreFang)?;
 
         // Fire external session:start hook for the newly created session.
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionStart,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),
@@ -443,13 +465,14 @@ impl LibreFangKernel {
         session_id: SessionId,
     ) -> KernelResult<()> {
         // Verify agent exists
-        let _entry = self.registry.get(agent_id).ok_or_else(|| {
+        let _entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
         // Verify session exists and belongs to this agent
         let session = self
             .memory
+            .substrate
             .get_session(session_id)
             .map_err(KernelError::LibreFang)?
             .ok_or_else(|| {
@@ -462,7 +485,8 @@ impl LibreFangKernel {
             )));
         }
 
-        self.registry
+        self.agents
+            .registry
             .update_session_id(agent_id, session_id)
             .map_err(KernelError::LibreFang)?;
 
@@ -476,12 +500,13 @@ impl LibreFangKernel {
         agent_id: AgentId,
         session_id: SessionId,
     ) -> KernelResult<librefang_memory::session::SessionExport> {
-        let entry = self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
         let session = self
             .memory
+            .substrate
             .get_session(session_id)
             .map_err(KernelError::LibreFang)?
             .ok_or_else(|| {
@@ -517,7 +542,7 @@ impl LibreFangKernel {
         export: librefang_memory::session::SessionExport,
     ) -> KernelResult<SessionId> {
         // Verify agent exists
-        let _entry = self.registry.get(agent_id).ok_or_else(|| {
+        let _entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
@@ -556,6 +581,7 @@ impl LibreFangKernel {
         };
         // Sync save_session: caller `import_session` is a sync fn, no `.await` allowed.
         self.memory
+            .substrate
             .save_session(&new_session)
             .map_err(KernelError::LibreFang)?;
 
@@ -588,6 +614,7 @@ impl LibreFangKernel {
 
         // Collect agent-level injections (if the agent is registered).
         let agent_injections: Vec<librefang_types::config::ContextInjection> = self
+            .agents
             .registry
             .get(agent_id)
             .map(|entry| entry.manifest.context_injection.clone())
@@ -595,6 +622,7 @@ impl LibreFangKernel {
 
         // Collect agent tags for condition evaluation.
         let agent_tags: Vec<String> = self
+            .agents
             .registry
             .get(agent_id)
             .map(|entry| entry.manifest.tags.clone())
@@ -670,7 +698,7 @@ impl LibreFangKernel {
         // Persist if anything was injected.
         // Sync save_session: caller `inject_reset_prompt` is a sync fn, no `.await` allowed.
         if !session.messages.is_empty() {
-            if let Err(e) = self.memory.save_session(session) {
+            if let Err(e) = self.memory.substrate.save_session(session) {
                 // Persist failed — roll back the Phase 4 BeforeUser injections
                 // from the in-memory session so the next call does not
                 // re-inject the same items (which would cause duplicate
@@ -802,9 +830,11 @@ impl LibreFangKernel {
 
         // Save to structured memory store (key = "session_{date}_{slug}")
         let key = format!("session_{date}_{slug}");
-        let _ =
-            self.memory
-                .structured_set(agent_id, &key, serde_json::Value::String(summary.clone()));
+        let _ = self.memory.substrate.structured_set(
+            agent_id,
+            &key,
+            serde_json::Value::String(summary.clone()),
+        );
 
         // Also write to workspace memory/ dir if workspace exists
         if let Some(ref workspace) = entry.manifest.workspace {

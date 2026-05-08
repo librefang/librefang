@@ -104,6 +104,7 @@ export function TerminalPage() {
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const wsGenerationRef = useRef(0);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toastDismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const intentionalDisconnectRef = useRef(false);
@@ -174,7 +175,11 @@ export function TerminalPage() {
   const connect = useCallback(() => {
     if (terminalEnabled !== true) return;
 
+    const gen = ++wsGenerationRef.current;
+
     if (wsRef.current) {
+      wsRef.current.onclose = null;
+      wsRef.current.onerror = null;
       wsRef.current.close();
     }
 
@@ -204,6 +209,7 @@ export function TerminalPage() {
     wsRef.current = ws;
 
     ws.onopen = () => {
+      if (gen !== wsGenerationRef.current) return;
       // #4675: anchor the no-started fast-fail window from the moment
       // the WS handshake completes. Read in the close handler below.
       wsOpenedAtRef.current = Date.now();
@@ -243,6 +249,7 @@ export function TerminalPage() {
     };
 
     ws.onmessage = (event) => {
+      if (gen !== wsGenerationRef.current) return;
       let msg: ServerMessage;
       try {
         msg = JSON.parse(event.data);
@@ -311,11 +318,13 @@ export function TerminalPage() {
     };
 
     ws.onerror = () => {
+      if (gen !== wsGenerationRef.current) return;
       setIsConnecting(false);
       setError(t("terminal.websocket_error"));
     };
 
     ws.onclose = (event: CloseEvent) => {
+      if (gen !== wsGenerationRef.current) return;
       setIsConnected(false);
       setIsConnecting(false);
 
@@ -459,8 +468,9 @@ export function TerminalPage() {
   // Refit the terminal after fullscreen toggles.
   useEffect(() => {
     if (!terminalRef.current || !fitAddonRef.current) return;
+    let raf2: number | null = null;
     const raf1 = requestAnimationFrame(() => {
-      const raf2 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
         try {
           fitAddonRef.current?.fit();
         } catch { /* xterm not attached yet */ }
@@ -471,9 +481,11 @@ export function TerminalPage() {
           if (size) ws.send(JSON.stringify({ type: "resize", ...size }));
         }
       });
-      return () => cancelAnimationFrame(raf2);
     });
-    return () => cancelAnimationFrame(raf1);
+    return () => {
+      cancelAnimationFrame(raf1);
+      if (raf2 !== null) cancelAnimationFrame(raf2);
+    };
   }, [isFullscreen]);
 
   // ESC exits fullscreen, but not when focus is inside the terminal.
@@ -613,12 +625,20 @@ export function TerminalPage() {
       )}
       <div className="flex items-center gap-0.5">
         <button
-          onClick={() => setFontSize(s => { const n = Math.max(10, s - 1); localStorage.setItem("terminal.fontSize", String(n)); return n; })}
+          onClick={() => {
+            const n = Math.max(10, fontSize - 1);
+            setFontSize(n);
+            localStorage.setItem("terminal.fontSize", String(n));
+          }}
           className="flex items-center justify-center w-6 h-6 rounded text-gray-500 hover:text-gray-300 hover:bg-gray-700/40 transition-colors text-xs font-mono"
           title={t("terminal.font_decrease")}
         >A-</button>
         <button
-          onClick={() => setFontSize(s => { const n = Math.min(20, s + 1); localStorage.setItem("terminal.fontSize", String(n)); return n; })}
+          onClick={() => {
+            const n = Math.min(20, fontSize + 1);
+            setFontSize(n);
+            localStorage.setItem("terminal.fontSize", String(n));
+          }}
           className="flex items-center justify-center w-7 h-6 rounded text-gray-500 hover:text-gray-300 hover:bg-gray-700/40 transition-colors text-xs font-mono"
           title={t("terminal.font_increase")}
         >A+</button>

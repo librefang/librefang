@@ -412,14 +412,16 @@ impl ClaudeCodeDriver {
 
     fn build_command_args(
         &self,
-        prompt: &str,
         output_format: &str,
         verbose: bool,
         model_flag: Option<&str>,
     ) -> Vec<String> {
+        // Prompt is fed via stdin, not argv. Passing the full rendered
+        // prompt as a CLI argument crashed `execve` with `E2BIG` once the
+        // skill catalog + history + tool registry pushed it past Linux
+        // ARG_MAX (~128 KB on most kernels).
         let mut args = vec![
             "-p".to_string(),
-            prompt.to_string(),
             "--output-format".to_string(),
             output_format.to_string(),
         ];
@@ -617,8 +619,7 @@ impl LlmDriver for ClaudeCodeDriver {
         }
 
         let mut cmd = tokio::process::Command::new(&self.cli_path);
-        let mut args =
-            self.build_command_args(&prepared.text, "json", false, model_flag.as_deref());
+        let mut args = self.build_command_args("json", false, model_flag.as_deref());
         if let Some(ref path) = prepared.mcp_config_path {
             Self::append_mcp_args(&mut args, path);
         }
@@ -640,10 +641,19 @@ impl LlmDriver for ClaudeCodeDriver {
             Self::apply_caller_trace_envs(&mut cmd, &request);
         }
 
+        // Prompt is piped to the CLI's stdin. Passing it as argv crashed
+        // execve with E2BIG once the skill catalog + history + tool registry
+        // pushed the rendered text past Linux ARG_MAX (~128 KB).
+        cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
-        debug!(cli = %self.cli_path, skip_permissions = self.skip_permissions, "Spawning Claude Code CLI");
+        debug!(
+            cli = %self.cli_path,
+            skip_permissions = self.skip_permissions,
+            prompt_bytes = prepared.text.len(),
+            "Spawning Claude Code CLI"
+        );
 
         // Spawn child process instead of cmd.output() so we can track PID and timeout
         let mut child = cmd.spawn().map_err(|e| {
@@ -654,6 +664,23 @@ impl LlmDriver for ClaudeCodeDriver {
                 e
             ))
         })?;
+
+        // Write the prompt to stdin and close it so the CLI sees EOF and
+        // begins processing. tokio::io::AsyncWriteExt::write_all chunks
+        // automatically — no per-write size limit applies here, only the
+        // pipe-buffer ceiling, which the kernel handles transparently.
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            if let Err(e) = stdin.write_all(prepared.text.as_bytes()).await {
+                prepared.cleanup();
+                let _ = child.kill().await;
+                return Err(LlmError::Http(format!(
+                    "Failed to write prompt to Claude Code CLI stdin: {e}"
+                )));
+            }
+            // Drop closes stdin; CLI proceeds with the full prompt.
+            drop(stdin);
+        }
 
         // Track the PID using model + UUID to avoid collisions on concurrent same-model requests
         let pid_label = format!("{}:{}", request.model, uuid::Uuid::new_v4());
@@ -873,8 +900,7 @@ impl LlmDriver for ClaudeCodeDriver {
         }
 
         let mut cmd = tokio::process::Command::new(&self.cli_path);
-        let mut args =
-            self.build_command_args(&prepared.text, "stream-json", true, model_flag.as_deref());
+        let mut args = self.build_command_args("stream-json", true, model_flag.as_deref());
         if let Some(ref path) = prepared.mcp_config_path {
             Self::append_mcp_args(&mut args, path);
         }
@@ -896,10 +922,17 @@ impl LlmDriver for ClaudeCodeDriver {
             Self::apply_caller_trace_envs(&mut cmd, &request);
         }
 
+        // Same stdin-piping rationale as the non-streaming path: prompt
+        // exceeds ARG_MAX once the skill catalog and history grow.
+        cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
-        debug!(cli = %self.cli_path, "Spawning Claude Code CLI (streaming)");
+        debug!(
+            cli = %self.cli_path,
+            prompt_bytes = prepared.text.len(),
+            "Spawning Claude Code CLI (streaming)"
+        );
 
         let mut child = cmd.spawn().map_err(|e| {
             prepared.cleanup();
@@ -909,6 +942,18 @@ impl LlmDriver for ClaudeCodeDriver {
                 e
             ))
         })?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            if let Err(e) = stdin.write_all(prepared.text.as_bytes()).await {
+                prepared.cleanup();
+                let _ = child.kill().await;
+                return Err(LlmError::Http(format!(
+                    "Failed to write prompt to Claude Code CLI stdin: {e}"
+                )));
+            }
+            drop(stdin);
+        }
 
         // Track PID with unique key to avoid collisions on concurrent same-model requests
         let pid_label = format!("{}-stream:{}", request.model, uuid::Uuid::new_v4());
@@ -1005,6 +1050,30 @@ impl LlmDriver for ClaudeCodeDriver {
                             || (l.contains("resets") && l.contains("utc"))
                             || t.trim() == "NO_REPLY"
                             || t.trim().ends_with("NO_REPLY")
+                            // Suppress CLI progress placeholders that leak
+                            // into channel text when the model emits a
+                            // status preamble alone (no real reply). Both
+                            // bracket and paren shapes — observed live as
+                            // `[Reading the conversation context]` and
+                            // `(thinking)` whole-message replies. Narrow
+                            // on purpose so legitimate user content that
+                            // happens to start with a paren or bracket
+                            // (e.g. `[1] First...` lists) is not suppressed.
+                            || {
+                                let trimmed = t.trim();
+                                let bracket_wrapped = (trimmed.starts_with('[')
+                                    && trimmed.ends_with(']'))
+                                    || (trimmed.starts_with('(')
+                                        && trimmed.ends_with(')'));
+                                bracket_wrapped
+                                    && (l.contains("reading")
+                                        || l.contains("thinking")
+                                        || l.contains("loading")
+                                        || l.contains("processing")
+                                        || l.contains("analyzing")
+                                        || l.contains("conversation context")
+                                        || l.contains("still working"))
+                            }
                     };
 
                     match serde_json::from_str::<ClaudeStreamEvent>(&line) {
@@ -1588,13 +1657,12 @@ mod tests {
     #[test]
     fn test_complete_args_include_skip_permissions_when_enabled() {
         let driver = ClaudeCodeDriver::new(None, true);
-        let args = driver.build_command_args("hello", "json", false, Some("sonnet"));
+        let args = driver.build_command_args("json", false, Some("sonnet"));
 
         assert_eq!(
             args,
             vec![
                 "-p",
-                "hello",
                 "--output-format",
                 "json",
                 "--dangerously-skip-permissions",
@@ -1607,13 +1675,12 @@ mod tests {
     #[test]
     fn test_stream_args_include_verbose_and_skip_permissions() {
         let driver = ClaudeCodeDriver::new(None, true);
-        let args = driver.build_command_args("hello", "stream-json", true, Some("sonnet"));
+        let args = driver.build_command_args("stream-json", true, Some("sonnet"));
 
         assert_eq!(
             args,
             vec![
                 "-p",
-                "hello",
                 "--output-format",
                 "stream-json",
                 "--verbose",
@@ -1627,11 +1694,23 @@ mod tests {
     #[test]
     fn test_args_omit_skip_permissions_when_disabled() {
         let driver = ClaudeCodeDriver::new(None, false);
-        let args = driver.build_command_args("hello", "json", false, Some("sonnet"));
+        let args = driver.build_command_args("json", false, Some("sonnet"));
 
         assert!(!args
             .iter()
             .any(|arg| arg == "--dangerously-skip-permissions"));
+    }
+
+    #[test]
+    fn test_args_no_longer_carry_prompt_in_argv() {
+        // Regression: passing the prompt as a CLI argument crashed
+        // execve with E2BIG once the rendered text exceeded ARG_MAX
+        // (~128 KB on most kernels). Prompt is now piped to stdin.
+        let driver = ClaudeCodeDriver::new(None, true);
+        let args = driver.build_command_args("json", false, None);
+        // Argument vector must be small and bounded — no prompt body in it.
+        assert!(args.iter().all(|a| a.len() < 256));
+        assert!(args.contains(&"-p".to_string()));
     }
 
     #[test]

@@ -3,8 +3,8 @@
 use chrono::Utc;
 use dashmap::DashMap;
 use librefang_types::approval::{
-    ApprovalAuditEntry, ApprovalDecision, ApprovalPolicy, ApprovalRequest, ApprovalResponse,
-    RiskLevel, SecondFactor, TimeoutFallback,
+    ApprovalAuditEntry, ApprovalDecision, ApprovalEvent, ApprovalPolicy, ApprovalRequest,
+    ApprovalResponse, RiskLevel, SecondFactor, TimeoutFallback,
 };
 use librefang_types::capability::glob_matches;
 use r2d2::Pool;
@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
+use tokio::sync::broadcast;
 use totp_rs::{Algorithm, Secret, TOTP};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -49,6 +50,23 @@ pub struct ApprovalManager {
     /// Callers hold this lock across the check and record to prevent TOCTOU
     /// races where concurrent requests both pass the lockout check (fixes #3584).
     failure_rw_mutex: StdMutex<()>,
+    /// Broadcast surface for external transports that need low-latency
+    /// awareness of pending-queue changes. The ACP adapter (#3313) listens
+    /// on this so editor-side `session/request_permission` requests can
+    /// fire the moment a tool needs approval, instead of polling
+    /// `list_pending` on a 100ms tick. Capacity is small — slow consumers
+    /// drop old events rather than apply back-pressure to the agent loop.
+    events_tx: broadcast::Sender<ApprovalEvent>,
+    /// In-memory "always" decision cache (#3313): when an external
+    /// surface (currently only the ACP bridge) records that a user
+    /// chose `allow_always` / `reject_always`, future calls of the
+    /// same `(agent_id, tool_name)` skip the approval gate (Approved
+    /// → no approval prompt; Denied → tool blocked at
+    /// `is_tool_denied_with_context`). Persistence across daemon
+    /// restart is tracked under a follow-up — Phase 1 keeps it in
+    /// memory so user-level remembered decisions don't outlive an
+    /// `acp` invocation in surprising ways.
+    remembered: DashMap<(String, String), ApprovalDecision>,
 }
 
 struct PendingRequest {
@@ -81,6 +99,7 @@ impl ApprovalManager {
     }
 
     pub fn new(policy: ApprovalPolicy) -> Self {
+        let (events_tx, _) = broadcast::channel(256);
         Self {
             pending: DashMap::new(),
             recent: std::sync::Mutex::new(VecDeque::new()),
@@ -89,6 +108,8 @@ impl ApprovalManager {
             totp_grace: StdMutex::new(HashMap::new()),
             totp_failures: StdMutex::new(HashMap::new()),
             failure_rw_mutex: StdMutex::new(()),
+            events_tx,
+            remembered: DashMap::new(),
         }
     }
 
@@ -103,6 +124,7 @@ impl ApprovalManager {
         let pending: DashMap<Uuid, PendingRequest> = DashMap::new();
         // Restore pending approvals from the previous session.
         Self::restore_pending_approvals(&pool, &pending);
+        let (events_tx, _) = broadcast::channel(256);
         Self {
             pending,
             recent: std::sync::Mutex::new(VecDeque::new()),
@@ -111,7 +133,49 @@ impl ApprovalManager {
             totp_grace: StdMutex::new(HashMap::new()),
             totp_failures: StdMutex::new(failures),
             failure_rw_mutex: StdMutex::new(()),
+            events_tx,
+            remembered: DashMap::new(),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Remembered "always" decisions (#3313)
+    // -----------------------------------------------------------------
+
+    /// Record an "always" decision for `(agent_id, tool_name)`. Future
+    /// `requires_approval_with_context` / `is_tool_denied_with_context`
+    /// calls for the same pair short-circuit on the cached decision.
+    pub fn remember(&self, agent_id: &str, tool_name: &str, decision: ApprovalDecision) {
+        self.remembered
+            .insert((agent_id.to_string(), tool_name.to_string()), decision);
+    }
+
+    /// Retrieve a previously-remembered decision, if any.
+    pub fn recall(&self, agent_id: &str, tool_name: &str) -> Option<ApprovalDecision> {
+        self.remembered
+            .get(&(agent_id.to_string(), tool_name.to_string()))
+            .map(|r| r.value().clone())
+    }
+
+    /// Forget any remembered decision for `(agent_id, tool_name)`.
+    /// Returns the previously-cached decision, if any.
+    pub fn forget(&self, agent_id: &str, tool_name: &str) -> Option<ApprovalDecision> {
+        self.remembered
+            .remove(&(agent_id.to_string(), tool_name.to_string()))
+            .map(|(_, v)| v)
+    }
+
+    /// Subscribe to [`ApprovalEvent`]s from this manager.
+    ///
+    /// The receiver yields events in commit order. Slow consumers may see
+    /// `RecvError::Lagged` if more than 256 events queue up before they
+    /// resume polling — they should re-sync via [`Self::list_pending`] in
+    /// that case rather than relying on the broadcast as the source of
+    /// truth. Returning the receiver from this method (rather than
+    /// `subscribe(&Sender)`) lets external surfaces hold the manager
+    /// behind `&Arc<Self>` without needing to expose the internal sender.
+    pub fn subscribe(&self) -> broadcast::Receiver<ApprovalEvent> {
+        self.events_tx.subscribe()
     }
 
     /// Restore pending approvals from the database into the in-memory map.
@@ -126,7 +190,7 @@ impl ApprovalManager {
     ) {
         let Ok(guard) = conn.get() else { return };
         let Ok(mut stmt) = guard.prepare(
-            "SELECT id, agent_id, session_id, tool_name, tool_input, created_at, expires_at \
+            "SELECT id, agent_id, session_id, tool_name, tool_input, created_at, expires_at, tool_use_id, deferred_payload \
              FROM pending_approvals",
         ) else {
             return;
@@ -140,12 +204,23 @@ impl ApprovalManager {
                 row.get::<_, String>(4)?,
                 row.get::<_, i64>(5)?,
                 row.get::<_, Option<i64>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<Vec<u8>>>(8)?,
             ))
         });
         let Ok(rows) = rows else { return };
         for row in rows.filter_map(|r| r.ok()) {
-            let (id_str, agent_id, session_id, tool_name, tool_input, created_at_unix, _expires_at) =
-                row;
+            let (
+                id_str,
+                agent_id,
+                session_id,
+                tool_name,
+                tool_input,
+                created_at_unix,
+                _expires_at,
+                tool_use_id,
+                deferred_blob,
+            ) = row;
             let Ok(id) = id_str.parse::<Uuid>() else {
                 warn!(id = %id_str, "pending_approvals: skipping row with invalid UUID");
                 continue;
@@ -167,10 +242,90 @@ impl ApprovalManager {
                 route_to: Vec::new(),
                 escalation_count: 0,
                 session_id,
+                // Restored from sqlite v35 column. Pre-v35 rows have
+                // `NULL` here so the ACP adapter still falls back to
+                // `approval-{req_id}` for them, same as the synchronous
+                // (`request_approval`) and dashboard-manual paths.
+                tool_use_id,
             };
+            // Decode the persisted deferred payload (v36, #3313). NULL
+            // for pre-v36 rows or for the synchronous request path —
+            // restored entries with `deferred = None` still surface
+            // the pending approval to the UI but a post-restart
+            // approval won't run the original tool. Decode failures
+            // (corruption, schema mismatch) log a warning and degrade
+            // to no-resume so a single bad row doesn't lock everyone
+            // else out.
+            //
+            // SECURITY (#3313 review, H3): integrity-check the decoded
+            // payload against the row's *separate* `agent_id` and
+            // `tool_name` columns before trusting it. The sqlite file
+            // sits on disk at the daemon's user perms; a local writer
+            // could swap `tool_name` from `file_read` to `shell_exec`
+            // (or change `agent_id` to a different victim agent) and
+            // the kernel would auto-fire the tampered tool on next
+            // `Allow once`. On mismatch we drop the deferred slot —
+            // the pending request still surfaces in the UI for an
+            // operator to investigate, but no auto-resume happens.
+            let deferred = deferred_blob.and_then(|bytes| {
+                serde_json::from_slice::<DeferredToolExecution>(&bytes)
+                    .map_err(|e| {
+                        warn!(
+                            request_id = %id,
+                            error = %e,
+                            "Failed to decode persisted deferred payload — restored approval cannot resume tool"
+                        );
+                    })
+                    .ok()
+                    .and_then(|d| {
+                        if d.agent_id != request.agent_id {
+                            warn!(
+                                request_id = %id,
+                                row_agent = %request.agent_id,
+                                payload_agent = %d.agent_id,
+                                "Deferred payload agent_id mismatches row column — refusing auto-resume"
+                            );
+                            return None;
+                        }
+                        if d.tool_name != request.tool_name {
+                            warn!(
+                                request_id = %id,
+                                row_tool = %request.tool_name,
+                                payload_tool = %d.tool_name,
+                                "Deferred payload tool_name mismatches row column — refusing auto-resume"
+                            );
+                            return None;
+                        }
+                        // Cross-check the BLOB's session_id against the
+                        // row's separate `session_id` TEXT column. A
+                        // local writer with sqlite access could otherwise
+                        // re-target the deferred resume to a different
+                        // editor connection's `acp_fs_client` /
+                        // `acp_terminal_client` registry slot — the
+                        // tool would still be "the right tool" but the
+                        // editor receiving the side effects (file
+                        // contents, shell output) would be a victim
+                        // session, not the one that originally asked.
+                        let payload_session_str =
+                            d.session_id.map(|s| s.0.to_string());
+                        if request.session_id.as_deref()
+                            != payload_session_str.as_deref()
+                        {
+                            warn!(
+                                request_id = %id,
+                                row_session = ?request.session_id,
+                                payload_session = ?payload_session_str,
+                                "Deferred payload session_id mismatches row column — refusing auto-resume"
+                            );
+                            return None;
+                        }
+                        Some(d)
+                    })
+            });
             info!(
                 request_id = %id,
                 tool = %tool_name,
+                deferred = deferred.is_some(),
                 "Restored pending approval from database after restart"
             );
             pending.insert(
@@ -178,7 +333,7 @@ impl ApprovalManager {
                 PendingRequest {
                     request,
                     sender: None,
-                    deferred: None,
+                    deferred,
                     submitted_at: requested_at,
                 },
             );
@@ -189,14 +344,26 @@ impl ApprovalManager {
     ///
     /// Also writes a `pending` audit row so submission is observable even when
     /// the daemon dies before resolution (#3611).
-    fn db_insert_pending(&self, req: &ApprovalRequest) {
+    fn db_insert_pending(&self, req: &ApprovalRequest, deferred: Option<&DeferredToolExecution>) {
         let Some(db) = &self.audit_db else { return };
         let Ok(conn) = db.get() else { return };
         let created_unix = req.requested_at.timestamp();
+        // Serialize the deferred payload as JSON so a daemon restart
+        // can pick the request back up and run the tool when the
+        // human eventually approves (#3313). NULL when the caller
+        // didn't supply one (synchronous `request_approval` path,
+        // dashboard manual approvals).
+        let deferred_blob: Option<Vec<u8>> = deferred.and_then(|d| {
+            serde_json::to_vec(d)
+                .map_err(|e| {
+                    warn!(request_id = %req.id, error = %e, "Failed to serialize deferred payload — restored row will fall back to no-resume");
+                })
+                .ok()
+        });
         if let Err(e) = conn.execute(
             "INSERT OR IGNORE INTO pending_approvals \
-             (id, agent_id, session_id, tool_name, tool_input, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (id, agent_id, session_id, tool_name, tool_input, created_at, tool_use_id, deferred_payload) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 req.id.to_string(),
                 req.agent_id,
@@ -204,6 +371,8 @@ impl ApprovalManager {
                 req.tool_name,
                 &req.action_summary,
                 created_unix,
+                req.tool_use_id,
+                deferred_blob,
             ],
         ) {
             warn!(request_id = %req.id, error = %e, "Failed to persist pending approval to database");
@@ -332,6 +501,30 @@ impl ApprovalManager {
     }
 
     /// Check whether a tool is hard-denied in the current sender/channel context.
+    ///
+    /// `agent_id` is consulted against the remembered-decisions cache
+    /// first (#3313). If the user previously chose `reject_always` for
+    /// the `(agent_id, tool_name)` pair via the ACP permission UI, the
+    /// tool is hard-denied without further policy evaluation.
+    pub fn is_tool_denied_with_context_for(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> bool {
+        if matches!(
+            self.recall(agent_id, tool_name),
+            Some(ApprovalDecision::Denied)
+        ) {
+            debug!(agent_id, tool_name, "remembered decision: deny");
+            return true;
+        }
+        self.is_tool_denied_with_context(tool_name, sender_id, channel)
+    }
+
+    /// Pre-#3313 entry point — kept for callers that don't have an
+    /// `agent_id` handy. Skips the remembered-decisions cache.
     pub fn is_tool_denied_with_context(
         &self,
         tool_name: &str,
@@ -366,6 +559,29 @@ impl ApprovalManager {
     /// Returns `true` (approval needed) if:
     /// 1. A channel rule explicitly denies the tool, OR
     /// 2. The tool is in `require_approval` and none of the above bypasses apply.
+    ///
+    /// Agent-aware variant that consults the remembered-decisions cache
+    /// (#3313) before falling through to the policy check. The caller
+    /// passes the same `agent_id` it would later submit on the approval
+    /// request; a cached `Approved` short-circuits to "no approval
+    /// needed".
+    pub fn requires_approval_with_context_for(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> bool {
+        if matches!(
+            self.recall(agent_id, tool_name),
+            Some(ApprovalDecision::Approved)
+        ) {
+            debug!(agent_id, tool_name, "remembered decision: allow");
+            return false;
+        }
+        self.requires_approval_with_context(tool_name, sender_id, channel)
+    }
+
     pub fn requires_approval_with_context(
         &self,
         tool_name: &str,
@@ -438,7 +654,7 @@ impl ApprovalManager {
             let (tx, rx) = tokio::sync::oneshot::channel();
             // Persist before inserting into the in-memory map so the entry
             // survives a daemon crash/restart (issue #3611).
-            self.db_insert_pending(&req_for_timeout);
+            self.db_insert_pending(&req_for_timeout, None);
             self.pending.insert(
                 id,
                 PendingRequest {
@@ -448,6 +664,12 @@ impl ApprovalManager {
                     submitted_at: chrono::Utc::now(),
                 },
             );
+            // Notify broadcast subscribers (#3313). Ignore the result —
+            // an empty receiver list is the steady state when nothing is
+            // listening (no ACP client attached).
+            let _ = self
+                .events_tx
+                .send(ApprovalEvent::Created(req_for_timeout.clone()));
 
             info!(request_id = %id, escalation, "Approval request submitted, waiting for resolution");
 
@@ -517,7 +739,8 @@ impl ApprovalManager {
 
         let id = req.id;
         // Persist before inserting so the entry survives a daemon restart (issue #3611).
-        self.db_insert_pending(&req);
+        self.db_insert_pending(&req, Some(&deferred));
+        let req_for_event = req.clone();
         self.pending.insert(
             id,
             PendingRequest {
@@ -527,6 +750,10 @@ impl ApprovalManager {
                 submitted_at: chrono::Utc::now(),
             },
         );
+        // Notify broadcast subscribers (#3313). The deferred path is what
+        // tool execution uses, so this is the primary signal for the ACP
+        // permission bridge.
+        let _ = self.events_tx.send(ApprovalEvent::Created(req_for_event));
         Ok(id)
     }
 
@@ -675,6 +902,15 @@ impl ApprovalManager {
                     response.decided_at,
                     totp_verified,
                 );
+                // Notify broadcast subscribers (#3313) so external
+                // transports can clear their pending UI even when the
+                // resolution came from another surface (TUI / dashboard
+                // / ACP).
+                let _ = self.events_tx.send(ApprovalEvent::Resolved {
+                    request_id,
+                    decision: response.decision.clone(),
+                    decided_by: response.decided_by.clone(),
+                });
                 // Send decision to waiting agent via oneshot if present (blocking path)
                 info!(request_id = %request_id, decision = ?response.decision, "Approval request resolved");
                 if let Some(sender) = pending.sender {
@@ -1682,6 +1918,7 @@ mod tests {
             route_to: Vec::new(),
             escalation_count: 0,
             session_id: None,
+            tool_use_id: None,
         }
     }
 
@@ -2192,6 +2429,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
 
         let result = mgr.submit_request(req, deferred);
@@ -2222,6 +2460,7 @@ mod tests {
             channel: Some("telegram".to_string()),
             workspace_root: Some(std::path::PathBuf::from("/tmp")),
             force_human: false,
+            session_id: None,
         };
 
         let id = mgr.submit_request(req, deferred.clone()).unwrap();
@@ -2264,6 +2503,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
 
         let id = mgr.submit_request(req, deferred.clone()).unwrap();
@@ -2304,6 +2544,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
         mgr.submit_request(req, deferred).unwrap();
         mgr.pending.get_mut(&id).unwrap().submitted_at = Utc::now() - chrono::Duration::seconds(5);
@@ -2338,6 +2579,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
         mgr.submit_request(req, deferred).unwrap();
 
@@ -2376,6 +2618,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
 
         let id1 = mgr.submit_request(req1, deferred1).unwrap();
@@ -2394,6 +2637,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
 
         let result = mgr.submit_request(req2, deferred2);
@@ -2420,6 +2664,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
         let id1 = mgr.submit_request(req1, deferred1).unwrap();
 
@@ -2436,6 +2681,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
 
         let id2 = mgr.submit_request(req2, deferred2).unwrap();
@@ -2464,6 +2710,7 @@ mod tests {
                 channel: None,
                 workspace_root: None,
                 force_human: false,
+                session_id: None,
             };
             let id = mgr.submit_request(req, deferred).unwrap();
             ids.push(id);
@@ -2483,6 +2730,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
         let result = mgr.submit_request(req, deferred);
         assert!(result.is_err());
@@ -2502,6 +2750,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
         let result = mgr.submit_request(req, deferred);
         assert!(result.is_ok());
@@ -2535,6 +2784,7 @@ mod tests {
                     channel: None,
                     workspace_root: None,
                     force_human: false,
+                    session_id: None,
                 }),
                 submitted_at: Utc::now() - chrono::Duration::seconds(120),
             },
@@ -2577,6 +2827,7 @@ mod tests {
                     channel: None,
                     workspace_root: None,
                     force_human: false,
+                    session_id: None,
                 }),
                 submitted_at: Utc::now() - chrono::Duration::seconds(120),
             },
@@ -3242,6 +3493,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
 
         let req1 = make_session_request("agent-1", "sess-dedup");
@@ -3266,6 +3518,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
         let req3 = make_session_request("agent-1", "sess-dedup");
         let id3 = mgr.submit_request(req3, deferred2).unwrap();
@@ -3294,6 +3547,7 @@ mod tests {
             channel: None,
             workspace_root: None,
             force_human: false,
+            session_id: None,
         };
         let req = make_session_request("agent-3611", "sess-3611");
         let request_id = mgr.submit_request(req, deferred).unwrap();
@@ -3663,6 +3917,278 @@ mod tests {
         patterns
             .iter()
             .any(|p| oracle_pattern_matches(p, tool_name))
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-restart deferred-execution restore (#3313 review, PR-2)
+    //
+    // The headline persistence promise of v36 (`pending_approvals.deferred_payload`)
+    // is that a daemon dying mid-approval can come back and resume the deferred
+    // tool when the operator clicks "Allow once". This test exercises exactly
+    // that round-trip: write through one ApprovalManager, drop it, build a fresh
+    // ApprovalManager backed by the same sqlite pool, then resolve the restored
+    // entry and assert the deferred payload comes back byte-equivalent — proving
+    // both that v36 serialization is round-trip safe AND that the v36 H1 fix
+    // (session_id threaded through the BLOB) survives the restart.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn deferred_payload_survives_manager_drop_and_resume() {
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            librefang_memory::migration::run_migrations(&conn).unwrap();
+        }
+
+        let original_session_id = librefang_types::agent::SessionId(uuid::Uuid::new_v4());
+        // Production-shape fixture: the row's `session_id` column and
+        // the BLOB's `session_id` field come from the same origin in
+        // real submit paths, so the integrity check at restore (#3313
+        // H1) requires they match. Keep them consistent here.
+        let mut req = make_request("agent-restart", "shell_exec", 300);
+        req.session_id = Some(original_session_id.0.to_string());
+        let request_id = req.id;
+        let deferred = DeferredToolExecution {
+            agent_id: "agent-restart".to_string(),
+            tool_use_id: "tool-restart-1".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"command": "echo restart-survived"}),
+            allowed_tools: Some(vec!["shell_exec".to_string()]),
+            allowed_env_vars: Some(vec!["PATH".to_string()]),
+            exec_policy: Some(librefang_types::config::ExecPolicy {
+                mode: librefang_types::config::ExecSecurityMode::Full,
+                ..Default::default()
+            }),
+            sender_id: Some("operator-7".to_string()),
+            channel: Some("acp".to_string()),
+            workspace_root: Some(std::path::PathBuf::from("/tmp/restart-test")),
+            force_human: false,
+            session_id: Some(original_session_id),
+        };
+
+        // 1. Pre-restart: submit + persist via the first ApprovalManager.
+        {
+            let mgr = ApprovalManager::new_with_db(ApprovalPolicy::default(), pool.clone());
+            let returned_id = mgr.submit_request(req, deferred.clone()).unwrap();
+            assert_eq!(
+                returned_id, request_id,
+                "submit_request should preserve the request id"
+            );
+            // Drop mgr at end of scope; pool stays alive (in-memory sqlite
+            // would otherwise be wiped because the single connection is
+            // pinned to that DB instance).
+        }
+
+        // 2. Post-restart: a fresh ApprovalManager backed by the same pool
+        //    must restore the pending entry from sqlite (#3611) AND decode
+        //    the v36 deferred_payload BLOB into the original payload (#3313).
+        let mgr2 = ApprovalManager::new_with_db(ApprovalPolicy::default(), pool.clone());
+        let pending = mgr2.list_pending();
+        assert_eq!(pending.len(), 1, "exactly one pending row must restore");
+        assert_eq!(pending[0].id, request_id);
+        assert_eq!(pending[0].agent_id, "agent-restart");
+        assert_eq!(pending[0].tool_name, "shell_exec");
+
+        // 3. Approve and assert the deferred payload is returned with all
+        //    fields intact — including session_id, the H1-critical
+        //    plumbing for editor-bound resume.
+        let (response, restored_deferred) = mgr2
+            .resolve(
+                request_id,
+                ApprovalDecision::Approved,
+                Some("operator-7".to_string()),
+                false,
+                None,
+            )
+            .expect("resolve must succeed against restored entry");
+        assert_eq!(response.decision, ApprovalDecision::Approved);
+        let restored = restored_deferred
+            .expect("v36 deferred_payload must round-trip through sqlite — H1 critical");
+        assert_eq!(restored.agent_id, deferred.agent_id);
+        assert_eq!(restored.tool_use_id, deferred.tool_use_id);
+        assert_eq!(restored.tool_name, deferred.tool_name);
+        assert_eq!(restored.input, deferred.input);
+        assert_eq!(restored.allowed_tools, deferred.allowed_tools);
+        assert_eq!(restored.allowed_env_vars, deferred.allowed_env_vars);
+        assert_eq!(
+            restored.exec_policy.as_ref().map(|p| p.mode),
+            deferred.exec_policy.as_ref().map(|p| p.mode)
+        );
+        assert_eq!(restored.sender_id, deferred.sender_id);
+        assert_eq!(restored.channel, deferred.channel);
+        assert_eq!(restored.workspace_root, deferred.workspace_root);
+        assert_eq!(restored.force_human, deferred.force_human);
+        // The H1 invariant: the SessionId persisted into deferred_payload
+        // must come back. Without this, a post-restart resume would
+        // silently fall back to local-fs / local-shell instead of routing
+        // through the editor's `acp_fs_client` / `acp_terminal_client`.
+        assert_eq!(
+            restored.session_id,
+            Some(original_session_id),
+            "session_id must round-trip through v36 deferred_payload (#3313 H1)"
+        );
+    }
+
+    /// Companion to the round-trip test above: when the persisted blob's
+    /// `tool_name` (or `agent_id`) disagrees with the row column, we MUST
+    /// drop the deferred slot rather than auto-fire the tampered tool.
+    /// Forge a row directly and verify the integrity check (#3313 H3).
+    #[tokio::test]
+    async fn deferred_payload_with_tampered_tool_name_is_dropped_on_restore() {
+        use rusqlite::params;
+
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            librefang_memory::migration::run_migrations(&conn).unwrap();
+        }
+
+        // Forge a pending_approvals row whose row.tool_name is `file_read`
+        // but whose deferred_payload claims `tool_name = "shell_exec"`.
+        // A naïve restore would use the BLOB, fire shell_exec on Allow,
+        // and bypass the row-level audit signal that recorded the call
+        // as `file_read`. The integrity check must drop the deferred.
+        let req_id = uuid::Uuid::new_v4();
+        let tampered = DeferredToolExecution {
+            agent_id: "agent-X".to_string(),
+            tool_use_id: "tool-tampered".to_string(),
+            // *** mismatch *** — row says file_read.
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"command": "rm -rf /"}),
+            allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+            force_human: false,
+            session_id: None,
+        };
+        let blob = serde_json::to_vec(&tampered).unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO pending_approvals \
+                 (id, agent_id, session_id, tool_name, tool_input, created_at, tool_use_id, deferred_payload) \
+                 VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    req_id.to_string(),
+                    "agent-X",
+                    "file_read", // row column
+                    "{}",
+                    chrono::Utc::now().timestamp(),
+                    "tool-tampered",
+                    blob,
+                ],
+            )
+            .expect("seed tampered row");
+        }
+
+        let mgr = ApprovalManager::new_with_db(ApprovalPolicy::default(), pool);
+        let pending = mgr.list_pending();
+        assert_eq!(
+            pending.len(),
+            1,
+            "row must still surface for operator triage"
+        );
+
+        // Resolve as Approved — the deferred slot must be `None` because
+        // the integrity check refused the tampered payload, even though
+        // the operator clicked allow. Without this guard, an attacker
+        // who can write to the sqlite file rewrites tool_name and gains
+        // a one-click foothold on operator approval.
+        let (_resp, returned_deferred) = mgr
+            .resolve(req_id, ApprovalDecision::Approved, None, false, None)
+            .expect("resolve must still succeed — only the deferred is dropped");
+        assert!(
+            returned_deferred.is_none(),
+            "tampered deferred payload must NOT auto-fire on resume"
+        );
+    }
+
+    /// Session-id tampering variant of the integrity check above. A
+    /// local writer with sqlite access could otherwise re-target a
+    /// deferred resume to a different ACP session — the tool runs with
+    /// the original tool_name + agent_id (so the row-level audit looks
+    /// fine) but the editor receiving fs/terminal reverse-RPC side
+    /// effects is a victim session, not the one that asked. Forge a
+    /// row whose deferred_payload.session_id disagrees with the
+    /// row.session_id column and verify the deferred slot is dropped.
+    #[tokio::test]
+    async fn deferred_payload_with_tampered_session_id_is_dropped_on_restore() {
+        use rusqlite::params;
+
+        let pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::memory())
+            .unwrap();
+        {
+            let conn = pool.get().unwrap();
+            librefang_memory::migration::run_migrations(&conn).unwrap();
+        }
+
+        let req_id = uuid::Uuid::new_v4();
+        let row_session = librefang_types::agent::SessionId(uuid::Uuid::new_v4());
+        let payload_session = librefang_types::agent::SessionId(uuid::Uuid::new_v4());
+        assert_ne!(row_session.0, payload_session.0);
+
+        let tampered = DeferredToolExecution {
+            agent_id: "agent-X".to_string(),
+            tool_use_id: "tool-session-tampered".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"command": "echo hi"}),
+            allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+            force_human: false,
+            // *** mismatch *** — row column carries `row_session`.
+            session_id: Some(payload_session),
+        };
+        let blob = serde_json::to_vec(&tampered).unwrap();
+        {
+            let conn = pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO pending_approvals \
+                 (id, agent_id, session_id, tool_name, tool_input, created_at, tool_use_id, deferred_payload) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    req_id.to_string(),
+                    "agent-X",
+                    row_session.0.to_string(),
+                    "shell_exec",
+                    "{}",
+                    chrono::Utc::now().timestamp(),
+                    "tool-session-tampered",
+                    blob,
+                ],
+            )
+            .expect("seed tampered row");
+        }
+
+        let mgr = ApprovalManager::new_with_db(ApprovalPolicy::default(), pool);
+        let pending = mgr.list_pending();
+        assert_eq!(
+            pending.len(),
+            1,
+            "row must still surface for operator triage"
+        );
+
+        let (_resp, returned_deferred) = mgr
+            .resolve(req_id, ApprovalDecision::Approved, None, false, None)
+            .expect("resolve must still succeed — only the deferred is dropped");
+        assert!(
+            returned_deferred.is_none(),
+            "session-tampered deferred payload must NOT auto-fire on resume"
+        );
     }
 
     mod prop {

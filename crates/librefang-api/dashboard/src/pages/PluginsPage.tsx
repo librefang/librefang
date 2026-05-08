@@ -41,6 +41,91 @@ function getErrorMessage(e: unknown): string | null {
   return null;
 }
 
+function RegistryPluginDetails({
+  rp,
+  repo,
+  installingName,
+  onInstall,
+}: {
+  rp: RegistryPluginListing;
+  repo: string;
+  installingName: string | null;
+  onInstall: (name: string, repo: string) => void;
+}) {
+  const { t } = useTranslation();
+  const installKey = `${repo}:${rp.name}`;
+  return (
+    <div className="p-5 space-y-5">
+      <div className="flex items-start gap-3">
+        <div className="w-12 h-12 rounded-xl bg-brand/10 flex items-center justify-center shrink-0 text-brand">
+          <Puzzle className="w-5 h-5" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h2 className="text-lg font-black tracking-tight truncate">{rp.display_name ?? rp.name}</h2>
+            {rp.version && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-mono">v{rp.version}</span>
+            )}
+            {rp.installed && (
+              <Badge variant="success">
+                <Check className="w-3 h-3 mr-1" />
+                {t("plugins.installed")}
+              </Badge>
+            )}
+          </div>
+          {rp.author && (
+            <p className="text-[11px] text-text-dim/70 mt-0.5">{rp.author}</p>
+          )}
+          <a
+            href={`https://github.com/${repo}`}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 mt-1 text-[11px] font-mono text-text-dim/70 hover:text-brand transition-colors"
+          >
+            <GitBranch className="w-3 h-3" />
+            {repo}
+          </a>
+        </div>
+      </div>
+
+      {rp.description && (
+        <p className="text-sm text-text-dim leading-relaxed whitespace-pre-wrap">{rp.description}</p>
+      )}
+
+      {(rp.hooks ?? []).length > 0 && (
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">
+            {t("plugins.hooks", { defaultValue: "Hooks" })}
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {(rp.hooks ?? []).map(h => (
+              <Badge key={h} variant="brand">{h}</Badge>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="pt-3 border-t border-border-subtle/50">
+        {rp.installed ? (
+          <Button variant="secondary" className="w-full" disabled leftIcon={<Check className="w-4 h-4" />}>
+            {t("plugins.installed")}
+          </Button>
+        ) : (
+          <Button
+            variant="primary"
+            className="w-full"
+            disabled={installingName === installKey}
+            leftIcon={installingName === installKey ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+            onClick={() => onInstall(rp.name, repo)}
+          >
+            {installingName === installKey ? t("common.loading") : t("plugins.install")}
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function PluginsPage() {
   const { t } = useTranslation();
   const [tab, setTab] = useState<"installed" | "registry">("installed");
@@ -107,6 +192,10 @@ export function PluginsPage() {
   const onInstallError = useCallback((e: unknown) => {
     addToast(getErrorMessage(e) || t("plugins.install_failed", { defaultValue: "Install failed" }), "error");
   }, [addToast, t]);
+
+  const installValid = installSource === "registry" ? installName.trim() !== ""
+    : installSource === "local" ? installPath.trim() !== ""
+    : installUrl.trim() !== "";
 
   const handleInstall = useCallback(() => {
     const payload = {
@@ -212,9 +301,9 @@ export function PluginsPage() {
                     <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
                       <h3 className="text-xs sm:text-sm font-bold">{p.display_name ?? p.name}</h3>
                       <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-mono">{p.version}</span>
-                      {p.hooks?.ingest && <Badge variant="brand">ingest</Badge>}
-                      {p.hooks?.after_turn && <Badge variant="brand">after_turn</Badge>}
-                      {!p.hooks_valid && <Badge variant="error">invalid</Badge>}
+                      {p.hooks?.ingest && <Badge variant="brand">{t("plugins.hook_ingest")}</Badge>}
+                      {p.hooks?.after_turn && <Badge variant="brand">{t("plugins.hook_after_turn")}</Badge>}
+                      {!p.hooks_valid && <Badge variant="error">{t("plugins.hook_invalid")}</Badge>}
                     </div>
                     <p className="text-[10px] text-text-dim mt-0.5">{p.description || "-"}</p>
                     <div className="flex items-center gap-3 mt-1 text-[9px] text-text-dim/50">
@@ -417,7 +506,7 @@ export function PluginsPage() {
               )}
 
               <div className="flex gap-2 pt-2">
-                <Button variant="primary" className="flex-1" onClick={handleInstall} disabled={installMutation.isPending}>
+                <Button variant="primary" className="flex-1" onClick={handleInstall} disabled={!installValid || installMutation.isPending}>
                   {installMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Download className="w-4 h-4 mr-1" />}
                   {t("plugins.install")}
                 </Button>
@@ -440,17 +529,17 @@ export function PluginsPage() {
           <div>
             <label htmlFor="scaffold-plugin-runtime" className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.runtime", { defaultValue: "Runtime" })}</label>
             <select id="scaffold-plugin-runtime" value={scaffoldRuntime} onChange={e => setScaffoldRuntime(e.target.value)} className={inputClass} disabled={scaffoldMutation.isPending}>
-              <option value="python">Python</option>
-              <option value="node">Node.js</option>
-              <option value="deno">Deno (TypeScript)</option>
-              <option value="bun">Bun (TypeScript)</option>
-              <option value="go">Go</option>
-              <option value="v">V (vlang)</option>
-              <option value="ruby">Ruby</option>
-              <option value="php">PHP</option>
-              <option value="lua">Lua</option>
-              <option value="bash">Bash</option>
-              <option value="native">Native binary</option>
+              <option value="python">{t("plugins.runtime_python")}</option>
+              <option value="node">{t("plugins.runtime_node")}</option>
+              <option value="deno">{t("plugins.runtime_deno")}</option>
+              <option value="bun">{t("plugins.runtime_bun")}</option>
+              <option value="go">{t("plugins.runtime_go")}</option>
+              <option value="v">{t("plugins.runtime_v")}</option>
+              <option value="ruby">{t("plugins.runtime_ruby")}</option>
+              <option value="php">{t("plugins.runtime_php")}</option>
+              <option value="lua">{t("plugins.runtime_lua")}</option>
+              <option value="bash">{t("plugins.runtime_bash")}</option>
+              <option value="native">{t("plugins.runtime_native")}</option>
             </select>
           </div>
           <div className="flex gap-2 pt-2">
@@ -512,8 +601,8 @@ export function PluginsPage() {
             <div>
               <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">{t("plugins.hooks", { defaultValue: "Hooks" })}</p>
               <div className="flex flex-wrap gap-1.5">
-                {detailsPlugin.hooks?.ingest && <Badge variant="brand">ingest</Badge>}
-                {detailsPlugin.hooks?.after_turn && <Badge variant="brand">after_turn</Badge>}
+                {detailsPlugin.hooks?.ingest && <Badge variant="brand">{t("plugins.hook_ingest")}</Badge>}
+                {detailsPlugin.hooks?.after_turn && <Badge variant="brand">{t("plugins.hook_after_turn")}</Badge>}
                 {!detailsPlugin.hooks?.ingest && !detailsPlugin.hooks?.after_turn && (
                   <span className="text-[11px] text-text-dim/50 italic">{t("common.none", { defaultValue: "none" })}</span>
                 )}
@@ -578,80 +667,14 @@ export function PluginsPage() {
         title={detailsRegistryPlugin?.rp.display_name ?? detailsRegistryPlugin?.rp.name ?? ""}
         size="md"
       >
-        {detailsRegistryPlugin && (() => {
-          const { rp, repo } = detailsRegistryPlugin;
-          const installKey = `${repo}:${rp.name}`;
-          return (
-            <div className="p-5 space-y-5">
-              <div className="flex items-start gap-3">
-                <div className="w-12 h-12 rounded-xl bg-brand/10 flex items-center justify-center shrink-0 text-brand">
-                  <Puzzle className="w-5 h-5" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h2 className="text-lg font-black tracking-tight truncate">{rp.display_name ?? rp.name}</h2>
-                    {rp.version && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-mono">v{rp.version}</span>
-                    )}
-                    {rp.installed && (
-                      <Badge variant="success">
-                        <Check className="w-3 h-3 mr-1" />
-                        {t("plugins.installed")}
-                      </Badge>
-                    )}
-                  </div>
-                  {rp.author && (
-                    <p className="text-[11px] text-text-dim/70 mt-0.5">{rp.author}</p>
-                  )}
-                  <a
-                    href={`https://github.com/${repo}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1 mt-1 text-[11px] font-mono text-text-dim/70 hover:text-brand transition-colors"
-                  >
-                    <GitBranch className="w-3 h-3" />
-                    {repo}
-                  </a>
-                </div>
-              </div>
-
-              {rp.description && (
-                <p className="text-sm text-text-dim leading-relaxed whitespace-pre-wrap">{rp.description}</p>
-              )}
-
-              {(rp.hooks ?? []).length > 0 && (
-                <div>
-                  <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">
-                    {t("plugins.hooks", { defaultValue: "Hooks" })}
-                  </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {(rp.hooks ?? []).map(h => (
-                      <Badge key={h} variant="brand">{h}</Badge>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div className="pt-3 border-t border-border-subtle/50">
-                {rp.installed ? (
-                  <Button variant="secondary" className="w-full" disabled leftIcon={<Check className="w-4 h-4" />}>
-                    {t("plugins.installed")}
-                  </Button>
-                ) : (
-                  <Button
-                    variant="primary"
-                    className="w-full"
-                    disabled={installingName === installKey}
-                    leftIcon={installingName === installKey ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                    onClick={() => handleRegistryInstall(rp.name, repo)}
-                  >
-                    {installingName === installKey ? t("common.loading") : t("plugins.install")}
-                  </Button>
-                )}
-              </div>
-            </div>
-          );
-        })()}
+        {detailsRegistryPlugin && (
+          <RegistryPluginDetails
+            rp={detailsRegistryPlugin.rp}
+            repo={detailsRegistryPlugin.repo}
+            installingName={installingName}
+            onInstall={handleRegistryInstall}
+          />
+        )}
       </DrawerPanel>
     </div>
   );

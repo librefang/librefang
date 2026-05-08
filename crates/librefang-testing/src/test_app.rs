@@ -7,6 +7,7 @@ use axum::Router;
 use librefang_api::middleware::ApiUserAuth;
 use librefang_api::routes::AppState;
 use librefang_kernel::LibreFangKernel;
+use librefang_kernel::MemorySubsystemApi;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -198,7 +199,7 @@ impl TestAppState {
         let idempotency_store: Arc<
             dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync,
         > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
-            kernel.memory_substrate().pool(),
+            kernel.substrate_ref().pool(),
         ));
 
         Arc::new(AppState {

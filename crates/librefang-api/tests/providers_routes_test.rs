@@ -23,7 +23,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use librefang_api::routes::{self, AppState};
-use librefang_testing::{MockKernelBuilder, TestAppState};
+use librefang_testing::{test_catalog_baseline, MockKernelBuilder, TestAppState};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -36,18 +36,30 @@ struct Harness {
 /// Boots a kernel with a sane default-model provider so handlers that fall
 /// back to `config.default_model.provider` (notably `add_custom_model`)
 /// don't end up tagging entries with the placeholder `"auto"` provider.
+///
+/// Seeds the model catalog with [`test_catalog_baseline`] so tests that
+/// reference specific ids (notably `openai:gpt-4o-mini` for the
+/// capability-override flow) don't depend on the network-fed
+/// `sync_registry` baseline that flakes on CI when GitHub rate-limits or
+/// the runner is partitioned. Validation/error-path tests in this file
+/// either target unknown ids (404 paths) or only inspect envelope shape,
+/// so a non-empty deterministic catalog leaves them unaffected.
 fn boot() -> Harness {
-    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(|cfg| {
-        cfg.default_model = librefang_types::config::DefaultModelConfig {
-            provider: "openai".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            api_key_env: "OPENAI_API_KEY".to_string(),
-            base_url: None,
-            message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
-            cli_profile_dirs: Vec::new(),
-        };
-    }));
+    let test = TestAppState::with_builder(
+        MockKernelBuilder::new()
+            .with_config(|cfg| {
+                cfg.default_model = librefang_types::config::DefaultModelConfig {
+                    provider: "openai".to_string(),
+                    model: "gpt-4o-mini".to_string(),
+                    api_key_env: "OPENAI_API_KEY".to_string(),
+                    base_url: None,
+                    message_timeout_secs: 300,
+                    extra_params: std::collections::HashMap::new(),
+                    cli_profile_dirs: Vec::new(),
+                };
+            })
+            .with_catalog_seed(test_catalog_baseline()),
+    );
 
     let state = test.state.clone();
     let app = Router::new()
@@ -388,6 +400,159 @@ async fn model_overrides_set_then_get_then_delete_round_trips() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.is_object() && body.as_object().unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Capability overrides (refs #4745)
+// User overrides on `supports_tools / vision / streaming / thinking` must
+// surface in the GET /api/models/{id}, GET /api/models, and
+// GET /api/providers/{name} responses, and revert when the override is
+// deleted. Tests pin behaviour for both directions (force-on, force-off) so
+// the catalog default never has to be hardcoded — we capture it first.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn capability_override_flips_effective_value_in_get_model() {
+    let h = boot();
+    let model_id = "gpt-4o-mini";
+    let key = "openai:gpt-4o-mini";
+
+    // Capture the catalog defaults so we can pick override values that are
+    // guaranteed to differ.
+    let (status, base) =
+        json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let base_tools = base["supports_tools"].as_bool().unwrap();
+    let base_vision = base["supports_vision"].as_bool().unwrap();
+    let base_thinking = base["supports_thinking"].as_bool().unwrap();
+    let base_streaming = base["supports_streaming"].as_bool().unwrap();
+
+    // PUT the negation of every capability.
+    let payload = serde_json::json!({
+        "supports_tools": !base_tools,
+        "supports_vision": !base_vision,
+        "supports_streaming": !base_streaming,
+        "supports_thinking": !base_thinking,
+    });
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/models/overrides/{key}"),
+        Some(payload),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["supports_tools"].as_bool(), Some(!base_tools));
+    assert_eq!(body["supports_vision"].as_bool(), Some(!base_vision));
+    assert_eq!(body["supports_streaming"].as_bool(), Some(!base_streaming));
+    assert_eq!(body["supports_thinking"].as_bool(), Some(!base_thinking));
+
+    // GET /api/models/{id} now reports the overridden values.
+    let (status, body) =
+        json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["supports_tools"].as_bool(), Some(!base_tools));
+    assert_eq!(body["supports_vision"].as_bool(), Some(!base_vision));
+    assert_eq!(body["supports_streaming"].as_bool(), Some(!base_streaming));
+    assert_eq!(body["supports_thinking"].as_bool(), Some(!base_thinking));
+    // The raw `overrides` envelope still echoes the user's intent.
+    assert_eq!(
+        body["overrides"]["supports_tools"].as_bool(),
+        Some(!base_tools)
+    );
+    // `capabilities_catalog` is the unmerged catalog default — it must NOT
+    // shift when an override is active, otherwise the override-editor UI
+    // can't render "Auto = revert to catalog" correctly.
+    let cat = &body["capabilities_catalog"];
+    assert_eq!(cat["supports_tools"].as_bool(), Some(base_tools));
+    assert_eq!(cat["supports_vision"].as_bool(), Some(base_vision));
+    assert_eq!(cat["supports_streaming"].as_bool(), Some(base_streaming));
+    assert_eq!(cat["supports_thinking"].as_bool(), Some(base_thinking));
+
+    // GET /api/models?provider=openai also reflects the override.
+    let (status, listed) = json_request(&h, Method::GET, "/api/models?provider=openai", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"].as_str() == Some(model_id))
+        .expect("gpt-4o-mini should be in the openai catalog slice");
+    assert_eq!(entry["supports_tools"].as_bool(), Some(!base_tools));
+    assert_eq!(entry["supports_vision"].as_bool(), Some(!base_vision));
+    // `capabilities_catalog` must also be present and unaffected by override.
+    assert_eq!(
+        entry["capabilities_catalog"]["supports_tools"].as_bool(),
+        Some(base_tools)
+    );
+
+    // GET /api/providers/openai also surfaces the effective values for the
+    // single-provider drilldown.
+    let (status, prov) = json_request(&h, Method::GET, "/api/providers/openai", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let prov_entry = prov["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"].as_str() == Some(model_id))
+        .expect("gpt-4o-mini should be in /api/providers/openai");
+    assert_eq!(prov_entry["supports_tools"].as_bool(), Some(!base_tools));
+    assert_eq!(
+        prov_entry["supports_thinking"].as_bool(),
+        Some(!base_thinking)
+    );
+    assert_eq!(
+        prov_entry["capabilities_catalog"]["supports_thinking"].as_bool(),
+        Some(base_thinking),
+        "capabilities_catalog in /api/providers/{{name}} must be unmerged"
+    );
+
+    // DELETE — effective values revert to catalog defaults.
+    let (status, _) = json_request(
+        &h,
+        Method::DELETE,
+        &format!("/api/models/overrides/{key}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) =
+        json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["supports_tools"].as_bool(), Some(base_tools));
+    assert_eq!(body["supports_vision"].as_bool(), Some(base_vision));
+    assert_eq!(body["supports_streaming"].as_bool(), Some(base_streaming));
+    assert_eq!(body["supports_thinking"].as_bool(), Some(base_thinking));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn capability_override_partial_only_flips_set_fields() {
+    let h = boot();
+    let model_id = "gpt-4o-mini";
+    let key = "openai:gpt-4o-mini";
+
+    let (_, base) = json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    let base_tools = base["supports_tools"].as_bool().unwrap();
+    let base_vision = base["supports_vision"].as_bool().unwrap();
+
+    // Override only `supports_vision`. `supports_tools` must stay at the
+    // catalog default — partial overrides don't touch other fields.
+    let (status, _) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/models/overrides/{key}"),
+        Some(serde_json::json!({ "supports_vision": !base_vision })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, body) = json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    assert_eq!(
+        body["supports_tools"].as_bool(),
+        Some(base_tools),
+        "supports_tools must keep its catalog default when not in override payload"
+    );
+    assert_eq!(body["supports_vision"].as_bool(), Some(!base_vision));
 }
 
 // ---------------------------------------------------------------------------

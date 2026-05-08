@@ -4,8 +4,9 @@
 //! receives the callback with the authorization code, and exchanges it for tokens.
 //! All tokens are stored in the credential vault with `Zeroizing<String>`.
 
-use crate::{ExtensionError, ExtensionResult, OAuthTemplate};
+use crate::{ExtensionError, ExtensionResult};
 use hmac::{Hmac, Mac};
+use librefang_types::oauth::OAuthTemplate;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;

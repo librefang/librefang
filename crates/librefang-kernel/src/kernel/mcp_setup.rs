@@ -13,6 +13,17 @@
 use std::sync::Arc;
 
 use super::*;
+use crate::McpSubsystemApi;
+
+/// Coerce the trait-borrowed `Arc<dyn McpOAuthProvider + Send + Sync>` to
+/// the unsized `Arc<dyn McpOAuthProvider>` that `McpServerConfig` expects.
+fn oauth_provider_clone(
+    kernel: &LibreFangKernel,
+) -> Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider> {
+    let with_bounds: Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync> =
+        Arc::clone(kernel.oauth_provider_ref());
+    with_bounds
+}
 
 impl LibreFangKernel {
     /// Connect to all configured MCP servers and cache their tool definitions.
@@ -24,6 +35,7 @@ impl LibreFangKernel {
         use librefang_types::config::McpTransportEntry;
 
         let servers = self
+            .mcp
             .effective_mcp_servers
             .read()
             .map(|s| s.clone())
@@ -32,7 +44,7 @@ impl LibreFangKernel {
         for server_config in &servers {
             // Skip servers that already have a live connection (idempotent).
             {
-                let conns = self.mcp_connections.lock().await;
+                let conns = self.mcp.mcp_connections.lock().await;
                 if conns.iter().any(|c| c.name() == server_config.name) {
                     continue;
                 }
@@ -69,7 +81,7 @@ impl LibreFangKernel {
                 timeout_secs: server_config.timeout_secs,
                 env: server_config.env.clone(),
                 headers: server_config.headers.clone(),
-                oauth_provider: Some(self.oauth_provider_ref()),
+                oauth_provider: Some(oauth_provider_clone(self)),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
                 taint_policy: server_config.taint_policy.clone(),
@@ -81,9 +93,10 @@ impl LibreFangKernel {
                 Ok(conn) => {
                     let tool_count = conn.tools().len();
                     // Cache tool definitions
-                    if let Ok(mut tools) = self.mcp_tools.lock() {
+                    if let Ok(mut tools) = self.mcp.mcp_tools.lock() {
                         tools.extend(conn.tools().iter().cloned());
-                        self.mcp_generation
+                        self.mcp
+                            .mcp_generation
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     info!(
@@ -92,8 +105,10 @@ impl LibreFangKernel {
                         "MCP server connected"
                     );
                     // Update extension health if this is an extension-provided server
-                    self.mcp_health.report_ok(&server_config.name, tool_count);
-                    self.mcp_connections.lock().await.push(conn);
+                    self.mcp
+                        .mcp_health
+                        .report_ok(&server_config.name, tool_count);
+                    self.mcp.mcp_connections.lock().await.push(conn);
                 }
                 Err(e) => {
                     let err_str = e.to_string();
@@ -107,7 +122,7 @@ impl LibreFangKernel {
                             server = %server_config.name,
                             "MCP server requires OAuth — waiting for UI-driven auth"
                         );
-                        self.mcp_auth_states.lock().await.insert(
+                        self.mcp.mcp_auth_states.lock().await.insert(
                             server_config.name.clone(),
                             librefang_runtime::mcp_oauth::McpAuthState::NeedsAuth,
                         );
@@ -118,16 +133,18 @@ impl LibreFangKernel {
                             "Failed to connect to MCP server"
                         );
                     }
-                    self.mcp_health.report_error(&server_config.name, err_str);
+                    self.mcp
+                        .mcp_health
+                        .report_error(&server_config.name, err_str);
                 }
             }
         }
 
-        let tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
+        let tool_count = self.mcp.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
         if tool_count > 0 {
             info!(
                 "MCP: {tool_count} tools available from {} server(s)",
-                self.mcp_connections.lock().await.len()
+                self.mcp.mcp_connections.lock().await.len()
             );
         }
     }
@@ -142,7 +159,7 @@ impl LibreFangKernel {
         // the underlying stdio child process is reaped before we return, which
         // prevents subprocess leaks on hot-reload. (#3800)
         let removed_conns: Vec<librefang_runtime::mcp::McpConnection> = {
-            let mut conns = self.mcp_connections.lock().await;
+            let mut conns = self.mcp.mcp_connections.lock().await;
             let mut extracted = Vec::new();
             let mut i = 0;
             while i < conns.len() {
@@ -160,10 +177,11 @@ impl LibreFangKernel {
             // Remove cached tools from this server and bump generation.
             // MCP tools are prefixed: mcp_{normalized_server_name}_{tool_name}
             let prefix = format!("mcp_{}_", librefang_runtime::mcp::normalize_name(name));
-            if let Ok(mut tools) = self.mcp_tools.lock() {
+            if let Ok(mut tools) = self.mcp.mcp_tools.lock() {
                 tools.retain(|t| !t.name.starts_with(&prefix));
             }
-            self.mcp_generation
+            self.mcp
+                .mcp_generation
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             info!(server = %name, "MCP server disconnected");
 
@@ -194,6 +212,7 @@ impl LibreFangKernel {
 
         let server_config = {
             let servers = self
+                .mcp
                 .effective_mcp_servers
                 .read()
                 .map(|s| s.clone())
@@ -241,7 +260,7 @@ impl LibreFangKernel {
             timeout_secs: server_config.timeout_secs,
             env: server_config.env.clone(),
             headers: server_config.headers.clone(),
-            oauth_provider: Some(self.oauth_provider_ref()),
+            oauth_provider: Some(oauth_provider_clone(self)),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
             taint_policy: server_config.taint_policy.clone(),
@@ -252,9 +271,10 @@ impl LibreFangKernel {
         match McpConnection::connect(mcp_config).await {
             Ok(conn) => {
                 let tool_count = conn.tools().len();
-                if let Ok(mut tools) = self.mcp_tools.lock() {
+                if let Ok(mut tools) = self.mcp.mcp_tools.lock() {
                     tools.extend(conn.tools().iter().cloned());
-                    self.mcp_generation
+                    self.mcp
+                        .mcp_generation
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 info!(
@@ -262,11 +282,13 @@ impl LibreFangKernel {
                     tools = tool_count,
                     "MCP server connected after OAuth"
                 );
-                self.mcp_health.report_ok(&server_config.name, tool_count);
-                self.mcp_connections.lock().await.push(conn);
+                self.mcp
+                    .mcp_health
+                    .report_ok(&server_config.name, tool_count);
+                self.mcp.mcp_connections.lock().await.push(conn);
 
                 // Update auth state to Authorized
-                self.mcp_auth_states.lock().await.insert(
+                self.mcp.mcp_auth_states.lock().await.insert(
                     server_name.to_string(),
                     librefang_runtime::mcp_oauth::McpAuthState::Authorized {
                         expires_at: None,
@@ -280,9 +302,10 @@ impl LibreFangKernel {
                     error = %e,
                     "MCP server retry after OAuth failed"
                 );
-                self.mcp_health
+                self.mcp
+                    .mcp_health
                     .report_error(&server_config.name, e.to_string());
-                self.mcp_auth_states.lock().await.insert(
+                self.mcp.mcp_auth_states.lock().await.insert(
                     server_name.to_string(),
                     librefang_runtime::mcp_oauth::McpAuthState::Error {
                         message: format!("Connection failed after auth: {e}"),
@@ -312,6 +335,7 @@ impl LibreFangKernel {
 
         // 3. Find servers that aren't already connected
         let already_connected: Vec<String> = self
+            .mcp
             .mcp_connections
             .lock()
             .await
@@ -326,9 +350,10 @@ impl LibreFangKernel {
             .collect();
 
         // 4. Update effective list; bump mcp_generation inside the same write lock so cached summaries invalidate atomically.
-        if let Ok(mut effective) = self.effective_mcp_servers.write() {
+        if let Ok(mut effective) = self.mcp.effective_mcp_servers.write() {
             *effective = new_configs;
-            self.mcp_generation
+            self.mcp
+                .mcp_generation
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
@@ -365,7 +390,7 @@ impl LibreFangKernel {
                 timeout_secs: server_config.timeout_secs,
                 env: server_config.env.clone(),
                 headers: server_config.headers.clone(),
-                oauth_provider: Some(self.oauth_provider_ref()),
+                oauth_provider: Some(oauth_provider_clone(self)),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
                 taint_policy: server_config.taint_policy.clone(),
@@ -373,27 +398,31 @@ impl LibreFangKernel {
                 roots: self.mcp_roots_for_server(server_config),
             };
 
-            self.mcp_health.register(&server_config.name);
+            self.mcp.mcp_health.register(&server_config.name);
 
             match McpConnection::connect(mcp_config).await {
                 Ok(conn) => {
                     let tool_count = conn.tools().len();
-                    if let Ok(mut tools) = self.mcp_tools.lock() {
+                    if let Ok(mut tools) = self.mcp.mcp_tools.lock() {
                         tools.extend(conn.tools().iter().cloned());
-                        self.mcp_generation
+                        self.mcp
+                            .mcp_generation
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
-                    self.mcp_health.report_ok(&server_config.name, tool_count);
+                    self.mcp
+                        .mcp_health
+                        .report_ok(&server_config.name, tool_count);
                     info!(
                         server = %server_config.name,
                         tools = tool_count,
                         "MCP server connected (hot-reload)"
                     );
-                    self.mcp_connections.lock().await.push(conn);
+                    self.mcp.mcp_connections.lock().await.push(conn);
                     connected_count += 1;
                 }
                 Err(e) => {
-                    self.mcp_health
+                    self.mcp
+                        .mcp_health
                         .report_error(&server_config.name, e.to_string());
                     warn!(
                         server = %server_config.name,
@@ -409,6 +438,7 @@ impl LibreFangKernel {
             .iter()
             .filter(|name| {
                 let effective = self
+                    .mcp
                     .effective_mcp_servers
                     .read()
                     .unwrap_or_else(|e| e.into_inner());
@@ -421,7 +451,7 @@ impl LibreFangKernel {
             // Extract the connections to remove so we can close them explicitly
             // after releasing the lock, preventing subprocess leaks on hot-reload. (#3800)
             let conns_to_close: Vec<librefang_runtime::mcp::McpConnection> = {
-                let mut conns = self.mcp_connections.lock().await;
+                let mut conns = self.mcp.mcp_connections.lock().await;
                 let mut extracted = Vec::new();
                 let mut i = 0;
                 while i < conns.len() {
@@ -432,18 +462,19 @@ impl LibreFangKernel {
                     }
                 }
                 // Rebuild tool cache with remaining connections.
-                if let Ok(mut tools) = self.mcp_tools.lock() {
+                if let Ok(mut tools) = self.mcp.mcp_tools.lock() {
                     tools.clear();
                     for conn in conns.iter() {
                         tools.extend(conn.tools().iter().cloned());
                     }
-                    self.mcp_generation
+                    self.mcp
+                        .mcp_generation
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 extracted
             };
             for name in &removed {
-                self.mcp_health.unregister(name);
+                self.mcp.mcp_health.unregister(name);
                 info!(server = %name, "MCP server disconnected (removed)");
             }
             // Close extracted connections after releasing the lock. (#3800)
@@ -467,6 +498,7 @@ impl LibreFangKernel {
         // Find the config for this server
         let server_config = {
             let effective = self
+                .mcp
                 .effective_mcp_servers
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
@@ -478,23 +510,24 @@ impl LibreFangKernel {
 
         // Disconnect existing connection if any
         {
-            let mut conns = self.mcp_connections.lock().await;
+            let mut conns = self.mcp.mcp_connections.lock().await;
             let old_len = conns.len();
             conns.retain(|c| c.name() != id);
             if conns.len() < old_len {
                 // Rebuild tool cache
-                if let Ok(mut tools) = self.mcp_tools.lock() {
+                if let Ok(mut tools) = self.mcp.mcp_tools.lock() {
                     tools.clear();
                     for conn in conns.iter() {
                         tools.extend(conn.tools().iter().cloned());
                     }
-                    self.mcp_generation
+                    self.mcp
+                        .mcp_generation
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         }
 
-        self.mcp_health.mark_reconnecting(id);
+        self.mcp.mcp_health.mark_reconnecting(id);
 
         let transport_entry = match &server_config.transport {
             Some(t) => t,
@@ -529,7 +562,7 @@ impl LibreFangKernel {
             timeout_secs: server_config.timeout_secs,
             env: server_config.env.clone(),
             headers: server_config.headers.clone(),
-            oauth_provider: Some(self.oauth_provider_ref()),
+            oauth_provider: Some(oauth_provider_clone(self)),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
             taint_policy: server_config.taint_policy.clone(),
@@ -540,18 +573,19 @@ impl LibreFangKernel {
         match McpConnection::connect(mcp_config).await {
             Ok(conn) => {
                 let tool_count = conn.tools().len();
-                if let Ok(mut tools) = self.mcp_tools.lock() {
+                if let Ok(mut tools) = self.mcp.mcp_tools.lock() {
                     tools.extend(conn.tools().iter().cloned());
-                    self.mcp_generation
+                    self.mcp
+                        .mcp_generation
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                self.mcp_health.report_ok(id, tool_count);
+                self.mcp.mcp_health.report_ok(id, tool_count);
                 info!(
                     server = %id,
                     tools = tool_count,
                     "MCP server reconnected"
                 );
-                self.mcp_connections.lock().await.push(conn);
+                self.mcp.mcp_connections.lock().await.push(conn);
                 // Cardinality: server label is the operator-configured MCP
                 // server id (bounded set), outcome is one of two fixed
                 // values. (#3495)
@@ -564,7 +598,7 @@ impl LibreFangKernel {
                 Ok(tool_count)
             }
             Err(e) => {
-                self.mcp_health.report_error(id, e.to_string());
+                self.mcp.mcp_health.report_error(id, e.to_string());
                 metrics::counter!(
                     "librefang_mcp_reconnect_total",
                     "server" => id.to_string(),
@@ -578,7 +612,7 @@ impl LibreFangKernel {
 
     /// Background loop that checks MCP server health and auto-reconnects.
     pub(crate) async fn run_mcp_health_loop(self: &Arc<Self>) {
-        let interval_secs = self.mcp_health.config().check_interval_secs;
+        let interval_secs = self.mcp.mcp_health.config().check_interval_secs;
         if interval_secs == 0 {
             return;
         }
@@ -590,11 +624,14 @@ impl LibreFangKernel {
             interval.tick().await;
 
             // Check each registered server
-            let health_entries = self.mcp_health.all_health();
+            let health_entries = self.mcp.mcp_health.all_health();
             for entry in health_entries {
                 // Try reconnect for errored servers
-                if self.mcp_health.should_reconnect(&entry.id) {
-                    let backoff = self.mcp_health.backoff_duration(entry.reconnect_attempts);
+                if self.mcp.mcp_health.should_reconnect(&entry.id) {
+                    let backoff = self
+                        .mcp
+                        .mcp_health
+                        .backoff_duration(entry.reconnect_attempts);
                     debug!(
                         server = %entry.id,
                         attempt = entry.reconnect_attempts + 1,

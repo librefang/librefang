@@ -10,13 +10,49 @@ use crate::vault::CredentialVault;
 use crate::ExtensionResult;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 use tracing::debug;
 use zeroize::Zeroizing;
 
+/// Backing store for a [`CredentialResolver`]'s vault — either an owned vault
+/// (built ad-hoc by short-lived callers like the CLI) or a shared handle into
+/// the kernel's cached, already-unlocked vault.
+///
+/// The shared variant exists so that long-lived callers (the API layer) can
+/// route through the kernel's `vault_handle()` cache (#3598) instead of
+/// re-running the unlock-time Argon2id KDF on every request.
+enum VaultSource {
+    Owned(CredentialVault),
+    Shared(Arc<RwLock<CredentialVault>>),
+}
+
+impl VaultSource {
+    fn with_read<R>(&self, f: impl FnOnce(&CredentialVault) -> R) -> R {
+        match self {
+            VaultSource::Owned(v) => f(v),
+            VaultSource::Shared(handle) => {
+                let guard = handle.read().unwrap_or_else(|e| e.into_inner());
+                f(&guard)
+            }
+        }
+    }
+
+    fn with_write<R>(&mut self, f: impl FnOnce(&mut CredentialVault) -> R) -> R {
+        match self {
+            VaultSource::Owned(v) => f(v),
+            VaultSource::Shared(handle) => {
+                let mut guard = handle.write().unwrap_or_else(|e| e.into_inner());
+                f(&mut guard)
+            }
+        }
+    }
+}
+
 /// Credential resolver — tries multiple sources in priority order.
 pub struct CredentialResolver {
-    /// Reference to the credential vault.
-    vault: Option<CredentialVault>,
+    /// Backing vault (owned by this resolver, or a shared handle into the
+    /// kernel's cached vault).
+    vault: Option<VaultSource>,
     /// Dotenv entries (loaded from `~/.librefang/.env`).
     dotenv: HashMap<String, String>,
     /// Whether to prompt interactively as a last resort.
@@ -24,8 +60,26 @@ pub struct CredentialResolver {
 }
 
 impl CredentialResolver {
-    /// Create a resolver with optional vault and dotenv path.
+    /// Create a resolver with an owned vault and dotenv path. Used by
+    /// short-lived callers (CLI subcommands, tests) where there is no kernel
+    /// to share a cached vault with.
     pub fn new(vault: Option<CredentialVault>, dotenv_path: Option<&Path>) -> Self {
+        Self::with_optional_source(vault.map(VaultSource::Owned), dotenv_path)
+    }
+
+    /// Create a resolver backed by the kernel's shared, already-unlocked
+    /// vault handle. Long-lived callers (API request handlers) MUST use this
+    /// constructor — it lets the resolver read/write through the kernel's
+    /// vault cache (#3598) instead of opening + Argon2id-unlocking the vault
+    /// on every request.
+    pub fn with_vault_handle(
+        handle: Option<Arc<RwLock<CredentialVault>>>,
+        dotenv_path: Option<&Path>,
+    ) -> Self {
+        Self::with_optional_source(handle.map(VaultSource::Shared), dotenv_path)
+    }
+
+    fn with_optional_source(vault: Option<VaultSource>, dotenv_path: Option<&Path>) -> Self {
         let dotenv = if let Some(path) = dotenv_path {
             load_dotenv(path).unwrap_or_default()
         } else {
@@ -47,12 +101,17 @@ impl CredentialResolver {
     /// Resolve a credential by key, trying all sources in order.
     pub fn resolve(&self, key: &str) -> Option<Zeroizing<String>> {
         // 1. Vault
-        if let Some(ref vault) = self.vault {
-            if vault.is_unlocked() {
-                if let Some(val) = vault.get(key) {
-                    debug!("Credential '{}' resolved from vault", key);
-                    return Some(val);
+        if let Some(ref source) = self.vault {
+            let hit = source.with_read(|vault| {
+                if vault.is_unlocked() {
+                    vault.get(key)
+                } else {
+                    None
                 }
+            });
+            if let Some(val) = hit {
+                debug!("Credential '{}' resolved from vault", key);
+                return Some(val);
             }
         }
 
@@ -82,8 +141,10 @@ impl CredentialResolver {
     /// Check if a credential is available (without prompting).
     pub fn has_credential(&self, key: &str) -> bool {
         // Check vault
-        if let Some(ref vault) = self.vault {
-            if vault.is_unlocked() && vault.get(key).is_some() {
+        if let Some(ref source) = self.vault {
+            let in_vault =
+                source.with_read(|vault| vault.is_unlocked() && vault.get(key).is_some());
+            if in_vault {
                 return true;
             }
         }
@@ -117,9 +178,8 @@ impl CredentialResolver {
 
     /// Store a credential in the vault (if available).
     pub fn store_in_vault(&mut self, key: &str, value: Zeroizing<String>) -> ExtensionResult<()> {
-        if let Some(ref mut vault) = self.vault {
-            vault.set(key.to_string(), value)?;
-            Ok(())
+        if let Some(ref mut source) = self.vault {
+            source.with_write(|vault| vault.set(key.to_string(), value))
         } else {
             Err(crate::ExtensionError::Vault(
                 "No vault configured".to_string(),

@@ -55,6 +55,8 @@ const inputClass =
 const textareaClass =
   "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand resize-y min-h-[88px]";
 
+const MAX_BASE64_LENGTH = 2 * 1024 * 1024;
+
 export function MediaPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -282,7 +284,7 @@ function ImagePanel({
             prompt,
             provider: provider || undefined,
             model: model || undefined,
-            count: count || undefined,
+            count: Math.min(Math.max(count, 1), 4) || undefined,
             aspect_ratio: aspect || undefined,
           },
           {
@@ -290,7 +292,7 @@ function ImagePanel({
               setResult(data);
               onToast(t("media.image_done"), "success");
             },
-            onError: (err: Error) => onToast(err.message || t("common.error"), "error"),
+            onError: (err: unknown) => onToast((err instanceof Error ? err.message : String(err)) || t("common.error"), "error"),
           },
         );
       }}
@@ -350,6 +352,11 @@ function ImagePanel({
               >
                 {img.url ? (
                   <img src={img.url} alt={t("media.generated_alt", { index: i + 1, defaultValue: "generated {{index}}" })} className="w-full h-auto" />
+                ) : img.data_base64 && img.data_base64.length > MAX_BASE64_LENGTH ? (
+                  <div className="flex items-center gap-2 p-3 text-xs text-warning">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    <span>{t("media.image_too_large", { defaultValue: "Image too large to display" })}</span>
+                  </div>
                 ) : (
                   <img src={`data:image/png;base64,${img.data_base64}`} alt={t("media.generated_alt", { index: i + 1, defaultValue: "generated {{index}}" })} className="w-full h-auto" />
                 )}
@@ -394,14 +401,14 @@ function SpeechPanel({
             model: model || undefined,
             voice: voice || undefined,
             format: format || undefined,
-            speed: speed || undefined,
+            speed: speed ?? undefined,
           },
           {
             onSuccess: (data) => {
               setResult(data);
               onToast(t("media.speech_done"), "success");
             },
-            onError: (err: Error) => onToast(err.message || t("common.error"), "error"),
+            onError: (err: unknown) => onToast((err instanceof Error ? err.message : String(err)) || t("common.error"), "error"),
           },
         );
       }}
@@ -554,7 +561,7 @@ function VideoPanel({
               errorToastShown.current = null;
               onToast(t("media.video_submitted"), "success");
             },
-            onError: (err: Error) => onToast(err.message || t("common.error"), "error"),
+            onError: (err: unknown) => onToast((err instanceof Error ? err.message : String(err)) || t("common.error"), "error"),
           },
         );
       }}
@@ -666,7 +673,7 @@ function MusicPanel({
               setResult(data);
               onToast(t("media.music_done"), "success");
             },
-            onError: (err: Error) => onToast(err.message || t("common.error"), "error"),
+            onError: (err: unknown) => onToast((err instanceof Error ? err.message : String(err)) || t("common.error"), "error"),
           },
         );
       }}

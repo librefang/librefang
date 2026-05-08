@@ -16,7 +16,7 @@ use futures::FutureExt as _;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use tokio::task::JoinHandle;
-use tracing::error;
+use tracing::{error, Instrument};
 
 /// Spawn a fire-and-forget task with panic logging.
 ///
@@ -32,25 +32,35 @@ pub fn spawn_supervised<F>(name: &'static str, future: F) -> JoinHandle<()>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    tokio::spawn(async move {
-        // catch_unwind requires UnwindSafe; futures rarely advertise that
-        // bound but in practice tokio tasks already isolate state at the
-        // poll boundary. AssertUnwindSafe is the standard escape hatch
-        // (mirrors what the tracing-subscriber and tower implementations
-        // do for the same reason).
-        let result = AssertUnwindSafe(future).catch_unwind().await;
-        if let Err(payload) = result {
-            // Best-effort: extract a string description from the payload.
-            let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
-                (*s).to_string()
-            } else if let Some(s) = payload.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "<non-string panic payload>".to_string()
-            };
-            error!(task = name, panic = %msg, "supervised task panicked");
+    // Inherit the calling task's tracing span so events emitted inside the
+    // spawned future carry the same `agent.id` / `session.id` / request span
+    // fields as the spawn site. `tokio::spawn` does NOT propagate the
+    // current span by default; without `.in_current_span()` every supervised
+    // background task starts in a bare span context and its logs cannot be
+    // correlated to the originating agent run.
+    let span = tracing::Span::current();
+    tokio::spawn(
+        async move {
+            // catch_unwind requires UnwindSafe; futures rarely advertise that
+            // bound but in practice tokio tasks already isolate state at the
+            // poll boundary. AssertUnwindSafe is the standard escape hatch
+            // (mirrors what the tracing-subscriber and tower implementations
+            // do for the same reason).
+            let result = AssertUnwindSafe(future).catch_unwind().await;
+            if let Err(payload) = result {
+                // Best-effort: extract a string description from the payload.
+                let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
+                    (*s).to_string()
+                } else if let Some(s) = payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "<non-string panic payload>".to_string()
+                };
+                error!(task = name, panic = %msg, "supervised task panicked");
+            }
         }
-    })
+        .instrument(span),
+    )
 }
 
 #[cfg(test)]
@@ -80,5 +90,84 @@ mod tests {
         });
         let result = h.await;
         assert!(result.is_ok(), "supervised handle must not propagate panic");
+    }
+
+    /// Regression: spawned future must inherit the calling task's tracing
+    /// span so events emitted inside it carry `agent.id` / `session.id` set
+    /// by `#[instrument]` on `run_agent_loop`. Without `.in_current_span()`
+    /// in `spawn_supervised` (or equivalent), every supervised background
+    /// task starts in a bare span context and its logs cannot be correlated.
+    // Relies on the default `current_thread` flavor of `#[tokio::test]`:
+    // `tracing::subscriber::set_default` installs the subscriber on the
+    // calling thread only, so the supervised task must run on that same
+    // thread to capture its events. Switching this test to
+    // `#[tokio::test(flavor = "multi_thread")]` would land the spawned
+    // task on a worker without the subscriber and break the assertion.
+    #[tokio::test]
+    async fn supervised_task_inherits_caller_span() {
+        use std::io;
+        use std::sync::Mutex;
+        use tracing::{info_span, warn, Instrument as _};
+        use tracing_subscriber::fmt::MakeWriter;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone)]
+        struct VecWriter(Arc<Mutex<Vec<u8>>>);
+        impl io::Write for VecWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for VecWriter {
+            type Writer = VecWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = VecWriter(buf.clone());
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_target(false);
+        let subscriber = tracing_subscriber::registry().with(layer);
+
+        let _g = tracing::subscriber::set_default(subscriber);
+
+        // Build the parent span on the caller side, then spawn from inside
+        // it. The supervised task must inherit this span when its `warn!`
+        // fires, even though `tokio::spawn` itself does not propagate spans.
+        let parent = info_span!(
+            "run_agent_loop",
+            agent.id = "agent-uuid-aaaa",
+            session.id = "session-uuid-bbbb",
+        );
+        async {
+            let h = spawn_supervised("test_span_inherit", async {
+                warn!("event from supervised task");
+            });
+            h.await.unwrap();
+        }
+        .instrument(parent)
+        .await;
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).expect("utf8");
+        assert!(
+            captured.contains("agent.id=\"agent-uuid-aaaa\""),
+            "supervised task did not inherit agent.id; captured: {captured:?}"
+        );
+        assert!(
+            captured.contains("session.id=\"session-uuid-bbbb\""),
+            "supervised task did not inherit session.id; captured: {captured:?}"
+        );
+        assert!(
+            captured.contains("event from supervised task"),
+            "warn message lost; captured: {captured:?}"
+        );
     }
 }

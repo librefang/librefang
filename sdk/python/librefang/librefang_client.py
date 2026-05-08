@@ -817,6 +817,18 @@ class _SkillsResource(_Resource):
     def install_skill(self, **data):
         return self._c._request("POST", "/api/skills/install", data)
 
+    def list_pending_candidates(self, agent: Any = None):
+        return self._c._request("GET", "/api/skills/pending", None, query={"agent": agent})
+
+    def show_pending_candidate(self, id: str):
+        return self._c._request("GET", f"/api/skills/pending/{id}")
+
+    def approve_pending_candidate(self, id: str):
+        return self._c._request("POST", f"/api/skills/pending/{id}/approve")
+
+    def reject_pending_candidate(self, id: str):
+        return self._c._request("POST", f"/api/skills/pending/{id}/reject")
+
     def uninstall_skill(self, **data):
         return self._c._request("POST", "/api/skills/uninstall", data)
 

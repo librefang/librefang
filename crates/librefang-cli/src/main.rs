@@ -7,6 +7,7 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+mod acp;
 mod desktop_install;
 pub mod doctor;
 mod http_client;
@@ -24,7 +25,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use librefang_api::server::read_daemon_info;
 use librefang_extensions::dotenv;
-use librefang_kernel::{config::load_config, LibreFangKernel};
+use librefang_kernel::{config::load_config, AgentSubsystemApi, LibreFangKernel, LlmSubsystemApi};
 use librefang_types::agent::{AgentId, AgentManifest};
 use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
@@ -310,6 +311,20 @@ enum Commands {
     Mcp {
         #[command(subcommand)]
         command: Option<McpCommands>,
+    },
+    /// Run the Agent Client Protocol (ACP) server over stdio (#3313).
+    ///
+    /// Launches an in-process kernel and serves an ACP `Agent` on
+    /// stdin/stdout. Editors like Zed, VS Code (Claude Code), and
+    /// JetBrains spawn this as a child process per workspace and
+    /// drive prompts / approvals / streaming through it.
+    #[command(
+        long_about = "Run the Agent Client Protocol (ACP) server over stdio (#3313).\n\nExposes a LibreFang agent to ACP-compatible editors (Zed, VS Code, JetBrains).\nThe editor spawns `librefang acp` as a child process per workspace; this\ncommand runs an in-process kernel and serves the JSON-RPC protocol on\nstdin/stdout until the editor disconnects.\n\nExamples:\n  librefang acp                    # Use the default agent (\"assistant\")\n  librefang acp --agent reviewer   # Use a named agent\n  librefang acp --agent <uuid>     # Use an agent by UUID"
+    )]
+    Acp {
+        /// Agent name or UUID to embed. Defaults to "assistant".
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// Authenticate with a provider (chatgpt) [*].
     #[command(
@@ -755,6 +770,39 @@ enum SkillCommands {
         long_about = "Manually invoke the skill evolution pipeline that agents use internally.\n\nOperates on the globally-installed skill directory (~/.librefang/skills).\nAll mutations go through the same validation, security scan, file locking,\nand version-history bookkeeping as the agent tools.\n\nExamples:\n  librefang skill evolve create --name my-skill --description ... --context-file prompt.md\n  librefang skill evolve update my-skill prompt.md --changelog \"tightened wording\"\n  librefang skill evolve patch my-skill --old-file a.txt --new-file b.txt --changelog \"fix typo\"\n  librefang skill evolve rollback my-skill\n  librefang skill evolve history my-skill"
     )]
     Evolve(EvolveCommands),
+    /// Skill workshop (#3328) — review pending candidates captured from
+    /// agent conversations.
+    #[command(
+        subcommand,
+        long_about = "Review candidates produced by the skill workshop after-turn capture.\n\nA candidate is a draft skill the workshop extracted from a conversation\nturn (e.g. `from now on always run cargo fmt`). Candidates land in\n`~/.librefang/skills/pending/<agent_id>/<uuid>.toml` and are NOT loaded\ninto the active registry until you approve them. Approval routes\nthrough the same evolution::create_skill path used for marketplace\ninstalls, so name validation and prompt-injection scans run a second\ntime before anything reaches `~/.librefang/skills/`.\n\nExamples:\n  librefang skill pending list\n  librefang skill pending show <id>\n  librefang skill pending approve <id>\n  librefang skill pending reject <id>"
+    )]
+    Pending(PendingCommands),
+}
+
+#[derive(Subcommand)]
+enum PendingCommands {
+    /// List pending candidates (oldest captured first — same order the
+    /// dashboard's pending review section renders).
+    List {
+        /// Show only candidates from the given agent UUID.
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Print a candidate's full TOML and provenance.
+    Show {
+        /// Candidate UUID (shown by `pending list`).
+        id: String,
+    },
+    /// Promote a candidate into the active skill registry.
+    Approve {
+        /// Candidate UUID.
+        id: String,
+    },
+    /// Drop a candidate without promoting.
+    Reject {
+        /// Candidate UUID.
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2182,6 +2230,7 @@ fn main() {
             } => cmd_skill_publish(path, repo, tag, output, dry_run),
             SkillCommands::Create => cmd_skill_create(),
             SkillCommands::Evolve(sub) => cmd_skill_evolve(sub),
+            SkillCommands::Pending(sub) => cmd_skill_pending(sub),
         },
         Some(Commands::Channel(sub)) => match sub {
             ChannelCommands::List => cmd_channel_list(),
@@ -2238,6 +2287,7 @@ fn main() {
             Some(McpCommands::Add { name, key }) => cmd_mcp_add(&name, key.as_deref()),
             Some(McpCommands::Remove { name }) => cmd_mcp_remove(&name),
         },
+        Some(Commands::Acp { agent }) => acp::run_acp_server(cli.config, agent),
         Some(Commands::Auth(sub)) => match sub {
             AuthCommands::Chatgpt { device_auth } => cmd_auth_chatgpt(device_auth),
         },
@@ -3678,8 +3728,8 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
         let daemon_info_path = kernel.home_dir().join("daemon.json");
         let provider = cfg.default_model.provider.clone();
         let model = cfg.default_model.model.clone();
-        let agent_count = kernel.agent_registry().count();
-        let model_count = kernel.model_catalog_ref().load().list_models().len();
+        let agent_count = kernel.agent_registry_ref().count();
+        let model_count = kernel.model_catalog_swap().load().list_models().len();
 
         ui::success(&i18n::t_args(
             "kernel-booted",
@@ -4151,7 +4201,7 @@ fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
         }
     } else {
         let kernel = boot_kernel(config);
-        let agents = kernel.agent_registry().list();
+        let agents = kernel.agent_registry_ref().list();
 
         if json {
             let list: Vec<serde_json::Value> = agents
@@ -4296,7 +4346,7 @@ fn cmd_agent_delete(config: Option<PathBuf>, name: &str, yes: bool) {
         }
     } else {
         let kernel = boot_kernel(config);
-        let canonical_uuid = match kernel.agent_identities().get(name) {
+        let canonical_uuid = match kernel.identities_ref().get(name) {
             Some(id) => id,
             None => {
                 eprintln!(
@@ -4357,7 +4407,7 @@ fn cmd_agent_reset_uuid(config: Option<PathBuf>, name: &str, yes: bool) {
         }
     } else {
         let kernel = boot_kernel(config);
-        match kernel.agent_identities().purge(name) {
+        match kernel.identities_ref().purge(name) {
             Some(prev) => println!("Canonical UUID for \"{name}\" reset (was {prev})."),
             None => {
                 eprintln!("No canonical UUID recorded for agent name '{name}'.");
@@ -5186,7 +5236,7 @@ fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> 
     }
 
     let kernel = boot_kernel(config);
-    let agent_count = kernel.agent_registry().count();
+    let agent_count = kernel.agent_registry_ref().count();
     let cfg = kernel.config_ref();
 
     if json {
@@ -5235,7 +5285,7 @@ fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> 
     if agent_count > 0 {
         ui::blank();
         ui::section(&i18n::t("section-persisted-agents"));
-        for entry in kernel.agent_registry().list() {
+        for entry in kernel.agent_registry_ref().list() {
             println!("    {} ({}) -- {:?}", entry.name, entry.id, entry.state);
         }
     }
@@ -7797,6 +7847,109 @@ fn cmd_skill_evolve(sub: EvolveCommands) {
 }
 
 // ---------------------------------------------------------------------------
+// Skill workshop pending review (#3328)
+// ---------------------------------------------------------------------------
+
+fn cmd_skill_pending(sub: PendingCommands) {
+    let skills_root = librefang_home().join("skills");
+    match sub {
+        PendingCommands::List { agent } => {
+            let candidates = match &agent {
+                Some(a) => librefang_kernel::skill_workshop::storage::list_pending(&skills_root, a),
+                None => librefang_kernel::skill_workshop::storage::list_pending_all(&skills_root),
+            };
+            let candidates = match candidates {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("Failed to read pending directory: {e}");
+                    std::process::exit(1);
+                }
+            };
+            if candidates.is_empty() {
+                println!(
+                    "No pending skill candidates.{}",
+                    match &agent {
+                        Some(a) => format!(" (filter: agent {a})"),
+                        None => String::new(),
+                    }
+                );
+                return;
+            }
+            println!("{:<38}  {:<18}  {:<22}  NAME", "ID", "SOURCE", "CAPTURED");
+            for c in candidates {
+                let source_label = match &c.source {
+                    librefang_kernel::skill_workshop::CaptureSource::ExplicitInstruction {
+                        ..
+                    } => "explicit_instr",
+                    librefang_kernel::skill_workshop::CaptureSource::UserCorrection { .. } => {
+                        "user_correction"
+                    }
+                    librefang_kernel::skill_workshop::CaptureSource::RepeatedToolPattern {
+                        ..
+                    } => "tool_pattern",
+                };
+                println!(
+                    "{:<38}  {:<18}  {:<22}  {}",
+                    c.id,
+                    source_label,
+                    c.captured_at.format("%Y-%m-%d %H:%M:%S UTC"),
+                    c.name
+                );
+            }
+        }
+        PendingCommands::Show { id } => {
+            let candidate = match librefang_kernel::skill_workshop::storage::load_candidate(
+                &skills_root,
+                &id,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Failed to load candidate: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let toml_str = match toml::to_string_pretty(&candidate) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to render candidate as TOML: {e}");
+                    std::process::exit(1);
+                }
+            };
+            print!("{toml_str}");
+        }
+        PendingCommands::Approve { id } => {
+            match librefang_kernel::skill_workshop::storage::approve_candidate(
+                &skills_root,
+                &skills_root,
+                &id,
+            ) {
+                Ok(result) => {
+                    println!(
+                        "Approved candidate {} → installed skill '{}' (v{}).",
+                        id,
+                        result.skill_name,
+                        result.version.unwrap_or_else(|| "?".to_string())
+                    );
+                }
+                Err(e) => {
+                    eprintln!("Approve failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        PendingCommands::Reject { id } => {
+            match librefang_kernel::skill_workshop::storage::reject_candidate(&skills_root, &id) {
+                Ok(()) => println!("Rejected and removed candidate {id}."),
+                Err(e) => {
+                    eprintln!("Reject failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Channel commands
 // ---------------------------------------------------------------------------
 
@@ -9434,8 +9587,8 @@ fn cmd_mcp_add(name: &str, key: Option<&str>) {
     }
 
     match &result.status {
-        librefang_extensions::McpStatus::Ready => ui::success(&result.message),
-        librefang_extensions::McpStatus::Setup => {
+        librefang_types::mcp::McpStatus::Ready => ui::success(&result.message),
+        librefang_types::mcp::McpStatus::Setup => {
             println!("{}", result.message.yellow());
             println!("\nTo add credentials:");
             for env in &template.required_env {
@@ -9549,7 +9702,7 @@ fn cmd_mcp_catalog(query: Option<&str>) {
     // Group by category
     let mut by_category: std::collections::BTreeMap<
         String,
-        Vec<&librefang_extensions::McpCatalogEntry>,
+        Vec<&librefang_types::mcp::McpCatalogEntry>,
     > = std::collections::BTreeMap::new();
     for entry in &entries {
         by_category
@@ -13656,6 +13809,81 @@ input_schema = { type = "object" }
             "expected lowercase hex, got {hex:?}"
         );
         assert_eq!(hex, "0123456789abcdef0123456789abcdef");
+    }
+
+    /// Pins the daemon's compact-format behavior: when an event fires inside
+    /// a span carrying `agent.id` / `session.id` fields, the rendered line
+    /// MUST include both as inline span suffix tokens (the format
+    /// `tracing-subscriber`'s `Compact` formatter emits is
+    /// `<level> <span_name>: <message> <field>=<value> ...`). Daemon log
+    /// search relies on this to correlate any line back to the originating
+    /// agent + session — see also the `#[instrument]` on `run_agent_loop`
+    /// in `librefang-runtime/src/agent_loop.rs`.
+    #[test]
+    fn with_trace_id_compact_format_carries_agent_and_session_ids_from_span() {
+        use super::WithTraceId;
+        use std::sync::{Arc, Mutex};
+        use tracing::{info_span, warn};
+        use tracing_subscriber::fmt::MakeWriter;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone)]
+        struct VecWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for VecWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for VecWriter {
+            type Writer = VecWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = VecWriter(buf.clone());
+        let inner = tracing_subscriber::fmt::format()
+            .without_time()
+            .with_target(false)
+            .compact();
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .event_format(WithTraceId(inner));
+        let subscriber = tracing_subscriber::registry().with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = info_span!(
+                "run_agent_loop",
+                agent.id = "agent-uuid-aaaa",
+                session.id = "session-uuid-bbbb",
+            );
+            let _entered = span.enter();
+            warn!("shell exec full mode");
+        });
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).expect("utf8");
+        assert!(
+            captured.contains("agent.id=\"agent-uuid-aaaa\""),
+            "expected agent.id span field in line, got: {captured:?}"
+        );
+        assert!(
+            captured.contains("session.id=\"session-uuid-bbbb\""),
+            "expected session.id span field in line, got: {captured:?}"
+        );
+        assert!(
+            captured.contains("run_agent_loop"),
+            "expected span name prefix, got: {captured:?}"
+        );
+        assert!(
+            captured.contains("shell exec full mode"),
+            "expected original message preserved, got: {captured:?}"
+        );
     }
 
     // --- Daemon detection / launcher port logic (#3582) ---
