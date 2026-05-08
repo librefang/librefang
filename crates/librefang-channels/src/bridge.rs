@@ -1046,11 +1046,6 @@ pub struct BridgeManager {
     /// Single-process thread-ownership claims. Suppresses multi-agent
     /// duplicate replies in shared group threads (#3334).
     thread_ownership: Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
-    /// buffer of group messages skipped by gating, drained
-    /// when the agent is next addressed in the same group so it doesn't
-    /// lose the attachments and context other participants posted while
-    /// it was silent.
-    group_history: Arc<crate::group_history::GroupHistoryBuffer>,
 }
 
 impl BridgeManager {
@@ -1069,11 +1064,6 @@ impl BridgeManager {
             webhook_routes: Vec::new(),
             journal: None,
             thread_ownership: Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new()),
-            // install process-wide buffer on first construct so
-            // dispatch helpers can reach it without signature churn.
-            group_history: crate::group_history::install_global(Arc::new(
-                crate::group_history::GroupHistoryBuffer::with_default_retention(),
-            )),
         }
     }
 
@@ -1096,11 +1086,6 @@ impl BridgeManager {
             webhook_routes: Vec::new(),
             journal: None,
             thread_ownership: Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new()),
-            // install process-wide buffer on first construct so
-            // dispatch helpers can reach it without signature churn.
-            group_history: crate::group_history::install_global(Arc::new(
-                crate::group_history::GroupHistoryBuffer::with_default_retention(),
-            )),
         }
     }
 
@@ -1113,15 +1098,6 @@ impl BridgeManager {
     /// Get a reference to the journal (if configured).
     pub fn journal(&self) -> Option<&crate::message_journal::MessageJournal> {
         self.journal.as_ref()
-    }
-
-    /// accessor for the group-history buffer. Lets the
-    /// dispatch path record skipped group messages and drain them on
-    /// the next gating-pass for the same group. Returned as `Arc` so
-    /// the per-adapter spawn task can capture it independently of the
-    /// `BridgeManager` lifetime.
-    pub fn group_history(&self) -> Arc<crate::group_history::GroupHistoryBuffer> {
-        Arc::clone(&self.group_history)
     }
 
     /// Recover messages that were in-flight when the daemon last crashed.
@@ -1173,6 +1149,37 @@ impl BridgeManager {
             CLEANUP_ONCE.call_once(|| {
                 tokio::spawn(async move { cleanup_old_uploads(&dir).await });
             });
+        }
+
+        // 24h retention only fires when something accesses a bucket;
+        // groups that go quiet without ever being addressed need an
+        // active ticker to free memory. Once-gated so hot-reload doesn't
+        // spawn a second evictor.
+        {
+            static HISTORY_ONCE: std::sync::Once = std::sync::Once::new();
+            let mut spawned = None;
+            HISTORY_ONCE.call_once(|| {
+                let buffer = crate::group_history::install_global(|| {
+                    Arc::new(crate::group_history::GroupHistoryBuffer::with_default_retention())
+                });
+                let mut shutdown = self.shutdown_rx.clone();
+                let handle = tokio::spawn(async move {
+                    let mut tick = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
+                    tick.tick().await; // tokio::interval emits immediately on first tick
+                    loop {
+                        tokio::select! {
+                            _ = tick.tick() => buffer.evict_expired().await,
+                            _ = shutdown.changed() => {
+                                if *shutdown.borrow() { break; }
+                            }
+                        }
+                    }
+                });
+                spawned = Some(handle);
+            });
+            if let Some(handle) = spawned {
+                self.tasks.push(handle);
+            }
         }
 
         // Prefer shared webhook routes over adapter-managed HTTP servers.
@@ -2585,39 +2592,33 @@ async fn dispatch_message(
 
             if !should_process_group_message(ct_str, ov, message) {
                 // Record the skipped message into the per-group buffer so
-                // its attachments + text survive until the next addressed
-                // turn on this group. No-op when the global buffer hasn't
-                // been installed (e.g. unit tests that don't construct a
-                // full BridgeManager).
+                // the next addressed turn on this group can recover its
+                // text. Only plain-text content reaches `dispatch_message`
+                // (media goes through `dispatch_with_blocks` which doesn't
+                // gate); recording empty text would just bloat the
+                // buffer, so we skip when nothing useful is extractable.
                 if let Some(buffer) = crate::group_history::global() {
-                    let entry = crate::group_history::HistoryEntry {
-                        sender_display_name: message.sender.display_name.clone(),
-                        sender_platform_id: message.sender.platform_id.clone(),
-                        text: text_content(message).unwrap_or("").to_string(),
-                        content_blocks: Vec::new(),
-                        captured_at: std::time::Instant::now(),
-                    };
-                    let has_text = !entry.text.is_empty();
-                    let has_attachment = !matches!(
-                        message.content,
-                        ChannelContent::Text(_) | ChannelContent::Command { .. }
-                    );
-                    if has_text || has_attachment {
-                        buffer
-                            .record(&crate::group_history::group_key(ct_str, &group_id), entry)
-                            .await;
+                    if let Some(text) = text_content(message) {
+                        if !text.is_empty() {
+                            let entry = crate::group_history::HistoryEntry {
+                                sender_display_name: message.sender.display_name.clone(),
+                                text: text.to_string(),
+                                captured_at: std::time::Instant::now(),
+                            };
+                            buffer
+                                .record(&crate::group_history::group_key(ct_str, &group_id), entry)
+                                .await;
+                        }
                     }
                 }
                 return;
             }
             // Gating pass: drain the buffer for this group so the
-            // accumulated context is consumed exactly once. The drained
-            // entries are logged structurally (tracing) so downstream
-            // observability can correlate the agent's response to the
-            // prior context, even though the kernel-side prompt
-            // enrichment is not yet wired here (follow-up
-            // — needs `&mut ChannelMessage` plumbing through dispatch
-            // or equivalent).
+            // accumulated text context is consumed exactly once. The drained
+            // entries are logged structurally so downstream observability
+            // can correlate the agent's response to prior context. The
+            // kernel-side prompt enrichment that consumes `drained` is the
+            // follow-up PR — currently we just log the count.
             if let Some(buffer) = crate::group_history::global() {
                 let key = crate::group_history::group_key(ct_str, &group_id);
                 if let Some(drained) = buffer.drain(&key).await {
@@ -2626,8 +2627,7 @@ async fn dispatch_message(
                         channel = ct_str,
                         group = %group_id,
                         entries = drained.len(),
-                        "drained {} prior group entries on gating pass",
-                        drained.len(),
+                        "drained prior group entries on gating pass",
                     );
                 }
             }

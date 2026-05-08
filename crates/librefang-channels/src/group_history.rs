@@ -1,97 +1,75 @@
-//! Group-message retention buffer for messages skipped by gating.
+//! Text-only retention buffer for group messages skipped by gating.
 //!
-//! In `mention_required` group mode, messages that don't address
-//! the agent are dropped at gating time. If they carry attachments (PDF,
-//! image, voice) those attachments are lost — when the agent is finally
-//! addressed and asked about prior context ("look at the attachment mum
-//! sent"), it has nothing to reference.
+//! In `mention_required` group mode, plain-text messages that don't address
+//! the agent are dropped at gating time. When the agent is finally addressed
+//! and asked about prior context ("did mum say something earlier?"), it has
+//! nothing to reference. This buffer captures sender + text of each
+//! gated-out plain-text message so a follow-up enrichment pass can stitch
+//! them into the prompt.
 //!
-//! This module keeps a small per-group ring buffer of skipped messages
-//! (text + already-downloaded `ContentBlock` extras when available) for
-//! retrieval at the next gating-pass on the same group. Storage is
-//! in-memory only — restart-volatile by design, since the rolling window
-//! is short (24h default) and SQLite persistence + cleanup adds surface
-//! we don't need yet. Move to disk only if the operator measures that
-//! restart loss matters.
+//! v1 scope is **plumbing only**: record + drain are wired in the bridge,
+//! the prompt-builder is a follow-up PR. Storage is in-memory,
+//! restart-volatile by design.
+//!
+//! Media-bearing messages (image/voice/video/file) bypass the gating skip
+//! today — `dispatch_with_blocks` doesn't call `should_process_group_message`
+//! — so they're not seen by this buffer. When the media path is gated in
+//! a future PR, captions and `Vec<ContentBlock>` extras can be added back
+//! to `HistoryEntry`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use librefang_types::message::ContentBlock;
 use tokio::sync::RwLock;
 
-/// Process-wide singleton, set on first `BridgeManager` construction
-/// so the deep dispatch path can reach the buffer without threading
-/// it through every helper signature. The buffer is stateless across
-/// agents (it's keyed by `(channel_type, group_jid)`) so a single
-/// shared instance is correct semantics.
+/// Process-wide singleton, populated lazily on the first
+/// `BridgeManager` construction.
 static GLOBAL_BUFFER: OnceLock<Arc<GroupHistoryBuffer>> = OnceLock::new();
 
-/// Install (or fetch) the process-wide buffer. Idempotent — calling
-/// twice with different instances keeps the first one (the stored
-/// closure is `get_or_init`).
-pub fn install_global(default: Arc<GroupHistoryBuffer>) -> Arc<GroupHistoryBuffer> {
-    GLOBAL_BUFFER.get_or_init(|| default).clone()
+/// Install (or fetch) the process-wide buffer. The closure runs only on
+/// the first call — second-and-later constructions reuse the existing
+/// instance without allocating.
+pub fn install_global<F>(default: F) -> Arc<GroupHistoryBuffer>
+where
+    F: FnOnce() -> Arc<GroupHistoryBuffer>,
+{
+    GLOBAL_BUFFER.get_or_init(default).clone()
 }
 
-/// Read the process-wide buffer if installed. `None` in tests that
-/// never construct a `BridgeManager`. Callers must handle the `None`
-/// case as "no buffer wired — treat as no-op".
+/// Read the process-wide buffer if installed. `None` in unit tests that
+/// don't construct a `BridgeManager`. Callers must handle `None` as
+/// "no buffer wired — record/drain are no-ops".
 pub fn global() -> Option<Arc<GroupHistoryBuffer>> {
     GLOBAL_BUFFER.get().cloned()
 }
 
-/// Build the canonical group key from a `ChannelType` and the
+/// Build the canonical group key from a `ChannelType` string and the
 /// platform-specific group identifier (chat JID, channel id, etc).
-/// Same channel-type prefix used everywhere else in the bridge so
-/// keys are interoperable with the rest of the codebase's logging.
 pub fn group_key(channel_type_str: &str, group_jid: &str) -> String {
     format!("{channel_type_str}|{group_jid}")
 }
 
 /// Default retention window for buffered group messages.
-///
-/// 24h matches the WhatsApp gateway's own `pending_group_history` TTL
-/// from the pre-Phase-07 design (history of skipped messages); long enough to
-/// cover a "this morning's bolletta arrived, agent re-engaged this
-/// evening" gap, short enough that the buffer doesn't grow without
-/// bound on noisy groups.
 pub const DEFAULT_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Hard ceiling on entries retained per group. Beyond this we drop the
-/// oldest on insert. Prevents a runaway noisy group from consuming all
-/// memory in pathological cases (e.g. a 5k-member announcement channel
-/// where the bot was added but never addressed).
+/// Per-bucket cap. Beyond this we drop the oldest on insert.
 pub const MAX_ENTRIES_PER_GROUP: usize = 100;
-
-/// Hard ceiling on rendered preamble length so we don't blow the LLM
-/// context with 100 buffered messages of small talk on the next address.
-pub const MAX_RENDER_CHARS: usize = 4000;
 
 /// One captured skipped message.
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
     pub sender_display_name: String,
-    pub sender_platform_id: String,
-    /// Plain-text rendition of the message (caption for media, body for
-    /// text). Empty string if the message had no extractable text.
+    /// Plain-text body. Empty entries are never recorded (the bridge
+    /// skips messages that yield no extractable text).
     pub text: String,
-    /// Media blocks the channel adapter already prepared for the LLM,
-    /// most importantly `ContentBlock::ImageFile { path }` referencing
-    /// files saved by the channel-download path. Empty for plain-text
-    /// messages.
-    pub content_blocks: Vec<ContentBlock>,
-    /// Insert time — used both for ordering on render and for TTL eviction.
+    /// Insert time — used for chronological ordering on render and for
+    /// TTL eviction.
     pub captured_at: Instant,
 }
 
 /// Process-wide in-memory buffer of skipped group messages.
-///
-/// Cloneable via `Arc`; one instance is created at bridge init and
-/// shared by every adapter task that needs to record skips or drain on
-/// pass.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct GroupHistoryBuffer {
     inner: Arc<RwLock<Inner>>,
     retention: Duration,
@@ -101,7 +79,8 @@ pub struct GroupHistoryBuffer {
 struct Inner {
     /// Keyed by `group_key = format!("{}|{}", channel_type, group_jid)`
     /// so two channels with overlapping group ids stay isolated.
-    by_group: HashMap<String, Vec<HistoryEntry>>,
+    /// `VecDeque` so cap-overflow eviction is O(1) instead of O(n).
+    by_group: HashMap<String, VecDeque<HistoryEntry>>,
 }
 
 impl GroupHistoryBuffer {
@@ -123,9 +102,9 @@ impl GroupHistoryBuffer {
         let mut inner = self.inner.write().await;
         let bucket = inner.by_group.entry(group_key.to_string()).or_default();
         if bucket.len() >= MAX_ENTRIES_PER_GROUP {
-            bucket.remove(0);
+            bucket.pop_front();
         }
-        bucket.push(entry);
+        bucket.push_back(entry);
     }
 
     /// Drain all live entries for `group_key`, evicting expired ones in
@@ -150,7 +129,8 @@ impl GroupHistoryBuffer {
 
     /// Periodic sweep: drop expired entries from every bucket so a group
     /// that goes quiet without ever being addressed doesn't keep stale
-    /// memory pinned.
+    /// memory pinned. Driven by the bridge's evictor task; safe to call
+    /// from anywhere.
     pub async fn evict_expired(&self) {
         let cutoff = Instant::now().checked_sub(self.retention);
         let Some(cutoff) = cutoff else { return };
@@ -161,7 +141,23 @@ impl GroupHistoryBuffer {
         });
     }
 
-    /// Test-only inspection of bucket sizes. Not exposed in production.
+    /// Number of live buckets (one per `(channel, group_jid)`).
+    /// Exposed for ops metrics.
+    pub async fn bucket_count(&self) -> usize {
+        self.inner.read().await.by_group.len()
+    }
+
+    /// Total entries across all buckets. Exposed for ops metrics.
+    pub async fn entries_total(&self) -> usize {
+        self.inner
+            .read()
+            .await
+            .by_group
+            .values()
+            .map(|b| b.len())
+            .sum()
+    }
+
     #[cfg(test)]
     pub async fn bucket_size(&self, group_key: &str) -> usize {
         self.inner
@@ -174,85 +170,6 @@ impl GroupHistoryBuffer {
     }
 }
 
-/// Build the `[GROUP_CONTEXT]` preamble injected before the user
-/// message on a gating-pass that has buffered prior skipped messages.
-///
-/// Keeps the rendering deterministic (chronological order, capped at
-/// `MAX_RENDER_CHARS`) so the LLM prompt cache stays warm across turns.
-pub fn render_group_context(entries: &[HistoryEntry]) -> Option<String> {
-    if entries.is_empty() {
-        return None;
-    }
-
-    let mut out = String::new();
-    out.push_str("[GROUP_CONTEXT — messages received while you were not addressed]\n");
-
-    let mut sorted: Vec<&HistoryEntry> = entries.iter().collect();
-    sorted.sort_by_key(|e| e.captured_at);
-
-    for entry in sorted {
-        let line = format_entry(entry);
-        if out.len() + line.len() > MAX_RENDER_CHARS {
-            out.push_str(&format!(
-                "• ... ({} more messages truncated)\n",
-                entries.len() - count_in_buffer(&out)
-            ));
-            break;
-        }
-        out.push_str(&line);
-    }
-    out.push_str("[/GROUP_CONTEXT]\n");
-    Some(out)
-}
-
-fn format_entry(entry: &HistoryEntry) -> String {
-    let mut bullet = format!("• {}: ", entry.sender_display_name);
-    if !entry.text.is_empty() {
-        bullet.push_str(&entry.text);
-    }
-    if !entry.content_blocks.is_empty() {
-        let media_count = entry
-            .content_blocks
-            .iter()
-            .filter(|b| {
-                matches!(
-                    b,
-                    ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
-                )
-            })
-            .count();
-        if media_count > 0 {
-            if !entry.text.is_empty() {
-                bullet.push(' ');
-            }
-            bullet.push_str(&format!("[+{media_count} attachment(s)]"));
-        }
-    }
-    bullet.push('\n');
-    bullet
-}
-
-fn count_in_buffer(rendered: &str) -> usize {
-    rendered.lines().filter(|l| l.starts_with("• ")).count()
-}
-
-/// Extract the live `ContentBlock`s (image/imagefile) from a list of
-/// drained entries — the bridge then prepends them to the user message
-/// so the agent has the actual media available, not just the text
-/// reference.
-pub fn collect_media_blocks(entries: &[HistoryEntry]) -> Vec<ContentBlock> {
-    entries
-        .iter()
-        .flat_map(|e| e.content_blocks.iter().cloned())
-        .filter(|b| {
-            matches!(
-                b,
-                ContentBlock::Image { .. } | ContentBlock::ImageFile { .. }
-            )
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,9 +177,7 @@ mod tests {
     fn entry(sender: &str, text: &str) -> HistoryEntry {
         HistoryEntry {
             sender_display_name: sender.into(),
-            sender_platform_id: format!("{sender}-id"),
             text: text.into(),
-            content_blocks: Vec::new(),
             captured_at: Instant::now(),
         }
     }
@@ -308,7 +223,6 @@ mod tests {
             "bucket bounded at MAX_ENTRIES_PER_GROUP",
         );
         let drained = buf.drain("ct|grp1").await.expect("drained");
-        // First 5 inserted should have been dropped — oldest survivor is m5.
         assert_eq!(drained.first().unwrap().text, "m5");
     }
 
@@ -321,56 +235,15 @@ mod tests {
         assert_eq!(buf.bucket_size("ct|grp1").await, 0);
     }
 
-    #[test]
-    fn render_group_context_empty_returns_none() {
-        assert!(render_group_context(&[]).is_none());
-    }
-
-    #[test]
-    fn render_group_context_chronological_ordering() {
-        let mut e1 = entry("Alice", "first");
-        let mut e2 = entry("Bob", "second");
-        // Force ordering: e2 must sort after e1.
-        e1.captured_at = Instant::now();
-        e2.captured_at = e1.captured_at + Duration::from_millis(1);
-        let rendered = render_group_context(&[e2, e1]).expect("rendered");
-        // first should appear before second despite reversed input order.
-        let first_idx = rendered.find("first").expect("first present");
-        let second_idx = rendered.find("second").expect("second present");
-        assert!(first_idx < second_idx);
-    }
-
-    #[test]
-    fn render_group_context_marks_attachments() {
-        let entry_with_image = HistoryEntry {
-            sender_display_name: "Patrizia".into(),
-            sender_platform_id: "patrizia-id".into(),
-            text: "bolletta".into(),
-            content_blocks: vec![ContentBlock::ImageFile {
-                path: "/tmp/librefang_uploads/x.jpg".into(),
-                media_type: "image/jpeg".into(),
-            }],
-            captured_at: Instant::now(),
-        };
-        let out = render_group_context(&[entry_with_image]).expect("rendered");
-        assert!(out.contains("[+1 attachment(s)]"));
-    }
-
-    #[test]
-    fn collect_media_blocks_filters_text() {
-        let mut e = entry("Alice", "with image");
-        e.content_blocks = vec![
-            ContentBlock::Text {
-                text: "should be filtered out".into(),
-                provider_metadata: None,
-            },
-            ContentBlock::ImageFile {
-                path: "/tmp/x.jpg".into(),
-                media_type: "image/jpeg".into(),
-            },
-        ];
-        let blocks = collect_media_blocks(&[e]);
-        assert_eq!(blocks.len(), 1, "Text blocks excluded");
-        assert!(matches!(blocks[0], ContentBlock::ImageFile { .. }));
+    #[tokio::test]
+    async fn metrics_reflect_buffer_state() {
+        let buf = GroupHistoryBuffer::with_default_retention();
+        assert_eq!(buf.bucket_count().await, 0);
+        assert_eq!(buf.entries_total().await, 0);
+        buf.record("ct|grp1", entry("Alice", "a")).await;
+        buf.record("ct|grp1", entry("Bob", "b")).await;
+        buf.record("ct|grp2", entry("Carol", "c")).await;
+        assert_eq!(buf.bucket_count().await, 2);
+        assert_eq!(buf.entries_total().await, 3);
     }
 }
