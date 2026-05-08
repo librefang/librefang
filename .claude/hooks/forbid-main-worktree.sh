@@ -17,8 +17,18 @@ LIB="$script_dir/lib/check-bash-rules.py"
 
 py() { python3 -c "$1" 2>/dev/null || true; }
 
-cwd="$(printf '%s' "$input" | py 'import sys,json; print(json.load(sys.stdin).get("cwd",""))')"
-tool="$(printf '%s' "$input" | py 'import sys,json; print(json.load(sys.stdin).get("tool_name",""))')"
+# Use here-strings (`<<<"$input"`) instead of `printf … | py …` pipelines.
+# Bash buffers the here-string content into a temp FD before the reader
+# starts, so there's no active writer process that can collect SIGPIPE
+# when python3 finishes early. With the previous `printf | py` pattern,
+# python's `json.load` returning before printf flushed gave printf an
+# EPIPE → exit 141, and `set -o pipefail` then propagated 141 as the
+# pipeline's status, which `set -e` aborted on — even though the hook
+# logic itself never tripped a real rule. The non-blocking failure
+# surfaced in the Claude Code UI as bare "Failed with non-blocking
+# status code: No stderr output" noise.
+cwd="$(py 'import sys,json; print(json.load(sys.stdin).get("cwd",""))' <<<"$input")"
+tool="$(py 'import sys,json; print(json.load(sys.stdin).get("tool_name",""))' <<<"$input")"
 
 # detect_git <path>: prints "<repo_root> <kind>" where kind is main or worktree.
 detect_git() {
@@ -42,7 +52,7 @@ detect_git() {
 target_dir=""
 case "$tool" in
   Edit|MultiEdit|Write|NotebookEdit)
-    fp="$(printf '%s' "$input" | py 'import sys,json; t=json.load(sys.stdin).get("tool_input",{}); print(t.get("file_path") or t.get("notebook_path") or "")')"
+    fp="$(py 'import sys,json; t=json.load(sys.stdin).get("tool_input",{}); print(t.get("file_path") or t.get("notebook_path") or "")' <<<"$input")"
     if [ -n "$fp" ]; then
       case "$fp" in
         /*) target="$fp" ;;
@@ -54,8 +64,8 @@ case "$tool" in
     fi
     ;;
   Bash)
-    cmd="$(printf '%s' "$input" | py 'import sys,json; print(json.load(sys.stdin).get("tool_input",{}).get("command",""))')"
-    target_dir="$(printf '%s' "$cmd" | python3 -c '
+    cmd="$(py 'import sys,json; print(json.load(sys.stdin).get("tool_input",{}).get("command",""))' <<<"$input")"
+    target_dir="$(python3 -c '
 import sys, re, os
 text = sys.stdin.read()
 cwd = sys.argv[1] if len(sys.argv) > 1 else ""
@@ -75,7 +85,7 @@ if m:
     elif base:
         base = os.path.join(base, p)
 print(base)
-' "$cwd" 2>/dev/null || echo "$cwd")"
+' "$cwd" 2>/dev/null <<<"$cmd" || echo "$cwd")"
     ;;
   *)
     exit 0
@@ -92,8 +102,12 @@ main_root=""
 if [ "$tool" = "Bash" ]; then
   toplevel="$(git -C "$target_dir" rev-parse --show-toplevel 2>/dev/null || true)"
   if [ -n "$toplevel" ]; then
-    main_root="$(git -C "$toplevel" worktree list --porcelain 2>/dev/null \
-      | awk '/^worktree / {print $2; exit}')"
+    # Capture first; pipe-and-awk-exit would SIGPIPE the git writer, and
+    # under `set -o pipefail` that 141 would abort the hook before any
+    # rule ran. Splitting it via a here-string also avoids silently
+    # masking a real git failure (which `… | awk … || true` would).
+    worktree_list="$(git -C "$toplevel" worktree list --porcelain 2>/dev/null || true)"
+    main_root="$(awk '/^worktree / {print $2; exit}' <<<"$worktree_list")"
     [ -n "$main_root" ] || main_root="$toplevel"
   fi
 fi
@@ -133,11 +147,11 @@ case "$main_root" in
   *) exit 0 ;;
 esac
 
-msg="$(printf '%s' "$cmd" | python3 "$LIB" \
+msg="$(python3 "$LIB" \
   --rules "$rules" \
   --cwd "$cwd" \
   --main-root "$main_root" \
-  --kind "${kind:-}" 2>/dev/null || true)"
+  --kind "${kind:-}" <<<"$cmd" 2>/dev/null || true)"
 
 if [ -n "$msg" ]; then
   cat >&2 <<EOF

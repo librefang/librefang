@@ -864,6 +864,12 @@ fn find_chromium(config: &BrowserConfig) -> Result<PathBuf, String> {
 
 /// Platform-specific candidate paths for Chromium-based browsers.
 fn chromium_candidates() -> Vec<String> {
+    // `mut` is exercised only under the windows / macOS / linux cfg branches
+    // below; on other targets (Android, iOS, …) every branch is stripped and
+    // the binding is never mutated. Accept the unused-mut on those targets
+    // rather than gating each platform's import — the function is meant to
+    // return an empty vec on unsupported targets.
+    #[allow(unused_mut)]
     let mut paths = Vec::new();
 
     #[cfg(windows)]
