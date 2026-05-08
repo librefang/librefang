@@ -415,6 +415,17 @@ impl LibreFangKernel {
             return Ok(AgentLoopResult::default());
         }
 
+        // Pre-dispatch provider budget gate (ephemeral path).
+        {
+            let provider = &entry.manifest.model.provider;
+            let bc = self.budget_config();
+            if let Some(pb) = bc.providers.get(provider.as_str()) {
+                self.metering
+                    .check_provider_budget(provider, pb)
+                    .map_err(KernelError::LibreFang)?;
+            }
+        }
+
         // Ephemeral: no tools — prevents side effects (tool writes to memory/disk)
         let tools: Vec<librefang_types::tool::ToolDefinition> = vec![];
         let mut manifest = entry.manifest.clone();
@@ -822,6 +833,22 @@ impl LibreFangKernel {
                 return Err(KernelError::LibreFang(e));
             }
         };
+
+        // Pre-dispatch provider budget gate. Reject calls against an
+        // already-exhausted provider before the LLM round-trip so
+        // streaming responses can't leak tokens past the post-call check.
+        {
+            let provider = &entry.manifest.model.provider;
+            let bc = self.budget_config();
+            if let Some(pb) = bc.providers.get(provider.as_str()) {
+                if let Err(e) = self.metering.check_provider_budget(provider, pb) {
+                    self.scheduler
+                        .release_reservation(agent_id, token_reservation);
+                    usd_reservation.release();
+                    return Err(KernelError::LibreFang(e));
+                }
+            }
+        }
 
         // Skip suspended agents — cron/triggers should not dispatch to them
         if entry.state == AgentState::Suspended {
