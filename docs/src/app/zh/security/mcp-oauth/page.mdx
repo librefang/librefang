@@ -1,0 +1,106 @@
+# MCP OAuth 主机钉接
+
+当 LibreFang 完成对某个 MCP 服务器的 OAuth 授权时,它要把授权码 POST 到的
+那个 URL,是从该服务器的发现文档(`/.well-known/oauth-authorization-server`)
+里读出来的。这份文档属于"攻击者可影响的数据":一份被篡改或被恶意托管的
+metadata 可以把 token 交换重定向到运营者从未授权过的主机,从而泄露授权码或
+最终的 access token。
+
+LibreFang 会把 token 交换的目标钉到运营者在 `config.toml` 里**亲手输入**的
+那个主机上。钉接策略只接受两种形态,其它一律拒绝并在守护进程日志里抛出安全
+错误,授权流程随之失败。
+
+## 接受规则
+
+| 规则 | 接受条件 | 历史 |
+| --- | --- | --- |
+| 1 | token 端点的主机与 `config.toml` 里输入的主机**完全一致**(忽略大小写)。 | 最初的严格钉接(#3713)。 |
+| 2 | token 端点的主机与输入的主机共享同一个**可注册域(eTLD+1)**——通过 Public Suffix List 计算。 | #4665 引入,用于支持跨域 OAuth 代理。 |
+
+规则 2 是对称的——同一个可注册域下的 sub→root、root→sub、sibling→sibling
+都会被接受。**信任边界是可注册域本身**,不是它的层级关系。
+
+## 为什么需要规则 2
+
+有不少 MCP 服务在设计上就把发现端点和 token 端点拆到同一个可注册域下的两个
+不同主机:
+
+- **Slack** —— `mcp.slack.com` 在 metadata 里声明 token 端点为
+  `https://slack.com/api/oauth.v2.user.access`。
+- **Notion** —— `mcp.notion.com` 把 token 交换委派给 `api.notion.com`。
+
+如果没有规则 2,这些合法的流程会被拒绝,运营者除了放弃集成之外没有任何
+变通办法。
+
+## 威胁权衡
+
+规则 2 接受了一类攻击场景:**只要攻击者既能控制该可注册域下的任意一个兄弟
+子域,又能篡改经过 HTTPS 校验的 metadata**,就有可能把 token 交换重定向到
+他自己的主机。我们接受这一残余风险的理由是:
+
+1. metadata 的拉取走 HTTPS 校验,篡改要么需要攻陷合法授权服务器的 HTTPS
+   端点,要么需要对守护进程的 TLS 实施可用的 MITM——两者都比 DNS 投毒的
+   门槛高得多。
+2. 在一个组织自己的可注册域下接管兄弟子域,通常已经意味着该组织本身被
+   攻陷了。最现实的一类风险——指向被删除的第三方服务的悬空 DNS 记录——
+   是组织治理的边界,而不是这条检查能挡的。
+3. 严格钉接对合法的跨域 OAuth 委派没有留任何逃生口,导致运营者必须放弃
+   原本信任的服务。
+
+完整的推理保留在 `crates/librefang-api/src/routes/mcp_auth.rs` 中
+`token_endpoint_host_matches` 的文档注释里,以及更深入的
+`docs/architecture/mcp-oauth-host-pinning.md`。
+
+## 多租户主机如何被保护
+
+Public Suffix List 有一个 *private* 区段,列出了多租户托管的边界——
+`*.github.io`、`*.herokuapp.com`、`*.s3.amazonaws.com`、`*.vercel.app`
+等等。对这些主机,PSL 会把**每个租户**视为各自独立的可注册域。也就是说
+两个 GitHub Pages 租户**不**共享可注册域,规则 2 不会接受跨租户的重定向。
+这条性质是让"放松到 eTLD+1"这件事在租户边界与 DNS 子域不重合的服务上
+依然站得住的关键。
+
+回归测试 `token_endpoint_psl_private_domain_does_not_false_match` 把这条
+性质钉了下来,以防将来 PSL crate 被替换时悄悄回归。
+
+## IP 字面量主机
+
+`localhost`、IPv4 字面量和 IPv6 字面量都不是带已知公共后缀的 DNS 名字,
+PSL 对它们没有任何观点。代码在进入规则 2 之前会**短路** IP 字面量
+(IPv6 来自 `url::Url` 时是带方括号的,先脱掉方括号再解析),也就是说
+只有规则 1——完全相等——能接受 IP 字面量的配对。即使两个 IPv4 在尾部
+共享 label,例如 `10.0.0.1` 与 `127.0.0.1`,也不会通过规则 2 互认。
+
+## 检查触发时
+
+被拒绝的请求在守护进程日志里长这样:
+
+```
+ERROR mcp_auth: token_endpoint host failed both exact and same-eTLD+1 checks
+  vs authorization server — refusing token exchange (possible metadata-tamper
+  attack; refs #3713 #4665)
+  server=<name> token_endpoint=<url> issuer_host=<host> token_host=<host>
+```
+
+授权流程会被中止,该 MCP 服务器在守护进程内的 `McpAuthState` 会变为
+`Error`,Dashboard 会显示"token_endpoint host mismatch"错误。授权码
+**不会**被 POST 到任何地方。
+
+如果一个你信任的服务被这条规则挡住:
+
+1. 比对 `issuer_host`(你输入的主机)和 `token_host`(metadata 声明的
+   主机)。如果它们共享你认得的可注册域,通常是该供应商的 metadata
+   文档配置错了——给他们提个 issue。
+2. 如果 `token_host` 在一个完全不同的可注册域上,**不要**绕过这条
+   检查——这正是钉接被设计来挡掉的 metadata 篡改场景。
+
+## 不在本策略覆盖范围内
+
+- **metadata 与 token 拉取本身的 SSRF** 由
+  `librefang-runtime::mcp_oauth::is_ssrf_blocked_url` 单独负责
+  (loopback / link-local / 内网段黑名单)。它走自己的主机检查、有不一样的
+  威胁模型,**没有**也不会被迁到 eTLD+1 规则上。
+- **授权端点(`authorization_endpoint`)的主机** 不被本辅助函数钉接——
+  它是面向用户的导航目标,不是凭据接收者。
+- **按服务器粒度的 `oauth.strict_host_pin = true` opt-in** 给极度偏执
+  的运营者用,作为后续工作跟进,本次没有交付。

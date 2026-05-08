@@ -531,10 +531,15 @@ impl LibreFangKernel {
                 .filter(|w| *w > 0)
         });
 
-        // Inject model_supports_tools for auto web search augmentation
+        // Inject model_supports_tools for auto web search augmentation.
+        // Refs #4745: honour user-configured per-model capability overrides
+        // here too — when a user has manually flipped `supports_tools` for a
+        // model whose catalog metadata was wrong, the auto-augmentation path
+        // must respect that override or the runtime behaviour diverges from
+        // what the dashboard shows.
         if let Some(supports) = Some(self.llm.model_catalog.load()).and_then(|cat| {
             cat.find_model(&manifest.model.model)
-                .map(|m| m.supports_tools)
+                .map(|m| cat.effective_capabilities(m).supports_tools)
         }) {
             manifest.metadata.insert(
                 "model_supports_tools".to_string(),
@@ -1899,10 +1904,11 @@ impl LibreFangKernel {
         );
         let mut manifest = entry.manifest.clone();
 
-        // Inject model_supports_tools for auto web search augmentation
+        // Inject model_supports_tools for auto web search augmentation.
+        // Refs #4745: honour user capability overrides via effective_capabilities.
         if let Some(supports) = Some(self.llm.model_catalog.load()).and_then(|cat| {
             cat.find_model(&manifest.model.model)
-                .map(|m| m.supports_tools)
+                .map(|m| cat.effective_capabilities(m).supports_tools)
         }) {
             manifest.metadata.insert(
                 "model_supports_tools".to_string(),
@@ -2099,6 +2105,12 @@ impl LibreFangKernel {
 
         // Inject sender context into manifest metadata so the tool runner can
         // use it for per-sender trust and channel-specific authorization rules.
+        // Mirrors `kernel/agent_execution.rs::execute_llm_agent` —
+        // `sender_display_name` is part of the same triple and must land here
+        // too, otherwise `build_sender_prefix` (#4666) falls back to
+        // `sender_user_id` and triggers / `agent_send` produce
+        // `[<numeric_id>]: ` instead of `[<friendly_name>]: ` for the same
+        // user identity.
         if let Some(ctx) = sender_context {
             if !ctx.user_id.is_empty() {
                 manifest.metadata.insert(
@@ -2110,6 +2122,12 @@ impl LibreFangKernel {
                 manifest.metadata.insert(
                     "sender_channel".to_string(),
                     serde_json::Value::String(ctx.channel.clone()),
+                );
+            }
+            if !ctx.display_name.is_empty() {
+                manifest.metadata.insert(
+                    "sender_display_name".to_string(),
+                    serde_json::Value::String(ctx.display_name.clone()),
                 );
             }
         }

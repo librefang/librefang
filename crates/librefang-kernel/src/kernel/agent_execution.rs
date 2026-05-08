@@ -791,10 +791,11 @@ impl LibreFangKernel {
                 .filter(|w| *w > 0)
         });
 
-        // Inject model_supports_tools for auto web search augmentation
+        // Inject model_supports_tools for auto web search augmentation.
+        // Refs #4745: honour user capability overrides via effective_capabilities.
         if let Some(supports) = Some(self.llm.model_catalog.load()).and_then(|cat| {
             cat.find_model(&manifest.model.model)
-                .map(|m| m.supports_tools)
+                .map(|m| cat.effective_capabilities(m).supports_tools)
         }) {
             manifest.metadata.insert(
                 "model_supports_tools".to_string(),

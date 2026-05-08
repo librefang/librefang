@@ -1494,10 +1494,18 @@ export interface ModelItem {
   max_output_tokens?: number;
   input_cost_per_m?: number;
   output_cost_per_m?: number;
+  // Effective (catalog ∘ override) — use for "what the model actually does". Refs #4745.
   supports_tools?: boolean;
   supports_vision?: boolean;
   supports_streaming?: boolean;
   supports_thinking?: boolean;
+  // Raw catalog defaults — use for "Auto = revert target" in override editors.
+  capabilities_catalog?: {
+    supports_tools?: boolean;
+    supports_vision?: boolean;
+    supports_streaming?: boolean;
+    supports_thinking?: boolean;
+  };
   aliases?: string[];
   available?: boolean;
 }
@@ -1543,6 +1551,12 @@ export interface ModelOverrides {
   use_max_completion_tokens?: boolean;
   no_system_role?: boolean;
   force_max_tokens?: boolean;
+  // Refs #4745: capability overrides — undefined = use catalog default,
+  // true/false = force the capability on/off regardless of catalog metadata.
+  supports_tools?: boolean;
+  supports_vision?: boolean;
+  supports_streaming?: boolean;
+  supports_thinking?: boolean;
 }
 
 export async function getModelOverrides(modelKey: string): Promise<ModelOverrides> {

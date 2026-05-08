@@ -131,13 +131,28 @@ use reviewer_sanitize::{sanitize_reviewer_block, sanitize_reviewer_line};
 /// `[[cron_jobs]]` fires. Matched in [`KernelHandle::resolve_user_tool_decision`]
 /// to bypass per-user RBAC the same way the `system_call=true` flag does
 /// — daemon-driven calls have no user to attribute to.
-pub(crate) const SYSTEM_CHANNEL_CRON: &str = "cron";
+///
+/// Public so that out-of-crate carve-out sites (`librefang-api::ws.rs` for
+/// the dashboard, `librefang-runtime::agent_loop` for the sender-prefix
+/// deny-list, …) can reference the same string instead of duplicating the
+/// literal. The runtime path can't import this directly (circular dep),
+/// but exposing it lets api/cli code stay in lock-step.
+pub const SYSTEM_CHANNEL_CRON: &str = "cron";
 
 /// Synthetic `SenderContext.channel` value the autonomous-loop dispatcher
 /// uses for agents whose manifest declares `[autonomous]`. Same RBAC
 /// carve-out as [`SYSTEM_CHANNEL_CRON`] — both are kernel-internal and
 /// have no user to attribute to. Issue #3243.
-pub(crate) const SYSTEM_CHANNEL_AUTONOMOUS: &str = "autonomous";
+pub const SYSTEM_CHANNEL_AUTONOMOUS: &str = "autonomous";
+
+/// Synthetic `SenderContext.channel` value the dashboard WebSocket
+/// (`librefang-api::ws::handle_ws`) uses when forwarding browser-initiated
+/// turns to the kernel. The display name is hard-coded "Web UI" and
+/// `user_id` is the resolved client IP — neither is a real human identity,
+/// which is why the sender-prefix builder (`librefang-runtime::
+/// agent_loop::build_sender_prefix`, #4666) carves this channel out
+/// alongside [`SYSTEM_CHANNEL_CRON`] / [`SYSTEM_CHANNEL_AUTONOMOUS`].
+pub const SYSTEM_CHANNEL_WEBUI: &str = "webui";
 
 /// Minimum tolerated value for `cron_session_max_messages` (#3459).
 /// Mirrors `agent_loop::MIN_HISTORY_MESSAGES`. Smaller values silently
