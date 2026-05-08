@@ -2086,14 +2086,6 @@ fn build_group_sender_prefix(
     manifest: &AgentManifest,
     sender_user_id: Option<&str>,
 ) -> Option<String> {
-    let is_group = manifest
-        .metadata
-        .get("is_group")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if !is_group {
-        return None;
-    }
     let raw = manifest
         .metadata
         .get("sender_display_name")
@@ -7141,9 +7133,12 @@ mod tests {
     }
 
     #[test]
-    fn test_build_group_sender_prefix_not_group() {
+    fn test_build_group_sender_prefix_dm_with_display_name() {
         let m = manifest_with_group(Some("Alice"), false);
-        assert_eq!(build_group_sender_prefix(&m, Some("user-1")), None);
+        assert_eq!(
+            build_group_sender_prefix(&m, Some("user-1")),
+            Some("[Alice]: ".to_string())
+        );
     }
 
     #[test]
