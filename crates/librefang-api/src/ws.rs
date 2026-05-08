@@ -1033,7 +1033,7 @@ async fn handle_text_message(
             // Send message to agent with streaming
             let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone();
             let sender_ctx = SenderContext {
-                channel: "webui".to_string(),
+                channel: librefang_kernel::SYSTEM_CHANNEL_WEBUI.to_string(),
                 // Behaviour change (`trusted_proxies` + `trust_forwarded_for`):
                 // when both flags are configured AND the TCP peer matches the
                 // allowlist, this is the resolved real client IP, not the proxy
