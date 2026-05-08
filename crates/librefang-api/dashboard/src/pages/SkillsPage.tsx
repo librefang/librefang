@@ -1809,8 +1809,10 @@ export function SkillsPage() {
 
       {/* Skill workshop pending review (#3328). Mounts above the
           installed/browse tab bar so a fresh capture is the first
-          thing the operator sees on the Skills page; if the queue is
-          empty this collapses to a one-line empty state. */}
+          thing the operator sees on the Skills page; renders nothing
+          while the queue is empty (the steady state for most
+          operators) so it doesn't waste page space — see the
+          early-return in `PendingSkillsSection`. */}
       <PendingSkillsSection />
 
       {/* Tab bar */}

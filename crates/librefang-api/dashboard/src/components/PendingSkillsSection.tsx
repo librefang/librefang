@@ -15,7 +15,6 @@ import { useState } from "react";
 import { Card } from "./ui/Card";
 import { Button } from "./ui/Button";
 import { Badge } from "./ui/Badge";
-import { EmptyState } from "./ui/EmptyState";
 import { CardSkeleton } from "./ui/Skeleton";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import {
@@ -176,35 +175,34 @@ export function PendingSkillsSection() {
     );
   }
 
+  // Empty queue is the steady state — most users never have a pending
+  // candidate. Render nothing rather than a permanent ~150 px Card +
+  // EmptyState block on the Skills page; the section materialises only
+  // when there is actually something to review. Discoverability of the
+  // workshop feature lives in `docs/architecture/skill-workshop.md`
+  // and the `[skill_workshop]` block of `agent.toml`.
+  if (candidates.length === 0) {
+    return null;
+  }
+
   return (
     <Card className="p-4">
       <div className="flex items-center justify-between">
         <h2 className="text-base font-semibold">
           Skill workshop pending
-          {candidates.length > 0 ? (
-            <Badge className="ml-2" variant="brand">
-              {candidates.length}
-            </Badge>
-          ) : null}
+          <Badge className="ml-2" variant="brand">
+            {candidates.length}
+          </Badge>
         </h2>
         <p className="text-xs text-muted-foreground">
           Drafts captured from agent conversations awaiting your review (#3328).
         </p>
       </div>
-      {candidates.length === 0 ? (
-        <EmptyState
-          title="No pending candidates"
-          description={
-            'Skill workshop is on by default and captures reusable workflows when you teach the agent something durable (e.g. "from now on always run cargo fmt"). Candidates land here for review. To opt out per agent, set [skill_workshop] enabled = false in agent.toml.'
-          }
-        />
-      ) : (
-        <ul className="mt-3">
-          {candidates.map((c) => (
-            <CandidateRow key={c.id} candidate={c} />
-          ))}
-        </ul>
-      )}
+      <ul className="mt-3">
+        {candidates.map((c) => (
+          <CandidateRow key={c.id} candidate={c} />
+        ))}
+      </ul>
     </Card>
   );
 }
