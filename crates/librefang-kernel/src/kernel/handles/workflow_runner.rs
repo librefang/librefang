@@ -23,7 +23,7 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
         } else {
             // Name-based lookup: scan all registered workflows.
             let name_lower = workflow_id.to_lowercase();
-            let workflows = self.workflows.list_workflows().await;
+            let workflows = self.workflows.engine.list_workflows().await;
             workflows
                 .iter()
                 .find(|w| w.name.to_lowercase() == name_lower)

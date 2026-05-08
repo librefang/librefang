@@ -145,6 +145,17 @@ impl AgentRegistry {
         self.agents.get(&id).map(|e| (**e.value()).clone())
     }
 
+    /// Cheap-read accessor: hand back the stored `Arc<AgentEntry>` without
+    /// deep-cloning. Hot paths (skill-workshop after-turn hook, metrics
+    /// scrapes) call this once per turn per agent and only need read
+    /// access. Mirrors [`Self::list_arcs`] but for a single id; identical
+    /// snapshot semantics — subsequent registry mutations create copy-on-
+    /// write replacements via `Arc::make_mut` and are not visible through
+    /// previously returned Arcs.
+    pub fn get_arc(&self, id: AgentId) -> Option<Arc<AgentEntry>> {
+        self.agents.get(&id).map(|e| Arc::clone(e.value()))
+    }
+
     /// Find an agent by name.
     pub fn find_by_name(&self, name: &str) -> Option<AgentEntry> {
         self.name_index

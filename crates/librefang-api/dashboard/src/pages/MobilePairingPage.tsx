@@ -4,9 +4,11 @@ import { useQueryClient } from "@tanstack/react-query";
 import QRCode from "qrcode";
 import { Smartphone, RefreshCw, CheckCircle, Clock, Trash2, AlertCircle } from "lucide-react";
 import { usePairingRequest, usePairedDevices, useRemovePairedDevice } from "../lib/queries/pairing";
+import { ApiError } from "../lib/http/errors";
 import { pairingKeys } from "../lib/queries/keys";
 
 function QRCanvas({ uri }: { uri: string }) {
+  const { t } = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     if (canvasRef.current) {
@@ -17,7 +19,14 @@ function QRCanvas({ uri }: { uri: string }) {
       });
     }
   }, [uri]);
-  return <canvas ref={canvasRef} className="rounded-xl" />;
+  return (
+    <canvas
+      ref={canvasRef}
+      role="img"
+      aria-label={t("mobile_pairing.qr_aria_label")}
+      className="rounded-xl"
+    />
+  );
 }
 
 function CountdownBadge({ expiresAt }: { expiresAt: string }) {
@@ -54,10 +63,12 @@ export function MobilePairingPage() {
   // into these strings, so dangerouslySetInnerHTML is safe here.
   const subtitleHtml = { __html: t("mobile_pairing.subtitle") };
   const disabledBodyHtml = {
+    // i18next <link> pseudo-tag → real <a>. Source is translator-only markup;
+    // no user input flows through these strings, so innerHTML is safe.
     __html: t("mobile_pairing.error_disabled_body").replace(
-      "<link>",
-      '<a href="/dashboard/config/security" class="text-brand underline">',
-    ).replace("</link>", "</a>"),
+      /<link>(.*?)<\/link>/s,
+      '<a href="/dashboard/config/security" class="text-brand underline">$1</a>',
+    ),
   };
 
   const refresh = () => {
@@ -66,7 +77,7 @@ export function MobilePairingPage() {
   };
 
   if (error) {
-    const isDisabled = (error as { status?: number })?.status === 404;
+    const isDisabled = error instanceof ApiError && error.status === 404;
     return (
       <div className="max-w-xl mx-auto px-4 py-12 text-center space-y-3">
         <Smartphone className="w-10 h-10 mx-auto text-text-dim" />

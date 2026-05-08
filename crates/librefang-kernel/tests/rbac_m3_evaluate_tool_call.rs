@@ -19,6 +19,7 @@
 //!       NeedsApproval
 
 use librefang_kernel::LibreFangKernel;
+use librefang_kernel::SecuritySubsystemApi;
 use librefang_runtime::kernel_handle::prelude::*;
 use librefang_types::config::{DefaultModelConfig, KernelConfig, UserConfig};
 use librefang_types::tool_policy::{ToolGroup, ToolPolicy};
@@ -323,6 +324,7 @@ async fn submit_tool_approval_hand_agent_force_human_skips_auto_approve() {
         channel: None,
         workspace_root: None,
         force_human: false,
+        session_id: None,
     };
     let kh: &dyn KernelHandle = &*kernel;
     let lax = kh
@@ -354,6 +356,7 @@ async fn submit_tool_approval_hand_agent_force_human_skips_auto_approve() {
         channel: None,
         workspace_root: None,
         force_human: true,
+        session_id: None,
     };
     let strict = kh
         .submit_tool_approval(
@@ -410,7 +413,7 @@ async fn evaluate_tool_call_reload_picks_up_new_policy() {
         }),
         None,
     )];
-    kernel.auth_manager().reload(&new_users, &[]);
+    kernel.auth_ref().reload(&new_users, &[]);
 
     // After reload: file_read must now be denied.
     let gate = kh.resolve_user_tool_decision("file_read", Some("111"), Some("telegram"));

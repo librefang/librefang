@@ -25,7 +25,7 @@ impl LibreFangKernel {
     /// By default, NO hands are activated to prevent unexpected token consumption.
     pub async fn start_background_agents(self: &Arc<Self>) {
         // Fire external gateway:startup hook (fire-and-forget) before starting agents.
-        self.external_hooks.fire(
+        self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::GatewayStartup,
             serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
@@ -114,8 +114,10 @@ impl LibreFangKernel {
                         for (role, old_id) in &old_agent_id {
                             if let Some(&new_id) = inst.agent_ids.get(role) {
                                 if old_id.0 != new_id.0 {
-                                    let migrated =
-                                        self.cron_scheduler.reassign_agent_jobs(*old_id, new_id);
+                                    let migrated = self
+                                        .workflows
+                                        .cron_scheduler
+                                        .reassign_agent_jobs(*old_id, new_id);
                                     if migrated > 0 {
                                         info!(
                                             hand = %hand_id,
@@ -125,14 +127,16 @@ impl LibreFangKernel {
                                             migrated,
                                             "Reassigned cron jobs after restart"
                                         );
-                                        if let Err(e) = self.cron_scheduler.persist() {
+                                        if let Err(e) = self.workflows.cron_scheduler.persist() {
                                             warn!(
                                                 "Failed to persist cron jobs after hand restore: {e}"
                                             );
                                         }
                                     }
-                                    let t_migrated =
-                                        self.triggers.reassign_agent_triggers(*old_id, new_id);
+                                    let t_migrated = self
+                                        .workflows
+                                        .triggers
+                                        .reassign_agent_triggers(*old_id, new_id);
                                     if t_migrated > 0 {
                                         info!(
                                             hand = %hand_id,
@@ -142,7 +146,7 @@ impl LibreFangKernel {
                                             migrated = t_migrated,
                                             "Reassigned triggers after restart"
                                         );
-                                        if let Err(e) = self.triggers.persist() {
+                                        if let Err(e) = self.workflows.triggers.persist() {
                                             warn!(
                                                 "Failed to persist trigger jobs after hand restore: {e}"
                                             );
@@ -160,7 +164,7 @@ impl LibreFangKernel {
             // registry hands without activating them. Activation (DB entries, session
             // spawning, agent registration) only happens when the user explicitly
             // enables a hand — not unconditionally on every fresh install.
-            let defs = self.hand_registry.list_definitions();
+            let defs = self.skills.hand_registry.list_definitions();
             if !defs.is_empty() {
                 info!(
                     "First boot — scaffolding {} hand workspace(s) (files only, no activation)",
@@ -211,12 +215,13 @@ impl LibreFangKernel {
         // the only surviving hand-agent metadata.
         if saved_hands.status != librefang_hands::registry::LoadStateStatus::ParseFailed {
             let live_hand_agents: std::collections::HashSet<AgentId> = self
+                .skills
                 .hand_registry
                 .list_instances()
                 .iter()
                 .flat_map(|inst| inst.agent_ids.values().copied().collect::<Vec<_>>())
                 .collect();
-            match self.memory.load_all_agents_async().await {
+            match self.memory.substrate.load_all_agents_async().await {
                 Ok(all) => {
                     let mut removed = 0usize;
                     for entry in all {
@@ -226,7 +231,7 @@ impl LibreFangKernel {
                         if live_hand_agents.contains(&entry.id) {
                             continue;
                         }
-                        match self.memory.remove_agent_async(entry.id).await {
+                        match self.memory.substrate.remove_agent_async(entry.id).await {
                             Ok(()) => {
                                 removed += 1;
                                 info!(
@@ -345,7 +350,7 @@ impl LibreFangKernel {
             }
         }
 
-        let agents = self.registry.list();
+        let agents = self.agents.registry.list();
         let mut bg_agents: Vec<(librefang_types::agent::AgentId, String, ScheduleMode)> =
             Vec::new();
 
@@ -425,7 +430,7 @@ impl LibreFangKernel {
             } else {
                 60
             };
-            let mut shutdown_rx = self.supervisor.subscribe();
+            let mut shutdown_rx = self.agents.supervisor.subscribe();
             spawn_logged("local_provider_probe", async move {
                 let mut interval =
                     tokio::time::interval(std::time::Duration::from_secs(probe_interval_secs));
@@ -455,10 +460,10 @@ impl LibreFangKernel {
                 interval.tick().await; // Skip first immediate tick
                 loop {
                     interval.tick().await;
-                    if kernel.supervisor.is_shutting_down() {
+                    if kernel.agents.supervisor.is_shutting_down() {
                         break;
                     }
-                    match kernel.metering.cleanup(90) {
+                    match kernel.metering.engine.cleanup(90) {
                         Ok(removed) if removed > 0 => {
                             info!("Metering cleanup: removed {removed} old usage records");
                         }
@@ -490,11 +495,15 @@ impl LibreFangKernel {
                     interval.tick().await; // skip immediate tick
                     loop {
                         interval.tick().await;
-                        if kernel.supervisor.is_shutting_down() {
+                        if kernel.agents.supervisor.is_shutting_down() {
                             break;
                         }
                         if memory_retention > 0 {
-                            match kernel.memory.prune_soft_deleted_memories(memory_retention) {
+                            match kernel
+                                .memory
+                                .substrate
+                                .prune_soft_deleted_memories(memory_retention)
+                            {
                                 Ok(n) if n > 0 => info!(
                                     "Memory retention: hard-deleted {n} soft-deleted memories \
                                      (older than {memory_retention} days)"
@@ -504,7 +513,12 @@ impl LibreFangKernel {
                             }
                         }
                         if queue_retention > 0 {
-                            match kernel.memory.task_prune_finished(queue_retention).await {
+                            match kernel
+                                .memory
+                                .substrate
+                                .task_prune_finished(queue_retention)
+                                .await
+                            {
                                 Ok(n) if n > 0 => info!(
                                     "Task queue retention: pruned {n} finished tasks \
                                      (older than {queue_retention} days)"
@@ -514,7 +528,10 @@ impl LibreFangKernel {
                             }
                         }
                         if approval_retention > 0 {
-                            let n = kernel.approval_manager.prune_audit(approval_retention);
+                            let n = kernel
+                                .governance
+                                .approval_manager
+                                .prune_audit(approval_retention);
                             if n > 0 {
                                 info!(
                                     "Approval audit retention: pruned {n} rows \
@@ -543,10 +560,10 @@ impl LibreFangKernel {
                     interval.tick().await; // Skip first immediate tick
                     loop {
                         interval.tick().await;
-                        if kernel.supervisor.is_shutting_down() {
+                        if kernel.agents.supervisor.is_shutting_down() {
                             break;
                         }
-                        let pruned = kernel.audit_log.prune(retention);
+                        let pruned = kernel.metering.audit_log.prune(retention);
                         if pruned > 0 {
                             info!("Audit log pruning: removed {pruned} entries older than {retention} days");
                         }
@@ -576,10 +593,13 @@ impl LibreFangKernel {
                     interval.tick().await; // Skip first immediate tick.
                     loop {
                         interval.tick().await;
-                        if kernel.supervisor.is_shutting_down() {
+                        if kernel.agents.supervisor.is_shutting_down() {
                             break;
                         }
-                        let report = kernel.audit_log.trim(&retention, chrono::Utc::now());
+                        let report = kernel
+                            .metering
+                            .audit_log
+                            .trim(&retention, chrono::Utc::now());
                         if !report.is_empty() {
                             // Detail is JSON of the per-action drop counts.
                             // Keeping it small + structured so a downstream
@@ -591,7 +611,7 @@ impl LibreFangKernel {
                                 "new_chain_anchor": report.new_chain_anchor,
                             })
                             .to_string();
-                            kernel.audit_log.record(
+                            kernel.metering.audit_log.record(
                                 "system",
                                 librefang_runtime::audit::AuditAction::RetentionTrim,
                                 detail,
@@ -629,13 +649,14 @@ impl LibreFangKernel {
                     interval.tick().await; // Skip first immediate tick
                     loop {
                         interval.tick().await;
-                        if kernel.supervisor.is_shutting_down() {
+                        if kernel.agents.supervisor.is_shutting_down() {
                             break;
                         }
                         let mut total = 0u64;
                         if session_cfg.retention_days > 0 {
                             match kernel
                                 .memory
+                                .substrate
                                 .cleanup_expired_sessions(session_cfg.retention_days)
                             {
                                 Ok(n) => total += n,
@@ -647,6 +668,7 @@ impl LibreFangKernel {
                         if session_cfg.max_sessions_per_agent > 0 {
                             match kernel
                                 .memory
+                                .substrate
                                 .cleanup_excess_sessions(session_cfg.max_sessions_per_agent)
                             {
                                 Ok(n) => total += n,
@@ -681,6 +703,7 @@ impl LibreFangKernel {
                 if session_cfg.retention_days > 0 {
                     match self
                         .memory
+                        .substrate
                         .cleanup_expired_sessions(session_cfg.retention_days)
                     {
                         Ok(n) => pruned_total += n,
@@ -690,6 +713,7 @@ impl LibreFangKernel {
                 if session_cfg.max_sessions_per_agent > 0 {
                     match self
                         .memory
+                        .substrate
                         .cleanup_excess_sessions(session_cfg.max_sessions_per_agent)
                     {
                         Ok(n) => pruned_total += n,
@@ -698,6 +722,7 @@ impl LibreFangKernel {
                 }
                 if let Err(e) = self
                     .memory
+                    .substrate
                     .vacuum_if_shrank_async(pruned_total as usize)
                     .await
                 {
@@ -717,7 +742,7 @@ impl LibreFangKernel {
                 interval.tick().await; // skip first immediate tick
                 loop {
                     interval.tick().await;
-                    if kernel.supervisor.is_shutting_down() {
+                    if kernel.agents.supervisor.is_shutting_down() {
                         break;
                     }
                     let upload_dir = kernel.config_ref().channels.effective_file_download_dir();
@@ -754,10 +779,10 @@ impl LibreFangKernel {
                     interval.tick().await; // Skip first immediate tick
                     loop {
                         interval.tick().await;
-                        if kernel.supervisor.is_shutting_down() {
+                        if kernel.agents.supervisor.is_shutting_down() {
                             break;
                         }
-                        match kernel.memory.consolidate().await {
+                        match kernel.memory.substrate.consolidate().await {
                             Ok(report) => {
                                 if report.memories_decayed > 0 || report.memories_merged > 0 {
                                     info!(
@@ -791,10 +816,10 @@ impl LibreFangKernel {
                     interval.tick().await; // Skip first immediate tick
                     loop {
                         interval.tick().await;
-                        if kernel.supervisor.is_shutting_down() {
+                        if kernel.agents.supervisor.is_shutting_down() {
                             break;
                         }
-                        match kernel.memory.run_decay(&decay_config) {
+                        match kernel.memory.substrate.run_decay(&decay_config) {
                             Ok(n) => {
                                 if n > 0 {
                                     info!(deleted = n, "Memory decay sweep completed");
@@ -818,7 +843,7 @@ impl LibreFangKernel {
                 interval.tick().await; // Skip first immediate tick
                 loop {
                     interval.tick().await;
-                    if kernel.supervisor.is_shutting_down() {
+                    if kernel.agents.supervisor.is_shutting_down() {
                         break;
                     }
                     kernel.gc_sweep();
@@ -829,6 +854,7 @@ impl LibreFangKernel {
 
         // Connect to configured + extension MCP servers
         let has_mcp = self
+            .mcp
             .effective_mcp_servers
             .read()
             .map(|s| !s.is_empty())
@@ -861,10 +887,10 @@ impl LibreFangKernel {
             let kernel = Arc::clone(self);
             // #3740: spawn_logged so panics in the cron loop surface in logs.
             spawn_logged("cron_scheduler", cron_tick::run_cron_scheduler_loop(kernel));
-            if self.cron_scheduler.total_jobs() > 0 {
+            if self.workflows.cron_scheduler.total_jobs() > 0 {
                 info!(
                     "Cron scheduler active with {} job(s)",
-                    self.cron_scheduler.total_jobs()
+                    self.workflows.cron_scheduler.total_jobs()
                 );
             }
         }
@@ -882,7 +908,7 @@ impl LibreFangKernel {
                 spawn_logged("a2a_discover_external", async move {
                     let discovered =
                         librefang_runtime::a2a::discover_external_agents(&agents).await;
-                    if let Ok(mut store) = kernel.a2a_external_agents.lock() {
+                    if let Ok(mut store) = kernel.mesh.a2a_external_agents.lock() {
                         *store = discovered;
                     }
                 });
@@ -994,8 +1020,8 @@ impl LibreFangKernel {
                 );
 
                 // Safe one-time initialization via OnceLock (replaces previous unsafe pointer mutation).
-                let _ = self.peer_registry.set(registry.clone());
-                let _ = self.peer_node.set(node.clone());
+                let _ = self.mesh.peer_registry.set(registry.clone());
+                let _ = self.mesh.peer_node.set(node.clone());
 
                 // Connect to bootstrap peers
                 for peer_addr_str in &cfg.network.bootstrap_peers {
@@ -1056,15 +1082,15 @@ impl LibreFangKernel {
             loop {
                 interval.tick().await;
 
-                if kernel.supervisor.is_shutting_down() {
+                if kernel.agents.supervisor.is_shutting_down() {
                     info!("Heartbeat monitor stopping (shutdown)");
                     break;
                 }
 
-                let statuses = check_agents(&kernel.registry, &config);
+                let statuses = check_agents(&kernel.agents.registry, &config);
                 for status in &statuses {
                     // Skip agents in quiet hours (per-agent config)
-                    if let Some(entry) = kernel.registry.get(status.agent_id) {
+                    if let Some(entry) = kernel.agents.registry.get(status.agent_id) {
                         if let Some(ref auto_cfg) = entry.manifest.autonomous {
                             if let Some(ref qh) = auto_cfg.quiet_hours {
                                 if is_quiet_hours(qh) {
@@ -1090,7 +1116,7 @@ impl LibreFangKernel {
                                     unresponsive_secs: status.inactive_secs as u64,
                                 }),
                             );
-                            kernel.event_bus.publish(event).await;
+                            kernel.events.event_bus.publish(event).await;
 
                             // Fan out to operator notification channels
                             // (notification.alert_channels and matching
@@ -1145,19 +1171,25 @@ impl LibreFangKernel {
             let mut registered = false;
             for condition in conditions {
                 if let Some(pattern) = background::parse_condition(condition) {
-                    if self.triggers.agent_has_pattern(agent_id, &pattern) {
+                    if self
+                        .workflows
+                        .triggers
+                        .agent_has_pattern(agent_id, &pattern)
+                    {
                         continue;
                     }
                     let prompt = format!(
                         "[PROACTIVE ALERT] Condition '{condition}' matched: {{{{event}}}}. \
                          Review and take appropriate action. Agent: {name}"
                     );
-                    self.triggers.register(agent_id, pattern, prompt, 0);
+                    self.workflows
+                        .triggers
+                        .register(agent_id, pattern, prompt, 0);
                     registered = true;
                 }
             }
             if registered {
-                if let Err(e) = self.triggers.persist() {
+                if let Err(e) = self.workflows.triggers.persist() {
                     warn!(agent = %name, id = %agent_id, "Failed to persist proactive triggers: {e}");
                 }
                 info!(agent = %name, id = %agent_id, "Registered proactive triggers");
@@ -1175,7 +1207,8 @@ impl LibreFangKernel {
         // `system_call=true` carve-out as cron (see
         // `resolve_user_tool_decision` in this file).
         let kernel = Arc::clone(self);
-        self.background
+        self.workflows
+            .background
             .start_agent(agent_id, name, schedule, move |aid, msg| {
                 let k = Arc::clone(&kernel);
                 tokio::spawn(async move {
@@ -1234,7 +1267,7 @@ impl LibreFangKernel {
             }
         }
 
-        self.supervisor.shutdown();
+        self.agents.supervisor.shutdown();
 
         // Drain in-flight workflow runs (#3335). `Running` / `Pending`
         // are deliberately not persisted by `persist_runs` (no durable
@@ -1253,7 +1286,7 @@ impl LibreFangKernel {
         // immediately after this block, and the next-boot
         // `recover_stale_running_runs` sweep is the safety net for any
         // crash-shutdown residue.
-        let drained = self.workflows.drain_on_shutdown();
+        let drained = self.workflows.engine.drain_on_shutdown();
         if drained > 0 {
             tracing::info!(drained, "Paused in-flight workflow runs for shutdown");
         }
@@ -1266,15 +1299,19 @@ impl LibreFangKernel {
         let mut total = 0usize;
         let mut state_failures = 0usize;
         let mut save_failures = 0usize;
-        for entry in self.registry.list() {
+        for entry in self.agents.registry.list() {
             total += 1;
-            if let Err(e) = self.registry.set_state(entry.id, AgentState::Suspended) {
+            if let Err(e) = self
+                .agents
+                .registry
+                .set_state(entry.id, AgentState::Suspended)
+            {
                 state_failures += 1;
                 tracing::error!(agent_id = %entry.id, "failed to set agent state to Suspended on shutdown: {e}");
             }
             // Re-save with Suspended state for clean resume on next boot
-            if let Some(updated) = self.registry.get(entry.id) {
-                if let Err(e) = self.memory.save_agent(&updated) {
+            if let Some(updated) = self.agents.registry.get(entry.id) {
+                if let Err(e) = self.memory.substrate.save_agent(&updated) {
                     save_failures += 1;
                     tracing::error!(agent_id = %entry.id, "failed to persist agent state on shutdown: {e}");
                 }
@@ -1294,7 +1331,7 @@ impl LibreFangKernel {
 
         info!(
             "LibreFang kernel shut down ({} agents preserved)",
-            self.registry.list().len()
+            self.agents.registry.list().len()
         );
     }
 }

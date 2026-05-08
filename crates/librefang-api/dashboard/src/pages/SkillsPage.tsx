@@ -38,6 +38,8 @@ import { Input } from "../components/ui/Input";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { PageHeader } from "../components/ui/PageHeader";
+import { PendingSkillsSection } from "../components/PendingSkillsSection";
+import { usePendingSkillCandidates } from "../lib/queries/skills";
 import { useUIStore } from "../lib/store";
 import {
   SkillHubBar,
@@ -84,7 +86,7 @@ import {
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 type ClawHubSkillWithStatus = ClawHubBrowseItem & { is_installed?: boolean };
-type ViewMode = "installed" | "browse";
+type ViewMode = "installed" | "browse" | "pending";
 type MarketplaceSource = "fanghub" | "clawhub" | "clawhub-cn" | "skillhub";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -1479,7 +1481,37 @@ export function SkillsPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
 
-  const [viewMode, setViewMode] = useState<ViewMode>("browse");
+  // Read optional `?tab=` search param on mount so deep links from the
+  // NotificationCenter footer ("X skill candidates pending review →")
+  // land directly on the matching tab instead of the default.
+  const initialViewMode = ((): ViewMode => {
+    if (typeof window === "undefined") return "browse";
+    const tab = new URLSearchParams(window.location.search).get("tab");
+    return tab === "pending" || tab === "installed" || tab === "browse"
+      ? tab
+      : "browse";
+  })();
+  const [viewMode, setViewMode] = useState<ViewMode>(initialViewMode);
+  // Skill workshop pending queue — surfaced as a third tab only when
+  // the queue is non-empty so the Skills page stays clean for operators
+  // who never touch the workshop. The tab disappears the moment the
+  // queue drains, returning the page to its two-tab layout.
+  const pendingSkillsQuery = usePendingSkillCandidates();
+  const pendingSkillsCount = pendingSkillsQuery.data?.length ?? 0;
+  // If the deep link or the user landed on the Pending tab but the
+  // queue has since drained (someone else approved / rejected, the
+  // last candidate was just acted on), fall back to the Browse tab —
+  // otherwise the active-tab indicator would point at a tab that no
+  // longer exists.
+  useEffect(() => {
+    if (
+      viewMode === "pending" &&
+      !pendingSkillsQuery.isLoading &&
+      pendingSkillsCount === 0
+    ) {
+      setViewMode("browse");
+    }
+  }, [viewMode, pendingSkillsCount, pendingSkillsQuery.isLoading]);
   /**
    * Which federated hub the browse grid pulls from. Defaults to
    * `"fanghub"` so the page lands on a populated grid (FangHub is the
@@ -1806,7 +1838,10 @@ export function SkillsPage() {
         }
       />
 
-      {/* Tab bar */}
+      {/* Tab bar — `Pending` only renders when the workshop has
+          something queued so the steady-state Skills page stays a
+          two-tab layout (#3328). The tab disappears as soon as the
+          queue drains. */}
       <div className="flex gap-1 p-1 bg-surface rounded-xl border border-border-subtle w-fit">
         {(
           [
@@ -1823,6 +1858,19 @@ export function SkillsPage() {
               label: t("skills.browse", { defaultValue: "Browse" }),
               activeColor: "text-brand",
             },
+            ...(pendingSkillsCount > 0
+              ? [
+                  {
+                    mode: "pending" as const,
+                    icon: <Sparkles className="w-4 h-4" />,
+                    label: t("skills.pending_tab", {
+                      defaultValue: "Pending",
+                    }),
+                    count: pendingSkillsCount,
+                    activeColor: "text-warning",
+                  },
+                ]
+              : []),
           ]
         ).map((tab) => {
           const active = viewMode === tab.mode;
@@ -1925,6 +1973,9 @@ export function SkillsPage() {
           }
         />
       )}
+
+      {/* ── Pending (#3328 skill workshop review queue) ── */}
+      {viewMode === "pending" && <PendingSkillsSection />}
 
       {/* ── Installed ── */}
       {viewMode === "installed" &&

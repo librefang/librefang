@@ -182,7 +182,12 @@ impl AuxClient {
             // Compression and fold are high-volume side tasks. Cheap haiku-class
             // models are good enough; OpenRouter is preferred because most
             // adopters of "auxiliary cheap tier" already have a key there.
-            AuxTask::Compression | AuxTask::Title | AuxTask::Search | AuxTask::Fold => vec![
+            AuxTask::Compression
+            | AuxTask::Title
+            | AuxTask::Search
+            | AuxTask::Fold
+            | AuxTask::SkillReview
+            | AuxTask::SkillWorkshopReview => vec![
                 "openrouter:anthropic/claude-3-5-haiku".to_string(),
                 "anthropic:haiku".to_string(),
                 "openai:gpt-4o-mini".to_string(),
@@ -455,6 +460,9 @@ mod tests {
             AuxTask::Search,
             AuxTask::Vision,
             AuxTask::BrowserVision,
+            AuxTask::Fold,
+            AuxTask::SkillReview,
+            AuxTask::SkillWorkshopReview,
         ] {
             let res = aux.resolve(task);
             assert!(

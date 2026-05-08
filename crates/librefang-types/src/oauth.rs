@@ -13,6 +13,24 @@
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+/// OAuth provider configuration template — embedded in [`crate::mcp::McpCatalogEntry`]
+/// to describe how an MCP catalog entry should perform an OAuth2 PKCE flow.
+///
+/// The runtime PKCE machinery lives in `librefang-extensions::oauth`; this
+/// type only carries the template values declared in
+/// `~/.librefang/mcp/catalog/*.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthTemplate {
+    /// OAuth provider (google, github, microsoft, slack).
+    pub provider: String,
+    /// OAuth scopes required.
+    pub scopes: Vec<String>,
+    /// Authorization URL.
+    pub auth_url: String,
+    /// Token exchange URL.
+    pub token_url: String,
+}
+
 /// OAuth2 token response from the token endpoint.
 ///
 /// Field defaults follow the providers we have observed:

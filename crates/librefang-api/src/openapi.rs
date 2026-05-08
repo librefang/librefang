@@ -114,6 +114,11 @@ use crate::types;
         routes::install_skill,
         routes::uninstall_skill,
         routes::create_skill,
+        // Skill workshop pending review (#3328)
+        routes::list_pending_candidates,
+        routes::show_pending_candidate,
+        routes::approve_pending_candidate,
+        routes::reject_pending_candidate,
         routes::list_tools,
         routes::get_tool,
         routes::invoke_tool,

@@ -195,9 +195,9 @@ describe("PluginsPage", () => {
     expect(screen.getByText("broken-plugin")).toBeInTheDocument();
     expect(screen.getByText("Tracks recent messages")).toBeInTheDocument();
     // ingest hook badge from echo-memory
-    expect(screen.getByText("ingest")).toBeInTheDocument();
+    expect(screen.getByText("plugins.hook_ingest")).toBeInTheDocument();
     // hooks_valid=false plugin gets the invalid badge
-    expect(screen.getByText("invalid")).toBeInTheDocument();
+    expect(screen.getByText("plugins.hook_invalid")).toBeInTheDocument();
   });
 
   it("requires a confirm click before uninstalling a plugin", async () => {

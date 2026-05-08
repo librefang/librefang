@@ -1,7 +1,6 @@
 import React, { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
 import { AnimatePresence, motion } from "motion/react";
 import { tabContent } from "../lib/motion";
 import {
@@ -514,14 +513,13 @@ function ServerCard({
   conn,
   onAuthSuccess,
   onViewDetail,
-  t,
 }: {
   server: McpServerConfigured;
   conn?: McpServerConnected;
   onAuthSuccess?: () => void;
   onViewDetail: () => void;
-  t: TFunction;
 }) {
+  const { t } = useTranslation();
   const isConnected = conn?.connected ?? false;
   const toolsCount = conn?.tools_count ?? 0;
   const transportType = useMemo(() => getTransportType(server), [server]);
@@ -680,12 +678,12 @@ function ServerDetailBody({
       </div>
 
       {/* Tabs */}
-      <div className="flex border-b border-border-subtle px-5 bg-main/20">
+      <div role="tablist" aria-label={t("mcp.detail_tabs_label", { defaultValue: "Server details" })} className="flex border-b border-border-subtle px-5 bg-main/20">
         {([
           { id: "tools" as const, label: t("mcp.tab_tools", { defaultValue: "Tools" }), icon: Wrench, count: conn?.tools_count ?? 0 },
           { id: "logs" as const, label: t("mcp.tab_logs", { defaultValue: "Logs" }), icon: FileText },
           { id: "config" as const, label: t("mcp.tab_config", { defaultValue: "Config" }), icon: Settings },
-        ]).map((td) => {
+        ] as const).map((td, _i, arr) => {
           const active = tab === td.id;
           const Icon = td.icon;
           return (
@@ -693,7 +691,18 @@ function ServerDetailBody({
               key={td.id}
               role="tab"
               aria-selected={active}
+              tabIndex={active ? 0 : -1}
               onClick={() => setTab(td.id)}
+              onKeyDown={(e: React.KeyboardEvent) => {
+                if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+                  e.preventDefault();
+                  const delta = e.key === "ArrowRight" ? 1 : -1;
+                  const curIdx = arr.findIndex((a) => a.id === tab);
+                  const nextIdx = (curIdx + delta + arr.length) % arr.length;
+                  setTab(arr[nextIdx].id);
+                  (e.currentTarget.parentElement?.querySelectorAll('[role="tab"]')[nextIdx] as HTMLElement)?.focus();
+                }
+              }}
               className={`inline-flex items-center gap-2 px-3 py-2.5 text-[12.5px] border-b-2 transition-colors ${
                 active
                   ? "border-brand font-semibold"
@@ -702,7 +711,7 @@ function ServerDetailBody({
             >
               <Icon className="w-3.5 h-3.5" />
               {td.label}
-              {td.count !== undefined && (
+              {"count" in td && (
                 <span
                   className={`font-mono text-[10px] px-1.5 py-px rounded-full ${
                     active ? "bg-brand/15 text-brand" : "bg-text-dim/10 text-text-dim"
@@ -717,14 +726,14 @@ function ServerDetailBody({
       </div>
 
       {/* Tab body */}
-      <div className="flex-1 overflow-y-auto p-5">
+      <div role="tabpanel" className="flex-1 overflow-y-auto p-5">
         {tab === "tools" && (
           <>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-4">
-              <Mini label="tools_count" value={String(conn?.tools_count ?? 0)} />
-              <Mini label="connected" value={isConnected ? "true" : "false"} tone={isConnected ? "ok" : "bad"} />
-              <Mini label="auth_state" value={authStateStr} />
-              <Mini label="timeout_secs" value={String(server.timeout_secs ?? 30)} />
+              <Mini label={t("mcp.tools_count", { defaultValue: "Tools" })} value={String(conn?.tools_count ?? 0)} />
+              <Mini label={t("mcp.connected", { defaultValue: "Connected" })} value={isConnected ? "true" : "false"} tone={isConnected ? "ok" : "bad"} />
+              <Mini label={t("mcp.auth_state", { defaultValue: "Auth" })} value={authStateStr} />
+              <Mini label={t("mcp.timeout_secs", { defaultValue: "Timeout" })} value={String(server.timeout_secs ?? 30)} />
             </div>
 
             {tools.length === 0 ? (
@@ -872,14 +881,13 @@ function CatalogCard({
   alreadyAdded,
   onViewDetail,
   onInstall,
-  t,
 }: {
   tpl: McpCatalogEntry;
   alreadyAdded: boolean;
   onViewDetail: () => void;
   onInstall: () => void;
-  t: TFunction;
 }) {
+  const { t } = useTranslation();
   const reqEnvCount = (tpl.required_env ?? []).length;
   return (
     <Card
@@ -992,13 +1000,12 @@ function CatalogInstallWizard({
   template,
   onClose,
   onSuccess,
-  t,
 }: {
   template: McpCatalogEntry;
   onClose: () => void;
   onSuccess: () => void;
-  t: TFunction;
 }) {
+  const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const addMutation = useAddMcpServer();
   const [step, setStep] = useState<WizardStep>("permissions");
@@ -1534,8 +1541,20 @@ export function McpServersPage() {
       />
 
       {/* Tab switcher */}
-      <div className="flex gap-1 rounded-xl border border-border-subtle bg-surface p-1">
+      <div
+        role="tablist"
+        aria-label={t("mcp.tabs_label", { defaultValue: "Server views" })}
+        className="flex gap-1 rounded-xl border border-border-subtle bg-surface p-1"
+        onKeyDown={(e) => {
+          if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+            e.preventDefault();
+            setTab((prev) => prev === "servers" ? "catalog" : "servers");
+          }
+        }}
+      >
         <button
+          role="tab"
+          aria-selected={tab === "servers"}
           onClick={() => setTab("servers")}
           className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-colors ${
             tab === "servers" ? "bg-brand/10 text-brand shadow-sm" : "text-text-dim hover:text-text"
@@ -1550,6 +1569,8 @@ export function McpServersPage() {
           )}
         </button>
         <button
+          role="tab"
+          aria-selected={tab === "catalog"}
           onClick={() => setTab("catalog")}
           className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-colors ${
             tab === "catalog" ? "bg-brand/10 text-brand shadow-sm" : "text-text-dim hover:text-text"
@@ -1561,7 +1582,7 @@ export function McpServersPage() {
       </div>
 
       <AnimatePresence mode="wait">
-      <motion.div key={tab} variants={tabContent} initial="initial" animate="animate" exit="exit" className="space-y-4">
+      <motion.div key={tab} role="tabpanel" variants={tabContent} initial="initial" animate="animate" exit="exit" className="space-y-4">
       {tab === "servers" && (
         <>
           {/* Search + filter toolbar */}
@@ -1654,7 +1675,6 @@ export function McpServersPage() {
                     server={server}
                     conn={connectedMap.get(id)}
                     onViewDetail={() => setDetailsServer(server)}
-                    t={t}
                   />
                 );
               })}
@@ -1706,7 +1726,6 @@ export function McpServersPage() {
                     alreadyAdded={alreadyAdded}
                     onViewDetail={() => setDetailsCatalog(tpl)}
                     onInstall={() => setInstallingTemplate(tpl)}
-                    t={t}
                   />
                 );
               })}
@@ -1862,7 +1881,6 @@ export function McpServersPage() {
             template={installingTemplate}
             onClose={() => setInstallingTemplate(null)}
             onSuccess={() => setTab("servers")}
-            t={t}
           />
         )}
       </DrawerPanel>

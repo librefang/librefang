@@ -1,3 +1,4 @@
+import { createClientId } from "./store";
 import { formatCost } from "./format";
 import type { ContentBlock } from "../api";
 
@@ -14,6 +15,10 @@ export interface ToolOutputEntry {
 export function normalizeRole(raw?: string): ChatRole {
   if (raw === "User") return "user";
   if (raw === "System") return "system";
+  if (raw === "Assistant") return "assistant";
+  if (import.meta.env.DEV) {
+    console.warn(`normalizeRole: unknown role "${raw}", falling back to "assistant"`);
+  }
   return "assistant";
 }
 
@@ -21,9 +26,16 @@ export function asText(value: unknown): string {
   if (typeof value === "string") return value;
   if (value == null) return "";
   try {
-    return JSON.stringify(value, null, 2);
+    const seen = new WeakSet();
+    return JSON.stringify(value, (_, v) => {
+      if (typeof v === "object" && v !== null) {
+        if (seen.has(v)) return "[circular]";
+        seen.add(v);
+      }
+      return v;
+    }, 2);
   } catch {
-    return String(value);
+    return "[unserializable]";
   }
 }
 
@@ -33,7 +45,10 @@ export function formatMeta(response: {
   iterations?: number;
   cost_usd?: number;
 }): string {
-  const parts = [`${response.input_tokens ?? 0} in / ${response.output_tokens ?? 0} out`];
+  const parts: string[] = [];
+  if (response.input_tokens != null || response.output_tokens != null) {
+    parts.push(`${response.input_tokens ?? 0} in / ${response.output_tokens ?? 0} out`);
+  }
   if (typeof response.iterations === "number" && response.iterations > 0) {
     parts.push(`${response.iterations} iter`);
   }
@@ -56,7 +71,7 @@ export function normalizeToolOutput(event: {
   const content = rawResult || (isError ? "Tool failed without a preview." : "Tool finished.");
 
   return {
-    id: `${tool}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id: `${tool}-${createClientId()}`,
     tool,
     content,
     isError,

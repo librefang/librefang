@@ -18,6 +18,12 @@ import { useActiveHandsWhen } from "../lib/queries/hands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
+import {
+  chatSessionCacheKey,
+  deleteCachedChatMessages,
+  getCachedChatMessages,
+  setCachedChatMessages,
+} from "../lib/chatSessionCache";
 import { useTtsManager } from "../lib/tts";
 import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
@@ -350,9 +356,9 @@ function useWebSocket(
 // previously-viewed session's messages whenever the user switched sessions on
 // the same agent, because the cache hit on a fresh mount didn't consult the
 // requested sessionId.
-const sessionCache = new Map<string, ChatMessage[]>();
-const cacheKey = (agentId: string, sessionId: string | null): string =>
-  `${agentId}:${sessionId ?? ""}`;
+const cacheKey = chatSessionCacheKey;
+const cacheGet = getCachedChatMessages<ChatMessage>;
+const cacheSet = setCachedChatMessages<ChatMessage>;
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
@@ -454,8 +460,8 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
       // next view anyway).
       const sid = id === currentAgentRef.current ? currentSessionRef.current : null;
       const key = cacheKey(id, sid);
-      const current = sessionCache.get(key) ?? [];
-      sessionCache.set(key, updater(current));
+      const current = cacheGet(key) ?? [];
+      cacheSet(key, updater(current));
     }
   }, []);
 
@@ -489,6 +495,31 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     rafHandleRef.current.set(msgId, handle);
   }, [flushStreamingContent]);
 
+  const thinkingBufferRef = useRef<Map<string, string>>(new Map());
+  const thinkingRafHandleRef = useRef<Map<string, number>>(new Map());
+
+  const flushThinkingContent = useCallback((agentId: string, msgId: string) => {
+    const buffered = thinkingBufferRef.current.get(msgId);
+    if (buffered === undefined) return;
+    thinkingBufferRef.current.delete(msgId);
+    thinkingRafHandleRef.current.delete(msgId);
+    updateAgentMessages(agentId, prev => {
+      const idx = prev.findIndex(m => m.id === msgId);
+      if (idx === -1) return prev;
+      const next = prev.slice();
+      next[idx] = { ...next[idx], thinking: buffered, thinkingCollapsed: next[idx].thinkingCollapsed ?? false };
+      return next;
+    });
+  }, [updateAgentMessages]);
+
+  const scheduleThinkingFlush = useCallback((agentId: string, msgId: string) => {
+    if (thinkingRafHandleRef.current.has(msgId)) return;
+    const handle = requestAnimationFrame(() => {
+      flushThinkingContent(agentId, msgId);
+    });
+    thinkingRafHandleRef.current.set(msgId, handle);
+  }, [flushThinkingContent]);
+
   // Save current messages to cache when switching away. The cleanup must
   // read the LATEST messages at unmount/agent-swap time, so we keep a
   // ref that tracks messages and only fire the save effect on agentId
@@ -507,7 +538,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     const ownedSessionId = sessionId;
 
     return () => {
-      sessionCache.set(cacheKey(ownedAgentId, ownedSessionId), messagesRef.current);
+      cacheSet(cacheKey(ownedAgentId, ownedSessionId), messagesRef.current);
     };
   }, [agentId, sessionId]);
 
@@ -518,13 +549,13 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
 
     const key = cacheKey(agentId, sessionId);
     if (sessionVersion === 0) {
-      const cached = sessionCache.get(key);
+      const cached = cacheGet(key);
       if (cached) {
         setMessages(cached);
         return;
       }
     } else {
-      sessionCache.delete(key);
+      deleteCachedChatMessages(key);
     }
 
     setMessages([]);
@@ -587,7 +618,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
           // for loadId. Only touch live React state when the user is still
           // viewing loadId; otherwise a slow A load resolving after the
           // user has swapped to B would overwrite B's displayed messages.
-          sessionCache.set(cacheKey(loadId, sessionId), historical);
+          cacheSet(cacheKey(loadId, sessionId), historical);
           if (loadId === currentAgentRef.current && sessionId === currentSessionRef.current) {
             setMessages(historical);
           }
@@ -616,7 +647,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     }
     try {
       await clearAgentHistory(agentId);
-      sessionCache.delete(cacheKey(agentId, sessionId));
+      deleteCachedChatMessages(cacheKey(agentId, sessionId));
       if (prevAgentRef.current === agentId) {
         messagesRef.current = [];
       }
@@ -888,21 +919,22 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
               scheduleStreamingFlush(sendAgentId, botMsg.id);
             } else if (data.type === "thinking_delta") {
               const chunk = data.content || "";
-              updateAgentMessages(sendAgentId, prev => prev.map(m =>
-                m.id === botMsg.id
-                  ? {
-                      ...m,
-                      thinking: (m.thinking ?? "") + chunk,
-                      thinkingCollapsed: m.thinkingCollapsed ?? false,
-                    }
-                  : m
-              ));
+              const tPrev = thinkingBufferRef.current.get(botMsg.id);
+              if (tPrev === undefined) {
+                const currentThinking = (messagesRef.current.find(m => m.id === botMsg.id)?.thinking) ?? "";
+                thinkingBufferRef.current.set(botMsg.id, currentThinking + chunk);
+              } else {
+                thinkingBufferRef.current.set(botMsg.id, tPrev + chunk);
+              }
+              scheduleThinkingFlush(sendAgentId, botMsg.id);
             } else if (data.type === "typing") {
               if (data.state === "stop") {
-                // Flush any buffered streaming content before marking done
                 const rafHandle = rafHandleRef.current.get(botMsg.id);
                 if (rafHandle !== undefined) cancelAnimationFrame(rafHandle);
                 flushStreamingContent(sendAgentId, botMsg.id);
+                const tRaf = thinkingRafHandleRef.current.get(botMsg.id);
+                if (tRaf !== undefined) cancelAnimationFrame(tRaf);
+                flushThinkingContent(sendAgentId, botMsg.id);
                 updateAgentMessages(sendAgentId, prev => prev.map(m =>
                   m.id === botMsg.id ? { ...m, isStreaming: false } : m
                 ));
@@ -953,11 +985,14 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
                 addSkillOutput({ skillName: entry.tool, agentId: sendAgentId, content: entry.content });
               }
             } else if (data.type === "silent_complete") {
-              // Cancel any pending RAF flush — message is being removed
               const rafHandle = rafHandleRef.current.get(botMsg.id);
               if (rafHandle !== undefined) cancelAnimationFrame(rafHandle);
               streamingBufferRef.current.delete(botMsg.id);
               rafHandleRef.current.delete(botMsg.id);
+              const tRaf = thinkingRafHandleRef.current.get(botMsg.id);
+              if (tRaf !== undefined) cancelAnimationFrame(tRaf);
+              thinkingBufferRef.current.delete(botMsg.id);
+              thinkingRafHandleRef.current.delete(botMsg.id);
               updateAgentMessages(sendAgentId, prev => prev.filter(m => m.id !== botMsg.id));
               finishTurnIfCurrent(sendAgentId, botMsg.id);
               cleanup();
@@ -966,6 +1001,9 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
               const rafHandle = rafHandleRef.current.get(botMsg.id);
               if (rafHandle !== undefined) cancelAnimationFrame(rafHandle);
               flushStreamingContent(sendAgentId, botMsg.id);
+              const tRaf = thinkingRafHandleRef.current.get(botMsg.id);
+              if (tRaf !== undefined) cancelAnimationFrame(tRaf);
+              flushThinkingContent(sendAgentId, botMsg.id);
               const error = data.content || "WebSocket error";
               updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id ? { ...m, isStreaming: false, error } : m
@@ -987,12 +1025,14 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
                 if (!turn.responded) { cleanup(); sendViaHttp(); }
               }, 30_000);
             } else if (data.type === "response") {
-              // Cancel any pending RAF flush — the final response supersedes
-              // any buffered streaming content.
               const rafHandle = rafHandleRef.current.get(botMsg.id);
               if (rafHandle !== undefined) cancelAnimationFrame(rafHandle);
               streamingBufferRef.current.delete(botMsg.id);
               rafHandleRef.current.delete(botMsg.id);
+              const tRaf = thinkingRafHandleRef.current.get(botMsg.id);
+              if (tRaf !== undefined) cancelAnimationFrame(tRaf);
+              thinkingBufferRef.current.delete(botMsg.id);
+              thinkingRafHandleRef.current.delete(botMsg.id);
               updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id
                   ? {
@@ -1055,7 +1095,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
 
     // HTTP fallback — direct, no fake streaming
     await sendViaHttp();
-  }, [agentId, agents, wsConnected, ws, deepThinking, showThinkingProcess, finishTurnIfCurrent, clearHistory, scheduleStreamingFlush, flushStreamingContent]);
+  }, [agentId, agents, wsConnected, ws, deepThinking, showThinkingProcess, finishTurnIfCurrent, clearHistory, scheduleStreamingFlush, flushStreamingContent, scheduleThinkingFlush, flushThinkingContent]);
 
   // Abort an in-flight agent run. Hits the backend stop endpoint (which aborts
   // the tokio task on the kernel side) and optimistically finalizes any
@@ -1469,6 +1509,22 @@ const ATTACHMENT_ACCEPT = [
   ...TEXT_LIKE_EXTENSIONS,
 ].join(",");
 
+const isImageMime = (mime: string) => mime.startsWith("image/");
+const isPdfMime = (mime: string) => mime === PDF_MIME;
+const isTextLikeMime = (mime: string) => {
+  if (mime.startsWith("text/")) return true;
+  return TEXT_LIKE_MIMES.includes(mime);
+};
+const hasTextLikeExtension = (filename: string) => {
+  const lower = filename.toLowerCase();
+  return TEXT_LIKE_EXTENSIONS.some(ext => lower.endsWith(ext));
+};
+const isSupportedFile = (file: File) =>
+  isImageMime(file.type)
+  || isPdfMime(file.type)
+  || isTextLikeMime(file.type)
+  || hasTextLikeExtension(file.name);
+
 interface PendingAttachment {
   /** Stable client id used to track this entry across upload state changes. */
   localId: string;
@@ -1570,25 +1626,6 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
 
   // ─────────────────────────────────────────────────────────────────────────
   // ── Attachment upload pipeline ────────────────────────────────────────────
-
-  const isImageMime = (mime: string) => mime.startsWith("image/");
-  const isPdfMime = (mime: string) => mime === PDF_MIME;
-  const isTextLikeMime = (mime: string) => {
-    if (mime.startsWith("text/")) return true;
-    return TEXT_LIKE_MIMES.includes(mime);
-  };
-  const hasTextLikeExtension = (filename: string) => {
-    const lower = filename.toLowerCase();
-    return TEXT_LIKE_EXTENSIONS.some(ext => lower.endsWith(ext));
-  };
-  // Browsers often leave `file.type` empty for code files (e.g. `.rs`),
-  // so we fall back to extension matching — matching the backend's
-  // `is_text_like_attachment` logic.
-  const isSupportedFile = (file: File) =>
-    isImageMime(file.type)
-    || isPdfMime(file.type)
-    || isTextLikeMime(file.type)
-    || hasTextLikeExtension(file.name);
 
   const enqueueFiles = useCallback((files: File[]) => {
     if (!agentId || files.length === 0) return;
@@ -2531,6 +2568,8 @@ export function ChatPage() {
   const [selectedAgentId, setSelectedAgentId] = useState(initialAgentId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current); }, []);
   // Message windowing: render only the last N messages to avoid DOM bloat in
   // long sessions. The user can load earlier messages with the button above.
   const [visibleCount, setVisibleCount] = useState(50);
@@ -2574,7 +2613,8 @@ export function ChatPage() {
   const handleCopy = useCallback(async (messageId: string, content: string) => {
     if (await copyToClipboard(content)) {
       setCopiedMessageId(messageId);
-      setTimeout(() => setCopiedMessageId(null), 1500);
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = setTimeout(() => setCopiedMessageId(null), 1500);
     } else {
       addToast(t("common.copy_failed"), "error");
     }

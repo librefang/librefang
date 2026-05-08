@@ -44,8 +44,12 @@ interface PairingPayload {
 }
 
 function decodeQrPayload(raw: string): PairingPayload {
-  // Parse librefang://pair?payload=<base64url-no-pad>
-  const uri = new URL(raw);
+  let uri: URL;
+  try {
+    uri = new URL(raw);
+  } catch {
+    throw new Error("Invalid QR code: expected a librefang:// pairing URL");
+  }
   const payloadB64 = uri.searchParams.get("payload");
   if (!payloadB64) throw new Error("Invalid QR code: missing payload");
 
@@ -205,8 +209,13 @@ export function ConnectWizardPage() {
         </div>
 
         {/* Tab switcher */}
-        <div className="grid grid-cols-2 gap-1 rounded-xl bg-surface p-1 border border-border-subtle">
+        <div role="tablist" aria-label={t("connect_wizard.title")} className="grid grid-cols-2 gap-1 rounded-xl bg-surface p-1 border border-border-subtle">
           <button
+            id="connect-tab-manual"
+            role="tab"
+            aria-selected={tab === "manual"}
+            aria-controls="connect-panel-manual"
+            tabIndex={tab === "manual" ? 0 : -1}
             onClick={() => { setTab("manual"); reset(); }}
             disabled={busy}
             className={`rounded-lg py-2 text-sm font-semibold transition-colors ${
@@ -218,6 +227,11 @@ export function ConnectWizardPage() {
             {t("connect_wizard.tab_manual")}
           </button>
           <button
+            id="connect-tab-qr"
+            role="tab"
+            aria-selected={tab === "qr"}
+            aria-controls="connect-panel-qr"
+            tabIndex={tab === "qr" ? 0 : -1}
             onClick={() => { setTab("qr"); reset(); }}
             disabled={busy}
             className={`rounded-lg py-2 text-sm font-semibold transition-colors ${
@@ -232,7 +246,7 @@ export function ConnectWizardPage() {
 
         {/* Tab content */}
         {tab === "manual" ? (
-          <div className="space-y-4">
+          <div id="connect-panel-manual" role="tabpanel" aria-labelledby="connect-tab-manual" className="space-y-4">
             <div className="space-y-1.5">
               <label htmlFor="daemon-url" className="text-xs font-semibold text-text-dim uppercase tracking-wider">
                 {t("connect_wizard.field_url")}
@@ -244,7 +258,7 @@ export function ConnectWizardPage() {
                 autoCapitalize="none"
                 autoCorrect="off"
                 spellCheck={false}
-                placeholder="http://192.168.1.100:4545"
+                placeholder={t("connect_wizard.url_placeholder", { defaultValue: `${window.location.protocol}//${window.location.hostname}:4545` })}
                 value={baseUrl}
                 onChange={(e) => { setBaseUrl(e.target.value); reset(); }}
                 disabled={busy}
@@ -284,7 +298,7 @@ export function ConnectWizardPage() {
             </button>
           </div>
         ) : (
-          <div className="space-y-4">
+          <div id="connect-panel-qr" role="tabpanel" aria-labelledby="connect-tab-qr" className="space-y-4">
             <div className="space-y-1.5">
               <label htmlFor="device-name" className="text-xs font-semibold text-text-dim uppercase tracking-wider">
                 {t("connect_wizard.field_device_name")}

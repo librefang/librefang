@@ -1,0 +1,92 @@
+//! Workflow subsystem — orchestration engines + scheduler + queue.
+//!
+//! Bundles every long-lived orchestration handle that previously sat as
+//! a flat field on `LibreFangKernel`: the workflow execution `engine`
+//! (renamed from the original `workflows` field to avoid the
+//! `self.workflows.workflows` collision), workflow `template_registry`,
+//! event-driven `triggers`, the `background` agent executor, the
+//! `cron_scheduler`, and the lane-based `command_queue`.
+
+use librefang_runtime::command_lane::CommandQueue;
+
+use crate::background::BackgroundExecutor;
+use crate::cron::CronScheduler;
+use crate::triggers::TriggerEngine;
+use crate::workflow::{WorkflowEngine, WorkflowTemplateRegistry};
+
+/// Focused workflow + scheduler + queue API.
+pub trait WorkflowSubsystemApi: Send + Sync {
+    /// Workflow execution engine handle.
+    fn engine_ref(&self) -> &WorkflowEngine;
+    /// Workflow template registry.
+    fn templates_ref(&self) -> &WorkflowTemplateRegistry;
+    /// Event-driven trigger engine.
+    fn triggers_ref(&self) -> &TriggerEngine;
+    /// Cron scheduler.
+    fn cron_ref(&self) -> &CronScheduler;
+    /// Command queue (lane-based concurrency).
+    fn command_queue_ref(&self) -> &CommandQueue;
+}
+
+/// Workflow / trigger / cron / queue cluster — see module docs.
+pub struct WorkflowSubsystem {
+    /// Workflow execution engine (renamed from the original `workflows`
+    /// field — see module docs).
+    pub(crate) engine: WorkflowEngine,
+    /// Workflow template registry.
+    pub(crate) template_registry: WorkflowTemplateRegistry,
+    /// Event-driven trigger engine.
+    pub(crate) triggers: TriggerEngine,
+    /// Background agent executor.
+    pub(crate) background: BackgroundExecutor,
+    /// Cron job scheduler.
+    pub(crate) cron_scheduler: CronScheduler,
+    /// Command queue with lane-based concurrency control.
+    pub(crate) command_queue: CommandQueue,
+}
+
+impl WorkflowSubsystem {
+    pub(crate) fn new(
+        engine: WorkflowEngine,
+        triggers: TriggerEngine,
+        background: BackgroundExecutor,
+        cron_scheduler: CronScheduler,
+        command_queue: CommandQueue,
+    ) -> Self {
+        Self {
+            engine,
+            template_registry: WorkflowTemplateRegistry::new(),
+            triggers,
+            background,
+            cron_scheduler,
+            command_queue,
+        }
+    }
+}
+
+impl WorkflowSubsystemApi for WorkflowSubsystem {
+    #[inline]
+    fn engine_ref(&self) -> &WorkflowEngine {
+        &self.engine
+    }
+
+    #[inline]
+    fn templates_ref(&self) -> &WorkflowTemplateRegistry {
+        &self.template_registry
+    }
+
+    #[inline]
+    fn triggers_ref(&self) -> &TriggerEngine {
+        &self.triggers
+    }
+
+    #[inline]
+    fn cron_ref(&self) -> &CronScheduler {
+        &self.cron_scheduler
+    }
+
+    #[inline]
+    fn command_queue_ref(&self) -> &CommandQueue {
+        &self.command_queue
+    }
+}

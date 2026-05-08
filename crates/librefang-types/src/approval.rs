@@ -330,6 +330,17 @@ pub struct ApprovalRequest {
     /// `resolve_gateway_approval(session_key, choice, resolve_all=True)`).
     #[serde(default)]
     pub session_id: Option<String>,
+    /// LLM-assigned `tool_use_id` from the original `ToolUseStart` block
+    /// (deferred-path only). Carried so external surfaces can correlate
+    /// the approval request back to the streaming `ToolCall` already
+    /// rendered — e.g. the ACP adapter uses this as the
+    /// `RequestPermissionRequest` `ToolCallId` so the editor's permission
+    /// modal attaches to the existing tool-call card instead of a fresh
+    /// orphan id (#3313). `None` for the synchronous `request_approval`
+    /// path and for pre-existing rows that pre-date this field — callers
+    /// that need a stable id should fall back to `request.id`.
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
 }
 
 impl ApprovalRequest {
@@ -399,6 +410,36 @@ pub struct ApprovalResponse {
     pub decision: ApprovalDecision,
     pub decided_at: DateTime<Utc>,
     pub decided_by: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// ApprovalEvent — broadcast surface for external subscribers (#3313)
+// ---------------------------------------------------------------------------
+
+/// Event emitted by the kernel's `ApprovalManager` when a request enters
+/// or leaves the pending queue.
+///
+/// Subscribed to by external transports that need to mirror approval
+/// state into their own UI surface (e.g. the ACP adapter forwards
+/// `Created` events into editor-side `session/request_permission`
+/// requests). The dashboard and TUI continue to use the synchronous
+/// `list_pending` / `list_recent` API; the broadcast is purely additive
+/// for low-latency subscribers.
+///
+/// Variants are non-exhaustive so future kernel versions can add states
+/// (e.g. `Escalated`) without breaking subscribers.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum ApprovalEvent {
+    /// A new approval request has been added to the pending queue.
+    Created(ApprovalRequest),
+    /// A pending approval has been resolved (approved, denied, modified,
+    /// timed out, or skipped).
+    Resolved {
+        request_id: Uuid,
+        decision: ApprovalDecision,
+        decided_by: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -884,6 +925,7 @@ mod tests {
             route_to: Vec::new(),
             escalation_count: 0,
             session_id: None,
+            tool_use_id: None,
         }
     }
 

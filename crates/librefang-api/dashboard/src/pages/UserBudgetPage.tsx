@@ -107,6 +107,16 @@ export function UserBudgetPage() {
   const isLoading = query.isLoading;
   const fetchError = query.error;
 
+  const FIELD_LABELS: Record<string, string> = {
+    max_hourly_usd: t("userBudget.fields.max_hourly", "Max hourly USD"),
+    max_daily_usd: t("userBudget.fields.max_daily", "Max daily USD"),
+    max_monthly_usd: t("userBudget.fields.max_monthly", "Max monthly USD"),
+    alert_threshold: t(
+      "userBudget.fields.alert_threshold",
+      "Alert threshold (0–1)",
+    ),
+  };
+
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -124,7 +134,7 @@ export function UserBudgetPage() {
           t(
             "userBudget.errors.non_negative",
             "{{field}} must be a finite, non-negative number",
-            { field: k },
+            { field: FIELD_LABELS[k] ?? k },
           ),
         );
         return;
@@ -261,12 +271,14 @@ export function UserBudgetPage() {
                           breached ? "text-error" : "text-text-main"
                         }`}
                       >
-                        ${win.spend.toFixed(4)}
+                        {t("common.currency_symbol", "$")}{win.spend.toFixed(4)}
                       </span>
                     </div>
                     <p className="mt-0.5 text-[11px] text-text-dim font-mono">
                       {t("user_budget.of_cap", "of {{cap}}", {
-                        cap: unlimited ? "∞" : `$${win.limit.toFixed(2)}`,
+                        cap: unlimited
+                          ? t("common.unlimited", "∞")
+                          : `${t("common.currency_symbol", "$")}${win.limit.toFixed(2)}`,
                       })}
                     </p>
                   </div>
