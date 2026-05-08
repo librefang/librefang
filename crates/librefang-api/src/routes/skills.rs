@@ -4033,7 +4033,7 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
                 .collect();
             let is_alive = matches!(
                 health.get_health(conn.name()).map(|h| h.status),
-                Some(librefang_extensions::McpStatus::Ready),
+                Some(librefang_types::mcp::McpStatus::Ready),
             );
             serde_json::json!({
                 "name": conn.name(),
@@ -5631,15 +5631,15 @@ pub(crate) fn remove_channel_config(
 // ---------------------------------------------------------------------------
 
 /// Serialize a single catalog transport for API output.
-fn serialize_catalog_transport(t: &librefang_extensions::McpCatalogTransport) -> serde_json::Value {
+fn serialize_catalog_transport(t: &librefang_types::mcp::McpCatalogTransport) -> serde_json::Value {
     match t {
-        librefang_extensions::McpCatalogTransport::Stdio { command, args } => {
+        librefang_types::mcp::McpCatalogTransport::Stdio { command, args } => {
             serde_json::json!({ "type": "stdio", "command": command, "args": args })
         }
-        librefang_extensions::McpCatalogTransport::Sse { url } => {
+        librefang_types::mcp::McpCatalogTransport::Sse { url } => {
             serde_json::json!({ "type": "sse", "url": url })
         }
-        librefang_extensions::McpCatalogTransport::Http { url } => {
+        librefang_types::mcp::McpCatalogTransport::Http { url } => {
             serde_json::json!({ "type": "http", "url": url })
         }
     }
@@ -5663,7 +5663,7 @@ fn collect_installed_catalog_ids(state: &Arc<AppState>) -> std::collections::Has
 }
 
 fn render_catalog_entry(
-    entry: &librefang_extensions::McpCatalogEntry,
+    entry: &librefang_types::mcp::McpCatalogEntry,
     installed_template_ids: &std::collections::HashSet<String>,
     lang: &str,
 ) -> serde_json::Value {
@@ -5902,8 +5902,8 @@ fn status_str_for_catalog(
 ) -> &'static str {
     match installed_by_template.get(template_id) {
         Some(srv) => match health.get_health(&srv.name).as_ref().map(|h| &h.status) {
-            Some(librefang_extensions::McpStatus::Ready) => "ready",
-            Some(librefang_extensions::McpStatus::Error(_)) => "error",
+            Some(librefang_types::mcp::McpStatus::Ready) => "ready",
+            Some(librefang_types::mcp::McpStatus::Error(_)) => "error",
             _ => "installed",
         },
         None => "available",
