@@ -11,7 +11,7 @@ use librefang_types::config::McpOAuthConfig;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use url::Url;
 
 // Canonical OAuth token type lives in `librefang-types`.  Re-export so existing
@@ -319,11 +319,46 @@ pub fn well_known_url(server_url: &str) -> Option<String> {
     Some(format!("{}/.well-known/oauth-authorization-server", origin))
 }
 
+/// Returns true when `endpoint_host` and `server_host` resolve to the same
+/// registrable domain (eTLD+1) per the Public Suffix List, with both sides
+/// required to be DNS names (IP literals are rejected because the PSL's
+/// unknown-TLD default rule can produce false matches on shared trailing
+/// IP octets — e.g. `psl::domain_str("10.0.0.1") == Some("0.1")`).
+///
+/// Mirrors the policy of `librefang-api::routes::mcp_auth::token_endpoint_host_matches`'s
+/// Rule 2 (#4779, #4665).
+fn shares_registrable_domain(endpoint_host: &str, server_host: &str) -> bool {
+    use std::net::IpAddr;
+    use std::str::FromStr;
+
+    // Strip IPv6 brackets if present — Url::host_str preserves them.
+    let strip = |h: &str| h.trim_start_matches('[').trim_end_matches(']').to_string();
+    let eh = strip(endpoint_host);
+    let sh = strip(server_host);
+
+    // Reject if either side is an IP literal (v4 or v6).
+    if IpAddr::from_str(&eh).is_ok() || IpAddr::from_str(&sh).is_ok() {
+        return false;
+    }
+
+    match (psl::domain_str(&eh), psl::domain_str(&sh)) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        _ => false,
+    }
+}
+
 /// Verify that every OAuth endpoint URL returned by a metadata document
-/// shares the same scheme and host (origin) as `server_url`.
+/// shares the same scheme and host (origin) as `server_url`, or at minimum
+/// the same registrable domain (eTLD+1).
 ///
 /// This prevents a rogue metadata document from redirecting the token
 /// exchange or authorization flow to an attacker-controlled host.
+///
+/// Acceptance rules (same two-rule policy as the api-layer
+/// `token_endpoint_host_matches`):
+/// - **Rule 1** (#3713): strict origin equality (scheme + host + port).
+/// - **Rule 2** (#4665, #4779): both endpoint host and server host are DNS
+///   names sharing the same registrable domain under the Public Suffix List.
 pub fn validate_metadata_endpoints(
     metadata: &OAuthMetadata,
     server_url: &str,
@@ -334,13 +369,38 @@ pub fn validate_metadata_endpoints(
     let check = |endpoint: &str, label: &str| -> Result<(), String> {
         let parsed =
             Url::parse(endpoint).map_err(|e| format!("Invalid {label} URL '{endpoint}': {e}"))?;
-        if parsed.origin() != server_origin {
-            return Err(format!(
-                "OAuth metadata endpoint domain mismatch: {label} '{endpoint}' \
-                 does not share the same scheme+host as the MCP server '{server_url}'"
-            ));
+
+        // Rule 1 (#3713): strict origin equality.
+        if parsed.origin() == server_origin {
+            return Ok(());
         }
-        Ok(())
+
+        // Rule 2 (#4665, mirrors #4779's api-side policy): same eTLD+1.
+        let endpoint_host = parsed.host_str().unwrap_or("");
+        let server_host = server_parsed.host_str().unwrap_or("");
+        if !endpoint_host.is_empty()
+            && !server_host.is_empty()
+            && shares_registrable_domain(endpoint_host, server_host)
+        {
+            // psl::domain_str on the endpoint host (already verified to match
+            // the server host's eTLD+1 inside shares_registrable_domain).
+            let registrable = psl::domain_str(endpoint_host).unwrap_or("");
+            info!(
+                endpoint = %endpoint,
+                endpoint_host = %endpoint_host,
+                server_url = %server_url,
+                server_host = %server_host,
+                registrable_domain = %registrable,
+                label = %label,
+                "accepted OAuth metadata endpoint on sibling subdomain within the same registrable domain (#4665)"
+            );
+            return Ok(());
+        }
+
+        Err(format!(
+            "OAuth metadata endpoint domain mismatch: {label} '{endpoint}' \
+             does not share the same scheme+host as the MCP server '{server_url}'"
+        ))
     };
 
     check(&metadata.authorization_endpoint, "authorization_endpoint")?;
@@ -1178,6 +1238,79 @@ mod tests {
             server_url: "https://example.com/mcp".to_string(),
         };
         assert!(validate_metadata_endpoints(&meta, "https://example.com/mcp").is_ok());
+    }
+
+    #[test]
+    fn validate_metadata_endpoints_accepts_cross_subdomain_within_registrable_domain() {
+        // Slack-shaped delegation: server URL on mcp.slack.com, metadata
+        // declares endpoints on slack.com. Both share eTLD+1 = slack.com,
+        // so Rule 2 must accept (#4665, #4779).
+        let meta = OAuthMetadata {
+            authorization_endpoint: "https://slack.com/oauth/v2_user/authorize".to_string(),
+            token_endpoint: "https://slack.com/api/oauth.v2.user.access".to_string(),
+            client_id: None,
+            registration_endpoint: None,
+            scopes: Vec::new(),
+            user_scopes: Vec::new(),
+            server_url: "https://mcp.slack.com/mcp".to_string(),
+        };
+        assert!(
+            validate_metadata_endpoints(&meta, "https://mcp.slack.com/mcp").is_ok(),
+            "expected legitimate cross-subdomain delegation to be accepted"
+        );
+    }
+
+    #[test]
+    fn validate_metadata_endpoints_accepts_deeper_subdomain_within_registrable_domain() {
+        let meta = OAuthMetadata {
+            authorization_endpoint: "https://c.foo.com/auth".to_string(),
+            token_endpoint: "https://c.foo.com/token".to_string(),
+            client_id: None,
+            registration_endpoint: None,
+            scopes: Vec::new(),
+            user_scopes: Vec::new(),
+            server_url: "https://a.b.foo.com/mcp".to_string(),
+        };
+        assert!(validate_metadata_endpoints(&meta, "https://a.b.foo.com/mcp").is_ok());
+    }
+
+    #[test]
+    fn validate_metadata_endpoints_rejects_under_public_suffix_boundary() {
+        // *.github.io is a PSL private suffix; userA and userB are different
+        // registrable domains and must not trust each other (#4665).
+        let meta = OAuthMetadata {
+            authorization_endpoint: "https://userB.github.io/auth".to_string(),
+            token_endpoint: "https://userA.github.io/token".to_string(),
+            client_id: None,
+            registration_endpoint: None,
+            scopes: Vec::new(),
+            user_scopes: Vec::new(),
+            server_url: "https://userA.github.io/mcp".to_string(),
+        };
+        let err = validate_metadata_endpoints(&meta, "https://userA.github.io/mcp").unwrap_err();
+        assert!(err.contains("domain mismatch"), "{err}");
+        assert!(err.contains("authorization_endpoint"), "{err}");
+    }
+
+    #[test]
+    fn validate_metadata_endpoints_rejects_ip_literal_with_shared_psl_default_rule() {
+        // psl::domain_str's unknown-TLD default rule produces shared
+        // trailing labels for unrelated IPv4 literals
+        // (psl::domain_str("10.0.0.1") == Some("0.1")). The IP carve-out
+        // in shares_registrable_domain must reject this even though Rule 1
+        // (origin equality) also fails. Pin against false-match (mirrors
+        // #4779's `token_endpoint_ip_host_requires_exact_match`).
+        let meta = OAuthMetadata {
+            authorization_endpoint: "https://10.0.0.1/auth".to_string(),
+            token_endpoint: "https://10.0.0.1/token".to_string(),
+            client_id: None,
+            registration_endpoint: None,
+            scopes: Vec::new(),
+            user_scopes: Vec::new(),
+            server_url: "https://127.0.0.1/mcp".to_string(),
+        };
+        let err = validate_metadata_endpoints(&meta, "https://127.0.0.1/mcp").unwrap_err();
+        assert!(err.contains("domain mismatch"), "{err}");
     }
 
     // -- #3727: generate_flow_id tests --
