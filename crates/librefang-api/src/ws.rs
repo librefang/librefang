@@ -996,13 +996,19 @@ async fn handle_text_message(
                     .get(agent_id)
                     .map(|e| e.manifest.model.model.clone())
                     .unwrap_or_default();
-                let supports_vision = state
-                    .kernel
-                    .model_catalog_ref()
-                    .load()
-                    .find_model(&model_name)
-                    .map(|m| m.supports_vision)
-                    .unwrap_or(false);
+                // Refs #4745: respect user-configured vision override so the
+                // CLI/WS warning matches what the dashboard shows. If the user
+                // explicitly forced `supports_vision = true` for a model whose
+                // catalog declared it false (because the provider's
+                // `capabilities` field is wrong), we should let the image
+                // request through.
+                let supports_vision = {
+                    let catalog = state.kernel.model_catalog_ref().load();
+                    catalog
+                        .find_model(&model_name)
+                        .map(|m| catalog.effective_capabilities(m).supports_vision)
+                        .unwrap_or(false)
+                };
                 if !supports_vision {
                     let _ = send_json(
                         sender,

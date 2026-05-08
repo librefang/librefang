@@ -90,6 +90,14 @@ function addFormReducer(state: AddFormState, action: AddFormAction): AddFormStat
 
 // ── Settings-form reducer (MD5/MD6/MD7) ────────────────────────
 
+// Tri-state capability override (refs #4745). `default` means "use the
+// catalog/provider value"; `on` / `off` force the capability regardless of
+// what the catalog declares. Maps to ModelOverrides on the wire as:
+//   default → field absent (undefined)
+//   on      → true
+//   off     → false
+type CapOverride = "default" | "on" | "off";
+
 type SettingsState = {
   modelType: "chat" | "speech" | "embedding";
   temperature: number;
@@ -106,6 +114,10 @@ type SettingsState = {
   useMaxCompletionTokens: boolean;
   noSystemRole: boolean;
   forceMaxTokens: boolean;
+  toolsOverride: CapOverride;
+  visionOverride: CapOverride;
+  streamingOverride: CapOverride;
+  thinkingOverride: CapOverride;
 };
 
 type SettingsAction =
@@ -128,7 +140,23 @@ const settingsInitial: SettingsState = {
   useMaxCompletionTokens: false,
   noSystemRole: false,
   forceMaxTokens: false,
+  toolsOverride: "default",
+  visionOverride: "default",
+  streamingOverride: "default",
+  thinkingOverride: "default",
 };
+
+function boolToOverride(v: boolean | undefined | null): CapOverride {
+  if (v === true) return "on";
+  if (v === false) return "off";
+  return "default";
+}
+
+function overrideToBool(v: CapOverride): boolean | undefined {
+  if (v === "on") return true;
+  if (v === "off") return false;
+  return undefined;
+}
 
 function settingsReducer(state: SettingsState, action: SettingsAction): SettingsState {
   switch (action.type) {
@@ -787,6 +815,10 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
     if (o.use_max_completion_tokens != null) payload.useMaxCompletionTokens = o.use_max_completion_tokens;
     if (o.no_system_role != null) payload.noSystemRole = o.no_system_role;
     if (o.force_max_tokens != null) payload.forceMaxTokens = o.force_max_tokens;
+    payload.toolsOverride = boolToOverride(o.supports_tools);
+    payload.visionOverride = boolToOverride(o.supports_vision);
+    payload.streamingOverride = boolToOverride(o.supports_streaming);
+    payload.thinkingOverride = boolToOverride(o.supports_thinking);
     dispatch({ type: "HYDRATE", payload });
     hydratedRef.current = true;
   }, [overridesQuery.data]);
@@ -805,6 +837,14 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
     if (s.useMaxCompletionTokens) overrides.use_max_completion_tokens = true;
     if (s.noSystemRole) overrides.no_system_role = true;
     if (s.forceMaxTokens) overrides.force_max_tokens = true;
+    const tools = overrideToBool(s.toolsOverride);
+    if (tools !== undefined) overrides.supports_tools = tools;
+    const vision = overrideToBool(s.visionOverride);
+    if (vision !== undefined) overrides.supports_vision = vision;
+    const streaming = overrideToBool(s.streamingOverride);
+    if (streaming !== undefined) overrides.supports_streaming = streaming;
+    const thinking = overrideToBool(s.thinkingOverride);
+    if (thinking !== undefined) overrides.supports_thinking = thinking;
     try {
       await updateMut.mutateAsync({ modelKey: overrideKey, overrides });
       onSaved();
@@ -865,21 +905,48 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
           </div>
         </div>
 
-        {/* Capabilities */}
+        {/* Capabilities — refs #4745: editable per-model overrides.
+            Each capability has a tri-state segmented control:
+              Auto   = use catalog/provider default (no override stored)
+              On     = force capability on regardless of catalog
+              Off    = force capability off regardless of catalog
+            Useful when the provider's `capabilities` field is wrong, missing,
+            or non-standard. The "Auto" segment shows the catalog default in
+            parens so the user can see what they'd revert to. */}
         <div className="space-y-1.5">
           <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.capabilities")}</label>
-          <div className="flex flex-wrap gap-2">
+          <p className="text-[11px] text-text-dim leading-snug">{t("models.capabilities_override_hint")}</p>
+          <div className="space-y-1.5">
             {([
-              ["vision", model.supports_vision, Eye] as const,
-              ["tools", model.supports_tools, Wrench] as const,
-              ["thinking", model.supports_thinking, Brain] as const,
-            ]).map(([key, supported, Icon]) => (
-              <span key={key} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-bold ${
-                supported ? "border-success/30 bg-success/10 text-success" : "border-border-subtle text-text-dim/40"
-              }`}>
-                <Icon className="w-3.5 h-3.5" />
-                {t(`models.supports_${key}`)}
-              </span>
+              ["tools", state.toolsOverride, model.supports_tools, Wrench, "toolsOverride"] as const,
+              ["vision", state.visionOverride, model.supports_vision, Eye, "visionOverride"] as const,
+              ["streaming", state.streamingOverride, model.supports_streaming, Zap, "streamingOverride"] as const,
+              ["thinking", state.thinkingOverride, model.supports_thinking, Brain, "thinkingOverride"] as const,
+            ]).map(([key, current, catalogDefault, Icon, field]) => (
+              <div key={key} className="flex items-center gap-3">
+                <span className="flex items-center gap-1.5 text-xs font-bold text-text min-w-[6.5rem]">
+                  <Icon className="w-3.5 h-3.5" />
+                  {t(`models.supports_${key}`)}
+                </span>
+                <div className="flex flex-1 gap-0.5 rounded-xl border border-border-subtle bg-surface p-0.5">
+                  {(["default", "on", "off"] as const).map((opt) => {
+                    const label = opt === "default"
+                      ? `${t("models.cap_auto")} (${catalogDefault ? t("models.cap_on") : t("models.cap_off")})`
+                      : opt === "on" ? t("models.cap_force_on") : t("models.cap_force_off");
+                    return (
+                      <button
+                        key={opt}
+                        type="button"
+                        onClick={() => dispatch({ type: "SET_FIELD", field, value: opt })}
+                        className={`flex-1 px-2 py-1.5 rounded-lg text-[11px] font-bold transition-colors ${
+                          current === opt ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-text hover:bg-main"
+                        }`}>
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             ))}
           </div>
         </div>

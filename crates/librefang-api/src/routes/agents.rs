@@ -815,7 +815,12 @@ pub(crate) fn enrich_agent_json(
             let tier = model_entry
                 .map(|m| format!("{:?}", m.tier).to_lowercase())
                 .unwrap_or_else(|| "unknown".to_string());
-            let thinking = model_entry.map(|m| m.supports_thinking).unwrap_or(false);
+            // Refs #4745: surface effective `supports_thinking` (catalog ∘ user
+            // override) so the agents page reflects the user's per-model
+            // capability overrides.
+            let thinking = model_entry
+                .map(|m| cat.effective_capabilities(m).supports_thinking)
+                .unwrap_or(false);
             let auth = cat
                 .get_provider(provider)
                 .map(|p| p.auth_status.to_string())

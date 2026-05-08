@@ -531,10 +531,15 @@ impl LibreFangKernel {
                 .filter(|w| *w > 0)
         });
 
-        // Inject model_supports_tools for auto web search augmentation
+        // Inject model_supports_tools for auto web search augmentation.
+        // Refs #4745: honour user-configured per-model capability overrides
+        // here too — when a user has manually flipped `supports_tools` for a
+        // model whose catalog metadata was wrong, the auto-augmentation path
+        // must respect that override or the runtime behaviour diverges from
+        // what the dashboard shows.
         if let Some(supports) = Some(self.llm.model_catalog.load()).and_then(|cat| {
             cat.find_model(&manifest.model.model)
-                .map(|m| m.supports_tools)
+                .map(|m| cat.effective_capabilities(m).supports_tools)
         }) {
             manifest.metadata.insert(
                 "model_supports_tools".to_string(),
@@ -1899,10 +1904,11 @@ impl LibreFangKernel {
         );
         let mut manifest = entry.manifest.clone();
 
-        // Inject model_supports_tools for auto web search augmentation
+        // Inject model_supports_tools for auto web search augmentation.
+        // Refs #4745: honour user capability overrides via effective_capabilities.
         if let Some(supports) = Some(self.llm.model_catalog.load()).and_then(|cat| {
             cat.find_model(&manifest.model.model)
-                .map(|m| m.supports_tools)
+                .map(|m| cat.effective_capabilities(m).supports_tools)
         }) {
             manifest.metadata.insert(
                 "model_supports_tools".to_string(),
