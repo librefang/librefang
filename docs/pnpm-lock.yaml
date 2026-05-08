@@ -139,8 +139,8 @@ importers:
         specifier: ^8.5.14
         version: 8.5.14
       postcss-focus-visible:
-        specifier: ^10.0.1
-        version: 10.0.1(postcss@8.5.14)
+        specifier: ^11.0.0
+        version: 11.0.0(postcss@8.5.14)
       simple-functional-loader:
         specifier: ^1.2.1
         version: 1.2.1
@@ -1369,9 +1369,9 @@ packages:
     resolution: {integrity: sha512-QP88BAKvMam/3NxH6vj2o21R6MjxZUAd6nlwAS/pnGvN9IVLocLHxGYIzFhg6fUQ+5th6P4dv4eW9jX3DSIj7A==}
     engines: {node: '>=12'}
 
-  postcss-focus-visible@10.0.1:
-    resolution: {integrity: sha512-U58wyjS/I1GZgjRok33aE8juW9qQgQUNwTSdxQGuShHzwuYdcklnvK/+qOWX1Q9kr7ysbraQ6ht6r+udansalA==}
-    engines: {node: '>=18'}
+  postcss-focus-visible@11.0.0:
+    resolution: {integrity: sha512-VG1a9kBKizUBWS66t5xyB4uLONBnvZLCmZXxT40FALu8EF0QgVZBYy5ApC0KhmpHsv+pvHMJHB3agKHwmocWjw==}
+    engines: {node: '>=20.19.0'}
     peerDependencies:
       postcss: '>=8.5.10'
 
@@ -3161,7 +3161,7 @@ snapshots:
 
   picomatch@4.0.4: {}
 
-  postcss-focus-visible@10.0.1(postcss@8.5.14):
+  postcss-focus-visible@11.0.0(postcss@8.5.14):
     dependencies:
       postcss: 8.5.14
       postcss-selector-parser: 7.1.1
