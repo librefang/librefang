@@ -9,7 +9,10 @@
 set -euo pipefail
 
 input="$(cat)"
-cwd="$(printf '%s' "$input" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("cwd",""))' 2>/dev/null || true)"
+# here-string (not `printf | python3`) so `set -o pipefail` can't pick up
+# a SIGPIPE 141 from printf when python finishes and closes its stdin
+# early — same fix shape as the PreToolUse hooks.
+cwd="$(python3 -c 'import sys,json; print(json.load(sys.stdin).get("cwd",""))' <<<"$input" 2>/dev/null || true)"
 [ -n "$cwd" ] || { echo '{}'; exit 0; }
 
 real_cwd="$(cd "$cwd" 2>/dev/null && pwd -P || true)"
@@ -29,9 +32,11 @@ done
 
 # Find the *main* worktree path (first entry of `git worktree list`) so we can
 # tell whether this session is inside the librefang repo regardless of whether
-# we are in the main tree or a linked one.
-main_root="$(git -C "$repo_root" worktree list --porcelain 2>/dev/null \
-  | awk '/^worktree / {print $2; exit}')"
+# we are in the main tree or a linked one. Capture git's output first; the
+# original `git … | awk … {exit}` pipeline SIGPIPE'd git when awk exited
+# early, which `set -o pipefail` then propagated as a hook abort.
+worktree_list="$(git -C "$repo_root" worktree list --porcelain 2>/dev/null || true)"
+main_root="$(awk '/^worktree / {print $2; exit}' <<<"$worktree_list")"
 [ -n "$main_root" ] || main_root="$repo_root"
 
 case "$main_root" in
