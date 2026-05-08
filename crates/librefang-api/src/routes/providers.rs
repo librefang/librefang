@@ -169,9 +169,7 @@ pub async fn list_models(
                 .get_provider(&m.provider)
                 .map(|p| p.auth_status.is_available())
                 .unwrap_or(m.tier == librefang_types::model_catalog::ModelTier::Custom);
-            // Refs #4745: surface effective capabilities (catalog ∘ user override)
-            // so the dashboard reflects the user's overrides without a separate
-            // round-trip to the per-model overrides endpoint.
+            // Effective `supports_*` reflects user overrides; `capabilities_catalog` ships the raw default for revert-target UIs. Refs #4745.
             let eff = catalog.effective_capabilities(m);
             serde_json::json!({
                 "id": m.id,
@@ -189,6 +187,12 @@ pub async fn list_models(
                 "supports_vision": eff.supports_vision,
                 "supports_streaming": eff.supports_streaming,
                 "supports_thinking": eff.supports_thinking,
+                "capabilities_catalog": {
+                    "supports_tools": m.supports_tools,
+                    "supports_vision": m.supports_vision,
+                    "supports_streaming": m.supports_streaming,
+                    "supports_thinking": m.supports_thinking,
+                },
                 "aliases": m.aliases,
                 "available": available,
             })
@@ -312,9 +316,7 @@ pub async fn get_model(
                 .unwrap_or(m.tier == librefang_types::model_catalog::ModelTier::Custom);
             let override_key = format!("{}:{}", m.provider, m.id);
             let overrides = catalog.get_overrides(&override_key);
-            // Refs #4745: surface effective capabilities (catalog ∘ user override)
-            // so the dashboard model detail page does not have to merge values
-            // client-side.
+            // Effective `supports_*` reflects user overrides; `capabilities_catalog` ships the raw default for revert-target UIs. Refs #4745.
             let eff = catalog.effective_capabilities(m);
             (
                 StatusCode::OK,
@@ -334,6 +336,12 @@ pub async fn get_model(
                     "supports_vision": eff.supports_vision,
                     "supports_streaming": eff.supports_streaming,
                     "supports_thinking": eff.supports_thinking,
+                    "capabilities_catalog": {
+                        "supports_tools": m.supports_tools,
+                        "supports_vision": m.supports_vision,
+                        "supports_streaming": m.supports_streaming,
+                        "supports_thinking": m.supports_thinking,
+                    },
                     "aliases": m.aliases,
                     "available": available,
                     "overrides": overrides,
@@ -729,9 +737,7 @@ pub async fn get_provider(
                     .models_by_provider(&name)
                     .iter()
                     .map(|m| {
-                        // Refs #4745: surface effective capabilities here too
-                        // so single-provider drilldown stays consistent with
-                        // the catalog-wide /api/models view.
+                        // Effective `supports_*` reflects user overrides; `capabilities_catalog` ships the raw default for revert-target UIs. Refs #4745.
                         let eff = catalog.effective_capabilities(m);
                         serde_json::json!({
                             "id": m.id,
@@ -748,6 +754,12 @@ pub async fn get_provider(
                             "supports_vision": eff.supports_vision,
                             "supports_streaming": eff.supports_streaming,
                             "supports_thinking": eff.supports_thinking,
+                            "capabilities_catalog": {
+                                "supports_tools": m.supports_tools,
+                                "supports_vision": m.supports_vision,
+                                "supports_streaming": m.supports_streaming,
+                                "supports_thinking": m.supports_thinking,
+                            },
                         })
                     })
                     .collect();

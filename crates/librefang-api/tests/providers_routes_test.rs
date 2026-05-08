@@ -448,6 +448,14 @@ async fn capability_override_flips_effective_value_in_get_model() {
         body["overrides"]["supports_tools"].as_bool(),
         Some(!base_tools)
     );
+    // `capabilities_catalog` is the unmerged catalog default — it must NOT
+    // shift when an override is active, otherwise the override-editor UI
+    // can't render "Auto = revert to catalog" correctly.
+    let cat = &body["capabilities_catalog"];
+    assert_eq!(cat["supports_tools"].as_bool(), Some(base_tools));
+    assert_eq!(cat["supports_vision"].as_bool(), Some(base_vision));
+    assert_eq!(cat["supports_streaming"].as_bool(), Some(base_streaming));
+    assert_eq!(cat["supports_thinking"].as_bool(), Some(base_thinking));
 
     // GET /api/models?provider=openai also reflects the override.
     let (status, listed) = json_request(&h, Method::GET, "/api/models?provider=openai", None).await;
@@ -460,6 +468,11 @@ async fn capability_override_flips_effective_value_in_get_model() {
         .expect("gpt-4o-mini should be in the openai catalog slice");
     assert_eq!(entry["supports_tools"].as_bool(), Some(!base_tools));
     assert_eq!(entry["supports_vision"].as_bool(), Some(!base_vision));
+    // `capabilities_catalog` must also be present and unaffected by override.
+    assert_eq!(
+        entry["capabilities_catalog"]["supports_tools"].as_bool(),
+        Some(base_tools)
+    );
 
     // GET /api/providers/openai also surfaces the effective values for the
     // single-provider drilldown.
@@ -475,6 +488,11 @@ async fn capability_override_flips_effective_value_in_get_model() {
     assert_eq!(
         prov_entry["supports_thinking"].as_bool(),
         Some(!base_thinking)
+    );
+    assert_eq!(
+        prov_entry["capabilities_catalog"]["supports_thinking"].as_bool(),
+        Some(base_thinking),
+        "capabilities_catalog in /api/providers/{name} must be unmerged"
     );
 
     // DELETE — effective values revert to catalog defaults.

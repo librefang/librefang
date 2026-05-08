@@ -1494,10 +1494,18 @@ export interface ModelItem {
   max_output_tokens?: number;
   input_cost_per_m?: number;
   output_cost_per_m?: number;
+  // Effective (catalog ∘ override) — use for "what the model actually does". Refs #4745.
   supports_tools?: boolean;
   supports_vision?: boolean;
   supports_streaming?: boolean;
   supports_thinking?: boolean;
+  // Raw catalog defaults — use for "Auto = revert target" in override editors.
+  capabilities_catalog?: {
+    supports_tools?: boolean;
+    supports_vision?: boolean;
+    supports_streaming?: boolean;
+    supports_thinking?: boolean;
+  };
   aliases?: string[];
   available?: boolean;
 }

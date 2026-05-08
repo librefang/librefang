@@ -917,11 +917,12 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
           <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.capabilities")}</label>
           <p className="text-[11px] text-text-dim leading-snug">{t("models.capabilities_override_hint")}</p>
           <div className="space-y-1.5">
+            {/* Auto label uses raw catalog default, not the post-override `supports_*` (refs #4745). */}
             {([
-              ["tools", state.toolsOverride, model.supports_tools, Wrench, "toolsOverride"] as const,
-              ["vision", state.visionOverride, model.supports_vision, Eye, "visionOverride"] as const,
-              ["streaming", state.streamingOverride, model.supports_streaming, Zap, "streamingOverride"] as const,
-              ["thinking", state.thinkingOverride, model.supports_thinking, Brain, "thinkingOverride"] as const,
+              ["tools", state.toolsOverride, model.capabilities_catalog?.supports_tools ?? model.supports_tools, Wrench, "toolsOverride"] as const,
+              ["vision", state.visionOverride, model.capabilities_catalog?.supports_vision ?? model.supports_vision, Eye, "visionOverride"] as const,
+              ["streaming", state.streamingOverride, model.capabilities_catalog?.supports_streaming ?? model.supports_streaming, Zap, "streamingOverride"] as const,
+              ["thinking", state.thinkingOverride, model.capabilities_catalog?.supports_thinking ?? model.supports_thinking, Brain, "thinkingOverride"] as const,
             ]).map(([key, current, catalogDefault, Icon, field]) => (
               <div key={key} className="flex items-center gap-3">
                 <span className="flex items-center gap-1.5 text-xs font-bold text-text min-w-[6.5rem]">
