@@ -263,6 +263,10 @@ pub fn open_logs_dir() -> Result<(), String> {
 /// - **Linux/AppImage**: deletes the AppImage binary directly.
 /// - **Linux/system package**: returns a hint to run the distro uninstall command.
 #[tauri::command]
+#[cfg_attr(
+    not(any(target_os = "windows", target_os = "macos", target_os = "linux")),
+    allow(unused_variables)
+)]
 pub async fn uninstall_app(app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {

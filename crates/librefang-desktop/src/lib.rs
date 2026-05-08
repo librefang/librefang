@@ -525,6 +525,8 @@ pub fn run(server_url: Option<String>, force_local: bool) {
                 let _ = window.hide();
                 api.prevent_close();
             }
+            #[cfg(not(desktop))]
+            let _ = (window, event);
         })
         .build(tauri::generate_context!())
         .expect("Failed to build Tauri application")
