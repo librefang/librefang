@@ -9587,8 +9587,8 @@ fn cmd_mcp_add(name: &str, key: Option<&str>) {
     }
 
     match &result.status {
-        librefang_extensions::McpStatus::Ready => ui::success(&result.message),
-        librefang_extensions::McpStatus::Setup => {
+        librefang_types::mcp::McpStatus::Ready => ui::success(&result.message),
+        librefang_types::mcp::McpStatus::Setup => {
             println!("{}", result.message.yellow());
             println!("\nTo add credentials:");
             for env in &template.required_env {
@@ -9702,7 +9702,7 @@ fn cmd_mcp_catalog(query: Option<&str>) {
     // Group by category
     let mut by_category: std::collections::BTreeMap<
         String,
-        Vec<&librefang_extensions::McpCatalogEntry>,
+        Vec<&librefang_types::mcp::McpCatalogEntry>,
     > = std::collections::BTreeMap::new();
     for entry in &entries {
         by_category

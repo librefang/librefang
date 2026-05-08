@@ -687,7 +687,7 @@ impl LibreFangKernel {
     /// unlocked (bad master key, corrupt file, missing keyring entry).
     /// A missing vault file is **not** an error: the cache is populated
     /// with an unopened vault and the first `set()` call will `init()` it.
-    pub(super) fn vault_handle(
+    pub fn vault_handle(
         &self,
     ) -> Result<
         std::sync::Arc<std::sync::RwLock<librefang_extensions::vault::CredentialVault>>,
@@ -767,6 +767,68 @@ impl LibreFangKernel {
         guard
             .set(key.to_string(), zeroize::Zeroizing::new(value.to_string()))
             .map_err(|e| format!("Vault write failed: {e}"))
+    }
+
+    /// Install an MCP catalog template into the configured server set,
+    /// using the kernel's cached vault and catalog.
+    ///
+    /// Routes through `vault_handle()` (#3598) so the unlock-time Argon2id
+    /// KDF runs at most once per kernel lifetime, regardless of how many
+    /// install requests arrive. The previous API-side path opened
+    /// `vault.enc` and ran the KDF on every HTTP install request.
+    ///
+    /// Vault unlock failure is **not** fatal — the resolver falls through to
+    /// dotenv / env lookups, matching the original `skills.rs`
+    /// `if v.unlock().is_ok() { Some(v) } else { None }` semantics. Operators
+    /// who rotate `LIBREFANG_VAULT_KEY` post-boot (or whose keyring entry is
+    /// briefly unavailable) can still complete an install whose required
+    /// credentials live in `.env` / process env. The failure is logged at
+    /// `warn` level so it isn't silent.
+    ///
+    /// Catalog freshness: this method calls `mcp_catalog_reload` so manual
+    /// edits to `~/.librefang/mcp/catalog/*.toml` are picked up immediately —
+    /// the previous API-side path performed an ad-hoc `McpCatalog::new(home)
+    /// .load(home)` per request, and operators relied on that to drop in
+    /// custom templates without a daemon restart. The reload is a directory
+    /// scan of a few dozen TOML files — comfortably cheap on the install
+    /// path's latency budget.
+    ///
+    /// Returns the installer's [`librefang_extensions::installer::InstallResult`];
+    /// the caller persists the resulting `McpServerConfigEntry` into
+    /// `config.toml` and triggers a kernel reload.
+    pub fn install_integration(
+        &self,
+        template_id: &str,
+        provided_keys: &std::collections::HashMap<String, String>,
+    ) -> librefang_extensions::ExtensionResult<librefang_extensions::installer::InstallResult> {
+        // Pull the cached, already-unlocked vault. Soft-fail on unlock errors
+        // so a post-boot key rotation / keyring blip doesn't block installs
+        // whose credentials happen to live in dotenv or process env.
+        let vault_handle = match self.vault_handle() {
+            Ok(h) => Some(h),
+            Err(e) => {
+                warn!(
+                    "install_integration: vault unavailable, falling back to dotenv/env only: {e}"
+                );
+                None
+            }
+        };
+        let dotenv_path = self.home_dir().join(".env");
+        let mut resolver = librefang_extensions::credentials::CredentialResolver::with_vault_handle(
+            vault_handle,
+            Some(&dotenv_path),
+        );
+        // Refresh the catalog snapshot from disk so manually-added template
+        // TOMLs are visible without a daemon restart (matches pre-#3295
+        // ad-hoc-load behaviour). Cheap: reads `~/.librefang/mcp/catalog/`.
+        self.mcp_catalog_reload(self.home_dir());
+        let catalog_snap = self.mcp_catalog_load();
+        librefang_extensions::installer::install_integration(
+            &catalog_snap,
+            &mut resolver,
+            template_id,
+            provided_keys,
+        )
     }
 
     /// Atomically redeem a TOTP recovery code.

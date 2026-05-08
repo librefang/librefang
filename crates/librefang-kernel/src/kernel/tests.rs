@@ -6537,6 +6537,116 @@ async fn vault_cache_reuses_unlocked_handle_across_calls() {
     kernel.shutdown();
 }
 
+/// Regression test for the kernel install façade introduced in #3295: the
+/// HTTP install path historically opened `vault.enc` and ran the Argon2id
+/// KDF on every request. After the refactor, `Kernel::install_integration`
+/// rides the cached `vault_handle()` so the unlock cost is paid once per
+/// kernel lifetime.
+///
+/// We assert two things at the seam between resolver and cached vault:
+///
+///   1. Credentials supplied to `install_integration` are written into the
+///      kernel's cached vault — `vault_get` reads them back immediately
+///      with no fresh `unlock()` call. This proves the resolver's
+///      `with_vault_handle` constructor really does share storage with the
+///      kernel cache (rather than holding a stale clone).
+///   2. The `vault_handle()` Arc returned before the install is the same
+///      allocation as the one returned after — the install path must not
+///      poison or rebuild the cache slot.
+///
+/// Same `serial_test::serial` group as the other vault tests because
+/// `LIBREFANG_VAULT_KEY` is process-global.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn install_integration_writes_through_cached_vault_handle() {
+    const TEST_VAULT_KEY_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    let _vault_key = set_test_env("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
+    let _no_keyring = set_test_env("LIBREFANG_VAULT_NO_KEYRING", "1");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    // Drop a single catalog template into the location the kernel scans.
+    // One required env var so the resolver has somewhere to write through.
+    let catalog_dir = home_dir.join("mcp").join("catalog");
+    std::fs::create_dir_all(&catalog_dir).unwrap();
+    std::fs::write(
+        catalog_dir.join("test-template.toml"),
+        r#"
+id = "test-template"
+name = "Test Template"
+description = "Fixture for install_integration vault-write seam test"
+category = "devtools"
+
+[transport]
+type = "stdio"
+command = "echo"
+args = ["hello"]
+
+[[required_env]]
+name = "TEST_TEMPLATE_TOKEN"
+label = "Test Token"
+help = "anything goes"
+is_secret = true
+"#,
+    )
+    .unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // Snapshot the cached handle BEFORE install so we can assert the install
+    // path doesn't replace the cache slot.
+    let pre_handle = kernel
+        .vault_handle()
+        .expect("vault_handle should succeed before install");
+
+    let mut provided = std::collections::HashMap::new();
+    provided.insert(
+        "TEST_TEMPLATE_TOKEN".to_string(),
+        "shibboleth-42".to_string(),
+    );
+
+    let result = kernel
+        .install_integration("test-template", &provided)
+        .expect("install should succeed when all required creds are provided");
+
+    // Status must be Ready — the resolver saw the credential we just stored.
+    assert_eq!(
+        result.status,
+        librefang_types::mcp::McpStatus::Ready,
+        "install should report Ready when required cred was supplied",
+    );
+
+    // The credential lives in the kernel's cached vault — `vault_get` reads
+    // it without re-unlocking. This is the seam the resolver's
+    // `with_vault_handle` constructor exists to guarantee.
+    assert_eq!(
+        kernel.vault_get("TEST_TEMPLATE_TOKEN").as_deref(),
+        Some("shibboleth-42"),
+        "install_integration must write credentials through the cached \
+         vault handle, so kernel.vault_get sees them immediately",
+    );
+
+    // Same Arc before and after — install path didn't poison the cache.
+    let post_handle = kernel
+        .vault_handle()
+        .expect("vault_handle should succeed after install");
+    assert!(
+        std::sync::Arc::ptr_eq(&pre_handle, &post_handle),
+        "install_integration must reuse the cached vault handle; \
+         rebuilding it would silently re-introduce the per-request \
+         Argon2id KDF cost the façade exists to avoid",
+    );
+
+    kernel.shutdown();
+}
+
 // ── /api/agents/{id}/sessions `active` semantics (#4293) ────────────────────
 //
 // `list_agent_sessions` historically marked `active = (sid == registry pointer)`.

@@ -158,6 +158,20 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn vault_redeem_recovery_code(&self, code: &str) -> Result<bool, String>;
 
     // ====================================================================
+    // MCP install façade — routes through the kernel's cached vault and
+    // catalog so HTTP request handlers don't open vault.enc and run the
+    // unlock-time Argon2id KDF on every install request (#3598). The trait
+    // exposes the high-level installer; the underlying `vault_handle` stays
+    // an inherent method to keep the trait surface small.
+    // ====================================================================
+
+    fn install_integration(
+        &self,
+        template_id: &str,
+        provided_keys: &std::collections::HashMap<String, String>,
+    ) -> librefang_extensions::ExtensionResult<librefang_extensions::installer::InstallResult>;
+
+    // ====================================================================
     // Inbox / auto-dream observability
     // ====================================================================
 
@@ -698,6 +712,15 @@ impl KernelApi for LibreFangKernel {
     }
     fn vault_redeem_recovery_code(&self, code: &str) -> Result<bool, String> {
         Self::vault_redeem_recovery_code(self, code)
+    }
+
+    // -- MCP install façade --
+    fn install_integration(
+        &self,
+        template_id: &str,
+        provided_keys: &std::collections::HashMap<String, String>,
+    ) -> librefang_extensions::ExtensionResult<librefang_extensions::installer::InstallResult> {
+        Self::install_integration(self, template_id, provided_keys)
     }
 
     // -- Inbox / auto-dream --
