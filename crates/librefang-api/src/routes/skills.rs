@@ -4198,32 +4198,9 @@ pub async fn add_mcp_server(
             .into_json_tuple();
         }
 
-        // Credential resolver: dotenv + vault (if unlocked)
-        let home = state.kernel.home_dir().to_path_buf();
-        let dotenv_path = home.join(".env");
-        let vault_path = home.join("vault.enc");
-        let vault = if vault_path.exists() {
-            let mut v = librefang_extensions::vault::CredentialVault::new(vault_path);
-            if v.unlock().is_ok() {
-                Some(v)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let mut resolver =
-            librefang_extensions::credentials::CredentialResolver::new(vault, Some(&dotenv_path));
-
-        // Ephemeral catalog to feed the installer (it takes &McpCatalog).
-        let mut cat = librefang_extensions::catalog::McpCatalog::new(&home);
-        cat.load(&home);
-        let result = match librefang_extensions::installer::install_integration(
-            &cat,
-            &mut resolver,
-            &entry.id,
-            &creds,
-        ) {
+        // Route through the kernel facade: cached vault (no per-request
+        // Argon2id KDF) + cached catalog snapshot (#3598).
+        let result = match state.kernel.install_integration(&entry.id, &creds) {
             Ok(r) => r,
             Err(e) => {
                 return ApiErrorResponse::bad_request(format!("Install failed: {e}"))
@@ -6056,31 +6033,11 @@ pub async fn install_extension(
         );
     }
 
-    // Reuse the installer via an ephemeral catalog load.
-    let home = state.kernel.home_dir().to_path_buf();
-    let dotenv_path = home.join(".env");
-    let vault_path = home.join("vault.enc");
-    let vault = if vault_path.exists() {
-        let mut v = librefang_extensions::vault::CredentialVault::new(vault_path);
-        if v.unlock().is_ok() {
-            Some(v)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let mut resolver =
-        librefang_extensions::credentials::CredentialResolver::new(vault, Some(&dotenv_path));
-    let mut catalog = librefang_extensions::catalog::McpCatalog::new(&home);
-    catalog.load(&home);
-
-    let result = match librefang_extensions::installer::install_integration(
-        &catalog,
-        &mut resolver,
-        &name,
-        &std::collections::HashMap::new(),
-    ) {
+    // Route through the kernel facade: cached vault + cached catalog (#3598).
+    let result = match state
+        .kernel
+        .install_integration(&name, &std::collections::HashMap::new())
+    {
         Ok(r) => r,
         Err(e) => {
             let err_str = e.to_string();

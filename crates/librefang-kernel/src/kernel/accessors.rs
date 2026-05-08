@@ -687,7 +687,7 @@ impl LibreFangKernel {
     /// unlocked (bad master key, corrupt file, missing keyring entry).
     /// A missing vault file is **not** an error: the cache is populated
     /// with an unopened vault and the first `set()` call will `init()` it.
-    pub(super) fn vault_handle(
+    pub fn vault_handle(
         &self,
     ) -> Result<
         std::sync::Arc<std::sync::RwLock<librefang_extensions::vault::CredentialVault>>,
@@ -767,6 +767,44 @@ impl LibreFangKernel {
         guard
             .set(key.to_string(), zeroize::Zeroizing::new(value.to_string()))
             .map_err(|e| format!("Vault write failed: {e}"))
+    }
+
+    /// Install an MCP catalog template into the configured server set,
+    /// using the kernel's cached vault and catalog.
+    ///
+    /// Routes through `vault_handle()` (#3598) so the unlock-time Argon2id
+    /// KDF runs at most once per kernel lifetime, regardless of how many
+    /// install requests arrive. The previous API-side path opened
+    /// `vault.enc` and ran the KDF on every HTTP install request.
+    ///
+    /// Returns the installer's [`librefang_extensions::installer::InstallResult`];
+    /// the caller persists the resulting `McpServerConfigEntry` into
+    /// `config.toml` and triggers a kernel reload.
+    pub fn install_integration(
+        &self,
+        template_id: &str,
+        provided_keys: &std::collections::HashMap<String, String>,
+    ) -> librefang_extensions::ExtensionResult<librefang_extensions::installer::InstallResult> {
+        // Pull the cached, already-unlocked vault. A vault file that does not
+        // exist is not an error here — `vault_handle` populates the cache with
+        // an unopened vault and the resolver will fall through to dotenv / env
+        // lookups (matching the previous behaviour where a missing vault file
+        // was silently tolerated).
+        let vault_handle = self
+            .vault_handle()
+            .map_err(librefang_extensions::ExtensionError::Vault)?;
+        let dotenv_path = self.home_dir().join(".env");
+        let mut resolver = librefang_extensions::credentials::CredentialResolver::with_vault_handle(
+            Some(vault_handle),
+            Some(&dotenv_path),
+        );
+        let catalog_snap = self.mcp_catalog_load();
+        librefang_extensions::installer::install_integration(
+            &catalog_snap,
+            &mut resolver,
+            template_id,
+            provided_keys,
+        )
     }
 
     /// Atomically redeem a TOTP recovery code.
