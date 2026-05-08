@@ -13,7 +13,13 @@ WORKDIR /build/dashboard
 # registry, which has flaked on us during builds. Activate the pinned pnpm
 # version (matches the `packageManager` field in package.json) directly so
 # the build never has to ask the registry "what's the latest stable?".
-RUN corepack enable \
+# Node 20.18.1 ships corepack ~0.30, whose bundled keyring lacks the current
+# pnpm signing key — `corepack prepare pnpm@10.x` then fails with
+# "Internal Error: Cannot find matching keyid". Refresh corepack first so it
+# picks up the latest signing keys (upstream nodejs/corepack rolls these
+# regularly as pnpm rotates them).
+RUN npm install --global corepack@latest \
+    && corepack enable \
     && corepack prepare pnpm@10.33.0 --activate \
     && pnpm install --frozen-lockfile --ignore-scripts \
     && pnpm run build
