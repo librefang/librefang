@@ -23,16 +23,20 @@
 //!
 //! # Default behaviour
 //!
-//! `SkillWorkshopConfig::default()` (and therefore every agent that
-//! omits the `[skill_workshop]` block in `agent.toml`) is on with the
-//! conservative knob set: `review_mode = "heuristic"` (no LLM call),
-//! `approval_policy = "pending"` (every candidate waits for human
-//! review), `max_pending = 20`. Heuristic-only review is microseconds
-//! of regex per turn plus a small toml file when a candidate lands.
+//! `SkillWorkshopConfig::default()` is **off** (opt-in, per the
+//! original #3328 acceptance criteria). An agent that omits the
+//! `[skill_workshop]` block in `agent.toml` runs no scanners, makes
+//! no LLM calls, and writes nothing to `pending/`. Operators turn it
+//! on per-agent with `[skill_workshop] enabled = true`.
+//!
+//! Once enabled, the conservative knob set is the default:
+//! `review_mode = "heuristic"` (no LLM call), `approval_policy =
+//! "pending"` (every candidate waits for human review), `max_pending
+//! = 20`. Heuristic-only review is microseconds of regex per turn
+//! plus a small toml file when a candidate lands.
 //!
 //! Operators that want LLM refinement set
-//! `[skill_workshop] review_mode = "threshold_llm"`. Operators that
-//! want to disable the feature wholesale set `enabled = false`.
+//! `[skill_workshop] review_mode = "threshold_llm"`.
 //!
 //! Auto-promotion (`approval_policy = "auto"`) still gates writes
 //! through the same prompt-injection scanner that protects marketplace

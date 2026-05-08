@@ -1185,26 +1185,21 @@ pub struct SkillWorkshopConfig {
 
 impl Default for SkillWorkshopConfig {
     fn default() -> Self {
-        // Default-on with the conservative knob set: heuristic-only
-        // review (no LLM cost), pending policy (no auto-promote into
-        // the active registry, every candidate waits for human approve
-        // / reject), 20-candidate cap (oldest evicts on overflow).
-        // Heuristic mode is microseconds of regex per turn plus a small
-        // toml file when a candidate lands, so the cost regression vs
-        // pre-#3328 is well under the noise floor.
-        //
-        // Operators who want the LLM refinement pass set
-        // `review_mode = "threshold_llm"`; operators who want to
-        // disable the feature wholesale set `enabled = false`.
+        // Default-OFF — opt-in per the original #3328 acceptance
+        // criteria. Operators who want the workshop set
+        // `[skill_workshop] enabled = true` in `agent.toml`. The
+        // remaining knobs document the conservative shape the
+        // workshop takes once it IS turned on: heuristic-only review
+        // (no LLM cost), pending policy (every candidate waits for
+        // human approve / reject), 20-candidate cap.
         Self {
-            enabled: true,
+            enabled: false,
             auto_capture: true,
             approval_policy: ApprovalPolicy::Pending,
             review_mode: ReviewMode::Heuristic,
             max_pending: 20,
             // No TTL by default — the cap is the only aging mechanism
-            // unless the operator opts in. Avoids a second silent
-            // surprise on top of the default-on flip.
+            // unless the operator opts in.
             max_pending_age_days: None,
         }
     }
