@@ -13,6 +13,7 @@
 ))]
 
 use librefang_kernel::config::librefang_home;
+use librefang_kernel::AgentSubsystemApi;
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -73,7 +74,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let agent_count = if let Some(ks) = app.try_state::<crate::KernelState>() {
         let guard = ks.0.read().unwrap_or_else(|p| p.into_inner());
         if let Some(ref inner) = *guard {
-            inner.kernel.agent_registry().list().len()
+            inner.kernel.agent_registry_ref().list().len()
         } else {
             0
         }

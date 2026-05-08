@@ -5,7 +5,7 @@
 # tagged release months later produce a bit-for-bit identical builder image.
 # Track Node 20 LTS — CI's setup-node also uses node-version: 20
 # (.github/workflows/ci.yml, .github/workflows/dashboard-build.yml).
-FROM node:20.18.1-alpine AS dashboard-builder
+FROM node:20.20.2-alpine AS dashboard-builder
 WORKDIR /build
 COPY crates/librefang-api/dashboard ./dashboard
 WORKDIR /build/dashboard
@@ -13,7 +13,14 @@ WORKDIR /build/dashboard
 # registry, which has flaked on us during builds. Activate the pinned pnpm
 # version (matches the `packageManager` field in package.json) directly so
 # the build never has to ask the registry "what's the latest stable?".
-RUN corepack enable \
+# We also refresh corepack itself first: the keyring bundled with the node
+# base image goes stale as pnpm rotates signing keys, manifesting as
+# "Internal Error: Cannot find matching keyid" during `corepack prepare`.
+# Node ≥20.19 is also required by vite 8 / rolldown's optional native
+# bindings (engines: ^20.19.0), without which `pnpm install` silently skips
+# the linux-x64-musl binding and `vite build` fails at require-time.
+RUN npm install --global corepack@latest \
+    && corepack enable \
     && corepack prepare pnpm@10.33.0 --activate \
     && pnpm install --frozen-lockfile --ignore-scripts \
     && pnpm run build

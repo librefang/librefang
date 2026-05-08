@@ -38,6 +38,7 @@ pub mod scheduler;
 pub mod session_lifecycle;
 pub mod session_policy;
 pub mod session_stream_hub;
+pub mod skill_workshop;
 pub mod supervised_spawn;
 pub mod supervisor;
 pub mod trajectory;
@@ -48,7 +49,18 @@ pub mod workflow;
 
 pub use kernel::DeliveryTracker;
 pub use kernel::LibreFangKernel;
+pub use kernel::{SYSTEM_CHANNEL_AUTONOMOUS, SYSTEM_CHANNEL_CRON, SYSTEM_CHANNEL_WEBUI};
 pub use kernel_api::KernelApi;
+
+// Focused per-subsystem traits (refs #3565). Re-exported so external
+// crates can bind `&dyn FooSubsystemApi` instead of dragging in the
+// entire `KernelApi` surface, and so the upcoming method-body
+// migration can move callers off `LibreFangKernel` inherent forwards.
+pub use kernel::subsystems::{
+    AgentSubsystemApi, EventSubsystemApi, GovernanceSubsystemApi, LlmSubsystemApi, McpSubsystemApi,
+    MediaSubsystemApi, MemorySubsystemApi, MeshSubsystemApi, MeteringSubsystemApi,
+    ProcessSubsystemApi, SecuritySubsystemApi, SkillsSubsystemApi, WorkflowSubsystemApi,
+};
 
 // ---------------------------------------------------------------------------
 // Runtime re-exports (refs #3596 — API → Kernel → Runtime layering)

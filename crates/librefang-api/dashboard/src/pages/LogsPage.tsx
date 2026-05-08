@@ -51,7 +51,7 @@ export function LogsPage() {
   );
 
   const handleExport = () => {
-    const blob = new Blob([JSON.stringify(logs, null, 2)], { type: "application/json" });
+    const blob = new Blob([JSON.stringify(filteredLogs, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;

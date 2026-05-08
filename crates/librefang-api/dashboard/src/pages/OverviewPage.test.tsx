@@ -9,7 +9,13 @@ import { useMcpServers } from "../lib/queries/mcp";
 import { usePeers } from "../lib/queries/network";
 import { useSchedules } from "../lib/queries/schedules";
 import { useSessions } from "../lib/queries/sessions";
-import { useBudgetStatus } from "../lib/queries/analytics";
+import {
+  useBudgetStatus,
+  useUsageDaily,
+  useUsageByAgent,
+  useUsageByModel,
+  useModelPerformance,
+} from "../lib/queries/analytics";
 
 vi.mock("../lib/queries/overview", () => ({
   useDashboardSnapshot: vi.fn(),
@@ -42,6 +48,10 @@ vi.mock("../lib/queries/sessions", () => ({
 
 vi.mock("../lib/queries/analytics", () => ({
   useBudgetStatus: vi.fn(),
+  useUsageDaily: vi.fn(),
+  useUsageByAgent: vi.fn(),
+  useUsageByModel: vi.fn(),
+  useModelPerformance: vi.fn(),
 }));
 
 vi.mock("react-i18next", async () => {
@@ -69,6 +79,10 @@ const usePeersMock = usePeers as unknown as ReturnType<typeof vi.fn>;
 const useSchedulesMock = useSchedules as unknown as ReturnType<typeof vi.fn>;
 const useSessionsMock = useSessions as unknown as ReturnType<typeof vi.fn>;
 const useBudgetStatusMock = useBudgetStatus as unknown as ReturnType<typeof vi.fn>;
+const useUsageDailyMock = useUsageDaily as unknown as ReturnType<typeof vi.fn>;
+const useUsageByAgentMock = useUsageByAgent as unknown as ReturnType<typeof vi.fn>;
+const useUsageByModelMock = useUsageByModel as unknown as ReturnType<typeof vi.fn>;
+const useModelPerformanceMock = useModelPerformance as unknown as ReturnType<typeof vi.fn>;
 
 function setQuickInitDefault(): void {
   useQuickInitMock.mockReturnValue({
@@ -86,6 +100,10 @@ function setSidecarHooksDefault(): void {
   useSchedulesMock.mockReturnValue({ data: [] });
   useSessionsMock.mockReturnValue({ data: [] });
   useBudgetStatusMock.mockReturnValue({ data: undefined });
+  useUsageDailyMock.mockReturnValue({ data: { days: [], today_cost_usd: 0 } });
+  useUsageByAgentMock.mockReturnValue({ data: [] });
+  useUsageByModelMock.mockReturnValue({ data: [] });
+  useModelPerformanceMock.mockReturnValue({ data: [] });
 }
 
 function renderPage(): void {
@@ -170,10 +188,74 @@ describe("OverviewPage", () => {
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("2");
     // KPI tile labels render using i18n keys.
     expect(screen.getByText("overview.kpi.active_agents")).toBeInTheDocument();
-    expect(screen.getByText("overview.kpi.p95_latency")).toBeInTheDocument();
+    expect(screen.getByText("analytics.avg_latency")).toBeInTheDocument();
     // Recent-agents fallback table (and tokens-by-agent breakdown)
     // surface the agent name from snapshot.agents.
     expect(screen.getAllByText("alpha").length).toBeGreaterThan(0);
+  });
+
+  it("keeps overview usage labels honest for seven-day backend data", () => {
+    useDashboardSnapshotMock.mockReturnValue({
+      data: {
+        status: {
+          active_agent_count: 1,
+          agent_count: 1,
+          uptime_seconds: 60,
+          session_count: 1,
+          config_exists: true,
+          hostname: "node-test",
+          version: "2026.4.27",
+        },
+        providers: [],
+        channels: [],
+        agents: [
+          { id: "a1", name: "alpha", state: "running", model_name: "gpt-4.1" },
+        ],
+        skillCount: 0,
+        workflowCount: 0,
+        health: { status: "ok", checks: [] },
+      },
+      isLoading: false,
+      isFetching: false,
+      isError: false,
+      dataUpdatedAt: 0,
+      refetch: vi.fn(),
+    });
+    useVersionInfoMock.mockReturnValue({ data: undefined, isLoading: false });
+    useUsageDailyMock.mockReturnValue({
+      data: {
+        days: [
+          { date: "2026-05-01", tokens: 0, cost_usd: 0 },
+          { date: "2026-05-02", tokens: 0, cost_usd: 0 },
+          { date: "2026-05-03", tokens: 0, cost_usd: 0 },
+          { date: "2026-05-04", tokens: 0, cost_usd: 0 },
+          { date: "2026-05-05", tokens: 0, cost_usd: 0 },
+          { date: "2026-05-06", tokens: 0, cost_usd: 0 },
+          { date: "2026-05-07", tokens: 0, cost_usd: 0 },
+        ],
+        today_cost_usd: 0,
+      },
+    });
+    useModelPerformanceMock.mockReturnValue({
+      data: [{ model: "gpt-4.1", call_count: 2, avg_latency_ms: 125 }],
+    });
+    useUsageByAgentMock.mockReturnValue({
+      data: [{ agent_id: "a1", name: "alpha", total_tokens: 1234 }],
+    });
+    useUsageByModelMock.mockReturnValue({
+      data: [{ model: "gpt-4.1", total_cost_usd: 1.23 }],
+    });
+
+    renderPage();
+
+    // Range selector buttons restored — all three options present.
+    expect(screen.getAllByText("7d").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("30d").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("90d").length).toBeGreaterThan(0);
+    expect(screen.getByText(/overview\.kpi\.tokens_over_7d$/)).toBeInTheDocument();
+    expect(screen.getByText("overview.kpi.no_prior")).toBeInTheDocument();
+    expect(screen.getByText("overview.cost.provider_all_time")).toBeInTheDocument();
+    expect(screen.getByText("analytics.avg_latency")).toBeInTheDocument();
   });
 
   it("renders the setup banner when config does not exist", () => {

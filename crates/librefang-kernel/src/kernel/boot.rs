@@ -12,6 +12,7 @@
 //! literal directly.
 
 use super::*;
+use crate::MeteringSubsystemApi;
 
 impl LibreFangKernel {
     /// Per-session stream-event hub (multi-client SSE attach).
@@ -1280,6 +1281,8 @@ impl LibreFangKernel {
             context_engine,
             context_engine_config,
             self_handle: OnceLock::new(),
+            acp_fs_clients: dashmap::DashMap::new(),
+            acp_terminal_clients: dashmap::DashMap::new(),
             provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
             config_reload_lock: tokio::sync::RwLock::new(()),
             prompt_metadata_cache: PromptMetadataCache::new(),
@@ -1745,7 +1748,7 @@ impl LibreFangKernel {
 
                     // Apply global budget defaults to restored agents
                     apply_budget_defaults(
-                        &kernel.budget_config(),
+                        &kernel.current_budget(),
                         &mut restored_entry.manifest.resources,
                     );
 

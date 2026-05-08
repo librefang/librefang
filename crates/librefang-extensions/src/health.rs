@@ -3,9 +3,9 @@
 //! Background tokio task pings MCP connections, auto-reconnects with
 //! exponential backoff (5s -> 10s -> 20s -> ... -> 5min max, 10 attempts max).
 
-use crate::McpStatus;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use librefang_types::mcp::McpStatus;
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;

@@ -11,6 +11,7 @@ members = [
     "crates/librefang-runtime-wasm",
     "crates/librefang-llm-driver",
     "crates/librefang-kernel-handle",
+    "crates/librefang-acp",
     "crates/librefang-http",
     "crates/librefang-wire",
     "crates/librefang-api",
@@ -32,7 +33,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2026.5.6-beta.9"
+version = "2026.5.8-beta.10"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"
@@ -126,9 +127,28 @@ futures = "0.3"
 # MCP SDK
 rmcp = { version = "1.5", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 
+# ACP (Agent Client Protocol) SDK — official Zed-maintained crates for IDE integration (#3313)
+# `unstable` enables session/{resume,close,fork,list-additional-directories}, message-id, session-usage,
+# and auth-method extensions so our agent surface matches what Zed publishes downstream.
+#
+# Pinned exactly (`=`-prefix). The `unstable` feature is explicitly
+# marked breaking by upstream, so a caret bump (0.11.x) could change
+# wire-format expectations between minor releases without warning.
+# Bumping this pin is an explicit, reviewed change.
+agent-client-protocol = { version = "=0.11.1", features = ["unstable"] }
+agent-client-protocol-tokio = "=0.11.1"
+tokio-util = { version = "0.7", features = ["compat"] }
+
 # WebSocket client (for Discord/Slack gateway)
 tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 url = "2"
+
+# Public Suffix List — used by mcp_auth to decide whether a metadata-declared
+# token_endpoint shares a registrable domain with the operator-typed issuer
+# host (refs #4665). Picked over `publicsuffix` because `psl` ships the PSL
+# data baked-in at compile time (no runtime fetch), keeping the security check
+# self-contained and reproducible.
+psl = "2"
 
 # WASM sandbox
 wasmtime = "44"

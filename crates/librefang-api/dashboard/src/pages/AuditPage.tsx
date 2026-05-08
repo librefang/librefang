@@ -306,7 +306,7 @@ function shouldClampDetail(detail: string): boolean {
 // string, no timezone — `toRfc3339` normalises before send).
 interface DatePreset {
   key: string;
-  label: string;
+  labelKey: string;
   since: () => string;
 }
 function localDatetimeInput(d: Date): string {
@@ -317,19 +317,17 @@ function localDatetimeInput(d: Date): string {
 const DATE_PRESETS: DatePreset[] = [
   {
     key: "1h",
-    label: "1h",
+    labelKey: "audit.preset_1h",
     since: () => localDatetimeInput(new Date(Date.now() - 3_600_000)),
   },
   {
     key: "24h",
-    label: "24h",
+    labelKey: "audit.preset_24h",
     since: () => localDatetimeInput(new Date(Date.now() - 86_400_000)),
   },
   {
     key: "today",
-    // Translated at render via the `audit.today` key — the literal
-    // here is only the fallback / readable identifier for the preset.
-    label: "Today",
+    labelKey: "audit.preset_today",
     since: () => {
       const d = new Date();
       d.setHours(0, 0, 0, 0);
@@ -338,12 +336,12 @@ const DATE_PRESETS: DatePreset[] = [
   },
   {
     key: "7d",
-    label: "7d",
+    labelKey: "audit.preset_7d",
     since: () => localDatetimeInput(new Date(Date.now() - 7 * 86_400_000)),
   },
   {
     key: "30d",
-    label: "30d",
+    labelKey: "audit.preset_30d",
     since: () => localDatetimeInput(new Date(Date.now() - 30 * 86_400_000)),
   },
 ];
@@ -369,6 +367,55 @@ function ActiveChip({ label, value, onClear }: ActiveChipProps) {
       <span className="font-mono normal-case tracking-normal">{value}</span>
       <XIcon className="h-3 w-3 opacity-50 group-hover:opacity-100" />
     </button>
+  );
+}
+
+function DetailClamped({
+  detail,
+  isExpanded,
+  onToggle,
+  t,
+}: {
+  detail: string;
+  isExpanded: boolean;
+  onToggle: () => void;
+  t: Translator;
+}) {
+  if (!shouldClampDetail(detail)) {
+    return (
+      <p className="mt-1 text-xs text-text-main/90 break-words leading-relaxed">
+        {detail}
+      </p>
+    );
+  }
+  return (
+    <div className="mt-1">
+      <p
+        className={`text-xs text-text-main/90 break-words leading-relaxed whitespace-pre-wrap ${isExpanded ? "" : "line-clamp-2"}`}
+      >
+        {detail}
+      </p>
+      <button
+        type="button"
+        onClick={(ev) => {
+          ev.stopPropagation();
+          onToggle();
+        }}
+        className="mt-1 inline-flex items-center gap-1 text-[10px] font-bold text-brand hover:text-brand/80 transition-colors"
+      >
+        {isExpanded ? (
+          <>
+            <ChevronUp className="h-3 w-3" />
+            {t("audit.show_less")}
+          </>
+        ) : (
+          <>
+            <ChevronDown className="h-3 w-3" />
+            {t("audit.show_more")}
+          </>
+        )}
+      </button>
+    </div>
   );
 }
 
@@ -428,6 +475,9 @@ export function AuditPage() {
       return next;
     });
   };
+  useEffect(() => {
+    setExpanded(new Set());
+  }, [active]);
 
   // Normalise from/to so the server's RFC-3339 parser doesn't 400 on
   // the bare datetime-local format. Same for export URL.
@@ -435,6 +485,13 @@ export function AuditPage() {
   // `useMemo` bodies run synchronously on first render and would hit
   // a TDZ ReferenceError if `query` were declared below them.
   const query = useAuditQuery(normaliseFilters(active));
+  const groupsWithTallies = useMemo(() => {
+    const entries = query.data?.entries ?? [];
+    return groupByDate(entries, t).map((g) => ({
+      ...g,
+      tally: outcomeBreakdown(g.rows),
+    }));
+  }, [query.data?.entries, t]);
 
   // Action options for the Select — the empty-value "(any)" gets the
   // localised label; the rest are pinned to their server-side enum
@@ -804,7 +861,7 @@ export function AuditPage() {
                   className="inline-flex items-center gap-1 rounded-lg border border-border-subtle bg-main/40 px-2 py-1 text-[10px] font-bold text-text-main hover:border-brand/30 hover:text-brand transition-colors"
                 >
                   <Clock className="h-3 w-3" />
-                  {p.key === "today" ? t("audit.today") : p.label}
+                  {t(p.labelKey)}
                 </button>
               ))}
             </div>
@@ -972,8 +1029,8 @@ export function AuditPage() {
         />
       ) : query.data ? (
         <div className="flex flex-col gap-4">
-          {groupByDate(query.data.entries ?? [], t).map((group) => {
-            const tally = outcomeBreakdown(group.rows);
+          {groupsWithTallies.map((group) => {
+            const { tally } = group;
             return (
             <section key={group.label} className="flex flex-col gap-2">
               <div className="flex items-center gap-3 px-1">
@@ -1102,47 +1159,14 @@ export function AuditPage() {
                             #{e.seq}
                           </span>
                         </div>
-                        {e.detail && (() => {
-                          const rowKey = `${e.seq}-${e.hash}`;
-                          const clamp = shouldClampDetail(e.detail);
-                          const isExpanded = expanded.has(rowKey);
-                          if (!clamp) {
-                            return (
-                              <p className="mt-1 text-xs text-text-main/90 break-words leading-relaxed">
-                                {e.detail}
-                              </p>
-                            );
-                          }
-                          return (
-                            <div className="mt-1">
-                              <p
-                                className={`text-xs text-text-main/90 break-words leading-relaxed whitespace-pre-wrap ${isExpanded ? "" : "line-clamp-2"}`}
-                              >
-                                {e.detail}
-                              </p>
-                              <button
-                                type="button"
-                                onClick={(ev) => {
-                                  ev.stopPropagation();
-                                  toggleExpanded(rowKey);
-                                }}
-                                className="mt-1 inline-flex items-center gap-1 text-[10px] font-bold text-brand hover:text-brand/80 transition-colors"
-                              >
-                                {isExpanded ? (
-                                  <>
-                                    <ChevronUp className="h-3 w-3" />
-                                    {t("audit.show_less")}
-                                  </>
-                                ) : (
-                                  <>
-                                    <ChevronDown className="h-3 w-3" />
-                                    {t("audit.show_more")}
-                                  </>
-                                )}
-                              </button>
-                            </div>
-                          );
-                        })()}
+                        {e.detail && (
+                          <DetailClamped
+                            detail={e.detail}
+                            isExpanded={expanded.has(`${e.seq}-${e.hash}`)}
+                            onToggle={() => toggleExpanded(`${e.seq}-${e.hash}`)}
+                            t={t}
+                          />
+                        )}
                       </div>
 
                       {/* Timestamp */}
@@ -1158,8 +1182,7 @@ export function AuditPage() {
                 })}
               </StaggerList>
             </section>
-            );
-          })}
+            )})}
         </div>
       ) : null}
 

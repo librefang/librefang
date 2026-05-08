@@ -106,7 +106,7 @@ mod reviewer_sanitize;
 mod session_ops;
 mod spawn;
 mod subsystem_forwards;
-pub(crate) mod subsystems;
+pub mod subsystems;
 mod tools_and_skills;
 mod triggers_and_workflow;
 
@@ -131,13 +131,28 @@ use reviewer_sanitize::{sanitize_reviewer_block, sanitize_reviewer_line};
 /// `[[cron_jobs]]` fires. Matched in [`KernelHandle::resolve_user_tool_decision`]
 /// to bypass per-user RBAC the same way the `system_call=true` flag does
 /// — daemon-driven calls have no user to attribute to.
-pub(crate) const SYSTEM_CHANNEL_CRON: &str = "cron";
+///
+/// Public so that out-of-crate carve-out sites (`librefang-api::ws.rs` for
+/// the dashboard, `librefang-runtime::agent_loop` for the sender-prefix
+/// deny-list, …) can reference the same string instead of duplicating the
+/// literal. The runtime path can't import this directly (circular dep),
+/// but exposing it lets api/cli code stay in lock-step.
+pub const SYSTEM_CHANNEL_CRON: &str = "cron";
 
 /// Synthetic `SenderContext.channel` value the autonomous-loop dispatcher
 /// uses for agents whose manifest declares `[autonomous]`. Same RBAC
 /// carve-out as [`SYSTEM_CHANNEL_CRON`] — both are kernel-internal and
 /// have no user to attribute to. Issue #3243.
-pub(crate) const SYSTEM_CHANNEL_AUTONOMOUS: &str = "autonomous";
+pub const SYSTEM_CHANNEL_AUTONOMOUS: &str = "autonomous";
+
+/// Synthetic `SenderContext.channel` value the dashboard WebSocket
+/// (`librefang-api::ws::handle_ws`) uses when forwarding browser-initiated
+/// turns to the kernel. The display name is hard-coded "Web UI" and
+/// `user_id` is the resolved client IP — neither is a real human identity,
+/// which is why the sender-prefix builder (`librefang-runtime::
+/// agent_loop::build_sender_prefix`, #4666) carves this channel out
+/// alongside [`SYSTEM_CHANNEL_CRON`] / [`SYSTEM_CHANNEL_AUTONOMOUS`].
+pub const SYSTEM_CHANNEL_WEBUI: &str = "webui";
 
 /// Minimum tolerated value for `cron_session_max_messages` (#3459).
 /// Mirrors `agent_loop::MIN_HISTORY_MESSAGES`. Smaller values silently
@@ -684,6 +699,24 @@ pub struct LibreFangKernel {
     /// Approval enforcement + lifecycle hooks + sweeper guards. See
     /// [`subsystems::GovernanceSubsystem`].
     pub(crate) governance: subsystems::GovernanceSubsystem,
+    /// Per-LibreFang-session ACP `fs/*` clients, populated by the ACP
+    /// adapter at `session/new` time so runtime tools can route file
+    /// reads/writes back through the editor instead of the local
+    /// filesystem (#3313). Lookup is per-tool-call so we keep this as a
+    /// top-level field rather than wrapping it in a subsystem — there's
+    /// no other coupled state, and the runtime accesses the map via
+    /// `kernel.acp_fs_clients` at the deepest tool path.
+    pub(crate) acp_fs_clients: dashmap::DashMap<
+        librefang_types::agent::SessionId,
+        std::sync::Arc<dyn librefang_runtime::kernel_handle::AcpFsClient>,
+    >,
+    /// Per-LibreFang-session ACP `terminal/*` clients (#3313).
+    /// Same shape as `acp_fs_clients`; lets `shell_exec` route
+    /// commands through the editor's terminal panel.
+    pub(crate) acp_terminal_clients: dashmap::DashMap<
+        librefang_types::agent::SessionId,
+        std::sync::Arc<dyn librefang_runtime::kernel_handle::AcpTerminalClient>,
+    >,
     /// Auto-reply engine.
     pub(crate) auto_reply_engine: crate::auto_reply::AutoReplyEngine,
     /// Persistent + background process registries. See
@@ -1428,6 +1461,14 @@ impl LibreFangKernel {
             process_manager: Some(&self.processes.manager),
             sender_id: deferred.sender_id.as_deref(),
             channel: deferred.channel.as_deref(),
+            // Restore the originating SessionId from v36's persisted
+            // `deferred_payload` so a post-restart `Allow once` resumes
+            // through the *original* editor's `acp_fs_client` /
+            // `acp_terminal_client` rather than silently falling back
+            // to local fs / shell. `None` for deferred rows written
+            // before this field existed (pre-#3313 H1) — those still
+            // resume, just without ACP routing.
+            session_id: deferred.session_id,
             spill_threshold_bytes: cfg.tool_results.spill_threshold_bytes,
             max_artifact_bytes: cfg.tool_results.max_artifact_bytes,
             checkpoint_manager: self.checkpoint_manager.as_ref(),

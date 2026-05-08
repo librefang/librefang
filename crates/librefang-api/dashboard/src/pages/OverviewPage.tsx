@@ -6,7 +6,6 @@ import {
   CheckCircle2,
   ChevronRight,
   Clock,
-  Filter,
   Plus,
   RefreshCw,
   Rocket,
@@ -27,27 +26,50 @@ import { useMcpServers } from "../lib/queries/mcp";
 import { usePeers } from "../lib/queries/network";
 import { useSchedules } from "../lib/queries/schedules";
 import { useSessions } from "../lib/queries/sessions";
-import { useBudgetStatus } from "../lib/queries/analytics";
+import { useBudgetStatus, useUsageDaily, useUsageByAgent, useUsageByModel, useModelPerformance } from "../lib/queries/analytics";
 import { formatCompact, formatCost } from "../lib/format";
-
-// Sample series for sparkline / cost chart trend until backend exposes them.
-// Replace with snapshot fields once /api/usage/daily / /api/sessions/density land.
-const COST_TREND_30D = [4.2, 4.0, 3.8, 4.5, 5.1, 4.9, 5.4, 5.0, 4.6, 5.2, 5.6, 6.1, 5.8, 6.3, 6.0, 6.4, 6.8, 6.5, 7.0, 6.9, 7.4, 7.1, 7.6, 7.3, 7.8, 8.1, 7.9, 8.4, 8.2, 8.7];
-const COST_TREND_7D  = [4, 5, 4, 6, 5, 7, 6];
-const COST_TREND_90D = Array.from({ length: 30 }, (_, i) => 4 + Math.sin(i / 3) * 2 + i * 0.08 + Math.random() * 1.2);
-const TOKEN_BARS    = [82, 74, 91, 68, 103, 87, 79, 95, 71, 88, 102, 96, 84, 77, 108, 93, 86, 99, 82, 91, 77, 104, 89, 95, 71, 88, 102, 96, 84, 77];
-const LATENCY_TREND = [320, 340, 290, 310, 285, 305, 270, 295, 280, 268, 285, 270, 260, 275, 250, 265, 245, 258, 240, 255, 232, 248, 220, 235, 215, 228, 210, 225, 205, 218];
+import { useUIStore } from "../lib/store";
+import { toastErr } from "../lib/errors";
 
 type Range = "7d" | "30d" | "90d";
-const RANGE_DATA: Record<Range, { trend: number[]; cost: number; prior: number; labelKey: string }> = {
-  "7d":  { trend: COST_TREND_7D,  cost:  41.20, prior:  48.40, labelKey: "overview.range.7d" },
-  "30d": { trend: COST_TREND_30D, cost: 184.20, prior: 206.40, labelKey: "overview.range.30d" },
-  "90d": { trend: COST_TREND_90D, cost: 512.80, prior: 498.10, labelKey: "overview.range.90d" },
-};
+
+function computeRangeData(
+  days: { date?: string; cost_usd?: number }[] | undefined,
+  range: Range,
+) {
+  const empty = { trend: [] as number[], cost: 0, prior: 0, labelKey: `overview.range.${range}` as string };
+  if (!days || days.length === 0) return empty;
+  const sorted = [...days].sort((a, b) => (a.date ?? "").localeCompare(b.date ?? ""));
+  const n = range === "90d" ? 90 : range === "30d" ? 30 : 7;
+  const recent = sorted.slice(-n);
+  const older = sorted.slice(-(n * 2), -n);
+  const cost = recent.reduce((s, d) => s + (d.cost_usd ?? 0), 0);
+  const prior = older.reduce((s, d) => s + (d.cost_usd ?? 0), 0);
+  return {
+    trend: recent.map((d) => d.cost_usd ?? 0),
+    cost,
+    prior,
+    labelKey: `overview.range.${range}`,
+  };
+}
 
 function CostChart({ data, height = 170 }: { data: number[]; height?: number }) {
+  if (data.length < 2) {
+    return (
+      <div className={`h-[130px] lg:h-[170px] flex items-center justify-center text-text-dim text-xs`}>
+        —
+      </div>
+    );
+  }
   const w = 1000;
   const max = Math.max(...data) * 1.2;
+  if (max <= 0) {
+    return (
+      <div className={`h-[130px] lg:h-[170px] flex items-center justify-center text-text-dim text-xs`}>
+        —
+      </div>
+    );
+  }
   const stepX = w / (data.length - 1);
   const path = data.map((v, i) => `${i === 0 ? "M" : "L"}${i * stepX},${height - (v / max) * (height - 16)}`).join(" ");
   const fill = `${path} L${w},${height} L0,${height} Z`;
@@ -205,15 +227,37 @@ interface AlertItem {
   triggered_at?: string;
 }
 
+const PROVIDER_PREFIXES: [string, string][] = [
+  ['claude', 'Anthropic'],
+  ['gpt', 'OpenAI'],
+  ['o1', 'OpenAI'],
+  ['o3', 'OpenAI'],
+  ['o4', 'OpenAI'],
+];
+const PROVIDER_DOT_COLORS = ['#FF6A3D', '#a78bfa', '#34d399', '#fbbf24'];
+
 const ALERT_KIND_TINT: Record<AlertKind, { color: string; bg: string }> = {
   error:   { color: "#fb7185", bg: "rgba(251,113,133,0.12)" },
   warning: { color: "#fbbf24", bg: "rgba(251,191,36,0.12)" },
   pending: { color: "#fbbf24", bg: "rgba(251,191,36,0.10)" },
 };
 
+function RelativeTime({ date }: { date: number | undefined }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!date) return;
+    const ms = Date.now() - date < 60_000 ? 1_000 : 30_000;
+    const id = window.setInterval(() => setTick((t) => t + 1), ms);
+    return () => window.clearInterval(id);
+  }, [date]);
+  if (!date) return <>-</>;
+  return <>{formatRelativeTime(date)}</>;
+}
+
 export function OverviewPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const addToast = useUIStore((s) => s.addToast);
   const snapshotQuery = useDashboardSnapshot();
   const versionQuery = useVersionInfo();
   const quickInitMutation = useQuickInit();
@@ -223,6 +267,10 @@ export function OverviewPage() {
   const schedulesQuery = useSchedules();
   const sessionsQuery = useSessions();
   const budgetStatusQuery = useBudgetStatus();
+  const dailyQuery = useUsageDaily();
+  const usageByAgentQuery = useUsageByAgent();
+  const modelPerfQuery = useModelPerformance();
+  const usageByModelQuery = useUsageByModel();
 
   const snapshot = snapshotQuery.data ?? null;
   const versionInfo = versionQuery.data;
@@ -230,22 +278,9 @@ export function OverviewPage() {
   const isError = snapshotQuery.isError;
   const needsInit = snapshot?.status?.config_exists === false;
 
-  const [range, setRange] = useState<Range>("30d");
-  const [updatedTick, setUpdatedTick] = useState(0);
+  const [range, setRange] = useState<Range>("7d");
   const [dismissedAlerts, setDismissedAlerts] = useState<string[]>([]);
   const [showAllAlerts, setShowAllAlerts] = useState(false);
-
-  useEffect(() => {
-    const id = window.setInterval(() => setUpdatedTick((x) => x + 1), 1000);
-    return () => window.clearInterval(id);
-  }, []);
-
-  const updatedAgo = snapshotQuery.dataUpdatedAt
-    ? formatRelativeTime(snapshotQuery.dataUpdatedAt)
-    : "-";
-  // Force re-render every second so updatedAgo refreshes; the value isn't read,
-  // but useEffect tick ensures formatRelativeTime gets recomputed.
-  void updatedTick;
 
   const agents       = snapshot?.agents ?? [];
   // Prefer the backend's pre-computed active count when available — it's
@@ -290,10 +325,70 @@ export function OverviewPage() {
   }, [sessionsQuery.data]);
   const defaultModel = agents.find((a) => a.model_name)?.model_name ?? "-";
 
-  const rangeData = RANGE_DATA[range];
+  const rangeData = useMemo(() => computeRangeData(dailyQuery.data?.days, range), [dailyQuery.data?.days, range]);
   const costDelta = rangeData.cost - rangeData.prior;
-  const costDeltaPct = Math.abs((costDelta / rangeData.prior) * 100);
-  const costTrendDir: "up" | "down" = costDelta > 0 ? "up" : "down";
+  const hasPriorCost = rangeData.prior > 0;
+  const costDeltaPct = hasPriorCost ? Math.abs((costDelta / rangeData.prior) * 100) : undefined;
+  const costTrendDir: "up" | "down" | "flat" = !hasPriorCost || costDelta === 0 ? "flat" : costDelta > 0 ? "up" : "down";
+  const costDeltaLabel = costDeltaPct == null
+    ? t("overview.kpi.no_prior", { defaultValue: "no prior spend" })
+    : `${costDelta > 0 ? "+" : "−"}${costDeltaPct.toFixed(0)}%`;
+  const costDeltaAmountLabel = hasPriorCost
+    ? `${costDelta > 0 ? "+" : costDelta < 0 ? "−" : ""}$${Math.abs(costDelta).toFixed(0)} ${t("overview.cost.vs_prior", { defaultValue: "vs prior" })}`
+    : t("overview.cost.no_prior", { defaultValue: "no prior spend" });
+
+  const dailyTokens = useMemo(
+    () => (dailyQuery.data?.days ?? []).map((d) => d.tokens ?? 0),
+    [dailyQuery.data?.days],
+  );
+
+  const avgLatency = useMemo(() => {
+    const items = modelPerfQuery.data ?? [];
+    if (items.length === 0) return undefined;
+    let totalCalls = 0;
+    let weightedSum = 0;
+    for (const m of items) {
+      const calls = m.call_count ?? 0;
+      const avg = m.avg_latency_ms;
+      if (calls > 0 && avg != null) {
+        totalCalls += calls;
+        weightedSum += avg * calls;
+      }
+    }
+    return totalCalls > 0 ? weightedSum / totalCalls : undefined;
+  }, [modelPerfQuery.data]);
+
+  const usageByAgent = useMemo(
+    () => (usageByAgentQuery.data ?? []).slice().sort((a, b) => (b.total_tokens ?? 0) - (a.total_tokens ?? 0)).slice(0, 5),
+    [usageByAgentQuery.data],
+  );
+
+  const providerBreakdown = useMemo(() => {
+    const items = usageByModelQuery.data ?? [];
+    if (items.length === 0) return null;
+    const totals = new Map<string, number>();
+    let grandTotal = 0;
+    for (const item of items) {
+      const model = (item.model ?? '').toLowerCase();
+      const cost = item.total_cost_usd ?? 0;
+      grandTotal += cost;
+      let provider = 'Other';
+      for (const [prefix, name] of PROVIDER_PREFIXES) {
+        if (model.startsWith(prefix)) {
+          provider = name;
+          break;
+        }
+      }
+      totals.set(provider, (totals.get(provider) ?? 0) + cost);
+    }
+    if (grandTotal === 0) return null;
+    return [...totals.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([name, cost]) => ({
+        name,
+        pct: Math.round((cost / grandTotal) * 100),
+      }));
+  }, [usageByModelQuery.data]);
 
   const recentAgents = useMemo(
     () => agents.filter((a) => !a.is_hand && !a.name.includes(":")).slice(0, 7),
@@ -510,17 +605,22 @@ export function OverviewPage() {
           >
             {snapshotQuery.isFetching ? t("overview.refreshing", { defaultValue: "Refreshing…" }) : t("overview.refresh", { defaultValue: "Refresh" })}
           </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            leftIcon={<Filter className="w-3.5 h-3.5" />}
-            onClick={() => {
-              const next: Range = range === "30d" ? "7d" : range === "7d" ? "90d" : "30d";
-              setRange(next);
-            }}
-          >
-            {t(rangeData.labelKey, { defaultValue: range === "7d" ? "7 days" : range === "30d" ? "30 days" : "90 days" })}
-          </Button>
+          <div className="flex gap-1 shrink-0">
+            {(["7d", "30d", "90d"] as const).map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => setRange(p)}
+                className={`h-8 px-2.5 rounded-md text-[11px] font-mono cursor-pointer transition-colors ${
+                  p === range
+                    ? "bg-brand/10 border border-brand/30 text-brand"
+                    : "bg-transparent border border-border-subtle text-text-dim hover:border-brand/20"
+                }`}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
           <Button variant="primary" size="sm" leftIcon={<Plus className="w-3.5 h-3.5" />} onClick={() => navigate({ to: "/agents" })}>
             {t("overview.new_agent", { defaultValue: "New agent" })}
           </Button>
@@ -535,17 +635,22 @@ export function OverviewPage() {
           >
             <RefreshCw className={`w-4 h-4 ${snapshotQuery.isFetching ? "animate-spin" : ""}`} />
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              const next: Range = range === "30d" ? "7d" : range === "7d" ? "90d" : "30d";
-              setRange(next);
-            }}
-            className="h-9 px-2.5 rounded-md border border-border-subtle bg-surface text-text-dim hover:text-text-main hover:border-brand/30 inline-flex items-center gap-1 text-[11px] font-mono transition-colors"
-          >
-            <Filter className="w-3.5 h-3.5" />
-            <span>{range}</span>
-          </button>
+          <div className="flex gap-1 shrink-0">
+            {(["7d", "30d", "90d"] as const).map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => setRange(p)}
+                className={`h-9 px-2.5 rounded-md text-[11px] font-mono cursor-pointer transition-colors ${
+                  p === range
+                    ? "bg-brand/10 border border-brand/30 text-brand"
+                    : "bg-transparent border border-border-subtle text-text-dim hover:border-brand/20"
+                }`}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
           <button
             type="button"
             onClick={() => navigate({ to: "/agents" })}
@@ -575,7 +680,11 @@ export function OverviewPage() {
               <Button
                 variant="primary"
                 size="sm"
-                onClick={() => quickInitMutation.mutateAsync().catch(() => {})}
+                onClick={() => {
+                  quickInitMutation.mutate(undefined, {
+                    onError: (err) => addToast(toastErr(err, t("overview.setup_failed", { defaultValue: "Quick init failed" })), "error"),
+                  });
+                }}
                 disabled={quickInitMutation.isPending}
               >
                 {quickInitMutation.isPending ? t("overview.setup_running") : t("overview.setup_button")}
@@ -600,7 +709,7 @@ export function OverviewPage() {
         <Kpi
           label={`${t("overview.kpi.spend", { defaultValue: "Spend" })} · ${t(rangeData.labelKey, { defaultValue: range })}`}
           value={`$${rangeData.cost.toFixed(2)}`}
-          delta={`${costTrendDir === "up" ? "+" : "−"}${costDeltaPct.toFixed(0)}%`}
+          delta={costDeltaLabel}
           trend={costTrendDir}
           sub={`vs $${rangeData.prior.toFixed(2)} ${t("overview.kpi.prior", { defaultValue: "prior" })}`}
           sparkline={<Sparkline data={rangeData.trend.slice(-12)} width={70} height={28} color="#a78bfa" />}
@@ -609,20 +718,15 @@ export function OverviewPage() {
         <Kpi
           label={`${t("nav.sessions", { defaultValue: "Sessions" })} · 24h`}
           value={sessionsCount > 0 ? formatCompact(sessionsCount) : "0"}
-          delta={sessionsCount > 0 ? `+${Math.floor(sessionsCount * 0.15)}` : undefined}
-          trend="up"
-          sub={`3.4k ${t("overview.kpi.peak", { defaultValue: "tokens/s peak" })}`}
-          sparkline={<Sparkline data={TOKEN_BARS.slice(-12)} width={70} height={28} color="#34d399" />}
+          sub={dailyTokens.length > 0 ? `${formatCompact(dailyTokens.reduce((a, b) => a + b, 0))} ${t("overview.kpi.tokens_over_7d", { defaultValue: "tokens over 7d" })}` : undefined}
+          sparkline={dailyTokens.length > 1 ? <Sparkline data={dailyTokens.slice(-12)} width={70} height={28} color="#34d399" /> : undefined/* Needs 2+ data points to draw a line; text sub still shows for 1 day */}
           onClick={() => navigate({ to: "/sessions" })}
         />
         <Kpi
-          label={t("overview.kpi.p95_latency", { defaultValue: "P95 latency" })}
-          value="218"
-          unit="ms"
-          delta="−14ms"
-          trend="down"
+          label={t("analytics.avg_latency", { defaultValue: "Avg Latency" })}
+          value={avgLatency != null ? `${Math.round(avgLatency)}` : "-"}
+          unit={avgLatency != null ? "ms" : undefined}
           sub={defaultModel}
-          sparkline={<Sparkline data={LATENCY_TREND.slice(-12).map((x) => 600 - x)} width={70} height={28} color="#fbbf24" />}
           onClick={() => navigate({ to: "/telemetry" })}
         />
       </div>
@@ -637,8 +741,8 @@ export function OverviewPage() {
               </SectionLabel>
               <div className="flex items-baseline gap-2 flex-wrap">
                 <span className="font-mono font-semibold text-lg lg:text-[22px] tracking-[-0.02em] tabular-nums">${rangeData.cost.toFixed(2)}</span>
-                <span className={`text-[11px] font-mono tabular-nums ${costTrendDir === "up" ? "text-rose-400" : "text-emerald-400"}`}>
-                  {costTrendDir === "up" ? "+" : "−"}${Math.abs(costDelta).toFixed(0)} {t("overview.cost.vs_prior", { defaultValue: "vs prior" })}
+                <span className={`text-[11px] font-mono tabular-nums ${costTrendDir === "up" ? "text-rose-400" : costTrendDir === "down" ? "text-emerald-400" : "text-text-dim"}`}>
+                  {costDeltaAmountLabel}
                 </span>
               </div>
             </div>
@@ -648,6 +752,7 @@ export function OverviewPage() {
                 return (
                   <button
                     key={p}
+                    type="button"
                     onClick={() => setRange(p)}
                     className={`px-2 lg:px-2.5 py-0.5 text-[11px] rounded-md font-mono cursor-pointer transition-colors ${
                       active
@@ -664,17 +769,18 @@ export function OverviewPage() {
           <div className="px-2 pb-2">
             <CostChart data={rangeData.trend} height={170} />
           </div>
-          <div className="flex flex-wrap gap-x-3 gap-y-1 lg:gap-4 px-3 lg:px-4 pb-3 text-[10.5px] lg:text-[11px] text-text-dim">
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2 h-0.5 bg-sky-400 rounded-sm" /> Anthropic · 64%
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2 h-0.5 bg-violet-400 rounded-sm" /> OpenAI · 28%
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-2 h-0.5 bg-emerald-400 rounded-sm" /> Other · 8%
-            </span>
-          </div>
+           <div className="flex flex-wrap gap-x-3 gap-y-1 lg:gap-4 px-3 lg:px-4 pb-3 text-[10.5px] lg:text-[11px] text-text-dim">
+              {providerBreakdown ? providerBreakdown.map((p, i) => (
+                <span key={p.name} className="inline-flex items-center gap-1.5">
+                  <span className="w-2 h-0.5 rounded-sm" style={{ backgroundColor: PROVIDER_DOT_COLORS[i % PROVIDER_DOT_COLORS.length] }} /> {p.name} · {p.pct}%
+                </span>
+              )) : (
+                <span className="text-text-dim/60">{t("overview.cost.no_provider_data", { defaultValue: "No provider data" })}</span>
+              )}
+              {providerBreakdown ? (
+                <span className="text-text-dim/60">{t("overview.cost.provider_all_time", { defaultValue: "provider share all-time" })}</span>
+              ) : null}
+           </div>
         </Card>
 
         {/* Alerts — derived from agents/MCP/approvals. Mirrors the design's
@@ -786,7 +892,7 @@ export function OverviewPage() {
           </SectionLabel>
           <div className="flex items-center gap-2 lg:gap-3 shrink-0">
             <span className="font-mono text-[10.5px] lg:text-[11px] text-text-dim/80 hidden sm:inline">
-              {t("overview.updated", { defaultValue: "updated" })} · {updatedAgo}
+              {t("overview.updated", { defaultValue: "updated" })} · <RelativeTime date={snapshotQuery.dataUpdatedAt} />
             </span>
             <button
               onClick={() => navigate({
@@ -993,33 +1099,35 @@ export function OverviewPage() {
       {/* Bottom dual: tokens-by-agent + system tiles */}
       <div className="hidden md:grid md:grid-cols-2 gap-3">
         <Card padding="md" className="surface-lit">
-          <SectionLabel>{t("overview.tokens_by_agent", { defaultValue: "Tokens by agent · 24h" })}</SectionLabel>
+          <SectionLabel>{t("overview.tokens_by_agent", { defaultValue: "Tokens by agent · all-time" })}</SectionLabel>
           <div className="flex flex-col gap-2 mt-1">
-            {recentAgents.slice(0, 5).map((agent, idx) => {
-              const pct = Math.max(0.18, 1 - idx * 0.18);
-              const tokens = Math.round(420 - idx * 70);
-              return (
-                <button
-                  key={agent.id}
-                  onClick={() => navigate({ to: "/agents" })}
-                  className="flex items-center gap-2.5 bg-transparent border-0 px-0 py-1 cursor-pointer text-left text-text-main"
-                >
-                  <span className="font-mono text-[11.5px] w-32 truncate">{agent.name}</span>
-                  <div className="flex-1 h-1.5 bg-slate-700/40 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-linear-to-r from-sky-400/40 to-sky-400 shadow-[0_0_8px_rgba(255,106,61,0.5)] rounded-full"
-                      style={{ width: `${pct * 100}%` }}
-                    />
-                  </div>
-                  <span className="font-mono text-[11px] text-text-dim w-12 text-right">{tokens}k</span>
-                </button>
-              );
-            })}
-            {recentAgents.length === 0 ? (
+            {usageByAgent.length > 0 ? (() => {
+              const maxTokens = usageByAgent[0].total_tokens ?? 1;
+              return usageByAgent.map((item) => {
+                const pct = Math.max(0.08, (item.total_tokens ?? 0) / maxTokens);
+                const tokens = item.total_tokens ?? 0;
+                return (
+                  <button
+                    key={item.agent_id ?? item.name}
+                    onClick={() => navigate({ to: "/agents" })}
+                    className="flex items-center gap-2.5 bg-transparent border-0 px-0 py-1 cursor-pointer text-left text-text-main"
+                  >
+                    <span className="font-mono text-[11.5px] w-32 truncate">{item.name ?? item.agent_id ?? "-"}</span>
+                    <div className="flex-1 h-1.5 bg-slate-700/40 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-linear-to-r from-brand/40 to-brand shadow-[0_0_8px_rgba(255,106,61,0.5)] rounded-full"
+                        style={{ width: `${pct * 100}%` }}
+                      />
+                    </div>
+                    <span className="font-mono text-[11px] text-text-dim w-12 text-right">{formatCompact(tokens)}</span>
+                  </button>
+                );
+              });
+            })() : (
               <div className="text-text-dim text-xs py-6 text-center">
                 {t("overview.no_token_data", { defaultValue: "No token usage yet" })}
               </div>
-            ) : null}
+            )}
           </div>
         </Card>
 

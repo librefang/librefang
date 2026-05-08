@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { useUIStore } from "../lib/store";
 import type { HealthCheck, AuditEntry, BackupItem, TaskQueueItem } from "../api";
@@ -183,7 +183,7 @@ export function RuntimePage() {
       { label: t("runtime.failed_count"), value: taskStatus.failed ?? 0, color: taskStatus.failed ? "text-error" : "text-text-dim" },
     ] : [];
 
-  const refreshAll = () => {
+  const refreshAll = useCallback(() => {
     for (const q of [
       snapshotQuery,
       queueQuery,
@@ -197,8 +197,17 @@ export function RuntimePage() {
     ]) {
       q.refetch();
     }
-    // Skip version refetch: effectively immutable for daemon lifetime, no value here.
-  };
+  }, [
+    snapshotQuery.refetch,
+    queueQuery.refetch,
+    healthDetailQuery.refetch,
+    securityQuery.refetch,
+    auditQuery.refetch,
+    auditVerifyQuery.refetch,
+    backupsQuery.refetch,
+    taskStatusQuery.refetch,
+    taskListQuery.refetch,
+  ]);
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">

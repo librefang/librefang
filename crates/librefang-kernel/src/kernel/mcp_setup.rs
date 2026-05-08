@@ -13,6 +13,17 @@
 use std::sync::Arc;
 
 use super::*;
+use crate::McpSubsystemApi;
+
+/// Coerce the trait-borrowed `Arc<dyn McpOAuthProvider + Send + Sync>` to
+/// the unsized `Arc<dyn McpOAuthProvider>` that `McpServerConfig` expects.
+fn oauth_provider_clone(
+    kernel: &LibreFangKernel,
+) -> Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider> {
+    let with_bounds: Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync> =
+        Arc::clone(kernel.oauth_provider_ref());
+    with_bounds
+}
 
 impl LibreFangKernel {
     /// Connect to all configured MCP servers and cache their tool definitions.
@@ -70,7 +81,7 @@ impl LibreFangKernel {
                 timeout_secs: server_config.timeout_secs,
                 env: server_config.env.clone(),
                 headers: server_config.headers.clone(),
-                oauth_provider: Some(self.oauth_provider_ref()),
+                oauth_provider: Some(oauth_provider_clone(self)),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
                 taint_policy: server_config.taint_policy.clone(),
@@ -249,7 +260,7 @@ impl LibreFangKernel {
             timeout_secs: server_config.timeout_secs,
             env: server_config.env.clone(),
             headers: server_config.headers.clone(),
-            oauth_provider: Some(self.oauth_provider_ref()),
+            oauth_provider: Some(oauth_provider_clone(self)),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
             taint_policy: server_config.taint_policy.clone(),
@@ -379,7 +390,7 @@ impl LibreFangKernel {
                 timeout_secs: server_config.timeout_secs,
                 env: server_config.env.clone(),
                 headers: server_config.headers.clone(),
-                oauth_provider: Some(self.oauth_provider_ref()),
+                oauth_provider: Some(oauth_provider_clone(self)),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
                 taint_policy: server_config.taint_policy.clone(),
@@ -551,7 +562,7 @@ impl LibreFangKernel {
             timeout_secs: server_config.timeout_secs,
             env: server_config.env.clone(),
             headers: server_config.headers.clone(),
-            oauth_provider: Some(self.oauth_provider_ref()),
+            oauth_provider: Some(oauth_provider_clone(self)),
             oauth_config: server_config.oauth.clone(),
             taint_scanning: server_config.taint_scanning,
             taint_policy: server_config.taint_policy.clone(),

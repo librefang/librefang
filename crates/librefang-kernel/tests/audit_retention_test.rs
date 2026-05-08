@@ -17,6 +17,7 @@
 //! requiring back-dated timestamps (which would need test-only access
 //! to the AuditLog internals).
 
+use librefang_kernel::MeteringSubsystemApi;
 use librefang_runtime::audit::AuditAction;
 use librefang_testing::MockKernelBuilder;
 
@@ -41,7 +42,7 @@ async fn test_kernel_boot_with_retention_config_starts_trim_task() {
     // Seed 50 audit entries — well over the cap of 10. Use RoleChange
     // so no per-action retention rule could kick in (we want the cap
     // path to be the sole reason rows are dropped).
-    let audit = kernel.audit().clone();
+    let audit = kernel.audit_log().clone();
     for i in 0..50 {
         audit.record(
             "agent-x",

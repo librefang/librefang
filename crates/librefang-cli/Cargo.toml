@@ -62,6 +62,8 @@ walkdir = { workspace = true }
 base64 = { workspace = true }
 librefang-runtime = { path = "../librefang-runtime" }
 librefang-storage = { path = "../librefang-storage", optional = true, default-features = false }
+librefang-acp = { path = "../librefang-acp", features = ["kernel-adapter"] }
+async-trait = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 uuid = { workspace = true }
 ratatui = { workspace = true }

@@ -7,10 +7,10 @@
 
 use crate::catalog::McpCatalog;
 use crate::credentials::CredentialResolver;
-use crate::{
-    ExtensionError, ExtensionResult, McpCatalogEntry, McpCatalogTransport, McpStatus, OAuthTemplate,
-};
+use crate::{ExtensionError, ExtensionResult};
 use librefang_types::config::{McpOAuthConfig, McpServerConfigEntry, McpTransportEntry};
+use librefang_types::mcp::{McpCatalogEntry, McpCatalogTransport, McpStatus};
+use librefang_types::oauth::OAuthTemplate;
 use std::collections::HashMap;
 use tracing::{info, warn};
 use zeroize::Zeroizing;

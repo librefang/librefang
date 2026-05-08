@@ -1,5 +1,5 @@
-@import "tailwindcss";
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700;900&family=Roboto:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
 
 @theme {
   /* Dynamic Semantic Palette */
@@ -43,6 +43,10 @@
   --bg-surface-hover: #f1f5f9;
   --border-color: #e2e8f0;
   --text-muted: #64748b;
+
+  --glow-primary: rgba(224, 78, 40, 0.4);
+  --glow-secondary: rgba(224, 78, 40, 0.18);
+  --glow-medium: rgba(224, 78, 40, 0.25);
 }
 
 :root.dark {
@@ -62,6 +66,10 @@
   --bg-surface-hover: rgba(30, 41, 59, 0.75);
   --border-color: rgba(51, 65, 85, 0.8);
   --text-muted: #94a3b8;
+
+  --glow-primary: rgba(255, 106, 61, 0.4);
+  --glow-secondary: rgba(255, 106, 61, 0.18);
+  --glow-medium: rgba(255, 106, 61, 0.25);
 }
 
 html,
@@ -116,7 +124,6 @@ body {
 :root {
   --apple-spring: cubic-bezier(0.22, 1, 0.36, 1);
   --apple-ease: cubic-bezier(0.25, 0.1, 0.25, 1);
-  --apple-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 /* Animation primitives moved to motion (`src/lib/motion.ts` + per-component
@@ -170,19 +177,6 @@ body {
   animation: pulse-soft 2s ease-in-out infinite;
 }
 
-/* ── Shimmer for skeletons / placeholder ─────────── */
-@keyframes shimmer {
-  0% { background-position: -400px 0; }
-  100% { background-position: 400px 0; }
-}
-@utility animate-shimmer {
-  background: linear-gradient(90deg,
-    rgba(51, 65, 85, 0.15) 0%,
-    rgba(51, 65, 85, 0.35) 50%,
-    rgba(51, 65, 85, 0.15) 100%);
-  background-size: 800px 100%;
-  animation: shimmer 1.6s linear infinite;
-}
 
 /* ── Rise (toast / modal entry) ─────────────────── */
 @keyframes rise {
@@ -193,24 +187,13 @@ body {
   animation: rise 0.5s var(--apple-spring) both;
 }
 
-/* ── Approval glow ring ─────────────────────────── */
-@keyframes glow-ring {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.3); }
-  50% { box-shadow: 0 0 0 4px rgba(251, 191, 36, 0); }
-}
-@utility animate-glow-ring {
-  animation: glow-ring 2.4s ease-in-out infinite;
-}
 
-/* ── Grid bg (canvas / scratchpad) ─────────────── */
-@utility bg-grid {
-  background-image:
-    linear-gradient(rgba(51, 65, 85, 0.18) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(51, 65, 85, 0.18) 1px, transparent 1px);
-  background-size: 24px 24px;
-}
 
 /* ── Smooth scrollbar ───────────────────────────── */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
 .scrollbar-thin::-webkit-scrollbar { width: 5px; }
 .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
 .scrollbar-thin::-webkit-scrollbar-thumb {
@@ -222,33 +205,19 @@ body {
 .dark .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); }
 .dark .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
 
-/* prefers-reduced-motion is handled by motion (`useReducedMotion`) on a
-   per-variant basis; no global override is needed here. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse-soft,
+  .animate-rise,
+  .card-glow {
+    animation: none !important;
+    transition: none !important;
+  }
+}
 
 /* ── iOS / Android safe-area insets ────────────── */
-/* Applied to elements that sit at the edge of the screen (sidebar bottom,
-   chat input bar, sticky action bars) so content clears the iOS home
-   indicator and Android gesture navigation bar.
-
-   pb-safe         — pure inset, no minimum (for fixed wrappers with no base padding)
-   pb-safe-2 / -4  — inset OR base padding, whichever is larger; use these when the
-                     element already has p-2 / p-4 padding and must not lose it on
-                     non-mobile platforms where the inset is 0. */
+/* Applied to elements at screen edge so content clears the iOS home indicator
+   and Android gesture navigation bar. */
 @utility pb-safe {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
-@utility pb-safe-2 {
-  padding-bottom: max(env(safe-area-inset-bottom, 0px), 0.5rem);
-}
-@utility pb-safe-4 {
-  padding-bottom: max(env(safe-area-inset-bottom, 0px), 1rem);
-}
-@utility pt-safe {
-  padding-top: max(env(safe-area-inset-top, 0px), 0px);
-}
-@utility pl-safe {
-  padding-left: max(env(safe-area-inset-left, 0px), 0px);
-}
-@utility pr-safe {
-  padding-right: max(env(safe-area-inset-right, 0px), 0px);
-}
+

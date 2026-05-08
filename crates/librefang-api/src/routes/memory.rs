@@ -1938,6 +1938,7 @@ mod tests {
     //! observe the audit chain.
     use super::*;
     use librefang_kernel::audit::AuditAction;
+    use librefang_kernel::MemorySubsystemApi;
     use librefang_memory::namespace_acl::{MemoryNamespaceGuard, NamespaceGate};
     use librefang_types::config::KernelConfig;
 
@@ -2075,7 +2076,7 @@ mod tests {
         let idempotency_store: Arc<
             dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync,
         > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
-            kernel.memory_substrate().pool(),
+            kernel.substrate_ref().pool(),
         ));
         let state = Arc::new(AppState {
             kernel,

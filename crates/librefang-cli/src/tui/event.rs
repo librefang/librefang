@@ -1,6 +1,9 @@
 //! Event system: crossterm polling, tick timer, streaming bridges.
 
+use librefang_kernel::AgentSubsystemApi;
 use librefang_kernel::LibreFangKernel;
+use librefang_kernel::McpSubsystemApi;
+use librefang_kernel::SkillsSubsystemApi;
 use librefang_runtime::agent_loop::AgentLoopResult;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
@@ -713,7 +716,7 @@ pub fn spawn_fetch_dashboard(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             }
         }
         BackendRef::InProcess(kernel) => {
-            let count = kernel.agent_registry().count() as u64;
+            let count = kernel.agent_registry_ref().count() as u64;
             let _ = tx.send(AppEvent::DashboardData {
                 agent_count: count,
                 uptime_secs: 0,
@@ -1190,7 +1193,7 @@ pub fn spawn_fetch_agent_skills(backend: BackendRef, agent_id: String, tx: mpsc:
             if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
                 let aid = librefang_types::agent::AgentId(uuid);
                 let assigned = kernel
-                    .agent_registry()
+                    .agent_registry_ref()
                     .get(aid)
                     .map(|e| e.manifest.skills.clone())
                     .unwrap_or_default();
@@ -1253,14 +1256,14 @@ pub fn spawn_fetch_agent_mcp_servers(
             if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
                 let aid = librefang_types::agent::AgentId(uuid);
                 let assigned = kernel
-                    .agent_registry()
+                    .agent_registry_ref()
                     .get(aid)
                     .map(|e| e.manifest.mcp_servers.clone())
                     .unwrap_or_default();
                 let mut available = Vec::new();
-                if let Ok(mcp_tools) = kernel.mcp_tools_ref().lock() {
+                if let Ok(mcp_tools) = kernel.tools_ref().lock() {
                     let configured_servers: Vec<String> = kernel
-                        .effective_mcp_servers_ref()
+                        .effective_servers_ref()
                         .read()
                         .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
                         .unwrap_or_default();
@@ -1478,7 +1481,7 @@ pub fn spawn_fetch_memory_agents(backend: BackendRef, tx: mpsc::Sender<AppEvent>
         }
         BackendRef::InProcess(kernel) => {
             let agents: Vec<AgentEntry> = kernel
-                .agent_registry()
+                .agent_registry_ref()
                 .list()
                 .iter()
                 .map(|e| AgentEntry {
@@ -2314,12 +2317,12 @@ pub fn spawn_fetch_hands(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             }
         }
         BackendRef::InProcess(kernel) => {
-            let defs = kernel.hands().list_definitions();
+            let defs = kernel.hand_registry_ref().list_definitions();
             let hands: Vec<HandInfo> = defs
                 .iter()
                 .map(|d| {
                     let reqs_met = kernel
-                        .hands()
+                        .hand_registry_ref()
                         .check_requirements(&d.id)
                         .map(|r| r.iter().all(|(_, ok)| *ok))
                         .unwrap_or(false);
@@ -2372,7 +2375,7 @@ pub fn spawn_fetch_active_hands(backend: BackendRef, tx: mpsc::Sender<AppEvent>)
         }
         BackendRef::InProcess(kernel) => {
             let instances: Vec<HandInstanceInfo> = kernel
-                .hands()
+                .hand_registry_ref()
                 .list_instances()
                 .iter()
                 .map(|i| HandInstanceInfo {
@@ -2656,7 +2659,7 @@ pub fn spawn_fetch_extension_health(backend: BackendRef, tx: mpsc::Sender<AppEve
             }
         }
         BackendRef::InProcess(kernel) => {
-            let health = kernel.mcp_health().all_health();
+            let health = kernel.health().all_health();
             let entries: Vec<ExtensionHealthInfo> = health
                 .iter()
                 .map(|h| ExtensionHealthInfo {

@@ -29,6 +29,7 @@ const MIN_WIDTH: Record<DrawerSize, string> = {
 function useIsMobile() {
   const [isMobile, setIsMobile] = useState(false);
   useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
     const mql = window.matchMedia("(max-width: 1023px)");
     setIsMobile(mql.matches);
     const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);

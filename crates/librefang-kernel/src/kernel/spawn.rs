@@ -13,6 +13,7 @@
 //! visibility surgery.
 
 use super::*;
+use crate::MeteringSubsystemApi;
 
 impl LibreFangKernel {
     /// Spawn a new agent from a manifest, optionally linking to a parent agent.
@@ -239,7 +240,7 @@ impl LibreFangKernel {
         }
 
         // Apply global budget defaults to agent resource quotas
-        apply_budget_defaults(&self.budget_config(), &mut manifest.resources);
+        apply_budget_defaults(&self.current_budget(), &mut manifest.resources);
 
         // Create workspace directory for the agent.
         // Hand agents set a relative workspace path (hands/<hand>/<role>) resolved

@@ -682,7 +682,7 @@ pub async fn auth_callback(
             token_endpoint = %token_endpoint,
             issuer_host = %issuer_host,
             token_host = %token_host,
-            "token_endpoint host does not match authorization server host — refusing token exchange (possible metadata-tamper attack, #3713)"
+            "token_endpoint host failed both exact and same-eTLD+1 checks vs authorization server — refusing token exchange (possible metadata-tamper attack; refs #3713 #4665)"
         );
         let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
         auth_states.insert(
@@ -989,15 +989,86 @@ fn url_host_lower(raw: &str) -> Option<String> {
         .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
 }
 
-/// True iff `token_endpoint` parses to a URL whose host equals
-/// `expected_host` (case-insensitive). A token endpoint with no host, an
-/// unparseable URL, or a different host all return false — the caller MUST
-/// refuse the code exchange in that case (#3713).
+/// True iff the auth-code exchange may POST the code to `token_endpoint`,
+/// given the operator-typed issuer host (the value stored as `issuer_host`,
+/// derived from the URL the operator placed in `config.toml`).
+///
+/// Acceptance rules, in order:
+/// 1. **Exact host match** (case-insensitive) — the original #3713 pin.
+/// 2. **Same registrable domain (eTLD+1)** — covers OAuth-proxy patterns
+///    where a vendor's MCP service legitimately delegates token exchange
+///    to its main OAuth domain (e.g. Slack: `mcp.slack.com` →
+///    `slack.com/api/oauth.v2.user.access`; Notion: `mcp.notion.com` →
+///    `api.notion.com`). Refs #4665. The eTLD+1 is computed via the
+///    Public Suffix List so multi-label suffixes (`*.co.uk`,
+///    `*.com.cn`, …) don't false-match across organizations. Rule 2 is
+///    symmetric: the operator-typed host and the metadata-declared host
+///    can be in either parent/child arrangement under the same eTLD+1
+///    (sub→root, root→sub, sibling→sibling) — the trust boundary is the
+///    registrable domain itself, not its hierarchy. The attacker still
+///    needs to tamper with HTTPS-validated discovery metadata before any
+///    of those shapes become exploitable.
+///
+/// **Threat-model trade-off (#4665 vs #3713).** The strict #3713 pin
+/// rejected even sibling subdomains under the same registrable domain;
+/// loosening to "same eTLD+1" admits a class of attack where someone
+/// who controls *any* subdomain on the issuer's registrable domain
+/// could redirect the token exchange to themselves *if they also*
+/// tamper with the discovery metadata. We accept that residual risk
+/// because (a) metadata fetches are HTTPS-validated, raising the MITM
+/// bar, (b) sibling-subdomain takeover within an org's own registrable
+/// domain implies the org itself is compromised, and (c) the strict
+/// pin left no workaround for legitimate cross-domain OAuth delegation.
+///
+/// Hosts that are not DNS names with a known public suffix — IPs,
+/// `localhost`, single-label hosts, internal names — fall through to
+/// **exact match only**, since the PSL has no opinion on them and a
+/// "registrable domain" check would be meaningless or unsafe.
 fn token_endpoint_host_matches(token_endpoint: &str, expected_host: &str) -> bool {
-    match url_host_lower(token_endpoint) {
-        Some(h) => h == expected_host.to_ascii_lowercase(),
-        None => false,
+    let token_host = match url_host_lower(token_endpoint) {
+        Some(h) => h,
+        None => return false,
+    };
+    let expected_host = expected_host.to_ascii_lowercase();
+
+    // Rule 1: exact match preserves the strict #3713 pin.
+    if token_host == expected_host {
+        return true;
     }
+
+    // IP literals must only ever pass via Rule 1. The PSL crate is
+    // *not* documented to return None for every IP shape — for an
+    // IPv4 address with an unknown TLD label the default rule emits
+    // the trailing two labels as the "registrable domain", which
+    // would let `10.0.0.1` and `127.0.0.1` collide on `0.1`. Bail
+    // explicitly so the eTLD+1 path never sees an IP. Strip IPv6
+    // brackets (`url::Url::host_str` keeps them) before parsing.
+    if is_ip_literal(&token_host) || is_ip_literal(&expected_host) {
+        return false;
+    }
+
+    // Rule 2: same registrable domain (eTLD+1). `psl::domain_str`
+    // returns None for `localhost`, names whose TLD is unknown, etc.
+    // — those only ever pass via Rule 1 above.
+    let token_etld1 = match psl::domain_str(&token_host) {
+        Some(d) => d,
+        None => return false,
+    };
+    let expected_etld1 = match psl::domain_str(&expected_host) {
+        Some(d) => d,
+        None => return false,
+    };
+    token_etld1 == expected_etld1
+}
+
+/// `true` when `host` is an IPv4 or IPv6 literal. Tolerates the
+/// bracketed IPv6 form (`[::1]`) emitted by `url::Url::host_str`.
+fn is_ip_literal(host: &str) -> bool {
+    let stripped = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    stripped.parse::<std::net::IpAddr>().is_ok()
 }
 
 #[cfg(test)]
@@ -1249,16 +1320,119 @@ mod tests {
     }
 
     #[test]
-    fn token_endpoint_subdomain_is_rejected() {
-        // Defense-in-depth: a sibling/child of the issuer host is still a
-        // different origin and must not be trusted.
+    fn token_endpoint_across_registrable_domain_is_rejected() {
+        // The dangerous case: token endpoint sits on a totally different
+        // registrable domain. Must still be refused after #4665 loosened
+        // the same-eTLD+1 case — the PSL boundary is what makes the
+        // loosening defensible.
         assert!(!token_endpoint_host_matches(
             "https://evil.auth.example.com.attacker.example/oauth/token",
             "auth.example.com"
         ));
-        assert!(!token_endpoint_host_matches(
+    }
+
+    #[test]
+    fn token_endpoint_same_registrable_domain_is_accepted() {
+        // #4665: legitimate OAuth-proxy pattern — MCP service on a
+        // subdomain delegates the token exchange to the org's main OAuth
+        // domain. Both hosts share the registrable domain `slack.com`.
+        assert!(token_endpoint_host_matches(
+            "https://slack.com/api/oauth.v2.user.access",
+            "mcp.slack.com"
+        ));
+        // Operator-typed parent, metadata-declared sibling subdomain on
+        // the same eTLD+1 — also accepted (same trust boundary).
+        assert!(token_endpoint_host_matches(
             "https://api.auth.example.com/oauth/token",
             "auth.example.com"
+        ));
+    }
+
+    #[test]
+    fn token_endpoint_multilabel_public_suffix_does_not_false_match() {
+        // Naive "share last 2 labels" would false-allow these because
+        // both end in `.co.uk`. The PSL knows `co.uk` is the eTLD, so
+        // `attacker.co.uk` and `victim.co.uk` are different registrable
+        // domains and the check refuses.
+        assert!(!token_endpoint_host_matches(
+            "https://attacker.co.uk/oauth/token",
+            "auth.victim.co.uk"
+        ));
+    }
+
+    /// PSL's private section treats things like `*.github.io`,
+    /// `*.herokuapp.com`, `*.s3.amazonaws.com` as public suffixes, so
+    /// each tenant's site is its own registrable domain. This is
+    /// load-bearing for the threat model: without it, anyone who can
+    /// register `attacker.github.io` could false-match an issuer on
+    /// `victim.github.io` via the eTLD+1 rule. Pin the property so a
+    /// future swap of the PSL crate or `domain_str` → `domain` cannot
+    /// regress it silently.
+    #[test]
+    fn token_endpoint_psl_private_domain_does_not_false_match() {
+        assert!(!token_endpoint_host_matches(
+            "https://attacker.github.io/oauth/token",
+            "victim.github.io"
+        ));
+        assert!(!token_endpoint_host_matches(
+            "https://evil-tenant.s3.amazonaws.com/oauth/token",
+            "good-tenant.s3.amazonaws.com"
+        ));
+    }
+
+    #[test]
+    fn token_endpoint_ip_host_requires_exact_match() {
+        // The PSL has no opinion on IP literals; only Rule 1 (exact
+        // match) can accept them, so a different IP must be refused.
+        assert!(token_endpoint_host_matches(
+            "https://127.0.0.1/oauth/token",
+            "127.0.0.1"
+        ));
+        assert!(!token_endpoint_host_matches(
+            "https://10.0.0.1/oauth/token",
+            "127.0.0.1"
+        ));
+    }
+
+    /// `psl::domain_str` returns `Some("0.1")` for both `10.0.0.1` and
+    /// `192.168.0.1` — the unknown-TLD default rule emits the rightmost
+    /// two labels. Without the explicit IP carve-out, two unrelated
+    /// IPv4 addresses would Rule-2 each other. Pin the carve-out.
+    #[test]
+    fn token_endpoint_ipv4_with_shared_trailing_labels_must_not_match() {
+        assert!(!token_endpoint_host_matches(
+            "https://192.168.0.1/oauth/token",
+            "10.0.0.1"
+        ));
+    }
+
+    /// IPv6 literals come back from `url::Url::host_str` in bracketed
+    /// form. The carve-out must strip brackets before its IpAddr
+    /// parse, otherwise `[::1]` would wrongly fall through to Rule 2.
+    #[test]
+    fn token_endpoint_ipv6_host_requires_exact_match() {
+        assert!(token_endpoint_host_matches(
+            "https://[::1]/oauth/token",
+            "[::1]"
+        ));
+        assert!(!token_endpoint_host_matches(
+            "https://[fe80::1]/oauth/token",
+            "[::1]"
+        ));
+    }
+
+    /// Mixed IP-vs-domain: an IP token endpoint must never match a
+    /// domain expected_host (or vice versa) via Rule 2. The strict
+    /// pin is the only acceptance path for IP literals.
+    #[test]
+    fn token_endpoint_ip_does_not_match_domain() {
+        assert!(!token_endpoint_host_matches(
+            "https://127.0.0.1/oauth/token",
+            "example.com"
+        ));
+        assert!(!token_endpoint_host_matches(
+            "https://auth.example.com/oauth/token",
+            "127.0.0.1"
         ));
     }
 

@@ -4,8 +4,8 @@
 //! with alias resolution, auth status detection, and pricing lookups.
 
 use librefang_types::model_catalog::{
-    AliasesCatalogFile, AuthStatus, ModelCatalogEntry, ModelCatalogFile, ModelOverrides, ModelTier,
-    ProviderInfo,
+    AliasesCatalogFile, AuthStatus, EffectiveCapabilities, ModelCatalogEntry, ModelCatalogFile,
+    ModelOverrides, ModelTier, ProviderInfo,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use tracing::warn;
@@ -96,12 +96,20 @@ fn resolve_discovered_capabilities(
     (has_vision, supports_tools, has_thinking)
 }
 
-#[cfg(test)]
 impl ModelCatalog {
-    /// Test-only constructor: build a catalog directly from owned entries
-    /// without going through TOML loading. Used by sibling modules' unit
-    /// tests (`model_metadata`, etc.) so they can inject deterministic
-    /// fixtures without touching the filesystem.
+    /// Construct a catalog directly from owned entries without going
+    /// through TOML loading. Used by:
+    /// - this crate's sibling-module unit tests (`model_metadata`, etc.)
+    ///   for deterministic fixture injection;
+    /// - `librefang-testing::MockKernelBuilder::with_catalog_seed` (#4796)
+    ///   so integration tests can pin a known catalog without depending
+    ///   on the network-fed `registry_sync` baseline.
+    ///
+    /// Only assembles owned data — no invariant beyond the alias-lowering
+    /// rule — so exposing it outside `cfg(test)` is safe. Production
+    /// paths still go through `ModelCatalog::new()` and the
+    /// `registry_sync` pipeline; this constructor exists purely as a
+    /// fixture-building seam.
     pub fn from_entries(models: Vec<ModelCatalogEntry>, providers: Vec<ProviderInfo>) -> Self {
         let mut aliases: HashMap<String, String> = HashMap::new();
         for m in &models {
@@ -683,6 +691,38 @@ impl ModelCatalog {
     /// Remove inference parameter overrides for a model.
     pub fn remove_overrides(&mut self, key: &str) -> bool {
         self.overrides.remove(key).is_some()
+    }
+
+    /// Compute the effective capabilities for a catalog entry, applying any
+    /// user override on top of the catalog-declared values (refs #4745).
+    ///
+    /// Override key matches the persistence shape `provider:model_id`. Each
+    /// `Option<bool>` field on `ModelOverrides`: `None` defers to the catalog,
+    /// `Some(v)` forces the capability to `v`.
+    pub fn effective_capabilities(&self, entry: &ModelCatalogEntry) -> EffectiveCapabilities {
+        let key = format!("{}:{}", entry.provider, entry.id);
+        let o = self.overrides.get(&key);
+        EffectiveCapabilities {
+            supports_tools: o
+                .and_then(|x| x.supports_tools)
+                .unwrap_or(entry.supports_tools),
+            supports_vision: o
+                .and_then(|x| x.supports_vision)
+                .unwrap_or(entry.supports_vision),
+            supports_streaming: o
+                .and_then(|x| x.supports_streaming)
+                .unwrap_or(entry.supports_streaming),
+            supports_thinking: o
+                .and_then(|x| x.supports_thinking)
+                .unwrap_or(entry.supports_thinking),
+        }
+    }
+
+    /// Look up a model by id-or-alias and return its effective capabilities.
+    /// Returns `None` if no such model exists in the catalog.
+    pub fn effective_capabilities_for(&self, id_or_alias: &str) -> Option<EffectiveCapabilities> {
+        self.find_model(id_or_alias)
+            .map(|m| self.effective_capabilities(m))
     }
 
     /// Load model overrides from a JSON file.
@@ -2812,6 +2852,105 @@ supports_streaming = true
                 model.id
             );
         }
+    }
+
+    /// Refs #4745. With no override, effective capabilities equal the catalog
+    /// entry's declared values byte-for-byte.
+    #[test]
+    fn effective_capabilities_no_override_returns_catalog_values() {
+        let catalog = test_catalog();
+        let entry = catalog.find_model("claude-sonnet-4-6").unwrap().clone();
+        let eff = catalog.effective_capabilities(&entry);
+        assert_eq!(eff.supports_tools, entry.supports_tools);
+        assert_eq!(eff.supports_vision, entry.supports_vision);
+        assert_eq!(eff.supports_streaming, entry.supports_streaming);
+        assert_eq!(eff.supports_thinking, entry.supports_thinking);
+    }
+
+    /// Refs #4745. A user override of `supports_tools = Some(false)` flips the
+    /// effective value off even when the catalog declares the model as
+    /// tool-capable. Other capabilities stay at the catalog default since
+    /// their override fields are `None`.
+    #[test]
+    fn effective_capabilities_override_can_force_off() {
+        let mut catalog = test_catalog();
+        let entry = catalog.find_model("claude-sonnet-4-6").unwrap().clone();
+        // sanity — the test is meaningful only when the catalog says tools=true.
+        assert!(entry.supports_tools);
+        let key = format!("{}:{}", entry.provider, entry.id);
+        catalog.set_overrides(
+            key,
+            ModelOverrides {
+                supports_tools: Some(false),
+                ..Default::default()
+            },
+        );
+        let eff = catalog.effective_capabilities(&entry);
+        assert!(!eff.supports_tools, "override should force tools off");
+        assert_eq!(eff.supports_vision, entry.supports_vision);
+        assert_eq!(eff.supports_streaming, entry.supports_streaming);
+        assert_eq!(eff.supports_thinking, entry.supports_thinking);
+    }
+
+    /// Refs #4745. A user override can also force a capability ON when the
+    /// catalog declares it as unsupported — this is the headline use case
+    /// (the issue: provider's `capabilities` field is wrong/missing).
+    #[test]
+    fn effective_capabilities_override_can_force_on() {
+        let mut catalog = test_catalog();
+        // Pick any model where supports_thinking is false in the catalog so
+        // the override flip is observable. Using a custom-added entry keeps
+        // the test resilient to upstream catalog churn.
+        catalog.add_custom_model(ModelCatalogEntry {
+            id: "test-no-thinking".to_string(),
+            display_name: "Test Model".to_string(),
+            provider: "test-provider".to_string(),
+            tier: ModelTier::Custom,
+            context_window: 8_192,
+            max_output_tokens: 2_048,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: false,
+            supports_vision: false,
+            supports_streaming: false,
+            supports_thinking: false,
+            ..Default::default()
+        });
+        let entry = catalog.find_model("test-no-thinking").unwrap().clone();
+        let key = format!("{}:{}", entry.provider, entry.id);
+        catalog.set_overrides(
+            key,
+            ModelOverrides {
+                supports_thinking: Some(true),
+                supports_vision: Some(true),
+                ..Default::default()
+            },
+        );
+        let eff = catalog.effective_capabilities(&entry);
+        assert!(eff.supports_thinking);
+        assert!(eff.supports_vision);
+        assert!(!eff.supports_tools);
+        assert!(!eff.supports_streaming);
+    }
+
+    /// Refs #4745. `effective_capabilities_for` resolves by id-or-alias and
+    /// applies overrides keyed by `provider:id`.
+    #[test]
+    fn effective_capabilities_for_resolves_by_alias() {
+        let mut catalog = test_catalog();
+        let entry = catalog.find_model("sonnet").unwrap().clone();
+        let key = format!("{}:{}", entry.provider, entry.id);
+        catalog.set_overrides(
+            key,
+            ModelOverrides {
+                supports_vision: Some(false),
+                ..Default::default()
+            },
+        );
+        let eff = catalog
+            .effective_capabilities_for("sonnet")
+            .expect("alias should resolve");
+        assert!(!eff.supports_vision);
     }
 }
 

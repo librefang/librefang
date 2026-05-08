@@ -16,6 +16,57 @@ import "./index.css";
 import i18n from "./lib/i18n";
 import { channelKeys, handKeys, mcpKeys, pluginKeys } from "./lib/queries/keys";
 
+interface RootErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class RootErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  RootErrorBoundaryState
+> {
+  state: RootErrorBoundaryState = { hasError: false, error: null };
+
+  static getDerivedStateFromError(error: Error): RootErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      // Inline styles: this boundary may render before CSS is loaded.
+      return (
+        <div style={{ display: "flex", height: "100vh", alignItems: "center", justifyContent: "center" }}>
+          <div style={{ textAlign: "center", padding: "2rem", maxWidth: "32rem" }}>
+            <p style={{ fontSize: "1.125rem", fontWeight: 600, marginBottom: "0.5rem" }}>
+              Something went wrong
+            </p>
+            <p style={{ fontSize: "0.875rem", color: "#6b7280", wordBreak: "break-word" }}>
+              {this.state.error?.message ?? "An unexpected error occurred."}
+            </p>
+            <button
+              onClick={() => window.location.reload()}
+              style={{
+                marginTop: "1rem",
+                borderRadius: "0.75rem",
+                backgroundColor: "#FF6A3D",
+                padding: "0.625rem 1.5rem",
+                fontSize: "0.875rem",
+                fontWeight: 700,
+                color: "#fff",
+                border: "none",
+                cursor: "pointer",
+              }}
+            >
+              Reload
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -48,11 +99,18 @@ if (import.meta.hot) {
   });
 }
 
-createRoot(document.getElementById("root")!).render(
+const rootEl = document.getElementById("root");
+if (!rootEl) {
+  throw new Error("Root element #root not found — cannot mount dashboard.");
+}
+
+createRoot(rootEl).render(
   <React.StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
-      <ToastContainer />
-    </QueryClientProvider>
+    <RootErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+        <ToastContainer />
+      </QueryClientProvider>
+    </RootErrorBoundary>
   </React.StrictMode>
 );

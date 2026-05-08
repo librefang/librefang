@@ -148,4 +148,14 @@ pub const OPERATIONAL_MIGRATIONS: &[Migration] = &[
         name: "idempotency_keys_v1",
         sql: include_str!("sql/024_idempotency_keys.surql"),
     },
+    Migration {
+        version: 25,
+        name: "approvals_tool_use_id_v1",
+        sql: include_str!("sql/025_approvals_tool_use_id.surql"),
+    },
+    Migration {
+        version: 26,
+        name: "approvals_deferred_payload_v1",
+        sql: include_str!("sql/026_approvals_deferred_payload.surql"),
+    },
 ];

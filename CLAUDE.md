@@ -235,6 +235,29 @@ The daemon command is `start` (not `daemon`).
   up a new cap, **kill the agent and let it respawn** (or restart the
   daemon); an in-place activate/status flip will silently keep the old
   cap. See `docs/architecture/trigger-dispatch-concurrency.md`.
+- **Skill workshop** (#3328) passively captures teaching signals from
+  successful turns into draft skills under
+  `~/.librefang/skills/pending/<agent>/<uuid>.toml`. **Default-on with
+  the conservative knob set**: `enabled=true`, `auto_capture=true`,
+  `review_mode="heuristic"` (no LLM call), `approval_policy="pending"`
+  (every candidate waits for human approve / reject), `max_pending=20`.
+  Three signals — `ExplicitInstruction` ("from now on always …"),
+  `UserCorrection` ("no, do it like …"), `RepeatedToolPattern` (same
+  tool sequence ≥ 3 turns). Approval routes through
+  `evolution::create_skill`, so the prompt-injection scan runs at both
+  `save_candidate` and `approve_candidate` — every artefact visible to
+  the agent has crossed the same security boundary as a marketplace
+  skill. LLM refinement (`review_mode="threshold_llm"`) uses the
+  dedicated `AuxTask::SkillWorkshopReview` slot and the cheap-tier
+  provider chain; when no cheap-tier credentials are configured the
+  workshop returns `Indeterminate` rather than billing the operator's
+  primary provider, blocking a financial-DoS regression. UUID
+  validation guards every storage entry that addresses files by id, so
+  a non-UUID id never reaches `Path::join`. CLI: `librefang skill
+  pending list / show / approve / reject`. HTTP:
+  `GET/POST /api/skills/pending[…]`. Dashboard:
+  `PendingSkillsSection` on the Skills page. See
+  `docs/architecture/skill-workshop.md`.
 
 ## BossFang Branding — Non-negotiable Rules
 

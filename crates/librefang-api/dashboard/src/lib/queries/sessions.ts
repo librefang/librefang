@@ -1,6 +1,6 @@
-import { queryOptions, useQuery } from "@tanstack/react-query";
+import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import { listSessions, getSessionDetails } from "../http/client";
+import { listSessions, getSessionDetails, type ListSessionsResult } from "../http/client";
 import { sessionKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
@@ -11,6 +11,7 @@ export const sessionQueries = {
     queryOptions({
       queryKey: sessionKeys.lists(),
       queryFn: listSessions,
+      select: (data: ListSessionsResult) => data.items,
       staleTime: STALE_MS,
       refetchInterval: STALE_MS,
       refetchIntervalInBackground: false, // #3393
@@ -24,7 +25,13 @@ export const sessionQueries = {
 };
 
 export function useSessions(options: QueryOverrides = {}) {
-  return useQuery(withOverrides(sessionQueries.list(), options));
+  const qc = useQueryClient();
+  const query = useQuery(withOverrides(sessionQueries.list(), options));
+  const raw = qc.getQueryData<ListSessionsResult>(sessionKeys.lists());
+  return {
+    ...query,
+    truncated: raw?.truncated ?? false,
+  };
 }
 
 export function useSessionDetails(sessionId: string, options: QueryOverrides = {}) {

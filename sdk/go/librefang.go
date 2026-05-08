@@ -1126,6 +1126,22 @@ func (r *SkillsResource) InstallSkill(data map[string]interface{}) (interface{},
 	return r.client.request("POST", "/api/skills/install", data, nil)
 }
 
+func (r *SkillsResource) ListPendingCandidates(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/skills/pending", nil, query)
+}
+
+func (r *SkillsResource) ShowPendingCandidate(id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/skills/pending/%s", id), nil, nil)
+}
+
+func (r *SkillsResource) ApprovePendingCandidate(id string) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/skills/pending/%s/approve", id), nil, nil)
+}
+
+func (r *SkillsResource) RejectPendingCandidate(id string) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/skills/pending/%s/reject", id), nil, nil)
+}
+
 func (r *SkillsResource) UninstallSkill(data map[string]interface{}) (interface{}, error) {
 	return r.client.request("POST", "/api/skills/uninstall", data, nil)
 }

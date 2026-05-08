@@ -14,33 +14,19 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use super::subsystems::{
-    AgentSubsystemApi, EventSubsystemApi, GovernanceSubsystemApi, LlmSubsystemApi, McpSubsystemApi,
-    MediaSubsystemApi, MemorySubsystemApi, MeshSubsystemApi, MeteringSubsystemApi,
-    ProcessSubsystemApi, SecuritySubsystemApi, SkillsSubsystemApi, WorkflowSubsystemApi,
-};
+use super::subsystems::{EventSubsystemApi, McpSubsystemApi, MemorySubsystemApi};
 
 use tracing::{debug, info, warn};
 
-use librefang_memory::MemorySubstrate;
-use librefang_runtime::audit::AuditLog;
 use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::config::KernelConfig;
 use librefang_types::error::LibreFangError;
-use librefang_types::tool::{AgentLoopSignal, ToolDefinition};
 
-use crate::auth::AuthManager;
 use crate::error::{KernelError, KernelResult};
-use crate::event_bus::EventBus;
-use crate::metering::MeteringEngine;
-use crate::registry::AgentRegistry;
-use crate::scheduler::AgentScheduler;
-use crate::supervisor::Supervisor;
-use crate::triggers::TriggerEngine;
-use crate::workflow::{WorkflowEngine, WorkflowTemplateRegistry};
+use crate::workflow::WorkflowEngine;
 
 use super::workspace_setup::migrate_legacy_agent_dirs;
-use super::{DeliveryTracker, LibreFangKernel};
+use super::LibreFangKernel;
 
 impl LibreFangKernel {
     /// Full kernel configuration (atomically loaded snapshot).
@@ -54,14 +40,12 @@ impl LibreFangKernel {
         self.config.load_full()
     }
 
-    /// Return a snapshot of the current budget configuration. Delegates
-    /// to [`MeteringSubsystem::current_budget`].
-    pub fn budget_config(&self) -> librefang_types::config::BudgetConfig {
-        self.metering.current_budget()
-    }
-
     /// Safely mutate the runtime budget configuration. Delegates to
     /// [`MeteringSubsystem::update_budget`].
+    ///
+    /// Inherent (not on `MeteringSubsystemApi`) because trait methods
+    /// cannot accept `impl Fn` arguments — see the metering subsystem
+    /// docs.
     pub fn update_budget_config(&self, f: impl Fn(&mut librefang_types::config::BudgetConfig)) {
         self.metering.update_budget(f);
     }
@@ -346,7 +330,13 @@ impl LibreFangKernel {
                 timeout_secs: server_config.timeout_secs,
                 env: server_config.env.clone(),
                 headers: server_config.headers.clone(),
-                oauth_provider: Some(self.oauth_provider_ref()),
+                oauth_provider: Some({
+                    let with_bounds: Arc<
+                        dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync,
+                    > = Arc::clone(self.oauth_provider_ref());
+                    let p: Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider> = with_bounds;
+                    p
+                }),
                 oauth_config: server_config.oauth.clone(),
                 taint_scanning: server_config.taint_scanning,
                 taint_policy: server_config.taint_policy.clone(),
@@ -392,68 +382,20 @@ impl LibreFangKernel {
         self.config.load().default_model.clone()
     }
 
-    /// Agent registry. Delegates to [`AgentSubsystem::registry_ref`].
+    /// Auxiliary LLM client snapshot (cheap-tier fallback chains for
+    /// side tasks: compression, titles, search, vision, fold,
+    /// skill_review, skill_workshop_review). `ArcSwap` snapshot lives
+    /// on [`LlmSubsystem::aux_client`] (post-#3565 refactor) so
+    /// hot-reload of `[llm.auxiliary]` swaps the resolver without
+    /// restarting the daemon — callers always see the latest
+    /// committed config.
+    ///
+    /// Inherent (not on `LlmSubsystemApi`) because trait methods cannot
+    /// return an owned `Arc<AuxClient>` from an `ArcSwap::load_full`
+    /// without an extra heap-allocated guard.
     #[inline]
-    pub fn agent_registry(&self) -> &AgentRegistry {
-        self.agents.agent_registry_ref()
-    }
-
-    /// Canonical agent UUID registry (refs #4614). Delegates to
-    /// [`AgentSubsystem::identities_ref`].
-    #[inline]
-    pub fn agent_identities(&self) -> &Arc<crate::agent_identity_registry::AgentIdentityRegistry> {
-        self.agents.identities_ref()
-    }
-
-    /// Memory substrate. Delegates to
-    /// [`MemorySubsystem::substrate_ref`].
-    #[inline]
-    pub fn memory_substrate(&self) -> &Arc<MemorySubstrate> {
-        self.memory.substrate_ref()
-    }
-
-    /// Proactive memory store. Delegates to
-    /// [`MemorySubsystem::proactive_store`].
-    #[inline]
-    pub fn proactive_memory_store(&self) -> Option<&Arc<librefang_memory::ProactiveMemoryStore>> {
-        self.memory.proactive_store()
-    }
-
-    /// Merkle hash chain audit trail.
-    #[inline]
-    pub fn audit(&self) -> &Arc<AuditLog> {
-        self.metering.audit_log()
-    }
-
-    /// Cost metering engine. Delegates to
-    /// [`MeteringSubsystem::engine`].
-    #[inline]
-    pub fn metering_ref(&self) -> &Arc<MeteringEngine> {
-        self.metering.metering_engine()
-    }
-
-    /// Agent scheduler. Delegates to [`AgentSubsystem::scheduler_ref`].
-    #[inline]
-    pub fn scheduler_ref(&self) -> &AgentScheduler {
-        self.agents.scheduler_ref()
-    }
-
-    /// Model catalog (`ArcSwap` since #3384). Delegates to
-    /// [`LlmSubsystem::catalog_swap`].
-    #[inline]
-    pub fn model_catalog_ref(
-        &self,
-    ) -> &arc_swap::ArcSwap<librefang_runtime::model_catalog::ModelCatalog> {
-        self.llm.model_catalog_swap()
-    }
-
-    /// Snapshot the current model catalog. Delegates to
-    /// [`LlmSubsystem::catalog_load`].
-    #[inline]
-    pub fn model_catalog_load(
-        &self,
-    ) -> arc_swap::Guard<Arc<librefang_runtime::model_catalog::ModelCatalog>> {
-        self.llm.model_catalog_load()
+    pub fn aux_client(&self) -> Arc<librefang_runtime::aux_client::AuxClient> {
+        self.llm.aux_client.load_full()
     }
 
     /// Atomically mutate the model catalog using the RCU pattern: clone the
@@ -535,14 +477,6 @@ impl LibreFangKernel {
                 .collect();
             futures::future::join_all(handles).await;
         });
-    }
-
-    /// Invalidate all cached LLM drivers so the next request rebuilds them
-    /// with current provider URLs / API keys. Delegates to
-    /// [`LlmSubsystem::clear_driver_cache`].
-    #[inline]
-    pub fn clear_driver_cache(&self) {
-        self.llm.clear_driver_cache();
     }
 
     /// Spawn the approval expiry sweep task.
@@ -729,40 +663,6 @@ impl LibreFangKernel {
         });
     }
 
-    /// Skill registry (RwLock — hot-reload on install/uninstall).
-    #[inline]
-    pub fn skill_registry_ref(
-        &self,
-    ) -> &std::sync::RwLock<librefang_skills::registry::SkillRegistry> {
-        self.skills.skill_registry_ref()
-    }
-
-    /// Hand registry (curated autonomous capability packages).
-    #[inline]
-    pub fn hands(&self) -> &librefang_hands::registry::HandRegistry {
-        self.skills.hand_registry_ref()
-    }
-
-    /// MCP catalog — returns the `ArcSwap` for lock-free reads.
-    ///
-    /// Prefer [`mcp_catalog_load`] for simple single-snapshot reads;
-    /// use this accessor when you need the `ArcSwap` handle directly.
-    #[inline]
-    pub fn mcp_catalog(&self) -> &arc_swap::ArcSwap<librefang_extensions::catalog::McpCatalog> {
-        self.mcp.mcp_catalog_swap()
-    }
-
-    /// Load a snapshot of the MCP catalog — lock-free, no blocking.
-    ///
-    /// The returned `Guard` holds a reference-counted snapshot; the catalog
-    /// can be swapped concurrently without invalidating it.
-    #[inline]
-    pub fn mcp_catalog_load(
-        &self,
-    ) -> arc_swap::Guard<std::sync::Arc<librefang_extensions::catalog::McpCatalog>> {
-        self.mcp.mcp_catalog_load()
-    }
-
     /// Reload the MCP catalog from disk, replacing the current snapshot
     /// atomically via RCU. Readers in flight keep the old snapshot until
     /// they drop their `Guard`.
@@ -771,24 +671,6 @@ impl LibreFangKernel {
         let count = fresh.load(home_dir);
         self.mcp.mcp_catalog.store(std::sync::Arc::new(fresh));
         count
-    }
-
-    /// MCP server health monitor.
-    #[inline]
-    pub fn mcp_health(&self) -> &librefang_extensions::health::HealthMonitor {
-        self.mcp.health()
-    }
-
-    /// Cron job scheduler.
-    #[inline]
-    pub fn cron(&self) -> &crate::cron::CronScheduler {
-        self.workflows.cron_ref()
-    }
-
-    /// Execution approval manager.
-    #[inline]
-    pub fn approvals(&self) -> &crate::approval::ApprovalManager {
-        self.governance.approvals()
     }
 
     /// Lazily open and unlock the credential vault, caching the result for
@@ -805,7 +687,7 @@ impl LibreFangKernel {
     /// unlocked (bad master key, corrupt file, missing keyring entry).
     /// A missing vault file is **not** an error: the cache is populated
     /// with an unopened vault and the first `set()` call will `init()` it.
-    pub(super) fn vault_handle(
+    pub fn vault_handle(
         &self,
     ) -> Result<
         std::sync::Arc<std::sync::RwLock<librefang_extensions::vault::CredentialVault>>,
@@ -887,6 +769,68 @@ impl LibreFangKernel {
             .map_err(|e| format!("Vault write failed: {e}"))
     }
 
+    /// Install an MCP catalog template into the configured server set,
+    /// using the kernel's cached vault and catalog.
+    ///
+    /// Routes through `vault_handle()` (#3598) so the unlock-time Argon2id
+    /// KDF runs at most once per kernel lifetime, regardless of how many
+    /// install requests arrive. The previous API-side path opened
+    /// `vault.enc` and ran the KDF on every HTTP install request.
+    ///
+    /// Vault unlock failure is **not** fatal — the resolver falls through to
+    /// dotenv / env lookups, matching the original `skills.rs`
+    /// `if v.unlock().is_ok() { Some(v) } else { None }` semantics. Operators
+    /// who rotate `LIBREFANG_VAULT_KEY` post-boot (or whose keyring entry is
+    /// briefly unavailable) can still complete an install whose required
+    /// credentials live in `.env` / process env. The failure is logged at
+    /// `warn` level so it isn't silent.
+    ///
+    /// Catalog freshness: this method calls `mcp_catalog_reload` so manual
+    /// edits to `~/.librefang/mcp/catalog/*.toml` are picked up immediately —
+    /// the previous API-side path performed an ad-hoc `McpCatalog::new(home)
+    /// .load(home)` per request, and operators relied on that to drop in
+    /// custom templates without a daemon restart. The reload is a directory
+    /// scan of a few dozen TOML files — comfortably cheap on the install
+    /// path's latency budget.
+    ///
+    /// Returns the installer's [`librefang_extensions::installer::InstallResult`];
+    /// the caller persists the resulting `McpServerConfigEntry` into
+    /// `config.toml` and triggers a kernel reload.
+    pub fn install_integration(
+        &self,
+        template_id: &str,
+        provided_keys: &std::collections::HashMap<String, String>,
+    ) -> librefang_extensions::ExtensionResult<librefang_extensions::installer::InstallResult> {
+        // Pull the cached, already-unlocked vault. Soft-fail on unlock errors
+        // so a post-boot key rotation / keyring blip doesn't block installs
+        // whose credentials happen to live in dotenv or process env.
+        let vault_handle = match self.vault_handle() {
+            Ok(h) => Some(h),
+            Err(e) => {
+                warn!(
+                    "install_integration: vault unavailable, falling back to dotenv/env only: {e}"
+                );
+                None
+            }
+        };
+        let dotenv_path = self.home_dir().join(".env");
+        let mut resolver = librefang_extensions::credentials::CredentialResolver::with_vault_handle(
+            vault_handle,
+            Some(&dotenv_path),
+        );
+        // Refresh the catalog snapshot from disk so manually-added template
+        // TOMLs are visible without a daemon restart (matches pre-#3295
+        // ad-hoc-load behaviour). Cheap: reads `~/.librefang/mcp/catalog/`.
+        self.mcp_catalog_reload(self.home_dir());
+        let catalog_snap = self.mcp_catalog_load();
+        librefang_extensions::installer::install_integration(
+            &catalog_snap,
+            &mut resolver,
+            template_id,
+            provided_keys,
+        )
+    }
+
     /// Atomically redeem a TOTP recovery code.
     ///
     /// Acquires `vault_recovery_codes_mutex`, reads the stored code list,
@@ -928,18 +872,6 @@ impl LibreFangKernel {
         }
     }
 
-    /// Workflow engine.
-    #[inline]
-    pub fn workflow_engine(&self) -> &WorkflowEngine {
-        self.workflows.engine_ref()
-    }
-
-    /// Workflow template registry.
-    #[inline]
-    pub fn templates(&self) -> &WorkflowTemplateRegistry {
-        self.workflows.templates_ref()
-    }
-
     /// Convert a workflow into a reusable template.
     ///
     /// Thin wrapper around [`WorkflowEngine::workflow_to_template`] so that
@@ -951,120 +883,6 @@ impl LibreFangKernel {
         workflow: &crate::workflow::Workflow,
     ) -> librefang_types::workflow_template::WorkflowTemplate {
         WorkflowEngine::workflow_to_template(workflow)
-    }
-
-    /// Event-driven trigger engine.
-    #[inline]
-    pub fn trigger_engine(&self) -> &TriggerEngine {
-        self.workflows.triggers_ref()
-    }
-
-    /// Process supervisor.
-    #[inline]
-    pub fn supervisor_ref(&self) -> &Supervisor {
-        self.agents.supervisor_ref()
-    }
-
-    /// RBAC authentication manager.
-    #[inline]
-    pub fn auth_manager(&self) -> &AuthManager {
-        self.security.auth_ref()
-    }
-
-    /// Device pairing manager.
-    #[inline]
-    pub fn pairing_ref(&self) -> &crate::pairing::PairingManager {
-        self.security.pairing_ref()
-    }
-
-    /// Web tools context (search + fetch). Delegates to
-    /// [`MediaSubsystem::web_tools`].
-    #[inline]
-    pub fn web_tools(&self) -> &librefang_runtime::web_search::WebToolsContext {
-        self.media.web_tools()
-    }
-
-    /// Browser automation manager. Delegates to
-    /// [`MediaSubsystem::browser`].
-    #[inline]
-    pub fn browser(&self) -> &librefang_runtime::browser::BrowserManager {
-        self.media.browser()
-    }
-
-    /// Media understanding engine. Delegates to
-    /// [`MediaSubsystem::engine`].
-    #[inline]
-    pub fn media(&self) -> &librefang_runtime::media_understanding::MediaEngine {
-        self.media.media_engine()
-    }
-
-    /// Text-to-speech engine. Delegates to [`MediaSubsystem::tts`].
-    #[inline]
-    pub fn tts(&self) -> &librefang_runtime::tts::TtsEngine {
-        self.media.tts()
-    }
-
-    /// Media generation driver cache (video, music, etc.). Delegates to
-    /// [`MediaSubsystem::drivers`].
-    #[inline]
-    pub fn media_drivers(&self) -> &librefang_runtime::media::MediaDriverCache {
-        self.media.drivers()
-    }
-
-    /// MCP server connections (Mutex — lazily initialized).
-    #[inline]
-    pub fn mcp_connections_ref(
-        &self,
-    ) -> &tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>> {
-        self.mcp.connections_ref()
-    }
-
-    /// Per-server MCP OAuth authentication states.
-    #[inline]
-    pub fn mcp_auth_states_ref(&self) -> &librefang_runtime::mcp_oauth::McpAuthStates {
-        self.mcp.auth_states_ref()
-    }
-
-    /// Pluggable OAuth provider for MCP server auth flows.
-    #[inline]
-    pub fn oauth_provider_ref(
-        &self,
-    ) -> Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync> {
-        Arc::clone(self.mcp.oauth_provider_ref())
-    }
-
-    /// MCP tool definitions cache.
-    #[inline]
-    pub fn mcp_tools_ref(&self) -> &std::sync::Mutex<Vec<ToolDefinition>> {
-        self.mcp.tools_ref()
-    }
-
-    /// Effective MCP server list (config + extensions merged).
-    #[inline]
-    pub fn effective_mcp_servers_ref(
-        &self,
-    ) -> &std::sync::RwLock<Vec<librefang_types::config::McpServerConfigEntry>> {
-        self.mcp.effective_servers_ref()
-    }
-
-    /// A2A task store.
-    #[inline]
-    pub fn a2a_tasks(&self) -> &librefang_runtime::a2a::A2aTaskStore {
-        self.mesh.a2a_tasks()
-    }
-
-    /// Discovered external A2A agent cards.
-    #[inline]
-    pub fn a2a_agents(
-        &self,
-    ) -> &std::sync::Mutex<Vec<(String, librefang_runtime::a2a::AgentCard)>> {
-        self.mesh.a2a_agents()
-    }
-
-    /// Delivery receipt tracker.
-    #[inline]
-    pub fn delivery(&self) -> &DeliveryTracker {
-        self.mesh.delivery()
     }
 
     /// First currently-active `SessionInterrupt` registered for `agent_id`,
@@ -1104,50 +922,10 @@ impl LibreFangKernel {
             .map(|e| (e.key().1, e.value().clone()))
     }
 
-    /// Per-agent decision traces.
-    #[inline]
-    pub fn traces(&self) -> &dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>> {
-        self.agents.traces()
-    }
-
-    /// Channel adapters map.
-    #[inline]
-    pub fn channel_adapters_ref(
-        &self,
-    ) -> &dashmap::DashMap<String, Arc<dyn librefang_channels::types::ChannelAdapter>> {
-        self.mesh.channel_adapters_ref()
-    }
-
-    /// Agent bindings for multi-account routing.
-    #[inline]
-    pub fn bindings_ref(&self) -> &std::sync::Mutex<Vec<librefang_types::config::AgentBinding>> {
-        self.mesh.bindings_ref()
-    }
-
-    /// Broadcast configuration.
-    #[inline]
-    pub fn broadcast_ref(&self) -> &librefang_types::config::BroadcastConfig {
-        self.mesh.broadcast_ref()
-    }
-
     /// Uptime since kernel boot.
     #[inline]
     pub fn uptime(&self) -> std::time::Duration {
         self.booted_at.elapsed()
-    }
-
-    /// Embedding driver (None = text fallback).
-    #[inline]
-    pub fn embedding(
-        &self,
-    ) -> Option<&Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>> {
-        self.llm.embedding()
-    }
-
-    /// Command queue.
-    #[inline]
-    pub fn command_queue_ref(&self) -> &librefang_runtime::command_lane::CommandQueue {
-        self.workflows.command_queue_ref()
     }
 
     /// Resolve the per-agent concurrency semaphore, lazily creating it on
@@ -1209,26 +987,6 @@ impl LibreFangKernel {
             .clone()
     }
 
-    /// Persistent process manager. Delegates to
-    /// [`ProcessSubsystem::manager`].
-    #[inline]
-    pub fn processes(&self) -> &Arc<librefang_runtime::process_manager::ProcessManager> {
-        self.processes.process_manager_ref()
-    }
-
-    /// Background process registry for fire-and-forget shell_exec
-    /// processes. Delegates to [`ProcessSubsystem::registry`].
-    #[inline]
-    pub fn process_registry(&self) -> &Arc<librefang_runtime::process_registry::ProcessRegistry> {
-        self.processes.process_registry_ref()
-    }
-
-    /// OFP peer registry (set once at startup).
-    #[inline]
-    pub fn peer_registry_ref(&self) -> Option<&librefang_wire::PeerRegistry> {
-        self.mesh.peer_registry_ref()
-    }
-
     /// Test-only: install a `PeerRegistry` without booting the OFP node.
     /// Used by route-handler regression tests for #3644 — never call from
     /// production code; the OFP startup path owns this initialization
@@ -1241,24 +999,10 @@ impl LibreFangKernel {
         self.mesh.peer_registry.set(registry)
     }
 
-    /// Hook registry.
-    #[inline]
-    pub fn hook_registry(&self) -> &librefang_runtime::hooks::HookRegistry {
-        self.governance.hook_registry()
-    }
-
     /// Auto-reply engine.
     #[inline]
     pub fn auto_reply(&self) -> &crate::auto_reply::AutoReplyEngine {
         &self.auto_reply_engine
-    }
-
-    /// Default model override (hot-reloadable).
-    #[inline]
-    pub fn default_model_override_ref(
-        &self,
-    ) -> &std::sync::RwLock<Option<librefang_types::config::DefaultModelConfig>> {
-        self.llm.default_model_override_ref()
     }
 
     /// Tool policy override (hot-reloadable).
@@ -1275,14 +1019,6 @@ impl LibreFangKernel {
         &self.whatsapp_gateway_pid
     }
 
-    /// Per-(agent, session) message injection senders.
-    #[inline]
-    pub fn injection_senders_ref(
-        &self,
-    ) -> &dashmap::DashMap<(AgentId, SessionId), tokio::sync::mpsc::Sender<AgentLoopSignal>> {
-        self.events.injection_senders_ref()
-    }
-
     /// Context engine (pluggable memory recall + assembly).
     #[inline]
     pub fn context_engine_ref(
@@ -1291,23 +1027,11 @@ impl LibreFangKernel {
         self.context_engine.as_deref()
     }
 
-    /// Event bus.
-    #[inline]
-    pub fn event_bus_ref(&self) -> &EventBus {
-        self.events.event_bus_ref()
-    }
-
     /// Session lifecycle event bus (clone-shared `Arc` so subscribers can hold
     /// it across tasks).
     #[inline]
     pub fn session_lifecycle_bus(&self) -> Arc<crate::session_lifecycle::SessionLifecycleBus> {
         self.events.lifecycle_bus()
-    }
-
-    /// OFP peer node (set once at startup).
-    #[inline]
-    pub fn peer_node_ref(&self) -> Option<&Arc<librefang_wire::PeerNode>> {
-        self.mesh.peer_node_ref()
     }
 
     /// Provider unconfigured log flag (atomic).
@@ -1537,7 +1261,7 @@ impl LibreFangKernel {
         {
             let live_ids: Vec<librefang_types::agent::AgentId> =
                 live_agents.iter().copied().collect();
-            match self.memory_substrate().cleanup_orphan_sessions(&live_ids) {
+            match self.substrate_ref().cleanup_orphan_sessions(&live_ids) {
                 Ok(n) if n > 0 => {
                     info!(deleted = n, "Cleaned up orphan sessions");
                     total_removed += n as usize;

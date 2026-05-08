@@ -1,0 +1,117 @@
+# MCP OAuth Host Pinning
+
+When LibreFang completes an OAuth flow against an MCP server, the URL it sends the
+authorization code to is taken from the server's discovery metadata
+(`/.well-known/oauth-authorization-server`). That metadata is attacker-influenced
+data: a tampered or maliciously-served document could redirect the token exchange
+to a host the operator never authorized against, leaking the auth code or the
+eventual access token.
+
+LibreFang pins the token-exchange target against the host the operator typed in
+`config.toml`. The pin admits two acceptance shapes; everything else is refused
+and the auth flow fails with a security error visible in the daemon log.
+
+## Acceptance rules
+
+| Rule | Accept when | History |
+| --- | --- | --- |
+| 1 | The token-endpoint host **exactly** matches the host you typed in `config.toml` (case-insensitive). | Original strict pin (#3713). |
+| 2 | The token-endpoint host shares the **same registrable domain (eTLD+1)** with the host you typed, computed via the Public Suffix List. | Loosened in #4665 to support cross-domain OAuth proxies. |
+
+Rule 2 is symmetric — sub→root, root→sub, and sibling→sibling under the same
+registrable domain are all accepted. The trust boundary is the registrable
+domain itself, not its hierarchy.
+
+## Why Rule 2 exists
+
+Several MCP services legitimately split discovery from token exchange across two
+hostnames in the same registrable domain:
+
+- **Slack** — `mcp.slack.com` advertises a token endpoint at
+  `https://slack.com/api/oauth.v2.user.access`.
+- **Notion** — `mcp.notion.com` delegates to `api.notion.com`.
+
+Without Rule 2 these flows were rejected and operators had no workaround short
+of abandoning the integration.
+
+## Threat trade-off
+
+Rule 2 admits a class of attack: someone who controls *any* sibling subdomain on
+the issuer's registrable domain could redirect the token exchange to a host they
+own **if they also tamper with HTTPS-validated discovery metadata**. That
+residual risk is accepted because:
+
+1. Metadata fetches are HTTPS-validated, so tampering requires either a
+   compromise of the legitimate auth server's HTTPS endpoint or a working MITM
+   against the daemon's TLS — both raise the bar substantially over plain DNS
+   poisoning.
+2. Sibling-subdomain takeover within an org's own registrable domain typically
+   implies the org itself is compromised. The most plausible class — dangling
+   DNS records pointing to deleted third-party services — is bounded by the org's
+   hygiene, not by this check.
+3. The strict pin left no escape hatch for legitimate cross-domain OAuth
+   delegation, which forced operators to give up on services they otherwise
+   trusted.
+
+The full reasoning is captured in the doc comment on
+`token_endpoint_host_matches` in `crates/librefang-api/src/routes/mcp_auth.rs`,
+and at greater depth in `docs/architecture/mcp-oauth-host-pinning.md`.
+
+## What protects multi-tenant hosts
+
+The Public Suffix List has a *private* section that lists multi-tenant hosting
+boundaries — `*.github.io`, `*.herokuapp.com`, `*.s3.amazonaws.com`,
+`*.vercel.app`, and similar. For those hosts the PSL treats each tenant as its
+own registrable domain. Two GitHub Pages tenants therefore do **not** share a
+registrable domain and Rule 2 will not accept a cross-tenant redirect. This
+property is what makes the loosening defensible on services where tenant
+boundaries do not align with DNS subdomains.
+
+A regression test
+(`token_endpoint_psl_private_domain_does_not_false_match`) pins this property so
+it cannot regress silently if the PSL crate is swapped.
+
+## IP-literal hosts
+
+`localhost`, IPv4 literals, and IPv6 literals are not DNS names with a known
+public suffix, and the PSL has no opinion on them. Rule 2 is short-circuited for
+IP literals (after stripping the brackets that `url::Url` emits for IPv6) so
+only Rule 1 — exact match — can accept them. A token endpoint at `10.0.0.1`
+will never be accepted against an `issuer_host` of `127.0.0.1`, even though both
+share trailing labels.
+
+## When the check fires
+
+A refusal looks like this in the daemon log:
+
+```
+ERROR mcp_auth: token_endpoint host failed both exact and same-eTLD+1 checks
+  vs authorization server — refusing token exchange (possible metadata-tamper
+  attack; refs #3713 #4665)
+  server=<name> token_endpoint=<url> issuer_host=<host> token_host=<host>
+```
+
+The auth flow is aborted, the daemon stores an `Error` `McpAuthState` for that
+server, and the dashboard surfaces a "token_endpoint host mismatch" error. The
+auth code is not POSTed anywhere.
+
+If you hit this for a service you trust:
+
+1. Compare `issuer_host` (what you typed) and `token_host` (what discovery
+   advertised). If they share a registrable domain you recognize, the metadata
+   document is probably misconfigured by the vendor — open an issue against
+   them.
+2. If `token_host` is on a completely different registrable domain, do **not**
+   override the check. That is the metadata-tamper case the pin is designed to
+   refuse.
+
+## Out of scope
+
+- **SSRF on metadata / token fetch** is enforced separately by
+  `is_ssrf_blocked_url` in `librefang-runtime::mcp_oauth` (loopback,
+  link-local, internal-range blocklist). It uses its own host check with a
+  different threat model and is intentionally not migrated to the eTLD+1 rule.
+- **Authorization endpoint host** is not pinned by this helper — it is a
+  user-facing navigation target, not a credential recipient.
+- **Per-server `oauth.strict_host_pin = true` opt-in** for ultra-paranoid
+  operators is tracked as a follow-up rather than shipped today.

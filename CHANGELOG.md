@@ -5,6 +5,109 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.5.8] - 2026-05-08
+
+_68 PRs from 5 contributors since v2026.5.6-beta.9._
+
+### Highlights
+- **New Dashboard & UI Refinements** — Adds a dedicated dashboard, resolves 159+ UI bugs and accessibility gaps, and fixes summarize-and-trim compaction for persistent agent sessions.
+- **Durable Knowledge Vault** — Introduces an isolated v1 knowledge vault with lazy initialization to fix silent setup successes and load secrets at boot for cross-restart persistence.
+- **Native Editor Integration** — Implements an Agent Client Protocol adapter and SSH/Daytona tool-exec backends for seamless editor-to-agent workflow connections.
+- **Passive Skill Capture & DM Improvements** — Launches a post-turn capture pipeline for automated skill development and exposes sender identity in direct message prompts.
+- **Performance Optimizations** — Batches per-agent KV lookups via useQueries to enhance dashboard and agent response speeds.
+
+### Added
+
+- Tool-exec backend trait + SSH and Daytona impls (#3332) (#4677) (@houko)
+- Scaffold durable knowledge vault — isolated mode v1 (#3329) (#4712) (@houko)
+- Closes #3328 — passive after-turn capture pipeline (#4741) (@houko)
+- Agent Client Protocol (ACP) adapter for native editor integration (#4742) (@houko)
+- Expose sender identity in DM prompts, not just groups (#4666) (#4776) (@houko)
+- Add dashboard (#4780) (@houko)
+- User-editable per-model capability overrides (#4745) (#4781) (@houko)
+
+### Fixed
+
+- Terminal page reconnect loop on container hosts (#4675) (#4681) (@houko)
+- Expose every KernelConfig section in single-page UI (#4682) (@houko)
+- Summarize-and-trim compaction mode for Persistent sessions (#3693) (#4683) (@houko)
+- Close DrawerPanel on parent-driven isOpen=false (#4687) (#4691) (@houko)
+- Expand leading ~ in stdio transport args (#4680) (#4692) (@houko)
+- Hub install/uninstall surface stale state across all 4 hubs (#4689) (#4696) (@houko)
+- Regenerate schema baselines as part of release/lts bump (#4697) (@houko)
+- PID fallback and clearer error when restart hits 401 (#4693) (#4698) (@houko)
+- Deterministic two-phase driver for find_by_name_is_atomic_under_concurrent_register_and_remove (#4704) (#4705) (@houko)
+- Reload_config must reject invalid TOML, not silently swap to defaults (#4664) (#4711) (@houko)
+- Resolve 35 UI bugs and review follow-ups across 10 pages (#4718) (@leszek3737)
+- Resolve 80+ bugs, a11y gaps, and i18n misses across 18 page components (#4719) (@leszek3737)
+- Toast refresh errors in AnalyticsPage (#4718 review L1) (#4724) (@houko)
+- Drain in-flight workflow runs on graceful shutdown (#3335) (#4725) (@houko)
+- DrawerPanel parent-close must check slot ownership (#4714) (#4727) (@houko)
+- Resolve 44 confirmed UI bugs across 13 dashboard components (#4731) (@leszek3737)
+- A11y improvements and UI bugfixes (#4733) (@leszek3737)
+- State-correctness and a11y bugs in UI primitives (#4734) (@leszek3737)
+- A11y polish and UX fixes across UI components (#4735) (@leszek3737)
+- Scope PushDrawer focus traps to their actual viewport (#4734 followup) (#4737) (@houko)
+- Close SSRF gaps in cron webhook delivery (#4732) (#4739) (@houko)
+- Load secrets.env at boot so dashboard-saved keys survive restart (#4701) (#4740) (@houko)
+- Unblock Dashboard / Mobile / Docker on main (#4744) (@houko)
+- Correlate daemon logs with agent.id / session.id across run_agent_loop and supervised tasks (#4761) (@neo-wanderer)
+- Pipe prompt to CLI stdin instead of argv to avoid E2BIG (#4764) (@f-liva)
+- Block CLI progress placeholders + add stream_to_channel toggle (#4765) (@f-liva)
+- Default opt-in + bell/tab navigation (#3328 follow-up) (#4775) (@houko)
+- Align tool_runner test assertions with new pre-ACP path guard (#4777) (@houko)
+- Allow unused_mut on chromium_candidates() for android/ios builds (#4778) (@houko)
+- Allow same-eTLD+1 token endpoint for cross-domain OAuth proxies (#4779) (@houko)
+- Kill SIGPIPE 141 noise in PreToolUse hooks (#4782) (@houko)
+- Bump corepack so pnpm 10.x signature check passes (#4784) (@houko)
+- Escape literal {name} in providers route assert message (#4786) (@houko)
+- Bump dashboard builder node to 20.20.2-alpine for vite 8 / rolldown engines (#4787) (@houko)
+- Drop install_integration fixture after boot to dodge sync_registry orphan cleanup (#4791) (@houko)
+- Lazy-init vault.enc on first set() — fix install_integration silent-success (#4793) (@houko)
+- Add deterministic catalog seed for mock kernel — fix capability_override flake (#4796) (@houko)
+- Expose ModelCatalog::from_entries outside cfg(test) — unbreak main (#4798) (@houko)
+
+### Changed
+
+- Replace Arc<Mutex<Connection>> with r2d2 connection pool (#3378 part 2) (#4685) (@houko)
+- Align ProvidersPage with ChannelsPage add-via-picker pattern (#4708) (@houko)
+- Split kernel/mod.rs into per-cluster files (#3744 phases 1-3) (#4713) (@houko)
+- Harden shell, extract modal, fix React perf and error handling (#4717) (@leszek3737)
+- KernelApi trait + Arc<dyn KernelApi> AppState (#3566) (#4726) (@houko)
+- Decompose LibreFangKernel god struct into 13 subsystems (#3565) (#4756) (@houko)
+- Migrate inherent forwards to *SubsystemApi traits (#3565 follow-up) (#4766) (@houko)
+- Manifest-first control plane — types spine + cached vault facade (#4783) (@houko)
+- Install-path vault facade + hook regex narrowing (#4788) (@houko)
+
+### Performance
+
+- Batch per-agent KV lookups via useQueries (#4722) (#4738) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Documentation
+
+- Document DrawerPanel ownership check in file-level sync model (#4727 followup) (#4729) (@houko)
+
+### Maintenance
+
+- Include PR number, failed jobs, and step names (#4694) (@houko)
+- Refresh openapi.sha256 to match merged v2026.5.6-beta.9 openapi.json (#4695) (@houko)
+- Auto-stage refreshed openapi.sha256 when openapi.json is committed (#4700) (@houko)
+- Bump the web-minor-patch group in /web with 6 updates (#4720) (@app/dependabot)
+- Bump the dashboard-minor-patch group in /crates/librefang-api/dashboard with 6 updates (#4721) (@app/dependabot)
+- Fix PR Status Labels 403 by splitting pull_request_review trigger (#4746) (@houko)
+- Pin pnpm via package.json so cache: pnpm save step works (#4758) (@houko)
+- Ignore graphify-out/ (#4762) (@neo-wanderer)
+- Bump the docs-minor-patch group in /docs with 6 updates (#4769) (@app/dependabot)
+- Bump postcss-focus-visible from 10.0.1 to 11.0.0 in /docs (#4770) (@app/dependabot)
+- Bump @sindresorhus/slugify from 2.2.1 to 3.0.0 in /docs (#4771) (@app/dependabot)
+- Bump marked from 16.2.1 to 18.0.3 in /docs (#4772) (@app/dependabot)
+
+</details>
+
+
 ## [2026.5.6] - 2026-05-06
 
 _310 PRs from 3 contributors since v2026.5.2-beta8._
@@ -725,11 +828,22 @@ _338 PRs from 7 contributors since v2026.4.28-beta7._
 
 ## [Unreleased]
 
+### Added
+
+- **Skill workshop — passive after-turn capture of teaching signals** (#3328) (default-OFF; opt in per agent via `[skill_workshop] enabled = true` in `agent.toml`, matching the original #3328 acceptance criteria). New `librefang-kernel::skill_workshop` subsystem. Once enabled, an `AgentLoopEnd` hook (registered alongside `auto_dream` in `set_self_handle`) runs three regex scanners against the latest user message + recent tool history after every non-fork turn and produces draft `CandidateSkill` TOML files under `~/.librefang/skills/pending/<agent_uuid>/<candidate_uuid>.toml`. Three signals: `ExplicitInstruction` ("from now on always …", "every time …"; conversational subjects "I" / "we" / "you" filtered, trigger must sit at sentence-start), `UserCorrection` ("no, do it like …", "actually …"), `RepeatedToolPattern` (same tool sequence ≥ 3 turns, length-1 patterns require ≥ 4). Per-agent config in `agent.toml` `[skill_workshop]`: `enabled` (default false), `auto_capture` (default true), `approval_policy` ("pending" default / "auto"), `review_mode` ("heuristic" default / "threshold_llm" / "none"; `"both"` is a serde alias for `threshold_llm`), `max_pending` (default 20). Once enabled, the conservative knob set is heuristic-only review and pending policy — microseconds of regex per turn plus a few KB written when a candidate lands, no LLM call, no auto-promote. Operators that want LLM refinement opt in via `review_mode = "threshold_llm"`, which routes through a dedicated `AuxTask::SkillWorkshopReview` slot and the cheap-tier provider chain (haiku → gpt-4o-mini → openrouter-haiku); when no cheap-tier credentials are configured the workshop returns `Indeterminate` rather than billing the operator's primary provider, blocking a financial-DoS regression. Approval routes through `evolution::create_skill` (same path as marketplace skills) so the `SkillVerifier::scan_prompt_content` security gate runs at both `save_candidate` and `approve_candidate` — `prompt_context`, `description`, and both 800-char provenance excerpts are scanned at save; Critical hits abort with `SecurityBlocked` before any temp file is written. UUID validation guards every public storage entry point that addresses files by id, so a non-UUID id never reaches `Path::join`. CLI: `librefang skill pending list / show / approve / reject`; HTTP: `GET/POST /api/skills/pending[…]` (auth-gated, `WorkshopError::InvalidId` → 400, not-found → 404, security/conflict → 409); dashboard: `PendingSkillsSection` on the Skills page with Approve / Reject buttons (the section renders nothing while the queue is empty so it doesn't waste page space). Architecture doc at `docs/architecture/skill-workshop.md`. Tests: 56 in `librefang-kernel::skill_workshop` (heuristic / llm_review / storage / candidate / mod) + 13 integration in `librefang-api::skill_workshop_pending_routes_test` (status + side-effect read-back per the project's mandatory pattern, including UUID-validation 400 cases). (@houko)
+
 ### Fixed
 
+- **MCP OAuth: accept `token_endpoint` on the same registrable domain as the authorization server** (#4665). The strict #3713 host pin refused legitimate cross-domain OAuth-proxy patterns where a vendor's MCP service delegates token exchange to its main OAuth domain — Slack's `mcp.slack.com` advertises a `token_endpoint` on `slack.com/api/oauth.v2.user.access`, and the pin left users with no workaround. `token_endpoint_host_matches` in `routes/mcp_auth.rs` now accepts either an exact host match (preserves the #3713 pin) or hosts on the same eTLD+1 computed via the Public Suffix List (`psl` crate, compile-time-baked data). Multi-label public suffixes (`*.co.uk`, …) and PSL private domains (`*.github.io`, `*.s3.amazonaws.com`, …) are handled correctly so cross-tenant lookalikes don't false-match. IP literals (v4 + v6, including bracketed IPv6) only ever pass via exact match — `psl::domain_str("10.0.0.1")` returns `Some("0.1")` under the unknown-TLD default rule, so an explicit `is_ip_literal` short-circuit guards the eTLD+1 path. Threat trade-off documented inline on the helper: loosening admits an attacker who controls *any* sibling subdomain on the issuer's registrable domain to redirect the token exchange there *if they also* tamper with HTTPS-validated discovery metadata; accepted because the strict pin left no escape hatch and sibling-subdomain takeover within an org's own domain implies the org itself is compromised. Eight unit tests pin every acceptance and rejection path (cross-org, sibling subdomain accept, multi-label PSL, IPv4/IPv6 literals, IPv4 with shared trailing labels, mixed IP-vs-domain, PSL private-domain false-match guard). (@houko)
+- Stop reporting fake 99.9% uptime when daemon hasn't been running that long (@leszek3737)
+- Preserve `progress` field through goal status change cycles instead of overwriting it (@neo-wanderer)
+- Fix `tally` crash when rendering grouped audit breakdown with empty buckets (@leszek3737)
+- Enforce base64 image size cap to prevent oversized payloads from stalling the agent loop (@leszek3737)
+- Migrate 18 dashboard pages to i18n with proper translation keys and locale formatters (@leszek3737)
 - **Dashboard-saved provider keys survive `librefang` daemon restart** (#4701). `POST /api/providers/{name}/key` (`routes/providers.rs::set_provider_key`) writes the key to `<home>/secrets.env` and `set_var`s the live process so the in-memory driver picks it up — the running daemon works, but the next restart booted a process that had never seen the key. Reason: the user-mode systemd unit produced by `librefang service install` (`librefang-cli/src/main.rs::service_install_linux`) and the packaged `deploy/librefang.service` both reference `<home>/env` (or `/etc/librefang/env`) for `EnvironmentFile=`, not `secrets.env`, and nothing in the boot path re-read `secrets.env`. Fix is two layers. (1) New `librefang-api::secrets_env` module exposes `load_into_process_blocking(home)` (sync, called from `cmd_start` *before* the tokio runtime / kernel boot — the only window where `std::env::set_var` is sound) and `load_into_process_async(home)` (spawn-blocking-guarded variant for the existing `channel_bridge::reload_channels_from_disk` hot-reload path, which previously inlined the same parser and now delegates here so the two paths cannot drift). The CLI `cmd_start` now calls the sync loader between `daemon_config_context()` and the runtime build, so any restart route — `systemctl restart`, `librefang restart`, plain `librefang start` — picks up the dashboard-saved key. (2) Belt-and-braces: both unit templates now declare `EnvironmentFile=-<home>/secrets.env` alongside the existing `…/env` so a future systemd-only restart path (skipping the in-process loader) still gets the key, and so newly installed users do not need to know the file exists. Existing installs pick up the loader on the first restart after upgrading; the unit edit only matters for fresh installs and for restarts that bypass the LibreFang CLI. Acceptance test in `secrets_env::tests::load_into_process_blocking_populates_std_env` writes a UUID-tagged `secrets.env` into a `tempdir`, calls the loader, and asserts the resulting `std::env` state matches the file. Closes #4701. (@houko)
 - **Workflow runs no longer disappear on graceful daemon shutdown** (#3335). `LibreFangKernel::shutdown` now invokes a new `WorkflowEngine::drain_on_shutdown` once, after `supervisor.shutdown()`, which transitions every `Running` / `Pending` run to `Paused` with a fresh `resume_token` and reason `"Interrupted by daemon shutdown"` and then flushes `workflow_runs.json` via the existing tmp+rename writer. Pre-fix, `persist_runs` deliberately skipped Running and Pending (no durable rollforward boundary), so a `librefang stop` with three in-flight runs left only the unrelated Completed row on disk and the dashboard came back up empty. Post-fix the operator can see the in-flight workload after restart and resume it via the existing `resume_run` API; the stale-running-runs sweep at next boot remains the safety net for crash paths where the drain never executed. Crash shutdown (SIGKILL / OOM / power loss) is **not** changed by this PR — that is what `recover_stale_running_runs` already handles. (@houko)
 - **CI Test job red on main for ~30 runs: align 5 missed assertions with dual-shape error envelope (#3639 / #4655 follow-up)**. `Test / macOS|Windows|Ubuntu (shard 2/3/4)` had been failing on the same five integration tests since the #3639 envelope migration: `plugins_routes_integration::install_plugin_rejects_missing_source` / `install_plugin_registry_source_requires_name` / `plugin_registry_search_rejects_invalid_registry_param` and `totp_flow_test::confirm_rejects_replayed_code` / `setup_when_already_confirmed_requires_current_code`. The cause is a shape mismatch — `/api/plugins/install` is `Idempotency-Key`-wrapped (#3637) so its inner handler still emits the flat `{error: <string>, code, type}` envelope, `/api/plugins/registry/search` returns the bare `ApiErrorResponse::bad_request()` shape `{error: <string>}`, while sibling routes use the standardized nested `{error: {message, ...}}` shape (#3639). PR #4655's first alignment pass committed the nested-only assertion at these five sites, so they read `body["error"]["message"]` and saw `Value::Null` when production returned flat. Switched to the dual-shape pattern `body["error"].as_str().or_else(|| body["error"]["message"].as_str())` consistent with the rest of `totp_flow_test.rs:340`, so the assertions pass on whichever envelope each route emits and survive future inner refactors. The `OpenAPI Drift` job (also red on `ee8ee554`) self-healed on the next push via the `IS_INTERNAL_PR` auto-commit branch in `.github/workflows/ci.yml` — local `cargo xtask codegen --openapi` + `python3 scripts/codegen-sdks.py` + `cargo xtask schema-check gen` are now no-ops on `origin/main`. (@houko)
+- **Daemon log lines now carry `agent.id` / `session.id` for correlation across `run_agent_loop` and supervised background tasks.** Three changes: (1) `run_agent_loop`'s `#[instrument]` span sets `session.id` alongside `agent.id` AND is pinned to `level = "warn"` so the daemon's baseline filter `librefang_runtime=warn` (installed by `init_tracing_stderr` to suppress runtime INFO noise) does not drop the span before it is created — INFO-level spans are filtered at the registry layer regardless of whether downstream events are visible, so every WARN/ERROR event inside the loop was firing in a bare context; the level bump is invisible to operators because `#[instrument]` does not auto-emit on enter/exit; (2) `librefang_kernel::supervised_spawn` now wraps the spawned future with `.instrument(Span::current())` — `tokio::spawn` does NOT propagate the current tracing span, so every supervised background task (channel bridges, cron tickers, inbox pumps, persist loops; ~48 call sites in the kernel) was starting in a bare span context; (3) `run_agent_loop_streaming` picks up the same `level = "warn"` + `session.id` field for parity. Symptom before: `docker logs jarvis | grep "Shell exec"` showed no agent context. After: `WARN run_agent_loop{agent.name=… agent.id="…" session.id="…"}: shell exec full mode …`. New regression tests: `instrument_span_fields::warn_inside_agent_span_includes_agent_and_session_ids`, `info_span_is_dropped_under_warn_target_filter` (proves the original bug), and `warn_span_survives_warn_target_filter_and_carries_fields` (pins the fix) in runtime; `with_trace_id_compact_format_carries_agent_and_session_ids_from_span` in cli; `supervised_spawn::tests::supervised_task_inherits_caller_span` in kernel. (@vigneshjagadeesh)
 - **`DELETE /api/agents/{id}` idempotent on nonexistent agent** — #4630 introduced a `?confirm=true` data-loss gate that fired UNCONDITIONALLY before the registry lookup, so even a DELETE for an already-absent agent returned 409 `delete_confirmation_required` instead of the documented idempotent 200. The handler now reorders: registry check first → 200 idempotent on absent → 409 confirm-required only when the agent actually exists → 409 hand-owned guard preserved. Restores the `test_delete_nonexistent_agent_is_idempotent` invariant in `librefang-testing`. Refs #4614 / #4630. (@houko)
 - **Review follow-ups for #4640 / #4649 / #4651 / #4655** (batch 1). (1) CI `Test / Unit (lib+bin)` job: added `--no-tests=pass` to the full-run `cargo nextest` invocation so workspace crates with zero lib/bin tests (pure type-def crates) no longer exit 4 and fail the job. (2) `librefang-skills` supply-chain audit: `.pth` extension check is now case-insensitive (`eq_ignore_ascii_case`) catching `evil.PTH` / `evil.Pth` on macOS/Windows; `collect_recursive` switched from `path.is_dir()` (follows symlinks) to `entry.file_type().is_dir()` (does not follow), and any symlink in the bundle now produces a `symlink-escape` `Violation` that blocks the install. (3) `librefang-runtime` artifact store: `spill_threshold_bytes` and `max_artifact_bytes` wired from `ToolResultsConfig` through `ToolExecContext` into `tool_web_fetch_legacy` (previously hardcoded `16_384`); new `max_artifact_bytes` field added to `ToolResultsConfig` (default 64 MiB) and enforced in `artifact_store::write` so oversized payloads fall back to truncation; Windows rename TOCTOU fixed by using unique temp names (`{hash}.{pid}.{nanos}.tmp`) and treating a post-rename `dest.exists()` as an idempotent success. (4) `librefang-api` tests: two `body["error"]["message"].as_str()` flat-only assertions in `memory_routes_integration.rs` (bulk-delete and put-blank-content error paths) converted to the dual-shape pattern consistent with the rest of the file. (@houko)
 
@@ -768,6 +882,8 @@ _338 PRs from 7 contributors since v2026.4.28-beta7._
 - **`mcp_catalog` migrated from `RwLock` to `ArcSwap`** (matching the `model_catalog` pattern from #4599). All five catalog read sites in `routes/skills.rs` (`list_mcp_catalog`, `get_mcp_catalog_entry`, two extensions list/detail handlers, and the install-flow template lookup) switch from `mcp_catalog().read().unwrap_or_else(…)` to a lock-free `mcp_catalog_load()` snapshot load; hot-reload and `POST /api/mcp/reload` writers use `mcp_catalog_reload()` which builds a fresh `McpCatalog` and stores it atomically. `McpCatalog` gains `#[derive(Clone)]` (only `HashMap<String, McpCatalogEntry>` + `PathBuf` — cheap to clone, clone only happens on the infrequent reload path). The existing `budget_config` was already on `ArcSwap` (migrated in a prior PR). Sync `std::fs::read_to_string` inside `reload_agent_from_disk` (a sync fn called from async axum handlers) is now wrapped with `tokio::task::block_in_place` so the tokio worker thread is not parked during I/O. The remaining sync context-md read on the streaming entry path (`send_message_streaming_with_sender_and_opts`) is deferred — the async `load_context_md_async` is already used on all other call sites. Closes #3579. (@houko)
 
 ### Changed
+
+- **Drop `LibreFangKernel` inherent forwards in favor of focused `*SubsystemApi` traits** (#3565 follow-up #4766). The 13 focused subsystem traits introduced in #4756 (`AgentSubsystemApi`, `EventSubsystemApi`, `GovernanceSubsystemApi`, `LlmSubsystemApi`, `McpSubsystemApi`, `MediaSubsystemApi`, `MemorySubsystemApi`, `MeshSubsystemApi`, `MeteringSubsystemApi`, `ProcessSubsystemApi`, `SecuritySubsystemApi`, `SkillsSubsystemApi`, `WorkflowSubsystemApi`) are now the canonical surface for subsystem access — re-exported at the crate root so external consumers can `use librefang_kernel::FooSubsystemApi` without reaching into the `kernel::subsystems` module. ~50 thin forwarding methods on `LibreFangKernel` (`audit`, `metering_ref`, `agent_registry`, `agent_identities`, `memory_substrate`, `proactive_memory_store`, `auth_manager`, `pairing_ref`, `approvals`, `hook_registry`, `event_bus_ref`, `injection_senders_ref`, `processes`, `process_registry`, `model_catalog_ref`, `model_catalog_load`, `clear_driver_cache`, `embedding`, `default_model_override_ref`, `mcp_catalog`, `mcp_catalog_load`, `mcp_health`, `mcp_connections_ref`, `mcp_auth_states_ref`, `oauth_provider_ref`, `mcp_tools_ref`, `effective_mcp_servers_ref`, `web_tools`, `browser`, `media`, `tts`, `media_drivers`, `a2a_tasks`, `a2a_agents`, `delivery`, `channel_adapters_ref`, `bindings_ref`, `broadcast_ref`, `peer_registry_ref`, `peer_node_ref`, `cron`, `workflow_engine`, `templates`, `trigger_engine`, `command_queue_ref`, `scheduler_ref`, `supervisor_ref`, `traces`, `skill_registry_ref`, `hands`, `budget_config`) deleted from `accessors.rs`. The `KernelApi` god-trait surface stays byte-identical — its method names route to the focused traits via fully-qualified `<Self as crate::FooSubsystemApi>::method(self)` syntax, so every `Arc<dyn KernelApi>` caller in `librefang-api` is unaffected. `Arc<LibreFangKernel>` / `&LibreFangKernel` callers (kernel internals, CLI TUI, desktop app, integration tests, ACP adapter) gain a one-line `use librefang_kernel::FooSubsystemApi` import per file. Inherents that genuinely cannot move to a trait stay put: `update_budget_config` / `model_catalog_update` (`impl Fn`/`impl FnMut` arguments), `mcp_catalog_reload` / `install_peer_registry_for_test` (direct field writes), `aux_client` (`ArcSwap::load_full` returns an owned `Arc`). Lays the groundwork for #3566 to carve `KernelApi` itself into focused trait objects. (@houko)
 
 - **`librefang-api` narrows the concrete `LibreFangKernel` coupling** (#3744 N/N). Two new role traits added to `librefang-kernel-handle`: `ApiAuth` (5 methods — `auth_api_key`, `dashboard_raw_config`, `auth_home_dir`, `auth_device_api_keys`, `auth_config_users`) and `SessionWriter` (1 method — `inject_attachment_blocks`). Both are implemented on `LibreFangKernel` and included in the `KernelHandle` supertrait. Server-layer auth helpers (`dashboard_session_token`, `valid_api_tokens`, `has_dashboard_credentials`, `configured_user_api_keys`, `paired_device_user_keys`, `any_auth_configured`, `check_bind_auth_safety`) narrowed from `&LibreFangKernel` to `&dyn ApiAuth`. `inject_attachments_into_session` in `routes/agents.rs` narrowed from `&LibreFangKernel` to `&dyn SessionWriter` with the injection logic moved into the kernel impl. All test stubs in `librefang-runtime` (`ApprovalKernel`, `ForceHumanCapturingKernel`, `NamedWsKernel`, `SpawnCheckKernel` in `tool_runner.rs`; `CapturingKernel` in `tool_runner_forwarding.rs`, `tool_runner_agent_event.rs`, `tool_runner_forwarding_task_cron.rs`) implement the new `ApiAuth` and `SessionWriter` traits. The `AppState.kernel` field, `channel_bridge.rs` adapters, `routes/mod.rs`, and `routes/providers.rs` retain `Arc<LibreFangKernel>` — these sites call 100+ kernel-internal methods (config, model catalog, probe results) that cannot be feasibly abstracted without exceeding the 30-method cap; they are covered by the allowlist in `scripts/check-api-kernel-imports.sh`. The comment-strip regex in that script is tightened to catch trailing-comment forms. Closes #3744. (@houko)
 

@@ -820,7 +820,12 @@ pub(crate) fn enrich_agent_json(
             let tier = model_entry
                 .map(|m| format!("{:?}", m.tier).to_lowercase())
                 .unwrap_or_else(|| "unknown".to_string());
-            let thinking = model_entry.map(|m| m.supports_thinking).unwrap_or(false);
+            // Refs #4745: surface effective `supports_thinking` (catalog ∘ user
+            // override) so the agents page reflects the user's per-model
+            // capability overrides.
+            let thinking = model_entry
+                .map(|m| cat.effective_capabilities(m).supports_thinking)
+                .unwrap_or(false);
             let auth = cat
                 .get_provider(provider)
                 .map(|p| p.auth_status.to_string())
@@ -7251,6 +7256,7 @@ mod monitoring_tests {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use librefang_kernel::audit::AuditAction;
+    use librefang_kernel::MemorySubsystemApi;
     use librefang_types::config::KernelConfig;
 
     fn monitoring_test_app_state() -> (Arc<AppState>, tempfile::TempDir) {
@@ -7268,7 +7274,7 @@ mod monitoring_tests {
         let idempotency_store: Arc<
             dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync,
         > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
-            kernel.memory_substrate().pool(),
+            kernel.substrate_ref().pool(),
         ));
         let state = Arc::new(AppState {
             kernel,

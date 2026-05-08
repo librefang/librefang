@@ -1,17 +1,48 @@
+import { ApiError } from "./http/errors";
+
+const MAX_CAUSE_DEPTH = 5;
+
+type ErrorWithCause = Error & { cause?: unknown };
+
+function deepestCauseMessage(err: Error): string | undefined {
+  let cur = (err as ErrorWithCause).cause;
+  let found: string | undefined;
+  let depth = 0;
+  while (cur instanceof Error && depth < MAX_CAUSE_DEPTH) {
+    if (cur.message && cur.message !== err.message) {
+      found = cur.message;
+    }
+    cur = (cur as ErrorWithCause).cause;
+    depth++;
+  }
+  return found;
+}
+
 /**
- * Extract a human-readable message from a `catch (err: unknown)` value
- * (the default since `useUnknownInCatchVariables` / TS 4.4) or a
- * react-query mutation `onError(err)` callback (where `err` is `Error`
- * for our wire client but could be a thrown string from misbehaving
- * deps).
+ * Extract a user-facing error message from an unknown thrown value.
  *
- * The fallback is the caller's localized string; pass it from
- * `t("…")` so the error UI stays translated when the throw isn't an
- * `Error`. Empty `Error.message` falls through to the fallback rather
- * than rendering an empty toast.
+ * Priority order (highest → lowest):
+ *  1. ApiError — includes status code + deepest cause message
+ *  2. Error instance — message + deepest cause message
+ *  3. Raw string — returned as-is
+ *  4. Fallback — caller-provided default
  */
 export function toastErr(err: unknown, fallback: string): string {
-  if (err instanceof Error && err.message) return err.message;
+  if (import.meta.env.DEV) {
+    console.error("[toastErr]", err);
+  }
+
+  if (err instanceof ApiError) {
+    const extra = deepestCauseMessage(err);
+    const body = extra ? `${err.message}: ${extra}` : err.message;
+    return `[${err.status}] ${body}`;
+  }
+
+  if (err instanceof Error && err.message) {
+    const extra = deepestCauseMessage(err);
+    return extra ? `${err.message}: ${extra}` : err.message;
+  }
+
   if (typeof err === "string" && err) return err;
   return fallback;
 }

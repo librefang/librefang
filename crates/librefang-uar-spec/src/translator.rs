@@ -177,6 +177,7 @@ pub fn artifact_to_manifest(artifact: &AgentArtifact) -> Result<AgentManifest> {
         max_concurrent_invocations: None,
         cache_context: false,
         tool_exec_backend: None,
+        skill_workshop: librefang_types::agent::SkillWorkshopConfig::default(),
     })
 }
 

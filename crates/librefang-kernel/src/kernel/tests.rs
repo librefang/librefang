@@ -1,5 +1,9 @@
 use super::*;
 use crate::registry::AgentRegistry;
+use crate::GovernanceSubsystemApi;
+use crate::McpSubsystemApi;
+use crate::MemorySubsystemApi;
+use crate::MeteringSubsystemApi;
 use futures::stream;
 use librefang_channels::types::{ChannelAdapter, ChannelContent, ChannelType, ChannelUser};
 use librefang_types::approval::{
@@ -243,6 +247,7 @@ async fn test_notify_escalated_approval_prefers_request_route_to() {
         route_to: vec![explicit_target],
         escalation_count: 1,
         session_id: None,
+        tool_use_id: None,
     };
 
     kernel.notify_escalated_approval(&req, req.id).await;
@@ -1663,7 +1668,7 @@ async fn test_task_board_sweep_resets_stuck_in_progress_task() {
     };
     let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
 
-    let mem = kernel.memory_substrate();
+    let mem = kernel.substrate_ref();
 
     // Post and claim a task so status = in_progress.
     let task_id = mem
@@ -5181,7 +5186,7 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
 
     // Order A: connect filesystem before github before weather.
     {
-        let mut tools = kernel.mcp_tools_ref().lock().unwrap();
+        let mut tools = kernel.tools_ref().lock().unwrap();
         tools.clear();
         tools.push(librefang_types::tool::ToolDefinition {
             name: "mcp_filesystem_read_file".to_string(),
@@ -5212,7 +5217,7 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
 
     // Order B: same set, scrambled connect order.
     {
-        let mut tools = kernel.mcp_tools_ref().lock().unwrap();
+        let mut tools = kernel.tools_ref().lock().unwrap();
         tools.clear();
         tools.push(librefang_types::tool::ToolDefinition {
             name: "mcp_weather_forecast".to_string(),
@@ -6568,6 +6573,126 @@ async fn vault_cache_reuses_unlocked_handle_across_calls() {
     kernel.shutdown();
 }
 
+/// Regression test for the kernel install façade introduced in #3295: the
+/// HTTP install path historically opened `vault.enc` and ran the Argon2id
+/// KDF on every request. After the refactor, `Kernel::install_integration`
+/// rides the cached `vault_handle()` so the unlock cost is paid once per
+/// kernel lifetime.
+///
+/// We assert two things at the seam between resolver and cached vault:
+///
+///   1. Credentials supplied to `install_integration` are written into the
+///      kernel's cached vault — `vault_get` reads them back immediately
+///      with no fresh `unlock()` call. This proves the resolver's
+///      `with_vault_handle` constructor really does share storage with the
+///      kernel cache (rather than holding a stale clone).
+///   2. The `vault_handle()` Arc returned before the install is the same
+///      allocation as the one returned after — the install path must not
+///      poison or rebuild the cache slot.
+///
+/// Same `serial_test::serial` group as the other vault tests because
+/// `LIBREFANG_VAULT_KEY` is process-global.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn install_integration_writes_through_cached_vault_handle() {
+    const TEST_VAULT_KEY_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    let _vault_key = set_test_env("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
+    let _no_keyring = set_test_env("LIBREFANG_VAULT_NO_KEYRING", "1");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // Drop the catalog fixture AFTER boot. `LibreFangKernel::boot_with_config`
+    // runs `librefang_runtime::registry_sync::sync_registry`, which calls
+    // `sync_flat_files` against `home_dir/mcp/catalog/`. That helper deletes
+    // any local TOML whose basename does not exist in the upstream registry
+    // mirror — a fixture written *before* boot gets nuked the moment CI has
+    // network access (see registry_sync.rs:458-475 "remove orphans" loop).
+    //
+    // Writing the fixture post-boot is the canonical path the test wants to
+    // exercise anyway: a user manually drops a custom template into
+    // ~/.librefang/mcp/catalog/, then triggers an install. The reload-on-
+    // install behaviour added in #4788 is what makes that path work without
+    // a daemon restart, and that is precisely what this test pins.
+    let catalog_dir = home_dir.join("mcp").join("catalog");
+    std::fs::create_dir_all(&catalog_dir).unwrap();
+    std::fs::write(
+        catalog_dir.join("test-template.toml"),
+        r#"
+id = "test-template"
+name = "Test Template"
+description = "Fixture for install_integration vault-write seam test"
+category = "devtools"
+
+[transport]
+type = "stdio"
+command = "echo"
+args = ["hello"]
+
+[[required_env]]
+name = "TEST_TEMPLATE_TOKEN"
+label = "Test Token"
+help = "anything goes"
+is_secret = true
+"#,
+    )
+    .unwrap();
+
+    // Snapshot the cached handle BEFORE install so we can assert the install
+    // path doesn't replace the cache slot.
+    let pre_handle = kernel
+        .vault_handle()
+        .expect("vault_handle should succeed before install");
+
+    let mut provided = std::collections::HashMap::new();
+    provided.insert(
+        "TEST_TEMPLATE_TOKEN".to_string(),
+        "shibboleth-42".to_string(),
+    );
+
+    let result = kernel
+        .install_integration("test-template", &provided)
+        .expect("install should succeed when all required creds are provided");
+
+    // Status must be Ready — the resolver saw the credential we just stored.
+    assert_eq!(
+        result.status,
+        librefang_types::mcp::McpStatus::Ready,
+        "install should report Ready when required cred was supplied",
+    );
+
+    // The credential lives in the kernel's cached vault — `vault_get` reads
+    // it without re-unlocking. This is the seam the resolver's
+    // `with_vault_handle` constructor exists to guarantee.
+    assert_eq!(
+        kernel.vault_get("TEST_TEMPLATE_TOKEN").as_deref(),
+        Some("shibboleth-42"),
+        "install_integration must write credentials through the cached \
+         vault handle, so kernel.vault_get sees them immediately",
+    );
+
+    // Same Arc before and after — install path didn't poison the cache.
+    let post_handle = kernel
+        .vault_handle()
+        .expect("vault_handle should succeed after install");
+    assert!(
+        std::sync::Arc::ptr_eq(&pre_handle, &post_handle),
+        "install_integration must reuse the cached vault handle; \
+         rebuilding it would silently re-introduce the per-request \
+         Argon2id KDF cost the façade exists to avoid",
+    );
+
+    kernel.shutdown();
+}
+
 // ── /api/agents/{id}/sessions `active` semantics (#4293) ────────────────────
 //
 // `list_agent_sessions` historically marked `active = (sid == registry pointer)`.
@@ -6750,7 +6875,7 @@ fn list_agent_sessions_canonical_and_active_can_coexist_on_same_row() {
 /// state), and the final stored value reflects the writer's mutation.
 ///
 /// This pins the contract for the LLM hot path, which calls
-/// `kernel.budget_config()` on every turn for budget enforcement and
+/// `kernel.current_budget()` on every turn for budget enforcement and
 /// must never park a tokio worker on a blocking lock.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn budget_config_arcswap_concurrent_reads_consistent_with_writer() {
@@ -6774,7 +6899,7 @@ async fn budget_config_arcswap_concurrent_reads_consistent_with_writer() {
         let k = kernel.clone();
         readers.push(tokio::spawn(async move {
             for _ in 0..50 {
-                let snap = k.budget_config();
+                let snap = k.current_budget();
                 // Only ever the pre-update or post-update sentinel, never
                 // a torn / partial value.
                 let v = snap.max_hourly_usd;
@@ -6792,7 +6917,7 @@ async fn budget_config_arcswap_concurrent_reads_consistent_with_writer() {
     }
 
     // After the writer completes, every subsequent read must see 9.0.
-    assert_eq!(kernel.budget_config().max_hourly_usd, 9.0);
+    assert_eq!(kernel.current_budget().max_hourly_usd, 9.0);
 
     kernel.shutdown();
 }
@@ -6839,7 +6964,7 @@ async fn budget_config_concurrent_writers_no_lost_update() {
         h.await.expect("writer task panicked");
     }
 
-    let final_cfg = kernel.budget_config();
+    let final_cfg = kernel.current_budget();
     // Final values must each be from *some* writer (in their respective
     // hourly_target / daily_target ranges) — proves the rcu retry kept
     // each field converging to a writer-supplied value rather than
