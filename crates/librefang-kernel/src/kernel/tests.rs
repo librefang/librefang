@@ -6567,8 +6567,25 @@ async fn install_integration_writes_through_cached_vault_handle() {
     let home_dir = dir.path().to_path_buf();
     std::fs::create_dir_all(home_dir.join("data")).unwrap();
 
-    // Drop a single catalog template into the location the kernel scans.
-    // One required env var so the resolver has somewhere to write through.
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // Drop the catalog fixture AFTER boot. `LibreFangKernel::boot_with_config`
+    // runs `librefang_runtime::registry_sync::sync_registry`, which calls
+    // `sync_flat_files` against `home_dir/mcp/catalog/`. That helper deletes
+    // any local TOML whose basename does not exist in the upstream registry
+    // mirror — a fixture written *before* boot gets nuked the moment CI has
+    // network access (see registry_sync.rs:458-475 "remove orphans" loop).
+    //
+    // Writing the fixture post-boot is the canonical path the test wants to
+    // exercise anyway: a user manually drops a custom template into
+    // ~/.librefang/mcp/catalog/, then triggers an install. The reload-on-
+    // install behaviour added in #4788 is what makes that path work without
+    // a daemon restart, and that is precisely what this test pins.
     let catalog_dir = home_dir.join("mcp").join("catalog");
     std::fs::create_dir_all(&catalog_dir).unwrap();
     std::fs::write(
@@ -6592,13 +6609,6 @@ is_secret = true
 "#,
     )
     .unwrap();
-
-    let config = KernelConfig {
-        home_dir: home_dir.clone(),
-        data_dir: home_dir.join("data"),
-        ..KernelConfig::default()
-    };
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
 
     // Snapshot the cached handle BEFORE install so we can assert the install
     // path doesn't replace the cache slot.
