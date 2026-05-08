@@ -427,12 +427,18 @@ def rule_broad_git_add(toks, ctx):
     return None
 
 
+# `credentials` / `secrets` are restricted to credential-STORAGE extensions
+# (data formats) so that source files that *handle* credentials — e.g.
+# `crates/librefang-extensions/src/credentials.rs` — don't trip the guard.
+# The earlier `(\.[a-z]+)?` form swept in `.rs` / `.py` / `.go` and forced a
+# manual user override on every legitimate code-edit commit.
+_DATA_EXT = r"(json|toml|yaml|yml|txt|csv|ini|conf|env|cfg)"
 _SENSITIVE_RE = re.compile(
     r"^("
     r"\.env(\.[a-z0-9._-]+)?"
     r"|id_(rsa|ed25519|ecdsa|dsa)(\.pub)?"
-    r"|credentials(\.[a-z]+)?"
-    r"|secrets?(\.[a-z]+)?"
+    rf"|credentials(\.{_DATA_EXT})?"
+    rf"|secrets?(\.{_DATA_EXT})?"
     r"|vault[_-][a-z0-9_-]+\.(key|json)"
     r"|.+\.(pem|p12|pfx|jks|keystore)"
     r")$",
