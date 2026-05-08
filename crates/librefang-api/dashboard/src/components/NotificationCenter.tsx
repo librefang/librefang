@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { useUIStore } from "../lib/store";
 import { useNavigate } from "@tanstack/react-router";
 import { useApprovalCount, useApprovals, useTotpStatus } from "../lib/queries/approvals";
+import { usePendingSkillCandidates } from "../lib/queries/skills";
 import { useApproveApproval, useRejectApproval } from "../lib/mutations/approvals";
 
 const POLL_INTERVAL_MS = 5_000;
@@ -31,10 +32,20 @@ export function NotificationCenter() {
   const totpQuery = useTotpStatus({ enabled: open });
   const approveMutation = useApproveApproval();
   const rejectMutation = useRejectApproval();
+  // Skill workshop pending queue (#3328) — surfaced alongside tool
+  // approvals so the operator has a single notification surface for
+  // anything that needs human attention. Polled at the same cadence
+  // as approvals; the workshop is opt-in and most agents won't ever
+  // populate this list.
+  const pendingSkillsQuery = usePendingSkillCandidates(undefined, {
+    refetchInterval: POLL_INTERVAL_MS,
+  });
+  const pendingSkillsCount = pendingSkillsQuery.data?.length ?? 0;
 
   const totpEnforced = totpQuery.data?.enforced ?? false;
 
-  const pendingCount = countQuery.data ?? 0;
+  const approvalCount = countQuery.data ?? 0;
+  const pendingCount = approvalCount + pendingSkillsCount;
   const pendingItems = useMemo(
     () => (listQuery.data ?? []).filter((a) => !a.status || a.status === "pending"),
     [listQuery.data]
@@ -112,7 +123,7 @@ export function NotificationCenter() {
               )}
             </div>
             <div className="max-h-96 overflow-y-auto">
-              {pendingItems.length === 0 ? (
+              {pendingItems.length === 0 && pendingSkillsCount === 0 ? (
                 <div className="px-4 py-6 text-center text-sm text-text-dim">
                   {t("approvals.queue_clear_desc", "All clear")}
                 </div>
@@ -176,6 +187,24 @@ export function NotificationCenter() {
                     </div>
                   </div>
                 ))
+              )}
+              {pendingSkillsCount > 0 && (
+                <button
+                  onClick={() => {
+                    setOpen(false);
+                    navigate({ to: "/skills" });
+                  }}
+                  className="flex w-full items-center justify-between gap-2 border-t border-border-subtle px-4 py-3 text-left text-sm hover:bg-surface-hover transition-colors"
+                  role="menuitem"
+                >
+                  <span className="text-text-main">
+                    {t("approvals.skill_candidates_pending", {
+                      defaultValue: "{{count}} skill candidates pending review",
+                      count: pendingSkillsCount,
+                    })}
+                  </span>
+                  <ExternalLink className="w-3 h-3 shrink-0 text-text-dim" />
+                </button>
               )}
             </div>
           </div>

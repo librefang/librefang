@@ -39,6 +39,7 @@ import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { PageHeader } from "../components/ui/PageHeader";
 import { PendingSkillsSection } from "../components/PendingSkillsSection";
+import { usePendingSkillCandidates } from "../lib/queries/skills";
 import { useUIStore } from "../lib/store";
 import {
   SkillHubBar,
@@ -85,7 +86,7 @@ import {
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 type ClawHubSkillWithStatus = ClawHubBrowseItem & { is_installed?: boolean };
-type ViewMode = "installed" | "browse";
+type ViewMode = "installed" | "browse" | "pending";
 type MarketplaceSource = "fanghub" | "clawhub" | "clawhub-cn" | "skillhub";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -1481,6 +1482,12 @@ export function SkillsPage() {
   const addToast = useUIStore((s) => s.addToast);
 
   const [viewMode, setViewMode] = useState<ViewMode>("browse");
+  // Skill workshop pending queue — surfaced as a third tab only when
+  // the queue is non-empty so the Skills page stays clean for operators
+  // who never touch the workshop. The tab disappears the moment the
+  // queue drains, returning the page to its two-tab layout.
+  const pendingSkillsQuery = usePendingSkillCandidates();
+  const pendingSkillsCount = pendingSkillsQuery.data?.length ?? 0;
   /**
    * Which federated hub the browse grid pulls from. Defaults to
    * `"fanghub"` so the page lands on a populated grid (FangHub is the
@@ -1807,15 +1814,10 @@ export function SkillsPage() {
         }
       />
 
-      {/* Skill workshop pending review (#3328). Mounts above the
-          installed/browse tab bar so a fresh capture is the first
-          thing the operator sees on the Skills page; renders nothing
-          while the queue is empty (the steady state for most
-          operators) so it doesn't waste page space — see the
-          early-return in `PendingSkillsSection`. */}
-      <PendingSkillsSection />
-
-      {/* Tab bar */}
+      {/* Tab bar — `Pending` only renders when the workshop has
+          something queued so the steady-state Skills page stays a
+          two-tab layout (#3328). The tab disappears as soon as the
+          queue drains. */}
       <div className="flex gap-1 p-1 bg-surface rounded-xl border border-border-subtle w-fit">
         {(
           [
@@ -1832,6 +1834,19 @@ export function SkillsPage() {
               label: t("skills.browse", { defaultValue: "Browse" }),
               activeColor: "text-brand",
             },
+            ...(pendingSkillsCount > 0
+              ? [
+                  {
+                    mode: "pending" as const,
+                    icon: <Sparkles className="w-4 h-4" />,
+                    label: t("skills.pending_tab", {
+                      defaultValue: "Pending",
+                    }),
+                    count: pendingSkillsCount,
+                    activeColor: "text-warning",
+                  },
+                ]
+              : []),
           ]
         ).map((tab) => {
           const active = viewMode === tab.mode;
@@ -1934,6 +1949,9 @@ export function SkillsPage() {
           }
         />
       )}
+
+      {/* ── Pending (#3328 skill workshop review queue) ── */}
+      {viewMode === "pending" && <PendingSkillsSection />}
 
       {/* ── Installed ── */}
       {viewMode === "installed" &&
