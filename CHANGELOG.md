@@ -5,6 +5,109 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.5.8] - 2026-05-08
+
+_68 PRs from 5 contributors since v2026.5.6-beta.9._
+
+### Highlights
+- **New Dashboard & UI Refinements** — Adds a dedicated dashboard, resolves 159+ UI bugs and accessibility gaps, and fixes summarize-and-trim compaction for persistent agent sessions.
+- **Durable Knowledge Vault** — Introduces an isolated v1 knowledge vault with lazy initialization to fix silent setup successes and load secrets at boot for cross-restart persistence.
+- **Native Editor Integration** — Implements an Agent Client Protocol adapter and SSH/Daytona tool-exec backends for seamless editor-to-agent workflow connections.
+- **Passive Skill Capture & DM Improvements** — Launches a post-turn capture pipeline for automated skill development and exposes sender identity in direct message prompts.
+- **Performance Optimizations** — Batches per-agent KV lookups via useQueries to enhance dashboard and agent response speeds.
+
+### Added
+
+- Tool-exec backend trait + SSH and Daytona impls (#3332) (#4677) (@houko)
+- Scaffold durable knowledge vault — isolated mode v1 (#3329) (#4712) (@houko)
+- Closes #3328 — passive after-turn capture pipeline (#4741) (@houko)
+- Agent Client Protocol (ACP) adapter for native editor integration (#4742) (@houko)
+- Expose sender identity in DM prompts, not just groups (#4666) (#4776) (@houko)
+- Add dashboard (#4780) (@houko)
+- User-editable per-model capability overrides (#4745) (#4781) (@houko)
+
+### Fixed
+
+- Terminal page reconnect loop on container hosts (#4675) (#4681) (@houko)
+- Expose every KernelConfig section in single-page UI (#4682) (@houko)
+- Summarize-and-trim compaction mode for Persistent sessions (#3693) (#4683) (@houko)
+- Close DrawerPanel on parent-driven isOpen=false (#4687) (#4691) (@houko)
+- Expand leading ~ in stdio transport args (#4680) (#4692) (@houko)
+- Hub install/uninstall surface stale state across all 4 hubs (#4689) (#4696) (@houko)
+- Regenerate schema baselines as part of release/lts bump (#4697) (@houko)
+- PID fallback and clearer error when restart hits 401 (#4693) (#4698) (@houko)
+- Deterministic two-phase driver for find_by_name_is_atomic_under_concurrent_register_and_remove (#4704) (#4705) (@houko)
+- Reload_config must reject invalid TOML, not silently swap to defaults (#4664) (#4711) (@houko)
+- Resolve 35 UI bugs and review follow-ups across 10 pages (#4718) (@leszek3737)
+- Resolve 80+ bugs, a11y gaps, and i18n misses across 18 page components (#4719) (@leszek3737)
+- Toast refresh errors in AnalyticsPage (#4718 review L1) (#4724) (@houko)
+- Drain in-flight workflow runs on graceful shutdown (#3335) (#4725) (@houko)
+- DrawerPanel parent-close must check slot ownership (#4714) (#4727) (@houko)
+- Resolve 44 confirmed UI bugs across 13 dashboard components (#4731) (@leszek3737)
+- A11y improvements and UI bugfixes (#4733) (@leszek3737)
+- State-correctness and a11y bugs in UI primitives (#4734) (@leszek3737)
+- A11y polish and UX fixes across UI components (#4735) (@leszek3737)
+- Scope PushDrawer focus traps to their actual viewport (#4734 followup) (#4737) (@houko)
+- Close SSRF gaps in cron webhook delivery (#4732) (#4739) (@houko)
+- Load secrets.env at boot so dashboard-saved keys survive restart (#4701) (#4740) (@houko)
+- Unblock Dashboard / Mobile / Docker on main (#4744) (@houko)
+- Correlate daemon logs with agent.id / session.id across run_agent_loop and supervised tasks (#4761) (@neo-wanderer)
+- Pipe prompt to CLI stdin instead of argv to avoid E2BIG (#4764) (@f-liva)
+- Block CLI progress placeholders + add stream_to_channel toggle (#4765) (@f-liva)
+- Default opt-in + bell/tab navigation (#3328 follow-up) (#4775) (@houko)
+- Align tool_runner test assertions with new pre-ACP path guard (#4777) (@houko)
+- Allow unused_mut on chromium_candidates() for android/ios builds (#4778) (@houko)
+- Allow same-eTLD+1 token endpoint for cross-domain OAuth proxies (#4779) (@houko)
+- Kill SIGPIPE 141 noise in PreToolUse hooks (#4782) (@houko)
+- Bump corepack so pnpm 10.x signature check passes (#4784) (@houko)
+- Escape literal {name} in providers route assert message (#4786) (@houko)
+- Bump dashboard builder node to 20.20.2-alpine for vite 8 / rolldown engines (#4787) (@houko)
+- Drop install_integration fixture after boot to dodge sync_registry orphan cleanup (#4791) (@houko)
+- Lazy-init vault.enc on first set() — fix install_integration silent-success (#4793) (@houko)
+- Add deterministic catalog seed for mock kernel — fix capability_override flake (#4796) (@houko)
+- Expose ModelCatalog::from_entries outside cfg(test) — unbreak main (#4798) (@houko)
+
+### Changed
+
+- Replace Arc<Mutex<Connection>> with r2d2 connection pool (#3378 part 2) (#4685) (@houko)
+- Align ProvidersPage with ChannelsPage add-via-picker pattern (#4708) (@houko)
+- Split kernel/mod.rs into per-cluster files (#3744 phases 1-3) (#4713) (@houko)
+- Harden shell, extract modal, fix React perf and error handling (#4717) (@leszek3737)
+- KernelApi trait + Arc<dyn KernelApi> AppState (#3566) (#4726) (@houko)
+- Decompose LibreFangKernel god struct into 13 subsystems (#3565) (#4756) (@houko)
+- Migrate inherent forwards to *SubsystemApi traits (#3565 follow-up) (#4766) (@houko)
+- Manifest-first control plane — types spine + cached vault facade (#4783) (@houko)
+- Install-path vault facade + hook regex narrowing (#4788) (@houko)
+
+### Performance
+
+- Batch per-agent KV lookups via useQueries (#4722) (#4738) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Documentation
+
+- Document DrawerPanel ownership check in file-level sync model (#4727 followup) (#4729) (@houko)
+
+### Maintenance
+
+- Include PR number, failed jobs, and step names (#4694) (@houko)
+- Refresh openapi.sha256 to match merged v2026.5.6-beta.9 openapi.json (#4695) (@houko)
+- Auto-stage refreshed openapi.sha256 when openapi.json is committed (#4700) (@houko)
+- Bump the web-minor-patch group in /web with 6 updates (#4720) (@app/dependabot)
+- Bump the dashboard-minor-patch group in /crates/librefang-api/dashboard with 6 updates (#4721) (@app/dependabot)
+- Fix PR Status Labels 403 by splitting pull_request_review trigger (#4746) (@houko)
+- Pin pnpm via package.json so cache: pnpm save step works (#4758) (@houko)
+- Ignore graphify-out/ (#4762) (@neo-wanderer)
+- Bump the docs-minor-patch group in /docs with 6 updates (#4769) (@app/dependabot)
+- Bump postcss-focus-visible from 10.0.1 to 11.0.0 in /docs (#4770) (@app/dependabot)
+- Bump @sindresorhus/slugify from 2.2.1 to 3.0.0 in /docs (#4771) (@app/dependabot)
+- Bump marked from 16.2.1 to 18.0.3 in /docs (#4772) (@app/dependabot)
+
+</details>
+
+
 ## [2026.5.6] - 2026-05-06
 
 _310 PRs from 3 contributors since v2026.5.2-beta8._
