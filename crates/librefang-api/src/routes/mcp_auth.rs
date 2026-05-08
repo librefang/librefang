@@ -1030,9 +1030,20 @@ fn token_endpoint_host_matches(token_endpoint: &str, expected_host: &str) -> boo
         return true;
     }
 
-    // Rule 2: same registrable domain (eTLD+1). `psl::domain_str` returns
-    // None for IPs, `localhost`, names whose TLD is unknown, etc. — those
-    // only ever pass via Rule 1 above.
+    // IP literals must only ever pass via Rule 1. The PSL crate is
+    // *not* documented to return None for every IP shape — for an
+    // IPv4 address with an unknown TLD label the default rule emits
+    // the trailing two labels as the "registrable domain", which
+    // would let `10.0.0.1` and `127.0.0.1` collide on `0.1`. Bail
+    // explicitly so the eTLD+1 path never sees an IP. Strip IPv6
+    // brackets (`url::Url::host_str` keeps them) before parsing.
+    if is_ip_literal(&token_host) || is_ip_literal(&expected_host) {
+        return false;
+    }
+
+    // Rule 2: same registrable domain (eTLD+1). `psl::domain_str`
+    // returns None for `localhost`, names whose TLD is unknown, etc.
+    // — those only ever pass via Rule 1 above.
     let token_etld1 = match psl::domain_str(&token_host) {
         Some(d) => d,
         None => return false,
@@ -1042,6 +1053,16 @@ fn token_endpoint_host_matches(token_endpoint: &str, expected_host: &str) -> boo
         None => return false,
     };
     token_etld1 == expected_etld1
+}
+
+/// `true` when `host` is an IPv4 or IPv6 literal. Tolerates the
+/// bracketed IPv6 form (`[::1]`) emitted by `url::Url::host_str`.
+fn is_ip_literal(host: &str) -> bool {
+    let stripped = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    stripped.parse::<std::net::IpAddr>().is_ok()
 }
 
 #[cfg(test)]
@@ -1343,6 +1364,48 @@ mod tests {
         ));
         assert!(!token_endpoint_host_matches(
             "https://10.0.0.1/oauth/token",
+            "127.0.0.1"
+        ));
+    }
+
+    /// `psl::domain_str` returns `Some("0.1")` for both `10.0.0.1` and
+    /// `192.168.0.1` — the unknown-TLD default rule emits the rightmost
+    /// two labels. Without the explicit IP carve-out, two unrelated
+    /// IPv4 addresses would Rule-2 each other. Pin the carve-out.
+    #[test]
+    fn token_endpoint_ipv4_with_shared_trailing_labels_must_not_match() {
+        assert!(!token_endpoint_host_matches(
+            "https://192.168.0.1/oauth/token",
+            "10.0.0.1"
+        ));
+    }
+
+    /// IPv6 literals come back from `url::Url::host_str` in bracketed
+    /// form. The carve-out must strip brackets before its IpAddr
+    /// parse, otherwise `[::1]` would wrongly fall through to Rule 2.
+    #[test]
+    fn token_endpoint_ipv6_host_requires_exact_match() {
+        assert!(token_endpoint_host_matches(
+            "https://[::1]/oauth/token",
+            "[::1]"
+        ));
+        assert!(!token_endpoint_host_matches(
+            "https://[fe80::1]/oauth/token",
+            "[::1]"
+        ));
+    }
+
+    /// Mixed IP-vs-domain: an IP token endpoint must never match a
+    /// domain expected_host (or vice versa) via Rule 2. The strict
+    /// pin is the only acceptance path for IP literals.
+    #[test]
+    fn token_endpoint_ip_does_not_match_domain() {
+        assert!(!token_endpoint_host_matches(
+            "https://127.0.0.1/oauth/token",
+            "example.com"
+        ));
+        assert!(!token_endpoint_host_matches(
+            "https://auth.example.com/oauth/token",
             "127.0.0.1"
         ));
     }
