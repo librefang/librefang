@@ -2099,6 +2099,12 @@ impl LibreFangKernel {
 
         // Inject sender context into manifest metadata so the tool runner can
         // use it for per-sender trust and channel-specific authorization rules.
+        // Mirrors `kernel/agent_execution.rs::execute_llm_agent` —
+        // `sender_display_name` is part of the same triple and must land here
+        // too, otherwise `build_sender_prefix` (#4666) falls back to
+        // `sender_user_id` and triggers / `agent_send` produce
+        // `[<numeric_id>]: ` instead of `[<friendly_name>]: ` for the same
+        // user identity.
         if let Some(ctx) = sender_context {
             if !ctx.user_id.is_empty() {
                 manifest.metadata.insert(
@@ -2110,6 +2116,12 @@ impl LibreFangKernel {
                 manifest.metadata.insert(
                     "sender_channel".to_string(),
                     serde_json::Value::String(ctx.channel.clone()),
+                );
+            }
+            if !ctx.display_name.is_empty() {
+                manifest.metadata.insert(
+                    "sender_display_name".to_string(),
+                    serde_json::Value::String(ctx.display_name.clone()),
                 );
             }
         }

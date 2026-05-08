@@ -2099,6 +2099,12 @@ fn build_sender_prefix(
         .get("sender_channel")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    // Keep these literals in sync with the kernel-side synthetic channel
+    // sentinels: `librefang_kernel::SYSTEM_CHANNEL_CRON`,
+    // `librefang_kernel::SYSTEM_CHANNEL_AUTONOMOUS`, and the `"webui"` string
+    // hard-coded at `crates/librefang-api/src/ws.rs` (the dashboard
+    // SenderContext synthesis site). Runtime can't import from kernel
+    // (circular dep), so a grep-pointer is the best we can do.
     if matches!(channel, "webui" | "cron" | "autonomous") {
         return None;
     }
@@ -7257,6 +7263,39 @@ mod tests {
         assert_eq!(
             build_sender_prefix(&m, Some("12345")),
             Some("[Alice]: ".to_string())
+        );
+    }
+
+    /// Regression guard for the asymmetric kernel write paths.
+    ///
+    /// `kernel/agent_execution.rs::execute_llm_agent` writes all three
+    /// metadata keys (`sender_user_id`, `sender_channel`,
+    /// `sender_display_name`) before the agent loop runs.
+    /// `kernel/messaging.rs::send_message_full` historically writes only
+    /// `sender_user_id` and `sender_channel`, leaving display_name to flow
+    /// through spawn-params and never reach `manifest.metadata`. So a
+    /// trigger fire / `agent_send` arriving via that path lands here with
+    /// `sender_channel = "telegram"` but no `sender_display_name`.
+    ///
+    /// In that case `build_sender_prefix` MUST still emit a prefix —
+    /// falling back to the raw `sender_user_id` — rather than swallow the
+    /// identity. Otherwise #4666 silently regresses for any non-channels-
+    /// adapter caller.
+    #[test]
+    fn test_build_sender_prefix_real_channel_falls_back_to_user_id_when_display_name_absent() {
+        let mut m = AgentManifest {
+            name: "agent".to_string(),
+            ..Default::default()
+        };
+        m.metadata.insert(
+            "sender_channel".to_string(),
+            serde_json::Value::String("telegram".to_string()),
+        );
+        // Note: deliberately no `sender_display_name` insert — mirrors the
+        // messaging.rs:2100 production path.
+        assert_eq!(
+            build_sender_prefix(&m, Some("12345")),
+            Some("[12345]: ".to_string())
         );
     }
 
