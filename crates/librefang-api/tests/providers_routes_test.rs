@@ -23,7 +23,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use librefang_api::routes::{self, AppState};
-use librefang_testing::{MockKernelBuilder, TestAppState};
+use librefang_testing::{test_catalog_baseline, MockKernelBuilder, TestAppState};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -36,18 +36,30 @@ struct Harness {
 /// Boots a kernel with a sane default-model provider so handlers that fall
 /// back to `config.default_model.provider` (notably `add_custom_model`)
 /// don't end up tagging entries with the placeholder `"auto"` provider.
+///
+/// Seeds the model catalog with [`test_catalog_baseline`] so tests that
+/// reference specific ids (notably `openai:gpt-4o-mini` for the
+/// capability-override flow) don't depend on the network-fed
+/// `sync_registry` baseline that flakes on CI when GitHub rate-limits or
+/// the runner is partitioned. Validation/error-path tests in this file
+/// either target unknown ids (404 paths) or only inspect envelope shape,
+/// so a non-empty deterministic catalog leaves them unaffected.
 fn boot() -> Harness {
-    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(|cfg| {
-        cfg.default_model = librefang_types::config::DefaultModelConfig {
-            provider: "openai".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            api_key_env: "OPENAI_API_KEY".to_string(),
-            base_url: None,
-            message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
-            cli_profile_dirs: Vec::new(),
-        };
-    }));
+    let test = TestAppState::with_builder(
+        MockKernelBuilder::new()
+            .with_config(|cfg| {
+                cfg.default_model = librefang_types::config::DefaultModelConfig {
+                    provider: "openai".to_string(),
+                    model: "gpt-4o-mini".to_string(),
+                    api_key_env: "OPENAI_API_KEY".to_string(),
+                    base_url: None,
+                    message_timeout_secs: 300,
+                    extra_params: std::collections::HashMap::new(),
+                    cli_profile_dirs: Vec::new(),
+                };
+            })
+            .with_catalog_seed(test_catalog_baseline()),
+    );
 
     let state = test.state.clone();
     let app = Router::new()
