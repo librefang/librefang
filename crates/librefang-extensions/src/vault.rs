@@ -431,17 +431,21 @@ impl CredentialVault {
     /// a fresh handle and `install_integration` swallowed the error while
     /// reporting `Ready` (refs #4788, #4791).
     pub fn set(&mut self, key: String, value: Zeroizing<String>) -> ExtensionResult<()> {
-        if !self.unlocked && !self.path.exists() {
-            self.init()?;
-        }
-        if !self.unlocked {
-            return Err(ExtensionError::VaultLocked);
-        }
+        // Reject the reserved sentinel slot BEFORE any side-effecting work
+        // (#3651). Doing it first means a rejected write on a fresh handle
+        // does not materialise vault.enc as a side effect of lazy-init —
+        // a no-op call must remain a no-op on disk.
         if key == SENTINEL_KEY {
             return Err(ExtensionError::Vault(format!(
                 "Refusing to write reserved key {SENTINEL_KEY}; this slot is owned by \
                  the vault startup-validation sentinel (#3651)."
             )));
+        }
+        if !self.unlocked && !self.path.exists() {
+            self.init()?;
+        }
+        if !self.unlocked {
+            return Err(ExtensionError::VaultLocked);
         }
         self.entries.insert(key, value);
         let master_key = self.resolve_master_key()?;
@@ -2741,6 +2745,7 @@ mod tests {
         assert!(!vault.exists(), "fresh test vault must not exist on disk");
         assert!(!vault.is_unlocked(), "fresh handle must be locked");
 
+        let path = vault.path.clone();
         vault
             .set(
                 "LAZY_INIT_TOKEN".to_string(),
@@ -2755,7 +2760,67 @@ mod tests {
         let got = vault.get("LAZY_INIT_TOKEN").expect("value must round-trip");
         assert_eq!(got.as_str(), "hello-lazy");
 
+        // Round-trip through a fresh process-shaped instance: drop the
+        // unlocked vault, re-open the same path, and unlock via the env
+        // master key. This pins that lazy-init *actually used* the
+        // env-driven key — the previous in-instance get could pass even
+        // if init() had silently fallen back to a random key (cached_key
+        // would still hot-read the just-written entry within the same
+        // instance, masking the divergence).
+        drop(vault);
+        let mut reopened = CredentialVault::new(path);
+        reopened
+            .unlock()
+            .expect("env master key must unlock the lazy-initialised vault");
+        let persisted = reopened
+            .get("LAZY_INIT_TOKEN")
+            .expect("token must survive a re-open with the env key");
+        assert_eq!(persisted.as_str(), "hello-lazy");
+
         // Cleanup so neighbouring tests see an unset env.
+        unsafe {
+            std::env::remove_var(VAULT_KEY_ENV);
+            std::env::remove_var(VAULT_NO_KEYRING_ENV);
+        }
+    }
+
+    /// Calling `set()` with the reserved [`SENTINEL_KEY`] on a fresh
+    /// handle must reject the write WITHOUT materialising vault.enc on
+    /// disk. A rejected write is a no-op, including its filesystem
+    /// footprint — otherwise an attacker / misuser triggering the
+    /// rejection path can still mint a stray vault file in the home dir.
+    #[test]
+    #[serial_test::serial]
+    fn set_rejects_sentinel_key_before_lazy_init_side_effect() {
+        const TEST_VAULT_KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+        unsafe {
+            std::env::set_var(VAULT_KEY_ENV, TEST_VAULT_KEY_B64);
+            std::env::set_var(VAULT_NO_KEYRING_ENV, "1");
+        }
+
+        let (_dir, mut vault) = test_vault();
+        assert!(!vault.exists());
+
+        let err = vault
+            .set(
+                SENTINEL_KEY.to_string(),
+                Zeroizing::new("attacker-controlled".to_string()),
+            )
+            .expect_err("writing the sentinel must fail");
+        assert!(
+            matches!(err, ExtensionError::Vault(_)),
+            "expected Vault(_) refusal, got: {err:?}"
+        );
+        assert!(
+            !vault.exists(),
+            "rejected sentinel write must not materialise vault.enc"
+        );
+        assert!(
+            !vault.is_unlocked(),
+            "rejected sentinel write must leave the handle locked"
+        );
+
         unsafe {
             std::env::remove_var(VAULT_KEY_ENV);
             std::env::remove_var(VAULT_NO_KEYRING_ENV);
