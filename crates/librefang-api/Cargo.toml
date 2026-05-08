@@ -51,6 +51,7 @@ reqwest = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 url = { workspace = true }
+psl = { workspace = true }
 zip = { workspace = true }
 walkdir = { workspace = true }
 dirs = { workspace = true }

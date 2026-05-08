@@ -137,6 +137,13 @@ tokio-util = { version = "0.7", features = ["compat"] }
 tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 url = "2"
 
+# Public Suffix List — used by mcp_auth to decide whether a metadata-declared
+# token_endpoint shares a registrable domain with the operator-typed issuer
+# host (refs #4665). Picked over `publicsuffix` because `psl` ships the PSL
+# data baked-in at compile time (no runtime fetch), keeping the security check
+# self-contained and reproducible.
+psl = "2"
+
 # WASM sandbox
 wasmtime = "44"
 
