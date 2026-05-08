@@ -492,7 +492,7 @@ async fn capability_override_flips_effective_value_in_get_model() {
     assert_eq!(
         prov_entry["capabilities_catalog"]["supports_thinking"].as_bool(),
         Some(base_thinking),
-        "capabilities_catalog in /api/providers/{name} must be unmerged"
+        "capabilities_catalog in /api/providers/{{name}} must be unmerged"
     );
 
     // DELETE — effective values revert to catalog defaults.
