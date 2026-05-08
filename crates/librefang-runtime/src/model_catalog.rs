@@ -96,12 +96,20 @@ fn resolve_discovered_capabilities(
     (has_vision, supports_tools, has_thinking)
 }
 
-#[cfg(test)]
 impl ModelCatalog {
-    /// Test-only constructor: build a catalog directly from owned entries
-    /// without going through TOML loading. Used by sibling modules' unit
-    /// tests (`model_metadata`, etc.) so they can inject deterministic
-    /// fixtures without touching the filesystem.
+    /// Construct a catalog directly from owned entries without going
+    /// through TOML loading. Used by:
+    /// - this crate's sibling-module unit tests (`model_metadata`, etc.)
+    ///   for deterministic fixture injection;
+    /// - `librefang-testing::MockKernelBuilder::with_catalog_seed` (#4796)
+    ///   so integration tests can pin a known catalog without depending
+    ///   on the network-fed `registry_sync` baseline.
+    ///
+    /// Only assembles owned data — no invariant beyond the alias-lowering
+    /// rule — so exposing it outside `cfg(test)` is safe. Production
+    /// paths still go through `ModelCatalog::new()` and the
+    /// `registry_sync` pipeline; this constructor exists purely as a
+    /// fixture-building seam.
     pub fn from_entries(models: Vec<ModelCatalogEntry>, providers: Vec<ProviderInfo>) -> Self {
         let mut aliases: HashMap<String, String> = HashMap::new();
         for m in &models {
