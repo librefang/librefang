@@ -11,7 +11,10 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 use librefang_kernel::kernel_handle::{AcpFsBridge, AcpTerminalBridge, KernelHandle};
+use librefang_kernel::AgentSubsystemApi;
+use librefang_kernel::GovernanceSubsystemApi;
 use librefang_kernel::LibreFangKernel;
+use librefang_kernel::MemorySubsystemApi;
 use librefang_llm_driver::StreamEvent;
 use librefang_types::agent::{AgentId, SessionId as LfSessionId};
 use librefang_types::approval::{ApprovalDecision, ApprovalEvent};
@@ -95,12 +98,12 @@ impl AcpKernel for KernelAdapter {
             let id = AgentId(uuid);
             return self
                 .kernel
-                .agent_registry()
+                .agent_registry_ref()
                 .get(id)
                 .map(|_| id)
                 .ok_or_else(|| AcpError::AgentNotFound(name_or_id.to_string()));
         }
-        if let Some(entry) = self.kernel.agent_registry().find_by_name(name_or_id) {
+        if let Some(entry) = self.kernel.agent_registry_ref().find_by_name(name_or_id) {
             return Ok(entry.id);
         }
         Err(AcpError::AgentNotFound(name_or_id.to_string()))
@@ -237,7 +240,7 @@ impl AcpKernel for KernelAdapter {
         // `Ok(None)` — empty history is the right fallback. Any error
         // path also degrades to empty so the editor's `session/load`
         // succeeds rather than failing on a transient sqlite glitch.
-        let Ok(Some(session)) = self.kernel.memory_substrate().get_session(lf_session_id) else {
+        let Ok(Some(session)) = self.kernel.substrate_ref().get_session(lf_session_id) else {
             return Vec::new();
         };
         let mut out = Vec::with_capacity(session.messages.len());

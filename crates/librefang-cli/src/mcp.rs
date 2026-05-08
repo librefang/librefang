@@ -6,6 +6,7 @@
 //! Protocol: Content-Length framing over stdin/stdout.
 //! Connects to running daemon via HTTP, falls back to in-process kernel.
 
+use librefang_kernel::AgentSubsystemApi;
 use librefang_kernel::LibreFangKernel;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -54,7 +55,7 @@ impl McpBackend {
                 }
             }
             McpBackend::InProcess { kernel, .. } => kernel
-                .agent_registry()
+                .agent_registry_ref()
                 .list()
                 .iter()
                 .map(|e| {

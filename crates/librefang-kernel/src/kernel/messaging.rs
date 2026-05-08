@@ -22,6 +22,7 @@ use tracing::info;
 
 use crate::error::{KernelError, KernelResult};
 use crate::metering::MeteringEngine;
+use crate::MeteringSubsystemApi;
 
 use super::*;
 
@@ -646,7 +647,7 @@ impl LibreFangKernel {
         if let Err(e) = self.metering.engine.check_all_and_record(
             &usage_record,
             &manifest.resources,
-            &self.budget_config(),
+            &self.current_budget(),
         ) {
             tracing::warn!(
                 agent_id = %agent_id,
@@ -795,7 +796,7 @@ impl LibreFangKernel {
         let usd_reservation = self
             .metering
             .engine
-            .reserve_global_budget(&self.budget_config(), estimated_usd)
+            .reserve_global_budget(&self.current_budget(), estimated_usd)
             .map_err(KernelError::LibreFang)?;
 
         // Enforce quota on the effective target agent (after routing).
@@ -1014,7 +1015,7 @@ impl LibreFangKernel {
                     match self
                         .metering
                         .engine
-                        .check_global_budget(&self.budget_config())
+                        .check_global_budget(&self.current_budget())
                     {
                         Ok(()) => true,
                         Err(e) => {
@@ -2475,7 +2476,7 @@ impl LibreFangKernel {
                     if let Err(e) = kernel_clone.metering.engine.check_all_and_record(
                         &usage_record,
                         &manifest.resources,
-                        &kernel_clone.budget_config(),
+                        &kernel_clone.current_budget(),
                     ) {
                         tracing::warn!(
                             agent_id = %agent_id,

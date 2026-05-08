@@ -21,6 +21,9 @@ use chrono::Utc;
 use librefang_api::routes::{self, AppState};
 use librefang_kernel::skill_workshop::candidate::{CandidateSkill, CaptureSource, Provenance};
 use librefang_kernel::skill_workshop::storage;
+use librefang_kernel::AgentSubsystemApi;
+use librefang_kernel::MemorySubsystemApi;
+use librefang_kernel::SkillsSubsystemApi;
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -531,7 +534,7 @@ async fn auto_policy_promotes_to_active_and_reloads_registry() {
         ..Default::default()
     };
     kernel
-        .agent_registry()
+        .agent_registry_ref()
         .register(entry)
         .expect("register agent");
 
@@ -549,7 +552,7 @@ async fn auto_policy_promotes_to_active_and_reloads_registry() {
         last_repaired_generation: None,
     };
     kernel
-        .memory_substrate()
+        .substrate_ref()
         .save_session(&session)
         .expect("save_session");
 
@@ -688,7 +691,7 @@ async fn auto_policy_recovers_orphaned_pending_via_retry() {
         ..Default::default()
     };
     kernel
-        .agent_registry()
+        .agent_registry_ref()
         .register(entry)
         .expect("register agent");
 
@@ -730,7 +733,7 @@ async fn auto_policy_recovers_orphaned_pending_via_retry() {
         last_repaired_generation: None,
     };
     kernel
-        .memory_substrate()
+        .substrate_ref()
         .save_session(&session)
         .expect("save_session");
 

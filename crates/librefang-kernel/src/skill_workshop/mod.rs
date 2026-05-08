@@ -51,6 +51,8 @@ pub use llm_review::ReviewDecision;
 pub use storage::WorkshopError;
 
 use crate::kernel::LibreFangKernel;
+use crate::AgentSubsystemApi;
+use crate::MemorySubsystemApi;
 use librefang_runtime::aux_client::AuxClient;
 use librefang_runtime::hooks::{HookContext, HookHandler};
 use librefang_types::agent::{
@@ -501,7 +503,7 @@ fn read_workshop_config(
     kernel: &Arc<LibreFangKernel>,
     agent_id: AgentId,
 ) -> Option<SkillWorkshopConfig> {
-    let entry = kernel.agent_registry().get_arc(agent_id)?;
+    let entry = kernel.agent_registry_ref().get_arc(agent_id)?;
     let _: &AgentManifest = &entry.manifest;
     Some(entry.manifest.skill_workshop)
 }
@@ -516,9 +518,9 @@ fn load_recent_turn(kernel: &Arc<LibreFangKernel>, agent_id: AgentId) -> Option<
     // currently chats in an older session (e.g. channel-derived) but
     // had a one-off newer session created (e.g. cron fire) would
     // otherwise have the workshop scan the wrong session's last turn.
-    let entry = kernel.agent_registry().get(agent_id)?;
+    let entry = kernel.agent_registry_ref().get(agent_id)?;
     let session_id = entry.session_id;
-    let memory = kernel.memory_substrate();
+    let memory = kernel.substrate_ref();
     let session = memory.get_session(session_id).ok().flatten()?;
 
     // Walk newest-last (the natural append order in librefang sessions).

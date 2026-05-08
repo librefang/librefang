@@ -12,6 +12,7 @@
 //! literal directly.
 
 use super::*;
+use crate::MeteringSubsystemApi;
 
 impl LibreFangKernel {
     /// Per-session stream-event hub (multi-client SSE attach).
@@ -1745,7 +1746,7 @@ impl LibreFangKernel {
 
                     // Apply global budget defaults to restored agents
                     apply_budget_defaults(
-                        &kernel.budget_config(),
+                        &kernel.current_budget(),
                         &mut restored_entry.manifest.resources,
                     );
 

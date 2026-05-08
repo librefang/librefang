@@ -5,6 +5,7 @@
 //! servers on demand.
 
 use librefang_kernel::config::librefang_home;
+use librefang_kernel::EventSubsystemApi;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tauri::Manager;
