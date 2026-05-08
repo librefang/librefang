@@ -108,7 +108,7 @@ export function NotificationCenter() {
           <div className="fixed top-[54px] right-3 sm:right-4 z-[100] w-[min(calc(100vw-1.5rem),24rem)] rounded-xl border border-border-subtle bg-surface shadow-xl" role="menu">
             <div className="px-4 py-3 border-b border-border-subtle flex items-center justify-between">
               <h3 className="text-sm font-bold text-text-main">
-                {t("approvals.pending_review", "Pending Approvals")}
+                {t("approvals.pending_review", "Pending Review")}
               </h3>
               {pendingItems.length > 0 && (
                 <button
@@ -127,7 +127,7 @@ export function NotificationCenter() {
                 <div className="px-4 py-6 text-center text-sm text-text-dim">
                   {t("approvals.queue_clear_desc", "All clear")}
                 </div>
-              ) : (
+              ) : pendingItems.length === 0 ? null : (
                 pendingItems.slice(0, MAX_VISIBLE_ITEMS).map((item) => (
                   <div
                     key={item.id}
@@ -192,9 +192,18 @@ export function NotificationCenter() {
                 <button
                   onClick={() => {
                     setOpen(false);
-                    navigate({ to: "/skills" });
+                    // `search: { tab: "pending" }` deep-links into the
+                    // SkillsPage `Pending` tab via the optional `?tab=`
+                    // search param the page reads on mount. Cast to
+                    // `never` because the route doesn't declare a
+                    // search schema (the parameter is optional and
+                    // only consumed by SkillsPage itself).
+                    navigate({
+                      to: "/skills",
+                      search: { tab: "pending" } as never,
+                    });
                   }}
-                  className="flex w-full items-center justify-between gap-2 border-t border-border-subtle px-4 py-3 text-left text-sm hover:bg-surface-hover transition-colors"
+                  className={`flex w-full items-center justify-between gap-2 ${pendingItems.length > 0 ? "border-t border-border-subtle" : ""} px-4 py-3 text-left text-sm hover:bg-surface-hover transition-colors`}
                   role="menuitem"
                 >
                   <span className="text-text-main">

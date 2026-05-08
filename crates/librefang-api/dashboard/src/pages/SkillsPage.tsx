@@ -1481,13 +1481,37 @@ export function SkillsPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
 
-  const [viewMode, setViewMode] = useState<ViewMode>("browse");
+  // Read optional `?tab=` search param on mount so deep links from the
+  // NotificationCenter footer ("X skill candidates pending review →")
+  // land directly on the matching tab instead of the default.
+  const initialViewMode = ((): ViewMode => {
+    if (typeof window === "undefined") return "browse";
+    const tab = new URLSearchParams(window.location.search).get("tab");
+    return tab === "pending" || tab === "installed" || tab === "browse"
+      ? tab
+      : "browse";
+  })();
+  const [viewMode, setViewMode] = useState<ViewMode>(initialViewMode);
   // Skill workshop pending queue — surfaced as a third tab only when
   // the queue is non-empty so the Skills page stays clean for operators
   // who never touch the workshop. The tab disappears the moment the
   // queue drains, returning the page to its two-tab layout.
   const pendingSkillsQuery = usePendingSkillCandidates();
   const pendingSkillsCount = pendingSkillsQuery.data?.length ?? 0;
+  // If the deep link or the user landed on the Pending tab but the
+  // queue has since drained (someone else approved / rejected, the
+  // last candidate was just acted on), fall back to the Browse tab —
+  // otherwise the active-tab indicator would point at a tab that no
+  // longer exists.
+  useEffect(() => {
+    if (
+      viewMode === "pending" &&
+      !pendingSkillsQuery.isLoading &&
+      pendingSkillsCount === 0
+    ) {
+      setViewMode("browse");
+    }
+  }, [viewMode, pendingSkillsCount, pendingSkillsQuery.isLoading]);
   /**
    * Which federated hub the browse grid pulls from. Defaults to
    * `"fanghub"` so the page lands on a populated grid (FangHub is the
