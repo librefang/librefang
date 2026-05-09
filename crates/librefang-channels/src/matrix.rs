@@ -22,6 +22,11 @@ const SYNC_TIMEOUT_MS: u64 = 30000;
 const MAX_MESSAGE_LEN: usize = 4096;
 #[allow(dead_code)]
 const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
+/// Maximum number of per-(room, target_event) lifecycle reaction entries to track.
+const PHASE_REACTIONS_CAPACITY: usize = 1024;
+
+/// Insertion-ordered cache mapping (room_id, target_event_id) -> reaction event_id.
+type PhaseReactionCache = Arc<RwLock<std::collections::VecDeque<((String, String), String)>>>;
 
 /// Convert mxc://server/mediaId -> an HTTPS download URL.
 ///
@@ -69,6 +74,11 @@ pub struct MatrixAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Sync token for resuming /sync.
     since_token: Arc<RwLock<Option<String>>>,
+    /// Tracks our most-recent lifecycle reaction per (room, target_event).
+    /// Maps to the event_id of the bot's reaction so we can redact it when
+    /// the next phase fires with remove_previous=true. Insertion-ordered;
+    /// bounded at PHASE_REACTIONS_CAPACITY entries (oldest evicted).
+    pub(crate) phase_reactions: PhaseReactionCache,
 }
 
 impl MatrixAdapter {
@@ -94,6 +104,7 @@ impl MatrixAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             since_token: Arc::new(RwLock::new(None)),
+            phase_reactions: Arc::new(RwLock::new(std::collections::VecDeque::new())),
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -149,7 +160,6 @@ impl MatrixAdapter {
 
     /// Redact (delete) a previously sent event.
     /// Returns the redaction event_id.
-    #[allow(dead_code)]
     async fn api_redact(
         &self,
         room_id: &str,
@@ -186,6 +196,43 @@ impl MatrixAdapter {
             .ok_or_else(|| "Matrix redact response missing event_id".to_string())?
             .to_string();
         Ok(event_id)
+    }
+
+    /// Look up our reaction event_id for (room, target). O(n).
+    #[allow(dead_code)]
+    pub(crate) async fn phase_reaction_lookup(&self, key: &(String, String)) -> Option<String> {
+        self.phase_reactions
+            .read()
+            .await
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    }
+
+    /// Remove (room, target). Returns the previous reaction id if present. O(n).
+    #[allow(dead_code)]
+    pub(crate) async fn phase_reaction_remove(&self, key: &(String, String)) -> Option<String> {
+        let mut w = self.phase_reactions.write().await;
+        if let Some(pos) = w.iter().position(|(k, _)| k == key) {
+            w.remove(pos).map(|(_, v)| v)
+        } else {
+            None
+        }
+    }
+
+    /// Insert (room, target) -> reaction_id, evicting oldest if at capacity.
+    /// If the key already exists, the value is replaced in place (preserving position).
+    #[allow(dead_code)]
+    pub(crate) async fn phase_reaction_insert(&self, key: (String, String), reaction_id: String) {
+        let mut w = self.phase_reactions.write().await;
+        if let Some(pos) = w.iter().position(|(k, _)| k == &key) {
+            w[pos].1 = reaction_id;
+            return;
+        }
+        if w.len() >= PHASE_REACTIONS_CAPACITY {
+            w.pop_front();
+        }
+        w.push_back((key, reaction_id));
     }
 
     /// Upload bytes to Matrix media repo. Returns mxc:// URI.
@@ -511,6 +558,33 @@ impl ChannelAdapter for MatrixAdapter {
             .send()
             .await;
 
+        Ok(())
+    }
+
+    async fn send_reaction(
+        &self,
+        user: &ChannelUser,
+        message_id: &str,
+        reaction: &crate::types::LifecycleReaction,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let room = &user.platform_id;
+        let key = (room.clone(), message_id.to_string());
+        if reaction.remove_previous {
+            if let Some(prev_id) = self.phase_reaction_remove(&key).await {
+                if let Err(e) = self.api_redact(room, &prev_id, Some("phase change")).await {
+                    debug!("Matrix: redact of previous reaction {prev_id} failed: {e}");
+                }
+            }
+        }
+        let body = serde_json::json!({
+            "m.relates_to": {
+                "rel_type": "m.annotation",
+                "event_id": message_id,
+                "key": reaction.emoji,
+            }
+        });
+        let new_id = self.api_send_event(room, "m.reaction", &body).await?;
+        self.phase_reaction_insert(key, new_id).await;
         Ok(())
     }
 
@@ -983,5 +1057,200 @@ mod tests {
         assert!(mxc_to_http("https://other.example/x", "https://hs").is_none());
         assert!(mxc_to_http("mxc://no-slash", "https://hs").is_none());
         assert!(mxc_to_http("", "https://hs").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_send_reaction_first_phase() {
+        use crate::types::{AgentPhase, ChannelUser, LifecycleReaction};
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/.+/send/m\.reaction/.+$",
+            ))
+            .and(body_partial_json(serde_json::json!({
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$tgt:test",
+                    "key": "🤔"
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$rxn1:test"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        let r = LifecycleReaction {
+            phase: AgentPhase::Thinking,
+            emoji: "🤔".to_string(),
+            remove_previous: false,
+        };
+        adapter
+            .send_reaction(&user, "$tgt:test", &r)
+            .await
+            .expect("first reaction must succeed");
+        let id = adapter
+            .phase_reaction_lookup(&("!room:test".to_string(), "$tgt:test".to_string()))
+            .await;
+        assert_eq!(id, Some("$rxn1:test".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_send_reaction_replace_redacts_previous() {
+        use crate::types::{AgentPhase, ChannelUser, LifecycleReaction};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+        let server = MockServer::start().await;
+        let redact_calls = StdArc::new(AtomicUsize::new(0));
+        let rc = redact_calls.clone();
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/.+/redact/%24rxn1%3Atest/.+$",
+            ))
+            .respond_with(move |_: &wiremock::Request| {
+                rc.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "event_id": "$rdct:test"
+                }))
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/.+/send/m\.reaction/.+$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$rxn2:test"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        adapter
+            .phase_reaction_insert(
+                ("!room:test".to_string(), "$tgt:test".to_string()),
+                "$rxn1:test".to_string(),
+            )
+            .await;
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        let r = LifecycleReaction {
+            phase: AgentPhase::Done,
+            emoji: "✅".to_string(),
+            remove_previous: true,
+        };
+        adapter
+            .send_reaction(&user, "$tgt:test", &r)
+            .await
+            .expect("replacement reaction must succeed");
+        assert_eq!(
+            redact_calls.load(Ordering::SeqCst),
+            1,
+            "previous reaction must be redacted exactly once"
+        );
+        let id = adapter
+            .phase_reaction_lookup(&("!room:test".to_string(), "$tgt:test".to_string()))
+            .await;
+        assert_eq!(id, Some("$rxn2:test".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_send_reaction_remove_previous_swallows_redact_failure() {
+        use crate::types::{AgentPhase, ChannelUser, LifecycleReaction};
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/_matrix/client/v3/rooms/.+/redact/.+$"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/.+/send/m\.reaction/.+$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$new:test"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        adapter
+            .phase_reaction_insert(
+                ("!room:test".to_string(), "$tgt:test".to_string()),
+                "$old:test".to_string(),
+            )
+            .await;
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        let r = LifecycleReaction {
+            phase: AgentPhase::Done,
+            emoji: "✅".to_string(),
+            remove_previous: true,
+        };
+        adapter
+            .send_reaction(&user, "$tgt:test", &r)
+            .await
+            .expect("redact failure must be swallowed");
+    }
+
+    #[tokio::test]
+    async fn test_send_reaction_lru_eviction() {
+        use crate::types::{AgentPhase, ChannelUser, LifecycleReaction};
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$x:test"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        // Pre-populate 1024 entries via the public-ish helper in insertion order.
+        for i in 0..1024 {
+            adapter
+                .phase_reaction_insert(
+                    ("!room:test".to_string(), format!("$evt{i}:test")),
+                    format!("$rxn{i}:test"),
+                )
+                .await;
+        }
+        assert_eq!(
+            adapter
+                .phase_reaction_lookup(&("!room:test".to_string(), "$evt0:test".to_string()))
+                .await,
+            Some("$rxn0:test".to_string()),
+            "evt0 must be present before eviction"
+        );
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        let r = LifecycleReaction {
+            phase: AgentPhase::Thinking,
+            emoji: "🤔".to_string(),
+            remove_previous: false,
+        };
+        adapter
+            .send_reaction(&user, "$evt_new:test", &r)
+            .await
+            .expect("send must succeed");
+        let len = adapter.phase_reactions.read().await.len();
+        assert_eq!(len, 1024, "map size must remain capped");
+        assert_eq!(
+            adapter
+                .phase_reaction_lookup(&("!room:test".to_string(), "$evt0:test".to_string()))
+                .await,
+            None,
+            "oldest entry (evt0) must be evicted"
+        );
     }
 }
