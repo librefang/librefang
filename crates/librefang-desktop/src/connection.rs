@@ -5,8 +5,13 @@
 //! servers on demand.
 
 use librefang_kernel::config::librefang_home;
+// `EventSubsystemApi` and `Instant` are only used inside `start_local`, which
+// is itself `cfg`-gated to non-mobile targets. Match the gate on the imports
+// so mobile builds don't trip `-D unused_imports`.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 use librefang_kernel::EventSubsystemApi;
 use serde::{Deserialize, Serialize};
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 use std::time::Instant;
 use tauri::Manager;
 use tracing::{info, warn};

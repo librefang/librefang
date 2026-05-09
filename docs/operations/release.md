@@ -21,7 +21,6 @@ later cutover.
 | ---- | ------- | ------ | ----------------------- |
 | `release-tag.yml`          | Manual tag verify + push                    | `version`                                                         | `tag_on_merge` (PAT-pushed tag), `create_release` precondition |
 | `release-cli.yml`          | CLI binaries, signed manifest, optional PyPI | `tag`, `include_pypi`                                             | `build_dashboard`, `cli_*`, `sign_release_artifacts`, `cli_pypi` |
-| `release-sdks.yml`         | JS / Python / Rust / Go SDK publishes       | `tag`, `include_javascript`, `include_cli_npm`, `include_python`, `include_rust`, `include_go` | `sdk_javascript`, `sdk_cli_npm`, `sdk_python`, `sdk_rust`, `sdk_go` |
 | `release-desktop.yml`      | Tauri desktop bundle (5 platforms) + cask sync | `tag`, `sync_cask`                                                | `desktop`, `sync_homebrew_cask` |
 | `release-npm-binaries.yml` | CLI npm binary packages (per-arch)          | `tag`                                                             | `cli_npm` |
 
@@ -47,18 +46,18 @@ which is the same idempotent path the monolithic jobs use on rerun.
 The split workflows are wired for **OIDC-based publishing** wherever
 possible, instead of the long-lived PATs the monolithic file uses:
 
-- **npm** (`release-npm-binaries`, `release-sdks` JavaScript jobs):
-  uses `permissions: id-token: write` + `npm publish --provenance`.
-  The maintainer must configure the npm trusted-publisher relationship
-  for each package on https://www.npmjs.com/package/<pkg>/access *before*
-  any cutover that flips traffic from `release.yml` (NPM_TOKEN) to a
-  split workflow. Until then, only the monolithic NPM_TOKEN path
-  publishes real releases.
-- **PyPI** (`release-cli` CLI wheels, `release-sdks` Python SDK):
-  already OIDC in both monolithic and split.
-- **crates.io** (`release-sdks` Rust SDK): still uses
-  `CARGO_REGISTRY_TOKEN`. crates.io has no OIDC trusted-publisher path
-  yet; this stays a PAT until upstream supports it.
+- **npm** (`release-npm-binaries`): uses `permissions: id-token: write`
+  + `npm publish --provenance`. The maintainer must configure the npm
+  trusted-publisher relationship for each package on
+  https://www.npmjs.com/package/<pkg>/access *before* any cutover that
+  flips traffic from `release.yml` (NPM_TOKEN) to a split workflow.
+  Until then, only the monolithic NPM_TOKEN path publishes real
+  releases.
+- **PyPI** (`release-cli` CLI wheels): already OIDC in both monolithic
+  and split. The SDK Python publish path stays in `release.yml` only.
+- **crates.io**: still uses `CARGO_REGISTRY_TOKEN` in `release.yml`.
+  crates.io has no OIDC trusted-publisher path yet; this stays a PAT
+  until upstream supports it.
 
 `release.yml` itself is not modified by this PR — its existing NPM_TOKEN
 path stays in place and is the actual publish path until cutover.
