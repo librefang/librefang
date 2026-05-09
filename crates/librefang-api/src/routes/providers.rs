@@ -1403,8 +1403,19 @@ pub async fn test_provider(
         api_format,
         Some(librefang_llm_drivers::drivers::ApiFormat::Anthropic)
     );
+    // Native-Ollama providers expose model discovery at `/api/tags`, not
+    // `/v1/models`. The registry reports `ApiFormat::Ollama` after #4810
+    // so probing routes off api_format rather than the provider name —
+    // any future Ollama-protocol server (e.g. Lemonade) auto-inherits
+    // the right probe URL.
+    let is_ollama_shape = matches!(
+        api_format,
+        Some(librefang_llm_drivers::drivers::ApiFormat::Ollama)
+    );
     let test_url_str = if is_anthropic_shape {
         format!("{}/v1/models", base_url.trim_end_matches('/'))
+    } else if is_ollama_shape {
+        format!("{}/api/tags", base_url.trim_end_matches('/'))
     } else {
         match name.as_str() {
             "gemini" | "google" => format!(
@@ -1424,6 +1435,13 @@ pub async fn test_provider(
         req = req
             .header("x-api-key", &api_key_val)
             .header("anthropic-version", "2023-06-01");
+    } else if is_ollama_shape {
+        // Local Ollama doesn't require auth; tunnelled / hosted Ollama
+        // accepts a Bearer token (via `OLLAMA_API_KEY`). Send it only
+        // when present so the localhost happy path stays unchanged.
+        if !api_key_val.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", api_key_val));
+        }
     } else {
         match name.as_str() {
             "gemini" | "google" => {
@@ -1530,14 +1548,27 @@ pub async fn set_provider_url(
             .into_json_tuple();
     }
 
-    // Normalize for the common Ollama / vLLM / LM Studio mistake: users
-    // paste `http://host:port` (no path) and the OpenAI driver then hits
+    // Normalize for the common vLLM / LM Studio mistake: users paste
+    // `http://host:port` (no path) and the OpenAI driver then hits
     // `/chat/completions` instead of `/v1/chat/completions`, getting a 404.
     // If the user gave us a host-only URL (path is empty or just "/"),
     // append `/v1` so OpenAI-compatible endpoints work out of the box.
     // Custom paths (`/api/openai`, `/openai/v1`, etc.) are left alone.
     // Issue #3138.
-    let base_url = normalize_base_url(&base_url_raw);
+    //
+    // Native-Ollama providers (#4810) speak `/api/chat` — appending `/v1`
+    // would produce `/v1/api/chat` and break the deployment. Skip the
+    // append when the provider is registered as Ollama-shape so paste
+    // flows like `http://192.168.1.10:11434` keep working.
+    let is_ollama_shape = matches!(
+        librefang_llm_drivers::drivers::provider_api_format(&name),
+        Some(librefang_llm_drivers::drivers::ApiFormat::Ollama)
+    );
+    let base_url = if is_ollama_shape {
+        base_url_raw.trim_end_matches('/').to_string()
+    } else {
+        normalize_base_url(&base_url_raw)
+    };
 
     // Optional proxy_url in same request
     let proxy_url = body["proxy_url"].as_str().map(|s| s.trim().to_string());
