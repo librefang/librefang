@@ -330,7 +330,6 @@ impl OllamaDriver {
                         ..Default::default()
                     });
                 }
-                _ => {}
             }
         }
 
