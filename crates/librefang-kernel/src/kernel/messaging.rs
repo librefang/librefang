@@ -415,6 +415,18 @@ impl LibreFangKernel {
             return Ok(AgentLoopResult::default());
         }
 
+        // Pre-dispatch provider budget gate (ephemeral path).
+        {
+            let provider = &entry.manifest.model.provider;
+            let bc = self.metering.budget_config.load();
+            if let Some(pb) = bc.providers.get(provider.as_str()) {
+                self.metering
+                    .engine
+                    .check_provider_budget(provider, pb)
+                    .map_err(KernelError::LibreFang)?;
+            }
+        }
+
         // Ephemeral: no tools — prevents side effects (tool writes to memory/disk)
         let tools: Vec<librefang_types::tool::ToolDefinition> = vec![];
         let mut manifest = entry.manifest.clone();
@@ -833,6 +845,22 @@ impl LibreFangKernel {
                 .release_reservation(agent_id, token_reservation);
             usd_reservation.release();
             return Ok(AgentLoopResult::default());
+        }
+
+        // Pre-dispatch provider budget gate — reject calls against an
+        // already-exhausted provider before the LLM round-trip.
+        {
+            let provider = &entry.manifest.model.provider;
+            let bc = self.metering.budget_config.load();
+            if let Some(pb) = bc.providers.get(provider.as_str()) {
+                if let Err(e) = self.metering.engine.check_provider_budget(provider, pb) {
+                    self.agents
+                        .scheduler
+                        .release_reservation(agent_id, token_reservation);
+                    usd_reservation.release();
+                    return Err(KernelError::LibreFang(e));
+                }
+            }
         }
 
         // Resolve the effective session id up front for the LLM path so we
@@ -1662,6 +1690,20 @@ impl LibreFangKernel {
             .scheduler
             .check_quota_and_reserve(agent_id, estimated_tokens)
             .map_err(KernelError::LibreFang)?;
+
+        // Pre-dispatch provider budget gate (streaming path).
+        {
+            let provider = &entry.manifest.model.provider;
+            let bc = self.metering.budget_config.load();
+            if let Some(pb) = bc.providers.get(provider.as_str()) {
+                if let Err(e) = self.metering.engine.check_provider_budget(provider, pb) {
+                    self.agents
+                        .scheduler
+                        .release_reservation(agent_id, token_reservation);
+                    return Err(KernelError::LibreFang(e));
+                }
+            }
+        }
 
         let is_wasm = entry.manifest.module.starts_with("wasm:");
         let is_python = entry.manifest.module.starts_with("python:");
