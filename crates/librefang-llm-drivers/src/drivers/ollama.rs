@@ -1291,7 +1291,7 @@ mod tests {
         let driver = OllamaDriver::new(String::new(), "http://x".to_string());
         let mut r = req("m");
         r.messages = std::sync::Arc::new(vec![]);
-        let err = driver.build_request(&r).err().expect("error");
+        let err = driver.build_request(&r).expect_err("error");
         match err {
             LlmError::Api { message, .. } => assert!(message.contains("no messages")),
             other => panic!("unexpected: {other:?}"),
