@@ -4,18 +4,24 @@
 
 The very first action in any task that will edit files **must** be:
 ```bash
-pwd && git rev-parse --git-dir
+git rev-parse --git-dir
 ```
-If `pwd` ends in `/Workspace/libre/librefang` (or wherever the user keeps the
-main clone) **and** `git rev-parse --git-dir` prints `.git` (a directory, not
-a `gitdir: ...` file), you are in the main worktree. **Stop.** Run:
-```bash
-git worktree add /tmp/librefang-<feature> -b <feature-branch> origin/main
-```
-and continue all work from that path. The `forbid-main-worktree` hook
-(`.claude/hooks/forbid-main-worktree.sh`) will block edits and mutating git
-commands targeted at the main tree if you forget — but the hook is a safety
-net, not your plan.
+- Output `.git` (a plain directory) → you are in the **main worktree**.
+  **Stop.** Run:
+  ```bash
+  git worktree add /tmp/librefang-<feature> -b <feature-branch> origin/main
+  ```
+  and continue all work from that path.
+- Output `gitdir: /path/to/main/.git/worktrees/<name>` (a pointer file)
+  → you are in a **linked worktree**. Continue.
+
+Do not rely on `pwd` matching any specific path — every developer's main
+clone lives somewhere different. The `git rev-parse --git-dir` shape is
+the only reliable signal.
+
+The `forbid-main-worktree` hook (`.claude/hooks/forbid-main-worktree.sh`)
+will block edits and mutating git commands targeted at the main tree if
+you forget — but the hook is a safety net, not your plan.
 
 ### Other AI safety hooks (`.claude/hooks/`)
 
@@ -66,7 +72,9 @@ yet.
 LibreFang is an open-source Agent Operating System written in Rust (24 crates in `crates/`, plus `xtask/`).
 - Config: `~/.librefang/config.toml`
 - Default API: `http://127.0.0.1:4545`
-- CLI binary: `target/release/librefang.exe` (or `target/debug/librefang.exe`)
+- CLI binary: `target/release/librefang` on Linux/macOS,
+  `target/release/librefang.exe` on Windows (debug builds at the
+  matching `target/debug/` path)
 
 ### Crate map
 - **Core types & utilities**: `librefang-types`, `librefang-http`, `librefang-wire`, `librefang-telemetry`, `librefang-testing`, `librefang-migrate`
@@ -113,19 +121,10 @@ cargo nextest run --workspace --no-fail-fast
 
 **Primary verification is automated.** The repo has comprehensive
 `#[tokio::test]` integration coverage in `crates/librefang-api/tests/`,
-landed via the #3571 PR series (~30 PRs). Every major route domain —
-`agents`, `a2a`, `approvals`, `audit`, `authz`, `auto-dream`, `budget`,
-`channels` (incl. webhooks), `config`, `goals`, `hands`, `hooks`,
-`inbox`, `mcp_auth`, `media`, `memory`, `network`/`peers`/`comms`,
-`oauth`, `pairing`/`backup`, `plugins`, `profiles`/`templates`,
-`prompts`, `providers`/`models`, `skills`, `terminal`, `tools`/`sessions`,
-`v1` (OpenAI compat), `workflows` — is exercised against a real axum
-router via `TestServer` (see `start_test_server*` in
-`tests/api_integration_test.rs`). Plus dedicated files:
-`auth_public_allowlist.rs`, `daemon_lifecycle_test.rs`, `load_test.rs`,
-`mcp_oauth_flow_test.rs`, `openapi_spec_test.rs`, `pairing_test.rs`,
-`tools_invoke_test.rs`, `totp_flow_test.rs`, `users_test.rs`. CI runs
-these on every push.
+landed via the #3571 PR series (~30 PRs). Every major route domain is
+exercised against a real axum router via `TestServer` (see
+`start_test_server*` in `tests/api_integration_test.rs`); the canonical
+list is `ls crates/librefang-api/tests/`. CI runs these on every push.
 
 ### What you MUST do for any route / wiring change
 
@@ -153,12 +152,13 @@ port 4545, both blocked by `.claude/hooks/`. Prepare commands and
 payloads for the user; they paste output back.
 
 ```bash
-# Stop any running daemon (Windows / Git Bash):
-tasklist | grep -i librefang && taskkill //PID <pid> //F && sleep 3
+# Stop any running daemon:
+#   Linux/macOS:        pkill -f librefang ; sleep 3
+#   Windows / Git Bash: tasklist | grep -i librefang && taskkill //PID <pid> //F && sleep 3
 
-# Build + start with provider key:
+# Build + start with provider key (binary suffix is .exe only on Windows):
 cargo build --release -p librefang-cli
-GROQ_API_KEY=<key> target/release/librefang.exe start &
+GROQ_API_KEY=<key> target/release/librefang start &
 sleep 6 && curl -s http://127.0.0.1:4545/api/health
 
 # Real LLM round-trip + side-effect check:
@@ -168,8 +168,7 @@ curl -s -X POST "http://127.0.0.1:4545/api/agents/$AGENT_ID/message" \
 curl -s http://127.0.0.1:4545/api/budget          # cost should have increased
 curl -s http://127.0.0.1:4545/api/budget/agents   # per-agent spend visible
 
-# Cleanup:
-taskkill //PID <pid> //F
+# Cleanup: same OS-specific kill command as above.
 ```
 
 The daemon command is `start` (not `daemon`).
@@ -201,10 +200,10 @@ The daemon command is `start` (not `daemon`).
 - **Auth middleware allowlist**: Unauthenticated endpoints must be added to the `is_public` allowlist in `middleware.rs` — NOT by reordering routes in `server.rs`. The auth layer applies to all routes.
 - **Docker callback URLs**: Never bind ephemeral localhost ports for OAuth callbacks in daemon code — the port is unreachable from outside Docker. Route callbacks through the API server's existing port instead.
 - **MCP OAuth flow**: Entirely UI-driven — daemon only detects 401 and sets `NeedsAuth` state. PKCE + callback handled by API layer (`routes/mcp_auth.rs`). Dynamic Client Registration (RFC 7591) used when server has `registration_endpoint` but no `client_id`.
-- `session_mode` in `AgentManifest` (agent.toml, **not** config.toml) controls whether automated invocations reuse the persistent session (`"persistent"`, default) or create a fresh one (`"new"`). Per-trigger override via `Trigger.session_mode: Option<SessionMode>`. Per-cron override via `CronJob.session_mode: Option<SessionMode>`. Resolution order: per-trigger / per-job override > agent manifest default. Session resolution in `execute_llm_agent` (`kernel/mod.rs` ~6959).
+- `session_mode` in `AgentManifest` (agent.toml, **not** config.toml) controls whether automated invocations reuse the persistent session (`"persistent"`, default) or create a fresh one (`"new"`). Per-trigger override via `Trigger.session_mode: Option<SessionMode>`. Per-cron override via `CronJob.session_mode: Option<SessionMode>`. Resolution order: per-trigger / per-job override > agent manifest default. Session resolution lives in `execute_llm_agent` (grep `kernel/mod.rs` for the function).
   - **Honors `session_mode`**: event triggers, `agent_send`, **cron jobs** (since #3597 / #3657 — see below).
-  - **Ignores `session_mode`**: channel messages (always `SessionId::for_channel(agent,"<channel>:<chat>")`), forks (forced `Persistent` at ~5543 to preserve prompt cache).
-  - **Cron + `session_mode`** (resolution at `kernel/mod.rs` ~13609, helper `cron::cron_fire_session_override`):
+  - **Ignores `session_mode`**: channel messages (always `SessionId::for_channel(agent,"<channel>:<chat>")`), forks (forced `Persistent` to preserve prompt cache).
+  - **Cron + `session_mode`** (resolution helper: `cron::cron_fire_session_override`):
     - Effective mode = per-job `CronJob.session_mode` > agent manifest `session_mode` > historical `Persistent`.
     - `Persistent` (or unset): the cron tick synthesizes `SenderContext{channel:"cron"}` and `send_message_full` derives `SessionId::for_channel(agent,"cron")`, so all fires of all cron jobs for that agent share one `(agent,"cron")` persistent session (historical behaviour, prompt-cache reuse).
     - `New`: `cron_fire_session_override` returns an explicit `SessionId::for_cron_run(agent, "<job_id>:<rfc3339_fire_time>")` which is passed as `session_id_override` into `send_message_full`. The override path wins over the channel-derived branch, so each fire lands on its own deterministic, isolated session — prior fires never leak into the current run, and the persistent `(agent,"cron")` session stays untouched.
@@ -258,8 +257,11 @@ The daemon command is `start` (not `daemon`).
   `docs/architecture/skill-workshop.md`.
 
 ## Git Conventions
-**Never include "generated by Claude Code" in commit messages** — omit the Co-Authored-By footer entirely
 - **Format**: Use conventional commits (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `perf:`, `test:`)
+- **No AI / Claude attribution** in commit messages, PR bodies, or
+  comments — see "Commit & PR hygiene" under GitHub Collaboration below
+  for the canonical rule (the `commit-msg` hook enforces it server-side
+  too).
 - **Worktree**: Use `git worktree add` on an external disk for new features; fall back to `/tmp/librefang-<feature>` only if no external disk is available. Never develop on the main worktree
 - **Worktree continuation = drive to PR**: When asked to continue half-done work in an existing worktree (uncommitted changes or unmerged commits), the workflow is **commit → push → open or update PR**. Don't stop at "local commits only". A new branch needs a fresh PR; an existing branch with an open PR gets a follow-up push to update it. If the dirty changes aren't real work (e.g., stale `Cargo.lock` after rebase on an already-merged branch), discard them with `git checkout` instead of half-committing
 
@@ -277,22 +279,22 @@ issue threads.
   not push additional commits to that branch unless the maintainer
   explicitly asks for them. The right move is a follow-up PR that
   references the original.
-- **Don't close PRs or issues opened by others on your own initiative.**
-  If you believe one is fixed or superseded, post a comment recommending
-  closure with the linking commit / PR — let a maintainer pull the
-  trigger. Exception: an explicit user instruction to close (e.g. "close
-  it", "close this PR") is the maintainer pulling that trigger via you;
-  execute it. Use the close comment to state the substantive reason
-  (review bugs, superseded by, scope mismatch) so the original author
-  understands what went wrong — do not attribute the close to "AI" /
-  "Claude", the reason itself is what matters.
+- **Don't close PRs or issues opened by others** unless the user (the
+  maintainer) directly instructs you to. By default, post a comment
+  recommending closure with the linking commit / PR and let the
+  maintainer pull the trigger. When directed to close, the close
+  comment must state the substantive reason (review bugs, superseded
+  by, scope mismatch) so the original author understands what went
+  wrong — do not attribute the close to "AI" / "Claude", the reason
+  itself is what matters.
 - **Force-push only to your own branches, only before review.** Once a
   reviewer has loaded the diff, prefer fixup commits or a follow-up PR
   over rewriting history. Force-push to `main` / `master` is blocked by
   `guard-bash-safety.sh` and requires explicit user OK regardless.
 - **Don't reassign, re-label, or re-milestone** issues / PRs you did not
-  open unless asked. Adding `needs-review` or self-assigning a triage
-  label is fine; flipping `priority` / `release` labels is not.
+  open unless directed. Self-assigning a triage label or adding
+  `needs-review` is auto-OK; flipping `priority` / `release` labels is
+  not.
 
 ### Commit & PR hygiene
 
@@ -316,9 +318,13 @@ issue threads.
 CI is shared infrastructure and frequently slow. Polling it from an AI
 session burns turns without producing information.
 
-- **Hard cap: ~5 minutes of polling.** After that, push, leave the run
-  URL in the PR / report, and **stop**. Don't loop a `gh run watch` for
-  half an hour.
+- **Hard cap: ~5 minutes of polling, but avoid the 300s sweet spot.**
+  Anthropic's prompt cache TTL is 5 minutes, so a single ~270s wake
+  keeps the cache warm; ~300s is the worst case (cache miss without
+  amortizing). Pick either 60–270s (warm) or 1200s+ (one cold reload
+  buys a long wait). After the total polling budget is spent, push,
+  leave the run URL in the PR / report, and **stop**. Don't loop a
+  `gh run watch` for half an hour.
 - **Don't pre-emptively re-run a check** that has not yet failed. Only
   retry after a recorded failure, and only once.
 - **Don't open follow-up issues or pivot the plan** while waiting for CI
