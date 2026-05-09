@@ -166,6 +166,29 @@ impl MatrixAdapter {
         Ok(event_id)
     }
 
+    /// Edit an existing event in place via the m.replace relation.
+    /// `new_text` is the new content. Returns the edit event_id.
+    async fn api_edit_event(
+        &self,
+        room_id: &str,
+        target_event_id: &str,
+        new_text: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let body = serde_json::json!({
+            "msgtype": "m.text",
+            "body": format!("* {new_text}"),
+            "m.new_content": {
+                "msgtype": "m.text",
+                "body": new_text,
+            },
+            "m.relates_to": {
+                "rel_type": "m.replace",
+                "event_id": target_event_id,
+            }
+        });
+        self.api_send_event(room_id, "m.room.message", &body).await
+    }
+
     /// Send a text message to a Matrix room. Splits long messages into chunks
     /// and sends each as a separate `m.room.message` event. Returns the
     /// event_ids in order; the last one is the message useful for editing/redacting.
@@ -818,5 +841,31 @@ mod tests {
             .await
             .expect("redact must succeed");
         assert_eq!(id, "$redact:test");
+    }
+
+    #[tokio::test]
+    async fn test_api_edit_event_shape() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/.+/send/m\.room\.message/.+$",
+            ))
+            .and(body_partial_json(serde_json::json!({
+                "msgtype": "m.text",
+                "body": "* updated text",
+                "m.new_content": { "msgtype": "m.text", "body": "updated text" },
+                "m.relates_to": { "rel_type": "m.replace", "event_id": "$orig:test" }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$edit:test"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let id = adapter
+            .api_edit_event("!room:test", "$orig:test", "updated text")
+            .await
+            .expect("edit must succeed");
+        assert_eq!(id, "$edit:test");
     }
 }
