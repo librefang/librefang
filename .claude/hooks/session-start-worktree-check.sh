@@ -47,7 +47,7 @@ esac
 if [ "$git_kind" = "main" ]; then
   msg="⚠️  Session starting in the librefang MAIN WORKTREE ($repo_root). Edits and mutating git commands here are blocked by .claude/hooks/forbid-main-worktree.sh. For any task that will modify files, FIRST run: git worktree add /tmp/librefang-<feature> -b <branch> origin/main, then continue from that path."
 else
-  msg="✅ Session starting in a librefang LINKED WORKTREE ($repo_root). Edits permitted; cargo build/run/install still forbidden, cargo test only with -p <crate>."
+  msg="✅ Session starting in a librefang LINKED WORKTREE ($repo_root). Edits permitted; cargo build/run still forbidden, cargo test only with -p <crate>."
 fi
 
 # Warn if scripts/hooks/ is checked in but not yet activated as core.hooksPath.

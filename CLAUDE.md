@@ -36,7 +36,6 @@ you forget — but the hook is a safety net, not your plan.
   `/Users`, `/usr`, `/etc`, `/var`, `/opt`, …)
 - Daemon launches: `librefang start`, `target/{debug,release}/librefang start|daemon`
   (port 4545 contention with the user's session — Live Integration Testing is human-only)
-- `cargo add` / `cargo remove` / `cargo upgrade` (deps need explicit user OK)
 
 `session-start-worktree-check.sh` (SessionStart) emits a banner telling
 the model whether the session started in the main tree or a linked worktree,
@@ -85,7 +84,7 @@ LibreFang is an open-source Agent Operating System written in Rust (24 crates in
 - **Extensibility**: `librefang-skills`, `librefang-hands`, `librefang-extensions`, `librefang-channels`
 
 ## Build & Verify Workflow
-**Do NOT run `cargo build`, `cargo run`, or `cargo install` locally.**
+**Do NOT run `cargo build` or `cargo run` locally.**
 **`cargo test` is allowed only when scoped with `-p <crate>` / `--package <crate>`** —
 the unscoped, workspace-wide form is blocked because it contends with the user's
 other sessions on the shared `target/` directory. Full workspace build / test
@@ -262,7 +261,7 @@ The daemon command is `start` (not `daemon`).
   for the canonical rule (the `commit-msg` hook enforces it server-side
   too).
 - **Worktree**: Use `git worktree add` on an external disk for new features; fall back to `/tmp/librefang-<feature>` only if no external disk is available. Never develop on the main worktree
-- **Worktree continuation = drive to PR**: When asked to continue half-done work in an existing worktree (uncommitted changes or unmerged commits), the workflow is **commit → push → open or update PR**. Don't stop at "local commits only". A new branch needs a fresh PR; an existing branch with an open PR gets a follow-up push to update it. If the dirty changes aren't real work (e.g., stale `Cargo.lock` after rebase on an already-merged branch), discard them with `git checkout` instead of half-committing
+- **Worktree continuation = drive to PR**: When asked to continue half-done work in an existing worktree (uncommitted changes or unmerged commits), the workflow is **commit → push → open or update PR**. Don't stop at "local commits only". A new branch needs a fresh PR; an existing branch with an open PR gets a follow-up push to update it. Anything left in the worktree counts as real work — including a regenerated `Cargo.lock` after rebase. Commit it together with the rest of the change; do not `git checkout` it away.
 
 ## GitHub Collaboration & Wait Policy
 
@@ -273,11 +272,6 @@ issue threads.
 
 ### Touching other people's work
 
-- **Maintainer-reviewed PRs are off-limits.** Once a human maintainer has
-  left review comments, an `Approve`, or a `Request changes` on a PR, do
-  not push additional commits to that branch unless the maintainer
-  explicitly asks for them. The right move is a follow-up PR that
-  references the original.
 - **Don't close PRs or issues opened by others** unless the user (the
   maintainer) directly instructs you to. By default, post a comment
   recommending closure with the linking commit / PR and let the
