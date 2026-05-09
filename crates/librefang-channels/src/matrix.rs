@@ -60,6 +60,26 @@ pub(crate) fn parse_thread_relation(content: &serde_json::Value) -> Option<Strin
     rel.get("event_id")?.as_str().map(String::from)
 }
 
+/// Render `text` followed by `[Label]` hints for each button row.
+/// Used for outbound EditInteractive / Interactive on Matrix, which has
+/// no native interactive button support — text suffix is the standard fallback.
+fn format_with_button_hints(
+    text: &str,
+    buttons: &[Vec<crate::types::InteractiveButton>],
+) -> String {
+    if buttons.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::from(text);
+    for row in buttons {
+        out.push('\n');
+        for btn in row {
+            out.push_str(&format!("[{}] ", btn.label));
+        }
+    }
+    out.trim_end().to_string()
+}
+
 /// Matrix channel adapter using the Client-Server API.
 pub struct MatrixAdapter {
     /// Matrix homeserver URL (e.g., `"https://matrix.org"`).
@@ -572,6 +592,15 @@ impl ChannelAdapter for MatrixAdapter {
             }
             ChannelContent::DeleteMessage { message_id } => {
                 self.api_redact(&user.platform_id, &message_id, None)
+                    .await?;
+            }
+            ChannelContent::EditInteractive {
+                message_id,
+                text,
+                buttons,
+            } => {
+                let combined = format_with_button_hints(&text, &buttons);
+                self.api_edit_event(&user.platform_id, &message_id, &combined)
                     .await?;
             }
             _ => {
@@ -1729,5 +1758,53 @@ mod tests {
             .await
             .expect("delete must succeed");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "expected one redact call");
+    }
+
+    #[tokio::test]
+    async fn test_send_edit_interactive_uses_replace() {
+        use crate::types::{ChannelContent, ChannelUser, InteractiveButton};
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/.+/send/m\.room\.message/.+$",
+            ))
+            .and(body_partial_json(serde_json::json!({
+                "m.relates_to": { "rel_type": "m.replace", "event_id": "$orig:test" }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$edit:test"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        adapter
+            .send(
+                &user,
+                ChannelContent::EditInteractive {
+                    message_id: "$orig:test".to_string(),
+                    text: "Choose:".to_string(),
+                    buttons: vec![vec![
+                        InteractiveButton {
+                            label: "Yes".to_string(),
+                            action: "yes".to_string(),
+                            style: None,
+                            url: None,
+                        },
+                        InteractiveButton {
+                            label: "No".to_string(),
+                            action: "no".to_string(),
+                            style: None,
+                            url: None,
+                        },
+                    ]],
+                },
+            )
+            .await
+            .expect("edit interactive must succeed");
     }
 }
