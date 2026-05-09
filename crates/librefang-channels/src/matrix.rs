@@ -764,6 +764,94 @@ impl ChannelAdapter for MatrixAdapter {
                 self.api_send_event(&user.platform_id, "m.room.message", &body)
                     .await?;
             }
+            ChannelContent::Audio {
+                url,
+                caption,
+                duration_seconds,
+                ..
+            } => {
+                let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
+                let fname = caption.clone().unwrap_or_else(|| "audio".to_string());
+                let mxc = self.api_upload_media(bytes.clone(), &fname, &mt).await?;
+                let body = serde_json::json!({
+                    "msgtype": "m.audio",
+                    "body": caption.clone().unwrap_or(fname.clone()),
+                    "filename": fname,
+                    "url": mxc,
+                    "info": {
+                        "mimetype": mt,
+                        "size": bytes.len(),
+                        "duration": (duration_seconds as u64) * 1000,
+                    },
+                });
+                self.api_send_event(&user.platform_id, "m.room.message", &body)
+                    .await?;
+            }
+            ChannelContent::Voice {
+                url,
+                caption,
+                duration_seconds,
+            } => {
+                let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
+                let fname = caption.clone().unwrap_or_else(|| "voice".to_string());
+                let mxc = self.api_upload_media(bytes.clone(), &fname, &mt).await?;
+                let body = serde_json::json!({
+                    "msgtype": "m.audio",
+                    "body": caption.clone().unwrap_or(fname.clone()),
+                    "filename": fname,
+                    "url": mxc,
+                    "info": {
+                        "mimetype": mt,
+                        "size": bytes.len(),
+                        "duration": (duration_seconds as u64) * 1000,
+                    },
+                    "org.matrix.msc3245.voice": {},
+                });
+                self.api_send_event(&user.platform_id, "m.room.message", &body)
+                    .await?;
+            }
+            ChannelContent::Video {
+                url,
+                caption,
+                duration_seconds,
+                filename,
+            } => {
+                let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
+                let fname = filename
+                    .unwrap_or_else(|| caption.clone().unwrap_or_else(|| "video".to_string()));
+                let mxc = self.api_upload_media(bytes.clone(), &fname, &mt).await?;
+                let body = serde_json::json!({
+                    "msgtype": "m.video",
+                    "body": caption.unwrap_or(fname.clone()),
+                    "filename": fname,
+                    "url": mxc,
+                    "info": {
+                        "mimetype": mt,
+                        "size": bytes.len(),
+                        "duration": (duration_seconds as u64) * 1000,
+                    },
+                });
+                self.api_send_event(&user.platform_id, "m.room.message", &body)
+                    .await?;
+            }
+            ChannelContent::Animation {
+                url,
+                caption,
+                duration_seconds: _,
+            } => {
+                let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
+                let fname = caption.clone().unwrap_or_else(|| "animation".to_string());
+                let mxc = self.api_upload_media(bytes.clone(), &fname, &mt).await?;
+                let body = serde_json::json!({
+                    "msgtype": "m.image",
+                    "body": caption.clone().unwrap_or(fname.clone()),
+                    "filename": fname,
+                    "url": mxc,
+                    "info": { "mimetype": mt, "size": bytes.len() },
+                });
+                self.api_send_event(&user.platform_id, "m.room.message", &body)
+                    .await?;
+            }
             _ => {
                 self.api_send_message(&user.platform_id, "(Unsupported content type)")
                     .await?;
@@ -2251,5 +2339,57 @@ mod tests {
             .await
             .expect("filedata must succeed");
         assert_eq!(upload_calls.load(Ordering::SeqCst), 1);
+    }
+
+    // ── Task 19: Outbound Audio/Voice/Video/Animation ─────────────────────────
+
+    #[tokio::test]
+    async fn test_outbound_voice_includes_msc3245_marker() {
+        use crate::types::{ChannelContent, ChannelUser};
+        let server = MockServer::start().await;
+        let bytes_url = format!("{}/v.ogg", server.uri());
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path("/v.ogg"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(b"OggS dummy".to_vec())
+                    .insert_header("Content-Type", "audio/ogg"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path("/_matrix/media/v3/upload"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content_uri": "mxc://srv/v1"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(body_partial_json(serde_json::json!({
+                "msgtype": "m.audio",
+                "org.matrix.msc3245.voice": {}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$voice:test"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        adapter
+            .send(
+                &user,
+                ChannelContent::Voice {
+                    url: bytes_url,
+                    caption: None,
+                    duration_seconds: 4,
+                },
+            )
+            .await
+            .expect("voice must succeed");
     }
 }
