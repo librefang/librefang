@@ -2865,90 +2865,9 @@ fn prune_old_config_backups(backups_dir: &std::path::Path, keep: usize) {
     }
 }
 
-/// Generate a local timestamp string in YYYYMMDD-HHMMSS format without external deps.
+/// Generate a local timestamp string in YYYYMMDD-HHMMSS format.
 fn format_local_timestamp() -> String {
-    // Use libc to get local time on unix; fallback to UTC seconds on other platforms.
-    #[cfg(unix)]
-    {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as libc::time_t;
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        // SAFETY: localtime_r is thread-safe and writes into our stack buffer.
-        unsafe { libc::localtime_r(&secs, &mut tm) };
-        format!(
-            "{:04}{:02}{:02}-{:02}{:02}{:02}",
-            tm.tm_year + 1900,
-            tm.tm_mon + 1,
-            tm.tm_mday,
-            tm.tm_hour,
-            tm.tm_min,
-            tm.tm_sec
-        )
-    }
-    #[cfg(not(unix))]
-    {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        // Fallback: use UTC (acceptable on Windows where libc tm isn't available)
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        // Simple UTC breakdown
-        let days = secs / 86400;
-        let day_secs = secs % 86400;
-        let hour = day_secs / 3600;
-        let min = (day_secs % 3600) / 60;
-        let sec = day_secs % 60;
-        // Days since 1970-01-01
-        let (year, month, day) = days_to_ymd(days);
-        format!("{year:04}{month:02}{day:02}-{hour:02}{min:02}{sec:02}")
-    }
-}
-
-/// Convert days since Unix epoch to (year, month, day). Used only on non-Unix platforms.
-#[cfg(not(unix))]
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    let mut year = 1970u64;
-    loop {
-        let days_in_year = if is_leap(year) { 366 } else { 365 };
-        if days < days_in_year {
-            break;
-        }
-        days -= days_in_year;
-        year += 1;
-    }
-    let leap = is_leap(year);
-    let month_days: [u64; 12] = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut month = 1u64;
-    for &md in &month_days {
-        if days < md {
-            break;
-        }
-        days -= md;
-        month += 1;
-    }
-    (year, month, days + 1)
-}
-
-#[cfg(not(unix))]
-fn is_leap(y: u64) -> bool {
-    y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+    chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
 }
 
 /// Find top-level keys in `defaults` that are missing from `existing`.
