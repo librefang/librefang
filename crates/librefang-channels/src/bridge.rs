@@ -2193,10 +2193,36 @@ fn default_output_format_for_channel(channel_type: &str) -> OutputFormat {
 
 /// Send a lifecycle reaction (best-effort, non-blocking for supported adapters).
 ///
-/// Errors are logged at debug level — reactions are non-critical UX polish, but
-/// repeated failures can hint at adapter / permission issues worth investigating.
-/// For Telegram, the underlying HTTP call is already fire-and-forget (spawned internally),
-/// so this await returns almost immediately.
+/// Extract the tool name from a `\n\n🔧 toolname\n\n` progress marker
+/// emitted by `librefang_api::channel_bridge` in response to a kernel
+/// `StreamEvent::ToolUseStart` event. Returns `None` for plain text
+/// deltas, the trailing-`⚠️`-error marker, the context-warning marker,
+/// or anything that doesn't exactly match the prefix+suffix wrapping —
+/// the api channel bridge sends each marker as its own dedicated
+/// `tx.send(line)` so an exact-match strip is the right shape (we
+/// would NOT want to grab a `🔧` that appeared inside model prose).
+fn extract_tool_marker_name(delta: &str) -> Option<String> {
+    let prefix = "\n\n🔧 ";
+    let suffix = "\n\n";
+    let inner = delta.strip_prefix(prefix)?.strip_suffix(suffix)?;
+    let trimmed = inner.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Errors are logged at WARN — reactions are best-effort UX polish, but a
+/// silent failure mode masks real problems. The original `debug!` here hid
+/// per-room rate-limit drops on Matrix (`M_LIMIT_EXCEEDED`) where the
+/// trailing `✅ Done` reaction was being silently swallowed at default
+/// verbosity, and made the lifecycle-reaction feature look broken even
+/// when it was working. WARN is the right level: a single failure tells
+/// an operator "your homeserver is rate-limiting the bot", which is
+/// exactly the actionable diagnosis we want surfaced.
+/// For Telegram, the underlying HTTP call is already fire-and-forget
+/// (spawned internally), so this await returns almost immediately.
 async fn send_lifecycle_reaction(
     adapter: &dyn ChannelAdapter,
     user: &ChannelUser,
@@ -2209,12 +2235,12 @@ async fn send_lifecycle_reaction(
         remove_previous: true,
     };
     if let Err(e) = adapter.send_reaction(user, message_id, &reaction).await {
-        debug!(
+        warn!(
             adapter = adapter.name(),
             message_id = message_id,
             phase = ?phase,
             error = %e,
-            "Lifecycle reaction send failed (best-effort, ignored)",
+            "Lifecycle reaction send failed (best-effort, not retried)",
         );
     }
 }
@@ -3644,42 +3670,54 @@ async fn dispatch_message(
 
                 // Tee: forward deltas to the adapter while buffering a copy.
                 // If send_streaming fails, the buffer lets us fall back to send().
+                //
+                // Drain runs as a sibling future via `tokio::join!` (not a
+                // detached `tokio::spawn`) so it shares the dispatch task's
+                // borrow of `adapter`. That lets us call
+                // `send_lifecycle_reaction(adapter, ...)` from inside the
+                // drain when we observe the api/channel_bridge's
+                // `\n\n🔧 toolname\n\n` text marker — a turn that runs a
+                // tool now flips the trigger-message reaction to ⚙️ for the
+                // duration of the call, instead of staying stuck on ✍️.
                 let (adapter_tx, adapter_rx) = mpsc::channel::<String>(64);
-                let mut buffered_text = String::new();
-                let buffer_handle = tokio::spawn({
-                    let prefix_chunk = prefix_chunk.clone();
+                let prefix_chunk_owned = prefix_chunk.clone();
+                let drain_fut = async {
                     let mut buffered = String::new();
-                    async move {
-                        // Inject the prefix as the first delta so it becomes
-                        // part of the streamed message. Mirror it into the
-                        // buffer so the stream-fail fallback path's
-                        // idempotency check (`apply_agent_prefix`) sees an
-                        // already-prefixed buffer and skips re-prefixing.
-                        if let Some(ref p) = prefix_chunk {
-                            buffered.push_str(p);
-                            if adapter_tx.send(p.clone()).await.is_err() {
-                                return buffered;
-                            }
+                    // Inject the prefix as the first delta so it becomes
+                    // part of the streamed message. Mirror it into the
+                    // buffer so the stream-fail fallback path's
+                    // idempotency check (`apply_agent_prefix`) sees an
+                    // already-prefixed buffer and skips re-prefixing.
+                    if let Some(ref p) = prefix_chunk_owned {
+                        buffered.push_str(p);
+                        if adapter_tx.send(p.clone()).await.is_err() {
+                            return buffered;
                         }
-                        while let Some(delta) = delta_rx.recv().await {
-                            buffered.push_str(&delta);
-                            // Best-effort forward — if adapter dropped rx, stop.
-                            if adapter_tx.send(delta).await.is_err() {
-                                break;
-                            }
-                        }
-                        buffered
                     }
-                });
+                    while let Some(delta) = delta_rx.recv().await {
+                        buffered.push_str(&delta);
+                        if let Some(name) = extract_tool_marker_name(&delta) {
+                            send_lifecycle_reaction(
+                                adapter,
+                                &message.sender,
+                                msg_id,
+                                &AgentPhase::tool_use(&name),
+                            )
+                            .await;
+                        }
+                        // Best-effort forward — if adapter dropped rx, stop.
+                        if adapter_tx.send(delta).await.is_err() {
+                            break;
+                        }
+                    }
+                    drop(adapter_tx);
+                    buffered
+                };
 
-                let stream_result = adapter
-                    .send_streaming(&message.sender, adapter_rx, thread_id)
-                    .await;
-
-                // Collect the buffered text (always succeeds unless the task panicked).
-                if let Ok(text) = buffer_handle.await {
-                    buffered_text = text;
-                }
+                let (stream_result, buffered_text) = tokio::join!(
+                    adapter.send_streaming(&message.sender, adapter_rx, thread_id),
+                    drain_fut
+                );
 
                 // Status is sent after the text channel fully drains, so
                 // awaiting here will not block longer than the stream itself.
@@ -7145,6 +7183,73 @@ mod tests {
                 }
                 other => panic!("Expected Text block, got: {other:?}"),
             }
+        }
+    }
+
+    mod tool_marker_extraction {
+        use super::super::extract_tool_marker_name;
+
+        #[test]
+        fn extracts_simple_tool_name() {
+            assert_eq!(
+                extract_tool_marker_name("\n\n🔧 system_time\n\n"),
+                Some("system_time".to_string())
+            );
+        }
+
+        #[test]
+        fn extracts_pretty_tool_name_with_spaces() {
+            // `prettify_tool_name` upstream may render `web_fetch` as
+            // `Web Fetch` — the marker passes through whatever upstream
+            // emits. Trim whitespace but preserve the inner text.
+            assert_eq!(
+                extract_tool_marker_name("\n\n🔧 Web Fetch\n\n"),
+                Some("Web Fetch".to_string())
+            );
+        }
+
+        #[test]
+        fn rejects_plain_text_delta() {
+            assert_eq!(extract_tool_marker_name("Hello world"), None);
+            assert_eq!(extract_tool_marker_name(""), None);
+        }
+
+        #[test]
+        fn rejects_error_marker() {
+            // `\n\n⚠️ tool failed\n\n` is a different signal — it MUST
+            // not be misread as a ToolUse start (would fire ⚙️ on a
+            // tool that just errored).
+            assert_eq!(
+                extract_tool_marker_name("\n\n⚠️ system_time failed\n\n"),
+                None
+            );
+        }
+
+        #[test]
+        fn rejects_marker_inside_prose() {
+            // We rely on the api channel bridge sending each marker as
+            // its own `tx.send(line)` — a `🔧` literal that appears
+            // inside model-authored prose must NOT be treated as a
+            // marker, since we'd extract the wrong "tool name" and
+            // fire a phantom reaction.
+            assert_eq!(
+                extract_tool_marker_name("Sure, I'll use 🔧 to fix it."),
+                None
+            );
+        }
+
+        #[test]
+        fn rejects_marker_missing_suffix() {
+            // The api bridge always emits `\n\n…\n\n`. If the suffix
+            // is missing the delta is malformed; fail closed rather
+            // than guess.
+            assert_eq!(extract_tool_marker_name("\n\n🔧 system_time"), None);
+        }
+
+        #[test]
+        fn rejects_empty_tool_name() {
+            assert_eq!(extract_tool_marker_name("\n\n🔧 \n\n"), None);
+            assert_eq!(extract_tool_marker_name("\n\n🔧    \n\n"), None);
         }
     }
 }
