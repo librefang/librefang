@@ -69,6 +69,59 @@ env:
 
 jobs:
   # ═════════════════════════════════════════════════════════════════════════
+  # workflow_dispatch channel=current: force-update the dispatched tag
+  # to main HEAD before publishing. Without this step, the tag in the
+  # GitHub Release would still point at the old (broken) commit even
+  # though the binary artifacts and SDK packages are rebuilt from main.
+  #
+  # Mechanics: if the tag is already at main HEAD, this is a no-op and
+  # the dispatch run continues into create_release/publish normally.
+  # Otherwise the force-push triggers a fresh `push: tags` run, the
+  # `cancel-in-progress` concurrency rule cancels this dispatch run,
+  # and the push run takes over the actual publishing — by then the
+  # tag and main HEAD are the same commit, so RELEASE_REF resolves to
+  # the same source either way.
+  # ═════════════════════════════════════════════════════════════════════════
+
+  sync_tag_to_main:
+    name: Sync tag to main HEAD (channel=current)
+    if: github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+          # PAT (not GITHUB_TOKEN) so the resulting `push: tags` event
+          # actually triggers downstream workflows. GITHUB_TOKEN-driven
+          # pushes intentionally do not chain workflows.
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      - name: Force-update tag to main HEAD
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          MAIN_SHA=$(git rev-parse refs/heads/main)
+          # `git rev-parse <tag>` resolves the tag's tip on the current
+          # clone. Since we just checked out main with full depth, the
+          # tag ref is present in the local repo (refs/tags/$TAG was
+          # fetched as part of the default refspec).
+          TAG_SHA=$(git rev-parse "refs/tags/$TAG^{commit}" 2>/dev/null || echo "")
+          if [ "$TAG_SHA" = "$MAIN_SHA" ]; then
+            echo "✓ Tag $TAG already at main HEAD ($MAIN_SHA); no force-push needed."
+            echo "  This dispatch run will continue into create_release and publish."
+            exit 0
+          fi
+          echo "Force-updating tag $TAG: $TAG_SHA → $MAIN_SHA"
+          git tag -f "$TAG" "$MAIN_SHA"
+          git push origin -f "refs/tags/$TAG"
+          echo "::notice::Tag $TAG force-pushed to main HEAD ($MAIN_SHA). The resulting push event will trigger a fresh release run; this dispatch run is about to be cancelled by concurrency.cancel-in-progress."
+
+  # ═════════════════════════════════════════════════════════════════════════
   # PR close → auto-tag (from release-create.yml)
   # ═════════════════════════════════════════════════════════════════════════
 
