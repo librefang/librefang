@@ -770,26 +770,28 @@ impl ChannelAdapter for MatrixAdapter {
                 let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
                 let mt = mime_type.clone().unwrap_or(mt);
                 let fname = caption.clone().unwrap_or_else(|| "image".to_string());
-                let mxc = self.api_upload_media(bytes.clone(), &fname, &mt).await?;
+                let size = bytes.len();
+                let mxc = self.api_upload_media(bytes, &fname, &mt).await?;
                 let body = serde_json::json!({
                     "msgtype": "m.image",
                     "body": caption.unwrap_or(fname.clone()),
                     "filename": fname,
                     "url": mxc,
-                    "info": { "mimetype": mt, "size": bytes.len() },
+                    "info": { "mimetype": mt, "size": size },
                 });
                 self.api_send_event(&user.platform_id, "m.room.message", &body)
                     .await?;
             }
             ChannelContent::File { url, filename } => {
                 let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
-                let mxc = self.api_upload_media(bytes.clone(), &filename, &mt).await?;
+                let size = bytes.len();
+                let mxc = self.api_upload_media(bytes, &filename, &mt).await?;
                 let body = serde_json::json!({
                     "msgtype": "m.file",
                     "body": filename.clone(),
                     "filename": filename,
                     "url": mxc,
-                    "info": { "mimetype": mt, "size": bytes.len() },
+                    "info": { "mimetype": mt, "size": size },
                 });
                 self.api_send_event(&user.platform_id, "m.room.message", &body)
                     .await?;
@@ -819,7 +821,8 @@ impl ChannelAdapter for MatrixAdapter {
             } => {
                 let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
                 let fname = caption.clone().unwrap_or_else(|| "audio".to_string());
-                let mxc = self.api_upload_media(bytes.clone(), &fname, &mt).await?;
+                let size = bytes.len();
+                let mxc = self.api_upload_media(bytes, &fname, &mt).await?;
                 let body = serde_json::json!({
                     "msgtype": "m.audio",
                     "body": caption.clone().unwrap_or(fname.clone()),
@@ -827,7 +830,7 @@ impl ChannelAdapter for MatrixAdapter {
                     "url": mxc,
                     "info": {
                         "mimetype": mt,
-                        "size": bytes.len(),
+                        "size": size,
                         "duration": (duration_seconds as u64) * 1000,
                     },
                 });
@@ -841,7 +844,8 @@ impl ChannelAdapter for MatrixAdapter {
             } => {
                 let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
                 let fname = caption.clone().unwrap_or_else(|| "voice".to_string());
-                let mxc = self.api_upload_media(bytes.clone(), &fname, &mt).await?;
+                let size = bytes.len();
+                let mxc = self.api_upload_media(bytes, &fname, &mt).await?;
                 let body = serde_json::json!({
                     "msgtype": "m.audio",
                     "body": caption.clone().unwrap_or(fname.clone()),
@@ -849,7 +853,7 @@ impl ChannelAdapter for MatrixAdapter {
                     "url": mxc,
                     "info": {
                         "mimetype": mt,
-                        "size": bytes.len(),
+                        "size": size,
                         "duration": (duration_seconds as u64) * 1000,
                     },
                     "org.matrix.msc3245.voice": {},
@@ -866,7 +870,8 @@ impl ChannelAdapter for MatrixAdapter {
                 let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
                 let fname = filename
                     .unwrap_or_else(|| caption.clone().unwrap_or_else(|| "video".to_string()));
-                let mxc = self.api_upload_media(bytes.clone(), &fname, &mt).await?;
+                let size = bytes.len();
+                let mxc = self.api_upload_media(bytes, &fname, &mt).await?;
                 let body = serde_json::json!({
                     "msgtype": "m.video",
                     "body": caption.unwrap_or(fname.clone()),
@@ -874,7 +879,7 @@ impl ChannelAdapter for MatrixAdapter {
                     "url": mxc,
                     "info": {
                         "mimetype": mt,
-                        "size": bytes.len(),
+                        "size": size,
                         "duration": (duration_seconds as u64) * 1000,
                     },
                 });
@@ -888,13 +893,14 @@ impl ChannelAdapter for MatrixAdapter {
             } => {
                 let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
                 let fname = caption.clone().unwrap_or_else(|| "animation".to_string());
-                let mxc = self.api_upload_media(bytes.clone(), &fname, &mt).await?;
+                let size = bytes.len();
+                let mxc = self.api_upload_media(bytes, &fname, &mt).await?;
                 let body = serde_json::json!({
                     "msgtype": "m.image",
                     "body": caption.clone().unwrap_or(fname.clone()),
                     "filename": fname,
                     "url": mxc,
-                    "info": { "mimetype": mt, "size": bytes.len() },
+                    "info": { "mimetype": mt, "size": size },
                 });
                 self.api_send_event(&user.platform_id, "m.room.message", &body)
                     .await?;
@@ -931,8 +937,10 @@ impl ChannelAdapter for MatrixAdapter {
                 let combined = format_with_button_hints(&text, &buttons);
                 self.api_send_message(&user.platform_id, &combined).await?;
             }
-            ChannelContent::Command { .. } => {
-                // Commands are inbound-only; outbound commands are a no-op.
+            ChannelContent::Command { name, args: _ } => {
+                debug!(
+                    "Matrix: outbound Command (name={name}) is a no-op (Command is inbound-only)"
+                );
             }
         }
         Ok(())
