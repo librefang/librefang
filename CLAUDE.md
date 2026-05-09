@@ -103,15 +103,23 @@ cargo test -p <crate>                                  # Only when verifying beh
 
 CI splits tests into two separate jobs so a unit failure surfaces quickly:
 
-- **Unit-fast** (`Test / Unit (lib+bin)`, ~2 min): `cargo nextest run --workspace --lib --bins --no-fail-fast`
+- **Unit-fast** (`Test / Unit (lib+bin)`, ~2 min): `cargo nextest run --workspace -E 'kind(lib) | kind(bin)' --no-fail-fast`
   — lib and binary unit tests only; no integration test binaries. Run this locally for quick iteration.
 - **Integration** (`Test / Ubuntu (shard N/4)`, ~10-20 min): sharded across 4 Ubuntu runners via
   `--partition hash:N/4`; also single jobs on macOS and Windows. Runs all `--tests` targets.
 
+The unit-fast lane uses nextest's `-E 'kind(lib) | kind(bin)'` filter rather
+than `--lib --bins` because the latter errors with "no library targets found"
+when a `-p <crate>` selector targets a binary-only crate
+(`librefang-cli`, `librefang-desktop`). The expression form matches whichever
+kinds the selected crates actually have, so the selective CI lane stays green
+when a PR touches only `librefang-cli/main.rs` (or when a stale-base diff
+drags it in).
+
 Local equivalents:
 ```bash
 # Fast lane — unit tests only:
-cargo nextest run --workspace --lib --bins --no-fail-fast
+cargo nextest run --workspace -E 'kind(lib) | kind(bin)' --no-fail-fast
 
 # Full validation — integration tests (mirrors the Ubuntu shard lane):
 cargo nextest run --workspace --no-fail-fast
