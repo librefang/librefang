@@ -588,6 +588,34 @@ impl ChannelAdapter for MatrixAdapter {
         Ok(())
     }
 
+    async fn send_in_thread(
+        &self,
+        user: &ChannelUser,
+        content: ChannelContent,
+        thread_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        match content {
+            ChannelContent::Text(text) => {
+                for chunk in crate::types::split_message(&text, MAX_MESSAGE_LEN) {
+                    let body = serde_json::json!({
+                        "msgtype": "m.text",
+                        "body": chunk,
+                        "m.relates_to": {
+                            "rel_type": "m.thread",
+                            "event_id": thread_id,
+                            "is_falling_back": true,
+                            "m.in_reply_to": { "event_id": thread_id },
+                        }
+                    });
+                    self.api_send_event(&user.platform_id, "m.room.message", &body)
+                        .await?;
+                }
+                Ok(())
+            }
+            other => self.send(user, other).await,
+        }
+    }
+
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
@@ -1252,5 +1280,44 @@ mod tests {
             None,
             "oldest entry (evt0) must be evicted"
         );
+    }
+
+    #[tokio::test]
+    async fn test_send_in_thread_includes_thread_relation() {
+        use crate::types::{ChannelContent, ChannelUser};
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/.+/send/m\.room\.message/.+$",
+            ))
+            .and(body_partial_json(serde_json::json!({
+                "msgtype": "m.text",
+                "body": "thread reply",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread_root:test",
+                    "is_falling_back": true,
+                    "m.in_reply_to": { "event_id": "$thread_root:test" }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$reply:test"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        adapter
+            .send_in_thread(
+                &user,
+                ChannelContent::Text("thread reply".to_string()),
+                "$thread_root:test",
+            )
+            .await
+            .expect("thread send must succeed");
     }
 }
