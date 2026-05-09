@@ -213,10 +213,21 @@ pub fn is_prompt_leak(text: &str) -> bool {
             };
             let header = rest.trim().as_bytes();
             // Keywords are ASCII-only English section names, so byte-wise
-            // case-insensitive compare is safe and zero-alloc.
+            // case-insensitive compare is safe and zero-alloc. Match must
+            // be whole-word to avoid prefix over-fire (e.g. `## Senders
+            // Update` should not match `sender`, `## Contextual Note`
+            // should not match `context`). The boundary check accepts the
+            // header end OR any non-alphanumeric trailing char (space,
+            // colon, punctuation).
             PROMPT_LEAK_HEADER_KEYWORDS.iter().any(|kw| {
                 let kw = kw.as_bytes();
-                header.len() >= kw.len() && header[..kw.len()].eq_ignore_ascii_case(kw)
+                if header.len() < kw.len() || !header[..kw.len()].eq_ignore_ascii_case(kw) {
+                    return false;
+                }
+                match header.get(kw.len()) {
+                    None => true,
+                    Some(b) => !b.is_ascii_alphanumeric(),
+                }
             })
         })
         .take(PROMPT_LEAK_HEADER_THRESHOLD)

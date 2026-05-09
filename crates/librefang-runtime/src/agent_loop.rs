@@ -7575,13 +7575,16 @@ mod tests {
     }
 
     #[test]
-    fn three_or_more_h2_headers_are_dropped() {
-        // System prompts contain many `## ` headers; real replies do
-        // not. Three is the minimum trigger to keep one or two genuine
-        // subheadings deliverable.
+    fn multiple_prompt_keyword_headers_are_dropped() {
+        // System prompts emit `## ` headers from a fixed keyword set
+        // (`silent_response::PROMPT_LEAK_HEADER_KEYWORDS`). Real replies
+        // virtually never stack two such section names back-to-back, so
+        // the threshold is two keyword-matching H2 headers (one is left
+        // deliverable for the genuine "## Tasks: …" reply pattern).
         let dump = "## Sender\nMessage from: X\n## Today\nWednesday\n## Calendar\nNo events.\n## Tasks\npending\n";
         assert!(is_prompt_leak(dump));
-        assert!(is_prompt_leak("## A\nfoo\n## B\nbar\n## C\nbaz"));
+        // Threshold pin: exactly two keyword-matching headers must trip.
+        assert!(is_prompt_leak("## Sender\nx\n## Calendar\ny"));
     }
 
     #[test]

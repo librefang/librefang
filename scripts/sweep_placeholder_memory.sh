@@ -55,7 +55,9 @@ Usage:
 
   --apply       Commit the soft-delete (memories.deleted = 1). Default is
                 dry-run: report counts only.
-  --db <path>   Database path. Defaults to /data/librefang.db (Lazycat NAS).
+  --db <path>   Database path. Defaults to ./data/librefang.db (local
+                checkout). On the Lazycat NAS, run via the live-pivot
+                snippet at the top of this file or pass --db /data/librefang.db.
   -h, --help    Show this help.
 
 The default mode is dry-run; --apply takes a timestamped backup of the
