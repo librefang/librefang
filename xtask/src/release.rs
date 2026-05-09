@@ -8,15 +8,24 @@ use std::io::{self, Write as _};
 use std::path::Path;
 use std::process::Command;
 
-/// Release channel for non-interactive version pick. Mirrors the 1/2/3/4
+/// Release channel for non-interactive version pick. Mirrors the 1/2/3/4/5
 /// prompt entries in the interactive flow so `just release` and
 /// `gh workflow run Release --input channel=…` pick versions identically.
+///
+/// `Current` is special — it does not bump the version or open a PR.
+/// Instead it dispatches the existing release run for the latest tag
+/// with `channel=current`, which causes `release.yml` to force-sync
+/// the tag to `main` HEAD and re-publish every artifact from `main`'s
+/// current code. Use it when a release tag failed on a code bug, the
+/// fix has landed on `main`, and the same version number should be
+/// re-published with the fix included.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Channel {
     Stable,
     Beta,
     Rc,
     Lts,
+    Current,
 }
 
 #[derive(Parser, Debug)]
@@ -157,8 +166,83 @@ fn extract_changelog_section(content: &str, heading: &str) -> String {
     }
 }
 
+/// Dispatch the existing release run for the latest tag with
+/// `channel=current`. `release.yml` then force-syncs the tag to
+/// `main` HEAD and re-publishes every artifact from main's code.
+///
+/// We do not change Cargo.toml, do not open a PR, and do not push a
+/// new tag locally — every mutating step happens server-side via the
+/// dispatched workflow.
+fn run_current(
+    root: &Path,
+    no_confirm: bool,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tag = find_latest_tag(root, true)
+        .ok_or("no existing release tag found; nothing to re-publish")?;
+    println!("=== channel=current: re-publish latest tag ===");
+    println!("  Tag:      {}", tag);
+    println!("  Source:   main HEAD (release.yml's RELEASE_REF resolves to refs/heads/main)");
+    println!();
+    println!("Effect: release.yml's `sync_tag_to_main` job will force-update");
+    println!(
+        "`{}` to main HEAD, then publish every artifact from main's",
+        tag
+    );
+    println!(
+        "current code. The previous `{}` GitHub Release artifacts will be",
+        tag
+    );
+    println!("clobbered; npm / PyPI / crates.io entries will be skipped where the");
+    println!("version already exists (idempotent publish steps).");
+    println!();
+
+    if dry_run {
+        println!("Dry run — would dispatch:");
+        println!("  gh workflow run Release --ref {} -f channel=current", tag);
+        return Ok(());
+    }
+
+    if !no_confirm {
+        let answer = prompt(&format!("Dispatch Release workflow for {}? [y/N]: ", tag));
+        if answer.to_lowercase() != "y" && answer.to_lowercase() != "yes" {
+            return Err("Aborted".into());
+        }
+    }
+
+    let status = Command::new("gh")
+        .args([
+            "workflow",
+            "run",
+            "Release",
+            "--ref",
+            &tag,
+            "-f",
+            "channel=current",
+        ])
+        .current_dir(root)
+        .status()?;
+    if !status.success() {
+        return Err(format!(
+            "gh workflow run failed (exit {}); is `gh` authenticated?",
+            status.code().unwrap_or(-1)
+        )
+        .into());
+    }
+
+    println!();
+    println!("✓ Dispatched. Watch with:");
+    println!("  gh run watch (or open the Actions tab)");
+    Ok(())
+}
+
 pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
+
+    // --- channel=current shortcut: dispatch only, no version bump / PR ---
+    if args.channel == Some(Channel::Current) {
+        return run_current(&root, args.no_confirm, args.dry_run);
+    }
 
     // --- LTS patch shortcut ---
     if args.lts_patch {
@@ -318,6 +402,10 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
                 Channel::Beta => format!("{}-beta.{}", base_version, next_beta),
                 Channel::Rc => format!("{}-rc.{}", base_version, next_rc),
                 Channel::Lts => format!("{}.{}-lts", lts_base, next_lts_patch),
+                // Current bypasses the version pick entirely — it's
+                // handled by the early `run_current` branch above and
+                // by the `"5"` arm of the interactive prompt below.
+                Channel::Current => unreachable!(),
             }
         };
 
@@ -339,14 +427,19 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             println!("  2) beta    -> {}", version_for(Channel::Beta));
             println!("  3) rc      -> {}", version_for(Channel::Rc));
             println!("  4) lts     -> {}", version_for(Channel::Lts));
+            println!(
+                "  5) current -> re-publish latest tag ({}) with main HEAD code",
+                prev_tag.as_deref().unwrap_or("none")
+            );
             println!();
 
-            let choice = prompt("Choose [1/2/3/4]: ");
+            let choice = prompt("Choose [1/2/3/4/5]: ");
             match choice.as_str() {
                 "1" => version_for(Channel::Stable),
                 "2" => version_for(Channel::Beta),
                 "3" => version_for(Channel::Rc),
                 "4" => version_for(Channel::Lts),
+                "5" => return run_current(&root, args.no_confirm, args.dry_run),
                 _ => return Err("Invalid choice".into()),
             }
         }
@@ -1009,6 +1102,7 @@ mod tests {
             Channel::Beta => format!("{}-beta.{}", base_version, next_beta),
             Channel::Rc => format!("{}-rc.{}", base_version, next_rc),
             Channel::Lts => format!("{}.{}-lts", lts_base, next_lts_patch),
+            Channel::Current => unreachable!(),
         }
     }
 
