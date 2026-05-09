@@ -162,17 +162,11 @@ fn infer_gh_repo(root: &Path) -> Option<String> {
 
 fn parse_github_owner_repo(url: &str) -> Option<String> {
     let url = url.strip_suffix(".git").unwrap_or(url);
-    let after_host = if let Some(rest) = url.strip_prefix("git@github.com:") {
-        rest
-    } else if let Some(rest) = url.strip_prefix("ssh://git@github.com/") {
-        rest
-    } else if let Some(rest) = url.strip_prefix("https://github.com/") {
-        rest
-    } else if let Some(rest) = url.strip_prefix("http://github.com/") {
-        rest
-    } else {
-        return None;
-    };
+    let after_host = url
+        .strip_prefix("git@github.com:")
+        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| url.strip_prefix("https://github.com/"))
+        .or_else(|| url.strip_prefix("http://github.com/"))?;
     let mut parts = after_host.split('/');
     let owner = parts.next()?;
     let repo = parts.next()?;
