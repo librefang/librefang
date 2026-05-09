@@ -74,6 +74,13 @@ jobs:
   # GitHub Release would still point at the old (broken) commit even
   # though the binary artifacts and SDK packages are rebuilt from main.
   #
+  # Operational note: this REWRITES the release tag's commit pointer.
+  # Anyone who already fetched the old `vX → C1` mapping (mirrors,
+  # third-party CI checking out the tag, Homebrew bottle pinning) will
+  # observe the tag jumping to a new commit on next fetch. That is the
+  # whole point of `channel=current` — we want vX to mean "main HEAD
+  # at re-publish time" — but it is intentional, not accidental.
+  #
   # Mechanics: if the tag is already at main HEAD, this is a no-op and
   # the dispatch run continues into create_release/publish normally.
   # Otherwise the force-push triggers a fresh `push: tags` run, the
@@ -81,6 +88,18 @@ jobs:
   # and the push run takes over the actual publishing — by then the
   # tag and main HEAD are the same commit, so RELEASE_REF resolves to
   # the same source either way.
+  #
+  # Race window during a force-push path: this job has no `needs:`
+  # blocker on the publish jobs, so build_dashboard / package_* /
+  # publish_* / docker / sdk jobs in this dispatch run start in
+  # parallel with `sync_tag_to_main`. Some may finish (or partially
+  # publish) before concurrency cancels the dispatch run. The follow-up
+  # `push: tags` run then redoes the same publishes. We rely on each
+  # publish step being idempotent for the same version: GitHub Release
+  # uploads overwrite, and npm / PyPI / crates.io reject duplicate
+  # publishes for an already-published version (handled as success in
+  # the publish jobs). If you add a non-idempotent publish step, gate
+  # it on `needs: sync_tag_to_main` to serialize behind this job.
   # ═════════════════════════════════════════════════════════════════════════
 
   sync_tag_to_main:
@@ -97,6 +116,14 @@ jobs:
           # PAT (not GITHUB_TOKEN) so the resulting `push: tags` event
           # actually triggers downstream workflows. GITHUB_TOKEN-driven
           # pushes intentionally do not chain workflows.
+          #
+          # Token scope note: the secret is named HOMEBREW_TAP_TOKEN
+          # because it was originally provisioned for pushing to the
+          # external `librefang/homebrew-tap` repo. It is also reused
+          # here and in `bump_version` for write access to *this*
+          # repo (PR creation and now tag force-push). Rotate / scope
+          # changes must keep `contents: write` on the main repo or
+          # this job and the bump-PR flow break.
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       - name: Force-update tag to main HEAD
         env:

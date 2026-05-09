@@ -136,6 +136,25 @@ fn prompt(message: &str) -> String {
     input.trim().to_string()
 }
 
+/// Best-effort `git rev-parse --short <revspec>`. Returns `None` when
+/// git fails or the revspec does not resolve in the local repo.
+fn git_short_sha(root: &Path, revspec: &str) -> Option<String> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--short", revspec])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
 fn compute_calver() -> String {
     let now = chrono::Local::now();
     format!(
@@ -180,9 +199,32 @@ fn run_current(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tag = find_latest_tag(root, true)
         .ok_or("no existing release tag found; nothing to re-publish")?;
+
+    // Resolve the tag's current commit and main HEAD locally so the
+    // operator sees, before confirming, exactly which commit pointer
+    // is about to move. Both lookups are best-effort: if the tag is
+    // not present locally (fresh clone, shallow fetch) we fall back
+    // to "(unknown)" rather than blocking — the workflow itself
+    // re-resolves both in the runner.
+    let tag_sha = git_short_sha(root, &format!("refs/tags/{}^{{commit}}", tag))
+        .unwrap_or_else(|| "(unknown)".to_string());
+    let main_sha = git_short_sha(root, "refs/heads/main")
+        .or_else(|| git_short_sha(root, "origin/main"))
+        .unwrap_or_else(|| "(unknown)".to_string());
+    let already_synced = tag_sha != "(unknown)" && main_sha != "(unknown)" && tag_sha == main_sha;
+
     println!("=== channel=current: re-publish latest tag ===");
-    println!("  Tag:      {}", tag);
-    println!("  Source:   main HEAD (release.yml's RELEASE_REF resolves to refs/heads/main)");
+    println!("  Tag:        {}", tag);
+    println!("  Tag → SHA:  {}", tag_sha);
+    println!("  main HEAD:  {}", main_sha);
+    if already_synced {
+        println!("  Status:     tag already at main HEAD — sync_tag_to_main will be a no-op");
+    } else {
+        println!(
+            "  Status:     tag will be force-pushed: {} → {}",
+            tag_sha, main_sha
+        );
+    }
     println!();
     println!("Effect: release.yml's `sync_tag_to_main` job will force-update");
     println!(
@@ -405,7 +447,10 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
                 // Current bypasses the version pick entirely — it's
                 // handled by the early `run_current` branch above and
                 // by the `"5"` arm of the interactive prompt below.
-                Channel::Current => unreachable!(),
+                Channel::Current => unreachable!(
+                    "Channel::Current must be intercepted before version_for() — \
+                     see the early-return in run() and the \"5\" arm of the prompt"
+                ),
             }
         };
 
@@ -1102,7 +1147,9 @@ mod tests {
             Channel::Beta => format!("{}-beta.{}", base_version, next_beta),
             Channel::Rc => format!("{}-rc.{}", base_version, next_rc),
             Channel::Lts => format!("{}.{}-lts", lts_base, next_lts_patch),
-            Channel::Current => unreachable!(),
+            Channel::Current => {
+                unreachable!("test fixture should never call with Channel::Current")
+            }
         }
     }
 
