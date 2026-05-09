@@ -4082,6 +4082,26 @@ async fn download_file_to_blocks(
         }
     };
 
+    // Fail closed on non-2xx. Without this the body of a 4xx/5xx (e.g.
+    // Synapse's `M_NOT_FOUND` JSON, ~45 bytes) streams straight into
+    // `<uuid>.<ext>` and the agent then sees a "PDF" that's actually an
+    // error envelope.
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let preview: String = body.chars().take(200).collect();
+        warn!(
+            status = %status,
+            body_preview = %preview,
+            url = %url,
+            "File download returned non-success status"
+        );
+        return vec![ContentBlock::Text {
+            text: format!("[File download failed: HTTP {status} ({filename})]"),
+            provider_metadata: None,
+        }];
+    }
+
     // Fast-reject via Content-Length header when available.
     if let Some(cl) = resp.content_length() {
         if cl > max_bytes {
