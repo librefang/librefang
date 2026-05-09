@@ -277,9 +277,15 @@ issue threads.
   not push additional commits to that branch unless the maintainer
   explicitly asks for them. The right move is a follow-up PR that
   references the original.
-- **Never close a PR or issue opened by someone else.** If you believe an
-  issue is fixed or a PR is superseded, post a comment recommending
-  closure with the linking commit / PR — let a maintainer pull the trigger.
+- **Don't close PRs or issues opened by others on your own initiative.**
+  If you believe one is fixed or superseded, post a comment recommending
+  closure with the linking commit / PR — let a maintainer pull the
+  trigger. Exception: an explicit user instruction to close (e.g. "close
+  it", "close this PR") is the maintainer pulling that trigger via you;
+  execute it. Use the close comment to state the substantive reason
+  (review bugs, superseded by, scope mismatch) so the original author
+  understands what went wrong — do not attribute the close to "AI" /
+  "Claude", the reason itself is what matters.
 - **Force-push only to your own branches, only before review.** Once a
   reviewer has loaded the diff, prefer fixup commits or a follow-up PR
   over rewriting history. Force-push to `main` / `master` is blocked by
