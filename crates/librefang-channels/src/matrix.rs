@@ -22,6 +22,24 @@ const SYNC_TIMEOUT_MS: u64 = 30000;
 const MAX_MESSAGE_LEN: usize = 4096;
 const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 
+/// Convert mxc://server/mediaId -> an HTTPS download URL.
+///
+/// Uses the legacy /_matrix/media/v3/download endpoint (unauthenticated).
+/// Synapse 1.100+ supports MSC3916 authenticated /_matrix/client/v1/media/download
+/// but requires opt-in enforcement (`enable_authenticated_media: true`).
+/// Default Synapse leaves the legacy endpoint working — this is the broadest
+/// compatibility path. MSC3916 fallback is documented as a known limitation.
+pub(crate) fn mxc_to_http(mxc: &str, homeserver_url: &str) -> Option<String> {
+    let stripped = mxc.strip_prefix("mxc://")?;
+    let (server, media_id) = stripped.split_once('/')?;
+    if server.is_empty() || media_id.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{homeserver_url}/_matrix/media/v3/download/{server}/{media_id}"
+    ))
+}
+
 /// Matrix channel adapter using the Client-Server API.
 pub struct MatrixAdapter {
     /// Matrix homeserver URL (e.g., `"https://matrix.org"`).
@@ -944,5 +962,21 @@ mod tests {
             format!("{err}").to_lowercase().contains("size"),
             "err should mention size: {err}"
         );
+    }
+
+    #[test]
+    fn test_mxc_to_http_basic() {
+        let url = mxc_to_http("mxc://srv/abc", "https://hs.example.com").unwrap();
+        assert_eq!(
+            url,
+            "https://hs.example.com/_matrix/media/v3/download/srv/abc"
+        );
+    }
+
+    #[test]
+    fn test_mxc_to_http_rejects_non_mxc() {
+        assert!(mxc_to_http("https://other.example/x", "https://hs").is_none());
+        assert!(mxc_to_http("mxc://no-slash", "https://hs").is_none());
+        assert!(mxc_to_http("", "https://hs").is_none());
     }
 }
