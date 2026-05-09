@@ -358,6 +358,26 @@ fn rand_u64() -> u64 {
     h.finish()
 }
 
+/// Replace credential-bearing query parameter values with `***` so URLs are
+/// safe to log at INFO. WeCom `response_url` carries a one-shot
+/// `response_code` bearer; webhook URLs carry a long-lived `key` secret.
+/// Both are sufficient on their own to send messages on the bot's behalf.
+fn redact_credential_query_params(url: &str) -> String {
+    const REDACTED: &[&str] = &["response_code", "key"];
+    let Some((base, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+    let redacted_query = query
+        .split('&')
+        .map(|kv| match kv.split_once('=') {
+            Some((k, _)) if REDACTED.contains(&k) => format!("{k}=***"),
+            _ => kv.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{base}?{redacted_query}")
+}
+
 // ── WeComAdapter ───────────────────────────────────────────────────
 
 /// Maps user_id → latest req_id so we can use `aibot_respond_msg` for replies.
@@ -964,13 +984,24 @@ impl WeComAdapter {
                                 .to_string();
                             let chat_type = msg.get("chattype").and_then(|v| v.as_str()).unwrap_or("single");
                             let is_group = chat_type == "group";
+                            let chat_id = msg.get("chatid").and_then(|v| v.as_str()).unwrap_or("").to_string();
                             let msg_id = msg.get("msgid").and_then(|v| v.as_str()).unwrap_or("").to_string();
                             let response_url = msg.get("response_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            // Composite identity scopes per-chat for groups so the
+                            // same user across multiple rooms stays distinguishable
+                            // downstream. See the parallel block in the Callback
+                            // handler for the full rationale.
+                            let composite_id = if is_group && !chat_id.is_empty() {
+                                format!("{user_id}|{chat_id}")
+                            } else {
+                                user_id.clone()
+                            };
 
                             info!(
                                 msgtype = msgtype,
                                 from_user = %user_id,
                                 chat_type = chat_type,
+                                chat_id = %chat_id,
                                 "Received WeCom bot callback"
                             );
 
@@ -1005,7 +1036,7 @@ impl WeComAdapter {
                                         channel: ChannelType::Custom("wecom".to_string()),
                                         platform_message_id: msg_id,
                                         sender: ChannelUser {
-                                            platform_id: user_id.clone(),
+                                            platform_id: composite_id.clone(),
                                             display_name: user_id.clone(),
                                             librefang_user: None,
                                         },
@@ -1258,13 +1289,28 @@ impl ChannelAdapter for WeComAdapter {
                             .to_string();
                         let chat_type = msg.get("chattype").and_then(|v| v.as_str()).unwrap_or("single");
                         let is_group = chat_type == "group";
+                        let chat_id = msg.get("chatid").and_then(|v| v.as_str()).unwrap_or("").to_string();
                         let msg_id = msg.get("msgid").and_then(|v| v.as_str()).unwrap_or("").to_string();
                         let response_url = msg.get("response_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        // Cache + identity key. WeCom routes by `(user_id, chat_id)` —
+                        // the same user messaging the bot from multiple groups gets a
+                        // distinct response_url per group. A user-only key would let
+                        // a later group's URL overwrite an earlier group's, so the
+                        // bot's reply to the earlier message would land in the wrong
+                        // chat. Composite for groups; raw user_id for single chats
+                        // (DMs are 1:1, no per-chat ambiguity, and keeping the bare
+                        // user_id preserves existing identity downstream).
+                        let composite_id = if is_group && !chat_id.is_empty() {
+                            format!("{user_id}|{chat_id}")
+                        } else {
+                            user_id.clone()
+                        };
 
                         info!(
                             msgtype = msgtype,
                             from_user = %user_id,
                             chat_type = chat_type,
+                            chat_id = %chat_id,
                             "Received WeCom bot callback"
                         );
 
@@ -1299,7 +1345,10 @@ impl ChannelAdapter for WeComAdapter {
                                     channel: ChannelType::Custom("wecom".to_string()),
                                     platform_message_id: msg_id,
                                     sender: ChannelUser {
-                                        platform_id: user_id.clone(),
+                                        // Composite identity scopes per-chat for groups
+                                        // so downstream routing (cache, sessions) can
+                                        // distinguish the same user across rooms.
+                                        platform_id: composite_id.clone(),
                                         display_name: user_id.clone(),
                                         librefang_user: None,
                                     },
@@ -1317,13 +1366,15 @@ impl ChannelAdapter for WeComAdapter {
                                         "wecom_response_url".to_string(),
                                         serde_json::json!(response_url),
                                     );
-                                    // cache the per-user response_url so
-                                    // the `send()` path (which only sees `&ChannelUser`,
+                                    // Cache the per-(user, chat) response_url so the
+                                    // `send()` path (which only sees `&ChannelUser`,
                                     // not the originating `ChannelMessage`) can quote
                                     // the exact one-time URL the platform delivered.
+                                    // Key matches `sender.platform_id` so the lookup
+                                    // is symmetrical.
                                     let mut guard = response_urls.write().await;
                                     guard.insert(
-                                        user_id.clone(),
+                                        composite_id.clone(),
                                         (response_url.clone(), std::time::Instant::now()),
                                     );
                                 }
@@ -1490,7 +1541,7 @@ impl ChannelAdapter for WeComAdapter {
                     });
 
                 if let Some(url) = response_url {
-                    info!(url = %url, "WeCom bot replying via response_url");
+                    info!(url = %redact_credential_query_params(&url), "WeCom bot replying via response_url");
                     // Use response_url (one-time, per-message)
                     for chunk in split_message(&text, MAX_MESSAGE_LEN) {
                         let payload = serde_json::json!({
@@ -1523,7 +1574,7 @@ impl ChannelAdapter for WeComAdapter {
                         .as_deref()
                         .unwrap_or("https://qyapi.weixin.qq.com/cgi-bin/webhook/send");
                     let url = format!("{}?key={}", base, key);
-                    info!(url = %url, "WeCom bot replying via webhook key");
+                    info!(url = %redact_credential_query_params(&url), "WeCom bot replying via webhook key");
                     for chunk in split_message(&text, MAX_MESSAGE_LEN) {
                         let payload = serde_json::json!({
                             "msgtype": "text",
@@ -2057,6 +2108,88 @@ mod tests {
             response_url_cache_size(&adapter).await,
             0,
             "expired entry must be removed on read"
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_response_url_is_chat_isolated_in_groups() {
+        // Regression: pre-fix the cache keyed on `user_id` only, so the
+        // same user pinging the bot from two different groups would have
+        // the second URL silently overwrite the first. The bot's reply to
+        // the first message would then land in the wrong group.
+        // Composite `user_id|chat_id` keys keep entries independent.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = WeComAdapter::new_callback(
+            "bot-id".to_string(),
+            "secret".to_string(),
+            8458,
+            None,
+            None,
+        )
+        .with_webhook_base(server.uri());
+        seed_webhook_key(&adapter, "WEBHOOK-KEY-4").await;
+
+        // Two composite keys for the same user across two groups. Only
+        // the chat-A entry should be consumed when we send to that
+        // composite identity; the chat-B entry stays put.
+        let url_a = format!("{}/group-a/", server.uri());
+        let url_b = format!("{}/group-b/", server.uri());
+        let now = std::time::Instant::now();
+        seed_response_url(&adapter, "user-X|chat-A", &url_a, now).await;
+        seed_response_url(&adapter, "user-X|chat-B", &url_b, now).await;
+        assert_eq!(
+            response_url_cache_size(&adapter).await,
+            2,
+            "both composite keys must coexist before send",
+        );
+
+        adapter
+            .send(
+                &wecom_user("user-X|chat-A"),
+                ChannelContent::Text("hi".into()),
+            )
+            .await
+            .expect("send must hit url_a");
+
+        assert_eq!(
+            response_url_cache_size(&adapter).await,
+            1,
+            "send must consume only the addressed chat's entry",
+        );
+    }
+
+    #[test]
+    fn redact_credential_query_params_strips_response_code_and_key() {
+        let url = "https://qyapi.weixin.qq.com/cgi-bin/aibot/response?response_code=SECRET-XYZ&other=keep";
+        let r = redact_credential_query_params(url);
+        assert!(
+            !r.contains("SECRET-XYZ"),
+            "response_code value must be redacted"
+        );
+        assert!(
+            r.contains("response_code=***"),
+            "redacted placeholder expected"
+        );
+        assert!(
+            r.contains("other=keep"),
+            "non-secret params must be preserved"
+        );
+
+        let webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=AAAA-BBBB-CCCC";
+        let rw = redact_credential_query_params(webhook);
+        assert!(!rw.contains("AAAA"), "webhook key value must be redacted");
+        assert!(rw.contains("key=***"), "redacted webhook key expected");
+
+        // No query string: pass-through.
+        assert_eq!(
+            redact_credential_query_params("https://example.com/path"),
+            "https://example.com/path"
         );
     }
 }
