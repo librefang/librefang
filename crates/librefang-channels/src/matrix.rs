@@ -103,8 +103,8 @@ impl MatrixAdapter {
             "{}/_matrix/client/v3/rooms/{}/send/{}/{}",
             self.homeserver_url,
             urlencoding::encode(room_id),
-            event_type,
-            txn_id,
+            urlencoding::encode(event_type),
+            txn_id
         );
         let resp = self
             .client
@@ -119,11 +119,11 @@ impl MatrixAdapter {
             return Err(format!("Matrix {event_type} failed {status}: {text}").into());
         }
         let v: serde_json::Value = resp.json().await?;
-        v["event_id"]
+        let event_id = v["event_id"]
             .as_str()
             .ok_or_else(|| "Matrix response missing event_id".to_string())?
-            .to_string()
-            .pipe(Ok)
+            .to_string();
+        Ok(event_id)
     }
 
     /// Send a text message to a Matrix room. Splits long messages into chunks
@@ -351,11 +351,10 @@ impl ChannelAdapter for MatrixAdapter {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
-                let _ = self.api_send_message(&user.platform_id, &text).await?;
+                self.api_send_message(&user.platform_id, &text).await?;
             }
             _ => {
-                let _ = self
-                    .api_send_message(&user.platform_id, "(Unsupported content type)")
+                self.api_send_message(&user.platform_id, "(Unsupported content type)")
                     .await?;
             }
         }
@@ -397,13 +396,6 @@ impl ChannelAdapter for MatrixAdapter {
 pub fn calculate_backoff(current: Duration, max: Duration) -> Duration {
     (current * 2).min(max)
 }
-
-trait Pipe: Sized {
-    fn pipe<T, F: FnOnce(Self) -> T>(self, f: F) -> T {
-        f(self)
-    }
-}
-impl<T> Pipe for T {}
 
 #[cfg(test)]
 mod tests {
@@ -665,12 +657,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_api_send_event_returns_event_id() {
-        use wiremock::matchers::{method, path_regex};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
             .and(path_regex(
-                r"^/_matrix/client/v3/rooms/.+/send/m\.room\.message/.+$",
+                r"^/_matrix/client/v3/rooms/%21room%3Atest/send/m\.room\.message/.+$",
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "event_id": "$abc:test"
@@ -688,8 +678,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_api_send_event_url_encodes_room_id() {
-        use wiremock::matchers::{method, path_regex};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
         // %23 is "#", %3A is ":". Match the encoded form in the URL path.
         Mock::given(method("PUT"))
@@ -711,8 +699,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_api_send_event_propagates_http_error() {
-        use wiremock::matchers::method;
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
             .respond_with(
