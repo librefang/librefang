@@ -21,8 +21,15 @@ use zeroize::Zeroizing;
 const SYNC_TIMEOUT_MS: u64 = 30000;
 const MAX_MESSAGE_LEN: usize = 4096;
 const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
-const STREAM_EDIT_INTERVAL_MS: u64 = 1500;
-const STREAM_EDIT_CHAR_BUDGET: usize = 256;
+// Tightened from 1500ms / 256 chars after the Synapse rate-limit lift
+// (rc_message: 5/s, burst 60). The previous values produced "first +
+// final only" cadence on typical 2-3s responses (~150 chars/sec). At
+// 700ms / 96 chars a 3s response yields ~4-5 visible edits, which
+// reads as actual streaming in Element. Telegram's equivalent is
+// 1000ms with no char budget; we run hotter because matrix /sync
+// resolution is finer.
+const STREAM_EDIT_INTERVAL_MS: u64 = 700;
+const STREAM_EDIT_CHAR_BUDGET: usize = 96;
 /// Maximum number of per-(room, target_event) lifecycle reaction entries to track.
 const PHASE_REACTIONS_CAPACITY: usize = 1024;
 
@@ -2068,11 +2075,11 @@ mod tests {
         // buffer always flushes immediately so the `…` placeholder is
         // replaced with real content fast (parity with telegram's
         // first-token send, fixes the tool-progress streaming gap where
-        // short markers like `\n\n🔧 X\n\n` never reach the 256-char
-        // budget). The remaining 9 deltas of "dN" total ~18 chars, well
-        // under STREAM_EDIT_CHAR_BUDGET (256) and STREAM_EDIT_INTERVAL_MS
-        // (1500), so they fold into the single final edit. → exactly
-        // 3 PUTs: placeholder + first-flush + final.
+        // short markers like `\n\n🔧 X\n\n` never reach the char budget).
+        // The remaining 9 deltas of "dN" total ~18 chars, well under
+        // STREAM_EDIT_CHAR_BUDGET (96) and the 700ms interval, so they
+        // fold into the single final edit. → exactly 3 PUTs:
+        // placeholder + first-flush + final.
         assert!(calls >= 3, "expected at least 3 PUTs, got {calls}");
         assert!(
             calls <= 3,
