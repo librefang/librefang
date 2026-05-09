@@ -16,6 +16,25 @@
 //! — so they're not seen by this buffer. When the media path is gated in
 //! a future PR, captions and `Vec<ContentBlock>` extras can be added back
 //! to `HistoryEntry`.
+//!
+//! # v1 limitation: cross-agent same-group key collapse
+//!
+//! Buckets are keyed `(channel_type, group_jid)` only — agent identity
+//! is **not** part of the key. If the same group has more than one
+//! addressable agent (multi-agent deployment, broadcast routing), all
+//! agents share one bucket: a drain triggered by Agent A consumes the
+//! entries that Agent B's next addressed turn would have observed.
+//!
+//! Why this is acceptable for v1:
+//! - Single-agent groups (the common shape today) are unaffected.
+//! - The buffer is currently log-only; no behaviour depends on bucket
+//!   ownership until the kernel-side prompt enrichment lands.
+//!
+//! When the enrichment PR adds prompt-side consumption, the key needs
+//! to extend to `(agent_id, channel_type, group_jid)` — or the drain
+//! needs to clone (not consume) entries so multiple agents on the same
+//! group all see the prior context. Tracked as a follow-up; revisit at
+//! enrichment time.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
@@ -27,14 +46,48 @@ use tokio::sync::RwLock;
 /// `BridgeManager` construction.
 static GLOBAL_BUFFER: OnceLock<Arc<GroupHistoryBuffer>> = OnceLock::new();
 
+/// Eviction-task tick. 5 minutes balances bucket churn (evict TTL-expired
+/// entries promptly enough to bound memory) with wakeup cost (one short
+/// async pass over the buckets every five minutes is cheap).
+const EVICTION_TICK: Duration = Duration::from_secs(5 * 60);
+
 /// Install (or fetch) the process-wide buffer. The closure runs only on
 /// the first call — second-and-later constructions reuse the existing
 /// instance without allocating.
+///
+/// On first install, a process-lifetime evictor task is spawned that
+/// drives `evict_expired()` every `EVICTION_TICK`. The task lifetime is
+/// intentionally bound to the buffer (singleton, never dropped), not to
+/// any caller (e.g. a `BridgeManager`): hot-reload can construct a new
+/// `BridgeManager` that observes the existing singleton — if the
+/// evictor's lifetime were tied to the previous bridge's shutdown
+/// signal, it would exit on the first reload and the singleton would
+/// accumulate entries with no TTL sweep until process exit.
+///
+/// The task is best-effort cleanup: on process shutdown the OS reaps it,
+/// no graceful drain is needed (evict_expired is idempotent and
+/// allocation-free in steady state).
 pub fn install_global<F>(default: F) -> Arc<GroupHistoryBuffer>
 where
     F: FnOnce() -> Arc<GroupHistoryBuffer>,
 {
-    GLOBAL_BUFFER.get_or_init(default).clone()
+    let buffer = GLOBAL_BUFFER.get_or_init(|| {
+        let buf = default();
+        let evictor_buf = Arc::clone(&buf);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(EVICTION_TICK);
+            // tokio::interval emits immediately on the first tick; skip
+            // it so the first sweep happens after EVICTION_TICK rather
+            // than at install time.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                evictor_buf.evict_expired().await;
+            }
+        });
+        buf
+    });
+    buffer.clone()
 }
 
 /// Read the process-wide buffer if installed. `None` in unit tests that

@@ -1153,34 +1153,15 @@ impl BridgeManager {
 
         // 24h retention only fires when something accesses a bucket;
         // groups that go quiet without ever being addressed need an
-        // active ticker to free memory. Once-gated so hot-reload doesn't
-        // spawn a second evictor.
-        {
-            static HISTORY_ONCE: std::sync::Once = std::sync::Once::new();
-            let mut spawned = None;
-            HISTORY_ONCE.call_once(|| {
-                let buffer = crate::group_history::install_global(|| {
-                    Arc::new(crate::group_history::GroupHistoryBuffer::with_default_retention())
-                });
-                let mut shutdown = self.shutdown_rx.clone();
-                let handle = tokio::spawn(async move {
-                    let mut tick = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
-                    tick.tick().await; // tokio::interval emits immediately on first tick
-                    loop {
-                        tokio::select! {
-                            _ = tick.tick() => buffer.evict_expired().await,
-                            _ = shutdown.changed() => {
-                                if *shutdown.borrow() { break; }
-                            }
-                        }
-                    }
-                });
-                spawned = Some(handle);
-            });
-            if let Some(handle) = spawned {
-                self.tasks.push(handle);
-            }
-        }
+        // active ticker to free memory. The evictor is owned by the
+        // process-wide buffer (see `crate::group_history::install_global`),
+        // not by any one BridgeManager — binding its lifetime to a single
+        // bridge would orphan the buffer's TTL on hot-reload (the second
+        // BridgeManager would skip the spawn, leaving the singleton
+        // accumulating entries with no ticker).
+        crate::group_history::install_global(|| {
+            Arc::new(crate::group_history::GroupHistoryBuffer::with_default_retention())
+        });
 
         // Prefer shared webhook routes over adapter-managed HTTP servers.
         // If the adapter provides webhook routes, collect them for mounting
@@ -2613,24 +2594,15 @@ async fn dispatch_message(
                 }
                 return;
             }
-            // Gating pass: drain the buffer for this group so the
-            // accumulated text context is consumed exactly once. The drained
-            // entries are logged structurally so downstream observability
-            // can correlate the agent's response to prior context. The
-            // kernel-side prompt enrichment that consumes `drained` is the
-            // follow-up PR — currently we just log the count.
-            if let Some(buffer) = crate::group_history::global() {
-                let key = crate::group_history::group_key(ct_str, &group_id);
-                if let Some(drained) = buffer.drain(&key).await {
-                    info!(
-                        event = "group_history_drained",
-                        channel = ct_str,
-                        group = %group_id,
-                        entries = drained.len(),
-                        "drained prior group entries on gating pass",
-                    );
-                }
-            }
+            // Gating pass: the drain is deferred to the dispatch site
+            // (just before the journal record) so per-channel rate-limit,
+            // per-user rate-limit, reply-intent precheck, command-policy,
+            // thread-ownership, RBAC, and auto-reply early-returns can
+            // each take their turn first. Draining here would empty the
+            // buffer even when one of those gates suppresses the message,
+            // erasing the very context the next addressed turn was meant
+            // to recover. See `dispatch_message` near the journal-record
+            // call for the actual drain.
             // Reply-intent precheck: lightweight LLM classification for group
             // messages when group_policy is "all" and precheck is enabled.
             // Skipped for mentions and commands (already filtered above).
@@ -3539,6 +3511,30 @@ async fn dispatch_message(
             )
             .await;
         return;
+    }
+
+    // --- Group-history drain (gating pass survived all early-return gates) ---
+    //
+    // Done here, after rate-limit / reply-intent / command-policy /
+    // thread-ownership / RBAC / auto-reply have all let the message
+    // through — earlier in the gating block we'd erase the buffer even
+    // when one of these suppressed the dispatch, costing the very
+    // context the next addressed turn was meant to recover. The drained
+    // count is log-only in v1; the kernel-side prompt enrichment that
+    // consumes `drained` is the follow-up PR.
+    if message.is_group {
+        if let Some(buffer) = crate::group_history::global() {
+            let key = crate::group_history::group_key(ct_str, &message.sender.platform_id);
+            if let Some(drained) = buffer.drain(&key).await {
+                info!(
+                    event = "group_history_drained",
+                    channel = ct_str,
+                    group = %message.sender.platform_id,
+                    entries = drained.len(),
+                    "drained prior group entries on gating pass",
+                );
+            }
+        }
     }
 
     // --- Message journal: record before dispatch for crash recovery ---
