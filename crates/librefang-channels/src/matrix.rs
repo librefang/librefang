@@ -264,6 +264,9 @@ pub struct MatrixAdapter {
     /// the next phase fires with remove_previous=true. Insertion-ordered;
     /// bounded at PHASE_REACTIONS_CAPACITY entries (oldest evicted).
     pub(crate) phase_reactions: PhaseReactionCache,
+    /// Rooms we've already warned about being E2EE.
+    /// First encrypted event in each room emits a WARN; subsequent ones are silent.
+    pub(crate) e2ee_warned_rooms: Arc<RwLock<std::collections::HashSet<String>>>,
 }
 
 impl MatrixAdapter {
@@ -290,6 +293,7 @@ impl MatrixAdapter {
             shutdown_rx,
             since_token: Arc::new(RwLock::new(None)),
             phase_reactions: Arc::new(RwLock::new(std::collections::VecDeque::new())),
+            e2ee_warned_rooms: Arc::new(RwLock::new(std::collections::HashSet::new())),
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -418,6 +422,14 @@ impl MatrixAdapter {
             w.pop_front();
         }
         w.push_back((key, reaction_id));
+    }
+
+    /// Returns true the first time this room is observed as E2EE.
+    /// Caller should emit a `warn!` log when it returns true.
+    #[allow(dead_code)]
+    pub(crate) async fn warn_e2ee_once_check(&self, room_id: &str) -> bool {
+        let mut w = self.e2ee_warned_rooms.write().await;
+        w.insert(room_id.to_string())
     }
 
     /// Upload bytes to Matrix media repo. Returns mxc:// URI.
@@ -590,6 +602,7 @@ impl ChannelAdapter for MatrixAdapter {
         let allowed_rooms = self.allowed_rooms.clone();
         let client = self.client.clone();
         let since_token = Arc::clone(&self.since_token);
+        let e2ee_warned_rooms = Arc::clone(&self.e2ee_warned_rooms);
         let mut shutdown_rx = self.shutdown_rx.clone();
         let account_id = self.account_id.clone();
         let initial_backoff = self.initial_backoff;
@@ -665,6 +678,14 @@ impl ChannelAdapter for MatrixAdapter {
                         if let Some(events) = room_data["timeline"]["events"].as_array() {
                             for event in events {
                                 let event_type = event["type"].as_str().unwrap_or("");
+                                if event_type == "m.room.encrypted" {
+                                    let mut w = e2ee_warned_rooms.write().await;
+                                    if w.insert(room_id.clone()) {
+                                        drop(w);
+                                        warn!("Matrix room {room_id} is E2EE; encrypted events ignored (E2EE not yet supported)");
+                                    }
+                                    continue;
+                                }
                                 if event_type != "m.room.message" {
                                     continue;
                                 }
@@ -1124,6 +1145,18 @@ mod tests {
         body_json, body_partial_json, header, method, path_regex, query_param,
     };
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_e2ee_event_emits_warn_once_per_room() {
+        let adapter = make_adapter("http://unused".to_string());
+        // First call: room not yet in set, returns true (caller should warn).
+        let r1a = adapter.warn_e2ee_once_check("!room1:test").await;
+        let r1b = adapter.warn_e2ee_once_check("!room1:test").await;
+        let r2 = adapter.warn_e2ee_once_check("!room2:test").await;
+        assert!(r1a, "first observation in room1 must signal warn");
+        assert!(!r1b, "second observation in room1 must be silent");
+        assert!(r2, "first observation in a new room must warn");
+    }
 
     fn make_adapter(homeserver_url: String) -> MatrixAdapter {
         MatrixAdapter::new(
