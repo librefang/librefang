@@ -147,6 +147,7 @@ regex-lite = { workspace = true }
 smallvec = { workspace = true }
 webpki-roots = { workspace = true }
 rustls-native-certs = { workspace = true }
+urlencoding = "2"
 
 # Channel-specific optional dependencies
 rsa = { workspace = true, optional = true }

@@ -88,41 +88,65 @@ impl MatrixAdapter {
         self
     }
 
-    /// Send a text message to a Matrix room.
+    /// Send any client event to a Matrix room. Returns the server-assigned event_id.
+    ///
+    /// `event_type` is the Matrix event type, e.g. "m.room.message" or "m.reaction".
+    /// `body` is the event content JSON.
+    async fn api_send_event(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        body: &serde_json::Value,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let txn_id = uuid::Uuid::new_v4().to_string();
+        let url = format!(
+            "{}/_matrix/client/v3/rooms/{}/send/{}/{}",
+            self.homeserver_url,
+            urlencoding::encode(room_id),
+            event_type,
+            txn_id,
+        );
+        let resp = self
+            .client
+            .put(&url)
+            .bearer_auth(&*self.access_token)
+            .json(body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Matrix {event_type} failed {status}: {text}").into());
+        }
+        let v: serde_json::Value = resp.json().await?;
+        v["event_id"]
+            .as_str()
+            .ok_or_else(|| "Matrix response missing event_id".to_string())?
+            .to_string()
+            .pipe(Ok)
+    }
+
+    /// Send a text message to a Matrix room. Splits long messages into chunks
+    /// and sends each as a separate `m.room.message` event. Returns the
+    /// event_ids in order; the last one is the message useful for editing/redacting.
     async fn api_send_message(
         &self,
         room_id: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let txn_id = uuid::Uuid::new_v4().to_string();
-        let url = format!(
-            "{}/_matrix/client/v3/rooms/{}/send/m.room.message/{}",
-            self.homeserver_url, room_id, txn_id
-        );
-
+    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
         let chunks = crate::types::split_message(text, MAX_MESSAGE_LEN);
+        let mut event_ids = Vec::with_capacity(chunks.len());
         for chunk in chunks {
             let body = serde_json::json!({
                 "msgtype": "m.text",
                 "body": chunk,
             });
-
-            let resp = self
-                .client
-                .put(&url)
-                .bearer_auth(&*self.access_token)
-                .json(&body)
-                .send()
+            let id = self
+                .api_send_event(room_id, "m.room.message", &body)
                 .await?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(format!("Matrix API error {status}: {body}").into());
-            }
+            event_ids.push(id);
         }
-
-        Ok(())
+        Ok(event_ids)
     }
 
     /// Validate credentials by calling /whoami.
@@ -327,10 +351,11 @@ impl ChannelAdapter for MatrixAdapter {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
-                self.api_send_message(&user.platform_id, &text).await?;
+                let _ = self.api_send_message(&user.platform_id, &text).await?;
             }
             _ => {
-                self.api_send_message(&user.platform_id, "(Unsupported content type)")
+                let _ = self
+                    .api_send_message(&user.platform_id, "(Unsupported content type)")
                     .await?;
             }
         }
@@ -372,6 +397,13 @@ impl ChannelAdapter for MatrixAdapter {
 pub fn calculate_backoff(current: Duration, max: Duration) -> Duration {
     (current * 2).min(max)
 }
+
+trait Pipe: Sized {
+    fn pipe<T, F: FnOnce(Self) -> T>(self, f: F) -> T {
+        f(self)
+    }
+}
+impl<T> Pipe for T {}
 
 #[cfg(test)]
 mod tests {
@@ -422,7 +454,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
             .and(path_regex(
-                r"^/_matrix/client/v3/rooms/!room:example\.org/send/m\.room\.message/[0-9a-fA-F-]{36}$",
+                r"^/_matrix/client/v3/rooms/%21room%3Aexample\.org/send/m\.room\.message/[0-9a-fA-F-]{36}$",
             ))
             .and(header("Authorization", "Bearer secret-access-token"))
             .and(body_json(serde_json::json!({
@@ -456,7 +488,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
             .and(path_regex(
-                r"^/_matrix/client/v3/rooms/!r:example\.org/send/m\.room\.message/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                r"^/_matrix/client/v3/rooms/%21r%3Aexample\.org/send/m\.room\.message/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "event_id": "$evt",
@@ -482,7 +514,7 @@ mod tests {
         let server2 = MockServer::start().await;
         Mock::given(method("PUT"))
             .and(path_regex(
-                r"^/_matrix/client/v3/rooms/!r:example\.org/send/m\.room\.message/.+$",
+                r"^/_matrix/client/v3/rooms/%21r%3Aexample\.org/send/m\.room\.message/.+$",
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "event_id": "$e",
@@ -544,7 +576,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
             .and(path_regex(
-                r"^/_matrix/client/v3/rooms/!r:example\.org/send/m\.room\.message/.+$",
+                r"^/_matrix/client/v3/rooms/%21r%3Aexample\.org/send/m\.room\.message/.+$",
             ))
             .respond_with(
                 ResponseTemplate::new(429)
@@ -629,6 +661,77 @@ mod tests {
         let initial = Duration::from_secs(1);
         let max = Duration::from_secs(60);
         assert!(initial < max);
+    }
+
+    #[tokio::test]
+    async fn test_api_send_event_returns_event_id() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/.+/send/m\.room\.message/.+$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$abc:test"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let body = serde_json::json!({"msgtype":"m.text","body":"hi"});
+        let id = adapter
+            .api_send_event("!room:test", "m.room.message", &body)
+            .await
+            .expect("send must succeed");
+        assert_eq!(id, "$abc:test");
+    }
+
+    #[tokio::test]
+    async fn test_api_send_event_url_encodes_room_id() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        // %23 is "#", %3A is ":". Match the encoded form in the URL path.
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/%23alias%3Atest/send/m\.room\.message/.+$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$x:test"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let body = serde_json::json!({"msgtype":"m.text","body":"hi"});
+        adapter
+            .api_send_event("#alias:test", "m.room.message", &body)
+            .await
+            .expect("aliased room must url-encode");
+    }
+
+    #[tokio::test]
+    async fn test_api_send_event_propagates_http_error() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_string("{\"errcode\":\"M_FORBIDDEN\"}"),
+            )
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let body = serde_json::json!({"msgtype":"m.text","body":"hi"});
+        let err = adapter
+            .api_send_event("!room:test", "m.room.message", &body)
+            .await
+            .expect_err("403 must surface as Err");
+        let msg = format!("{err}");
+        assert!(msg.contains("403"), "err should include status: {msg}");
+        assert!(
+            msg.contains("M_FORBIDDEN"),
+            "err should include body: {msg}"
+        );
     }
 
     #[test]
