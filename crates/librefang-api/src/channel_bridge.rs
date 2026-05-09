@@ -2309,18 +2309,22 @@ async fn redispatch_journal_entry(
         },
     };
 
-    // Claim the entry by flipping it to Processing before the slow LLM
-    // call. Without this, a second ticker tick that fires while
+    // Atomically claim the entry by flipping it to Processing before the
+    // slow LLM call. Without CAS, a second ticker tick that fires while
     // send_message is still in flight would observe the original Deferred
     // status and dispatch the same entry concurrently — double LLM bill,
-    // double user-facing reply.
+    // double user-facing reply. Two concurrent recovery snapshots (the
+    // boot-time `recoverable_entries` sweep and the periodic
+    // `due_deferred_entries` ticker) hit the same race, so the claim has
+    // to be CAS, not unconditional `update_status`.
     if let Some(j) = journal {
-        j.update_status(
-            &entry.message_id,
-            librefang_channels::message_journal::JournalStatus::Processing,
-            None,
-        )
-        .await;
+        if !j.claim(&entry.message_id).await {
+            info!(
+                id = %entry.message_id,
+                "Skip re-dispatch: claim already won by another snapshot"
+            );
+            return;
+        }
     }
 
     // Prefix tells the agent why this message is arriving late so it can

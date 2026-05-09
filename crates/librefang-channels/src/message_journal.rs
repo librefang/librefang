@@ -303,7 +303,10 @@ impl MessageJournal {
             .map(|e| e.message_id.clone())
             .collect();
         for id in &stale_ids {
-            debug!(id, "Discarding stale journal entry (>1h old)");
+            debug!(
+                id,
+                "Discarding stale journal entry (older than MAX_RECOVERY_AGE)"
+            );
             inner.pending.remove(id);
         }
         inner
@@ -333,7 +336,10 @@ impl MessageJournal {
             .map(|e| e.message_id.clone())
             .collect();
         for id in &stale_ids {
-            debug!(id, "Discarding stale journal entry (>1h old)");
+            debug!(
+                id,
+                "Discarding stale journal entry (older than MAX_RECOVERY_AGE)"
+            );
             inner.pending.remove(id);
         }
         inner
@@ -424,15 +430,101 @@ impl MessageJournal {
         }
     }
 
-    /// Maximum age of a message to be eligible for recovery (1 hour).
-    const MAX_RECOVERY_AGE: chrono::TimeDelta = match chrono::TimeDelta::try_hours(1) {
+    /// Atomically claim an entry for re-dispatch by transitioning its status
+    /// from `Pending` or `Deferred` to `Processing`. Returns `true` if the
+    /// claim was won; `false` if another caller already moved the entry
+    /// past `Pending`/`Deferred` (or the entry is gone).
+    ///
+    /// Race this guards against: two concurrent snapshots — the boot-time
+    /// initial-recovery sweep (`recoverable_entries`) and the periodic
+    /// retry ticker (`due_deferred_entries`) — can each see the same
+    /// `Deferred` entry whose `next_retry_after` has elapsed if the
+    /// initial-recovery dispatch is still in flight when the first ticker
+    /// tick fires. Without CAS, both call sites then dispatch the same
+    /// `message_id`, costing a double LLM bill and producing two
+    /// user-visible replies. With CAS, the second caller observes
+    /// `Processing` and skips the dispatch.
+    ///
+    /// Disk-then-memory ordering matches `update_status`: the proposed
+    /// entry is serialized and written *under* the inner lock; in-memory
+    /// state advances only after the disk write succeeds. A failed disk
+    /// write returns `false` so the caller does not act on a state the
+    /// journal cannot persist.
+    pub async fn claim(&self, message_id: &str) -> bool {
+        let mut inner = self.inner.lock().await;
+        let path = inner.path.clone();
+
+        let (line, updated) = {
+            let entry = match inner.pending.get(message_id) {
+                Some(e) => e,
+                None => return false,
+            };
+            // Reject the claim if another caller already advanced this
+            // entry. `Completed` / `Failed` are normally already removed
+            // from `pending` (so the `None` branch above catches them),
+            // but match exhaustively in case a future code path keeps
+            // them around.
+            match entry.status {
+                JournalStatus::Pending | JournalStatus::Deferred => {}
+                JournalStatus::Processing | JournalStatus::Completed | JournalStatus::Failed => {
+                    return false
+                }
+            }
+            let mut updated = entry.clone();
+            updated.status = JournalStatus::Processing;
+            updated.updated_at = Utc::now();
+            // Keep `next_retry_after` so that a later defer() that
+            // observes the still-set deadline can use it as the
+            // round-trip start without a clock query.
+            let line = match serde_json::to_string(&updated) {
+                Ok(l) => l,
+                Err(e) => {
+                    error!(error = %e, id = message_id, "Failed to serialize claim update");
+                    return false;
+                }
+            };
+            (line, updated)
+        };
+
+        let write_result =
+            tokio::task::spawn_blocking(move || Self::write_line_to_path(&path, &line)).await;
+        match write_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!(error = %e, id = message_id, "Failed to write claim update");
+                return false;
+            }
+            Err(e) => {
+                error!(error = %e, id = message_id, "spawn_blocking panicked claiming journal");
+                return false;
+            }
+        }
+
+        if let Some(entry) = inner.pending.get_mut(message_id) {
+            *entry = updated;
+        }
+        true
+    }
+
+    /// Maximum age of a message to be eligible for recovery.
+    ///
+    /// Sized to cover the longest realistic provider quota window: Claude.ai
+    /// rate-limits cycle on a 5-hour window, so a Deferred entry that hits
+    /// the start of a window must survive until the window resets without
+    /// being silently swept. 6 hours leaves margin for clock skew and
+    /// short overlap periods. Pre-PR this was 1 hour, which silently
+    /// dropped messages waiting on a 5h Claude.ai window — pre-#4754
+    /// behaviour was an immediate "rate limited" reply, so the 1h sweep
+    /// represented a UX regression for long windows. Bumping the window
+    /// keeps the deferred-retry contract honest end-to-end.
+    const MAX_RECOVERY_AGE: chrono::TimeDelta = match chrono::TimeDelta::try_hours(6) {
         Some(d) => d,
         None => unreachable!(),
     };
 
     /// Get all entries that need (re-)processing.
     /// Returns entries with status Pending or Processing (from a previous crash).
-    /// Skips entries older than 1 hour — they are too stale to recover.
+    /// Skips entries older than `MAX_RECOVERY_AGE` — they are too stale to recover.
     pub async fn pending_entries(&self) -> Vec<JournalEntry> {
         let now = Utc::now();
         let mut inner = self.inner.lock().await;
@@ -444,7 +536,10 @@ impl MessageJournal {
             .map(|e| e.message_id.clone())
             .collect();
         for id in &stale_ids {
-            debug!(id, "Discarding stale journal entry (>1h old)");
+            debug!(
+                id,
+                "Discarding stale journal entry (older than MAX_RECOVERY_AGE)"
+            );
             inner.pending.remove(id);
         }
         inner
@@ -947,5 +1042,69 @@ mod tests {
             assert_eq!(pending[0].message_id, "msg-1");
             assert_eq!(pending[0].status, JournalStatus::Processing);
         }
+    }
+
+    #[tokio::test]
+    async fn claim_rejects_already_claimed_entry() {
+        // Sequential proof of CAS semantics: the second claim observes
+        // Processing and bails. Concurrent variant below.
+        let dir = TempDir::new().unwrap();
+        let journal = MessageJournal::open(dir.path()).unwrap();
+        let mut e = test_entry("msg-1");
+        e.status = JournalStatus::Deferred;
+        e.next_retry_after = Some(Utc::now() - chrono::Duration::seconds(5));
+        journal.record(e).await;
+
+        assert!(journal.claim("msg-1").await, "first claim must win");
+        assert!(
+            !journal.claim("msg-1").await,
+            "second claim against the same entry must lose"
+        );
+
+        // Entry is now Processing in-memory; status reflects the won claim.
+        let pending = journal.pending_entries().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].status, JournalStatus::Processing);
+    }
+
+    #[tokio::test]
+    async fn claim_returns_false_for_unknown_message() {
+        let dir = TempDir::new().unwrap();
+        let journal = MessageJournal::open(dir.path()).unwrap();
+        assert!(
+            !journal.claim("does-not-exist").await,
+            "claiming a missing message must return false, not panic"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_claims_resolve_to_exactly_one_winner() {
+        // Multi-thread runtime + spawned tasks pin true contention. The
+        // single-threaded sequential variant above proves CAS semantics
+        // in isolation; this one proves the inner mutex serializes the
+        // claim race correctly under load.
+        let dir = TempDir::new().unwrap();
+        let journal = Arc::new(MessageJournal::open(dir.path()).unwrap());
+        let mut e = test_entry("msg-1");
+        e.status = JournalStatus::Deferred;
+        e.next_retry_after = Some(Utc::now() - chrono::Duration::seconds(5));
+        journal.record(e).await;
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let j = Arc::clone(&journal);
+            handles.push(tokio::spawn(async move { j.claim("msg-1").await }));
+        }
+
+        let mut wins = 0usize;
+        for h in handles {
+            if h.await.unwrap() {
+                wins += 1;
+            }
+        }
+        assert_eq!(
+            wins, 1,
+            "exactly one of 8 concurrent claims must win; the rest must observe Processing"
+        );
     }
 }
