@@ -4,19 +4,21 @@
 
 The very first action in any task that will edit files **must** be:
 ```bash
-git rev-parse --git-dir
+test -d "$(git rev-parse --show-toplevel)/.git" && echo main || echo linked
 ```
-The output's shape tells you which worktree you're in:
-
-- `.git` (a plain directory) → **main worktree**. **Stop.** Run
+- prints `main` → you are in the **main worktree**. **Stop.** Run
   `git worktree add /tmp/librefang-<feature> -b <feature-branch> origin/main`
   and continue all work from that path.
-- `gitdir: /path/to/main/.git/worktrees/<name>` (a pointer file) →
-  **linked worktree**. Continue.
+- prints `linked` → you are in a **linked worktree**. Continue.
 
-Do not rely on `pwd` matching any specific path — every developer's main
-clone lives somewhere different. The `git rev-parse --git-dir` output
-shape is the only reliable signal.
+Why this test: git stores the main worktree's `.git` as a directory,
+and a linked worktree's `.git` as a small text file pointing at
+`<main>/.git/worktrees/<name>`. So `[ -d <toplevel>/.git ]` is true
+exactly in the main worktree. This is the same check
+`.claude/hooks/forbid-main-worktree.sh` uses internally; do not
+substitute `git rev-parse --git-dir` (its output is path-shape and
+varies with cwd) or path-matching against `pwd` (every developer's
+clone lives somewhere different).
 
 The `forbid-main-worktree` hook (`.claude/hooks/forbid-main-worktree.sh`)
 will block edits and mutating git commands targeted at the main tree if
@@ -311,13 +313,16 @@ issue threads.
 CI is shared infrastructure and frequently slow. Polling it from an AI
 session burns turns without producing information.
 
-- **Hard cap: ~5 minutes of polling, but avoid the 300s sweet spot.**
-  Anthropic's prompt cache TTL is 5 minutes, so a single ~270s wake
-  keeps the cache warm; ~300s is the worst case (cache miss without
-  amortizing). Pick either 60–270s (warm) or 1200s+ (one cold reload
-  buys a long wait). After the total polling budget is spent, push,
-  leave the run URL in the PR / report, and **stop**. Don't loop a
-  `gh run watch` for half an hour.
+- **Total polling budget: ~5 minutes, in 60–270s chunks.** Anthropic's
+  prompt cache TTL is 5 minutes, so keep each wake-up inside that
+  window to keep the cache warm; ~300s is the worst case (cache miss
+  without amortizing). Don't reach for 1200s+ "save my turns" waits
+  here — that violates the 5 min total cap and reintroduces the long
+  `gh run watch` / sleep behaviour the policy is meant to prevent.
+  After the total budget is spent, push, leave the run URL in the PR
+  / report, and **stop**. (Long waits *are* appropriate elsewhere —
+  e.g. an autonomous-loop tick polling for an external job — just not
+  for in-session CI polling.)
 - **Don't pre-emptively re-run a check** that has not yet failed. Only
   retry after a recorded failure, and only once.
 - **Don't open follow-up issues or pivot the plan** while waiting for CI
