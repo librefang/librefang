@@ -1223,7 +1223,10 @@ impl LibreFangKernel {
                 wiki_vault.clone(),
             ),
             workflows: crate::kernel::subsystems::WorkflowSubsystem::new(
-                WorkflowEngine::new_with_persistence(&workflow_home_dir),
+                WorkflowEngine::new_with_store(
+                    librefang_memory::WorkflowStore::new(memory.pool()),
+                    &workflow_home_dir,
+                ),
                 trigger_engine,
                 background,
                 cron_scheduler,
@@ -1971,11 +1974,24 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Load persisted workflow runs (completed/failed) from disk.
+        // Migrate legacy JSON workflow runs to SQLite (one-time, idempotent).
+        {
+            match tokio::task::block_in_place(|| kernel.workflows.engine.migrate_from_json()) {
+                Ok(count) if count > 0 => {
+                    info!("Migrated {count} workflow run(s) from JSON to SQLite");
+                }
+                Err(e) => {
+                    warn!("Failed to migrate workflow runs from JSON to SQLite: {e}");
+                }
+                _ => {}
+            }
+        }
+
+        // Load persisted workflow runs from SQLite into memory.
         {
             match tokio::task::block_in_place(|| kernel.workflows.engine.load_runs()) {
                 Ok(count) if count > 0 => {
-                    info!("Loaded {count} persisted workflow run(s) from disk");
+                    info!("Loaded {count} persisted workflow run(s)");
                 }
                 Err(e) => {
                     warn!("Failed to load persisted workflow runs: {e}");
