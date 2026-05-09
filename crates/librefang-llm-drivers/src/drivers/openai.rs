@@ -312,18 +312,6 @@ impl OpenAIDriver {
         Ok(())
     }
 
-    /// True if this driver instance is pointed at an Ollama-compatible endpoint.
-    ///
-    /// Ollama's OpenAI-compatible `/v1/chat/completions` endpoint accepts a
-    /// top-level `think` boolean (as an extra body param) that controls whether
-    /// reasoning models (qwen3, gpt-oss, deepseek-r1, …) run their chain-of-thought
-    /// phase before answering. Detecting by base_url keeps the mapping local
-    /// without requiring kernel plumbing.
-    fn is_ollama_like(&self) -> bool {
-        let u = self.base_url.to_ascii_lowercase();
-        u.contains("ollama") || u.contains("11434")
-    }
-
     /// True if this model is DeepSeek-reasoner (R1).
     ///
     /// DeepSeek-reasoner returns `reasoning_content` in assistant responses, but
@@ -938,22 +926,7 @@ impl OpenAIDriver {
             (Some(request.max_tokens), None)
         };
 
-        // Ollama-compatible endpoints read a top-level `think: bool` field on the
-        // OpenAI-compat chat completions call. Drive it from the per-call
-        // `thinking` config so the chat UI deep-thinking toggle works end-to-end.
-        // Leave existing caller-supplied `think` values alone.
-        let extra_body = if self.is_ollama_like() {
-            let mut merged = request.extra_body.clone().unwrap_or_default();
-            if !merged.contains_key("think") {
-                merged.insert(
-                    "think".to_string(),
-                    serde_json::Value::Bool(request.thinking.is_some()),
-                );
-            }
-            Some(merged)
-        } else {
-            request.extra_body.clone()
-        };
+        let extra_body = request.extra_body.clone();
 
         Ok(OaiRequest {
             model: request.model.clone(),
@@ -2293,7 +2266,7 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
 /// - A JSON string that parses as an object → use the parsed object
 /// - Any other type (string, number, array, bool) → `{"raw_input": <value>}`
 ///   so the original value is preserved for debugging rather than silently lost.
-fn ensure_object(v: serde_json::Value) -> serde_json::Value {
+pub(crate) fn ensure_object(v: serde_json::Value) -> serde_json::Value {
     match v {
         serde_json::Value::Object(_) => v,
         serde_json::Value::Null => serde_json::json!({}),
@@ -2428,114 +2401,6 @@ mod tests {
         assert_eq!(driver.base_url, "http://localhost:11434/v1");
         let multi = OpenAIDriver::new("k".to_string(), "http://localhost:11434/v1///".to_string());
         assert_eq!(multi.base_url, "http://localhost:11434/v1");
-    }
-
-    #[test]
-    fn test_is_ollama_like_detects_default_port() {
-        let driver = OpenAIDriver::new("".to_string(), "http://127.0.0.1:11434/v1".to_string());
-        assert!(driver.is_ollama_like());
-    }
-
-    #[test]
-    fn test_is_ollama_like_detects_hostname() {
-        let driver = OpenAIDriver::new("".to_string(), "http://ollama.local/v1".to_string());
-        assert!(driver.is_ollama_like());
-    }
-
-    #[test]
-    fn test_is_ollama_like_rejects_openai() {
-        let driver = OpenAIDriver::new("k".to_string(), "https://api.openai.com/v1".to_string());
-        assert!(!driver.is_ollama_like());
-    }
-
-    #[test]
-    fn test_build_request_sets_think_true_for_ollama_when_thinking_enabled() {
-        let driver = OpenAIDriver::new("".to_string(), "http://127.0.0.1:11434/v1".to_string());
-        let request = CompletionRequest {
-            model: "qwen3:8b".to_string(),
-            messages: std::sync::Arc::new(vec![librefang_types::message::Message {
-                role: librefang_types::message::Role::User,
-                content: librefang_types::message::MessageContent::Text("hi".to_string()),
-                pinned: false,
-                timestamp: None,
-            }]),
-            tools: std::sync::Arc::new(vec![]),
-            max_tokens: 256,
-            temperature: 0.7,
-            system: None,
-            thinking: Some(librefang_types::config::ThinkingConfig::default()),
-            prompt_caching: false,
-            cache_ttl: None,
-            response_format: None,
-            timeout_secs: None,
-            extra_body: None,
-            agent_id: None,
-            session_id: None,
-            step_id: None,
-        };
-        let oai = driver.build_request(&request).expect("build request");
-        let extra = oai.extra_body.as_ref().expect("extra_body present");
-        assert_eq!(extra.get("think"), Some(&serde_json::Value::Bool(true)));
-    }
-
-    #[test]
-    fn test_build_request_sets_think_false_for_ollama_when_thinking_disabled() {
-        let driver = OpenAIDriver::new("".to_string(), "http://127.0.0.1:11434/v1".to_string());
-        let request = CompletionRequest {
-            model: "qwen3:8b".to_string(),
-            messages: std::sync::Arc::new(vec![librefang_types::message::Message {
-                role: librefang_types::message::Role::User,
-                content: librefang_types::message::MessageContent::Text("hi".to_string()),
-                pinned: false,
-                timestamp: None,
-            }]),
-            tools: std::sync::Arc::new(vec![]),
-            max_tokens: 256,
-            temperature: 0.7,
-            system: None,
-            thinking: None,
-            prompt_caching: false,
-            cache_ttl: None,
-            response_format: None,
-            timeout_secs: None,
-            extra_body: None,
-            agent_id: None,
-            session_id: None,
-            step_id: None,
-        };
-        let oai = driver.build_request(&request).expect("build request");
-        let extra = oai.extra_body.as_ref().expect("extra_body present");
-        assert_eq!(extra.get("think"), Some(&serde_json::Value::Bool(false)));
-    }
-
-    #[test]
-    fn test_build_request_omits_think_for_non_ollama() {
-        let driver = OpenAIDriver::new("k".to_string(), "https://api.openai.com/v1".to_string());
-        let request = CompletionRequest {
-            model: "gpt-4o".to_string(),
-            messages: std::sync::Arc::new(vec![librefang_types::message::Message {
-                role: librefang_types::message::Role::User,
-                content: librefang_types::message::MessageContent::Text("hi".to_string()),
-                pinned: false,
-                timestamp: None,
-            }]),
-            tools: std::sync::Arc::new(vec![]),
-            max_tokens: 256,
-            temperature: 0.7,
-            system: None,
-            thinking: Some(librefang_types::config::ThinkingConfig::default()),
-            prompt_caching: false,
-            cache_ttl: None,
-            response_format: None,
-            timeout_secs: None,
-            extra_body: None,
-            agent_id: None,
-            session_id: None,
-            step_id: None,
-        };
-        let oai = driver.build_request(&request).expect("build request");
-        // Non-ollama: extra_body should mirror the (None) request.extra_body.
-        assert!(oai.extra_body.is_none());
     }
 
     #[test]

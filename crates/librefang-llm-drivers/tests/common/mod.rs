@@ -13,6 +13,7 @@ use wiremock::{MockServer, Request, ResponseTemplate};
 use librefang_llm_drivers::backoff;
 use librefang_llm_drivers::drivers::anthropic::AnthropicDriver;
 use librefang_llm_drivers::drivers::gemini::GeminiDriver;
+use librefang_llm_drivers::drivers::ollama::OllamaDriver;
 use librefang_llm_drivers::drivers::openai::OpenAIDriver;
 use librefang_llm_drivers::shared_rate_guard;
 
@@ -58,6 +59,12 @@ pub fn mock_gemini_driver(server: &MockServer) -> GeminiDriver {
         None,
         Some(5),
     )
+}
+
+pub fn mock_ollama_driver(server: &MockServer) -> OllamaDriver {
+    // Empty key matches the default Ollama localhost flow; tunnelled
+    // setups are exercised with an explicit key in dedicated tests.
+    OllamaDriver::with_proxy_and_timeout(String::new(), server.uri(), None, Some(5))
 }
 
 pub fn simple_request(model: &str) -> CompletionRequest {
