@@ -294,14 +294,25 @@ fn run_current(
     // not a GitHub URL we recognize.
     let repo = infer_gh_repo(root);
 
+    // Dispatch ref MUST be `main`, not the tag — GitHub Actions reads
+    // the workflow YAML from the dispatched ref. An old tag's commit
+    // contains a stale release.yml that does not know about
+    // `channel=current`. We pass the tag name via the `tag` input
+    // instead, and release.yml's `RELEASE_TAG` env routes it through
+    // every `github.ref_name` site.
+    let tag_input = format!("tag={}", tag);
+
     if dry_run {
         println!("Dry run — would dispatch:");
         match &repo {
             Some(r) => println!(
-                "  gh workflow run Release --repo {} --ref {} -f channel=current",
-                r, tag
+                "  gh workflow run Release --repo {} --ref main -f channel=current -f {}",
+                r, tag_input
             ),
-            None => println!("  gh workflow run Release --ref {} -f channel=current", tag),
+            None => println!(
+                "  gh workflow run Release --ref main -f channel=current -f {}",
+                tag_input
+            ),
         }
         return Ok(());
     }
@@ -318,7 +329,7 @@ fn run_current(
     if let Some(r) = &repo {
         cmd.arg("--repo").arg(r);
     }
-    cmd.args(["--ref", &tag, "-f", "channel=current"]);
+    cmd.args(["--ref", "main", "-f", "channel=current", "-f", &tag_input]);
     let status = cmd.current_dir(root).status()?;
     if !status.success() {
         let hint = if repo.is_none() {
