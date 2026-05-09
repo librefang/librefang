@@ -22,6 +22,8 @@ const SYNC_TIMEOUT_MS: u64 = 30000;
 const MAX_MESSAGE_LEN: usize = 4096;
 #[allow(dead_code)]
 const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
+const STREAM_EDIT_INTERVAL_MS: u64 = 1500;
+const STREAM_EDIT_CHAR_BUDGET: usize = 256;
 /// Maximum number of per-(room, target_event) lifecycle reaction entries to track.
 const PHASE_REACTIONS_CAPACITY: usize = 1024;
 
@@ -290,7 +292,6 @@ impl MatrixAdapter {
 
     /// Edit an existing event in place via the m.replace relation.
     /// `new_text` is the new content. Returns the edit event_id.
-    #[allow(dead_code)]
     async fn api_edit_event(
         &self,
         room_id: &str,
@@ -626,6 +627,60 @@ impl ChannelAdapter for MatrixAdapter {
             }
             other => self.send(user, other).await,
         }
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn send_streaming(
+        &self,
+        user: &ChannelUser,
+        mut delta_rx: mpsc::Receiver<String>,
+        thread_id: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // 1. Send placeholder. With thread_id, include the m.thread relation
+        //    so the placeholder lives in the thread; subsequent edits keep it
+        //    via m.new_content.
+        let placeholder_body = match thread_id {
+            Some(tid) => serde_json::json!({
+                "msgtype": "m.text",
+                "body": "…",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": tid,
+                    "is_falling_back": true,
+                    "m.in_reply_to": { "event_id": tid },
+                }
+            }),
+            None => serde_json::json!({"msgtype": "m.text", "body": "…"}),
+        };
+        let placeholder_id = self
+            .api_send_event(&user.platform_id, "m.room.message", &placeholder_body)
+            .await?;
+
+        let mut buffer = String::new();
+        let mut last_flushed_len: usize = 0;
+        let mut last_edit = std::time::Instant::now();
+        let interval = Duration::from_millis(STREAM_EDIT_INTERVAL_MS);
+
+        while let Some(delta) = delta_rx.recv().await {
+            buffer.push_str(&delta);
+            let elapsed = last_edit.elapsed();
+            let added = buffer.len().saturating_sub(last_flushed_len);
+            if elapsed >= interval || added >= STREAM_EDIT_CHAR_BUDGET {
+                self.api_edit_event(&user.platform_id, &placeholder_id, &buffer)
+                    .await?;
+                last_edit = std::time::Instant::now();
+                last_flushed_len = buffer.len();
+            }
+        }
+        // Final flush
+        if !buffer.is_empty() {
+            self.api_edit_event(&user.platform_id, &placeholder_id, &buffer)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1358,5 +1413,97 @@ mod tests {
             "m.relates_to": { "m.in_reply_to": { "event_id": "$x" } }
         });
         assert_eq!(parse_thread_relation(&reply_only), None);
+    }
+
+    #[tokio::test]
+    async fn test_send_streaming_debounces_edits() {
+        use crate::types::ChannelUser;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+        use tokio::sync::mpsc;
+        let server = MockServer::start().await;
+        let send_calls = StdArc::new(AtomicUsize::new(0));
+        let sc = send_calls.clone();
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/.+/send/m\.room\.message/.+$",
+            ))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = sc.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "event_id": format!("$evt{n}:test")
+                }))
+            })
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        let (tx, rx) = mpsc::channel(16);
+        let sender = tokio::spawn(async move {
+            for i in 0..10 {
+                let _ = tx.send(format!("d{i}")).await;
+            }
+            drop(tx);
+        });
+        adapter
+            .send_streaming(&user, rx, None)
+            .await
+            .expect("streaming must succeed");
+        sender.await.unwrap();
+        let calls = send_calls.load(Ordering::SeqCst);
+        // Placeholder + final edit. 10 deltas of "dN" = ~20 chars total, well under
+        // STREAM_EDIT_CHAR_BUDGET (256) and STREAM_EDIT_INTERVAL_MS (1500). So
+        // exactly 2 PUTs: placeholder + final.
+        assert!(calls >= 2, "expected at least 2 PUTs, got {calls}");
+        assert!(
+            calls <= 2,
+            "expected at most 2 PUTs (debounce should suppress mid-stream edits), got {calls}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_streaming_finalizes_on_close() {
+        use crate::types::ChannelUser;
+        use tokio::sync::mpsc;
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/.+/send/m\.room\.message/.+$",
+            ))
+            .and(body_partial_json(serde_json::json!({
+                "m.new_content": { "body": "alpha-beta" }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$final:test"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/.+/send/m\.room\.message/.+$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$x:test"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        let (tx, rx) = mpsc::channel(2);
+        let _ = tx.send("alpha".to_string()).await;
+        let _ = tx.send("-beta".to_string()).await;
+        drop(tx);
+        adapter
+            .send_streaming(&user, rx, None)
+            .await
+            .expect("streaming must succeed");
     }
 }
