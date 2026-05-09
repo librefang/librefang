@@ -1282,7 +1282,8 @@ impl BridgeManager {
                                     let image_blocks = if let ChannelContent::Image {
                                         ref url, ref caption, ref mime_type
                                     } = message.content {
-                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), &upload_dir).await {
+                                        let extra_headers = adapter_clone.fetch_headers_for(url);
+                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), &upload_dir, &extra_headers).await {
                                             blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::ImageFile { .. })) => Some(blocks),
                                             _ => None,
                                         }
@@ -2791,9 +2792,15 @@ async fn dispatch_message(
     } = message.content
     {
         let upload_dir = handle.effective_channels_download_dir();
-        let blocks =
-            download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), &upload_dir)
-                .await;
+        let extra_headers = adapter.fetch_headers_for(url);
+        let blocks = download_image_to_blocks(
+            url,
+            caption.as_deref(),
+            mime_type.as_deref(),
+            &upload_dir,
+            &extra_headers,
+        )
+        .await;
         if blocks.iter().any(|b| {
             matches!(
                 b,
@@ -2830,7 +2837,9 @@ async fn dispatch_message(
         let max_bytes = handle
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
-        let blocks = download_file_to_blocks(url, filename, max_bytes, &download_dir).await;
+        let extra_headers = adapter.fetch_headers_for(url);
+        let blocks =
+            download_file_to_blocks(url, filename, max_bytes, &download_dir, &extra_headers).await;
         if has_file_saved_block(&blocks) {
             dispatch_with_blocks(
                 blocks,
@@ -2864,7 +2873,9 @@ async fn dispatch_message(
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
         let filename = filename_from_url(url).unwrap_or_else(|| "voice.ogg".to_string());
-        let mut blocks = download_file_to_blocks(url, &filename, max_bytes, &download_dir).await;
+        let extra_headers = adapter.fetch_headers_for(url);
+        let mut blocks =
+            download_file_to_blocks(url, &filename, max_bytes, &download_dir, &extra_headers).await;
         if has_file_saved_block(&blocks) {
             // Prepend a context block carrying duration + caption so the
             // model knows this is voice (not an arbitrary file) and any
@@ -2917,7 +2928,9 @@ async fn dispatch_message(
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
         let filename = filename_from_url(url).unwrap_or_else(|| "audio.mp3".to_string());
-        let mut blocks = download_file_to_blocks(url, &filename, max_bytes, &download_dir).await;
+        let extra_headers = adapter.fetch_headers_for(url);
+        let mut blocks =
+            download_file_to_blocks(url, &filename, max_bytes, &download_dir, &extra_headers).await;
         if has_file_saved_block(&blocks) {
             let mut header = format!("[Audio ({duration_seconds}s)");
             match (title.as_deref(), performer.as_deref()) {
@@ -2978,8 +2991,15 @@ async fn dispatch_message(
             .clone()
             .or_else(|| filename_from_url(url))
             .unwrap_or_else(|| "video.mp4".to_string());
-        let mut blocks =
-            download_file_to_blocks(url, &resolved_filename, max_bytes, &download_dir).await;
+        let extra_headers = adapter.fetch_headers_for(url);
+        let mut blocks = download_file_to_blocks(
+            url,
+            &resolved_filename,
+            max_bytes,
+            &download_dir,
+            &extra_headers,
+        )
+        .await;
         if has_file_saved_block(&blocks) {
             let context = match caption {
                 Some(c) if !c.is_empty() => {
@@ -4055,6 +4075,7 @@ async fn download_file_to_blocks(
     filename: &str,
     max_bytes: u64,
     download_dir: &std::path::Path,
+    extra_headers: &[(String, String)],
 ) -> Vec<ContentBlock> {
     // Validate URL scheme
     if let Err(reason) = validate_url_scheme(url) {
@@ -4066,12 +4087,11 @@ async fn download_file_to_blocks(
     }
 
     let client = crate::http_client::new_client();
-    let resp = match client
-        .get(url)
-        .timeout(std::time::Duration::from_secs(60))
-        .send()
-        .await
-    {
+    let mut req = client.get(url).timeout(std::time::Duration::from_secs(60));
+    for (name, value) in extra_headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+    let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             warn!("Failed to download file from channel: {e}");
@@ -4291,67 +4311,116 @@ async fn download_image_to_blocks(
     caption: Option<&str>,
     mime_type_hint: Option<&str>,
     upload_dir: &std::path::Path,
+    extra_headers: &[(String, String)],
 ) -> Vec<ContentBlock> {
     use base64::Engine;
 
     // 5 MB limit to prevent memory abuse from oversized images
     const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
-    // SSRF guard (#3442) + size cap (5 MiB, in-memory) + Content-Type
-    // capture, all behind one helper. The helper rejects non-http(s)
-    // schemes and any host literally in a private/loopback/metadata
-    // range BEFORE opening a socket — so a forged
-    // `http://169.254.169.254/...` never produces an "image" block in
-    // the agent's LLM context. The size cap enforces both a
-    // Content-Length pre-check and a streaming-accumulator mid-fetch
-    // bound, so a chunked-transfer "lying" length cannot bypass it.
-    let (buf, response_content_type) =
-        match crate::http_client::fetch_url_bytes(url, MAX_IMAGE_BYTES).await {
-            Ok(t) => t,
-            Err(crate::http_client::FetchError::Rejected(reason)) => {
-                warn!("Rejecting image download: {reason}");
-                return vec![ContentBlock::Text {
-                    text: format!("[Image download rejected: {reason}]"),
-                    provider_metadata: None,
-                }];
-            }
-            Err(crate::http_client::FetchError::TooLarge { actual, limit }) => {
-                let reported_kb = actual
-                    .map(|a| a / 1024)
-                    .unwrap_or_else(|| (limit as u64) / 1024);
-                match actual {
-                    Some(len) => warn!(
-                    "Image Content-Length ({len} bytes) exceeds limit, rejecting before download"
+    // SSRF guard (#3442) + size cap (5 MiB) + redirect validation, all
+    // on the safe_fetch_client() which re-runs validate_url_for_fetch on
+    // every redirect hop. When extra_headers are present (MSC3916 Bearer
+    // token for authenticated Matrix media), we validate first then send
+    // a custom request through the same redirect-safe client.
+    if let Err(reason) = crate::http_client::validate_url_for_fetch(url) {
+        warn!("Rejecting image download: {reason}");
+        return vec![ContentBlock::Text {
+            text: format!("[Image download rejected: {reason}]"),
+            provider_metadata: None,
+        }];
+    }
+
+    let client = crate::http_client::safe_fetch_client();
+    let mut req = client.get(url);
+    for (name, value) in extra_headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Failed to download image from channel: {e}");
+            return vec![ContentBlock::Text {
+                text: format!("[Image download failed: {e}]"),
+                provider_metadata: None,
+            }];
+        }
+    };
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let preview: String = body.chars().take(200).collect();
+        warn!(
+            status = %status,
+            body_preview = %preview,
+            url = %url,
+            "Image download returned non-success status"
+        );
+        return vec![ContentBlock::Text {
+            text: format!("[Image download failed: HTTP {status}]"),
+            provider_metadata: None,
+        }];
+    }
+
+    // Early rejection if Content-Length header exceeds limit
+    if let Some(len) = resp.content_length() {
+        if len as usize > MAX_IMAGE_BYTES {
+            warn!("Image Content-Length ({len} bytes) exceeds limit, rejecting before download");
+            let desc = match caption {
+                Some(c) => format!(
+                    "[Image too large for vision ({} KB)]\nCaption: {c}",
+                    len / 1024
                 ),
-                    None => warn!("Image stream exceeded {limit} byte limit, aborting download"),
-                }
-                let desc = match caption {
-                    Some(c) => {
-                        format!("[Image too large for vision ({reported_kb} KB)]\nCaption: {c}")
-                    }
-                    None => format!("[Image too large for vision ({reported_kb} KB)]"),
-                };
-                return vec![ContentBlock::Text {
-                    text: desc,
-                    provider_metadata: None,
-                }];
-            }
-            Err(crate::http_client::FetchError::Failed(reason)) => {
-                warn!("Image download failed: {reason}");
-                return vec![ContentBlock::Text {
-                    text: format!("[Image download failed: {reason}]"),
-                    provider_metadata: None,
-                }];
-            }
-        };
+                None => format!("[Image too large for vision ({} KB)]", len / 1024),
+            };
+            return vec![ContentBlock::Text {
+                text: desc,
+                provider_metadata: None,
+            }];
+        }
+    }
 
     // Detect media type from Content-Type header — but only trust it if it's
     // actually an image/* type. Many APIs (Telegram, S3 pre-signed URLs) return
     // `application/octet-stream` for all files, which breaks vision.
-    let header_type = response_content_type
-        .as_deref()
+    let header_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
         .map(|ct| ct.split(';').next().unwrap_or(ct).trim().to_string())
         .filter(|ct| ct.starts_with("image/"));
+
+    // Stream body with size accumulator to enforce limit even without Content-Length
+    let mut stream = resp.bytes_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to read image bytes: {e}");
+                return vec![ContentBlock::Text {
+                    text: format!("[Image download failed: {e}]"),
+                    provider_metadata: None,
+                }];
+            }
+        };
+        if buf.len().saturating_add(chunk.len()) > MAX_IMAGE_BYTES {
+            warn!("Image stream exceeded {MAX_IMAGE_BYTES} byte limit, aborting download");
+            let desc = match caption {
+                Some(c) => format!(
+                    "[Image too large for vision ({} KB)]\nCaption: {c}",
+                    MAX_IMAGE_BYTES / 1024
+                ),
+                None => format!("[Image too large for vision ({} KB)]", MAX_IMAGE_BYTES / 1024),
+            };
+            return vec![ContentBlock::Text {
+                text: desc,
+                provider_metadata: None,
+            }];
+        }
+        buf.extend_from_slice(&chunk);
+    }
 
     let bytes = bytes::Bytes::from(buf);
 
@@ -7058,9 +7127,14 @@ mod tests {
         #[tokio::test]
         async fn test_file_download_rejects_bad_scheme() {
             let dir = std::env::temp_dir().join("librefang_test_download");
-            let blocks =
-                download_file_to_blocks("ftp://evil.com/malware.exe", "malware.exe", 1024, &dir)
-                    .await;
+            let blocks = download_file_to_blocks(
+                "ftp://evil.com/malware.exe",
+                "malware.exe",
+                1024,
+                &dir,
+                &[],
+            )
+            .await;
             assert_eq!(blocks.len(), 1);
             match &blocks[0] {
                 ContentBlock::Text { text, .. } => {

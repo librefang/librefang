@@ -45,7 +45,7 @@ pub fn new_client() -> reqwest::Client {
 /// `OnceLock`-backed so the redirect policy and bundled TLS roots are
 /// initialised once per process; multiple concurrent media fetches
 /// share the connection pool.
-fn safe_fetch_client() -> &'static reqwest::Client {
+pub(crate) fn safe_fetch_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         client_builder()

@@ -73,11 +73,13 @@ fn text_body_with_html(raw: &str, extra: Option<serde_json::Value>) -> serde_jso
 
 /// Convert mxc://server/mediaId -> an HTTPS download URL.
 ///
-/// Uses the legacy /_matrix/media/v3/download endpoint (unauthenticated).
-/// Synapse 1.100+ supports MSC3916 authenticated /_matrix/client/v1/media/download
-/// but requires opt-in enforcement (`enable_authenticated_media: true`).
-/// Default Synapse leaves the legacy endpoint working — this is the broadest
-/// compatibility path. MSC3916 fallback is documented as a known limitation.
+/// Emits the MSC3916 authenticated endpoint
+/// (`/_matrix/client/v1/media/download/{server}/{mediaId}`). Modern
+/// Synapse (≥1.100, default since ~1.120) freezes the legacy
+/// unauthenticated `/_matrix/media/v3/download` path and returns
+/// `404 M_NOT_FOUND` on it — see `MatrixAdapter::fetch_headers_for`,
+/// which supplies the bot's `Authorization: Bearer <access_token>`
+/// when the bridge fetches this URL.
 pub(crate) fn mxc_to_http(mxc: &str, homeserver_url: &str) -> Option<String> {
     let stripped = mxc.strip_prefix("mxc://")?;
     let (server, media_id) = stripped.split_once('/')?;
@@ -85,7 +87,7 @@ pub(crate) fn mxc_to_http(mxc: &str, homeserver_url: &str) -> Option<String> {
         return None;
     }
     Some(format!(
-        "{homeserver_url}/_matrix/media/v3/download/{server}/{media_id}"
+        "{homeserver_url}/_matrix/client/v1/media/download/{server}/{media_id}"
     ))
 }
 
@@ -627,6 +629,28 @@ impl ChannelAdapter for MatrixAdapter {
 
     fn channel_type(&self) -> ChannelType {
         ChannelType::Matrix
+    }
+
+    /// Authenticated-media (MSC3916) requires the bot's access token on
+    /// every download. Only attach it when the URL points at THIS bot's
+    /// own homeserver — never to a model-controlled hostname, since the
+    /// token grants full account access (send messages, leave rooms,
+    /// read DMs).
+    fn fetch_headers_for(&self, url: &str) -> Vec<(String, String)> {
+        let url_host = match url::Url::parse(url) {
+            Ok(u) => u.host_str().map(|s| s.to_ascii_lowercase()),
+            Err(_) => return Vec::new(),
+        };
+        let hs_host = url::Url::parse(&self.homeserver_url)
+            .ok()
+            .and_then(|u| u.host_str().map(|s| s.to_ascii_lowercase()));
+        match (url_host, hs_host) {
+            (Some(u), Some(hs)) if u == hs => vec![(
+                "Authorization".to_string(),
+                format!("Bearer {}", &*self.access_token),
+            )],
+            _ => Vec::new(),
+        }
     }
 
     async fn start(
@@ -1679,7 +1703,7 @@ mod tests {
         let url = mxc_to_http("mxc://srv/abc", "https://hs.example.com").unwrap();
         assert_eq!(
             url,
-            "https://hs.example.com/_matrix/media/v3/download/srv/abc"
+            "https://hs.example.com/_matrix/client/v1/media/download/srv/abc"
         );
     }
 
@@ -1688,6 +1712,38 @@ mod tests {
         assert!(mxc_to_http("https://other.example/x", "https://hs").is_none());
         assert!(mxc_to_http("mxc://no-slash", "https://hs").is_none());
         assert!(mxc_to_http("", "https://hs").is_none());
+    }
+
+    /// Auth header is attached to URLs that point at the bot's own
+    /// homeserver, and ONLY to those — leaking the access token to a
+    /// model-controlled host would let a forged inbound message
+    /// exfiltrate full account access. Host comparison is
+    /// case-insensitive so `Matrix.Example.com` matches
+    /// `matrix.example.com`.
+    #[test]
+    fn test_fetch_headers_for_only_attaches_to_homeserver() {
+        let adapter = make_adapter("https://matrix.example.com".to_string());
+
+        let h = adapter.fetch_headers_for(
+            "https://matrix.example.com/_matrix/client/v1/media/download/srv/abc",
+        );
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].0, "Authorization");
+        assert_eq!(h[0].1, "Bearer secret-access-token");
+
+        // Different host (e.g. an attacker-supplied URL): no headers.
+        let h = adapter
+            .fetch_headers_for("https://attacker.example/_matrix/client/v1/media/download/x/y");
+        assert!(h.is_empty(), "must not leak token to other hosts: {h:?}");
+
+        // Case-insensitive host match.
+        let h = adapter.fetch_headers_for(
+            "https://Matrix.Example.COM/_matrix/client/v1/media/download/srv/abc",
+        );
+        assert_eq!(h.len(), 1);
+
+        // Garbage URL → no headers, no panic.
+        assert!(adapter.fetch_headers_for("not-a-url").is_empty());
     }
 
     #[tokio::test]
@@ -2259,7 +2315,10 @@ mod tests {
                 caption,
                 mime_type,
             } => {
-                assert_eq!(url, "https://hs.example/_matrix/media/v3/download/srv/img1");
+                assert_eq!(
+                    url,
+                    "https://hs.example/_matrix/client/v1/media/download/srv/img1"
+                );
                 assert_eq!(caption, Some("screenshot.png".to_string()));
                 assert_eq!(mime_type, Some("image/png".to_string()));
             }
@@ -2281,7 +2340,7 @@ mod tests {
             crate::types::ChannelContent::File { url, filename } => {
                 assert_eq!(
                     url,
-                    "https://hs.example/_matrix/media/v3/download/srv/file1"
+                    "https://hs.example/_matrix/client/v1/media/download/srv/file1"
                 );
                 assert_eq!(filename, "report.pdf");
             }

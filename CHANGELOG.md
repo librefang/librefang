@@ -66,6 +66,8 @@ _68 PRs from 5 contributors since v2026.5.6-beta.9._
 - Lazy-init vault.enc on first set() — fix install_integration silent-success (#4793) (@houko)
 - Add deterministic catalog seed for mock kernel — fix capability_override flake (#4796) (@houko)
 - Expose ModelCatalog::from_entries outside cfg(test) — unbreak main (#4798) (@houko)
+- Channels bridge: fail closed on non-2xx in `download_file_to_blocks` / `download_image_to_blocks`. Previously a 4xx/5xx response body (e.g. Synapse's 45-byte `M_NOT_FOUND` JSON envelope on the frozen `/_matrix/media/v3/download` endpoint) was streamed to disk as `<uuid>.<ext>` and surfaced to the agent as a corrupt file.
+- Matrix adapter: switch inbound media downloads to MSC3916 authenticated `/_matrix/client/v1/media/download/{server}/{mediaId}`, which Synapse 1.100+ requires (default Synapse no longer serves the legacy unauthenticated path). The bot's access token is attached via a new `ChannelAdapter::fetch_headers_for(url)` hook, gated by a homeserver-host match so the credential cannot leak to model-controlled URLs.
 
 ### Changed
 
