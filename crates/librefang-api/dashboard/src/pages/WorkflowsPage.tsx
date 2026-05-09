@@ -1,11 +1,12 @@
 import { formatDate } from "../lib/datetime";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import {
   type ApiActionResponse,
   type DryRunResult,
   type ScheduleItem,
+  type TemplateParameter,
   type WorkflowItem,
   type WorkflowRunItem,
   type WorkflowStep,
@@ -28,6 +29,7 @@ import {
 } from "lucide-react";
 import {
   useWorkflows,
+  useWorkflowDetail,
   useWorkflowRuns,
   useWorkflowRunDetail,
   useWorkflowTemplates,
@@ -181,6 +183,94 @@ function StepAccordion<T>({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Workflow parameter detection — mirrors the kernel's `to_template()` logic
+// that scans `prompt_template` fields for `{{var}}` placeholders.
+// ---------------------------------------------------------------------------
+
+/** Reserved variable names that are set by the engine at runtime. */
+const RESERVED_VARS = new Set(["input"]);
+
+/**
+ * Extract typed parameters from a workflow's steps by scanning prompt templates
+ * for `{{var}}` placeholders.  Returns one `TemplateParameter` per unique
+ * variable, excluding reserved names and step output variables (step names).
+ */
+function extractWorkflowParams(steps: WorkflowStep[]): TemplateParameter[] {
+  const re = /\{\{(\w+)\}\}/g;
+  const stepNames = new Set(steps.map((s) => s.name));
+  const seen = new Set<string>();
+  const params: TemplateParameter[] = [];
+
+  for (const step of steps) {
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(step.prompt_template)) !== null) {
+      const name = match[1];
+      if (seen.has(name) || RESERVED_VARS.has(name) || stepNames.has(name)) continue;
+      seen.add(name);
+      params.push({
+        name,
+        description: `Parameter '${name}' used in step '${step.name}'`,
+        param_type: "string",
+        required: true,
+      });
+    }
+  }
+  return params;
+}
+
+/**
+ * Inline form fields for detected workflow parameters.  Each parameter gets
+ * its own labeled input.  Values are stored in the parent via `onChange`.
+ */
+function WorkflowParamFields({
+  params,
+  values,
+  onChange,
+}: {
+  params: TemplateParameter[];
+  values: Record<string, string>;
+  onChange: (values: Record<string, string>) => void;
+}) {
+  const { t } = useTranslation();
+
+  const handleChange = useCallback(
+    (name: string, value: string) => {
+      onChange({ ...values, [name]: value });
+    },
+    [values, onChange],
+  );
+
+  if (params.length === 0) return null;
+
+  return (
+    <div className="space-y-2.5">
+      <p className="text-[9px] font-bold uppercase tracking-widest text-text-dim/50">
+        {t("workflows.parameters", { defaultValue: "Parameters" })}
+      </p>
+      {params.map((p) => (
+        <label key={p.name} className="block space-y-1">
+          <span className="text-[11px] font-semibold text-text">
+            {p.name}
+            {p.required && <span className="text-rose-500 ml-0.5">*</span>}
+          </span>
+          <input
+            type="text"
+            value={values[p.name] ?? (p.default != null ? String(p.default) : "")}
+            onChange={(e) => handleChange(p.name, e.target.value)}
+            placeholder={p.description ?? p.name}
+            className="w-full rounded-lg border border-border-subtle bg-main px-3 py-1.5 text-sm outline-none focus:border-brand transition-colors"
+            aria-required={p.required}
+          />
+          {p.description && (
+            <p className="text-[10px] text-text-dim/50 leading-snug">{p.description}</p>
+          )}
+        </label>
+      ))}
+    </div>
+  );
+}
+
 export function WorkflowsPage() {
   const { t, i18n } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -193,8 +283,10 @@ export function WorkflowsPage() {
   const [scheduleWorkflowId, setScheduleWorkflowId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [dryRunResult, setDryRunResult] = useState<DryRunResult | null>(null);
+  const [paramValues, setParamValues] = useState<Record<string, string>>({});
 
   const workflowsQuery = useWorkflows();
+  const workflowDetailQuery = useWorkflowDetail(selectedWorkflowId);
   const runsQuery = useWorkflowRuns(selectedWorkflowId);
   const runDetailQuery = useWorkflowRunDetail(selectedRunId ?? "");
   const runMutation = useRunWorkflow();
@@ -215,6 +307,29 @@ export function WorkflowsPage() {
     [allWorkflows, scheduleWorkflowId]
   );
 
+  // Detect parameters from the selected workflow's prompt templates.
+  // Uses the detail query (which includes full step objects with
+  // prompt_template strings) rather than the list query (which may
+  // only carry a step count).
+  const detectedParams = useMemo(() => {
+    const detail = workflowDetailQuery.data;
+    if (!detail || !Array.isArray(detail.steps)) return [];
+    return extractWorkflowParams(detail.steps as WorkflowStep[]);
+  }, [workflowDetailQuery.data]);
+
+  // Reset parameter values when the selected workflow changes, pre-filling
+  // defaults where available.
+  const prevWorkflowIdRef = useRef(selectedWorkflowId);
+  useEffect(() => {
+    if (prevWorkflowIdRef.current === selectedWorkflowId) return;
+    prevWorkflowIdRef.current = selectedWorkflowId;
+    const defaults: Record<string, string> = {};
+    for (const p of detectedParams) {
+      if (p.default != null) defaults[p.name] = String(p.default);
+    }
+    setParamValues(defaults);
+  }, [selectedWorkflowId, detectedParams]);
+
   // First-time visitors with no workflows configured land on the
   // marketplace tab — instantiating a template is the obvious next
   // step. Fires once per mount; if the user manually flips back to
@@ -234,6 +349,7 @@ export function WorkflowsPage() {
         setSelectedWorkflowId("");
         setSelectedRunId(null);
         setRunInput("");
+        setParamValues({});
         setDryRunResult(null);
       }
       return;
@@ -245,17 +361,36 @@ export function WorkflowsPage() {
     if (!allWorkflows.some((workflow) => workflow.id === selectedWorkflowId)) {
       setSelectedRunId(null);
       setRunInput("");
+      setParamValues({});
       setDryRunResult(null);
       setSelectedWorkflowId(workflows[0]?.id ?? "");
     }
   }, [allWorkflows, workflows, selectedWorkflowId, workflowsQuery.isSuccess]);
+
+  // Build the effective input string for a run.  When the workflow has
+  // detected parameters the user filled in, we prepend them as a JSON
+  // object so the prompt templates can reference the structured data.
+  // The free-text textarea value is appended after the parameters.
+  const buildRunInput = useCallback((): string => {
+    const hasParams = detectedParams.length > 0 &&
+      Object.values(paramValues).some((v) => v.trim() !== "");
+    if (!hasParams) return runInput;
+    const paramsObj: Record<string, string> = {};
+    for (const p of detectedParams) {
+      const val = paramValues[p.name]?.trim() ?? "";
+      if (val) paramsObj[p.name] = val;
+    }
+    const parts: string[] = [JSON.stringify(paramsObj, null, 2)];
+    if (runInput.trim()) parts.push(runInput.trim());
+    return parts.join("\n\n");
+  }, [detectedParams, paramValues, runInput]);
 
   const handleRun = async () => {
     if (!selectedWorkflowId) return;
     setDryRunResult(null);
     dryRunMutation.reset();
     try {
-      await runMutation.mutateAsync({ workflowId: selectedWorkflowId, input: runInput });
+      await runMutation.mutateAsync({ workflowId: selectedWorkflowId, input: buildRunInput() });
       addToast(t("workflows.run_started", { defaultValue: "Run started" }), "success");
     } catch (err) {
       addToast(
@@ -270,7 +405,7 @@ export function WorkflowsPage() {
     setDryRunResult(null);
     runMutation.reset();
     try {
-      const result = await dryRunMutation.mutateAsync({ workflowId: selectedWorkflowId, input: runInput });
+      const result = await dryRunMutation.mutateAsync({ workflowId: selectedWorkflowId, input: buildRunInput() });
       setDryRunResult(result);
     } catch {
       // Error already surfaced via dryRunMutation.error panel at line 465.
@@ -754,8 +889,20 @@ export function WorkflowsPage() {
             <div className="space-y-4">
               <Card padding="lg" className="sticky top-4 space-y-3">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-text-dim/50">{t("workflows.run_workflow")}</h3>
+                {detectedParams.length > 0 && (
+                  <WorkflowParamFields
+                    params={detectedParams}
+                    values={paramValues}
+                    onChange={setParamValues}
+                  />
+                )}
                 <textarea value={runInput} onChange={e => setRunInput(e.target.value)}
-                  placeholder={t("canvas.run_input_placeholder")} rows={4}
+                  placeholder={
+                    detectedParams.length > 0
+                      ? t("workflows.additional_context_placeholder", { defaultValue: "Additional context (optional)..." })
+                      : t("canvas.run_input_placeholder")
+                  }
+                  rows={detectedParams.length > 0 ? 2 : 4}
                   className="w-full rounded-xl border border-border-subtle bg-main px-4 py-2.5 text-sm outline-none focus:border-brand resize-none" />
                 <div className="flex gap-2">
                   <Button variant="primary" className="flex-1" disabled={runMutation.isPending || dryRunMutation.isPending} onClick={handleRun}>
