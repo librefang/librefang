@@ -37,7 +37,6 @@ type PhaseReactionCache = Arc<RwLock<std::collections::VecDeque<((String, String
 /// but requires opt-in enforcement (`enable_authenticated_media: true`).
 /// Default Synapse leaves the legacy endpoint working — this is the broadest
 /// compatibility path. MSC3916 fallback is documented as a known limitation.
-#[allow(dead_code)]
 pub(crate) fn mxc_to_http(mxc: &str, homeserver_url: &str) -> Option<String> {
     let stripped = mxc.strip_prefix("mxc://")?;
     let (server, media_id) = stripped.split_once('/')?;
@@ -58,6 +57,134 @@ pub(crate) fn parse_thread_relation(content: &serde_json::Value) -> Option<Strin
         return None;
     }
     rel.get("event_id")?.as_str().map(String::from)
+}
+
+/// Parse an `m.image` event content into ChannelContent::Image.
+pub(crate) fn parse_media_image(
+    c: &serde_json::Value,
+    hs: &str,
+) -> Option<crate::types::ChannelContent> {
+    let mxc = c.get("url")?.as_str()?;
+    let url = mxc_to_http(mxc, hs)?;
+    let mime_type = c
+        .get("info")
+        .and_then(|i| i.get("mimetype"))
+        .and_then(|m| m.as_str())
+        .map(String::from);
+    let caption = c.get("body").and_then(|b| b.as_str()).map(String::from);
+    Some(crate::types::ChannelContent::Image {
+        url,
+        caption,
+        mime_type,
+    })
+}
+
+/// Parse an `m.file` event content into ChannelContent::File.
+/// Matrix v1.10+ adds a `filename` field; if present, it wins over `body`.
+pub(crate) fn parse_media_file(
+    c: &serde_json::Value,
+    hs: &str,
+) -> Option<crate::types::ChannelContent> {
+    let mxc = c.get("url")?.as_str()?;
+    let url = mxc_to_http(mxc, hs)?;
+    let filename = c
+        .get("filename")
+        .and_then(|f| f.as_str())
+        .or_else(|| c.get("body").and_then(|b| b.as_str()))
+        .unwrap_or("file")
+        .to_string();
+    Some(crate::types::ChannelContent::File { url, filename })
+}
+
+/// Parse an `m.audio` event content. Voice messages (msc3245.voice marker)
+/// promote to ChannelContent::Voice; everything else is ChannelContent::Audio.
+pub(crate) fn parse_media_audio(
+    c: &serde_json::Value,
+    hs: &str,
+) -> Option<crate::types::ChannelContent> {
+    let mxc = c.get("url")?.as_str()?;
+    let url = mxc_to_http(mxc, hs)?;
+    let caption = c.get("body").and_then(|b| b.as_str()).map(String::from);
+    let duration_ms = c
+        .get("info")
+        .and_then(|i| i.get("duration"))
+        .and_then(|d| d.as_u64())
+        .unwrap_or(0);
+    let duration_seconds = (duration_ms / 1000) as u32;
+    if c.get("org.matrix.msc3245.voice").is_some() {
+        Some(crate::types::ChannelContent::Voice {
+            url,
+            caption,
+            duration_seconds,
+        })
+    } else {
+        Some(crate::types::ChannelContent::Audio {
+            url,
+            caption,
+            duration_seconds,
+            title: None,
+            performer: None,
+        })
+    }
+}
+
+/// Parse an `m.video` event content into ChannelContent::Video.
+pub(crate) fn parse_media_video(
+    c: &serde_json::Value,
+    hs: &str,
+) -> Option<crate::types::ChannelContent> {
+    let mxc = c.get("url")?.as_str()?;
+    let url = mxc_to_http(mxc, hs)?;
+    let caption = c.get("body").and_then(|b| b.as_str()).map(String::from);
+    let duration_ms = c
+        .get("info")
+        .and_then(|i| i.get("duration"))
+        .and_then(|d| d.as_u64())
+        .unwrap_or(0);
+    let duration_seconds = (duration_ms / 1000) as u32;
+    let filename = c.get("body").and_then(|b| b.as_str()).map(String::from);
+    Some(crate::types::ChannelContent::Video {
+        url,
+        caption,
+        duration_seconds,
+        filename,
+    })
+}
+
+/// Dispatch helper: return ChannelContent for a content blob based on msgtype.
+/// Returns None for empty bodies, malformed content, or unhandled msgtypes.
+pub(crate) fn parse_inbound_msg_content(
+    content: &serde_json::Value,
+    hs: &str,
+) -> Option<crate::types::ChannelContent> {
+    let msgtype = content
+        .get("msgtype")
+        .and_then(|m| m.as_str())
+        .unwrap_or("m.text");
+    match msgtype {
+        "m.text" | "m.notice" | "m.emote" => {
+            let body = content.get("body").and_then(|b| b.as_str())?;
+            if body.is_empty() {
+                return None;
+            }
+            if body.starts_with('/') {
+                let parts: Vec<&str> = body.splitn(2, ' ').collect();
+                let cmd = parts[0].trim_start_matches('/').to_string();
+                let args: Vec<String> = parts
+                    .get(1)
+                    .map(|a| a.split_whitespace().map(String::from).collect())
+                    .unwrap_or_default();
+                Some(crate::types::ChannelContent::Command { name: cmd, args })
+            } else {
+                Some(crate::types::ChannelContent::Text(body.to_string()))
+            }
+        }
+        "m.image" => parse_media_image(content, hs),
+        "m.file" => parse_media_file(content, hs),
+        "m.audio" => parse_media_audio(content, hs),
+        "m.video" => parse_media_video(content, hs),
+        _ => None,
+    }
 }
 
 /// Render `text` followed by `[Label]` hints for each button row.
@@ -523,25 +650,12 @@ impl ChannelAdapter for MatrixAdapter {
                                     continue; // Skip own messages
                                 }
 
-                                let content = event["content"]["body"].as_str().unwrap_or("");
-                                if content.is_empty() {
-                                    continue;
-                                }
-
-                                let msg_content = if content.starts_with('/') {
-                                    let parts: Vec<&str> = content.splitn(2, ' ').collect();
-                                    let cmd = parts[0].trim_start_matches('/');
-                                    let args: Vec<String> = parts
-                                        .get(1)
-                                        .map(|a| a.split_whitespace().map(String::from).collect())
-                                        .unwrap_or_default();
-                                    ChannelContent::Command {
-                                        name: cmd.to_string(),
-                                        args,
-                                    }
-                                } else {
-                                    ChannelContent::Text(content.to_string())
-                                };
+                                let msg_content =
+                                    match parse_inbound_msg_content(&event["content"], &homeserver)
+                                    {
+                                        Some(c) => c,
+                                        None => continue,
+                                    };
 
                                 let event_id = event["event_id"].as_str().unwrap_or("").to_string();
                                 let thread_id = parse_thread_relation(&event["content"]);
@@ -1806,5 +1920,127 @@ mod tests {
             )
             .await
             .expect("edit interactive must succeed");
+    }
+
+    #[test]
+    fn test_inbound_image_event() {
+        let content = serde_json::json!({
+            "msgtype": "m.image",
+            "body": "screenshot.png",
+            "url": "mxc://srv/img1",
+            "info": { "mimetype": "image/png", "size": 1234 }
+        });
+        let cc = parse_media_image(&content, "https://hs.example").expect("must parse");
+        match cc {
+            crate::types::ChannelContent::Image {
+                url,
+                caption,
+                mime_type,
+            } => {
+                assert_eq!(url, "https://hs.example/_matrix/media/v3/download/srv/img1");
+                assert_eq!(caption, Some("screenshot.png".to_string()));
+                assert_eq!(mime_type, Some("image/png".to_string()));
+            }
+            _ => panic!("expected Image variant"),
+        }
+    }
+
+    #[test]
+    fn test_inbound_file_event() {
+        // body field as filename fallback (no separate `filename` field).
+        let content = serde_json::json!({
+            "msgtype": "m.file",
+            "body": "report.pdf",
+            "url": "mxc://srv/file1",
+            "info": { "mimetype": "application/pdf", "size": 9000 }
+        });
+        let cc = parse_media_file(&content, "https://hs.example").expect("must parse");
+        match cc {
+            crate::types::ChannelContent::File { url, filename } => {
+                assert_eq!(
+                    url,
+                    "https://hs.example/_matrix/media/v3/download/srv/file1"
+                );
+                assert_eq!(filename, "report.pdf");
+            }
+            _ => panic!("expected File variant"),
+        }
+
+        // Matrix v1.10+: `filename` field takes precedence over `body`.
+        let v110 = serde_json::json!({
+            "msgtype": "m.file",
+            "body": "Caption text",
+            "filename": "actual_name.pdf",
+            "url": "mxc://srv/file2",
+            "info": { "mimetype": "application/pdf" }
+        });
+        let cc = parse_media_file(&v110, "https://hs.example").expect("must parse");
+        match cc {
+            crate::types::ChannelContent::File { filename, .. } => {
+                assert_eq!(
+                    filename, "actual_name.pdf",
+                    "v1.10 filename field should win"
+                );
+            }
+            _ => panic!("expected File variant"),
+        }
+    }
+
+    #[test]
+    fn test_inbound_audio_event() {
+        let content = serde_json::json!({
+            "msgtype": "m.audio",
+            "body": "song.mp3",
+            "url": "mxc://srv/audio1",
+            "info": { "mimetype": "audio/mpeg", "duration": 65000 }
+        });
+        let cc = parse_media_audio(&content, "https://hs.example").expect("must parse");
+        match cc {
+            crate::types::ChannelContent::Audio {
+                duration_seconds, ..
+            } => {
+                assert_eq!(duration_seconds, 65, "ms should convert to seconds");
+            }
+            _ => panic!("expected Audio variant"),
+        }
+
+        // Voice marker promotes to Voice.
+        let voice = serde_json::json!({
+            "msgtype": "m.audio",
+            "body": "voice.ogg",
+            "url": "mxc://srv/voice1",
+            "info": { "mimetype": "audio/ogg", "duration": 5000 },
+            "org.matrix.msc3245.voice": {}
+        });
+        let cc = parse_media_audio(&voice, "https://hs.example").expect("must parse");
+        assert!(matches!(cc, crate::types::ChannelContent::Voice { .. }));
+    }
+
+    #[test]
+    fn test_inbound_video_event() {
+        let content = serde_json::json!({
+            "msgtype": "m.video",
+            "body": "clip.mp4",
+            "url": "mxc://srv/vid1",
+            "info": { "mimetype": "video/mp4", "duration": 12000 }
+        });
+        let cc = parse_media_video(&content, "https://hs.example").expect("must parse");
+        match cc {
+            crate::types::ChannelContent::Video {
+                duration_seconds,
+                filename,
+                ..
+            } => {
+                assert_eq!(duration_seconds, 12);
+                assert_eq!(filename, Some("clip.mp4".to_string()));
+            }
+            _ => panic!("expected Video variant"),
+        }
+    }
+
+    #[test]
+    fn test_inbound_unknown_msgtype_skipped() {
+        let content = serde_json::json!({"msgtype":"m.foo","body":"unknown"});
+        assert!(parse_inbound_msg_content(&content, "https://hs.example").is_none());
     }
 }
