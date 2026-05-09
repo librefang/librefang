@@ -2510,27 +2510,53 @@ pub async fn start_channel_bridge_with_config(
     // Email
     #[cfg(feature = "channel-email")]
     for em_config in config.email.iter() {
-        if let Some(password) = read_token(&em_config.password_env, "Email") {
-            let adapter = Arc::new(
-                EmailAdapter::new(
-                    em_config.imap_host.clone(),
-                    em_config.imap_port,
-                    em_config.smtp_host.clone(),
-                    em_config.smtp_port,
-                    em_config.username.clone(),
-                    password,
-                    em_config.poll_interval_secs,
-                    em_config.folders.clone(),
-                    em_config.allowed_senders.clone(),
-                )
-                .with_account_id(em_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                em_config.default_agent.clone(),
-                em_config.account_id.clone(),
-            ));
-        }
+        let imap_username = em_config
+            .imap_username
+            .as_deref()
+            .unwrap_or(&em_config.username)
+            .to_string();
+        let imap_password_env = em_config
+            .imap_password_env
+            .as_deref()
+            .unwrap_or(&em_config.password_env);
+        let imap_password = match read_token(imap_password_env, "Email IMAP") {
+            Some(p) => p,
+            None => continue,
+        };
+        let smtp_username = em_config
+            .smtp_username
+            .as_deref()
+            .unwrap_or(&em_config.username)
+            .to_string();
+        let smtp_password_env = em_config
+            .smtp_password_env
+            .as_deref()
+            .unwrap_or(&em_config.password_env);
+        let smtp_password = match read_token(smtp_password_env, "Email SMTP") {
+            Some(p) => p,
+            None => continue,
+        };
+        let adapter = Arc::new(
+            EmailAdapter::new(
+                em_config.imap_host.clone(),
+                em_config.imap_port,
+                em_config.smtp_host.clone(),
+                em_config.smtp_port,
+                imap_username,
+                imap_password,
+                smtp_username,
+                smtp_password,
+                em_config.poll_interval_secs,
+                em_config.folders.clone(),
+                em_config.allowed_senders.clone(),
+            )
+            .with_account_id(em_config.account_id.clone()),
+        );
+        adapters.push((
+            adapter,
+            em_config.default_agent.clone(),
+            em_config.account_id.clone(),
+        ));
     }
 
     // Teams

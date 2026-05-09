@@ -6198,6 +6198,18 @@ pub struct EmailConfig {
     pub username: String,
     /// Env var name holding the password.
     pub password_env: String,
+    /// IMAP-specific username (falls back to `username` if not set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imap_username: Option<String>,
+    /// Env var for IMAP-specific password (falls back to `password_env` if not set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imap_password_env: Option<String>,
+    /// SMTP-specific username (falls back to `username` if not set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smtp_username: Option<String>,
+    /// Env var for SMTP-specific password (falls back to `password_env` if not set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smtp_password_env: Option<String>,
     /// Poll interval in seconds.
     pub poll_interval_secs: u64,
     /// IMAP folders to monitor.
@@ -6225,6 +6237,10 @@ impl Default for EmailConfig {
             smtp_port: 587,
             username: String::new(),
             password_env: "EMAIL_PASSWORD".to_string(),
+            imap_username: None,
+            imap_password_env: None,
+            smtp_username: None,
+            smtp_password_env: None,
             poll_interval_secs: 30,
             folders: vec!["INBOX".to_string()],
             allowed_senders: vec![],
