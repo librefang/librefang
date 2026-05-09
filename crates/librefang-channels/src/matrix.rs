@@ -655,7 +655,7 @@ impl ChannelAdapter for MatrixAdapter {
             }),
             None => serde_json::json!({"msgtype": "m.text", "body": "…"}),
         };
-        let placeholder_id = self
+        let mut placeholder_id = self
             .api_send_event(&user.platform_id, "m.room.message", &placeholder_body)
             .await?;
 
@@ -664,22 +664,56 @@ impl ChannelAdapter for MatrixAdapter {
         let mut last_edit = std::time::Instant::now();
         let interval = Duration::from_millis(STREAM_EDIT_INTERVAL_MS);
 
+        // Flush helper: edits the current placeholder. On overflow, splits
+        // head/tail (UTF-8-safe), finalizes head as edit, sends tail as a
+        // fresh non-edit event whose id becomes the new placeholder, and
+        // returns the new buffer length.
+        async fn flush(
+            adapter: &MatrixAdapter,
+            room: &str,
+            placeholder_id: &mut String,
+            buffer: &mut String,
+        ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+            if buffer.len() <= MAX_MESSAGE_LEN {
+                adapter.api_edit_event(room, placeholder_id, buffer).await?;
+                return Ok(buffer.len());
+            }
+            // UTF-8-safe split via librefang_types::truncate_str.
+            let head = librefang_types::truncate_str(buffer, MAX_MESSAGE_LEN);
+            let head_len = head.len();
+            let tail = buffer[head_len..].to_string();
+            adapter.api_edit_event(room, placeholder_id, head).await?;
+            let body = serde_json::json!({"msgtype": "m.text", "body": tail});
+            let new_id = adapter
+                .api_send_event(room, "m.room.message", &body)
+                .await?;
+            *placeholder_id = new_id;
+            *buffer = tail;
+            Ok(buffer.len())
+        }
+
         while let Some(delta) = delta_rx.recv().await {
             buffer.push_str(&delta);
             let elapsed = last_edit.elapsed();
             let added = buffer.len().saturating_sub(last_flushed_len);
-            if elapsed >= interval || added >= STREAM_EDIT_CHAR_BUDGET {
-                self.api_edit_event(&user.platform_id, &placeholder_id, &buffer)
-                    .await?;
+            if elapsed >= interval
+                || added >= STREAM_EDIT_CHAR_BUDGET
+                || buffer.len() > MAX_MESSAGE_LEN
+            {
+                last_flushed_len =
+                    flush(self, &user.platform_id, &mut placeholder_id, &mut buffer).await?;
                 last_edit = std::time::Instant::now();
-                last_flushed_len = buffer.len();
             }
         }
-        // Final flush
         if !buffer.is_empty() {
-            self.api_edit_event(&user.platform_id, &placeholder_id, &buffer)
-                .await?;
+            // Drain any further overflows — possible if the final delta crossed
+            // multiple cap boundaries.
+            while buffer.len() > MAX_MESSAGE_LEN {
+                let _ = flush(self, &user.platform_id, &mut placeholder_id, &mut buffer).await?;
+            }
+            let _ = flush(self, &user.platform_id, &mut placeholder_id, &mut buffer).await?;
         }
+        let _ = last_flushed_len; // last_flushed_len is loop-local state for the in-flight debounce; reads happen via saturating_sub above
         Ok(())
     }
 
@@ -1505,5 +1539,79 @@ mod tests {
             .send_streaming(&user, rx, None)
             .await
             .expect("streaming must succeed");
+    }
+
+    #[tokio::test]
+    async fn test_send_streaming_handles_overflow() {
+        use crate::types::ChannelUser;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+        use std::sync::Mutex as StdMutex;
+        use tokio::sync::mpsc;
+        let server = MockServer::start().await;
+        let send_calls = StdArc::new(AtomicUsize::new(0));
+        let sc = send_calls.clone();
+        // Capture every request body so we can assert overflow split shape:
+        // a no-split impl produces exactly ONE fresh non-m.replace PUT (the
+        // placeholder), while the rolling-placeholder impl produces TWO
+        // (placeholder + rolled-over after head finalization).
+        let bodies: StdArc<StdMutex<Vec<serde_json::Value>>> =
+            StdArc::new(StdMutex::new(Vec::new()));
+        let bc = bodies.clone();
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/.+/send/m\.room\.message/.+$",
+            ))
+            .respond_with(move |req: &wiremock::Request| {
+                let n = sc.fetch_add(1, Ordering::SeqCst);
+                if let Ok(b) = serde_json::from_slice::<serde_json::Value>(&req.body) {
+                    bc.lock().unwrap().push(b);
+                }
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "event_id": format!("$evt{n}:test")
+                }))
+            })
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        let (tx, rx) = mpsc::channel(8);
+        // Send a single 5000-char delta, exceeding MAX_MESSAGE_LEN (4096).
+        let _ = tx.send("a".repeat(5000)).await;
+        drop(tx);
+        adapter
+            .send_streaming(&user, rx, None)
+            .await
+            .expect("streaming with overflow must succeed");
+        let calls = send_calls.load(Ordering::SeqCst);
+        // Expected: placeholder + 1 head edit + 1 fresh non-edit (overflow start)
+        //         + 1 final flush of tail = at least 3 calls. Allow some slack
+        //         for exact ordering.
+        assert!(
+            calls >= 3,
+            "overflow should produce at least 3 PUTs, got {calls}"
+        );
+        // Among the PUT bodies, at least TWO must be fresh non-edits
+        // (no m.relates_to.rel_type == "m.replace"): the original
+        // placeholder + the rolled-over fresh placeholder after head
+        // finalization. A no-split implementation produces exactly ONE.
+        let bodies_snap = bodies.lock().unwrap().clone();
+        let fresh_count = bodies_snap
+            .iter()
+            .filter(|b| {
+                b.get("m.relates_to")
+                    .and_then(|r| r.get("rel_type"))
+                    .and_then(|s| s.as_str())
+                    != Some("m.replace")
+            })
+            .count();
+        assert!(
+            fresh_count >= 2,
+            "overflow split must produce at least 2 fresh (non-m.replace) PUTs (placeholder + rolled-over), got {fresh_count}"
+        );
     }
 }
