@@ -126,6 +126,46 @@ impl MatrixAdapter {
         Ok(event_id)
     }
 
+    /// Redact (delete) a previously sent event.
+    /// Returns the redaction event_id.
+    async fn api_redact(
+        &self,
+        room_id: &str,
+        target_event_id: &str,
+        reason: Option<&str>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let txn_id = uuid::Uuid::new_v4().to_string();
+        let url = format!(
+            "{}/_matrix/client/v3/rooms/{}/redact/{}/{}",
+            self.homeserver_url,
+            urlencoding::encode(room_id),
+            urlencoding::encode(target_event_id),
+            txn_id
+        );
+        let body = match reason {
+            Some(r) => serde_json::json!({ "reason": r }),
+            None => serde_json::json!({}),
+        };
+        let resp = self
+            .client
+            .put(&url)
+            .bearer_auth(&*self.access_token)
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Matrix redact failed {status}: {text}").into());
+        }
+        let v: serde_json::Value = resp.json().await?;
+        let event_id = v["event_id"]
+            .as_str()
+            .ok_or_else(|| "Matrix redact response missing event_id".to_string())?
+            .to_string();
+        Ok(event_id)
+    }
+
     /// Send a text message to a Matrix room. Splits long messages into chunks
     /// and sends each as a separate `m.room.message` event. Returns the
     /// event_ids in order; the last one is the message useful for editing/redacting.
@@ -417,7 +457,7 @@ mod tests {
     // as `Err` (fail-loud, unlike Slack/Discord); a follow-up that
     // adds retry must reuse the same txn_id and is tracked on #3406.
 
-    use wiremock::matchers::{body_json, header, method, path_regex};
+    use wiremock::matchers::{body_json, body_partial_json, header, method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn make_adapter(homeserver_url: String) -> MatrixAdapter {
@@ -755,5 +795,28 @@ mod tests {
         assert_eq!(b, Duration::from_secs(60));
         b = calculate_backoff(b, max);
         assert_eq!(b, Duration::from_secs(60)); // stays capped
+    }
+
+    #[tokio::test]
+    async fn test_api_redact_happy_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/.+/redact/%24evt%3Atest/.+$",
+            ))
+            .and(body_partial_json(
+                serde_json::json!({"reason":"phase change"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$redact:test"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let id = adapter
+            .api_redact("!room:test", "$evt:test", Some("phase change"))
+            .await
+            .expect("redact must succeed");
+        assert_eq!(id, "$redact:test");
     }
 }
