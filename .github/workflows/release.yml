@@ -1933,18 +1933,84 @@ jobs:
         # development team". Reuses the same secret as the macOS notarize
         # step — same Apple Developer account.
         #
-        # APPLE_PROFILE_NAME flips the generated xcodeproj from automatic to
-        # manual signing and sets PROVISIONING_PROFILE_SPECIFIER to the named
-        # profile. Required because GitHub-hosted runners have no signed-in
-        # Apple ID, so automatic signing fails with "No Accounts: Add a new
-        # account in Accounts settings." even though the .mobileprovision is
-        # imported into ~/Library/MobileDevice/Provisioning Profiles/. The
-        # secret value is the profile's display Name (not bundle id, not
-        # UUID file name) — see issue #4385.
+        # cargo-mobile2 does NOT honour APPLE_PROFILE_NAME and leaves
+        # CODE_SIGN_STYLE = Automatic in the generated xcodeproj. The
+        # subsequent "Force manual code signing on generated xcodeproj"
+        # step patches that — see its comment for the full rationale.
         env:
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_PROFILE_NAME: ${{ secrets.APPLE_PROFILE_NAME }}
         run: cargo tauri ios init
+
+      - name: Configure manual code signing via xcodebuild shim
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PROFILE_NAME: ${{ secrets.APPLE_PROFILE_NAME }}
+        # cargo-mobile2's `cargo tauri ios init` writes DEVELOPMENT_TEAM
+        # but leaves CODE_SIGN_STYLE = Automatic in the generated
+        # xcodeproj. xcodebuild on a GitHub-hosted macOS runner then
+        # fails the .ipa build with:
+        #   error: No Accounts: Add a new account in Accounts settings.
+        #   error: No profiles for '<bundle_id>' were found:
+        #          Xcode couldn't find any iOS App Development provisioning
+        #          profiles matching '<bundle_id>'.
+        # because Automatic signing tries to fetch a Development profile
+        # via a signed-in Apple ID, and CI runners don't have one — even
+        # though the distribution .mobileprovision is on disk.
+        #
+        # Use xcodebuild's first-class `-xcconfig <file>` mechanism for a
+        # build-time override, applied via a tiny PATH shim so cargo-tauri
+        # picks it up without us touching the generated pbxproj. xcconfig
+        # values win over pbxproj `buildSettings`, which is exactly the
+        # documented Apple way to flip signing per-build without modifying
+        # a vendored or generated project file. Settings live in one
+        # declarative file, so adding entitlements / bitcode / hardened
+        # runtime later is a one-line edit instead of more pbxproj surgery.
+        #
+        # Skipped (with a warning) when the signing secrets are absent so
+        # forks without an Apple Developer account still get a clean run;
+        # the downstream "Build signed .ipa" step is gated on signed=true.
+        #
+        # Refs #4818, #4385.
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_TEAM_ID:-}" ] || [ -z "${APPLE_PROFILE_NAME:-}" ]; then
+            echo "::warning::Apple signing secrets missing — leaving Automatic signing in place (the .ipa build will be skipped)"
+            exit 0
+          fi
+          REAL_XCODEBUILD=$(command -v xcodebuild || true)
+          if [ -z "$REAL_XCODEBUILD" ] || [ ! -x "$REAL_XCODEBUILD" ]; then
+            echo "::error::xcodebuild not found on PATH"
+            exit 1
+          fi
+          # Resolve any symlink so the shim never recurses into itself if
+          # PATH ordering shifts later in the job.
+          REAL_XCODEBUILD=$(readlink -f "$REAL_XCODEBUILD" 2>/dev/null || echo "$REAL_XCODEBUILD")
+          XCCONFIG="$RUNNER_TEMP/librefang-signing.xcconfig"
+          # Spaces in display names are common ("LibreFang Distribution")
+          # and xcconfig parses unquoted-to-end-of-line for string values,
+          # so no quoting required here.
+          cat > "$XCCONFIG" <<EOF
+          CODE_SIGN_STYLE = Manual
+          DEVELOPMENT_TEAM = $APPLE_TEAM_ID
+          PROVISIONING_PROFILE_SPECIFIER = $APPLE_PROFILE_NAME
+          CODE_SIGN_IDENTITY = iPhone Distribution
+          EOF
+          SHIM_DIR="$RUNNER_TEMP/xcodebuild-shim"
+          mkdir -p "$SHIM_DIR"
+          cat > "$SHIM_DIR/xcodebuild" <<EOF
+          #!/bin/bash
+          exec "$REAL_XCODEBUILD" -xcconfig "$XCCONFIG" "\$@"
+          EOF
+          chmod +x "$SHIM_DIR/xcodebuild"
+          # Make the shim visible to subsequent steps via GITHUB_PATH.
+          echo "$SHIM_DIR" >> "$GITHUB_PATH"
+          # Sanity-check the shim resolves before the build step relies
+          # on it. Use the same PATH ordering that subsequent steps will
+          # see (GITHUB_PATH prepends).
+          PATH="$SHIM_DIR:$PATH" command -v xcodebuild
+          PATH="$SHIM_DIR:$PATH" xcodebuild -version | head -2
+          echo "=== xcconfig ==="
+          cat "$XCCONFIG"
 
       # Mirror of the Android version-derivation logic. Both jobs run in
       # parallel for the same tag, so each computes its own copy. Same
@@ -2004,40 +2070,49 @@ jobs:
             || /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" "$PLIST"
           echo "iOS plist=$PLIST CFBundleShortVersionString=$DISPLAY CFBundleVersion=$BUILD"
 
-      - name: Import distribution certificate
+      - name: Gate iOS signing on secret availability
         id: keychain
         env:
           APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
-          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
           APPLE_PROVISIONING_PROFILE_B64: ${{ secrets.APPLE_PROVISIONING_PROFILE_B64 }}
+        # Mirrors the TestFlight gate pattern below. Forks without an
+        # Apple Developer account get a clean run; the cert + profile +
+        # build steps all `if:` on `signed == 'true'`.
         run: |
-          if [ -z "$APPLE_CERT_P12" ] || [ -z "$APPLE_PROVISIONING_PROFILE_B64" ]; then
+          if [ -n "$APPLE_CERT_P12" ] && [ -n "$APPLE_PROVISIONING_PROFILE_B64" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
             echo "::warning::Apple signing secrets missing — skipping iOS build (no unsigned simulator fallback; release artifacts must be signed)"
             echo "signed=false" >> "$GITHUB_OUTPUT"
-            exit 0
           fi
-          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
-          KEYCHAIN_PWD=$(openssl rand -base64 32)
-          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
-          echo "$APPLE_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERT_PASSWORD" \
-            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          # Prepend (NOT replace) the search list. On a clean GitHub-hosted
-          # macos runner only the login keychain is present and the delta
-          # is harmless, but a future self-hosted runner may have other
-          # entries we'd otherwise hide for the duration of the build.
-          PRIOR=$(security list-keychains -d user | tr -d '"' | tr '\n' ' ')
-          security list-keychain -d user -s "$KEYCHAIN_PATH" $PRIOR
-          security set-key-partition-list -S apple-tool:,apple:,codesign: \
-            -s -k "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
-          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+
+      - name: Import distribution certificate
+        if: steps.keychain.outputs.signed == 'true'
+        # Action creates a temporary `signing_temp` keychain, imports the
+        # .p12, sets the partition list for codesign access, and cleans
+        # everything up via its `post:` hook at job end. Replaces ~25
+        # lines of `security create-keychain / import / set-key-partition-list`
+        # shell that we used to maintain by hand (refs #4385).
+        uses: apple-actions/import-codesign-certs@b2e261033a9e248f91a9b57201e8d1e12b15a24e # v7.0.0
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERT_P12 }}
+          p12-password: ${{ secrets.APPLE_CERT_PASSWORD }}
+
+      - name: Install distribution provisioning profile
+        if: steps.keychain.outputs.signed == 'true'
+        env:
+          APPLE_PROVISIONING_PROFILE_B64: ${{ secrets.APPLE_PROVISIONING_PROFILE_B64 }}
+        # No first-party action covers base64-blob → MobileDevice/Provisioning
+        # Profiles/ install. apple-actions/download-provisioning-profiles
+        # would, but it pulls from App Store Connect which is a different
+        # secret shape (API key) than the .mobileprovision blob we already
+        # store. Keep the 3-line decode.
+        run: |
+          set -euo pipefail
+          PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILES_DIR"
           echo "$APPLE_PROVISIONING_PROFILE_B64" | base64 --decode \
-            > "$HOME/Library/MobileDevice/Provisioning Profiles/librefang.mobileprovision"
-          rm -f "$RUNNER_TEMP/cert.p12"
-          echo "signed=true" >> "$GITHUB_OUTPUT"
-          echo "keychain=$KEYCHAIN_PATH" >> "$GITHUB_OUTPUT"
+            > "$PROFILES_DIR/librefang.mobileprovision"
 
       - name: Build signed .ipa
         if: steps.keychain.outputs.signed == 'true'
@@ -2110,13 +2185,6 @@ jobs:
           # secret — GitHub Actions handles multi-line values fine.
           api-private-key: ${{ secrets.APPLE_API_KEY_P8 }}
           uses-non-exempt-encryption: "false"
-
-      - name: Tear down keychain
-        if: always() && steps.keychain.outputs.keychain != ''
-        env:
-          KEYCHAIN_PATH: ${{ steps.keychain.outputs.keychain }}
-        run: |
-          security delete-keychain "$KEYCHAIN_PATH" || true
 
   sync_homebrew_cask:
     name: Sync Homebrew Cask
