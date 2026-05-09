@@ -47,6 +47,17 @@ pub(crate) fn mxc_to_http(mxc: &str, homeserver_url: &str) -> Option<String> {
     ))
 }
 
+/// Extract the thread root event_id from an event's content if it has
+/// an m.thread relation. Returns None for plain messages, replies, or edits.
+pub(crate) fn parse_thread_relation(content: &serde_json::Value) -> Option<String> {
+    let rel = content.get("m.relates_to")?.as_object()?;
+    let rel_type = rel.get("rel_type")?.as_str()?;
+    if rel_type != "m.thread" {
+        return None;
+    }
+    rel.get("event_id")?.as_str().map(String::from)
+}
+
 /// Matrix channel adapter using the Client-Server API.
 pub struct MatrixAdapter {
     /// Matrix homeserver URL (e.g., `"https://matrix.org"`).
@@ -483,6 +494,7 @@ impl ChannelAdapter for MatrixAdapter {
                                 };
 
                                 let event_id = event["event_id"].as_str().unwrap_or("").to_string();
+                                let thread_id = parse_thread_relation(&event["content"]);
 
                                 let mut channel_msg = ChannelMessage {
                                     channel: ChannelType::Matrix,
@@ -496,7 +508,7 @@ impl ChannelAdapter for MatrixAdapter {
                                     target_agent: None,
                                     timestamp: Utc::now(),
                                     is_group: true,
-                                    thread_id: None,
+                                    thread_id,
                                     metadata: HashMap::new(),
                                 };
 
@@ -1319,5 +1331,32 @@ mod tests {
             )
             .await
             .expect("thread send must succeed");
+    }
+
+    #[test]
+    fn test_inbound_thread_id_populated() {
+        let event_content = serde_json::json!({
+            "msgtype": "m.text",
+            "body": "in a thread",
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$root:test"
+            }
+        });
+        let tid = parse_thread_relation(&event_content);
+        assert_eq!(tid, Some("$root:test".to_string()));
+    }
+
+    #[test]
+    fn test_inbound_non_thread_message_no_thread_id() {
+        let plain = serde_json::json!({"msgtype": "m.text", "body": "plain"});
+        assert_eq!(parse_thread_relation(&plain), None);
+
+        let reply_only = serde_json::json!({
+            "msgtype": "m.text",
+            "body": "reply",
+            "m.relates_to": { "m.in_reply_to": { "event_id": "$x" } }
+        });
+        assert_eq!(parse_thread_relation(&reply_only), None);
     }
 }
