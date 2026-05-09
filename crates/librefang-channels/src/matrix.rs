@@ -1128,6 +1128,17 @@ impl ChannelAdapter for MatrixAdapter {
         let mut last_flushed_len: usize = 0;
         let mut last_edit = std::time::Instant::now();
         let interval = Duration::from_millis(STREAM_EDIT_INTERVAL_MS);
+        // First-delta policy: flush as soon as ANY content arrives so the
+        // placeholder `…` is replaced with real text quickly, even when
+        // the deltas are short. Without this, tool-progress markers like
+        // `\n\n🔧 tool_name\n\n` (~35 chars) never reach the 256-char
+        // budget and the user sits on `…` for the full 1500ms — and for
+        // tool-only sequences (rapid tool calls with no LLM prose
+        // between them) the buffer-on-recv check never re-fires the
+        // timer, so EVERY tool marker is invisible until the final
+        // drain. Telegram already does this implicitly by sending the
+        // first delta as the initial message body (telegram.rs:2214).
+        let mut flushed_initial = false;
 
         // Flush helper: edits the current placeholder. On overflow, splits
         // head/tail (UTF-8-safe), finalizes head as edit, sends tail as a
@@ -1165,13 +1176,19 @@ impl ChannelAdapter for MatrixAdapter {
             buffer.push_str(&delta);
             let elapsed = last_edit.elapsed();
             let added = buffer.len().saturating_sub(last_flushed_len);
-            if elapsed >= interval
+            // Flush on the very first non-empty buffer so the placeholder
+            // is replaced immediately; afterwards, fall back to the
+            // time/size debounce for the rest of the stream.
+            let force_first_flush = !flushed_initial && !buffer.is_empty();
+            if force_first_flush
+                || elapsed >= interval
                 || added >= STREAM_EDIT_CHAR_BUDGET
                 || buffer.len() > MAX_MESSAGE_LEN
             {
                 last_flushed_len =
                     flush(self, &user.platform_id, &mut placeholder_id, &mut buffer).await?;
                 last_edit = std::time::Instant::now();
+                flushed_initial = true;
             }
         }
         if !buffer.is_empty() {
@@ -2047,13 +2064,84 @@ mod tests {
             .expect("streaming must succeed");
         sender.await.unwrap();
         let calls = send_calls.load(Ordering::SeqCst);
-        // Placeholder + final edit. 10 deltas of "dN" = ~20 chars total, well under
-        // STREAM_EDIT_CHAR_BUDGET (256) and STREAM_EDIT_INTERVAL_MS (1500). So
-        // exactly 2 PUTs: placeholder + final.
-        assert!(calls >= 2, "expected at least 2 PUTs, got {calls}");
+        // Placeholder + first-delta flush + final edit. The first non-empty
+        // buffer always flushes immediately so the `…` placeholder is
+        // replaced with real content fast (parity with telegram's
+        // first-token send, fixes the tool-progress streaming gap where
+        // short markers like `\n\n🔧 X\n\n` never reach the 256-char
+        // budget). The remaining 9 deltas of "dN" total ~18 chars, well
+        // under STREAM_EDIT_CHAR_BUDGET (256) and STREAM_EDIT_INTERVAL_MS
+        // (1500), so they fold into the single final edit. → exactly
+        // 3 PUTs: placeholder + first-flush + final.
+        assert!(calls >= 3, "expected at least 3 PUTs, got {calls}");
         assert!(
-            calls <= 2,
-            "expected at most 2 PUTs (debounce should suppress mid-stream edits), got {calls}"
+            calls <= 3,
+            "expected at most 3 PUTs (debounce should suppress all but first + final mid-stream edits), got {calls}"
+        );
+    }
+
+    /// Regression for the tool-progress streaming gap. The kernel's
+    /// streaming bridge interleaves `\n\n🔧 toolname\n\n` markers
+    /// (~30-40 chars each) into the delta channel for every tool
+    /// invocation. Before the first-delta-flushes-immediately change,
+    /// rapid tool-only sequences (no LLM prose between calls) accumulated
+    /// markers below the 256-char budget AND fired all checks back to
+    /// back without crossing the 1500ms wall-clock threshold, so the
+    /// placeholder `…` was the ONLY thing the user saw until the agent
+    /// loop terminated and the final drain fired. Pin the new behaviour:
+    /// the very first marker must reach the placeholder edit before the
+    /// stream ends.
+    #[tokio::test]
+    async fn test_send_streaming_flushes_first_tool_marker() {
+        use crate::types::ChannelUser;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+        use tokio::sync::mpsc;
+        let server = MockServer::start().await;
+        let send_calls = StdArc::new(AtomicUsize::new(0));
+        let sc = send_calls.clone();
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/.+/send/m\.room\.message/.+$",
+            ))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = sc.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "event_id": format!("$evt{n}:test")
+                }))
+            })
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        let (tx, rx) = mpsc::channel(8);
+        // Send a single short marker, then immediately close. Total
+        // accumulated chars ≪ 256, total wall-clock ≪ 1500ms — the only
+        // thing that can cause a mid-stream flush is the
+        // first-delta-flushes-immediately rule.
+        let sender = tokio::spawn(async move {
+            let _ = tx
+                .send("\n\n🔧 mcp_filesystem_read_file\n\n".to_string())
+                .await;
+            drop(tx);
+        });
+        adapter
+            .send_streaming(&user, rx, None)
+            .await
+            .expect("streaming must succeed");
+        sender.await.unwrap();
+        let calls = send_calls.load(Ordering::SeqCst);
+        // Placeholder + first-flush (with marker visible) + final
+        // (idempotent, same content) = 3 PUTs minimum. The point is
+        // calls > 2 — i.e. SOMETHING beyond the placeholder + end-drain
+        // has happened.
+        assert!(
+            calls >= 3,
+            "expected ≥3 PUTs so the tool marker reaches the user mid-stream; got {calls}"
         );
     }
 
