@@ -6,18 +6,17 @@ The very first action in any task that will edit files **must** be:
 ```bash
 git rev-parse --git-dir
 ```
-- Output `.git` (a plain directory) → you are in the **main worktree**.
-  **Stop.** Run:
-  ```bash
-  git worktree add /tmp/librefang-<feature> -b <feature-branch> origin/main
-  ```
+The output's shape tells you which worktree you're in:
+
+- `.git` (a plain directory) → **main worktree**. **Stop.** Run
+  `git worktree add /tmp/librefang-<feature> -b <feature-branch> origin/main`
   and continue all work from that path.
-- Output `gitdir: /path/to/main/.git/worktrees/<name>` (a pointer file)
-  → you are in a **linked worktree**. Continue.
+- `gitdir: /path/to/main/.git/worktrees/<name>` (a pointer file) →
+  **linked worktree**. Continue.
 
 Do not rely on `pwd` matching any specific path — every developer's main
-clone lives somewhere different. The `git rev-parse --git-dir` shape is
-the only reliable signal.
+clone lives somewhere different. The `git rev-parse --git-dir` output
+shape is the only reliable signal.
 
 The `forbid-main-worktree` hook (`.claude/hooks/forbid-main-worktree.sh`)
 will block edits and mutating git commands targeted at the main tree if
@@ -356,7 +355,9 @@ session burns turns without producing information.
   hunk because "it'll be reapplied later" is how regressions land.
 
 ## Common Gotchas
-- `librefang.exe` may be locked if daemon is running — use `--lib` flag or kill daemon first
+- Windows: `librefang.exe` may be locked if the daemon is running —
+  use `cargo check --lib` or kill the daemon first. (Linux / macOS
+  let you overwrite a running binary, so this is not an issue there.)
 - `PeerRegistry` is `Option<PeerRegistry>` on kernel but `Option<Arc<PeerRegistry>>` on `AppState` — wrap with `.as_ref().map(|r| Arc::new(r.clone()))`
 - Config fields added to `KernelConfig` struct MUST also be added to the `Default` impl or build fails
 - `AgentLoopResult` field is `.response` not `.response_text`
