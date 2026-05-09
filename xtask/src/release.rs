@@ -8,15 +8,24 @@ use std::io::{self, Write as _};
 use std::path::Path;
 use std::process::Command;
 
-/// Release channel for non-interactive version pick. Mirrors the 1/2/3/4
+/// Release channel for non-interactive version pick. Mirrors the 1/2/3/4/5
 /// prompt entries in the interactive flow so `just release` and
 /// `gh workflow run Release --input channel=…` pick versions identically.
+///
+/// `Current` is special — it does not bump the version or open a PR.
+/// Instead it dispatches the existing release run for the latest tag
+/// with `channel=current`, which causes `release.yml` to force-sync
+/// the tag to `main` HEAD and re-publish every artifact from `main`'s
+/// current code. Use it when a release tag failed on a code bug, the
+/// fix has landed on `main`, and the same version number should be
+/// re-published with the fix included.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Channel {
     Stable,
     Beta,
     Rc,
     Lts,
+    Current,
 }
 
 #[derive(Parser, Debug)]
@@ -127,6 +136,68 @@ fn prompt(message: &str) -> String {
     input.trim().to_string()
 }
 
+/// Best-effort GitHub `<owner>/<repo>` lookup from the `origin` remote
+/// URL. Returns `None` when there is no `origin`, the URL doesn't point
+/// at github.com, or it doesn't parse into exactly one `<owner>/<repo>`
+/// pair.
+///
+/// Why this exists: `gh workflow run` requires either a configured
+/// default repo (`gh repo set-default …`) or an explicit `--repo`
+/// argument. On a fresh clone the default isn't set, so the dispatch
+/// fails with "No default remote repository has been set". Inferring
+/// from `origin` lets `cargo xtask release --channel current` work
+/// without that prerequisite.
+fn infer_gh_repo(root: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    parse_github_owner_repo(&url)
+}
+
+fn parse_github_owner_repo(url: &str) -> Option<String> {
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    let after_host = url
+        .strip_prefix("git@github.com:")
+        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| url.strip_prefix("https://github.com/"))
+        .or_else(|| url.strip_prefix("http://github.com/"))?;
+    let mut parts = after_host.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{}/{}", owner, repo))
+}
+
+/// Best-effort `git rev-parse --short <revspec>`. Returns `None` when
+/// git fails or the revspec does not resolve in the local repo.
+fn git_short_sha(root: &Path, revspec: &str) -> Option<String> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--short", revspec])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
 fn compute_calver() -> String {
     let now = chrono::Local::now();
     format!(
@@ -157,8 +228,132 @@ fn extract_changelog_section(content: &str, heading: &str) -> String {
     }
 }
 
+/// Dispatch the existing release run for the latest tag with
+/// `channel=current`. `release.yml` then force-syncs the tag to
+/// `main` HEAD and re-publishes every artifact from main's code.
+///
+/// We do not change Cargo.toml, do not open a PR, and do not push a
+/// new tag locally — every mutating step happens server-side via the
+/// dispatched workflow.
+fn run_current(
+    root: &Path,
+    no_confirm: bool,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tag = find_latest_tag(root, true)
+        .ok_or("no existing release tag found; nothing to re-publish")?;
+
+    // Resolve the tag's current commit and main HEAD locally so the
+    // operator sees, before confirming, exactly which commit pointer
+    // is about to move. Both lookups are best-effort: if the tag is
+    // not present locally (fresh clone, shallow fetch) we fall back
+    // to "(unknown)" rather than blocking — the workflow itself
+    // re-resolves both in the runner.
+    let tag_sha = git_short_sha(root, &format!("refs/tags/{}^{{commit}}", tag))
+        .unwrap_or_else(|| "(unknown)".to_string());
+    let main_sha = git_short_sha(root, "refs/heads/main")
+        .or_else(|| git_short_sha(root, "origin/main"))
+        .unwrap_or_else(|| "(unknown)".to_string());
+    let already_synced = tag_sha != "(unknown)" && main_sha != "(unknown)" && tag_sha == main_sha;
+
+    println!("=== channel=current: re-publish latest tag ===");
+    println!("  Tag:        {}", tag);
+    println!("  Tag → SHA:  {}", tag_sha);
+    println!("  main HEAD:  {}", main_sha);
+    if already_synced {
+        println!("  Status:     tag already at main HEAD — sync_tag_to_main will be a no-op");
+    } else {
+        println!(
+            "  Status:     tag will be force-pushed: {} → {}",
+            tag_sha, main_sha
+        );
+    }
+    println!();
+    println!("Effect: release.yml's `sync_tag_to_main` job will force-update");
+    println!(
+        "`{}` to main HEAD, then publish every artifact from main's",
+        tag
+    );
+    println!(
+        "current code. The previous `{}` GitHub Release artifacts will be",
+        tag
+    );
+    println!("clobbered; npm / PyPI / crates.io entries will be skipped where the");
+    println!("version already exists (idempotent publish steps).");
+    println!();
+
+    // Infer `<owner>/<repo>` from the `origin` remote so the dispatch
+    // works on fresh clones where `gh repo set-default` hasn't been
+    // run. Falls back to gh's own default-resolution when origin is
+    // not a GitHub URL we recognize.
+    let repo = infer_gh_repo(root);
+
+    // Dispatch ref MUST be `main`, not the tag — GitHub Actions reads
+    // the workflow YAML from the dispatched ref. An old tag's commit
+    // contains a stale release.yml that does not know about
+    // `channel=current`. We pass the tag name via the `tag` input
+    // instead, and release.yml's `RELEASE_TAG` env routes it through
+    // every `github.ref_name` site.
+    let tag_input = format!("tag={}", tag);
+
+    if dry_run {
+        println!("Dry run — would dispatch:");
+        match &repo {
+            Some(r) => println!(
+                "  gh workflow run Release --repo {} --ref main -f channel=current -f {}",
+                r, tag_input
+            ),
+            None => println!(
+                "  gh workflow run Release --ref main -f channel=current -f {}",
+                tag_input
+            ),
+        }
+        return Ok(());
+    }
+
+    if !no_confirm {
+        let answer = prompt(&format!("Dispatch Release workflow for {}? [y/N]: ", tag));
+        if answer.to_lowercase() != "y" && answer.to_lowercase() != "yes" {
+            return Err("Aborted".into());
+        }
+    }
+
+    let mut cmd = Command::new("gh");
+    cmd.arg("workflow").arg("run").arg("Release");
+    if let Some(r) = &repo {
+        cmd.arg("--repo").arg(r);
+    }
+    cmd.args(["--ref", "main", "-f", "channel=current", "-f", &tag_input]);
+    let status = cmd.current_dir(root).status()?;
+    if !status.success() {
+        let hint = if repo.is_none() {
+            " — could not infer GitHub `<owner>/<repo>` from `origin` either; \
+                pin one with `gh repo set-default <owner>/<repo>` and retry"
+        } else {
+            ""
+        };
+        return Err(format!(
+            "gh workflow run failed (exit {}); is `gh` authenticated and the \
+             repo accessible?{}",
+            status.code().unwrap_or(-1),
+            hint
+        )
+        .into());
+    }
+
+    println!();
+    println!("✓ Dispatched. Watch with:");
+    println!("  gh run watch (or open the Actions tab)");
+    Ok(())
+}
+
 pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
+
+    // --- channel=current shortcut: dispatch only, no version bump / PR ---
+    if args.channel == Some(Channel::Current) {
+        return run_current(&root, args.no_confirm, args.dry_run);
+    }
 
     // --- LTS patch shortcut ---
     if args.lts_patch {
@@ -318,6 +513,13 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
                 Channel::Beta => format!("{}-beta.{}", base_version, next_beta),
                 Channel::Rc => format!("{}-rc.{}", base_version, next_rc),
                 Channel::Lts => format!("{}.{}-lts", lts_base, next_lts_patch),
+                // Current bypasses the version pick entirely — it's
+                // handled by the early `run_current` branch above and
+                // by the `"5"` arm of the interactive prompt below.
+                Channel::Current => unreachable!(
+                    "Channel::Current must be intercepted before version_for() — \
+                     see the early-return in run() and the \"5\" arm of the prompt"
+                ),
             }
         };
 
@@ -339,14 +541,19 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             println!("  2) beta    -> {}", version_for(Channel::Beta));
             println!("  3) rc      -> {}", version_for(Channel::Rc));
             println!("  4) lts     -> {}", version_for(Channel::Lts));
+            println!(
+                "  5) current -> re-publish latest tag ({}) with main HEAD code",
+                prev_tag.as_deref().unwrap_or("none")
+            );
             println!();
 
-            let choice = prompt("Choose [1/2/3/4]: ");
+            let choice = prompt("Choose [1/2/3/4/5]: ");
             match choice.as_str() {
                 "1" => version_for(Channel::Stable),
                 "2" => version_for(Channel::Beta),
                 "3" => version_for(Channel::Rc),
                 "4" => version_for(Channel::Lts),
+                "5" => return run_current(&root, args.no_confirm, args.dry_run),
                 _ => return Err("Invalid choice".into()),
             }
         }
@@ -1009,6 +1216,9 @@ mod tests {
             Channel::Beta => format!("{}-beta.{}", base_version, next_beta),
             Channel::Rc => format!("{}-rc.{}", base_version, next_rc),
             Channel::Lts => format!("{}.{}-lts", lts_base, next_lts_patch),
+            Channel::Current => {
+                unreachable!("test fixture should never call with Channel::Current")
+            }
         }
     }
 
@@ -1016,6 +1226,51 @@ mod tests {
     fn generator_emits_canonical_beta_with_dot() {
         let v = version_for("2026.5.4", "2026.5", 1, 0, 0, Channel::Beta);
         assert_eq!(v, "2026.5.4-beta.1");
+    }
+
+    #[test]
+    fn parse_github_owner_repo_handles_https() {
+        assert_eq!(
+            parse_github_owner_repo("https://github.com/librefang/librefang.git"),
+            Some("librefang/librefang".to_string())
+        );
+        assert_eq!(
+            parse_github_owner_repo("https://github.com/librefang/librefang"),
+            Some("librefang/librefang".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_github_owner_repo_handles_ssh() {
+        assert_eq!(
+            parse_github_owner_repo("git@github.com:librefang/librefang.git"),
+            Some("librefang/librefang".to_string())
+        );
+        assert_eq!(
+            parse_github_owner_repo("ssh://git@github.com/librefang/librefang.git"),
+            Some("librefang/librefang".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_github_owner_repo_rejects_non_github() {
+        assert_eq!(
+            parse_github_owner_repo("https://gitlab.com/librefang/librefang.git"),
+            None
+        );
+        assert_eq!(parse_github_owner_repo("not a url"), None);
+        assert_eq!(parse_github_owner_repo(""), None);
+    }
+
+    #[test]
+    fn parse_github_owner_repo_rejects_subpath() {
+        // Defensive: don't accept a URL with extra path components,
+        // because feeding an extra segment to `gh --repo` would error
+        // confusingly. Better to fall back to gh's own default.
+        assert_eq!(
+            parse_github_owner_repo("https://github.com/librefang/librefang/tree/main"),
+            None
+        );
     }
 
     #[test]

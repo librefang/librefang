@@ -23,7 +23,7 @@ Read-only investigation **plus** local file edits to `CHANGELOG.md` and
 `articles/release-YYYY.M.D.md`. You may stage and commit those files.
 You may **not**:
 
-- Run `cargo build`, `cargo run`, `cargo install`, or workspace-wide
+- Run `cargo build`, `cargo run`, or workspace-wide
   `cargo test` (blocked by `.claude/settings.json`).
 - Run `git push --force` against `main` / `master`.
 - Trigger the actual release workflow (`gh workflow run release.yml`).

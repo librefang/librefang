@@ -14,6 +14,7 @@ pub mod fallback;
 pub mod fallback_chain;
 pub mod gemini;
 pub mod gemini_cli;
+pub mod ollama;
 pub mod openai;
 pub mod qwen_code;
 pub mod token_rotation;
@@ -135,6 +136,12 @@ pub enum ApiFormat {
     AzureOpenAI,
     /// AWS Bedrock Converse API (Bearer token auth via `AWS_BEARER_TOKEN_BEDROCK`).
     Bedrock,
+    /// Native Ollama API (`/api/chat`, NDJSON streaming, first-class
+    /// `think` and `thinking` fields). Distinct from the OpenAI-compat shim
+    /// at `/v1/chat/completions` — covers real Ollama plus the long tail of
+    /// "Ollama-protocol" servers (Lemonade, certain llama.cpp wrappers,
+    /// gpt4all variants) that don't implement the OpenAI shim. See #4810.
+    Ollama,
 }
 
 /// A provider entry in the static registry.
@@ -278,10 +285,14 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         // localhost resolves to both ::1 and 127.0.0.1, IPv6 is tried first,
         // and these local servers usually bind IPv4 only, causing instant
         // connection-refused errors that don't always fall back to IPv4.
-        base_url: "http://127.0.0.1:11434/v1",
+        //
+        // No trailing `/v1`: native Ollama API (`/api/chat`, …) lives off the
+        // host root. Existing user configs that still carry `/v1` are
+        // auto-stripped at driver construction (see ollama::OllamaDriver).
+        base_url: "http://127.0.0.1:11434",
         api_key_env: "OLLAMA_API_KEY",
         key_required: false,
-        api_format: ApiFormat::OpenAI,
+        api_format: ApiFormat::Ollama,
         alt_api_key_env: None,
         hidden: false,
     },
@@ -814,6 +825,15 @@ fn create_driver_from_entry(
                     .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
             ))
         }
+        ApiFormat::Ollama => Ok(Arc::new(
+            ollama::OllamaDriver::with_proxy_and_timeout(
+                api_key,
+                base_url,
+                proxy_url,
+                request_timeout_secs,
+            )
+            .with_emit_caller_trace_headers(config.emit_caller_trace_headers),
+        )),
     }
 }
 

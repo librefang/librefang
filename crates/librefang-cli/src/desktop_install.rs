@@ -286,6 +286,12 @@ fn linux_install_path_in(home: &Path) -> Option<PathBuf> {
 }
 
 /// Platform-specific installation. Returns the path to the installed binary.
+// On non-desktop targets (e.g. Android in the CLI release matrix) every cfg
+// branch below is excluded, so `downloaded` is unused — silence the lint there.
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows", target_os = "linux")),
+    allow(unused_variables)
+)]
 fn install_platform(downloaded: &Path) -> Result<PathBuf, String> {
     #[cfg(target_os = "macos")]
     return install_macos_dmg(downloaded);

@@ -32,7 +32,7 @@ tool="$(py 'import sys,json; print(json.load(sys.stdin).get("tool_name",""))' <<
 cmd="$(py 'import sys,json; print(json.load(sys.stdin).get("tool_input",{}).get("command",""))' <<<"$input")"
 [ -n "$cmd" ] || exit 0
 
-rules="force-push-main,no-verify,broad-git-add,sensitive-file-add,claude-attribution,rm-rf-dangerous,librefang-daemon-launch,cargo-add-remove-upgrade"
+rules="force-push-main,no-verify,broad-git-add,sensitive-file-add,claude-attribution,rm-rf-dangerous,librefang-daemon-launch"
 
 msg="$(python3 "$LIB" --rules "$rules" <<<"$cmd" 2>/dev/null || true)"
 

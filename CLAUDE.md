@@ -4,18 +4,25 @@
 
 The very first action in any task that will edit files **must** be:
 ```bash
-pwd && git rev-parse --git-dir
+test -d "$(git rev-parse --show-toplevel)/.git" && echo main || echo linked
 ```
-If `pwd` ends in `/Workspace/libre/librefang` (or wherever the user keeps the
-main clone) **and** `git rev-parse --git-dir` prints `.git` (a directory, not
-a `gitdir: ...` file), you are in the main worktree. **Stop.** Run:
-```bash
-git worktree add /tmp/librefang-<feature> -b <feature-branch> origin/main
-```
-and continue all work from that path. The `forbid-main-worktree` hook
-(`.claude/hooks/forbid-main-worktree.sh`) will block edits and mutating git
-commands targeted at the main tree if you forget — but the hook is a safety
-net, not your plan.
+- prints `main` → you are in the **main worktree**. **Stop.** Run
+  `git worktree add /tmp/librefang-<feature> -b <feature-branch> origin/main`
+  and continue all work from that path.
+- prints `linked` → you are in a **linked worktree**. Continue.
+
+Why this test: git stores the main worktree's `.git` as a directory,
+and a linked worktree's `.git` as a small text file pointing at
+`<main>/.git/worktrees/<name>`. So `[ -d <toplevel>/.git ]` is true
+exactly in the main worktree. This is the same check
+`.claude/hooks/forbid-main-worktree.sh` uses internally; do not
+substitute `git rev-parse --git-dir` (its output is path-shape and
+varies with cwd) or path-matching against `pwd` (every developer's
+clone lives somewhere different).
+
+The `forbid-main-worktree` hook (`.claude/hooks/forbid-main-worktree.sh`)
+will block edits and mutating git commands targeted at the main tree if
+you forget — but the hook is a safety net, not your plan.
 
 ### Other AI safety hooks (`.claude/hooks/`)
 
@@ -31,7 +38,6 @@ net, not your plan.
   `/Users`, `/usr`, `/etc`, `/var`, `/opt`, …)
 - Daemon launches: `librefang start`, `target/{debug,release}/librefang start|daemon`
   (port 4545 contention with the user's session — Live Integration Testing is human-only)
-- `cargo add` / `cargo remove` / `cargo upgrade` (deps need explicit user OK)
 
 `session-start-worktree-check.sh` (SessionStart) emits a banner telling
 the model whether the session started in the main tree or a linked worktree,
@@ -66,7 +72,9 @@ yet.
 LibreFang is an open-source Agent Operating System written in Rust (31 crates in `crates/`, plus `xtask/`).
 - Config: `~/.librefang/config.toml`
 - Default API: `http://127.0.0.1:4545`
-- CLI binary: `target/release/librefang.exe` (or `target/debug/librefang.exe`)
+- CLI binary: `target/release/librefang` on Linux/macOS,
+  `target/release/librefang.exe` on Windows (debug builds at the
+  matching `target/debug/` path)
 
 ### Crate map
 - **Core types & utilities**: `librefang-types`, `librefang-http`, `librefang-wire`, `librefang-telemetry`, `librefang-testing`, `librefang-migrate`
@@ -80,7 +88,7 @@ LibreFang is an open-source Agent Operating System written in Rust (31 crates in
 - **UAR spec** (BossFang): `librefang-uar-spec` (UAR-AGENT-MD spec types + AgentManifest translator; see BossFang-Exclusive Features below)
 
 ## Build & Verify Workflow
-**Do NOT run `cargo build`, `cargo run`, or `cargo install` locally.**
+**Do NOT run `cargo build` or `cargo run` locally.**
 **`cargo test` is allowed only when scoped with `-p <crate>` / `--package <crate>`** —
 the unscoped, workspace-wide form is blocked because it contends with the user's
 other sessions on the shared `target/` directory. Full workspace build / test
@@ -97,15 +105,23 @@ cargo test -p <crate>                                  # Only when verifying beh
 
 CI splits tests into two separate jobs so a unit failure surfaces quickly:
 
-- **Unit-fast** (`Test / Unit (lib+bin)`, ~2 min): `cargo nextest run --workspace --lib --bins --no-fail-fast`
+- **Unit-fast** (`Test / Unit (lib+bin)`, ~2 min): `cargo nextest run --workspace -E 'kind(lib) | kind(bin)' --no-fail-fast`
   — lib and binary unit tests only; no integration test binaries. Run this locally for quick iteration.
 - **Integration** (`Test / Ubuntu (shard N/4)`, ~10-20 min): sharded across 4 Ubuntu runners via
   `--partition hash:N/4`; also single jobs on macOS and Windows. Runs all `--tests` targets.
 
+The unit-fast lane uses nextest's `-E 'kind(lib) | kind(bin)'` filter rather
+than `--lib --bins` because the latter errors with "no library targets found"
+when a `-p <crate>` selector targets a binary-only crate
+(`librefang-cli`, `librefang-desktop`). The expression form matches whichever
+kinds the selected crates actually have, so the selective CI lane stays green
+when a PR touches only `librefang-cli/main.rs` (or when a stale-base diff
+drags it in).
+
 Local equivalents:
 ```bash
 # Fast lane — unit tests only:
-cargo nextest run --workspace --lib --bins --no-fail-fast
+cargo nextest run --workspace -E 'kind(lib) | kind(bin)' --no-fail-fast
 
 # Full validation — integration tests (mirrors the Ubuntu shard lane):
 cargo nextest run --workspace --no-fail-fast
@@ -115,19 +131,10 @@ cargo nextest run --workspace --no-fail-fast
 
 **Primary verification is automated.** The repo has comprehensive
 `#[tokio::test]` integration coverage in `crates/librefang-api/tests/`,
-landed via the #3571 PR series (~30 PRs). Every major route domain —
-`agents`, `a2a`, `approvals`, `audit`, `authz`, `auto-dream`, `budget`,
-`channels` (incl. webhooks), `config`, `goals`, `hands`, `hooks`,
-`inbox`, `mcp_auth`, `media`, `memory`, `network`/`peers`/`comms`,
-`oauth`, `pairing`/`backup`, `plugins`, `profiles`/`templates`,
-`prompts`, `providers`/`models`, `skills`, `terminal`, `tools`/`sessions`,
-`v1` (OpenAI compat), `workflows` — is exercised against a real axum
-router via `TestServer` (see `start_test_server*` in
-`tests/api_integration_test.rs`). Plus dedicated files:
-`auth_public_allowlist.rs`, `daemon_lifecycle_test.rs`, `load_test.rs`,
-`mcp_oauth_flow_test.rs`, `openapi_spec_test.rs`, `pairing_test.rs`,
-`tools_invoke_test.rs`, `totp_flow_test.rs`, `users_test.rs`. CI runs
-these on every push.
+landed via the #3571 PR series (~30 PRs). Every major route domain is
+exercised against a real axum router via `TestServer` (see
+`start_test_server*` in `tests/api_integration_test.rs`); the canonical
+list is `ls crates/librefang-api/tests/`. CI runs these on every push.
 
 ### What you MUST do for any route / wiring change
 
@@ -155,12 +162,13 @@ port 4545, both blocked by `.claude/hooks/`. Prepare commands and
 payloads for the user; they paste output back.
 
 ```bash
-# Stop any running daemon (Windows / Git Bash):
-tasklist | grep -i librefang && taskkill //PID <pid> //F && sleep 3
+# Stop any running daemon:
+#   Linux/macOS:        pkill -f librefang ; sleep 3
+#   Windows / Git Bash: tasklist | grep -i librefang && taskkill //PID <pid> //F && sleep 3
 
-# Build + start with provider key:
+# Build + start with provider key (binary suffix is .exe only on Windows):
 cargo build --release -p librefang-cli
-GROQ_API_KEY=<key> target/release/librefang.exe start &
+GROQ_API_KEY=<key> target/release/librefang start &
 sleep 6 && curl -s http://127.0.0.1:4545/api/health
 
 # Real LLM round-trip + side-effect check:
@@ -170,8 +178,7 @@ curl -s -X POST "http://127.0.0.1:4545/api/agents/$AGENT_ID/message" \
 curl -s http://127.0.0.1:4545/api/budget          # cost should have increased
 curl -s http://127.0.0.1:4545/api/budget/agents   # per-agent spend visible
 
-# Cleanup:
-taskkill //PID <pid> //F
+# Cleanup: same OS-specific kill command as above.
 ```
 
 The daemon command is `start` (not `daemon`).
@@ -203,10 +210,10 @@ The daemon command is `start` (not `daemon`).
 - **Auth middleware allowlist**: Unauthenticated endpoints must be added to the `is_public` allowlist in `middleware.rs` — NOT by reordering routes in `server.rs`. The auth layer applies to all routes.
 - **Docker callback URLs**: Never bind ephemeral localhost ports for OAuth callbacks in daemon code — the port is unreachable from outside Docker. Route callbacks through the API server's existing port instead.
 - **MCP OAuth flow**: Entirely UI-driven — daemon only detects 401 and sets `NeedsAuth` state. PKCE + callback handled by API layer (`routes/mcp_auth.rs`). Dynamic Client Registration (RFC 7591) used when server has `registration_endpoint` but no `client_id`.
-- `session_mode` in `AgentManifest` (agent.toml, **not** config.toml) controls whether automated invocations reuse the persistent session (`"persistent"`, default) or create a fresh one (`"new"`). Per-trigger override via `Trigger.session_mode: Option<SessionMode>`. Per-cron override via `CronJob.session_mode: Option<SessionMode>`. Resolution order: per-trigger / per-job override > agent manifest default. Session resolution in `execute_llm_agent` (`kernel/mod.rs` ~6959).
+- `session_mode` in `AgentManifest` (agent.toml, **not** config.toml) controls whether automated invocations reuse the persistent session (`"persistent"`, default) or create a fresh one (`"new"`). Per-trigger override via `Trigger.session_mode: Option<SessionMode>`. Per-cron override via `CronJob.session_mode: Option<SessionMode>`. Resolution order: per-trigger / per-job override > agent manifest default. Session resolution lives in `execute_llm_agent` (grep `kernel/mod.rs` for the function).
   - **Honors `session_mode`**: event triggers, `agent_send`, **cron jobs** (since #3597 / #3657 — see below).
-  - **Ignores `session_mode`**: channel messages (always `SessionId::for_channel(agent,"<channel>:<chat>")`), forks (forced `Persistent` at ~5543 to preserve prompt cache).
-  - **Cron + `session_mode`** (resolution at `kernel/mod.rs` ~13609, helper `cron::cron_fire_session_override`):
+  - **Ignores `session_mode`**: channel messages (always `SessionId::for_channel(agent,"<channel>:<chat>")`), forks (forced `Persistent` to preserve prompt cache).
+  - **Cron + `session_mode`** (resolution helper: `cron::cron_fire_session_override`):
     - Effective mode = per-job `CronJob.session_mode` > agent manifest `session_mode` > historical `Persistent`.
     - `Persistent` (or unset): the cron tick synthesizes `SenderContext{channel:"cron"}` and `send_message_full` derives `SessionId::for_channel(agent,"cron")`, so all fires of all cron jobs for that agent share one `(agent,"cron")` persistent session (historical behaviour, prompt-cache reuse).
     - `New`: `cron_fire_session_override` returns an explicit `SessionId::for_cron_run(agent, "<job_id>:<rfc3339_fire_time>")` which is passed as `session_id_override` into `send_message_full`. The override path wins over the channel-derived branch, so each fire lands on its own deterministic, isolated session — prior fires never leak into the current run, and the persistent `(agent,"cron")` session stays untouched.
@@ -397,10 +404,13 @@ surrealdb = { version = "=3.0.5", default-features = false, features = ["kv-rock
 Version drift causes duplicate dep link errors that break the entire build.
 
 ## Git Conventions
-**Never include "generated by Claude Code" in commit messages** — omit the Co-Authored-By footer entirely
 - **Format**: Use conventional commits (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `perf:`, `test:`)
+- **No AI / Claude attribution** in commit messages, PR bodies, or
+  comments — see "Commit & PR hygiene" under GitHub Collaboration below
+  for the canonical rule (the `commit-msg` hook enforces it server-side
+  too).
 - **Worktree**: Use `git worktree add` on an external disk for new features; fall back to `/tmp/librefang-<feature>` only if no external disk is available. Never develop on the main worktree
-- **Worktree continuation = drive to PR**: When asked to continue half-done work in an existing worktree (uncommitted changes or unmerged commits), the workflow is **commit → push → open or update PR**. Don't stop at "local commits only". A new branch needs a fresh PR; an existing branch with an open PR gets a follow-up push to update it. If the dirty changes aren't real work (e.g., stale `Cargo.lock` after rebase on an already-merged branch), discard them with `git checkout` instead of half-committing
+- **Worktree continuation = drive to PR**: When asked to continue half-done work in an existing worktree (uncommitted changes or unmerged commits), the workflow is **commit → push → open or update PR**. Don't stop at "local commits only". A new branch needs a fresh PR; an existing branch with an open PR gets a follow-up push to update it. Anything left in the worktree counts as real work — including a regenerated `Cargo.lock` after rebase. Commit it together with the rest of the change; do not `git checkout` it away.
 
 ## GitHub Collaboration & Wait Policy
 
@@ -411,21 +421,22 @@ issue threads.
 
 ### Touching other people's work
 
-- **Maintainer-reviewed PRs are off-limits.** Once a human maintainer has
-  left review comments, an `Approve`, or a `Request changes` on a PR, do
-  not push additional commits to that branch unless the maintainer
-  explicitly asks for them. The right move is a follow-up PR that
-  references the original.
-- **Never close a PR or issue opened by someone else.** If you believe an
-  issue is fixed or a PR is superseded, post a comment recommending
-  closure with the linking commit / PR — let a maintainer pull the trigger.
+- **Don't close PRs or issues opened by others** unless the user (the
+  maintainer) directly instructs you to. By default, post a comment
+  recommending closure with the linking commit / PR and let the
+  maintainer pull the trigger. When directed to close, the close
+  comment must state the substantive reason (review bugs, superseded
+  by, scope mismatch) so the original author understands what went
+  wrong — do not attribute the close to "AI" / "Claude", the reason
+  itself is what matters.
 - **Force-push only to your own branches, only before review.** Once a
   reviewer has loaded the diff, prefer fixup commits or a follow-up PR
   over rewriting history. Force-push to `main` / `master` is blocked by
   `guard-bash-safety.sh` and requires explicit user OK regardless.
 - **Don't reassign, re-label, or re-milestone** issues / PRs you did not
-  open unless asked. Adding `needs-review` or self-assigning a triage
-  label is fine; flipping `priority` / `release` labels is not.
+  open unless directed. Self-assigning a triage label or adding
+  `needs-review` is auto-OK; flipping `priority` / `release` labels is
+  not.
 
 ### Commit & PR hygiene
 
@@ -449,9 +460,16 @@ issue threads.
 CI is shared infrastructure and frequently slow. Polling it from an AI
 session burns turns without producing information.
 
-- **Hard cap: ~5 minutes of polling.** After that, push, leave the run
-  URL in the PR / report, and **stop**. Don't loop a `gh run watch` for
-  half an hour.
+- **Total polling budget: ~5 minutes, in 60–270s chunks.** Anthropic's
+  prompt cache TTL is 5 minutes, so keep each wake-up inside that
+  window to keep the cache warm; ~300s is the worst case (cache miss
+  without amortizing). Don't reach for 1200s+ "save my turns" waits
+  here — that violates the 5 min total cap and reintroduces the long
+  `gh run watch` / sleep behaviour the policy is meant to prevent.
+  After the total budget is spent, push, leave the run URL in the PR
+  / report, and **stop**. (Long waits *are* appropriate elsewhere —
+  e.g. an autonomous-loop tick polling for an external job — just not
+  for in-session CI polling.)
 - **Don't pre-emptively re-run a check** that has not yet failed. Only
   retry after a recorded failure, and only once.
 - **Don't open follow-up issues or pivot the plan** while waiting for CI
@@ -483,7 +501,9 @@ session burns turns without producing information.
   hunk because "it'll be reapplied later" is how regressions land.
 
 ## Common Gotchas
-- `librefang.exe` may be locked if daemon is running — use `--lib` flag or kill daemon first
+- Windows: `librefang.exe` may be locked if the daemon is running —
+  use `cargo check --lib` or kill the daemon first. (Linux / macOS
+  let you overwrite a running binary, so this is not an issue there.)
 - `PeerRegistry` is `Option<PeerRegistry>` on kernel but `Option<Arc<PeerRegistry>>` on `AppState` — wrap with `.as_ref().map(|r| Arc::new(r.clone()))`
 - Config fields added to `KernelConfig` struct MUST also be added to the `Default` impl or build fails
 - `AgentLoopResult` field is `.response` not `.response_text`

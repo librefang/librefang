@@ -29,7 +29,13 @@ on:
     inputs:
       channel:
         description: |
-          `current` reruns the release for the tag picked by `--ref`.
+          `current` reruns the release for the tag passed via `tag`,
+          using the latest `main` HEAD as the source of truth so a
+          hotfix landed after the tag re-publishes the same version.
+          (Dispatch `--ref` MUST be `main` for `channel=current` —
+          GitHub Actions reads the workflow YAML from the dispatched
+          ref, so dispatching against an old tag would read a stale
+          release.yml that does not know about this flow.)
           `stable/beta/rc/lts` kicks off `cargo xtask release --channel …`
           which opens a bump-version PR; merging that PR auto-tags and
           re-enters this workflow via the tag push. Mirrors `just release`.
@@ -42,6 +48,16 @@ on:
           - beta
           - rc
           - lts
+      tag:
+        description: |
+          Required when `channel=current`. The release tag to re-publish
+          (e.g. `v2026.5.8-beta.10`). The workflow will force-push this
+          tag to `main` HEAD before re-publishing so the GitHub Release,
+          binary artifacts, and SDK packages all line up. Ignored for
+          other channels.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -57,8 +73,106 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Effective ref for source-using checkouts.
+  # - tag push (normal release): use the pushed tag's frozen commit
+  # - workflow_dispatch channel=current: use main HEAD so a hotfix
+  #   landed after the tag re-publishes the same version
+  # Other dispatch channels (stable/beta/rc/lts) only run bump_version,
+  # which always wants main.
+  RELEASE_REF: ${{ (github.event_name == 'workflow_dispatch' && inputs.channel == 'current') && 'refs/heads/main' || github.ref }}
+  # Effective release tag name. For channel=current dispatches the
+  # workflow runs from `main` (so GitHub reads release.yml fresh),
+  # which makes `github.ref_name` "main" — useless for naming the
+  # GitHub Release / artifact uploads / cache keys. The dispatcher
+  # passes the real tag via `inputs.tag`, and every site that used
+  # to read `github.ref_name` reads `env.RELEASE_TAG` instead.
+  RELEASE_TAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.channel == 'current') && inputs.tag || github.ref_name }}
 
 jobs:
+  # ═════════════════════════════════════════════════════════════════════════
+  # workflow_dispatch channel=current: force-update the dispatched tag
+  # to main HEAD before publishing. Without this step, the tag in the
+  # GitHub Release would still point at the old (broken) commit even
+  # though the binary artifacts and SDK packages are rebuilt from main.
+  #
+  # Operational note: this REWRITES the release tag's commit pointer.
+  # Anyone who already fetched the old `vX → C1` mapping (mirrors,
+  # third-party CI checking out the tag, Homebrew bottle pinning) will
+  # observe the tag jumping to a new commit on next fetch. That is the
+  # whole point of `channel=current` — we want vX to mean "main HEAD
+  # at re-publish time" — but it is intentional, not accidental.
+  #
+  # Mechanics: if the tag is already at main HEAD, this is a no-op and
+  # the dispatch run continues into create_release/publish normally.
+  # Otherwise the force-push triggers a fresh `push: tags` run, the
+  # `cancel-in-progress` concurrency rule cancels this dispatch run,
+  # and the push run takes over the actual publishing — by then the
+  # tag and main HEAD are the same commit, so RELEASE_REF resolves to
+  # the same source either way.
+  #
+  # Race window during a force-push path: this job has no `needs:`
+  # blocker on the publish jobs, so build_dashboard / package_* /
+  # publish_* / docker / sdk jobs in this dispatch run start in
+  # parallel with `sync_tag_to_main`. Some may finish (or partially
+  # publish) before concurrency cancels the dispatch run. The follow-up
+  # `push: tags` run then redoes the same publishes. We rely on each
+  # publish step being idempotent for the same version: GitHub Release
+  # uploads overwrite, and npm / PyPI / crates.io reject duplicate
+  # publishes for an already-published version (handled as success in
+  # the publish jobs). If you add a non-idempotent publish step, gate
+  # it on `needs: sync_tag_to_main` to serialize behind this job.
+  # ═════════════════════════════════════════════════════════════════════════
+
+  sync_tag_to_main:
+    name: Sync tag to main HEAD (channel=current)
+    if: github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+          # Token scope note: the secret is named HOMEBREW_TAP_TOKEN
+          # because it was originally provisioned for pushing to the
+          # external `librefang/homebrew-tap` repo. It is reused here
+          # and in `bump_version` for write access to *this* repo
+          # (PR creation and tag force-push). Rotate / scope changes
+          # must keep `contents: write` on the main repo or this job
+          # and the bump-PR flow break.
+          #
+          # Note: unlike #4813's first iteration, we do NOT need to
+          # use a PAT to "trigger downstream workflows" here. The
+          # whole release pipeline runs in this same dispatch run,
+          # so the tag force-push only needs to update the GitHub
+          # Release pointer afterwards — no chained `push: tags`
+          # event is required. GITHUB_TOKEN would also work; we use
+          # HOMEBREW_TAP_TOKEN for symmetry with bump_version.
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      - name: Force-update tag to main HEAD
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          MAIN_SHA=$(git rev-parse refs/heads/main)
+          # `git rev-parse <tag>` resolves the tag's tip on the current
+          # clone. Since we just checked out main with full depth, the
+          # tag ref is present in the local repo (refs/tags/$TAG was
+          # fetched as part of the default refspec).
+          TAG_SHA=$(git rev-parse "refs/tags/$TAG^{commit}" 2>/dev/null || echo "")
+          if [ "$TAG_SHA" = "$MAIN_SHA" ]; then
+            echo "✓ Tag $TAG already at main HEAD ($MAIN_SHA); no force-push needed."
+            echo "  This dispatch run will continue into create_release and publish."
+            exit 0
+          fi
+          echo "Force-updating tag $TAG: $TAG_SHA → $MAIN_SHA"
+          git tag -f "$TAG" "$MAIN_SHA"
+          git push origin -f "refs/tags/$TAG"
+          echo "::notice::Tag $TAG force-pushed to main HEAD ($MAIN_SHA). The resulting push event will trigger a fresh release run; this dispatch run is about to be cancelled by concurrency.cancel-in-progress."
+
   # ═════════════════════════════════════════════════════════════════════════
   # PR close → auto-tag (from release-create.yml)
   # ═════════════════════════════════════════════════════════════════════════
@@ -73,6 +187,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ env.RELEASE_REF }}
           fetch-depth: 0
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
@@ -124,6 +239,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ env.RELEASE_REF }}
           fetch-depth: 0
           # PAT (not GITHUB_TOKEN) is required so the PR is opened by a
           # user account and `release: published` events on the
@@ -155,11 +271,12 @@ jobs:
     name: Create Release
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ env.RELEASE_REF }}
           fetch-depth: 0
 
       # Block any tag whose stripped form does not match
@@ -170,7 +287,7 @@ jobs:
       # and downstream consumers ship inconsistent metadata. See #3545.
       - name: Verify tag matches workspace version
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           # Scope to the [workspace.package] section so a future top-level
           # [package] block or any other left-anchored `version = ...` line
           # cannot shadow the real workspace version.
@@ -184,7 +301,7 @@ jobs:
       - name: Extract changelog for this version
         id: changelog
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           VERSION="${TAG#v}"
           # Strip pre-release suffix (-betaN / -rcN) for CHANGELOG lookup
           VERSION=$(echo "$VERSION" | sed 's/-.*//')
@@ -209,7 +326,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
 
           {
             echo "## Full Changelog"
@@ -286,13 +403,14 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ env.RELEASE_REF }}
           fetch-depth: 0
 
       - name: Create release branch (only for .0-lts)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           # Extract: v2026.3.0-lts -> 2026.3.0
           BASE="${TAG#v}"
           BASE="${BASE%-lts}"
@@ -335,10 +453,12 @@ jobs:
     name: Build Dashboard
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: pnpm/action-setup@8912a9102ac27614460f54aedde9e1e7f9aec20d # v6
         with:
           version: 10
@@ -366,7 +486,7 @@ jobs:
     name: CLI / ${{ matrix.target }}
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release, build_dashboard]
     runs-on: macos-latest
     strategy:
@@ -378,6 +498,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
@@ -387,7 +509,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: cli-${{ matrix.target }}-${{ github.ref_name }}
+          key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
       - name: Build CLI
         run: cargo build --release --target ${{ matrix.target }} --bin librefang
       - name: Ad-hoc codesign
@@ -404,7 +526,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           for attempt in $(seq 1 5); do
             if gh release upload "$TAG" librefang-${{ matrix.target }}.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
@@ -420,7 +542,7 @@ jobs:
     name: CLI / ${{ matrix.target }}
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release, build_dashboard]
     runs-on: ubuntu-22.04
     strategy:
@@ -434,6 +556,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
@@ -451,7 +575,7 @@ jobs:
         run: cargo install cross --locked
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: cli-${{ matrix.target }}-${{ github.ref_name }}
+          key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
       - name: Build CLI
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
@@ -469,7 +593,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           for attempt in $(seq 1 5); do
             if gh release upload "$TAG" librefang-${{ matrix.target }}.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
@@ -485,12 +609,14 @@ jobs:
     name: CLI / aarch64-linux-android
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release, build_dashboard]
     runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
@@ -500,7 +626,7 @@ jobs:
         run: cargo install cross --locked
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: cli-aarch64-linux-android-${{ github.ref_name }}
+          key: cli-aarch64-linux-android-${{ env.RELEASE_TAG }}
       - name: Build CLI (Android aarch64)
         # channel-email excluded: rustls-connector 0.23.0 calls Verifier::new_with_extra_roots
         # which is not implemented in rustls-platform-verifier 0.7.0 on Android.
@@ -515,7 +641,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           for attempt in $(seq 1 5); do
             if gh release upload "$TAG" librefang-aarch64-linux-android.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
@@ -531,7 +657,7 @@ jobs:
     name: CLI / ${{ matrix.target }} (mini)
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release, build_dashboard]
     runs-on: ubuntu-22.04
     strategy:
@@ -542,6 +668,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
@@ -555,7 +683,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: cli-mini-${{ matrix.target }}-${{ github.ref_name }}
+          key: cli-mini-${{ matrix.target }}-${{ env.RELEASE_TAG }}
       - name: Build CLI (mini)
         run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features --features mini
       - name: Package
@@ -568,7 +696,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           for attempt in $(seq 1 5); do
             if gh release upload "$TAG" librefang-${{ matrix.target }}-mini.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
@@ -584,7 +712,7 @@ jobs:
     name: CLI / ${{ matrix.target }} (static)
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release, build_dashboard]
     runs-on: ubuntu-22.04
     strategy:
@@ -596,6 +724,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
@@ -607,7 +737,7 @@ jobs:
         run: cargo install cross --locked
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: cli-${{ matrix.target }}-${{ github.ref_name }}
+          key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
       - name: Build static CLI
         run: cross build --release --target ${{ matrix.target }} --bin librefang
       - name: Verify static linking
@@ -628,7 +758,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           for attempt in $(seq 1 5); do
             if gh release upload "$TAG" librefang-${{ matrix.target }}.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
@@ -644,7 +774,7 @@ jobs:
     name: CLI / ${{ matrix.target }}
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release, build_dashboard]
     runs-on: windows-latest
     strategy:
@@ -656,6 +786,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
@@ -665,7 +797,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: cli-${{ matrix.target }}-${{ github.ref_name }}
+          key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
       - name: Build CLI
         run: cargo build --release --target ${{ matrix.target }} --bin librefang
       - name: Package
@@ -679,7 +811,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           for attempt in $(seq 1 5); do
             if gh release upload "$TAG" librefang-${{ matrix.target }}.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
@@ -695,7 +827,7 @@ jobs:
     name: CLI / ${{ matrix.target }} (mini)
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release, build_dashboard]
     runs-on: macos-latest
     strategy:
@@ -706,6 +838,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
@@ -715,7 +849,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: cli-mini-${{ matrix.target }}-${{ github.ref_name }}
+          key: cli-mini-${{ matrix.target }}-${{ env.RELEASE_TAG }}
       - name: Build CLI (mini)
         run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features --features mini
       - name: Ad-hoc codesign
@@ -732,7 +866,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           for attempt in $(seq 1 5); do
             if gh release upload "$TAG" librefang-${{ matrix.target }}-mini.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
@@ -748,7 +882,7 @@ jobs:
     name: CLI / ${{ matrix.target }} (mini)
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release, build_dashboard]
     runs-on: windows-latest
     strategy:
@@ -759,6 +893,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
@@ -768,7 +904,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: cli-mini-${{ matrix.target }}-${{ github.ref_name }}
+          key: cli-mini-${{ matrix.target }}-${{ env.RELEASE_TAG }}
       - name: Build CLI (mini)
         run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features --features mini
       - name: Package
@@ -782,7 +918,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           for attempt in $(seq 1 5); do
             if gh release upload "$TAG" librefang-${{ matrix.target }}-mini.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
@@ -819,7 +955,7 @@ jobs:
     name: Sign Release Artifacts
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs:
       - create_release
       - cli_mac
@@ -836,6 +972,8 @@ jobs:
       id-token: write   # fetch OIDC token for cosign keyless signing
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
 
       - uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
         with:
@@ -845,7 +983,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           mkdir -p sums
           cd sums
 
@@ -926,7 +1064,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           gh release upload "$TAG" \
             SHA256SUMS \
             SHA256SUMS.sig \
@@ -937,11 +1075,13 @@ jobs:
     name: CLI / npm
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [cli_mac, cli_linux, cli_musl, cli_windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "24"
@@ -951,17 +1091,17 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
+          VERSION="${RELEASE_TAG#v}"
           cargo xtask publish-npm-binaries \
             --version "$VERSION" \
             --repo "${{ github.repository }}" \
-            --tag "${{ github.ref_name }}"
+            --tag "${{ env.RELEASE_TAG }}"
 
   cli_pypi:
     name: CLI / PyPI
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [cli_mac, cli_linux, cli_musl, cli_windows]
     runs-on: ubuntu-latest
     permissions:
@@ -969,18 +1109,20 @@ jobs:
       contents: read   # actions/checkout (job-level permissions block fully overrides top-level)
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: "3.12"
 
       - name: Build CLI wheels (no upload)
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
+          VERSION="${RELEASE_TAG#v}"
           mkdir -p "${{ runner.temp }}/cli-pypi-dist"
           cargo xtask publish-pypi-binaries \
             --version "$VERSION" \
             --repo "${{ github.repository }}" \
-            --tag "${{ github.ref_name }}" \
+            --tag "${{ env.RELEASE_TAG }}" \
             --build-only \
             --dist-dir "${{ runner.temp }}/cli-pypi-dist"
 
@@ -997,7 +1139,7 @@ jobs:
     name: Sync to Homebrew Tap
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     runs-on: ubuntu-latest
     needs: [cli_mac, cli_linux]
     steps:
@@ -1011,7 +1153,7 @@ jobs:
       - name: Fetch release metadata (with retry for asset availability)
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
 
@@ -1053,7 +1195,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          TAG="${{ github.ref_name }}"
+          TAG="${{ env.RELEASE_TAG }}"
           VERSION="${TAG#v}"
           SEMVER="${VERSION}"
 
@@ -1271,7 +1413,7 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           git add .
-          git commit -m "chore: update formula channels to ${{ github.ref_name }}" || echo "No changes"
+          git commit -m "chore: update formula channels to ${{ env.RELEASE_TAG }}" || echo "No changes"
           git push
 
   # ═════════════════════════════════════════════════════════════════════════
@@ -1282,7 +1424,7 @@ jobs:
     name: Desktop / ${{ matrix.platform.name }}
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release]
     strategy:
       fail-fast: false
@@ -1316,6 +1458,8 @@ jobs:
     runs-on: ${{ matrix.platform.os }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - name: Install system deps (Linux)
         if: runner.os == 'Linux'
         # libdbus-1-dev is required by libdbus-sys, pulled in transitively
@@ -1344,7 +1488,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: desktop-${{ matrix.platform.rust_target }}-${{ github.ref_name }}
+          key: desktop-${{ matrix.platform.rust_target }}-${{ env.RELEASE_TAG }}
 
       - uses: pnpm/action-setup@8912a9102ac27614460f54aedde9e1e7f9aec20d # v6
         with:
@@ -1416,7 +1560,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           # Fetch asset list with retry (GitHub API can be transiently unavailable)
           ASSETS=""
           for attempt in $(seq 1 5); do
@@ -1445,8 +1589,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "${{ github.ref_name }}"
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: "${{ env.RELEASE_TAG }}"
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
@@ -1465,8 +1609,8 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.MAC_NOTARIZE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.MAC_NOTARIZE_TEAM_ID }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "${{ github.ref_name }}"
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: "${{ env.RELEASE_TAG }}"
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
@@ -1490,7 +1634,7 @@ jobs:
     name: Mobile / Android (aab + apk)
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release]
     continue-on-error: true
     runs-on: ubuntu-latest
@@ -1501,6 +1645,8 @@ jobs:
       NDK_VERSION: "27.0.12077973"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
 
       - name: Set up JDK 17 (Temurin)
         uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
@@ -1531,7 +1677,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: mobile-android-${{ github.ref_name }}
+          key: mobile-android-${{ env.RELEASE_TAG }}
           restore-keys: |
             mobile-android-
 
@@ -1673,7 +1819,7 @@ jobs:
           APK_PATH: ${{ steps.art.outputs.apk }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           for f in "$AAB_PATH" "$APK_PATH"; do
             [ -z "$f" ] && continue
             base=$(basename "$f")
@@ -1724,7 +1870,7 @@ jobs:
     name: Mobile / iOS (ipa)
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release]
     continue-on-error: true
     # macos-26 ships Xcode 26 (default 26.2). Use the default Xcode
@@ -1734,6 +1880,8 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
 
       - name: Show selected Xcode
         run: |
@@ -1755,7 +1903,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: mobile-ios-${{ github.ref_name }}
+          key: mobile-ios-${{ env.RELEASE_TAG }}
           restore-keys: |
             mobile-ios-
 
@@ -1785,18 +1933,172 @@ jobs:
         # development team". Reuses the same secret as the macOS notarize
         # step — same Apple Developer account.
         #
-        # APPLE_PROFILE_NAME flips the generated xcodeproj from automatic to
-        # manual signing and sets PROVISIONING_PROFILE_SPECIFIER to the named
-        # profile. Required because GitHub-hosted runners have no signed-in
-        # Apple ID, so automatic signing fails with "No Accounts: Add a new
-        # account in Accounts settings." even though the .mobileprovision is
-        # imported into ~/Library/MobileDevice/Provisioning Profiles/. The
-        # secret value is the profile's display Name (not bundle id, not
-        # UUID file name) — see issue #4385.
+        # cargo-mobile2 does NOT honour APPLE_PROFILE_NAME and leaves
+        # CODE_SIGN_STYLE = Automatic in the generated xcodeproj. The
+        # subsequent "Force manual code signing on generated xcodeproj"
+        # step patches that — see its comment for the full rationale.
         env:
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_PROFILE_NAME: ${{ secrets.APPLE_PROFILE_NAME }}
         run: cargo tauri ios init
+
+      - name: Configure manual code signing via xcodebuild shim
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PROFILE_NAME: ${{ secrets.APPLE_PROFILE_NAME }}
+        # cargo-mobile2's `cargo tauri ios init` writes DEVELOPMENT_TEAM
+        # but leaves CODE_SIGN_STYLE = Automatic in the generated
+        # xcodeproj, AND cargo-tauri auto-generates an exportOptions.plist
+        # with `signingStyle=automatic` for the `xcodebuild -exportArchive`
+        # step. Both phases then fail on a GitHub-hosted macOS runner:
+        #
+        #   1. Build phase:
+        #      error: No Accounts: Add a new account in Accounts settings.
+        #      error: No profiles for '<bundle_id>' were found.
+        #
+        #   2. Export phase (after archive succeeds):
+        #      error: exportArchive No Accounts
+        #      error: exportArchive No profiles for '<bundle_id>' were found
+        #      ** EXPORT FAILED ** xcodebuild exited with code 70
+        #
+        # Both fall through to "fetch a Development profile via a signed-in
+        # Apple ID", and CI runners don't have one — even though the
+        # distribution .mobileprovision is on disk.
+        #
+        # Fix both with one PATH shim that wraps xcodebuild:
+        #   • For `xcodebuild build|archive|...`: prepend `-xcconfig <override>`
+        #     so manual signing build settings override the pbxproj's Automatic.
+        #   • For `xcodebuild -exportArchive ...`: strip cargo-tauri's auto-
+        #     generated `-exportOptionsPlist <auto>` pair and substitute our
+        #     own plist with `signingStyle=manual` + `provisioningProfiles`
+        #     mapping the bundle id to the imported distribution profile.
+        #
+        # Both override files (xcconfig + exportOptions.plist) live in
+        # $RUNNER_TEMP, are declarative, and don't touch the generated
+        # xcodeproj — so we stay decoupled from cargo-mobile2's templating.
+        # Bundle id is read from tauri.ios.conf.json so a future rename in
+        # that file doesn't silently regress the export step.
+        #
+        # Skipped (with a warning) when the signing secrets are absent so
+        # forks without an Apple Developer account still get a clean run;
+        # the downstream "Build signed .ipa" step is gated on signed=true.
+        #
+        # Refs #4818, #4385.
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_TEAM_ID:-}" ] || [ -z "${APPLE_PROFILE_NAME:-}" ]; then
+            echo "::warning::Apple signing secrets missing — leaving Automatic signing in place (the .ipa build will be skipped)"
+            exit 0
+          fi
+          REAL_XCODEBUILD=$(command -v xcodebuild || true)
+          if [ -z "$REAL_XCODEBUILD" ] || [ ! -x "$REAL_XCODEBUILD" ]; then
+            echo "::error::xcodebuild not found on PATH"
+            exit 1
+          fi
+          # Resolve any symlink so the shim never recurses into itself if
+          # PATH ordering shifts later in the job.
+          REAL_XCODEBUILD=$(readlink -f "$REAL_XCODEBUILD" 2>/dev/null || echo "$REAL_XCODEBUILD")
+          BUNDLE_ID=$(jq -r .identifier crates/librefang-desktop/tauri.ios.conf.json)
+          if [ -z "$BUNDLE_ID" ] || [ "$BUNDLE_ID" = "null" ]; then
+            echo "::error::Could not read .identifier from tauri.ios.conf.json"
+            exit 1
+          fi
+          XCCONFIG="$RUNNER_TEMP/librefang-signing.xcconfig"
+          # Spaces in display names are common ("LibreFang Distribution")
+          # and xcconfig parses unquoted-to-end-of-line for string values,
+          # so no quoting required here.
+          cat > "$XCCONFIG" <<EOF
+          CODE_SIGN_STYLE = Manual
+          DEVELOPMENT_TEAM = $APPLE_TEAM_ID
+          PROVISIONING_PROFILE_SPECIFIER = $APPLE_PROFILE_NAME
+          CODE_SIGN_IDENTITY = iPhone Distribution
+          EOF
+          # `method=app-store` keeps the .ipa shape compatible with the
+          # downstream TestFlight upload (App Store distribution); same
+          # value Apple's altool/notarytool flow expects.
+          EXPORT_OPTS="$RUNNER_TEMP/librefang-export-options.plist"
+          cat > "$EXPORT_OPTS" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>app-store</string>
+              <key>signingStyle</key>
+              <string>manual</string>
+              <key>teamID</key>
+              <string>$APPLE_TEAM_ID</string>
+              <key>provisioningProfiles</key>
+              <dict>
+                  <key>$BUNDLE_ID</key>
+                  <string>$APPLE_PROFILE_NAME</string>
+              </dict>
+              <key>uploadSymbols</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+          # Validate both override files before subsequent steps depend
+          # on them. xcconfig has no validator built into xcodebuild
+          # (loads silently), so we only check the plist; xcconfig
+          # syntax errors would surface as build failures with clear
+          # "unrecognized" messages.
+          plutil -lint "$EXPORT_OPTS"
+          SHIM_DIR="$RUNNER_TEMP/xcodebuild-shim"
+          mkdir -p "$SHIM_DIR"
+          # Quoted heredoc (`'EOF'`) so the shim body is written literally:
+          # only $REAL_XCODEBUILD / $XCCONFIG / $EXPORT_OPTS get interpolated
+          # via explicit variable substitution below the heredoc, so $@
+          # / $arg / etc. are evaluated at shim run-time, not now.
+          cat > "$SHIM_DIR/xcodebuild" <<'SHIM_EOF'
+          #!/bin/bash
+          # Auto-generated by release.yml's "Configure manual code signing"
+          # step. Wraps the real xcodebuild to inject manual-signing
+          # overrides into cargo-tauri's invocations.
+          set -euo pipefail
+          REAL_XCODEBUILD='__REAL_XCODEBUILD__'
+          XCCONFIG='__XCCONFIG__'
+          EXPORT_OPTS='__EXPORT_OPTS__'
+          IS_EXPORT=0
+          for a in "$@"; do
+            if [ "$a" = "-exportArchive" ]; then IS_EXPORT=1; break; fi
+          done
+          if [ $IS_EXPORT -eq 0 ]; then
+            exec "$REAL_XCODEBUILD" -xcconfig "$XCCONFIG" "$@"
+          fi
+          # Export: drop existing -exportOptionsPlist <path> pair, splice
+          # in ours. Other args (archive path, export path, scheme, etc.)
+          # pass through verbatim.
+          NEW=()
+          SKIP=0
+          for a in "$@"; do
+            if [ $SKIP -eq 1 ]; then SKIP=0; continue; fi
+            if [ "$a" = "-exportOptionsPlist" ]; then SKIP=1; continue; fi
+            NEW+=("$a")
+          done
+          exec "$REAL_XCODEBUILD" -exportOptionsPlist "$EXPORT_OPTS" "${NEW[@]}"
+          SHIM_EOF
+          # Substitute the literal placeholders with actual paths. Done
+          # post-hoc to keep the heredoc body unambiguous (no $-mixing
+          # with the shim's own runtime expansions).
+          sed -i '' \
+            -e "s|__REAL_XCODEBUILD__|$REAL_XCODEBUILD|" \
+            -e "s|__XCCONFIG__|$XCCONFIG|" \
+            -e "s|__EXPORT_OPTS__|$EXPORT_OPTS|" \
+            "$SHIM_DIR/xcodebuild"
+          chmod +x "$SHIM_DIR/xcodebuild"
+          # Make the shim visible to subsequent steps via GITHUB_PATH.
+          echo "$SHIM_DIR" >> "$GITHUB_PATH"
+          # Sanity-check the shim resolves before the build step relies
+          # on it. Use the same PATH ordering that subsequent steps will
+          # see (GITHUB_PATH prepends).
+          PATH="$SHIM_DIR:$PATH" command -v xcodebuild
+          PATH="$SHIM_DIR:$PATH" xcodebuild -version | head -2
+          echo "=== shim script ==="
+          cat "$SHIM_DIR/xcodebuild"
+          echo "=== xcconfig ==="
+          cat "$XCCONFIG"
+          echo "=== exportOptions.plist ==="
+          cat "$EXPORT_OPTS"
 
       # Mirror of the Android version-derivation logic. Both jobs run in
       # parallel for the same tag, so each computes its own copy. Same
@@ -1856,40 +2158,49 @@ jobs:
             || /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" "$PLIST"
           echo "iOS plist=$PLIST CFBundleShortVersionString=$DISPLAY CFBundleVersion=$BUILD"
 
-      - name: Import distribution certificate
+      - name: Gate iOS signing on secret availability
         id: keychain
         env:
           APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
-          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
           APPLE_PROVISIONING_PROFILE_B64: ${{ secrets.APPLE_PROVISIONING_PROFILE_B64 }}
+        # Mirrors the TestFlight gate pattern below. Forks without an
+        # Apple Developer account get a clean run; the cert + profile +
+        # build steps all `if:` on `signed == 'true'`.
         run: |
-          if [ -z "$APPLE_CERT_P12" ] || [ -z "$APPLE_PROVISIONING_PROFILE_B64" ]; then
+          if [ -n "$APPLE_CERT_P12" ] && [ -n "$APPLE_PROVISIONING_PROFILE_B64" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
             echo "::warning::Apple signing secrets missing — skipping iOS build (no unsigned simulator fallback; release artifacts must be signed)"
             echo "signed=false" >> "$GITHUB_OUTPUT"
-            exit 0
           fi
-          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
-          KEYCHAIN_PWD=$(openssl rand -base64 32)
-          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
-          echo "$APPLE_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERT_PASSWORD" \
-            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          # Prepend (NOT replace) the search list. On a clean GitHub-hosted
-          # macos runner only the login keychain is present and the delta
-          # is harmless, but a future self-hosted runner may have other
-          # entries we'd otherwise hide for the duration of the build.
-          PRIOR=$(security list-keychains -d user | tr -d '"' | tr '\n' ' ')
-          security list-keychain -d user -s "$KEYCHAIN_PATH" $PRIOR
-          security set-key-partition-list -S apple-tool:,apple:,codesign: \
-            -s -k "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
-          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+
+      - name: Import distribution certificate
+        if: steps.keychain.outputs.signed == 'true'
+        # Action creates a temporary `signing_temp` keychain, imports the
+        # .p12, sets the partition list for codesign access, and cleans
+        # everything up via its `post:` hook at job end. Replaces ~25
+        # lines of `security create-keychain / import / set-key-partition-list`
+        # shell that we used to maintain by hand (refs #4385).
+        uses: apple-actions/import-codesign-certs@b2e261033a9e248f91a9b57201e8d1e12b15a24e # v7.0.0
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERT_P12 }}
+          p12-password: ${{ secrets.APPLE_CERT_PASSWORD }}
+
+      - name: Install distribution provisioning profile
+        if: steps.keychain.outputs.signed == 'true'
+        env:
+          APPLE_PROVISIONING_PROFILE_B64: ${{ secrets.APPLE_PROVISIONING_PROFILE_B64 }}
+        # No first-party action covers base64-blob → MobileDevice/Provisioning
+        # Profiles/ install. apple-actions/download-provisioning-profiles
+        # would, but it pulls from App Store Connect which is a different
+        # secret shape (API key) than the .mobileprovision blob we already
+        # store. Keep the 3-line decode.
+        run: |
+          set -euo pipefail
+          PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILES_DIR"
           echo "$APPLE_PROVISIONING_PROFILE_B64" | base64 --decode \
-            > "$HOME/Library/MobileDevice/Provisioning Profiles/librefang.mobileprovision"
-          rm -f "$RUNNER_TEMP/cert.p12"
-          echo "signed=true" >> "$GITHUB_OUTPUT"
-          echo "keychain=$KEYCHAIN_PATH" >> "$GITHUB_OUTPUT"
+            > "$PROFILES_DIR/librefang.mobileprovision"
 
       - name: Build signed .ipa
         if: steps.keychain.outputs.signed == 'true'
@@ -1920,7 +2231,7 @@ jobs:
           IPA_PATH: ${{ steps.art.outputs.ipa }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           gh release upload "$TAG" "$IPA_PATH" --clobber || true
 
       # Unattended TestFlight upload (#3348). Uses an App Store Connect
@@ -1963,18 +2274,11 @@ jobs:
           api-private-key: ${{ secrets.APPLE_API_KEY_P8 }}
           uses-non-exempt-encryption: "false"
 
-      - name: Tear down keychain
-        if: always() && steps.keychain.outputs.keychain != ''
-        env:
-          KEYCHAIN_PATH: ${{ steps.keychain.outputs.keychain }}
-        run: |
-          security delete-keychain "$KEYCHAIN_PATH" || true
-
   sync_homebrew_cask:
     name: Sync Homebrew Cask
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     runs-on: ubuntu-latest
     needs: [desktop]
     steps:
@@ -1988,7 +2292,7 @@ jobs:
       - name: Fetch release metadata (with retry for DMG availability)
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
 
@@ -2025,7 +2329,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          TAG="${{ github.ref_name }}"
+          TAG="${{ env.RELEASE_TAG }}"
           VERSION="${TAG#v}"
 
           # Resolve actual DMG names (Tauri version differs from tag version)
@@ -2198,7 +2502,7 @@ jobs:
           git config user.email "actions@github.com"
           mkdir -p Casks
           git add .
-          git commit -m "chore: update cask channels to ${{ github.ref_name }}" || echo "No changes"
+          git commit -m "chore: update cask channels to ${{ env.RELEASE_TAG }}" || echo "No changes"
           git push
 
   # ═════════════════════════════════════════════════════════════════════════
@@ -2209,7 +2513,7 @@ jobs:
     name: Docker / ${{ matrix.platform }}
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release]
     timeout-minutes: 30
     strategy:
@@ -2223,6 +2527,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - name: Log in to GHCR
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
         with:
@@ -2234,7 +2540,7 @@ jobs:
       - name: Extract version & platform slug
         id: meta
         run: |
-          echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
           platform=${{ matrix.platform }}
           echo "slug=${platform//\//-}" >> "$GITHUB_OUTPUT"
       - name: Build and push (single-arch digest)
@@ -2266,7 +2572,7 @@ jobs:
     name: Docker Manifest
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     runs-on: ubuntu-latest
     needs: [docker]
     steps:
@@ -2281,7 +2587,7 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
       - name: Download digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -2306,11 +2612,13 @@ jobs:
     name: Deploy to Fly.io
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     runs-on: ubuntu-latest
     needs: [docker-manifest]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1
       - name: Deploy
         run: flyctl deploy --remote-only --config deploy/fly/fly.toml
@@ -2321,7 +2629,7 @@ jobs:
     name: Deploy to Render
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     runs-on: ubuntu-latest
     needs: [docker-manifest]
     steps:
@@ -2343,7 +2651,7 @@ jobs:
     name: SDK / JavaScript (npm)
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release]
     runs-on: ubuntu-latest
     defaults:
@@ -2351,6 +2659,8 @@ jobs:
         working-directory: sdk/javascript
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "24"
@@ -2358,7 +2668,7 @@ jobs:
 
       - name: Sync version from tag
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
+          VERSION="${RELEASE_TAG#v}"
           npm version "$VERSION" --no-git-tag-version --allow-same-version
           echo "Publishing @librefang/sdk@$VERSION"
 
@@ -2404,7 +2714,7 @@ jobs:
     name: SDK / CLI npm (@librefang/cli)
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release]
     runs-on: ubuntu-latest
     defaults:
@@ -2412,6 +2722,8 @@ jobs:
         working-directory: packages/cli-npm
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "24"
@@ -2419,7 +2731,7 @@ jobs:
 
       - name: Sync version from tag
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
+          VERSION="${RELEASE_TAG#v}"
           npm version "$VERSION" --no-git-tag-version --allow-same-version
           echo "Publishing @librefang/cli@$VERSION"
 
@@ -2445,7 +2757,7 @@ jobs:
     name: SDK / Python (PyPI)
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release]
     runs-on: ubuntu-latest
     permissions:
@@ -2456,6 +2768,8 @@ jobs:
         working-directory: sdk/python
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: "3.12"
@@ -2465,7 +2779,7 @@ jobs:
 
       - name: Sync version from tag
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
+          VERSION="${RELEASE_TAG#v}"
           # PEP 440: convert -beta.1 → b1, -rc.1 → rc1 (canonical form, #3310);
           # also handle legacy -beta1 / -rc1; strip -lts (no PEP 440 equivalent).
           # Order matters: dot-form first, otherwise the no-dot rule converts
@@ -2495,7 +2809,7 @@ jobs:
     name: SDK / Rust (crates.io)
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release]
     runs-on: ubuntu-latest
     defaults:
@@ -2503,10 +2817,12 @@ jobs:
         working-directory: sdk/rust
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Sync version from tag
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
+          VERSION="${RELEASE_TAG#v}"
           sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
           MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
           sed -i '/^\[dependencies\]/,/^```/ s/librefang = "[^"]*"/librefang = "'"$MAJOR_MINOR"'"/' README.md
@@ -2519,29 +2835,51 @@ jobs:
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        # Pre-flight skip-if-already-published. The previous guard used
+        # `cargo search librefang --limit 1` which returns only the
+        # latest *stable* version — prerelease tags (`-beta.N`) never
+        # match, so the guard failed open and `cargo publish` then
+        # exploded with `error: crate librefang@X already exists on
+        # crates.io index` on every Release re-run for the same tag.
+        # Hit the registry's read API directly: GET /api/v1/crates/<name>/<version>
+        # returns 200 if that exact version exists, 404 if not — handles
+        # both stable and prerelease versions identically.
         run: |
+          set -euo pipefail
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          if cargo search librefang --limit 1 2>/dev/null | grep -q "librefang = \"$VERSION\""; then
-            echo "✓ librefang@$VERSION already published to crates.io, skipping"
-          else
-            cargo publish --allow-dirty
-          fi
+          HTTP=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H 'User-Agent: librefang-release-yml (github.com/librefang/librefang)' \
+            "https://crates.io/api/v1/crates/librefang/$VERSION")
+          case "$HTTP" in
+            200)
+              echo "✓ librefang@$VERSION already published to crates.io, skipping"
+              ;;
+            404)
+              cargo publish --allow-dirty
+              ;;
+            *)
+              echo "::error::Unexpected HTTP $HTTP from crates.io for librefang/$VERSION"
+              exit 1
+              ;;
+          esac
           echo "- **crates.io**: https://crates.io/crates/librefang/${VERSION}" >> $GITHUB_STEP_SUMMARY
 
   sdk_go:
     name: SDK / Go (tag)
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     needs: [create_release]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - name: Create Go module tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
+          VERSION="${RELEASE_TAG#v}"
           REPO="${{ github.repository }}"
 
           # Map CalVer to Go-compatible v0.YYYYMMDD.0 (keeps major=0, no /v2026 import path)
@@ -2560,7 +2898,7 @@ jobs:
           fi
 
           # Get the commit SHA for this tag
-          SHA=$(gh api "repos/$REPO/git/ref/tags/${GITHUB_REF#refs/tags/}" --jq '.object.sha')
+          SHA=$(gh api "repos/$REPO/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')
 
           # Create tag via API (avoids git push workflow permission issue)
           gh api "repos/$REPO/git/refs" \

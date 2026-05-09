@@ -118,6 +118,26 @@ or committed state.
 | Dark background | `#0B0F14` (Deep Charcoal) |
 | Full spec | `docs/branding/branding-guide.html` |
 
+### Boundaries
+- **Don't modify a PR a human maintainer has already reviewed or approved**
+  unless the maintainer asks for the edit. Open a follow-up PR instead.
+- **Don't close a PR or issue you did not open** unless the maintainer
+  directly instructs you to. By default, recommend closure in a
+  comment and let the maintainer act. When directed to close, the close
+  comment must state the substantive reason (review bugs, superseded
+  by, scope mismatch) — see `CLAUDE.md` for the full close-comment
+  contract.
+- **Don't force-push to someone else's branch.** Force-push to your own
+  branch is acceptable only while the PR is still un-reviewed.
+- **Don't bypass git verification flags.** No `--no-verify`, no
+  `--no-gpg-sign`, no skipping `commit-msg` / `pre-push` hooks.
+- **Don't add Claude / AI attribution** to commit messages or PR bodies
+  (`Co-Authored-By: Claude`, `🤖 Generated with …`, etc.). The `commit-msg`
+  hook rejects these.
+- **Don't edit files in the main worktree.** Always work from a linked
+  worktree (`git worktree add`).
+
+
 **After every upstream merge**, run before committing:
 ```bash
 python3 scripts/enforce-branding.py

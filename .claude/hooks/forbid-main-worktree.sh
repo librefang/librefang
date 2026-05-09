@@ -134,7 +134,7 @@ esac
 # === Bash tool rules — delegated to lib/check-bash-rules.py (shlex-based) ===
 # Rules that always apply when somewhere in the librefang repo (cargo bans,
 # worktree remove targeting main).
-rules="cargo-build-run-install,cargo-test-unscoped,worktree-remove-main"
+rules="cargo-build-run,cargo-test-unscoped,worktree-remove-main"
 # Rules that only apply when the effective cwd is the main worktree.
 if [ "${kind:-}" = "main" ]; then
   rules="$rules,git-mutation-main,sed-i-perl-pi-main,redirect-into-main"
