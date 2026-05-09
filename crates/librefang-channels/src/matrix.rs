@@ -20,6 +20,7 @@ use zeroize::Zeroizing;
 /// Matrix /sync long-polling timeout in milliseconds.
 const SYNC_TIMEOUT_MS: u64 = 30000;
 const MAX_MESSAGE_LEN: usize = 4096;
+#[allow(dead_code)]
 const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 
 /// Convert mxc://server/mediaId -> an HTTPS download URL.
@@ -29,6 +30,7 @@ const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 /// but requires opt-in enforcement (`enable_authenticated_media: true`).
 /// Default Synapse leaves the legacy endpoint working — this is the broadest
 /// compatibility path. MSC3916 fallback is documented as a known limitation.
+#[allow(dead_code)]
 pub(crate) fn mxc_to_http(mxc: &str, homeserver_url: &str) -> Option<String> {
     let stripped = mxc.strip_prefix("mxc://")?;
     let (server, media_id) = stripped.split_once('/')?;
@@ -147,6 +149,7 @@ impl MatrixAdapter {
 
     /// Redact (delete) a previously sent event.
     /// Returns the redaction event_id.
+    #[allow(dead_code)]
     async fn api_redact(
         &self,
         room_id: &str,
@@ -186,6 +189,7 @@ impl MatrixAdapter {
     }
 
     /// Upload bytes to Matrix media repo. Returns mxc:// URI.
+    #[allow(dead_code)]
     async fn api_upload_media(
         &self,
         bytes: Vec<u8>,
@@ -228,6 +232,7 @@ impl MatrixAdapter {
 
     /// Edit an existing event in place via the m.replace relation.
     /// `new_text` is the new content. Returns the edit event_id.
+    #[allow(dead_code)]
     async fn api_edit_event(
         &self,
         room_id: &str,
