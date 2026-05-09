@@ -29,7 +29,9 @@ on:
     inputs:
       channel:
         description: |
-          `current` reruns the release for the tag picked by `--ref`.
+          `current` reruns the release for the tag picked by `--ref`,
+          using the latest `main` HEAD as the source of truth so a
+          hotfix landed after the tag re-publishes the same version.
           `stable/beta/rc/lts` kicks off `cargo xtask release --channel …`
           which opens a bump-version PR; merging that PR auto-tags and
           re-enters this workflow via the tag push. Mirrors `just release`.
@@ -57,6 +59,13 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Effective ref for source-using checkouts.
+  # - tag push (normal release): use the pushed tag's frozen commit
+  # - workflow_dispatch channel=current: use main HEAD so a hotfix
+  #   landed after the tag re-publishes the same version
+  # Other dispatch channels (stable/beta/rc/lts) only run bump_version,
+  # which always wants main.
+  RELEASE_REF: ${{ (github.event_name == 'workflow_dispatch' && inputs.channel == 'current') && 'refs/heads/main' || github.ref }}
 
 jobs:
   # ═════════════════════════════════════════════════════════════════════════
@@ -73,6 +82,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ env.RELEASE_REF }}
           fetch-depth: 0
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
@@ -124,6 +134,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ env.RELEASE_REF }}
           fetch-depth: 0
           # PAT (not GITHUB_TOKEN) is required so the PR is opened by a
           # user account and `release: published` events on the
@@ -160,6 +171,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ env.RELEASE_REF }}
           fetch-depth: 0
 
       # Block any tag whose stripped form does not match
@@ -286,6 +298,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ env.RELEASE_REF }}
           fetch-depth: 0
 
       - name: Create release branch (only for .0-lts)
@@ -339,6 +352,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: pnpm/action-setup@8912a9102ac27614460f54aedde9e1e7f9aec20d # v6
         with:
           version: 10
@@ -378,6 +393,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
@@ -434,6 +451,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
@@ -491,6 +510,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
@@ -542,6 +563,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
@@ -596,6 +619,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
@@ -656,6 +681,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
@@ -706,6 +733,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
@@ -759,6 +788,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
@@ -836,6 +867,8 @@ jobs:
       id-token: write   # fetch OIDC token for cosign keyless signing
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
 
       - uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
         with:
@@ -942,6 +975,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "24"
@@ -969,6 +1004,8 @@ jobs:
       contents: read   # actions/checkout (job-level permissions block fully overrides top-level)
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: "3.12"
@@ -1316,6 +1353,8 @@ jobs:
     runs-on: ${{ matrix.platform.os }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - name: Install system deps (Linux)
         if: runner.os == 'Linux'
         # libdbus-1-dev is required by libdbus-sys, pulled in transitively
@@ -1501,6 +1540,8 @@ jobs:
       NDK_VERSION: "27.0.12077973"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
 
       - name: Set up JDK 17 (Temurin)
         uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
@@ -1734,6 +1775,8 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
 
       - name: Show selected Xcode
         run: |
@@ -2223,6 +2266,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - name: Log in to GHCR
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
         with:
@@ -2311,6 +2356,8 @@ jobs:
     needs: [docker-manifest]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1
       - name: Deploy
         run: flyctl deploy --remote-only --config deploy/fly/fly.toml
@@ -2351,6 +2398,8 @@ jobs:
         working-directory: sdk/javascript
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "24"
@@ -2412,6 +2461,8 @@ jobs:
         working-directory: packages/cli-npm
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "24"
@@ -2456,6 +2507,8 @@ jobs:
         working-directory: sdk/python
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: "3.12"
@@ -2503,6 +2556,8 @@ jobs:
         working-directory: sdk/rust
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Sync version from tag
         run: |
@@ -2537,6 +2592,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.RELEASE_REF }}
       - name: Create Go module tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
