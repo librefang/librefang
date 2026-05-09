@@ -734,6 +734,36 @@ impl ChannelAdapter for MatrixAdapter {
                 self.api_send_event(&user.platform_id, "m.room.message", &body)
                     .await?;
             }
+            ChannelContent::File { url, filename } => {
+                let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
+                let mxc = self.api_upload_media(bytes.clone(), &filename, &mt).await?;
+                let body = serde_json::json!({
+                    "msgtype": "m.file",
+                    "body": filename.clone(),
+                    "filename": filename,
+                    "url": mxc,
+                    "info": { "mimetype": mt, "size": bytes.len() },
+                });
+                self.api_send_event(&user.platform_id, "m.room.message", &body)
+                    .await?;
+            }
+            ChannelContent::FileData {
+                data,
+                filename,
+                mime_type,
+            } => {
+                let size = data.len();
+                let mxc = self.api_upload_media(data, &filename, &mime_type).await?;
+                let body = serde_json::json!({
+                    "msgtype": "m.file",
+                    "body": filename.clone(),
+                    "filename": filename,
+                    "url": mxc,
+                    "info": { "mimetype": mime_type, "size": size },
+                });
+                self.api_send_event(&user.platform_id, "m.room.message", &body)
+                    .await?;
+            }
             _ => {
                 self.api_send_message(&user.platform_id, "(Unsupported content type)")
                     .await?;
@@ -2112,5 +2142,114 @@ mod tests {
             )
             .await
             .expect("image must succeed");
+    }
+
+    // ── Task 18: Outbound File + FileData ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_outbound_file_uploads_then_sends() {
+        use crate::types::{ChannelContent, ChannelUser};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+        let server = MockServer::start().await;
+        let bytes_url = format!("{}/x.pdf", server.uri());
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path("/x.pdf"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(b"%PDF-1.4 dummy".to_vec())
+                    .insert_header("Content-Type", "application/pdf"),
+            )
+            .mount(&server)
+            .await;
+        let upload_calls = StdArc::new(AtomicUsize::new(0));
+        let send_calls = StdArc::new(AtomicUsize::new(0));
+        let uc = upload_calls.clone();
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path("/_matrix/media/v3/upload"))
+            .respond_with(move |_: &wiremock::Request| {
+                uc.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "content_uri": "mxc://srv/file1"
+                }))
+            })
+            .mount(&server)
+            .await;
+        let sc = send_calls.clone();
+        Mock::given(method("PUT"))
+            .and(body_partial_json(serde_json::json!({
+                "msgtype": "m.file",
+                "url": "mxc://srv/file1"
+            })))
+            .respond_with(move |_: &wiremock::Request| {
+                sc.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "event_id": "$f:test"
+                }))
+            })
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        adapter
+            .send(
+                &user,
+                ChannelContent::File {
+                    url: bytes_url,
+                    filename: "x.pdf".to_string(),
+                },
+            )
+            .await
+            .expect("file must succeed");
+        assert_eq!(upload_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(send_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_outbound_filedata_skips_fetch() {
+        use crate::types::{ChannelContent, ChannelUser};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+        let server = MockServer::start().await;
+        let upload_calls = StdArc::new(AtomicUsize::new(0));
+        let uc = upload_calls.clone();
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path("/_matrix/media/v3/upload"))
+            .respond_with(move |_: &wiremock::Request| {
+                uc.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "content_uri": "mxc://srv/fd1"
+                }))
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$fd:test"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        adapter
+            .send(
+                &user,
+                ChannelContent::FileData {
+                    data: b"raw bytes".to_vec(),
+                    filename: "raw.bin".to_string(),
+                    mime_type: "application/octet-stream".to_string(),
+                },
+            )
+            .await
+            .expect("filedata must succeed");
+        assert_eq!(upload_calls.load(Ordering::SeqCst), 1);
     }
 }
