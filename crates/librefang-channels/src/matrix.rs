@@ -20,6 +20,7 @@ use zeroize::Zeroizing;
 /// Matrix /sync long-polling timeout in milliseconds.
 const SYNC_TIMEOUT_MS: u64 = 30000;
 const MAX_MESSAGE_LEN: usize = 4096;
+const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 
 /// Matrix channel adapter using the Client-Server API.
 pub struct MatrixAdapter {
@@ -164,6 +165,47 @@ impl MatrixAdapter {
             .ok_or_else(|| "Matrix redact response missing event_id".to_string())?
             .to_string();
         Ok(event_id)
+    }
+
+    /// Upload bytes to Matrix media repo. Returns mxc:// URI.
+    async fn api_upload_media(
+        &self,
+        bytes: Vec<u8>,
+        filename: &str,
+        mime_type: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        if bytes.len() > MAX_UPLOAD_BYTES {
+            return Err(format!(
+                "Matrix upload size {} exceeds {} byte limit",
+                bytes.len(),
+                MAX_UPLOAD_BYTES
+            )
+            .into());
+        }
+        let url = format!(
+            "{}/_matrix/media/v3/upload?filename={}",
+            self.homeserver_url,
+            urlencoding::encode(filename)
+        );
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&*self.access_token)
+            .header("Content-Type", mime_type)
+            .body(bytes)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Matrix media upload failed {status}: {text}").into());
+        }
+        let v: serde_json::Value = resp.json().await?;
+        let mxc = v["content_uri"]
+            .as_str()
+            .ok_or_else(|| "Matrix upload response missing content_uri".to_string())?
+            .to_string();
+        Ok(mxc)
     }
 
     /// Edit an existing event in place via the m.replace relation.
@@ -480,7 +522,9 @@ mod tests {
     // as `Err` (fail-loud, unlike Slack/Discord); a follow-up that
     // adds retry must reuse the same txn_id and is tracked on #3406.
 
-    use wiremock::matchers::{body_json, body_partial_json, header, method, path_regex};
+    use wiremock::matchers::{
+        body_json, body_partial_json, header, method, path_regex, query_param,
+    };
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn make_adapter(homeserver_url: String) -> MatrixAdapter {
@@ -867,5 +911,38 @@ mod tests {
             .await
             .expect("edit must succeed");
         assert_eq!(id, "$edit:test");
+    }
+
+    #[tokio::test]
+    async fn test_api_upload_media_returns_mxc() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(query_param("filename", "x.pdf"))
+            .and(header("Content-Type", "application/pdf"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content_uri": "mxc://srv/abc"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let mxc = adapter
+            .api_upload_media(b"%PDF-1.4 dummy".to_vec(), "x.pdf", "application/pdf")
+            .await
+            .expect("upload must succeed");
+        assert_eq!(mxc, "mxc://srv/abc");
+    }
+
+    #[tokio::test]
+    async fn test_api_upload_media_size_cap() {
+        let adapter = make_adapter("http://unused".to_string());
+        let too_big = vec![0u8; 51 * 1024 * 1024];
+        let err = adapter
+            .api_upload_media(too_big, "huge.bin", "application/octet-stream")
+            .await
+            .expect_err("51MB must be rejected pre-flight");
+        assert!(
+            format!("{err}").to_lowercase().contains("size"),
+            "err should mention size: {err}"
+        );
     }
 }
