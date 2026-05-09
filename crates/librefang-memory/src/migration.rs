@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 36;
+const SCHEMA_VERSION: u32 = 37;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -91,6 +91,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // the deferred-execution spawn (matching the prior in-memory
     // behaviour exactly).
     run_step!(36, migrate_v36);
+    // v37 (#3335): workflow run persistence in SQLite. Replaces the
+    // tmp+rename JSON file (`workflow_runs.json`) that lost Running/Pending
+    // state on any shutdown and didn't survive power loss.
+    run_step!(37, migrate_v37);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1320,6 +1324,47 @@ fn migrate_v36(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (36, datetime('now'), 'Persist DeferredToolExecution on pending_approvals for cross-restart resume (#3313)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 37: Workflow run persistence in SQLite (#3335).
+///
+/// Replaces the `workflow_runs.json` tmp+rename file with a proper SQLite
+/// table. Running and Pending states are now persisted — previous JSON
+/// approach filtered them out, losing in-flight work on daemon shutdown
+/// or power loss. The `state` CHECK constraint is enforced by the database
+/// so invalid values cannot be written by buggy callers.
+fn migrate_v37(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS workflow_runs (
+            id                   TEXT PRIMARY KEY,
+            workflow_id          TEXT NOT NULL,
+            workflow_name        TEXT NOT NULL DEFAULT '',
+            state                TEXT NOT NULL CHECK (state IN ('pending','running','paused','completed','failed')),
+            input                TEXT NOT NULL DEFAULT '',
+            output               TEXT,
+            error                TEXT,
+            resume_token         TEXT,
+            pause_reason         TEXT,
+            paused_at            TEXT,
+            paused_step_index    INTEGER,
+            paused_variables     TEXT,
+            paused_current_input TEXT,
+            step_results         TEXT NOT NULL DEFAULT '[]',
+            started_at           TEXT NOT NULL,
+            completed_at         TEXT,
+            created_at           TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_state
+            ON workflow_runs(state);
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id
+            ON workflow_runs(workflow_id);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (37, datetime('now'), 'Add workflow_runs table for SQLite-backed workflow persistence (#3335)')",
         [],
     )?;
     Ok(())
