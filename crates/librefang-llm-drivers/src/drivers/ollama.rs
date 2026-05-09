@@ -251,6 +251,40 @@ impl OllamaDriver {
                         });
                     }
                 }
+                (Role::System, MessageContent::Blocks(blocks)) => {
+                    // Rare but legal: a system message arrived as blocks
+                    // (e.g. from a session-repair pass). Ollama only
+                    // accepts string content on system, so flatten the
+                    // text blocks; warn so operators notice unexpected
+                    // shapes rather than silently dropping them.
+                    let mut text_buf = String::new();
+                    let mut had_non_text = false;
+                    for block in blocks {
+                        match block {
+                            ContentBlock::Text { text, .. } => {
+                                if !text_buf.is_empty() {
+                                    text_buf.push_str("\n\n");
+                                }
+                                text_buf.push_str(text);
+                            }
+                            _ => had_non_text = true,
+                        }
+                    }
+                    if had_non_text {
+                        warn!(
+                            "System message contained non-text blocks; \
+                             Ollama requires string content on system, \
+                             non-text blocks dropped",
+                        );
+                    }
+                    if !text_buf.is_empty() && request.system.is_none() {
+                        messages.push(OllamaMessage {
+                            role: "system".to_string(),
+                            content: Some(text_buf),
+                            ..Default::default()
+                        });
+                    }
+                }
                 (Role::Assistant, MessageContent::Blocks(blocks)) => {
                     let mut text_parts: Vec<String> = Vec::new();
                     let mut thinking_parts: Vec<String> = Vec::new();
@@ -351,10 +385,18 @@ impl OllamaDriver {
             stream: None,
             tools,
             // Native first-class field — drives whether reasoning models
-            // run their chain-of-thought phase. `None` lets the model use
-            // its default; we only set it explicitly when the caller has
-            // an opinion.
-            think: request.thinking.as_ref().map(|_| true),
+            // run their chain-of-thought phase. We mirror the legacy
+            // OpenAI-shim path's contract: `think` is ALWAYS sent, and
+            // the toggle is driven by `request.thinking.is_some()`.
+            //
+            // Why not "let the model use its default" (i.e. omit the
+            // field): qwen3 / deepseek-r1 / gpt-oss default `think: true`
+            // upstream. Omitting the field would silently flip
+            // chain-of-thought on for users who never enabled the
+            // dashboard's deep-thinking toggle, surfacing reasoning text
+            // and adding latency. Keeping the explicit `false` preserves
+            // the pre-#4810 user-visible behaviour exactly.
+            think: Some(request.thinking.is_some()),
             format,
             options,
             extra_body: request.extra_body.clone(),
@@ -362,22 +404,51 @@ impl OllamaDriver {
     }
 }
 
-/// Strip a trailing `/v1` (with or without trailing slashes) from a
-/// user-provided base URL, logging an INFO once per driver instance.
+/// Strip a trailing `/v1` from a user-provided base URL when (and only
+/// when) it is the entire path component, logging an INFO at
+/// construction time so the migration is visible to operators.
 ///
 /// Existing user configs predate the move to the native API and still
 /// pin `base_url = "http://127.0.0.1:11434/v1"`. Quietly migrating
-/// instead of failing-closed avoids paper-cut breakage on upgrade
-/// while making the change visible in operator logs.
+/// instead of failing-closed avoids paper-cut breakage on upgrade.
+///
+/// The strip is gated on "URL has no path beyond `/v1`" so reverse-proxy
+/// mounts like `http://api.corp.com/openai/v1` are left alone — those
+/// users meant a non-standard mount point, and stripping would compose
+/// `…/openai/api/chat` (still wrong) or worse, mask a misconfiguration
+/// they need to see. Inputs we explicitly migrate:
+///
+/// - `http://x:11434/v1`        → `http://x:11434`
+/// - `http://x:11434/v1/`       → `http://x:11434`
+/// - `http://x:11434/v1///`     → `http://x:11434`
+/// - `http://[::1]:11434/v1`    → `http://[::1]:11434`
+///
+/// Inputs we DO NOT touch (path is more than `/v1`):
+///
+/// - `http://api.corp.com/openai/v1`
+/// - `http://api.corp.com/api/v1`
 fn sanitize_base_url(input: &str) -> String {
     let trimmed = input.trim_end_matches('/');
     if let Some(stripped) = trimmed.strip_suffix("/v1") {
+        // Decide whether `/v1` was the entire path or a trailing segment
+        // of a custom mount. Look at what's left after `scheme://`: if
+        // there are no further `/`s, the authority is the whole tail and
+        // `/v1` was the only path component → safe to strip.
+        let after_scheme = match stripped.find("://") {
+            Some(i) => &stripped[i + 3..],
+            None => stripped,
+        };
+        if after_scheme.contains('/') {
+            // Reverse-proxy mount with a custom path; leave alone.
+            return trimmed.to_string();
+        }
         info!(
             original = %input,
             sanitized = %stripped,
+            rebuilt_chat_url = %format!("{stripped}/api/chat"),
             "Stripped legacy /v1 suffix from Ollama base_url; native API lives at /api/chat"
         );
-        return stripped.trim_end_matches('/').to_string();
+        return stripped.to_string();
     }
     trimmed.to_string()
 }
@@ -415,6 +486,14 @@ struct OllamaRequest {
     /// Pass-through extras merged into the top-level body in `complete`/`stream`
     /// so callers can override standard fields (`keep_alive`, custom sampler
     /// options, …) without driver changes.
+    ///
+    /// `HashMap` iteration order is non-deterministic, but the merge below
+    /// goes through `serde_json::Value::Object`, which (without the
+    /// `preserve_order` feature — the workspace does NOT enable it) is
+    /// `BTreeMap`-backed and re-sorts keys alphabetically on serialise.
+    /// The final wire body is therefore deterministic regardless of
+    /// HashMap iteration, so prompt-cache stability (#3298) is preserved.
+    /// If we ever turn on `preserve_order`, swap this to `BTreeMap`.
     #[serde(skip_serializing)]
     extra_body: Option<HashMap<String, serde_json::Value>>,
 }
@@ -792,8 +871,15 @@ impl LlmDriver for OllamaDriver {
                         // (Ollama 0.5+) emit the same shape progressively.
                         let parsed: Result<Vec<OllamaToolCall>, _> =
                             serde_json::from_value(serde_json::Value::Array(calls.clone()));
-                        if let Ok(snap) = parsed {
-                            tool_snapshot = snap;
+                        match parsed {
+                            Ok(snap) => tool_snapshot = snap,
+                            // Surface protocol drift so operators can see
+                            // it in logs instead of silently observing
+                            // tool calls disappear.
+                            Err(e) => debug!(
+                                error = %e,
+                                "Skipping unparseable tool_calls chunk; keeping prior snapshot",
+                            ),
                         }
                     }
                 }
@@ -974,6 +1060,32 @@ mod tests {
         assert_eq!(sanitize_base_url("http://x:11434"), "http://x:11434");
         assert_eq!(sanitize_base_url("http://x:11434/"), "http://x:11434");
         assert_eq!(sanitize_base_url("http://x:11434/v1///"), "http://x:11434");
+        // IPv6 literal — bracketed authority must still be detected as
+        // "no path beyond /v1" so the strip applies.
+        assert_eq!(
+            sanitize_base_url("http://[::1]:11434/v1"),
+            "http://[::1]:11434"
+        );
+    }
+
+    /// Reverse-proxy mounts where `/v1` is a *suffix* of a custom path
+    /// (not the entire path) are left alone — the user clearly meant a
+    /// non-standard mount point, and stripping would either compose
+    /// `…/openai/api/chat` (still wrong) or mask a misconfiguration.
+    #[test]
+    fn sanitize_preserves_reverse_proxy_paths() {
+        assert_eq!(
+            sanitize_base_url("http://api.corp.com/openai/v1"),
+            "http://api.corp.com/openai/v1",
+        );
+        assert_eq!(
+            sanitize_base_url("http://api.corp.com/api/v1"),
+            "http://api.corp.com/api/v1",
+        );
+        assert_eq!(
+            sanitize_base_url("https://gateway.example.com/v1-proxy/v1/"),
+            "https://gateway.example.com/v1-proxy/v1",
+        );
     }
 
     #[test]
@@ -1009,7 +1121,7 @@ mod tests {
     }
 
     #[test]
-    fn build_request_think_field_set_when_thinking_enabled() {
+    fn build_request_think_field_true_when_thinking_enabled() {
         let driver = OllamaDriver::new(String::new(), "http://x".to_string());
         let mut r = req("qwen3:8b");
         r.thinking = Some(ThinkingConfig::default());
@@ -1017,11 +1129,17 @@ mod tests {
         assert_eq!(wire.think, Some(true));
     }
 
+    /// The `think` field is ALWAYS sent (not omitted) when thinking is
+    /// disabled, mirroring the legacy OpenAI-shim contract. Reasoning
+    /// models (qwen3, deepseek-r1, gpt-oss) default `think: true`
+    /// upstream, so omitting the field would silently flip
+    /// chain-of-thought on for users who never enabled the dashboard's
+    /// deep-thinking toggle.
     #[test]
-    fn build_request_think_field_omitted_when_thinking_unset() {
+    fn build_request_think_field_explicit_false_when_thinking_unset() {
         let driver = OllamaDriver::new(String::new(), "http://x".to_string());
         let wire = driver.build_request(&req("m")).expect("build");
-        assert_eq!(wire.think, None);
+        assert_eq!(wire.think, Some(false));
     }
 
     #[test]
@@ -1131,6 +1249,42 @@ mod tests {
             .expect("tool message");
         assert_eq!(tool.tool_name.as_deref(), Some("get_weather"));
         assert_eq!(tool.content.as_deref(), Some("sunny, 72F"));
+    }
+
+    /// A system message that arrives as `MessageContent::Blocks` is
+    /// flattened to text before going on the wire — Ollama's `system`
+    /// role only accepts string content, and we want to surface (rather
+    /// than silently drop) the rare session-repair shape.
+    #[test]
+    fn build_request_system_blocks_flatten_to_text_system() {
+        let driver = OllamaDriver::new(String::new(), "http://x".to_string());
+        let mut r = req("m");
+        r.system = None;
+        r.messages = std::sync::Arc::new(vec![
+            Message {
+                role: Role::System,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "be terse".to_string(),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::Text {
+                        text: "and accurate".to_string(),
+                        provider_metadata: None,
+                    },
+                ]),
+                pinned: false,
+                timestamp: None,
+            },
+            Message::user("hello"),
+        ]);
+        let wire = driver.build_request(&r).expect("build");
+        let sys = wire
+            .messages
+            .iter()
+            .find(|m| m.role == "system")
+            .expect("system message");
+        assert_eq!(sys.content.as_deref(), Some("be terse\n\nand accurate"));
     }
 
     #[test]

@@ -610,6 +610,212 @@ async fn tool_result_serialises_as_role_tool_with_tool_name() {
     );
 }
 
+/// Streaming: a chunk that emits `tool_calls[].function.arguments` as a
+/// stringified JSON object (some quantised local models do this) is
+/// coerced into a real object via `coerce_tool_args` so the agent
+/// loop's tool dispatch sees structured input, not a raw string.
+#[tokio::test]
+#[serial_test::serial]
+async fn streaming_tool_call_with_stringified_arguments_is_coerced() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    let mut body = String::new();
+    body.push_str(
+        &serde_json::json!({
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "function": {
+                        "name": "get_weather",
+                        // Some local models double-encode the arguments
+                        // payload as a JSON string instead of a JSON
+                        // object — `coerce_tool_args` parses it back.
+                        "arguments": "{\"city\":\"Berlin\"}"
+                    }
+                }]
+            },
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 4,
+            "eval_count": 1
+        })
+        .to_string(),
+    );
+    body.push('\n');
+
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+
+    let driver = mock_ollama_driver(&server);
+    let (result, _events) = collect_stream(&driver, simple_request("m")).await;
+    let resp = result.expect("stream ok");
+    assert_eq!(resp.tool_calls.len(), 1);
+    let call = &resp.tool_calls[0];
+    assert_eq!(call.name, "get_weather");
+    assert!(
+        call.input.is_object(),
+        "stringified arguments must be coerced into a JSON object, got {:?}",
+        call.input,
+    );
+    assert_eq!(call.input["city"], "Berlin");
+}
+
+/// Streaming: a `tool_calls` chunk whose entries don't deserialise as
+/// `OllamaToolCall` (e.g. missing the `function` envelope) is skipped —
+/// the prior snapshot is kept and the stream completes without a
+/// hard-error. We exercise the path by sending a malformed chunk first,
+/// then a valid one in the same response.
+#[tokio::test]
+#[serial_test::serial]
+async fn streaming_unparseable_tool_calls_chunk_keeps_prior_snapshot() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    let mut body = String::new();
+    // Chunk 1: valid tool call → snapshot populated.
+    body.push_str(
+        &serde_json::json!({
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "function": {
+                        "name": "ping",
+                        "arguments": {"host": "8.8.8.8"}
+                    }
+                }]
+            },
+            "done": false
+        })
+        .to_string(),
+    );
+    body.push('\n');
+    // Chunk 2: malformed `tool_calls` (missing `function` envelope) →
+    // driver should debug-log and keep chunk 1's snapshot, NOT clear it.
+    body.push_str(
+        &serde_json::json!({
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"name": "ping", "arguments": {}}]
+            },
+            "done": false
+        })
+        .to_string(),
+    );
+    body.push('\n');
+    body.push_str(
+        &serde_json::json!({
+            "message": {"role": "assistant", "content": ""},
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 5,
+            "eval_count": 1
+        })
+        .to_string(),
+    );
+    body.push('\n');
+
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+
+    let driver = mock_ollama_driver(&server);
+    let (result, _events) = collect_stream(&driver, simple_request("m")).await;
+    let resp = result.expect("stream ok");
+    assert_eq!(
+        resp.tool_calls.len(),
+        1,
+        "malformed chunk must NOT erase the prior valid snapshot",
+    );
+    assert_eq!(resp.tool_calls[0].name, "ping");
+    assert_eq!(resp.tool_calls[0].input["host"], "8.8.8.8");
+}
+
+/// Streaming: if the upstream closes the connection cleanly mid-stream
+/// without ever sending a `done: true` chunk, the driver returns
+/// gracefully with whatever was aggregated so far AND zero token usage
+/// (we never observed `prompt_eval_count` / `eval_count`). This pins
+/// the contract so callers can detect "incomplete" by usage being all
+/// zeros — a hard error would force the chain to retry on what may be
+/// a usable partial answer.
+#[tokio::test]
+#[serial_test::serial]
+async fn streaming_truncated_response_returns_partial_with_zero_usage() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    let mut body = String::new();
+    body.push_str(
+        &serde_json::json!({
+            "message": {"role": "assistant", "content": "Hello"},
+            "done": false
+        })
+        .to_string(),
+    );
+    body.push('\n');
+    body.push_str(
+        &serde_json::json!({
+            "message": {"role": "assistant", "content": " world"},
+            "done": false
+        })
+        .to_string(),
+    );
+    body.push('\n');
+    // No final `done: true` chunk — wiremock will close the connection
+    // cleanly when the body ends.
+
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+
+    let driver = mock_ollama_driver(&server);
+    let (result, _events) = collect_stream(&driver, simple_request("m")).await;
+    let resp = result.expect("partial stream must surface, not hard-error");
+    assert_eq!(resp.text(), "Hello world");
+    assert_eq!(
+        resp.usage.input_tokens, 0,
+        "no done chunk → no prompt_eval_count → caller can detect incomplete",
+    );
+    assert_eq!(resp.usage.output_tokens, 0);
+}
+
+/// Reverse-proxy mounts where `/v1` is part of a custom path (not the
+/// entire path) MUST be left alone — stripping would break the user's
+/// deliberately-non-standard mount point. We exercise the gating by
+/// pointing the driver at `{server.uri()}/openai/v1` and confirming
+/// the request lands at `/openai/v1/api/chat` (the user-explicit
+/// mount), not `/openai/api/chat`.
+#[tokio::test]
+#[serial_test::serial]
+async fn reverse_proxy_v1_path_is_not_stripped() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/openai/v1/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ollama_200_body("ok")))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let driver = OllamaDriver::with_proxy_and_timeout(
+        String::new(),
+        format!("{}/openai/v1", server.uri()),
+        None,
+        Some(5),
+    );
+    driver
+        .complete(simple_request("m"))
+        .await
+        .expect("custom mount path must be preserved verbatim");
+}
+
 /// Existing user configs that pin `base_url = "http://host:11434/v1"`
 /// (a holdover from when the registry pointed at the OpenAI compat
 /// shim) get the `/v1` silently stripped at driver construction so
