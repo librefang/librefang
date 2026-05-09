@@ -509,6 +509,10 @@ pub struct ResourceQuota {
     pub max_cost_per_day_usd: f64,
     /// Maximum cost in USD per month (0.0 = unlimited).
     pub max_cost_per_month_usd: f64,
+    /// Per-agent burst ratio override. `None` = inherit global
+    /// `default_burst_ratio` (or compiled default 0.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst_ratio: Option<f32>,
 }
 
 impl Default for ResourceQuota {
@@ -522,6 +526,7 @@ impl Default for ResourceQuota {
             max_cost_per_hour_usd: 0.0,    // unlimited by default
             max_cost_per_day_usd: 0.0,     // unlimited
             max_cost_per_month_usd: 0.0,   // unlimited
+            burst_ratio: None,
         }
     }
 }
@@ -536,6 +541,20 @@ impl ResourceQuota {
     /// returned value is `0`.
     pub fn effective_token_limit(&self) -> u64 {
         self.max_llm_tokens_per_hour.unwrap_or(0)
+    }
+
+    /// Resolved burst ratio: agent override > global default > 0.2.
+    /// Clamped to [0.01, 1.0]. NaN/Inf fall back to 0.2.
+    pub fn effective_burst_ratio(&self, global_default: f32) -> f32 {
+        let raw = self.burst_ratio.unwrap_or(if global_default > 0.0 {
+            global_default
+        } else {
+            0.2
+        });
+        if !raw.is_finite() {
+            return 0.2;
+        }
+        raw.clamp(0.01, 1.0)
     }
 }
 
@@ -1688,6 +1707,54 @@ mod tests {
     }
 
     // ----- ToolProfile tests -----
+
+    #[test]
+    fn effective_burst_ratio_defaults_to_one_fifth() {
+        let q = ResourceQuota::default();
+        assert!((q.effective_burst_ratio(0.0) - 0.2).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn effective_burst_ratio_uses_global_default() {
+        let q = ResourceQuota::default();
+        assert!((q.effective_burst_ratio(0.5) - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn effective_burst_ratio_agent_overrides_global() {
+        let q = ResourceQuota {
+            burst_ratio: Some(0.3),
+            ..Default::default()
+        };
+        assert!((q.effective_burst_ratio(0.8) - 0.3).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn effective_burst_ratio_clamps_below_minimum() {
+        let q = ResourceQuota {
+            burst_ratio: Some(0.0),
+            ..Default::default()
+        };
+        assert!((q.effective_burst_ratio(0.0) - 0.01).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn effective_burst_ratio_clamps_above_one() {
+        let q = ResourceQuota {
+            burst_ratio: Some(2.5),
+            ..Default::default()
+        };
+        assert!((q.effective_burst_ratio(0.0) - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn effective_burst_ratio_nan_falls_back_to_default() {
+        let q = ResourceQuota {
+            burst_ratio: Some(f32::NAN),
+            ..Default::default()
+        };
+        assert!((q.effective_burst_ratio(0.0) - 0.2).abs() < f32::EPSILON);
+    }
 
     #[test]
     fn test_tool_profile_minimal() {
