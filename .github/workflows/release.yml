@@ -1947,24 +1947,36 @@ jobs:
           APPLE_PROFILE_NAME: ${{ secrets.APPLE_PROFILE_NAME }}
         # cargo-mobile2's `cargo tauri ios init` writes DEVELOPMENT_TEAM
         # but leaves CODE_SIGN_STYLE = Automatic in the generated
-        # xcodeproj. xcodebuild on a GitHub-hosted macOS runner then
-        # fails the .ipa build with:
-        #   error: No Accounts: Add a new account in Accounts settings.
-        #   error: No profiles for '<bundle_id>' were found:
-        #          Xcode couldn't find any iOS App Development provisioning
-        #          profiles matching '<bundle_id>'.
-        # because Automatic signing tries to fetch a Development profile
-        # via a signed-in Apple ID, and CI runners don't have one — even
-        # though the distribution .mobileprovision is on disk.
+        # xcodeproj, AND cargo-tauri auto-generates an exportOptions.plist
+        # with `signingStyle=automatic` for the `xcodebuild -exportArchive`
+        # step. Both phases then fail on a GitHub-hosted macOS runner:
         #
-        # Use xcodebuild's first-class `-xcconfig <file>` mechanism for a
-        # build-time override, applied via a tiny PATH shim so cargo-tauri
-        # picks it up without us touching the generated pbxproj. xcconfig
-        # values win over pbxproj `buildSettings`, which is exactly the
-        # documented Apple way to flip signing per-build without modifying
-        # a vendored or generated project file. Settings live in one
-        # declarative file, so adding entitlements / bitcode / hardened
-        # runtime later is a one-line edit instead of more pbxproj surgery.
+        #   1. Build phase:
+        #      error: No Accounts: Add a new account in Accounts settings.
+        #      error: No profiles for '<bundle_id>' were found.
+        #
+        #   2. Export phase (after archive succeeds):
+        #      error: exportArchive No Accounts
+        #      error: exportArchive No profiles for '<bundle_id>' were found
+        #      ** EXPORT FAILED ** xcodebuild exited with code 70
+        #
+        # Both fall through to "fetch a Development profile via a signed-in
+        # Apple ID", and CI runners don't have one — even though the
+        # distribution .mobileprovision is on disk.
+        #
+        # Fix both with one PATH shim that wraps xcodebuild:
+        #   • For `xcodebuild build|archive|...`: prepend `-xcconfig <override>`
+        #     so manual signing build settings override the pbxproj's Automatic.
+        #   • For `xcodebuild -exportArchive ...`: strip cargo-tauri's auto-
+        #     generated `-exportOptionsPlist <auto>` pair and substitute our
+        #     own plist with `signingStyle=manual` + `provisioningProfiles`
+        #     mapping the bundle id to the imported distribution profile.
+        #
+        # Both override files (xcconfig + exportOptions.plist) live in
+        # $RUNNER_TEMP, are declarative, and don't touch the generated
+        # xcodeproj — so we stay decoupled from cargo-mobile2's templating.
+        # Bundle id is read from tauri.ios.conf.json so a future rename in
+        # that file doesn't silently regress the export step.
         #
         # Skipped (with a warning) when the signing secrets are absent so
         # forks without an Apple Developer account still get a clean run;
@@ -1985,6 +1997,11 @@ jobs:
           # Resolve any symlink so the shim never recurses into itself if
           # PATH ordering shifts later in the job.
           REAL_XCODEBUILD=$(readlink -f "$REAL_XCODEBUILD" 2>/dev/null || echo "$REAL_XCODEBUILD")
+          BUNDLE_ID=$(jq -r .identifier crates/librefang-desktop/tauri.ios.conf.json)
+          if [ -z "$BUNDLE_ID" ] || [ "$BUNDLE_ID" = "null" ]; then
+            echo "::error::Could not read .identifier from tauri.ios.conf.json"
+            exit 1
+          fi
           XCCONFIG="$RUNNER_TEMP/librefang-signing.xcconfig"
           # Spaces in display names are common ("LibreFang Distribution")
           # and xcconfig parses unquoted-to-end-of-line for string values,
@@ -1995,12 +2012,79 @@ jobs:
           PROVISIONING_PROFILE_SPECIFIER = $APPLE_PROFILE_NAME
           CODE_SIGN_IDENTITY = iPhone Distribution
           EOF
+          # `method=app-store` keeps the .ipa shape compatible with the
+          # downstream TestFlight upload (App Store distribution); same
+          # value Apple's altool/notarytool flow expects.
+          EXPORT_OPTS="$RUNNER_TEMP/librefang-export-options.plist"
+          cat > "$EXPORT_OPTS" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>app-store</string>
+              <key>signingStyle</key>
+              <string>manual</string>
+              <key>teamID</key>
+              <string>$APPLE_TEAM_ID</string>
+              <key>provisioningProfiles</key>
+              <dict>
+                  <key>$BUNDLE_ID</key>
+                  <string>$APPLE_PROFILE_NAME</string>
+              </dict>
+              <key>uploadSymbols</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+          # Validate both override files before subsequent steps depend
+          # on them. xcconfig has no validator built into xcodebuild
+          # (loads silently), so we only check the plist; xcconfig
+          # syntax errors would surface as build failures with clear
+          # "unrecognized" messages.
+          plutil -lint "$EXPORT_OPTS"
           SHIM_DIR="$RUNNER_TEMP/xcodebuild-shim"
           mkdir -p "$SHIM_DIR"
-          cat > "$SHIM_DIR/xcodebuild" <<EOF
+          # Quoted heredoc (`'EOF'`) so the shim body is written literally:
+          # only $REAL_XCODEBUILD / $XCCONFIG / $EXPORT_OPTS get interpolated
+          # via explicit variable substitution below the heredoc, so $@
+          # / $arg / etc. are evaluated at shim run-time, not now.
+          cat > "$SHIM_DIR/xcodebuild" <<'SHIM_EOF'
           #!/bin/bash
-          exec "$REAL_XCODEBUILD" -xcconfig "$XCCONFIG" "\$@"
-          EOF
+          # Auto-generated by release.yml's "Configure manual code signing"
+          # step. Wraps the real xcodebuild to inject manual-signing
+          # overrides into cargo-tauri's invocations.
+          set -euo pipefail
+          REAL_XCODEBUILD='__REAL_XCODEBUILD__'
+          XCCONFIG='__XCCONFIG__'
+          EXPORT_OPTS='__EXPORT_OPTS__'
+          IS_EXPORT=0
+          for a in "$@"; do
+            if [ "$a" = "-exportArchive" ]; then IS_EXPORT=1; break; fi
+          done
+          if [ $IS_EXPORT -eq 0 ]; then
+            exec "$REAL_XCODEBUILD" -xcconfig "$XCCONFIG" "$@"
+          fi
+          # Export: drop existing -exportOptionsPlist <path> pair, splice
+          # in ours. Other args (archive path, export path, scheme, etc.)
+          # pass through verbatim.
+          NEW=()
+          SKIP=0
+          for a in "$@"; do
+            if [ $SKIP -eq 1 ]; then SKIP=0; continue; fi
+            if [ "$a" = "-exportOptionsPlist" ]; then SKIP=1; continue; fi
+            NEW+=("$a")
+          done
+          exec "$REAL_XCODEBUILD" -exportOptionsPlist "$EXPORT_OPTS" "${NEW[@]}"
+          SHIM_EOF
+          # Substitute the literal placeholders with actual paths. Done
+          # post-hoc to keep the heredoc body unambiguous (no $-mixing
+          # with the shim's own runtime expansions).
+          sed -i '' \
+            -e "s|__REAL_XCODEBUILD__|$REAL_XCODEBUILD|" \
+            -e "s|__XCCONFIG__|$XCCONFIG|" \
+            -e "s|__EXPORT_OPTS__|$EXPORT_OPTS|" \
+            "$SHIM_DIR/xcodebuild"
           chmod +x "$SHIM_DIR/xcodebuild"
           # Make the shim visible to subsequent steps via GITHUB_PATH.
           echo "$SHIM_DIR" >> "$GITHUB_PATH"
@@ -2009,8 +2093,12 @@ jobs:
           # see (GITHUB_PATH prepends).
           PATH="$SHIM_DIR:$PATH" command -v xcodebuild
           PATH="$SHIM_DIR:$PATH" xcodebuild -version | head -2
+          echo "=== shim script ==="
+          cat "$SHIM_DIR/xcodebuild"
           echo "=== xcconfig ==="
           cat "$XCCONFIG"
+          echo "=== exportOptions.plist ==="
+          cat "$EXPORT_OPTS"
 
       # Mirror of the Android version-derivation logic. Both jobs run in
       # parallel for the same tag, so each computes its own copy. Same
@@ -2747,13 +2835,33 @@ jobs:
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        # Pre-flight skip-if-already-published. The previous guard used
+        # `cargo search librefang --limit 1` which returns only the
+        # latest *stable* version — prerelease tags (`-beta.N`) never
+        # match, so the guard failed open and `cargo publish` then
+        # exploded with `error: crate librefang@X already exists on
+        # crates.io index` on every Release re-run for the same tag.
+        # Hit the registry's read API directly: GET /api/v1/crates/<name>/<version>
+        # returns 200 if that exact version exists, 404 if not — handles
+        # both stable and prerelease versions identically.
         run: |
+          set -euo pipefail
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          if cargo search librefang --limit 1 2>/dev/null | grep -q "librefang = \"$VERSION\""; then
-            echo "✓ librefang@$VERSION already published to crates.io, skipping"
-          else
-            cargo publish --allow-dirty
-          fi
+          HTTP=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H 'User-Agent: librefang-release-yml (github.com/librefang/librefang)' \
+            "https://crates.io/api/v1/crates/librefang/$VERSION")
+          case "$HTTP" in
+            200)
+              echo "✓ librefang@$VERSION already published to crates.io, skipping"
+              ;;
+            404)
+              cargo publish --allow-dirty
+              ;;
+            *)
+              echo "::error::Unexpected HTTP $HTTP from crates.io for librefang/$VERSION"
+              exit 1
+              ;;
+          esac
           echo "- **crates.io**: https://crates.io/crates/librefang/${VERSION}" >> $GITHUB_STEP_SUMMARY
 
   sdk_go:
