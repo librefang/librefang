@@ -456,6 +456,23 @@ fn split_outside_quotes(s: &str, delimiter: &str) -> Option<Vec<String>> {
     }
 }
 
+/// Compute the backoff duration for a workflow step retry.
+///
+/// Errors that mention "burst" or "rate limit" indicate the provider's sliding
+/// window (typically 60 s) is exhausted.  We wait 65 s (60 s window + 5 s
+/// safety margin) regardless of the attempt number.  All other errors use
+/// standard exponential backoff capped at 60 s.
+fn classify_backoff(err: &str, attempt: u32) -> std::time::Duration {
+    /// 60-second sliding window + 5-second safety margin.
+    const BURST_WINDOW_BACKOFF: std::time::Duration = std::time::Duration::from_secs(65);
+    let needs_window_clear = err.contains("burst") || err.contains("rate limit");
+    if needs_window_clear {
+        BURST_WINDOW_BACKOFF
+    } else {
+        std::time::Duration::from_secs(2u64.saturating_pow(attempt).min(60))
+    }
+}
+
 impl WorkflowEngine {
     /// Create a new workflow engine (no persistence).
     pub fn new() -> Self {
@@ -1074,21 +1091,27 @@ impl WorkflowEngine {
                         Ok(Err(e)) => {
                             last_err = e.to_string();
                             if attempt < *max_retries {
+                                let backoff = classify_backoff(&last_err, attempt);
                                 warn!(
-                                    "Step '{}' attempt {} failed: {e}, retrying",
+                                    "Step '{}' attempt {} failed: {e}, retrying in {:?}",
                                     step.name,
-                                    attempt + 1
+                                    attempt + 1,
+                                    backoff
                                 );
+                                tokio::time::sleep(backoff).await;
                             }
                         }
                         Err(_) => {
                             last_err = format!("timed out after {}s", step.timeout_secs);
                             if attempt < *max_retries {
+                                let backoff = classify_backoff(&last_err, attempt);
                                 warn!(
-                                    "Step '{}' attempt {} timed out, retrying",
+                                    "Step '{}' attempt {} timed out, retrying in {:?}",
                                     step.name,
-                                    attempt + 1
+                                    attempt + 1,
+                                    backoff
                                 );
+                                tokio::time::sleep(backoff).await;
                             }
                         }
                     }
@@ -5093,5 +5116,46 @@ prompt_template = "do {{x}}"
                 "every run should carry a pause_request"
             );
         }
+    }
+
+    #[test]
+    fn classify_backoff_burst_always_65s() {
+        assert_eq!(
+            classify_backoff("Token burst limit would be exceeded", 0),
+            std::time::Duration::from_secs(65)
+        );
+        assert_eq!(
+            classify_backoff("Token burst limit would be exceeded", 5),
+            std::time::Duration::from_secs(65)
+        );
+    }
+
+    #[test]
+    fn classify_backoff_rate_limit_always_65s() {
+        assert_eq!(
+            classify_backoff("Tool call rate limit exceeded: 10 per minute", 0),
+            std::time::Duration::from_secs(65)
+        );
+    }
+
+    #[test]
+    fn classify_backoff_generic_exponential_capped() {
+        assert_eq!(
+            classify_backoff("Resource quota exceeded: something", 0),
+            std::time::Duration::from_secs(1)
+        );
+        assert_eq!(
+            classify_backoff("Resource quota exceeded: something", 1),
+            std::time::Duration::from_secs(2)
+        );
+        assert_eq!(
+            classify_backoff("Resource quota exceeded: something", 3),
+            std::time::Duration::from_secs(8)
+        );
+        // attempt 10: 2^10 = 1024, capped at 60
+        assert_eq!(
+            classify_backoff("some other error", 10),
+            std::time::Duration::from_secs(60)
+        );
     }
 }
