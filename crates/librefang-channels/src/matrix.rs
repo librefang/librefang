@@ -570,6 +570,10 @@ impl ChannelAdapter for MatrixAdapter {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
             }
+            ChannelContent::DeleteMessage { message_id } => {
+                self.api_redact(&user.platform_id, &message_id, None)
+                    .await?;
+            }
             _ => {
                 self.api_send_message(&user.platform_id, "(Unsupported content type)")
                     .await?;
@@ -1690,5 +1694,40 @@ mod tests {
             3,
             "must retry once on 429, then stop"
         );
+    }
+
+    #[tokio::test]
+    async fn test_send_delete_message_calls_redact() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+        let server = MockServer::start().await;
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let cc = calls.clone();
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/_matrix/client/v3/rooms/.+/redact/.+$"))
+            .respond_with(move |_: &wiremock::Request| {
+                cc.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "event_id": "$rdct:test"
+                }))
+            })
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        adapter
+            .send(
+                &user,
+                ChannelContent::DeleteMessage {
+                    message_id: "$victim:test".to_string(),
+                },
+            )
+            .await
+            .expect("delete must succeed");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "expected one redact call");
     }
 }
