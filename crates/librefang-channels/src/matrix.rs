@@ -313,6 +313,35 @@ impl MatrixAdapter {
         self.api_send_event(room_id, "m.room.message", &body).await
     }
 
+    /// api_edit_event with one Retry-After-aware retry on 429. Returns Ok on
+    /// success, Err on second 429 / non-429 error. Used by send_streaming.
+    async fn api_edit_event_with_retry(
+        &self,
+        room_id: &str,
+        target_event_id: &str,
+        new_text: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        match self
+            .api_edit_event(room_id, target_event_id, new_text)
+            .await
+        {
+            Ok(id) => Ok(id),
+            Err(e) => {
+                let msg = format!("{e}");
+                if msg.contains("429") {
+                    // Conservative fixed backoff. We can't recover the
+                    // Retry-After header from the boxed error type today;
+                    // a richer error type is a deferred follow-up.
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    self.api_edit_event(room_id, target_event_id, new_text)
+                        .await
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
     /// Send a text message to a Matrix room. Splits long messages into chunks
     /// and sends each as a separate `m.room.message` event. Returns the
     /// event_ids in order; the last one is the message useful for editing/redacting.
@@ -675,14 +704,18 @@ impl ChannelAdapter for MatrixAdapter {
             buffer: &mut String,
         ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
             if buffer.len() <= MAX_MESSAGE_LEN {
-                adapter.api_edit_event(room, placeholder_id, buffer).await?;
+                adapter
+                    .api_edit_event_with_retry(room, placeholder_id, buffer)
+                    .await?;
                 return Ok(buffer.len());
             }
             // UTF-8-safe split via librefang_types::truncate_str.
             let head = librefang_types::truncate_str(buffer, MAX_MESSAGE_LEN);
             let head_len = head.len();
             let tail = buffer[head_len..].to_string();
-            adapter.api_edit_event(room, placeholder_id, head).await?;
+            adapter
+                .api_edit_event_with_retry(room, placeholder_id, head)
+                .await?;
             let body = serde_json::json!({"msgtype": "m.text", "body": tail});
             let new_id = adapter
                 .api_send_event(room, "m.room.message", &body)
@@ -1612,6 +1645,50 @@ mod tests {
         assert!(
             fresh_count >= 2,
             "overflow split must produce at least 2 fresh (non-m.replace) PUTs (placeholder + rolled-over), got {fresh_count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_streaming_429_retry_then_stop() {
+        use crate::types::ChannelUser;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+        use tokio::sync::mpsc;
+        let server = MockServer::start().await;
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let cc = calls.clone();
+        // 1st PUT (placeholder) succeeds; 2nd & 3rd return 429. Streaming should
+        // retry the edit once after a brief backoff, then stop on the second 429.
+        Mock::given(method("PUT"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = cc.fetch_add(1, Ordering::SeqCst);
+                match n {
+                    0 => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "event_id": "$plc:test"
+                    })),
+                    _ => ResponseTemplate::new(429)
+                        .insert_header("Retry-After", "0")
+                        .set_body_string("{\"errcode\":\"M_LIMIT_EXCEEDED\"}"),
+                }
+            })
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        let (tx, rx) = mpsc::channel(2);
+        let _ = tx.send("data".to_string()).await;
+        drop(tx);
+        let res = adapter.send_streaming(&user, rx, None).await;
+        assert!(res.is_err(), "second 429 must surface as Err");
+        // Expected: 1 placeholder + 1 edit (429) + 1 retry (also 429) = 3 calls.
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "must retry once on 429, then stop"
         );
     }
 }
