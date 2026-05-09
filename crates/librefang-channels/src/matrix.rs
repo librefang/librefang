@@ -186,6 +186,32 @@ pub(crate) fn parse_inbound_msg_content(
     }
 }
 
+/// Convert a `MediaGroupItem` to the corresponding `ChannelContent` variant
+/// so that `MediaGroup` handling can recurse into `send()` for each item.
+fn media_group_item_to_channel_content(
+    item: crate::types::MediaGroupItem,
+) -> crate::types::ChannelContent {
+    match item {
+        crate::types::MediaGroupItem::Photo { url, caption } => {
+            crate::types::ChannelContent::Image {
+                url,
+                caption,
+                mime_type: None,
+            }
+        }
+        crate::types::MediaGroupItem::Video {
+            url,
+            caption,
+            duration_seconds,
+        } => crate::types::ChannelContent::Video {
+            url,
+            caption,
+            duration_seconds,
+            filename: None,
+        },
+    }
+}
+
 /// Render `text` followed by `[Label]` hints for each button row.
 /// Used for outbound EditInteractive / Interactive on Matrix, which has
 /// no native interactive button support — text suffix is the standard fallback.
@@ -852,9 +878,40 @@ impl ChannelAdapter for MatrixAdapter {
                 self.api_send_event(&user.platform_id, "m.room.message", &body)
                     .await?;
             }
-            _ => {
-                self.api_send_message(&user.platform_id, "(Unsupported content type)")
+            ChannelContent::Sticker { file_id } => {
+                self.api_send_message(&user.platform_id, &format!("(sticker: {file_id})"))
                     .await?;
+            }
+            ChannelContent::MediaGroup { items } => {
+                for item in items {
+                    let cc: ChannelContent = media_group_item_to_channel_content(item);
+                    Box::pin(self.send(user, cc)).await?;
+                }
+            }
+            ChannelContent::Location { lat, lon } => {
+                let body = serde_json::json!({
+                    "msgtype": "m.location",
+                    "body": format!("Location {lat},{lon}"),
+                    "geo_uri": format!("geo:{lat},{lon}"),
+                });
+                self.api_send_event(&user.platform_id, "m.room.message", &body)
+                    .await?;
+            }
+            ChannelContent::ButtonCallback { action, .. } => {
+                debug!(
+                    "Matrix: ButtonCallback (action={action}) outbound is unsupported, skipping"
+                );
+            }
+            ChannelContent::Poll { .. } | ChannelContent::PollAnswer { .. } => {
+                self.api_send_message(&user.platform_id, "(poll unsupported)")
+                    .await?;
+            }
+            ChannelContent::Interactive { text, buttons } => {
+                let combined = format_with_button_hints(&text, &buttons);
+                self.api_send_message(&user.platform_id, &combined).await?;
+            }
+            ChannelContent::Command { .. } => {
+                // Commands are inbound-only; outbound commands are a no-op.
             }
         }
         Ok(())
@@ -2391,5 +2448,138 @@ mod tests {
             )
             .await
             .expect("voice must succeed");
+    }
+
+    // ── Task 20: Sticker/MediaGroup/Location/Poll/Interactive/ButtonCallback ──
+
+    #[tokio::test]
+    async fn test_outbound_location_event() {
+        use crate::types::{ChannelContent, ChannelUser};
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(body_partial_json(serde_json::json!({
+                "msgtype": "m.location",
+                "geo_uri": "geo:37.422,-122.0841"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$loc:test"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        adapter
+            .send(
+                &user,
+                ChannelContent::Location {
+                    lat: 37.422,
+                    lon: -122.0841,
+                },
+            )
+            .await
+            .expect("location must succeed");
+    }
+
+    #[tokio::test]
+    async fn test_outbound_sticker_falls_back_to_text() {
+        use crate::types::{ChannelContent, ChannelUser};
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(body_partial_json(serde_json::json!({
+                "msgtype": "m.text",
+                "body": "(sticker: stk-123)"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$stk:test"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        adapter
+            .send(
+                &user,
+                ChannelContent::Sticker {
+                    file_id: "stk-123".to_string(),
+                },
+            )
+            .await
+            .expect("sticker fallback must succeed");
+    }
+
+    #[tokio::test]
+    async fn test_outbound_media_group_sends_each() {
+        use crate::types::{ChannelContent, ChannelUser, MediaGroupItem};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+        let server = MockServer::start().await;
+        let bytes_url = format!("{}/p.png", server.uri());
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path("/p.png"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(b"\x89PNG".to_vec())
+                    .insert_header("Content-Type", "image/png"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path("/_matrix/media/v3/upload"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content_uri": "mxc://srv/x"
+            })))
+            .mount(&server)
+            .await;
+        let send_calls = StdArc::new(AtomicUsize::new(0));
+        let sc = send_calls.clone();
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/.+/send/m\.room\.message/.+$",
+            ))
+            .respond_with(move |_: &wiremock::Request| {
+                sc.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "event_id": "$g:test"
+                }))
+            })
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        let items = vec![
+            MediaGroupItem::Photo {
+                url: bytes_url.clone(),
+                caption: None,
+            },
+            MediaGroupItem::Photo {
+                url: bytes_url.clone(),
+                caption: None,
+            },
+            MediaGroupItem::Photo {
+                url: bytes_url.clone(),
+                caption: None,
+            },
+        ];
+        adapter
+            .send(&user, ChannelContent::MediaGroup { items })
+            .await
+            .expect("media group must succeed");
+        assert_eq!(
+            send_calls.load(Ordering::SeqCst),
+            3,
+            "3 items -> 3 PUT events"
+        );
     }
 }
