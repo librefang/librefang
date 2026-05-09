@@ -189,9 +189,10 @@ impl AgentScheduler {
             )));
         }
 
-        // --- Burst limit: no more than 1/5 of the hourly token budget in any single minute ---
+        // --- Burst limit: configurable fraction of the hourly budget in any single minute ---
         if token_limit > 0 {
-            let burst_cap = token_limit / 5;
+            let ratio = quota.effective_burst_ratio(0.0);
+            let burst_cap = (token_limit as f32 * ratio) as u64;
             let tokens_last_min = tracker.tokens_in_last_minute();
             if burst_cap > 0 && tokens_last_min > burst_cap {
                 return Err(LibreFangError::QuotaExceeded(format!(
@@ -278,7 +279,8 @@ impl AgentScheduler {
             )));
         }
         // Burst check against the projected spend
-        let burst_cap = token_limit / 5;
+        let ratio = quota.effective_burst_ratio(0.0);
+        let burst_cap = (token_limit as f32 * ratio) as u64;
         let tokens_last_min = tracker.tokens_in_last_minute();
         if burst_cap > 0 && tokens_last_min.saturating_add(estimated_tokens) > burst_cap {
             return Err(LibreFangError::QuotaExceeded(format!(
