@@ -29,6 +29,48 @@ const PHASE_REACTIONS_CAPACITY: usize = 1024;
 /// Insertion-ordered cache mapping (room_id, target_event_id) -> reaction event_id.
 type PhaseReactionCache = Arc<RwLock<std::collections::VecDeque<((String, String), String)>>>;
 
+/// Render CommonMark `text` into the HTML subset Element/Matrix clients
+/// accept for `formatted_body` (per the Matrix spec's "client-server message
+/// formatting" appendix). Used for `m.text` `body` + `formatted_body` pairs;
+/// `body` keeps the raw markdown so clients that ignore `format` still get a
+/// readable fallback.
+fn markdown_to_matrix_html(text: &str) -> String {
+    use pulldown_cmark::{html, Event, Options, Parser};
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_TABLES);
+    opts.insert(Options::ENABLE_TASKLISTS);
+    // Demote raw HTML in the source to plain text so an LLM-authored response
+    // can't inject `<script>` / `<iframe>` / `<img onerror=...>` into the
+    // formatted_body. pulldown-cmark's default is pass-through, which would
+    // be a real injection sink given untrusted model output.
+    let parser = Parser::new_ext(text, opts).map(|ev| match ev {
+        Event::Html(s) | Event::InlineHtml(s) => Event::Text(s),
+        other => other,
+    });
+    let mut out = String::with_capacity(text.len() + 32);
+    html::push_html(&mut out, parser);
+    out
+}
+
+/// Build a JSON `m.text` content body with both `body` (raw markdown for
+/// fallback) and `formatted_body` (rendered HTML). Optional `extra` is merged
+/// into the resulting object — used to attach `m.relates_to` / `m.new_content`.
+fn text_body_with_html(raw: &str, extra: Option<serde_json::Value>) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "msgtype": "m.text",
+        "body": raw,
+        "format": "org.matrix.custom.html",
+        "formatted_body": markdown_to_matrix_html(raw),
+    });
+    if let (Some(serde_json::Value::Object(extras)), Some(obj)) = (extra, v.as_object_mut()) {
+        for (k, val) in extras {
+            obj.insert(k, val);
+        }
+    }
+    v
+}
+
 /// Convert mxc://server/mediaId -> an HTTPS download URL.
 ///
 /// Uses the legacy /_matrix/media/v3/download endpoint (unauthenticated).
@@ -481,12 +523,17 @@ impl MatrixAdapter {
         target_event_id: &str,
         new_text: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let html = markdown_to_matrix_html(new_text);
         let body = serde_json::json!({
             "msgtype": "m.text",
             "body": format!("* {new_text}"),
+            "format": "org.matrix.custom.html",
+            "formatted_body": format!("* {html}"),
             "m.new_content": {
                 "msgtype": "m.text",
                 "body": new_text,
+                "format": "org.matrix.custom.html",
+                "formatted_body": html,
             },
             "m.relates_to": {
                 "rel_type": "m.replace",
@@ -536,10 +583,7 @@ impl MatrixAdapter {
         let chunks = crate::types::split_message(text, MAX_MESSAGE_LEN);
         let mut event_ids = Vec::with_capacity(chunks.len());
         for chunk in chunks {
-            let body = serde_json::json!({
-                "msgtype": "m.text",
-                "body": chunk,
-            });
+            let body = text_body_with_html(chunk, None);
             let id = self
                 .api_send_event(room_id, "m.room.message", &body)
                 .await?;
@@ -1007,9 +1051,7 @@ impl ChannelAdapter for MatrixAdapter {
         match content {
             ChannelContent::Text(text) => {
                 for chunk in crate::types::split_message(&text, MAX_MESSAGE_LEN) {
-                    let body = serde_json::json!({
-                        "msgtype": "m.text",
-                        "body": chunk,
+                    let extras = serde_json::json!({
                         "m.relates_to": {
                             "rel_type": "m.thread",
                             "event_id": thread_id,
@@ -1017,6 +1059,7 @@ impl ChannelAdapter for MatrixAdapter {
                             "m.in_reply_to": { "event_id": thread_id },
                         }
                     });
+                    let body = text_body_with_html(chunk, Some(extras));
                     self.api_send_event(&user.platform_id, "m.room.message", &body)
                         .await?;
                 }
@@ -1040,17 +1083,18 @@ impl ChannelAdapter for MatrixAdapter {
         //    so the placeholder lives in the thread; subsequent edits keep it
         //    via m.new_content.
         let placeholder_body = match thread_id {
-            Some(tid) => serde_json::json!({
-                "msgtype": "m.text",
-                "body": "…",
-                "m.relates_to": {
-                    "rel_type": "m.thread",
-                    "event_id": tid,
-                    "is_falling_back": true,
-                    "m.in_reply_to": { "event_id": tid },
-                }
-            }),
-            None => serde_json::json!({"msgtype": "m.text", "body": "…"}),
+            Some(tid) => text_body_with_html(
+                "…",
+                Some(serde_json::json!({
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": tid,
+                        "is_falling_back": true,
+                        "m.in_reply_to": { "event_id": tid },
+                    }
+                })),
+            ),
+            None => text_body_with_html("…", None),
         };
         let mut placeholder_id = self
             .api_send_event(&user.platform_id, "m.room.message", &placeholder_body)
@@ -1084,7 +1128,7 @@ impl ChannelAdapter for MatrixAdapter {
             adapter
                 .api_edit_event_with_retry(room, placeholder_id, head)
                 .await?;
-            let body = serde_json::json!({"msgtype": "m.text", "body": tail});
+            let body = text_body_with_html(&tail, None);
             let new_id = adapter
                 .api_send_event(room, "m.room.message", &body)
                 .await?;
@@ -1154,6 +1198,49 @@ mod tests {
     };
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    #[test]
+    fn test_markdown_to_matrix_html_renders_common_subset() {
+        let html = markdown_to_matrix_html("**bold** and *italic* and `code`");
+        assert!(html.contains("<strong>bold</strong>"));
+        assert!(html.contains("<em>italic</em>"));
+        assert!(html.contains("<code>code</code>"));
+
+        let h = markdown_to_matrix_html("# h1\n## h2");
+        assert!(h.contains("<h1>h1</h1>"));
+        assert!(h.contains("<h2>h2</h2>"));
+
+        let l = markdown_to_matrix_html("- one\n- two");
+        assert!(l.contains("<ul>") && l.contains("<li>one</li>") && l.contains("<li>two</li>"));
+
+        let link = markdown_to_matrix_html("[lf](https://example.org)");
+        assert!(link.contains("<a href=\"https://example.org\">lf</a>"));
+
+        // Tables (GFM) — enabled via Options::ENABLE_TABLES.
+        let t = markdown_to_matrix_html("| a | b |\n|---|---|\n| 1 | 2 |");
+        assert!(t.contains("<table>") && t.contains("<td>1</td>"));
+
+        // HTML escapes — bare angle brackets in the source must NOT inject raw tags.
+        let e = markdown_to_matrix_html("plain <script>alert(1)</script> text");
+        assert!(!e.contains("<script>"), "must escape script tag, got: {e}");
+    }
+
+    #[test]
+    fn test_text_body_with_html_includes_format_and_merges_extras() {
+        let v = text_body_with_html(
+            "**bold**",
+            Some(serde_json::json!({"m.relates_to": {"rel_type": "m.replace", "event_id": "$x"}})),
+        );
+        assert_eq!(v["msgtype"], "m.text");
+        assert_eq!(v["body"], "**bold**");
+        assert_eq!(v["format"], "org.matrix.custom.html");
+        assert!(v["formatted_body"]
+            .as_str()
+            .unwrap()
+            .contains("<strong>bold</strong>"));
+        assert_eq!(v["m.relates_to"]["rel_type"], "m.replace");
+        assert_eq!(v["m.relates_to"]["event_id"], "$x");
+    }
+
     #[tokio::test]
     async fn test_e2ee_event_emits_warn_once_per_room() {
         let adapter = make_adapter("http://unused".to_string());
@@ -1198,6 +1285,8 @@ mod tests {
             .and(body_json(serde_json::json!({
                 "msgtype": "m.text",
                 "body": "hello matrix",
+                "format": "org.matrix.custom.html",
+                "formatted_body": "<p>hello matrix</p>\n",
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "event_id": "$evt:example.org",

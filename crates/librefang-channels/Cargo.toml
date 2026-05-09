@@ -71,7 +71,7 @@ all-channels = [
 channel-telegram = []
 channel-discord = []
 channel-slack = []
-channel-matrix = []
+channel-matrix = ["dep:pulldown-cmark"]
 channel-email = ["dep:lettre", "dep:imap", "dep:rustls-connector", "dep:mailparse"]
 channel-webhook = []
 channel-whatsapp = []
@@ -148,6 +148,9 @@ smallvec = { workspace = true }
 webpki-roots = { workspace = true }
 rustls-native-certs = { workspace = true }
 urlencoding = { workspace = true }
+
+# Markdown → HTML for Matrix's `formatted_body`. Gated on channel-matrix.
+pulldown-cmark = { workspace = true, optional = true }
 
 # Channel-specific optional dependencies
 rsa = { workspace = true, optional = true }
