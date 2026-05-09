@@ -20,7 +20,6 @@ use zeroize::Zeroizing;
 /// Matrix /sync long-polling timeout in milliseconds.
 const SYNC_TIMEOUT_MS: u64 = 30000;
 const MAX_MESSAGE_LEN: usize = 4096;
-#[allow(dead_code)]
 const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 const STREAM_EDIT_INTERVAL_MS: u64 = 1500;
 const STREAM_EDIT_CHAR_BUDGET: usize = 256;
@@ -396,7 +395,6 @@ impl MatrixAdapter {
     }
 
     /// Upload bytes to Matrix media repo. Returns mxc:// URI.
-    #[allow(dead_code)]
     async fn api_upload_media(
         &self,
         bytes: Vec<u8>,
@@ -715,6 +713,25 @@ impl ChannelAdapter for MatrixAdapter {
             } => {
                 let combined = format_with_button_hints(&text, &buttons);
                 self.api_edit_event(&user.platform_id, &message_id, &combined)
+                    .await?;
+            }
+            ChannelContent::Image {
+                url,
+                caption,
+                mime_type,
+            } => {
+                let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
+                let mt = mime_type.clone().unwrap_or(mt);
+                let fname = caption.clone().unwrap_or_else(|| "image".to_string());
+                let mxc = self.api_upload_media(bytes.clone(), &fname, &mt).await?;
+                let body = serde_json::json!({
+                    "msgtype": "m.image",
+                    "body": caption.unwrap_or(fname.clone()),
+                    "filename": fname,
+                    "url": mxc,
+                    "info": { "mimetype": mt, "size": bytes.len() },
+                });
+                self.api_send_event(&user.platform_id, "m.room.message", &body)
                     .await?;
             }
             _ => {
@@ -2042,5 +2059,58 @@ mod tests {
     fn test_inbound_unknown_msgtype_skipped() {
         let content = serde_json::json!({"msgtype":"m.foo","body":"unknown"});
         assert!(parse_inbound_msg_content(&content, "https://hs.example").is_none());
+    }
+
+    // ── Task 17: Outbound Image ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_outbound_image_event_shape() {
+        use crate::types::{ChannelContent, ChannelUser};
+        let server = MockServer::start().await;
+        let bytes_url = format!("{}/dummy.png", server.uri());
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path("/dummy.png"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(b"\x89PNG\r\n\x1a\n".to_vec())
+                    .insert_header("Content-Type", "image/png"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path("/_matrix/media/v3/upload"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content_uri": "mxc://srv/img1"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(body_partial_json(serde_json::json!({
+                "msgtype": "m.image",
+                "url": "mxc://srv/img1",
+                "info": { "mimetype": "image/png" }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "event_id": "$img:test"
+            })))
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let user = ChannelUser {
+            platform_id: "!room:test".to_string(),
+            display_name: "u".to_string(),
+            librefang_user: None,
+        };
+        adapter
+            .send(
+                &user,
+                ChannelContent::Image {
+                    url: bytes_url,
+                    caption: Some("hello".to_string()),
+                    mime_type: Some("image/png".to_string()),
+                },
+            )
+            .await
+            .expect("image must succeed");
     }
 }
