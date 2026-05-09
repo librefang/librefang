@@ -136,6 +136,55 @@ fn prompt(message: &str) -> String {
     input.trim().to_string()
 }
 
+/// Best-effort GitHub `<owner>/<repo>` lookup from the `origin` remote
+/// URL. Returns `None` when there is no `origin`, the URL doesn't point
+/// at github.com, or it doesn't parse into exactly one `<owner>/<repo>`
+/// pair.
+///
+/// Why this exists: `gh workflow run` requires either a configured
+/// default repo (`gh repo set-default …`) or an explicit `--repo`
+/// argument. On a fresh clone the default isn't set, so the dispatch
+/// fails with "No default remote repository has been set". Inferring
+/// from `origin` lets `cargo xtask release --channel current` work
+/// without that prerequisite.
+fn infer_gh_repo(root: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    parse_github_owner_repo(&url)
+}
+
+fn parse_github_owner_repo(url: &str) -> Option<String> {
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    let after_host = if let Some(rest) = url.strip_prefix("git@github.com:") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("ssh://git@github.com/") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("https://github.com/") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("http://github.com/") {
+        rest
+    } else {
+        return None;
+    };
+    let mut parts = after_host.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{}/{}", owner, repo))
+}
+
 /// Best-effort `git rev-parse --short <revspec>`. Returns `None` when
 /// git fails or the revspec does not resolve in the local repo.
 fn git_short_sha(root: &Path, revspec: &str) -> Option<String> {
@@ -239,9 +288,21 @@ fn run_current(
     println!("version already exists (idempotent publish steps).");
     println!();
 
+    // Infer `<owner>/<repo>` from the `origin` remote so the dispatch
+    // works on fresh clones where `gh repo set-default` hasn't been
+    // run. Falls back to gh's own default-resolution when origin is
+    // not a GitHub URL we recognize.
+    let repo = infer_gh_repo(root);
+
     if dry_run {
         println!("Dry run — would dispatch:");
-        println!("  gh workflow run Release --ref {} -f channel=current", tag);
+        match &repo {
+            Some(r) => println!(
+                "  gh workflow run Release --repo {} --ref {} -f channel=current",
+                r, tag
+            ),
+            None => println!("  gh workflow run Release --ref {} -f channel=current", tag),
+        }
         return Ok(());
     }
 
@@ -252,22 +313,25 @@ fn run_current(
         }
     }
 
-    let status = Command::new("gh")
-        .args([
-            "workflow",
-            "run",
-            "Release",
-            "--ref",
-            &tag,
-            "-f",
-            "channel=current",
-        ])
-        .current_dir(root)
-        .status()?;
+    let mut cmd = Command::new("gh");
+    cmd.arg("workflow").arg("run").arg("Release");
+    if let Some(r) = &repo {
+        cmd.arg("--repo").arg(r);
+    }
+    cmd.args(["--ref", &tag, "-f", "channel=current"]);
+    let status = cmd.current_dir(root).status()?;
     if !status.success() {
+        let hint = if repo.is_none() {
+            " — could not infer GitHub `<owner>/<repo>` from `origin` either; \
+                pin one with `gh repo set-default <owner>/<repo>` and retry"
+        } else {
+            ""
+        };
         return Err(format!(
-            "gh workflow run failed (exit {}); is `gh` authenticated?",
-            status.code().unwrap_or(-1)
+            "gh workflow run failed (exit {}); is `gh` authenticated and the \
+             repo accessible?{}",
+            status.code().unwrap_or(-1),
+            hint
         )
         .into());
     }
@@ -1157,6 +1221,51 @@ mod tests {
     fn generator_emits_canonical_beta_with_dot() {
         let v = version_for("2026.5.4", "2026.5", 1, 0, 0, Channel::Beta);
         assert_eq!(v, "2026.5.4-beta.1");
+    }
+
+    #[test]
+    fn parse_github_owner_repo_handles_https() {
+        assert_eq!(
+            parse_github_owner_repo("https://github.com/librefang/librefang.git"),
+            Some("librefang/librefang".to_string())
+        );
+        assert_eq!(
+            parse_github_owner_repo("https://github.com/librefang/librefang"),
+            Some("librefang/librefang".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_github_owner_repo_handles_ssh() {
+        assert_eq!(
+            parse_github_owner_repo("git@github.com:librefang/librefang.git"),
+            Some("librefang/librefang".to_string())
+        );
+        assert_eq!(
+            parse_github_owner_repo("ssh://git@github.com/librefang/librefang.git"),
+            Some("librefang/librefang".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_github_owner_repo_rejects_non_github() {
+        assert_eq!(
+            parse_github_owner_repo("https://gitlab.com/librefang/librefang.git"),
+            None
+        );
+        assert_eq!(parse_github_owner_repo("not a url"), None);
+        assert_eq!(parse_github_owner_repo(""), None);
+    }
+
+    #[test]
+    fn parse_github_owner_repo_rejects_subpath() {
+        // Defensive: don't accept a URL with extra path components,
+        // because feeding an extra segment to `gh --repo` would error
+        // confusingly. Better to fall back to gh's own default.
+        assert_eq!(
+            parse_github_owner_repo("https://github.com/librefang/librefang/tree/main"),
+            None
+        );
     }
 
     #[test]
