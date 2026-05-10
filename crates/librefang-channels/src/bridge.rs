@@ -4285,9 +4285,8 @@ async fn download_image_to_blocks(
     // the agent's LLM context. The size cap enforces both a
     // Content-Length pre-check and a streaming-accumulator mid-fetch
     // bound, so a chunked-transfer "lying" length cannot bypass it.
-    let client = crate::http_client::new_client();
     let (buf, response_content_type) =
-        match crate::http_client::fetch_url_bytes(&client, url, MAX_IMAGE_BYTES).await {
+        match crate::http_client::fetch_url_bytes(url, MAX_IMAGE_BYTES).await {
             Ok(t) => t,
             Err(crate::http_client::FetchError::Rejected(reason)) => {
                 warn!("Rejecting image download: {reason}");
