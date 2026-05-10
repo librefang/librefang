@@ -481,11 +481,12 @@ impl LibreFangKernel {
                 },
                 HotAction::UpdateBudget => {
                     info!(
-                        "Hot-reload: updating budget caps (hourly=${}, daily=${}, monthly=${}, alert={})",
+                        "Hot-reload: updating budget caps (hourly=${}, daily=${}, monthly=${}, alert={}, tokens/hr={})",
                         new_config.budget.max_hourly_usd,
                         new_config.budget.max_daily_usd,
                         new_config.budget.max_monthly_usd,
                         new_config.budget.alert_threshold,
+                        new_config.budget.default_max_llm_tokens_per_hour,
                     );
                     let new_budget = new_config.budget.clone();
                     self.metering

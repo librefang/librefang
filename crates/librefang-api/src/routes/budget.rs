@@ -345,6 +345,7 @@ pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
     request_body(content = crate::types::JsonObject, description = "Partial budget config (max_hourly_usd / max_daily_usd / max_monthly_usd / alert_threshold / default_max_llm_tokens_per_hour)"),
     responses(
         (status = 200, description = "Updated global budget status", body = crate::types::JsonObject),
+        (status = 400, description = "Submitted budget produced an invalid config", body = crate::types::JsonObject),
         (status = 500, description = "Persist or reload failed", body = crate::types::JsonObject),
     )
 )]
@@ -397,10 +398,21 @@ pub async fn update_budget(
     // ArcSwap (via `HotAction::UpdateBudget`) without us having to mutate
     // it twice.
     if let Err(e) = persist_budget(&state, &new_budget).await {
-        return ApiErrorResponse::internal(format!("persist budget failed: {e}")).into_response();
+        return match e {
+            // Operator submitted a budget that, when serialised back into
+            // `config.toml`, fails `validate_config_for_reload` (e.g.
+            // would touch a restart-only field). Surface as 400 so the
+            // dashboard renders a "your input was rejected" toast rather
+            // than a generic 500 "we broke something" alert.
+            PersistBudgetError::BadRequest(m) => ApiErrorResponse::bad_request(m).into_response(),
+            PersistBudgetError::Internal(m) => ApiErrorResponse::internal(m).into_response(),
+        };
     }
 
-    let new_budget = state.kernel.budget_config();
+    // `persist_budget` already ran `reload_config()`, which routed
+    // `HotAction::UpdateBudget` into `MeteringSubsystem.update_budget`.
+    // The local `new_budget` variable IS what's now in the ArcSwap, so
+    // skip the extra `kernel.budget_config()` round-trip.
     state.kernel.audit().record_with_context(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
@@ -417,6 +429,23 @@ pub async fn update_budget(
     Json(serde_json::to_value(&status).unwrap_or_default()).into_response()
 }
 
+/// Failure modes for [`persist_budget`]. Split from the generic `String`
+/// return so the handler can return 400 for client-fixable input (the
+/// submitted config doesn't validate) and 500 for genuine I/O / kernel
+/// failures the operator can't influence.
+enum PersistBudgetError {
+    BadRequest(String),
+    Internal(String),
+}
+
+impl std::fmt::Display for PersistBudgetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadRequest(m) | Self::Internal(m) => f.write_str(m),
+        }
+    }
+}
+
 /// Replace the `[budget]` table in `config.toml` with the serialised form
 /// of `new_budget`, preserving comments and unrelated sections, then call
 /// `reload_config()` so the metering subsystem picks up the change.
@@ -428,7 +457,7 @@ pub async fn update_budget(
 async fn persist_budget(
     state: &Arc<AppState>,
     new_budget: &librefang_types::config::BudgetConfig,
-) -> Result<(), String> {
+) -> Result<(), PersistBudgetError> {
     let _guard = state.config_write_lock.lock().await;
 
     let config_path = state.kernel.home_dir().join("config.toml");
@@ -437,7 +466,9 @@ async fn persist_budget(
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
     {
-        return Err("invalid config file path".to_string());
+        return Err(PersistBudgetError::Internal(
+            "invalid config file path".to_string(),
+        ));
     }
 
     // Read the existing file. A read failure on an existing file MUST
@@ -445,33 +476,43 @@ async fn persist_budget(
     // (`[[users]]`, `[mcp_servers]`, `[[taint_rules]]`, …) on the next
     // write, exactly the failure mode `persist_users` documents.
     let raw = if config_path.exists() {
-        std::fs::read_to_string(&config_path)
-            .map_err(|e| format!("could not read existing config.toml: {e}"))?
+        std::fs::read_to_string(&config_path).map_err(|e| {
+            PersistBudgetError::Internal(format!("could not read existing config.toml: {e}"))
+        })?
     } else {
         String::new()
     };
-    let mut doc: toml_edit::DocumentMut = raw
-        .parse()
-        .map_err(|e| format!("config.toml is not valid TOML — refusing to overwrite: {e}"))?;
+    let mut doc: toml_edit::DocumentMut = raw.parse().map_err(|e| {
+        PersistBudgetError::Internal(format!(
+            "config.toml is not valid TOML — refusing to overwrite: {e}"
+        ))
+    })?;
 
     // Serialise `BudgetConfig` to a TOML table and replace the existing
     // `[budget]` table. `toml_edit::ser::to_document` reorders mixed
     // scalar/table layouts that the strict `toml` crate rejects with
     // `ValueAfterTable`, which matters here because `providers` is a
     // nested map sitting alongside scalar f64 fields.
-    let serialised =
-        toml_edit::ser::to_document(new_budget).map_err(|e| format!("serialize budget: {e}"))?;
+    let serialised = toml_edit::ser::to_document(new_budget)
+        .map_err(|e| PersistBudgetError::Internal(format!("serialize budget: {e}")))?;
     doc.insert(
         "budget",
         toml_edit::Item::Table(serialised.as_table().clone()),
     );
 
     let new_toml = doc.to_string();
-    let mut parsed: librefang_types::config::KernelConfig =
-        toml::from_str(&new_toml).map_err(|e| format!("invalid config after edit: {e}"))?;
+    let mut parsed: librefang_types::config::KernelConfig = toml::from_str(&new_toml)
+        .map_err(|e| PersistBudgetError::Internal(format!("invalid config after edit: {e}")))?;
     parsed.clamp_bounds();
     if let Err(errors) = state.kernel.validate_config_for_reload(&parsed) {
-        return Err(format!("invalid config: {}", errors.join("; ")));
+        // The operator's submitted budget produced a config the kernel
+        // refuses to hot-reload (e.g. it would touch a restart-only
+        // field). That's a client-fixable input problem, not a server
+        // failure — surface as `BadRequest` so the handler returns 400.
+        return Err(PersistBudgetError::BadRequest(format!(
+            "invalid config: {}",
+            errors.join("; ")
+        )));
     }
 
     if config_path.exists() {
@@ -484,13 +525,13 @@ async fn persist_budget(
     }
 
     crate::atomic_write(&config_path, new_toml.as_bytes())
-        .map_err(|e| format!("write failed: {e}"))?;
+        .map_err(|e| PersistBudgetError::Internal(format!("write failed: {e}")))?;
 
     state
         .kernel
         .reload_config()
         .await
-        .map_err(|e| format!("reload failed: {e}"))?;
+        .map_err(|e| PersistBudgetError::Internal(format!("reload failed: {e}")))?;
 
     Ok(())
 }
