@@ -1,0 +1,95 @@
+# Manifest 白名单 vs MCP 服务器注册表
+
+> **状态：** 描述运行时当前实际行为。
+> **Crate：** `librefang-types`、`librefang-kernel`、`librefang-extensions`、`librefang-api`。
+
+`AgentManifest.mcp_servers`（每个 agent 的白名单）和
+`KernelConfig.mcp_servers`（全局服务器注册表）这两个字段在第一次读到
+时常被误认为重复定义。它们存放的内容不同，所处的层次也不同。本页
+记录边界、解析规则，以及谁有权限改谁。
+
+## 三个值
+
+| 位置 | 类型 | 存放什么 |
+|---|---|---|
+| `AgentManifest.mcp_servers` | `Vec<String>`（服务器**名字**） | 单个 agent 的**白名单**。空 = "所有已配置服务器都对该 agent 可见"。位于 `agent.toml`。 |
+| `KernelConfig.mcp_servers` | `Vec<McpServerConfigEntry>`（完整配置） | 已安装服务器的全局**注册表** —— transport、env、OAuth、taint 策略、headers。位于 `~/.librefang/config.toml`。 |
+| `kernel.mcp.effective_mcp_servers` | `RwLock<Vec<McpServerConfigEntry>>` | `KernelConfig.mcp_servers` 的可热重载运行时镜像。与 `mcp_generation` 一起递增，保证缓存的 prompt 摘要原子失效。 |
+
+引用位置：
+
+- `crates/librefang-types/src/agent.rs:803` —— manifest 字段。
+- `crates/librefang-kernel/src/kernel/subsystems/mcp.rs:63` —— 运行时镜像。
+- `crates/librefang-kernel/src/kernel/mcp_setup.rs:324` —— `reload_mcp_servers` 在热重载时把 `cfg.mcp_servers` 拷贝进 `effective_mcp_servers`。
+
+## 解析规则
+
+注册表镜像**不会**预先和任何 agent 的白名单做交集。交集发生在 prompt
+边界上，按 agent、按轮次：
+
+```rust
+render_mcp_summary(tool_names, configured_servers, mcp_allowlist)
+```
+
+—— `crates/librefang-kernel/src/kernel/prompt_context.rs:281`。其中
+`configured_servers` 是注册表快照（`effective_mcp_servers`），
+`mcp_allowlist` 是 agent 的 manifest 字段。空白名单表示该 agent
+能看到所有已配置服务器。
+
+任何需要"按 agent 视角看 MCP"的地方（tool 列表渲染、路由处理器）都
+走同一套：先取注册表快照，再用 manifest 白名单过滤。**永远不要缓存
+交集结果。**
+
+## 为什么要拆开
+
+- **变更频率不同。** 注册表在运维安装 / 卸载 / 重新配置服务器时被改
+  写（少、全局、热重载）。白名单在运维决定"哪个 agent 能用哪个服务
+  器"时被改写（多、按 agent、不需要重连）。
+- **影响范围不同。** 从注册表里删一个服务器会断开连接。从某个 agent
+  的白名单里删一个服务器，仅仅是把它从该 agent 的 prompt 里隐藏 ——
+  连接对其他 agent 仍然有效。
+- **所有权不同。** 注册表归 `librefang-extensions` 管理（catalog →
+  installer → 写入 `[[mcp_servers]]`）。白名单是 agent 作者在
+  `agent.toml` 里编辑的。把两者合并会把 extension 安装器塞进 agent
+  作者的工作面，反之亦然。
+
+## `librefang-extensions` 的控制面边界
+
+extensions crate 是**唯一**应该写注册表的代码路径。它负责：
+
+- `catalog::McpCatalog` —— 只读模板集合，从
+  `~/.librefang/mcp/catalog/*.toml` 加载。
+- `installer::install_integration` —— 纯函数变换：catalog 条目 +
+  提供的凭据 → 新的 `McpServerConfigEntry`。不写文件 —— 调用方负责把
+  返回值持久化进 `config.toml` 并触发 kernel 重载。
+- `credentials::CredentialResolver` —— 在凭据被烧进注册表条目之前，
+  从 vault / env / dotenv 中取出。
+- `vault`、`oauth`、`health`、`dotenv`、`http_client` —— 上面这些
+  模块依赖的叶子模块。
+
+agent 端的白名单从不流经这个 crate。修改白名单是一次 kernel API
+调用：`KernelApi::set_agent_mcp_servers(agent_id, Vec<String>)` ——
+`crates/librefang-kernel/src/kernel_api.rs:232`，它会把变更写回磁盘
+上的 agent manifest 并递增 per-agent 重载代际。
+
+## HTTP 接口
+
+- `GET /api/agents/{id}/mcp_servers` —— 返回 agent 的白名单和已解析
+  的有效列表（注册表经白名单过滤后的结果）。`routes/agents.rs:4091`。
+- `PUT /api/agents/{id}/mcp_servers` —— 替换 agent 的白名单。
+  `routes/agents.rs:4162`。**不**触碰注册表。
+- `GET /api/mcp/servers` —— 注册表视图。`routes/skills.rs:3972`。
+  Dashboard 的 Integrations 页面用它来渲染安装 / 卸载。
+
+## 对新代码意味着什么
+
+- **给某个 agent 加 MCP 服务器：** 通过 `set_agent_mcp_servers` 写白
+  名单。**不要**改注册表。
+- **安装新的服务器模板：** 走 `install_integration`，把返回的
+  `McpServerConfigEntry` 持久化，然后调用 `reload_mcp_servers`。
+  **不要**改任何 agent manifest。
+- **读取"agent X 当前能看到哪些 MCP 工具"：** 从
+  `effective_mcp_servers` 取注册表快照，再用 agent 的 manifest 白名单
+  过滤。过滤后的视图除了 `mcp_summary_cache` 之外不会跨轮缓存，而该
+  缓存的 key 是 `(allowlist, mcp_generation)`，注册表热重载会自然
+  使其失效。

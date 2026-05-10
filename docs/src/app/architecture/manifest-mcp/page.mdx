@@ -1,42 +1,48 @@
-# Manifest-first control plane: MCP allowlist vs server registry
+# Manifest Allowlist vs MCP Server Registry
 
-This note records the **current** architecture, not a proposal. It exists
-because the split between `AgentManifest.mcp_servers` and
-`KernelConfig.mcp_servers` looks redundant on first reading; the two
-fields hold different things and live at different layers.
+> **Status:** documents the current state of the runtime.
+> **Crates:** `librefang-types`, `librefang-kernel`, `librefang-extensions`, `librefang-api`.
+
+The split between `AgentManifest.mcp_servers` (per-agent allowlist) and
+`KernelConfig.mcp_servers` (global server registry) reads as duplication
+on first encounter. The two fields hold different things and live at
+different layers. This page records the boundary, the resolution rule,
+and which crate is allowed to mutate which side.
 
 ## The three values
 
 | Where | Type | What it holds |
 |---|---|---|
-| `AgentManifest.mcp_servers` | `Vec<String>` (server **names**) | Per-agent **allowlist**. Empty = "all configured servers". Lives in `agent.toml`. |
+| `AgentManifest.mcp_servers` | `Vec<String>` (server **names**) | Per-agent **allowlist**. Empty = "every configured server is visible to this agent". Lives in `agent.toml`. |
 | `KernelConfig.mcp_servers` | `Vec<McpServerConfigEntry>` (full configs) | Global **registry** of installed servers — transport, env, OAuth, taint policy, headers. Lives in `~/.librefang/config.toml`. |
 | `kernel.mcp.effective_mcp_servers` | `RwLock<Vec<McpServerConfigEntry>>` | Hot-reloadable runtime mirror of `KernelConfig.mcp_servers`. Bumped together with `mcp_generation` so cached prompt summaries invalidate atomically. |
 
-`crates/librefang-types/src/agent.rs:803` — manifest field.
-`crates/librefang-kernel/src/kernel/subsystems/mcp.rs:63` — runtime mirror.
-`crates/librefang-kernel/src/kernel/mcp_setup.rs:324` — `reload_mcp_servers`
-copies `cfg.mcp_servers` into `effective_mcp_servers` on hot-reload.
+References:
+
+- `crates/librefang-types/src/agent.rs:803` — manifest field.
+- `crates/librefang-kernel/src/kernel/subsystems/mcp.rs:63` — runtime mirror.
+- `crates/librefang-kernel/src/kernel/mcp_setup.rs:324` — `reload_mcp_servers` copies `cfg.mcp_servers` into `effective_mcp_servers` on hot-reload.
 
 ## Resolution
 
-The registry mirror is **not** pre-intersected with any agent's allowlist.
-Intersection happens at the prompt boundary, per agent, per turn:
+The registry mirror is **not** pre-intersected with any agent's
+allowlist. Intersection happens at the prompt boundary, per agent, per
+turn:
 
-```
+```rust
 render_mcp_summary(tool_names, configured_servers, mcp_allowlist)
 ```
 
 — `crates/librefang-kernel/src/kernel/prompt_context.rs:281`. The
 `configured_servers` argument is the registry snapshot
 (`effective_mcp_servers`); the `mcp_allowlist` argument is the agent's
-manifest field. An empty allowlist means "every configured server is
-visible to this agent".
+manifest field. An empty allowlist means every configured server is
+visible to this agent.
 
 The same pattern is used elsewhere any time a per-agent view of MCP is
 needed (tool list rendering, route handlers): pull the registry
-snapshot, then filter through the manifest allowlist. Never store the
-intersection.
+snapshot, then filter through the manifest allowlist. **Never store the
+intersection.**
 
 ## Why the split is intentional
 
@@ -76,26 +82,28 @@ a kernel API operation:
 `crates/librefang-kernel/src/kernel_api.rs:232` — which writes back to
 the agent's manifest on disk and bumps the per-agent reload generation.
 
-## Surfaces (HTTP)
+## HTTP surfaces
 
 - `GET /api/agents/{id}/mcp_servers` — returns the agent's allowlist
   plus the resolved effective list (registry filtered through
   allowlist). `routes/agents.rs:4091`.
 - `PUT /api/agents/{id}/mcp_servers` — replaces the agent's allowlist.
   `routes/agents.rs:4162`. Does **not** touch the registry.
-- `GET /api/mcp/servers` — registry view (`routes/skills.rs:3972`).
+- `GET /api/mcp/servers` — registry view. `routes/skills.rs:3972`.
   Used by the dashboard's Integrations page to render install /
   uninstall.
 
 ## What this means for new code
 
-- Adding an MCP server to an agent: write to the allowlist via
+- **Adding an MCP server to an agent.** Write to the allowlist via
   `set_agent_mcp_servers`. Do **not** mutate the registry.
-- Installing a new server template: go through `install_integration`,
-  persist the returned `McpServerConfigEntry`, then call
-  `reload_mcp_servers`. Do **not** write to any agent manifest.
-- Reading "what MCP tools does agent X see right now": snapshot the
-  registry from `effective_mcp_servers`, filter through the agent's
-  manifest allowlist. The filtered view is never cached across turns
-  beyond the `mcp_summary_cache`, which is keyed on `(allowlist,
-  mcp_generation)` so registry hot-reloads invalidate it.
+- **Installing a new server template.** Go through
+  `install_integration`, persist the returned `McpServerConfigEntry`,
+  then call `reload_mcp_servers`. Do **not** write to any agent
+  manifest.
+- **Reading "what MCP tools does agent X see right now".** Snapshot
+  the registry from `effective_mcp_servers`, filter through the
+  agent's manifest allowlist. The filtered view is never cached
+  across turns beyond the `mcp_summary_cache`, which is keyed on
+  `(allowlist, mcp_generation)` so registry hot-reloads invalidate
+  it.

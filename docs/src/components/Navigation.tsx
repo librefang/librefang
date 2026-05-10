@@ -354,6 +354,7 @@ const zhNavigation: Array<NavGroup> = [
 			{ title: "系统架构", href: withPrefix("/zh/architecture") },
 			{ title: "安全", href: withPrefix("/zh/architecture/security") },
 			{ title: "OFP 链路加密", href: withPrefix("/zh/architecture/ofp-wire") },
+			{ title: "Manifest 与 MCP 注册表", href: withPrefix("/zh/architecture/manifest-mcp") },
 		],
 	},
 	{
@@ -455,6 +456,7 @@ export const enNavigation: Array<NavGroup> = [
 			{ title: "Architecture", href: withPrefix("/architecture") },
 			{ title: "Security", href: withPrefix("/architecture/security") },
 			{ title: "OFP Wire Encryption", href: withPrefix("/architecture/ofp-wire") },
+			{ title: "Manifest & MCP Registry", href: withPrefix("/architecture/manifest-mcp") },
 		],
 	},
 	{
