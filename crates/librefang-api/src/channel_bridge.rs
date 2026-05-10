@@ -2238,6 +2238,65 @@ fn read_token(env_var: &str, adapter_name: &str) -> Option<String> {
     }
 }
 
+#[cfg(feature = "channel-email")]
+#[derive(Debug)]
+pub(crate) struct EmailCredentials {
+    pub imap_username: String,
+    pub imap_password: String,
+    pub smtp_username: String,
+    pub smtp_password: String,
+}
+
+/// Resolve the four split-credential fields against an `EmailConfig`,
+/// returning `None` if either side's password env var fails to resolve.
+///
+/// Fallback order for each per-protocol field (`imap_username`,
+/// `smtp_username`, `imap_password_env`, `smtp_password_env`):
+///
+///   1. The protocol-specific override (`em_config.imap_username`, etc.)
+///   2. The shared default (`em_config.username` / `em_config.password_env`)
+///
+/// `read_env` is injected so tests can drive the env-lookup path
+/// without mutating shared process state. Production calls pass
+/// [`read_token`].
+#[cfg(feature = "channel-email")]
+pub(crate) fn resolve_email_credentials<F>(
+    em_config: &librefang_types::config::EmailConfig,
+    read_env: F,
+) -> Option<EmailCredentials>
+where
+    F: Fn(&str, &str) -> Option<String>,
+{
+    let imap_username = em_config
+        .imap_username
+        .as_deref()
+        .unwrap_or(&em_config.username)
+        .to_string();
+    let imap_password_env = em_config
+        .imap_password_env
+        .as_deref()
+        .unwrap_or(&em_config.password_env);
+    let imap_password = read_env(imap_password_env, "Email IMAP")?;
+
+    let smtp_username = em_config
+        .smtp_username
+        .as_deref()
+        .unwrap_or(&em_config.username)
+        .to_string();
+    let smtp_password_env = em_config
+        .smtp_password_env
+        .as_deref()
+        .unwrap_or(&em_config.password_env);
+    let smtp_password = read_env(smtp_password_env, "Email SMTP")?;
+
+    Some(EmailCredentials {
+        imap_username,
+        imap_password,
+        smtp_username,
+        smtp_password,
+    })
+}
+
 /// Start the channel bridge for all configured channels based on kernel config.
 ///
 /// Returns `Some(BridgeManager)` if any channels were configured and started,
@@ -2662,31 +2721,10 @@ pub async fn start_channel_bridge_with_config(
     // Email
     #[cfg(feature = "channel-email")]
     for em_config in config.email.iter() {
-        let imap_username = em_config
-            .imap_username
-            .as_deref()
-            .unwrap_or(&em_config.username)
-            .to_string();
-        let imap_password_env = em_config
-            .imap_password_env
-            .as_deref()
-            .unwrap_or(&em_config.password_env);
-        let imap_password = match read_token(imap_password_env, "Email IMAP") {
-            Some(p) => p,
-            None => continue,
-        };
-        let smtp_username = em_config
-            .smtp_username
-            .as_deref()
-            .unwrap_or(&em_config.username)
-            .to_string();
-        let smtp_password_env = em_config
-            .smtp_password_env
-            .as_deref()
-            .unwrap_or(&em_config.password_env);
-        let smtp_password = match read_token(smtp_password_env, "Email SMTP") {
-            Some(p) => p,
-            None => continue,
+        let Some(creds) = resolve_email_credentials(em_config, |env_var, adapter_name| {
+            read_token(env_var, adapter_name)
+        }) else {
+            continue;
         };
         let adapter = Arc::new(
             EmailAdapter::new(
@@ -2694,10 +2732,10 @@ pub async fn start_channel_bridge_with_config(
                 em_config.imap_port,
                 em_config.smtp_host.clone(),
                 em_config.smtp_port,
-                imap_username,
-                imap_password,
-                smtp_username,
-                smtp_password,
+                creds.imap_username,
+                creds.imap_password,
+                creds.smtp_username,
+                creds.smtp_password,
                 em_config.poll_interval_secs,
                 em_config.folders.clone(),
                 em_config.allowed_senders.clone(),
@@ -4581,5 +4619,158 @@ mod tests {
         assert_eq!(bus.dropped_count(), 5);
         bus.record_consumer_lag(3, "test-context");
         assert_eq!(bus.dropped_count(), 8);
+    }
+
+    // -- resolve_email_credentials: split-creds fallback semantics ----------
+    //
+    // Pins the four fallback paths in EmailConfig:
+    //   imap_username      -> falls back to em_config.username
+    //   imap_password_env  -> falls back to em_config.password_env
+    //   smtp_username      -> falls back to em_config.username
+    //   smtp_password_env  -> falls back to em_config.password_env
+    //
+    // Production wires `read_token` (which reads `std::env::var`); these
+    // tests inject a closure-based env lookup so they don't mutate
+    // shared process state and are race-free under cargo test's
+    // multi-threaded harness.
+
+    #[cfg(feature = "channel-email")]
+    use super::resolve_email_credentials;
+    #[cfg(feature = "channel-email")]
+    use librefang_types::config::EmailConfig;
+
+    #[cfg(feature = "channel-email")]
+    fn email_base() -> EmailConfig {
+        EmailConfig {
+            imap_host: "imap.example.com".to_string(),
+            imap_port: 993,
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_port: 587,
+            username: "shared@example.com".to_string(),
+            password_env: "SHARED_PASSWORD".to_string(),
+            ..EmailConfig::default()
+        }
+    }
+
+    /// Both passwords resolve from the shared `password_env` when no
+    /// per-protocol overrides are set; usernames inherit `username`.
+    #[cfg(feature = "channel-email")]
+    #[test]
+    fn shared_credentials_resolve_to_same_password_for_both_sides() {
+        let cfg = email_base();
+        let creds = resolve_email_credentials(&cfg, |env, _| {
+            (env == "SHARED_PASSWORD").then(|| "shared-secret".to_string())
+        })
+        .expect("must resolve when shared password env is set");
+        assert_eq!(creds.imap_username, "shared@example.com");
+        assert_eq!(creds.smtp_username, "shared@example.com");
+        assert_eq!(creds.imap_password, "shared-secret");
+        assert_eq!(creds.smtp_password, "shared-secret");
+    }
+
+    /// `imap_username = Some(...)` overrides the shared username on the
+    /// IMAP side only; SMTP still falls back to `username`.
+    #[cfg(feature = "channel-email")]
+    #[test]
+    fn imap_username_override_does_not_leak_into_smtp_side() {
+        let mut cfg = email_base();
+        cfg.imap_username = Some("imap-user@example.com".to_string());
+        let creds =
+            resolve_email_credentials(&cfg, |_, _| Some("p".to_string())).expect("must resolve");
+        assert_eq!(creds.imap_username, "imap-user@example.com");
+        assert_eq!(creds.smtp_username, "shared@example.com");
+    }
+
+    /// `smtp_username = Some(...)` overrides on SMTP side only.
+    #[cfg(feature = "channel-email")]
+    #[test]
+    fn smtp_username_override_does_not_leak_into_imap_side() {
+        let mut cfg = email_base();
+        cfg.smtp_username = Some("smtp-user@example.com".to_string());
+        let creds =
+            resolve_email_credentials(&cfg, |_, _| Some("p".to_string())).expect("must resolve");
+        assert_eq!(creds.smtp_username, "smtp-user@example.com");
+        assert_eq!(creds.imap_username, "shared@example.com");
+    }
+
+    /// Per-protocol password env overrides resolve through DIFFERENT
+    /// secrets — pin against a regression where both sides accidentally
+    /// share the same fallback variable.
+    #[cfg(feature = "channel-email")]
+    #[test]
+    fn per_protocol_password_envs_resolve_independently() {
+        let mut cfg = email_base();
+        cfg.imap_password_env = Some("IMAP_SECRET".to_string());
+        cfg.smtp_password_env = Some("SMTP_SECRET".to_string());
+        let creds = resolve_email_credentials(&cfg, |env, _| match env {
+            "IMAP_SECRET" => Some("imap-pw".to_string()),
+            "SMTP_SECRET" => Some("smtp-pw".to_string()),
+            _ => None,
+        })
+        .expect("must resolve");
+        assert_eq!(creds.imap_password, "imap-pw");
+        assert_eq!(creds.smtp_password, "smtp-pw");
+    }
+
+    /// IMAP-specific override resolves; SMTP falls back to `password_env`.
+    #[cfg(feature = "channel-email")]
+    #[test]
+    fn imap_password_override_smtp_falls_back_to_shared() {
+        let mut cfg = email_base();
+        cfg.imap_password_env = Some("IMAP_SECRET".to_string());
+        let creds = resolve_email_credentials(&cfg, |env, _| match env {
+            "IMAP_SECRET" => Some("imap-pw".to_string()),
+            "SHARED_PASSWORD" => Some("shared-pw".to_string()),
+            _ => None,
+        })
+        .expect("must resolve");
+        assert_eq!(creds.imap_password, "imap-pw");
+        assert_eq!(creds.smtp_password, "shared-pw");
+    }
+
+    /// If the IMAP password resolution yields `None` (env var missing
+    /// or empty), the entire adapter is skipped — `None` is returned
+    /// short-circuit BEFORE the SMTP side is consulted.
+    #[cfg(feature = "channel-email")]
+    #[test]
+    fn missing_imap_password_short_circuits_to_none() {
+        use std::cell::Cell;
+        let cfg = email_base();
+        let lookups = Cell::new(0_u32);
+        let result = resolve_email_credentials(&cfg, |env, _| {
+            lookups.set(lookups.get() + 1);
+            // Both sides default to "SHARED_PASSWORD"; returning None
+            // here forces the IMAP `?` to short-circuit.
+            let _ = env;
+            None
+        });
+        assert!(result.is_none(), "missing password must yield None");
+        assert_eq!(
+            lookups.get(),
+            1,
+            "SMTP-side lookup must NOT run after IMAP fails — short-circuit via the `?` operator on the first read_env call"
+        );
+    }
+
+    /// Smoke test for the silent-skip-on-empty case my comment flagged:
+    /// when `password_env = ""` (operator wiped it intending the
+    /// per-protocol fields to take over) and only one side is
+    /// configured, the OTHER side hits the empty fallback and the
+    /// adapter is skipped. Surfaces clearly via `None`.
+    #[cfg(feature = "channel-email")]
+    #[test]
+    fn empty_shared_password_env_with_single_side_override_skips_adapter() {
+        let mut cfg = email_base();
+        cfg.password_env = String::new();
+        cfg.imap_password_env = Some("IMAP_SECRET".to_string());
+        // SMTP side has neither override nor a usable shared env.
+        let result = resolve_email_credentials(&cfg, |env, _| match env {
+            "IMAP_SECRET" => Some("imap-pw".to_string()),
+            _ => None, // empty `password_env` looks up "" and gets None
+        });
+        assert!(
+            result.is_none(),
+            "operator must set BOTH per-protocol envs when wiping the shared one"
+        );
     }
 }
