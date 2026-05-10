@@ -3892,6 +3892,15 @@ pub async fn run_agent_loop(
                 }
             });
 
+        // Catalog-driven reasoning_echo_policy lookup (#4842). Falls back
+        // to `None` when no kernel handle is wired or the model isn't in
+        // the catalog; the OpenAI driver then resolves the policy via its
+        // own substring fallback for backwards compatibility.
+        let reasoning_echo_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_echo_policy_for(&api_model))
+            .unwrap_or_default();
+
         // Wrap messages once per turn — call_with_retry's `request.clone()`
         // becomes a refcount bump instead of a deep clone of the history (#3766).
         let request = CompletionRequest {
@@ -3916,7 +3925,7 @@ pub async fn run_agent_loop(
             agent_id: Some(agent_id_str.clone()),
             session_id: Some(session.id.to_string()),
             step_id: Some(iteration.to_string()),
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+            reasoning_echo_policy,
         };
 
         // Notify phase: Thinking
@@ -5374,6 +5383,13 @@ pub async fn run_agent_loop_streaming(
                 }
             });
 
+        // Catalog-driven reasoning_echo_policy lookup (#4842), same as the
+        // non-streaming path above.
+        let reasoning_echo_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_echo_policy_for(&api_model))
+            .unwrap_or_default();
+
         // Same Arc-wrap as the non-streaming hot path (#3766).
         let request = CompletionRequest {
             model: api_model,
@@ -5396,7 +5412,7 @@ pub async fn run_agent_loop_streaming(
             agent_id: Some(agent_id_str.clone()),
             session_id: Some(session.id.to_string()),
             step_id: Some(iteration.to_string()),
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+            reasoning_echo_policy,
         };
 
         // Notify phase: on first iteration emit Streaming; on subsequent

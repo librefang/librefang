@@ -3150,6 +3150,76 @@ mod tests {
         );
     }
 
+    /// Catalog `None` on a `deepseek-reasoner` model name must fall back to
+    /// substring detection and produce the R1 wire shape: omitted
+    /// `reasoning_content`. Companion to the v4-flash fallback test;
+    /// covers the Strip path of the substring fallback.
+    #[test]
+    fn test_catalog_none_falls_back_to_substring_for_deepseek_reasoner() {
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        let req = build_catalog_policy_test_request("deepseek-reasoner", ReasoningEchoPolicy::None);
+        let oai = driver.build_request(&req).expect("build_request");
+        let assistant_msg = oai
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert!(
+            assistant_msg.reasoning_content.is_none(),
+            "default policy must fall back to substring; deepseek-reasoner → Strip (omit)"
+        );
+    }
+
+    /// Catalog `None` on a `kimi`-named model must fall back to substring
+    /// detection and produce the Kimi wire shape: empty-string
+    /// `reasoning_content` on tool_calls turns + temperature 0.6 +
+    /// thinking disabled. Covers the EmptyString path of the substring
+    /// fallback via the model-name branch (`model.contains("kimi")`).
+    #[test]
+    fn test_catalog_none_falls_back_to_substring_for_kimi_name() {
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
+        let req = build_catalog_policy_test_request("kimi-k2-instruct", ReasoningEchoPolicy::None);
+        let oai = driver.build_request(&req).expect("build_request");
+        let assistant_msg = oai
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert_eq!(
+            assistant_msg.reasoning_content.as_deref(),
+            Some(""),
+            "default policy must fall back to substring; kimi-name → EmptyString"
+        );
+        assert_eq!(oai.temperature, Some(0.6));
+        assert_eq!(oai.thinking, Some(serde_json::json!({"type": "disabled"})));
+    }
+
+    /// Catalog `None` on a non-kimi model name routed through a Moonshot
+    /// base URL must fall back to substring detection via the host-based
+    /// branch (`is_moonshot()`) and produce the Kimi wire shape — proves
+    /// the fallback's host-aware branch still triggers post-refactor.
+    #[test]
+    fn test_catalog_none_falls_back_to_substring_for_moonshot_host() {
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://api.moonshot.cn/v1".to_string());
+        let req = build_catalog_policy_test_request("mystery-model", ReasoningEchoPolicy::None);
+        let oai = driver.build_request(&req).expect("build_request");
+        let assistant_msg = oai
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert_eq!(
+            assistant_msg.reasoning_content.as_deref(),
+            Some(""),
+            "default policy must fall back to substring via is_moonshot() host check"
+        );
+        assert_eq!(oai.temperature, Some(0.6));
+        assert_eq!(oai.thinking, Some(serde_json::json!({"type": "disabled"})));
+    }
+
     /// Verify that deepseek-reasoner assistant messages always get a non-null
     /// content field, even when text_parts is empty (thinking-only response).
     #[test]
