@@ -2724,9 +2724,13 @@ mod tests {
     #[test]
     fn login_page_redirects_dashboard_root_to_spa_shell() {
         let html = super::LOGIN_PAGE_HTML;
+        // Pin the full collapse condition so neither the bare `/dashboard`
+        // case nor the trailing-slash case can be silently dropped — a
+        // substring like `path === '/dashboard'` would also match
+        // `path === '/dashboard/'` and let one half regress unnoticed.
         assert!(
-            html.contains("path === '/dashboard'") && html.contains("path === '/dashboard/'"),
-            "login page must collapse /dashboard and /dashboard/ to the SPA shell at /"
+            html.contains("path === '/dashboard' || path === '/dashboard/'"),
+            "login page must collapse both /dashboard and /dashboard/ to the SPA shell at /"
         );
         assert!(
             !html.contains("target = '/dashboard/';"),
