@@ -4084,14 +4084,20 @@ pub struct BudgetConfig {
     pub default_max_llm_tokens_per_hour: u64,
     /// Per-provider spending caps, keyed by provider id (e.g. `"moonshot"`,
     /// `"openai"`, `"litellm"`). Missing providers are unlimited.
-    /// Per-provider spending caps, keyed by provider id (e.g. `"moonshot"`,
-    /// `"openai"`, `"litellm"`). Missing providers are unlimited.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub providers: std::collections::HashMap<String, ProviderBudget>,
-    /// Global default burst ratio for all agents (0.0 = not set, use
-    /// compiled default 0.2). Overridden per-agent via
+    /// Global default burst ratio for all agents (`0.0` = unset, use
+    /// compiled default `0.2`). Overridden per-agent via
     /// `ResourceQuota.burst_ratio`.
-    #[serde(default)]
+    ///
+    /// Validated at parse time: NaN, infinity, and values outside
+    /// `[0.0, 1.0]` are rejected with a serde error rather than
+    /// silently sanitised at the rate-limiter use site. The
+    /// compiled-default fallback for an out-of-range agent override
+    /// still lives in `ResourceQuota::effective_burst_ratio` (defence
+    /// in depth), but operator-provided config that's nonsensical
+    /// should fail loud at boot, not paper over a typo.
+    #[serde(default, deserialize_with = "deserialize_default_burst_ratio")]
     pub default_burst_ratio: f32,
 }
 
@@ -4111,6 +4117,29 @@ impl Default for BudgetConfig {
 
 fn default_max_cron_jobs() -> usize {
     500
+}
+
+/// Validate `BudgetConfig::default_burst_ratio` at parse time.
+///
+/// Rejects NaN, ±infinity, and values outside `[0.0, 1.0]`. `0.0` is
+/// the explicit "unset, use compiled default" sentinel and is allowed.
+fn deserialize_default_burst_ratio<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let v = f32::deserialize(deserializer)?;
+    if !v.is_finite() {
+        return Err(D::Error::custom(format!(
+            "default_burst_ratio must be finite (got {v}); use 0.0 to leave unset"
+        )));
+    }
+    if !(0.0..=1.0).contains(&v) {
+        return Err(D::Error::custom(format!(
+            "default_burst_ratio must be in [0.0, 1.0] (got {v}); 0.0 = unset, 1.0 = full hourly budget per minute"
+        )));
+    }
+    Ok(v)
 }
 
 /// Compaction strategy for Persistent cron sessions (#3693).
@@ -8657,5 +8686,59 @@ rule_sets = ["browser_handles", "pii_baseline"]
             cfg.otlp_export_disabled(true),
             "empty endpoint is the explicit opt-out path even when stack is up"
         );
+    }
+
+    // ----- BudgetConfig::default_burst_ratio parse-time validation -----
+
+    #[test]
+    fn default_burst_ratio_accepts_zero_and_unit_range() {
+        for v in [0.0_f32, 0.01, 0.2, 0.5, 1.0] {
+            let toml_str = format!("default_burst_ratio = {v}");
+            let cfg: BudgetConfig = toml::from_str(&toml_str)
+                .unwrap_or_else(|e| panic!("expected accept for {v}: {e}"));
+            assert!((cfg.default_burst_ratio - v).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn default_burst_ratio_rejects_negative_at_parse_time() {
+        let err = toml::from_str::<BudgetConfig>("default_burst_ratio = -0.5")
+            .expect_err("negative ratio must be rejected at parse time");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("default_burst_ratio") && msg.contains("[0.0, 1.0]"),
+            "error must explain the constraint, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn default_burst_ratio_rejects_above_one_at_parse_time() {
+        let err = toml::from_str::<BudgetConfig>("default_burst_ratio = 2.5")
+            .expect_err("ratio > 1.0 must be rejected at parse time");
+        assert!(err.to_string().contains("default_burst_ratio"));
+    }
+
+    #[test]
+    fn default_burst_ratio_rejects_nan_at_parse_time() {
+        let err = toml::from_str::<BudgetConfig>("default_burst_ratio = nan")
+            .expect_err("NaN must be rejected at parse time");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("default_burst_ratio") && msg.contains("finite"),
+            "error must explain the constraint, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn default_burst_ratio_rejects_infinity_at_parse_time() {
+        let err = toml::from_str::<BudgetConfig>("default_burst_ratio = inf")
+            .expect_err("infinity must be rejected at parse time");
+        assert!(err.to_string().contains("finite"));
+    }
+
+    #[test]
+    fn default_burst_ratio_defaults_to_zero_when_missing() {
+        let cfg: BudgetConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.default_burst_ratio, 0.0);
     }
 }
