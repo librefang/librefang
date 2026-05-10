@@ -12,6 +12,7 @@
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use librefang_memory::{WorkflowRunRow, WorkflowStore};
 use librefang_types::agent::AgentId;
 use librefang_types::subagent::SubagentContext;
 use serde::{Deserialize, Serialize};
@@ -346,12 +347,17 @@ pub struct WorkflowEngine {
     /// Active and completed workflow runs.
     runs: Arc<DashMap<WorkflowRunId, WorkflowRun>>,
     /// Optional path to persist completed/failed runs (`~/.librefang/workflow_runs.json`).
+    /// Retained for backward compatibility and JSON-to-SQLite migration.
     persist_path: Option<PathBuf>,
     /// Serializes `persist_runs` writes so concurrent callers within a
     /// single process don't `O_TRUNC` the same `.tmp.{pid}` path and
     /// produce a torn file before rename.  `Arc` so the engine stays
     /// `Clone` (mutexes are shared, not duplicated).
     persist_lock: Arc<std::sync::Mutex<()>>,
+    /// SQLite-backed workflow store. When `Some`, all persistence goes
+    /// through SQLite instead of the JSON file. The JSON path is still
+    /// kept for the one-time migration (`migrate_from_json`).
+    store: Option<WorkflowStore>,
 }
 
 /// Evaluate a conditional expression against the previous step output.
@@ -464,10 +470,11 @@ impl WorkflowEngine {
             runs: Arc::new(DashMap::new()),
             persist_path: None,
             persist_lock: Arc::new(std::sync::Mutex::new(())),
+            store: None,
         }
     }
 
-    /// Create a new workflow engine with run persistence.
+    /// Create a new workflow engine with run persistence (JSON file).
     ///
     /// Completed and failed runs are persisted to `<home_dir>/data/workflow_runs.json`.
     pub fn new_with_persistence(home_dir: &Path) -> Self {
@@ -476,16 +483,69 @@ impl WorkflowEngine {
             runs: Arc::new(DashMap::new()),
             persist_path: Some(home_dir.join("data").join("workflow_runs.json")),
             persist_lock: Arc::new(std::sync::Mutex::new(())),
+            store: None,
+        }
+    }
+
+    /// Create a new workflow engine backed by SQLite.
+    ///
+    /// All state transitions are persisted immediately to the database.
+    /// The `home_dir` is retained so `migrate_from_json` can find the
+    /// legacy `workflow_runs.json` file for one-time import.
+    pub fn new_with_store(store: WorkflowStore, home_dir: &Path) -> Self {
+        Self {
+            workflows: Arc::new(RwLock::new(HashMap::new())),
+            runs: Arc::new(DashMap::new()),
+            persist_path: Some(home_dir.join("data").join("workflow_runs.json")),
+            persist_lock: Arc::new(std::sync::Mutex::new(())),
+            store: Some(store),
         }
     }
 
     // -- Run Persistence ------------------------------------------------------
 
-    /// Load persisted runs from disk into memory.
+    /// Load persisted runs into memory.
     ///
-    /// Returns the number of runs loaded. If the file does not exist,
-    /// returns `Ok(0)` without error.
+    /// When a SQLite store is configured, loads from the database.
+    /// Otherwise falls back to the legacy JSON file. Returns the number
+    /// of runs loaded. If no data source exists, returns `Ok(0)`.
     pub fn load_runs(&self) -> Result<usize, String> {
+        if let Some(ref store) = self.store {
+            return self.load_runs_from_sqlite(store);
+        }
+        self.load_runs_from_json()
+    }
+
+    /// Load runs from the SQLite store into the in-memory DashMap.
+    fn load_runs_from_sqlite(&self, store: &WorkflowStore) -> Result<usize, String> {
+        let rows = store
+            .load_all_runs()
+            .map_err(|e| format!("workflow SQLite load failed: {e}"))?;
+        let total = rows.len();
+        let mut loaded: usize = 0;
+        let mut skipped: usize = 0;
+        for row in rows {
+            match row_to_workflow_run(&row) {
+                Ok(run) => {
+                    self.runs.insert(run.id, run);
+                    loaded += 1;
+                }
+                Err(e) => {
+                    skipped += 1;
+                    warn!(
+                        run_id = %row.id,
+                        error = %e,
+                        "Skipping unreadable workflow run from SQLite"
+                    );
+                }
+            }
+        }
+        debug!(loaded, skipped, total, "Loaded workflow runs from SQLite");
+        Ok(loaded)
+    }
+
+    /// Load runs from the legacy JSON file into the in-memory DashMap.
+    fn load_runs_from_json(&self) -> Result<usize, String> {
         let path = match &self.persist_path {
             Some(p) => p,
             None => return Ok(0),
@@ -535,8 +595,50 @@ impl WorkflowEngine {
         Ok(count)
     }
 
-    /// Persist completed/failed runs to disk via atomic write.
+    /// Persist runs to the backing store.
+    ///
+    /// When a SQLite store is configured, iterates all runs in the
+    /// DashMap and upserts each one. A WAL checkpoint is issued after
+    /// writing terminal-state runs to ensure durability.
+    ///
+    /// Without a SQLite store, falls back to the legacy JSON atomic
+    /// write.
     fn persist_runs(&self) {
+        if let Some(ref store) = self.store {
+            self.persist_runs_to_sqlite(store);
+            return;
+        }
+        self.persist_runs_to_json();
+    }
+
+    /// Persist all runs to SQLite via upsert.
+    fn persist_runs_to_sqlite(&self, store: &WorkflowStore) {
+        let mut wrote_terminal = false;
+        for entry in self.runs.iter() {
+            let run = entry.value();
+            let row = workflow_run_to_row(run);
+            if let Err(e) = store.upsert_run(&row) {
+                warn!(run_id = %run.id, error = %e, "Failed to persist workflow run to SQLite");
+            }
+            if matches!(
+                run.state,
+                WorkflowRunState::Completed
+                    | WorkflowRunState::Failed
+                    | WorkflowRunState::Paused { .. }
+            ) {
+                wrote_terminal = true;
+            }
+        }
+        if wrote_terminal {
+            if let Err(e) = store.wal_checkpoint() {
+                warn!("WAL checkpoint after workflow persist failed: {e}");
+            }
+        }
+        debug!("Persisted workflow runs to SQLite");
+    }
+
+    /// Persist completed/failed/paused runs to JSON via atomic write (legacy path).
+    fn persist_runs_to_json(&self) {
         let _guard = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
         let path = match &self.persist_path {
             Some(p) => p,
@@ -806,6 +908,18 @@ impl WorkflowEngine {
             paused_current_input: None,
         };
 
+        // Persist the freshly-created Pending row before it goes into
+        // the DashMap. The batch `persist_runs` family deliberately
+        // skips Pending — without an explicit per-row upsert here, a
+        // newly created run that crashes before being dispatched
+        // disappears entirely on restart. The store happens to be cheap
+        // enough (one indexed insert) that doing it inline is fine; if
+        // it ever becomes hot, the right move is to debounce the
+        // upsert, not drop it.
+        if self.store.is_some() {
+            self.upsert_run_to_store(&run);
+        }
+
         self.runs.insert(run_id, run);
 
         // Evict oldest completed/failed runs when we exceed the cap
@@ -880,6 +994,14 @@ impl WorkflowEngine {
             run.error = Some("Interrupted by daemon restart".to_string());
             run.completed_at = Some(now);
             run.clear_pause_state();
+            // Persist the recovered Failed state immediately. Without
+            // this, the run lives in the DashMap as Failed but the
+            // SQLite row is whatever was on disk before recovery — so a
+            // second crash before the next batch persist would resurface
+            // the same run as a stale Running again.
+            if self.store.is_some() {
+                self.upsert_run_to_store(run);
+            }
             recovered += 1;
         }
         recovered
@@ -2330,6 +2452,119 @@ impl WorkflowEngine {
 
         Ok(preview)
     }
+
+    // -- SQLite per-transition persistence ------------------------------------
+
+    /// Persist a single run to SQLite immediately after a state transition.
+    ///
+    /// This is the key durability improvement: each state change is
+    /// durable on its own rather than waiting for the full batch
+    /// `persist_runs`. A WAL checkpoint follows terminal-state writes.
+    pub fn upsert_run_to_store(&self, run: &WorkflowRun) {
+        if let Some(ref store) = self.store {
+            let row = workflow_run_to_row(run);
+            if let Err(e) = store.upsert_run(&row) {
+                // The caller (`create_run` / `recover_stale_running_runs` / state
+                // transitions) has already updated the in-memory DashMap, so the
+                // run looks persisted from outside, but a crash before the next
+                // batch persist would lose this state. Bumping a counter here
+                // gives ops a Prometheus signal beyond log inspection — log
+                // sampling under load tends to drop exactly the failures we
+                // care about. The caller signature is intentionally not
+                // changed to `Result<(), _>` because that would ripple
+                // through every state-transition site for marginal gain
+                // over a counter + warn.
+                metrics::counter!(
+                    "librefang_kernel_workflow_upsert_failed_total",
+                    "phase" => "upsert_run",
+                )
+                .increment(1);
+                warn!(run_id = %run.id, error = %e, "Immediate SQLite upsert failed");
+            }
+            if matches!(
+                run.state,
+                WorkflowRunState::Completed
+                    | WorkflowRunState::Failed
+                    | WorkflowRunState::Paused { .. }
+            ) {
+                if let Err(e) = store.wal_checkpoint() {
+                    metrics::counter!(
+                        "librefang_kernel_workflow_upsert_failed_total",
+                        "phase" => "wal_checkpoint",
+                    )
+                    .increment(1);
+                    warn!("WAL checkpoint after terminal upsert failed: {e}");
+                }
+            }
+        }
+    }
+
+    /// One-time migration from JSON to SQLite.
+    ///
+    /// If the legacy `workflow_runs.json` exists and has content, and
+    /// the SQLite table has zero rows, import all runs from JSON into
+    /// SQLite, then rename the JSON file to `.bak`. Idempotent: if
+    /// SQLite already has rows, or the JSON file is missing/empty, this
+    /// is a no-op.
+    pub fn migrate_from_json(&self) -> Result<usize, String> {
+        let store = match &self.store {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+        let path = match &self.persist_path {
+            Some(p) => p,
+            None => return Ok(0),
+        };
+        if !path.exists() {
+            return Ok(0);
+        }
+
+        // Only import when SQLite is empty — prevents double-import.
+        let existing = store
+            .count_runs()
+            .map_err(|e| format!("count_runs during migration: {e}"))?;
+        if existing > 0 {
+            debug!(
+                existing,
+                "SQLite workflow_runs already populated, skipping JSON migration"
+            );
+            return Ok(0);
+        }
+
+        let data = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+        if data.trim().is_empty() || data.trim() == "[]" {
+            return Ok(0);
+        }
+
+        let json_runs: Vec<WorkflowRun> = serde_json::from_str(&data)
+            .map_err(|e| format!("Failed to parse {}: {e}", path.display()))?;
+        if json_runs.is_empty() {
+            return Ok(0);
+        }
+
+        let rows: Vec<WorkflowRunRow> = json_runs.iter().map(workflow_run_to_row).collect();
+        let imported = store
+            .bulk_upsert_runs(&rows)
+            .map_err(|e| format!("bulk_upsert_runs during migration: {e}"))?;
+
+        // Rename the old file so we never re-import.
+        let bak = path.with_extension("json.bak");
+        if let Err(e) = std::fs::rename(path, &bak) {
+            warn!(
+                "Imported {imported} workflow runs but could not rename {} to {}: {e}",
+                path.display(),
+                bak.display()
+            );
+        } else {
+            info!(
+                "Migrated {imported} workflow run(s) from {} to SQLite (renamed to {})",
+                path.display(),
+                bak.display()
+            );
+        }
+        Ok(imported)
+    }
 }
 
 impl Default for WorkflowEngine {
@@ -2758,6 +2993,160 @@ impl Default for WorkflowTemplateRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// WorkflowRun <-> WorkflowRunRow conversion
+// ---------------------------------------------------------------------------
+
+/// Convert a `WorkflowRun` to a flat `WorkflowRunRow` for SQLite storage.
+fn workflow_run_to_row(run: &WorkflowRun) -> WorkflowRunRow {
+    let (state_str, resume_token, pause_reason, paused_at) = match &run.state {
+        WorkflowRunState::Pending => ("pending".to_string(), None, None, None),
+        WorkflowRunState::Running => ("running".to_string(), None, None, None),
+        WorkflowRunState::Paused {
+            resume_token,
+            reason,
+            paused_at,
+        } => (
+            "paused".to_string(),
+            Some(resume_token.to_string()),
+            Some(reason.clone()),
+            Some(paused_at.to_rfc3339()),
+        ),
+        WorkflowRunState::Completed => ("completed".to_string(), None, None, None),
+        WorkflowRunState::Failed => ("failed".to_string(), None, None, None),
+    };
+
+    let step_results_json =
+        serde_json::to_string(&run.step_results).unwrap_or_else(|_| "[]".to_string());
+
+    let paused_variables_json = if run.paused_variables.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&run.paused_variables).unwrap_or_else(|_| "{}".to_string()))
+    };
+
+    WorkflowRunRow {
+        id: run.id.to_string(),
+        workflow_id: run.workflow_id.to_string(),
+        workflow_name: run.workflow_name.clone(),
+        state: state_str,
+        input: run.input.clone(),
+        output: run.output.clone(),
+        error: run.error.clone(),
+        resume_token,
+        pause_reason,
+        paused_at,
+        paused_step_index: run.paused_step_index.map(|i| i as i64),
+        paused_variables: paused_variables_json,
+        paused_current_input: run.paused_current_input.clone(),
+        step_results: step_results_json,
+        started_at: run.started_at.to_rfc3339(),
+        completed_at: run.completed_at.map(|dt| dt.to_rfc3339()),
+        created_at: run.started_at.to_rfc3339(),
+    }
+}
+
+/// Convert a flat `WorkflowRunRow` back into a `WorkflowRun`.
+fn row_to_workflow_run(row: &WorkflowRunRow) -> Result<WorkflowRun, String> {
+    let id = WorkflowRunId(
+        Uuid::parse_str(&row.id).map_err(|e| format!("invalid run id '{}': {e}", row.id))?,
+    );
+    let workflow_id = WorkflowId(
+        Uuid::parse_str(&row.workflow_id)
+            .map_err(|e| format!("invalid workflow_id '{}': {e}", row.workflow_id))?,
+    );
+
+    let state = match row.state.as_str() {
+        "pending" => WorkflowRunState::Pending,
+        "running" => WorkflowRunState::Running,
+        "paused" => {
+            let resume_token = row
+                .resume_token
+                .as_deref()
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .unwrap_or_else(Uuid::new_v4);
+            let reason = row
+                .pause_reason
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            let paused_at = row
+                .paused_at
+                .as_deref()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(Utc::now);
+            WorkflowRunState::Paused {
+                resume_token,
+                reason,
+                paused_at,
+            }
+        }
+        "completed" => WorkflowRunState::Completed,
+        "failed" => WorkflowRunState::Failed,
+        other => return Err(format!("unknown workflow run state: {other}")),
+    };
+
+    let started_at = DateTime::parse_from_rfc3339(&row.started_at)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| format!("invalid started_at '{}': {e}", row.started_at))?;
+
+    let completed_at = row
+        .completed_at
+        .as_deref()
+        .map(|s| {
+            DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|e| format!("invalid completed_at '{s}': {e}"))
+        })
+        .transpose()?;
+
+    let step_results: Vec<StepResult> = serde_json::from_str(&row.step_results).unwrap_or_else(|e| {
+        // Corrupted JSON should never happen given workflow_run_to_row
+        // serializes from a typed Vec<StepResult>, but if it does, log
+        // the run_id rather than silently zero out the history. The
+        // alternative (returning Err) would block boot recovery on a
+        // single bad row, which is worse than visible truncation.
+        warn!(
+            run_id = %row.id,
+            error = %e,
+            "row_to_workflow_run: step_results JSON failed to parse; reloading run with empty history"
+        );
+        Vec::new()
+    });
+
+    let paused_variables: BTreeMap<String, String> = row
+        .paused_variables
+        .as_deref()
+        .map(|s| {
+            serde_json::from_str(s).unwrap_or_else(|e| {
+                warn!(
+                    run_id = %row.id,
+                    error = %e,
+                    "row_to_workflow_run: paused_variables JSON failed to parse; reloading run with empty variables"
+                );
+                BTreeMap::new()
+            })
+        })
+        .unwrap_or_default();
+
+    Ok(WorkflowRun {
+        id,
+        workflow_id,
+        workflow_name: row.workflow_name.clone(),
+        input: row.input.clone(),
+        state,
+        step_results,
+        output: row.output.clone(),
+        error: row.error.clone(),
+        started_at,
+        completed_at,
+        pause_request: None,
+        paused_step_index: row.paused_step_index.map(|i| i as usize),
+        paused_variables,
+        paused_current_input: row.paused_current_input.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -4855,6 +5244,68 @@ prompt_template = "do {{x}}"
             other => panic!("expected Paused after reload, got {:?}", other),
         }
         assert_eq!(run.paused_step_index, Some(0));
+    }
+
+    /// A Pending run created on engine #1 must survive a crash that
+    /// happens before any state transition or `persist_runs` call.
+    /// This exercises the create_run -> upsert_run_to_store wiring; the
+    /// batch `persist_runs_to_sqlite` only fires at end-of-execute_run /
+    /// end-of-resume / drain_on_shutdown, so without per-row upsert at
+    /// create time, a crash in the dispatch window loses the run.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pending_run_survives_crash_before_first_persist() {
+        use r2d2::Pool;
+        use r2d2_sqlite::SqliteConnectionManager;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("workflows.db");
+
+        let make_store = || {
+            let pool = Pool::builder()
+                .max_size(2)
+                .build(SqliteConnectionManager::file(&db_path))
+                .unwrap();
+            librefang_memory::migration::run_migrations(&pool.get().unwrap())
+                .expect("migrations must apply");
+            librefang_memory::WorkflowStore::new(pool)
+        };
+
+        let original_run_id: WorkflowRunId;
+
+        // Phase 1: create a Pending run, then drop the engine WITHOUT
+        // calling execute_run / persist_runs. The crash window we care
+        // about is between insert into the DashMap and first dispatch
+        // — historically a daemon kill here lost the run.
+        {
+            let store = make_store();
+            let engine = WorkflowEngine::new_with_store(store, tmp.path());
+            let wf_id = engine.register(test_workflow()).await;
+            original_run_id = engine
+                .create_run(wf_id, "data".to_string())
+                .await
+                .expect("create_run must succeed");
+            // Confirm the run is Pending in memory.
+            let run = engine.get_run(original_run_id).await.unwrap();
+            assert!(matches!(run.state, WorkflowRunState::Pending));
+            // Engine drops here. No `persist_runs_async`. No execute.
+        }
+
+        // Phase 2: re-open the SAME database file with a fresh store
+        // and engine, load runs, assert the Pending row came back.
+        let store = make_store();
+        let engine = WorkflowEngine::new_with_store(store, tmp.path());
+        let count =
+            tokio::task::block_in_place(|| engine.load_runs()).expect("load_runs must succeed");
+        assert_eq!(count, 1, "expected exactly one persisted run");
+        let run = engine
+            .get_run(original_run_id)
+            .await
+            .expect("Pending run must be reloadable");
+        assert!(
+            matches!(run.state, WorkflowRunState::Pending),
+            "expected Pending after reload, got {:?}",
+            run.state
+        );
     }
 
     #[tokio::test]

@@ -30,11 +30,13 @@ pub mod semantic;
 pub mod session;
 pub mod structured;
 pub mod usage;
+pub mod workflow_store;
 
 mod session_store;
 mod substrate;
 pub use session_store::SessionStore;
 pub use substrate::MemorySubstrate;
+pub use workflow_store::{WorkflowRunRow, WorkflowStore};
 
 // Re-export types for convenience
 pub use librefang_types::memory::{
