@@ -3,20 +3,27 @@ import { render, screen, fireEvent, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ChannelsPage } from "./ChannelsPage";
 import { useDrawerStore } from "../lib/drawerStore";
-import { useChannels } from "../lib/queries/channels";
+import { useChannels, useChannelInstances } from "../lib/queries/channels";
 import {
   useConfigureChannel,
-  useTestChannel,
+  useCreateChannelInstance,
+  useDeleteChannelInstance,
   useReloadChannels,
+  useTestChannel,
+  useUpdateChannelInstance,
 } from "../lib/mutations/channels";
-import type { ChannelItem } from "../api";
+import type { ChannelInstance, ChannelItem } from "../api";
 
 vi.mock("../lib/queries/channels", () => ({
   useChannels: vi.fn(),
+  useChannelInstances: vi.fn(),
 }));
 
 vi.mock("../lib/mutations/channels", () => ({
   useConfigureChannel: vi.fn(),
+  useCreateChannelInstance: vi.fn(),
+  useUpdateChannelInstance: vi.fn(),
+  useDeleteChannelInstance: vi.fn(),
   useTestChannel: vi.fn(),
   useReloadChannels: vi.fn(),
 }));
@@ -44,9 +51,18 @@ vi.mock("react-i18next", async () => {
 });
 
 const useChannelsMock = useChannels as unknown as ReturnType<typeof vi.fn>;
+const useChannelInstancesMock = useChannelInstances as unknown as ReturnType<
+  typeof vi.fn
+>;
 const useConfigureChannelMock = useConfigureChannel as unknown as ReturnType<
   typeof vi.fn
 >;
+const useCreateChannelInstanceMock =
+  useCreateChannelInstance as unknown as ReturnType<typeof vi.fn>;
+const useUpdateChannelInstanceMock =
+  useUpdateChannelInstance as unknown as ReturnType<typeof vi.fn>;
+const useDeleteChannelInstanceMock =
+  useDeleteChannelInstance as unknown as ReturnType<typeof vi.fn>;
 const useTestChannelMock = useTestChannel as unknown as ReturnType<typeof vi.fn>;
 const useReloadChannelsMock = useReloadChannels as unknown as ReturnType<
   typeof vi.fn
@@ -103,16 +119,35 @@ function makeMutation(overrides: Partial<MutationStub> = {}): MutationStub {
 
 function setMutationDefaults(): {
   configure: MutationStub;
+  create: MutationStub;
+  update: MutationStub;
+  remove: MutationStub;
   test: MutationStub;
   reload: MutationStub;
 } {
   const configure = makeMutation();
+  const create = makeMutation();
+  const update = makeMutation();
+  const remove = makeMutation();
   const test = makeMutation();
   const reload = makeMutation();
   useConfigureChannelMock.mockReturnValue(configure);
+  useCreateChannelInstanceMock.mockReturnValue(create);
+  useUpdateChannelInstanceMock.mockReturnValue(update);
+  useDeleteChannelInstanceMock.mockReturnValue(remove);
   useTestChannelMock.mockReturnValue(test);
   useReloadChannelsMock.mockReturnValue(reload);
-  return { configure, test, reload };
+  return { configure, create, update, remove, test, reload };
+}
+
+function setInstancesDefault(items: ChannelInstance[] = []): void {
+  useChannelInstancesMock.mockReturnValue(
+    makeQuery<{ channel: string; items: ChannelInstance[]; total: number }>({
+      channel: "test",
+      items,
+      total: items.length,
+    }),
+  );
 }
 
 function renderPage(): void {
@@ -142,6 +177,7 @@ describe("ChannelsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     setMutationDefaults();
+    setInstancesDefault();
     // Drawer state is a global zustand store — reset between tests so a
     // drawer left open by one test doesn't bleed into the next.
     useDrawerStore.setState({ isOpen: false, content: null });
@@ -275,7 +311,7 @@ describe("ChannelsPage", () => {
     expect(muts.reload.mutate).toHaveBeenCalledTimes(1);
   });
 
-  it("opens the configure drawer with form fields when a channel's gear is clicked", () => {
+  it("opens the instances drawer with an Add CTA when the gear is clicked (#4837)", () => {
     useChannelsMock.mockReturnValue(
       makeQuery<ChannelItem[]>([
         makeChannel({
@@ -298,12 +334,43 @@ describe("ChannelsPage", () => {
 
     fireEvent.click(screen.getByLabelText("channels.config"));
 
-    // Configure drawer header
-    expect(screen.getByText("channels.configure")).toBeInTheDocument();
-    expect(screen.getByText(/Bot Token/)).toBeInTheDocument();
+    // The instance manager opens in "list" phase. With no instances seeded
+    // the empty-state copy and the "Add instance" CTA must both render.
+    const drawer = screen.getByTestId("drawer-slot");
+    expect(within(drawer).getByText("channels.no_instances")).toBeInTheDocument();
+    expect(within(drawer).getByText("channels.add_instance")).toBeInTheDocument();
+    // The form fields must NOT render in the list phase — they only appear
+    // after the user clicks "Add instance" / "Edit".
+    expect(within(drawer).queryByText(/Bot Token/)).not.toBeInTheDocument();
   });
 
-  it("submits the configure mutation with only edited values when Save is clicked", () => {
+  it("clicking Add instance reveals the form fields", () => {
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({
+          name: "slack",
+          display_name: "Slack",
+          configured: true,
+          fields: [
+            {
+              key: "bot_token",
+              label: "Bot Token",
+              type: "secret",
+              required: true,
+            },
+          ],
+        }),
+      ]),
+    );
+
+    renderPage();
+    fireEvent.click(screen.getByLabelText("channels.config"));
+    const drawer = screen.getByTestId("drawer-slot");
+    fireEvent.click(within(drawer).getByText("channels.add_instance"));
+    expect(within(drawer).getByText(/Bot Token/)).toBeInTheDocument();
+  });
+
+  it("submits createChannelInstance with only typed values when Save is clicked (#4837)", () => {
     useChannelsMock.mockReturnValue(
       makeQuery<ChannelItem[]>([
         makeChannel({
@@ -330,27 +397,27 @@ describe("ChannelsPage", () => {
     const muts = setMutationDefaults();
 
     renderPage();
-
     fireEvent.click(screen.getByLabelText("channels.config"));
-
     const drawer = screen.getByTestId("drawer-slot");
-    // Type a new bot token only — workspace stays blank, so payload should
-    // omit it (the configure handler skips empty values).
+    fireEvent.click(within(drawer).getByText("channels.add_instance"));
+
     const allInputs = drawer.querySelectorAll<HTMLInputElement>("input");
     expect(allInputs.length).toBeGreaterThanOrEqual(2);
+    // Type a new bot token only — workspace stays blank, so payload should
+    // omit it (the create handler skips empty values).
     fireEvent.change(allInputs[0], { target: { value: "xoxb-secret" } });
 
-    fireEvent.click(within(drawer).getByText("common.save"));
+    fireEvent.click(within(drawer).getByText("common.create"));
 
-    expect(muts.configure.mutate).toHaveBeenCalledTimes(1);
-    const [payload] = muts.configure.mutate.mock.calls[0];
+    expect(muts.create.mutate).toHaveBeenCalledTimes(1);
+    const [payload] = muts.create.mutate.mock.calls[0];
     expect(payload).toEqual({
       channelName: "slack",
-      config: { bot_token: "xoxb-secret" },
+      fields: { bot_token: "xoxb-secret" },
     });
   });
 
-  it("disables the Save button while the configure mutation is pending", () => {
+  it("disables the Create button while createChannelInstance is pending", () => {
     useChannelsMock.mockReturnValue(
       makeQuery<ChannelItem[]>([
         makeChannel({
@@ -362,16 +429,85 @@ describe("ChannelsPage", () => {
       ]),
     );
     setMutationDefaults();
-    useConfigureChannelMock.mockReturnValue(
+    useCreateChannelInstanceMock.mockReturnValue(
       makeMutation({ isPending: true }),
     );
 
     renderPage();
-
     fireEvent.click(screen.getByLabelText("channels.config"));
+    const drawer = screen.getByTestId("drawer-slot");
+    fireEvent.click(within(drawer).getByText("channels.add_instance"));
 
-    const save = screen.getByText("common.saving").closest("button");
+    const save = within(drawer).getByText("common.saving").closest("button");
     expect(save).toBeDisabled();
+  });
+
+  it("lists seeded instances and routes Delete through useDeleteChannelInstance (#4837)", () => {
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({
+          name: "telegram",
+          display_name: "Telegram",
+          configured: true,
+          instance_count: 2,
+          fields: [
+            {
+              key: "bot_token_env",
+              label: "Bot Token",
+              type: "secret",
+              env_var: "TELEGRAM_BOT_TOKEN",
+            },
+          ],
+        }),
+      ]),
+    );
+    const muts = setMutationDefaults();
+    useChannelInstancesMock.mockReturnValue(
+      makeQuery({
+        channel: "telegram",
+        items: [
+          {
+            index: 0,
+            fields: [],
+            config: { bot_token_env: "TELEGRAM_BOT_TOKEN" },
+            has_token: true,
+            signature: "sig-instance-0",
+          },
+          {
+            index: 1,
+            fields: [],
+            config: { bot_token_env: "TELEGRAM_BOT_TOKEN_2" },
+            has_token: false,
+            signature: "sig-instance-1",
+          },
+        ],
+        total: 2,
+      }),
+    );
+
+    renderPage();
+    fireEvent.click(screen.getByLabelText("channels.config"));
+    const drawer = screen.getByTestId("drawer-slot");
+
+    // Both instances render with their pointed-at env var name as label.
+    expect(within(drawer).getByText(/TELEGRAM_BOT_TOKEN(?!_)/)).toBeInTheDocument();
+    expect(within(drawer).getByText(/TELEGRAM_BOT_TOKEN_2/)).toBeInTheDocument();
+
+    // Delete the second instance — first click stages confirmation, second
+    // click fires the mutation. Mutation must include the per-instance
+    // signature CAS token (#4865) so the server can detect concurrent edits.
+    const deleteButtons = within(drawer).getAllByLabelText("common.delete");
+    expect(deleteButtons).toHaveLength(2);
+    fireEvent.click(deleteButtons[1]);
+    fireEvent.click(within(drawer).getByText("common.confirm"));
+
+    expect(muts.remove.mutate).toHaveBeenCalledTimes(1);
+    const [args] = muts.remove.mutate.mock.calls[0];
+    expect(args).toEqual({
+      channelName: "telegram",
+      index: 1,
+      signature: "sig-instance-1",
+    });
   });
 
   it("refetches channels when the header refresh action fires", () => {

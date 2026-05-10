@@ -1,8 +1,23 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { wechatQrStart, wechatQrStatus, whatsappQrStart, whatsappQrStatus, type ChannelItem } from "../api";
-import { useChannels } from "../lib/queries/channels";
-import { useConfigureChannel, useTestChannel, useReloadChannels } from "../lib/mutations/channels";
+import {
+  wechatQrStart,
+  wechatQrStatus,
+  whatsappQrStart,
+  whatsappQrStatus,
+  type ChannelField,
+  type ChannelInstance,
+  type ChannelItem,
+} from "../api";
+import { useChannels, useChannelInstances } from "../lib/queries/channels";
+import {
+  useConfigureChannel,
+  useCreateChannelInstance,
+  useDeleteChannelInstance,
+  useReloadChannels,
+  useTestChannel,
+  useUpdateChannelInstance,
+} from "../lib/mutations/channels";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 import { copyToClipboard } from "../lib/clipboard";
@@ -17,7 +32,7 @@ import { Input } from "../components/ui/Input";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import {
   Network, Search, CheckCircle2, XCircle, ChevronRight, X, Grid3X3, List,
-  Settings, AlertCircle, CheckSquare, Square, Plus,
+  Settings, AlertCircle, CheckSquare, Square, Plus, Trash2, Pencil, ArrowLeft,
   MessageCircle, Mail, Phone, Link2, Radio, Send, Bell, Wifi, Globe
 } from "lucide-react";
 
@@ -87,6 +102,9 @@ const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode
   // drawer where they actually help selection).
   const msgs = typeof c.msgs_24h === "number" ? c.msgs_24h : 0;
   const kind = c.category || c.name;
+  // #4837: when a channel type has multiple instances configured, surface
+  // the count as a left-side meta tag so cards make sense at a glance.
+  const instanceCount = typeof c.instance_count === "number" ? c.instance_count : (c.configured ? 1 : 0);
   return (
     <Card
       hover
@@ -105,8 +123,13 @@ const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode
         {getChannelIcon(c.name)}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="font-mono text-[13px] truncate text-text-main">
+        <div className="font-mono text-[13px] truncate text-text-main flex items-center gap-1.5">
           {c.display_name || c.name}
+          {instanceCount > 1 && (
+            <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-brand/10 text-brand border border-brand/20">
+              {t("channels.instance_count_short", { defaultValue: `${instanceCount}×` })}
+            </span>
+          )}
         </div>
         <div className="font-mono text-[11px] text-text-dim mt-0.5 truncate">
           {kind} · {msgs} {t("channels.msgs_24h", { defaultValue: "msgs/24h" })}
@@ -281,142 +304,482 @@ function DetailsModal({ channel, onClose, onConfigure, onTest, t }: {
   );
 }
 
-// Config Dialog — standard form with controlled inputs
-function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () => void; t: (key: string) => string }) {
+// Form for one channel instance — used by both the create-new and edit-existing
+// flows in `InstancesDialog`. The same form was previously the whole of
+// `ConfigDialog` and drove the legacy single-instance `/configure` endpoint.
+//
+// `fields` is the schema (with `value` / `has_value` populated for edits).
+// `onSubmit` receives the non-empty, non-readonly values; the parent decides
+// which mutation to fire.
+function ChannelForm({
+  channel,
+  fields,
+  description,
+  submitLabel,
+  isPending,
+  onSubmit,
+  onCancel,
+  t,
+}: {
+  channel: Channel;
+  fields: ChannelField[];
+  description?: string;
+  submitLabel: string;
+  isPending: boolean;
+  onSubmit: (payload: Record<string, string>) => void;
+  onCancel: () => void;
+  t: (key: string, opts?: { defaultValue?: string }) => string;
+}) {
   const addToast = useUIStore((s) => s.addToast);
-  const fields = useMemo(() => (channel.fields ?? []).filter(f => !f.advanced), [channel.fields]);
+  const visibleSchema = useMemo(() => fields.filter(f => !f.advanced), [fields]);
 
-  // Build initial form values: non-secret fields use saved value, secrets start empty
   const initialValues = useMemo(() => {
     const vals: Record<string, string> = {};
-    for (const f of fields) {
+    for (const f of visibleSchema) {
       if (f.readonly) continue;
       if (f.type === "select" && f.options?.length) {
-        // Select: use saved value or fall back to first option
         vals[f.key] = f.value || f.options[0];
       } else {
         vals[f.key] = (f.type !== "secret" && f.value) ? f.value : "";
       }
     }
     return vals;
-  }, [fields]);
+  }, [visibleSchema]);
   const [values, setValues] = useState<Record<string, string>>(initialValues);
+  // Reset form values when the schema (i.e. instance) changes — without this,
+  // switching from "edit instance 0" to "edit instance 1" would keep the
+  // previous instance's typed values in the inputs.
+  useEffect(() => {
+    setValues(initialValues);
+  }, [initialValues]);
 
   const setValue = (key: string, val: string) => setValues(prev => ({ ...prev, [key]: val }));
 
-  // Find the "controlling" select field (e.g. mode) to drive show_when visibility
-  const controlField = useMemo(() => fields.find(f => f.type === "select" && f.options), [fields]);
+  const controlField = useMemo(
+    () => visibleSchema.find(f => f.type === "select" && f.options),
+    [visibleSchema],
+  );
   const controlValue = controlField ? (values[controlField.key] || "") : "";
 
-  // Filter visible fields: hide those whose show_when doesn't match the control value
-  const visibleFields = useMemo(
-    () => fields.filter(f => !f.show_when || f.show_when === controlValue),
-    [fields, controlValue],
+  const filteredFields = useMemo(
+    () => visibleSchema.filter(f => !f.show_when || f.show_when === controlValue),
+    [visibleSchema, controlValue],
   );
 
-  // Only submit non-readonly, non-empty values (skip untouched secrets)
-  const configMutation = useConfigureChannel();
   const handleSubmit = () => {
     const payload: Record<string, string> = {};
-    for (const f of visibleFields) {
+    for (const f of filteredFields) {
       if (f.readonly) continue;
       const v = values[f.key];
       if (v) payload[f.key] = v;
     }
-    configMutation.mutate(
-      { channelName: channel.name, config: payload },
-      {
-        onSuccess: () => {
-          addToast(t("channels.config_success") || `${channel.display_name || channel.name} configured`, "success");
-          onClose();
-        },
-        onError: (err) => addToast(toastErr(err, t("channels.config_failed") || "Failed to configure channel"), "error"),
-      },
-    );
+    onSubmit(payload);
   };
 
   return (
-    <DrawerPanel isOpen onClose={onClose} size="md" hideCloseButton>
-        <div className="px-6 py-5 border-b border-border-subtle">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center">
-                <Settings className="w-5 h-5 text-brand" />
-              </div>
-              <div>
-                <h3 className="text-base font-black">{channel.display_name || channel.name}</h3>
-                <p className="text-[10px] text-text-dim mt-0.5">{t("channels.configure")}</p>
-              </div>
-            </div>
-            <button onClick={onClose} className="p-2 rounded-xl hover:bg-main transition-colors" aria-label={t("common.close")}><X className="w-4 h-4" /></button>
-          </div>
-        </div>
-        <div className="p-6">
-        <p className="text-xs text-text-dim mb-5">{channel.description}</p>
+    <div className="p-6">
+      {description && <p className="text-xs text-text-dim mb-5">{description}</p>}
 
-        {/* Configuration Fields */}
-        {visibleFields.length > 0 ? (
-          <div className="space-y-3 mb-6 max-h-80 overflow-y-auto">
-            {visibleFields.map((field) => (
-              <div key={field.key}>
-                <label className="text-xs font-bold text-text-dim mb-1 block">
-                  {field.label || field.key} {field.required && <span className="text-error">*</span>}
-                </label>
-                {field.readonly ? (
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={field.value || field.placeholder || ""}
-                      readOnly
-                      className="flex-1 rounded-lg border border-border-subtle bg-main/50 px-3 py-2 text-xs text-text-dim font-mono"
-                    />
-                    <button
-                      onClick={async () => {
-                        const ok = await copyToClipboard(field.value || field.placeholder || "");
-                        addToast(ok ? t("common.copied") : t("common.copy_failed"), ok ? "success" : "error");
-                      }}
-                      className="px-3 py-2 rounded-lg bg-brand/10 text-brand text-xs hover:bg-brand/20 transition-colors shrink-0"
-                      title={t("common.copy")}
-                    >
-                      {t("common.copy")}
-                    </button>
-                  </div>
-                ) : field.type === "select" && field.options ? (
-                  <select
-                    value={values[field.key] || ""}
-                    onChange={(e) => setValue(field.key, e.target.value)}
-                    className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
-                  >
-                    {field.options.map((opt) => (
-                      <option key={opt} value={opt}>{opt}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    type={field.type === "secret" ? "password" : "text"}
-                    value={values[field.key] || ""}
-                    onChange={(e) => setValue(field.key, e.target.value)}
-                    placeholder={field.has_value ? "••••••••  (leave empty to keep)" : (field.placeholder || field.env_var || field.key)}
-                    className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
-                  />
+      {filteredFields.length > 0 ? (
+        <div className="space-y-3 mb-6 max-h-80 overflow-y-auto">
+          {filteredFields.map((field) => (
+            <div key={field.key}>
+              <label className="text-xs font-bold text-text-dim mb-1 block">
+                {field.label || field.key} {field.required && <span className="text-error">*</span>}
+                {field.type === "secret" && field.env_var && (
+                  <span className="ml-2 font-mono text-[10px] text-text-dim/80 normal-case">{field.env_var}</span>
                 )}
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="mb-6 p-4 rounded-lg bg-main/30 text-center">
-            <p className="text-xs text-text-dim">{t("channels.no_fields_required")}</p>
-          </div>
-        )}
+              </label>
+              {field.readonly ? (
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={field.value || field.placeholder || ""}
+                    readOnly
+                    className="flex-1 rounded-lg border border-border-subtle bg-main/50 px-3 py-2 text-xs text-text-dim font-mono"
+                  />
+                  <button
+                    onClick={async () => {
+                      const ok = await copyToClipboard(field.value || field.placeholder || "");
+                      addToast(ok ? t("common.copied") : t("common.copy_failed"), ok ? "success" : "error");
+                    }}
+                    className="px-3 py-2 rounded-lg bg-brand/10 text-brand text-xs hover:bg-brand/20 transition-colors shrink-0"
+                    title={t("common.copy")}
+                  >
+                    {t("common.copy")}
+                  </button>
+                </div>
+              ) : field.type === "select" && field.options ? (
+                <select
+                  value={values[field.key] || ""}
+                  onChange={(e) => setValue(field.key, e.target.value)}
+                  className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
+                >
+                  {field.options.map((opt) => (
+                    <option key={opt} value={opt}>{opt}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type={field.type === "secret" ? "password" : "text"}
+                  value={values[field.key] || ""}
+                  onChange={(e) => setValue(field.key, e.target.value)}
+                  placeholder={field.has_value ? "••••••••  (leave empty to keep)" : (field.placeholder || field.env_var || field.key)}
+                  className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
+                />
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="mb-6 p-4 rounded-lg bg-main/30 text-center">
+          <p className="text-xs text-text-dim">{t("channels.no_fields_required")}</p>
+        </div>
+      )}
 
-        {/* Buttons */}
-        <div className="flex gap-3">
-          <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
-          <Button variant="primary" className="flex-1" onClick={handleSubmit} disabled={configMutation.isPending}>
-            {configMutation.isPending ? t("common.saving") : t("common.save")}
+      <div className="flex gap-3">
+        <Button variant="secondary" className="flex-1" onClick={onCancel} disabled={isPending}>
+          {t("common.cancel")}
+        </Button>
+        <Button
+          variant="primary"
+          className="flex-1"
+          onClick={handleSubmit}
+          disabled={isPending}
+        >
+          {isPending ? t("common.saving") : submitLabel}
+        </Button>
+      </div>
+      {/* Channel name pinned for context */}
+      <p className="mt-3 text-[10px] text-text-dim/60 text-center">
+        {channel.display_name || channel.name}
+      </p>
+    </div>
+  );
+}
+
+// Multi-instance manager (#4837). Replaces the legacy single-form
+// `ConfigDialog` for any non-QR channel. Three internal phases:
+//   - "list" (default): shows configured instances + "Add instance" CTA
+//   - "create": embedded `ChannelForm` driving `useCreateChannelInstance`
+//   - "edit": embedded `ChannelForm` driving `useUpdateChannelInstance`
+// Delete uses an inline confirm because the destructive action is small and
+// a separate modal would be overkill.
+function InstancesDialog({
+  channel,
+  onClose,
+  t,
+}: {
+  channel: Channel;
+  onClose: () => void;
+  t: (key: string, opts?: { defaultValue?: string; count?: number }) => string;
+}) {
+  const addToast = useUIStore((s) => s.addToast);
+  const [phase, setPhase] = useState<"list" | "create" | "edit">("list");
+  const [editIndex, setEditIndex] = useState<number | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<number | null>(null);
+
+  const instancesQuery = useChannelInstances(channel.name);
+  const createMut = useCreateChannelInstance();
+  const updateMut = useUpdateChannelInstance();
+  const deleteMut = useDeleteChannelInstance();
+
+  const instances: ChannelInstance[] = instancesQuery.data?.items ?? [];
+  const channelLabel = channel.display_name || channel.name;
+
+  const handleCreate = useCallback(
+    (payload: Record<string, string>) => {
+      createMut.mutate(
+        { channelName: channel.name, fields: payload },
+        {
+          onSuccess: () => {
+            addToast(
+              t("channels.instance_added", { defaultValue: `${channelLabel} instance added` }),
+              "success",
+            );
+            setPhase("list");
+          },
+          onError: (err) =>
+            addToast(
+              toastErr(err, t("channels.config_failed", { defaultValue: "Failed to save instance" })),
+              "error",
+            ),
+        },
+      );
+    },
+    [createMut, channel.name, channelLabel, addToast, t],
+  );
+
+  const handleUpdate = useCallback(
+    (payload: Record<string, string>) => {
+      if (editIndex === null) return;
+      const target = instances[editIndex];
+      if (!target) {
+        // Defensive: the list refetch races with the edit form's submit.
+        // If the row vanished, surface the 409-equivalent inline instead of
+        // sending an unsigned PUT.
+        addToast(
+          t("channels.instance_stale", {
+            defaultValue: "Instance was removed by another tab; refresh and retry",
+          }),
+          "error",
+        );
+        setPhase("list");
+        setEditIndex(null);
+        return;
+      }
+      updateMut.mutate(
+        {
+          channelName: channel.name,
+          index: editIndex,
+          fields: payload,
+          signature: target.signature,
+        },
+        {
+          onSuccess: () => {
+            addToast(
+              t("channels.instance_updated", { defaultValue: `${channelLabel} instance updated` }),
+              "success",
+            );
+            setPhase("list");
+            setEditIndex(null);
+          },
+          onError: (err) =>
+            addToast(
+              toastErr(err, t("channels.config_failed", { defaultValue: "Failed to save instance" })),
+              "error",
+            ),
+        },
+      );
+    },
+    [updateMut, channel.name, channelLabel, editIndex, instances, addToast, t],
+  );
+
+  const handleDelete = useCallback(
+    (idx: number) => {
+      const target = instances[idx];
+      if (!target) {
+        addToast(
+          t("channels.instance_stale", {
+            defaultValue: "Instance was removed by another tab; refresh and retry",
+          }),
+          "error",
+        );
+        setPendingDelete(null);
+        return;
+      }
+      deleteMut.mutate(
+        { channelName: channel.name, index: idx, signature: target.signature },
+        {
+          onSuccess: () => {
+            addToast(
+              t("channels.instance_removed", { defaultValue: `${channelLabel} instance removed` }),
+              "success",
+            );
+            setPendingDelete(null);
+          },
+          onError: (err) => {
+            addToast(
+              toastErr(err, t("common.error", { defaultValue: "Error" })),
+              "error",
+            );
+            setPendingDelete(null);
+          },
+        },
+      );
+    },
+    [deleteMut, channel.name, channelLabel, instances, addToast, t],
+  );
+
+  const fieldsForEdit: ChannelField[] = useMemo(() => {
+    if (phase !== "edit" || editIndex === null) return [];
+    const inst = instances[editIndex];
+    return inst?.fields ?? channel.fields ?? [];
+  }, [phase, editIndex, instances, channel.fields]);
+
+  const renderInstanceLabel = (inst: ChannelInstance, idx: number) => {
+    // Prefer a meaningful identifier from the instance's config: either the
+    // env-var name a secret field points at (e.g. `TELEGRAM_BOT_TOKEN_2`)
+    // or the first non-empty stringy field. Falls back to the index.
+    const obj = inst.config ?? {};
+    const candidates: string[] = [];
+    for (const f of channel.fields ?? []) {
+      const v = obj[f.key];
+      if (typeof v === "string" && v.trim() !== "") {
+        candidates.push(`${f.label || f.key}: ${v}`);
+      }
+    }
+    return candidates[0] || t("channels.instance_n", { defaultValue: `Instance #${idx}`, count: idx });
+  };
+
+  const headerTitle = phase === "create"
+    ? t("channels.add_instance", { defaultValue: "Add instance" })
+    : phase === "edit"
+      ? t("channels.edit_instance", { defaultValue: "Edit instance" })
+      : channelLabel;
+
+  const headerSub = phase === "list"
+    ? t("channels.manage_instances", { defaultValue: "Manage configured instances" })
+    : channelLabel;
+
+  return (
+    <DrawerPanel isOpen onClose={onClose} size="md" hideCloseButton>
+      <div className="px-6 py-5 border-b border-border-subtle">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3 min-w-0">
+            {phase !== "list" && (
+              <button
+                onClick={() => {
+                  setPhase("list");
+                  setEditIndex(null);
+                }}
+                className="p-1.5 rounded-lg hover:bg-main transition-colors shrink-0"
+                aria-label={t("common.back", { defaultValue: "Back" })}
+              >
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+            )}
+            <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
+              <Settings className="w-5 h-5 text-brand" />
+            </div>
+            <div className="min-w-0">
+              <h3 className="text-base font-black truncate">{headerTitle}</h3>
+              <p className="text-[10px] text-text-dim mt-0.5 truncate">{headerSub}</p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-2 rounded-xl hover:bg-main transition-colors shrink-0"
+            aria-label={t("common.close", { defaultValue: "Close" })}
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {phase === "list" && (
+        <div className="p-6">
+          <p className="text-xs text-text-dim mb-4">
+            {channel.description}
+          </p>
+
+          {instancesQuery.isLoading ? (
+            <div className="space-y-2 mb-4">
+              {[1, 2].map((i) => <div key={i} className="h-14 rounded-lg bg-main/30 animate-pulse" />)}
+            </div>
+          ) : instances.length === 0 ? (
+            <div className="mb-4 p-4 rounded-lg bg-main/30 text-center">
+              <p className="text-xs text-text-dim">
+                {t("channels.no_instances", { defaultValue: "No instances configured yet." })}
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2 mb-4">
+              {instances.map((inst, idx) => {
+                const label = renderInstanceLabel(inst, idx);
+                const isDeleting = pendingDelete === idx;
+                return (
+                  <div
+                    key={idx}
+                    className="flex items-center gap-3 p-3 rounded-lg border border-border-subtle bg-main/30"
+                  >
+                    <div className="w-7 h-7 rounded-md bg-brand/10 grid place-items-center text-brand text-xs font-bold shrink-0">
+                      {idx + 1}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-[12px] text-text-main truncate">{label}</div>
+                      <div className="font-mono text-[10px] text-text-dim mt-0.5 flex items-center gap-1.5">
+                        {inst.has_token ? (
+                          <><CheckCircle2 className="w-3 h-3 text-success" /> {t("channels.creds_ok", { defaultValue: "credentials set" })}</>
+                        ) : (
+                          <><AlertCircle className="w-3 h-3 text-warning" /> {t("channels.creds_missing", { defaultValue: "credentials missing" })}</>
+                        )}
+                      </div>
+                    </div>
+                    {isDeleting ? (
+                      <div className="flex gap-1 shrink-0">
+                        <button
+                          onClick={() => handleDelete(idx)}
+                          disabled={deleteMut.isPending}
+                          className="px-2 py-1 rounded-md bg-error/10 text-error text-[10px] font-bold hover:bg-error/20"
+                        >
+                          {t("common.confirm", { defaultValue: "Confirm" })}
+                        </button>
+                        <button
+                          onClick={() => setPendingDelete(null)}
+                          className="px-2 py-1 rounded-md bg-main/50 text-text-dim text-[10px] font-bold hover:bg-main"
+                        >
+                          {t("common.cancel", { defaultValue: "Cancel" })}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex gap-1 shrink-0">
+                        <button
+                          onClick={() => {
+                            setEditIndex(idx);
+                            setPhase("edit");
+                          }}
+                          className="p-1.5 rounded-md text-text-dim hover:text-text-main hover:bg-main/40"
+                          aria-label={t("common.edit", { defaultValue: "Edit" })}
+                          title={t("common.edit", { defaultValue: "Edit" })}
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => setPendingDelete(idx)}
+                          className="p-1.5 rounded-md text-text-dim hover:text-error hover:bg-error/10"
+                          aria-label={t("common.delete", { defaultValue: "Delete" })}
+                          title={t("common.delete", { defaultValue: "Delete" })}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <Button
+            variant="primary"
+            className="w-full"
+            onClick={() => setPhase("create")}
+            leftIcon={<Plus className="w-4 h-4" />}
+          >
+            {t("channels.add_instance", { defaultValue: "Add instance" })}
           </Button>
         </div>
-        </div>
+      )}
+
+      {phase === "create" && (
+        <ChannelForm
+          channel={channel}
+          fields={channel.fields ?? []}
+          description={channel.description}
+          submitLabel={t("common.create", { defaultValue: "Create" })}
+          isPending={createMut.isPending}
+          onSubmit={handleCreate}
+          onCancel={() => setPhase("list")}
+          t={t}
+        />
+      )}
+
+      {phase === "edit" && editIndex !== null && (
+        <ChannelForm
+          channel={channel}
+          fields={fieldsForEdit}
+          description={channel.description}
+          submitLabel={t("common.save", { defaultValue: "Save" })}
+          isPending={updateMut.isPending}
+          onSubmit={handleUpdate}
+          onCancel={() => {
+            setPhase("list");
+            setEditIndex(null);
+          }}
+          t={t}
+        />
+      )}
     </DrawerPanel>
   );
 }
@@ -847,9 +1210,11 @@ export function ChannelsPage() {
         />
       )}
 
-      {/* Config Dialog */}
+      {/* Instance manager dialog (#4837) — drives create / edit / delete
+          for `[[channels.<name>]]` array entries. Replaces the legacy
+          single-form ConfigDialog for non-QR channels. */}
       {configuringChannel && (
-        <ConfigDialog
+        <InstancesDialog
           key={configuringChannel?.name}
           channel={configuringChannel}
           onClose={() => setConfiguringChannel(null)}
