@@ -559,6 +559,22 @@ class ChannelsResource {
     return this._c._request("DELETE", `/api/channels/${name}/configure`);
   }
 
+  async listChannelInstances(name) {
+    return this._c._request("GET", `/api/channels/${name}/instances`);
+  }
+
+  async createChannelInstance(name, data) {
+    return this._c._request("POST", `/api/channels/${name}/instances`, data, undefined);
+  }
+
+  async updateChannelInstanceHandler(name, index, data) {
+    return this._c._request("PUT", `/api/channels/${name}/instances/${index}`, data, undefined);
+  }
+
+  async deleteChannelInstance(name, index) {
+    return this._c._request("DELETE", `/api/channels/${name}/instances/${index}`);
+  }
+
   async testChannel(name, data) {
     return this._c._request("POST", `/api/channels/${name}/test`, data, undefined);
   }

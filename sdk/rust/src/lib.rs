@@ -708,6 +708,22 @@ impl ChannelsResource {
         do_req(&self.client, &self.base_url, reqwest::Method::DELETE, &format!("/api/channels/{}/configure", name), None, &[]).await
     }
 
+    pub async fn list_channel_instances(&self, name: &str) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/channels/{}/instances", name), None, &[]).await
+    }
+
+    pub async fn create_channel_instance(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::POST, &format!("/api/channels/{}/instances", name), Some(data), &[]).await
+    }
+
+    pub async fn update_channel_instance_handler(&self, name: &str, index: &str, data: Value) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::PUT, &format!("/api/channels/{}/instances/{}", name, index), Some(data), &[]).await
+    }
+
+    pub async fn delete_channel_instance(&self, name: &str, index: &str) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::DELETE, &format!("/api/channels/{}/instances/{}", name, index), None, &[]).await
+    }
+
     pub async fn test_channel(&self, name: &str, data: Value) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::POST, &format!("/api/channels/{}/test", name), Some(data), &[]).await
     }
