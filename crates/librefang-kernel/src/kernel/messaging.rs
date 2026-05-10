@@ -395,6 +395,25 @@ impl LibreFangKernel {
         None
     }
 
+    /// Pre-dispatch provider-budget check.
+    ///
+    /// Read-only: looks up the `[providers.<name>]` entry (if any) and
+    /// queries the metering store. Used by every dispatch path
+    /// (ephemeral / full / streaming) BEFORE any token or USD
+    /// reservation is acquired, so a rejection cannot leak reservations
+    /// and a hot loop of denied calls cannot drain the per-agent burst
+    /// window or the in-memory pending USD ledger.
+    fn check_provider_budget_for(
+        &self,
+        provider: &str,
+    ) -> librefang_types::error::LibreFangResult<()> {
+        let bc = self.metering.budget_config.load();
+        if let Some(pb) = bc.providers.get(provider) {
+            self.metering.engine.check_provider_budget(provider, pb)?;
+        }
+        Ok(())
+    }
+
     /// Send an ephemeral "side question" to an agent (`/btw` command).
     ///
     /// The message is answered using the agent's system prompt and model, but in a
@@ -416,20 +435,8 @@ impl LibreFangKernel {
         }
 
         // Pre-dispatch provider budget gate (ephemeral path).
-        //
-        // No reservation rollback needed — `send_message_ephemeral` does
-        // not call `check_quota_and_reserve` / `reserve_usd`, so a bare
-        // `?` early-return cannot leak reservations.
-        {
-            let provider = &entry.manifest.model.provider;
-            let bc = self.metering.budget_config.load();
-            if let Some(pb) = bc.providers.get(provider.as_str()) {
-                self.metering
-                    .engine
-                    .check_provider_budget(provider, pb)
-                    .map_err(KernelError::LibreFang)?;
-            }
-        }
+        self.check_provider_budget_for(&entry.manifest.model.provider)
+            .map_err(KernelError::LibreFang)?;
 
         // Ephemeral: no tools — prevents side effects (tool writes to memory/disk)
         let tools: Vec<librefang_types::tool::ToolDefinition> = vec![];
@@ -795,6 +802,14 @@ impl LibreFangKernel {
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
+
+        // Pre-dispatch provider budget gate (full path). Placed BEFORE
+        // both reservations so a rejection cannot leak the pending USD
+        // ledger or the per-agent burst window — bare `?` is sufficient
+        // because no resources have been acquired yet.
+        self.check_provider_budget_for(&entry.manifest.model.provider)
+            .map_err(KernelError::LibreFang)?;
+
         let estimated_usd = {
             // Best-effort pre-call estimate: model.max_tokens worth of
             // output, plus a conservative input estimate equal to the
@@ -849,26 +864,6 @@ impl LibreFangKernel {
                 .release_reservation(agent_id, token_reservation);
             usd_reservation.release();
             return Ok(AgentLoopResult::default());
-        }
-
-        // Pre-dispatch provider budget gate (full path).
-        //
-        // Reject calls against an already-exhausted provider before the
-        // LLM round-trip. Both reservations must be released on rejection
-        // so a hot loop of denied calls can't drain the per-agent token
-        // window or the per-call USD reservation.
-        {
-            let provider = &entry.manifest.model.provider;
-            let bc = self.metering.budget_config.load();
-            if let Some(pb) = bc.providers.get(provider.as_str()) {
-                if let Err(e) = self.metering.engine.check_provider_budget(provider, pb) {
-                    self.agents
-                        .scheduler
-                        .release_reservation(agent_id, token_reservation);
-                    usd_reservation.release();
-                    return Err(KernelError::LibreFang(e));
-                }
-            }
         }
 
         // Resolve the effective session id up front for the LLM path so we
@@ -1689,6 +1684,13 @@ impl LibreFangKernel {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
+        // Pre-dispatch provider budget gate (streaming path). Placed
+        // BEFORE `check_quota_and_reserve` so a rejection cannot leak
+        // the per-agent burst window — bare `?` is sufficient because
+        // no token reservation has been acquired yet.
+        self.check_provider_budget_for(&entry.manifest.model.provider)
+            .map_err(KernelError::LibreFang)?;
+
         // Pre-charge the estimated token budget atomically to prevent the
         // TOCTOU race (#3736).  The reservation is settled inside the spawned
         // task after the LLM call completes.
@@ -1698,26 +1700,6 @@ impl LibreFangKernel {
             .scheduler
             .check_quota_and_reserve(agent_id, estimated_tokens)
             .map_err(KernelError::LibreFang)?;
-
-        // Pre-dispatch provider budget gate (streaming path).
-        //
-        // The token reservation is already in flight at this point, so a
-        // rejection here MUST release it — otherwise a hot loop of denied
-        // streaming calls slowly drains the per-agent burst window and
-        // legitimate later calls falsely throttle. Mirrors the rollback
-        // pattern of the full path above.
-        {
-            let provider = &entry.manifest.model.provider;
-            let bc = self.metering.budget_config.load();
-            if let Some(pb) = bc.providers.get(provider.as_str()) {
-                if let Err(e) = self.metering.engine.check_provider_budget(provider, pb) {
-                    self.agents
-                        .scheduler
-                        .release_reservation(agent_id, token_reservation);
-                    return Err(KernelError::LibreFang(e));
-                }
-            }
-        }
 
         let is_wasm = entry.manifest.module.starts_with("wasm:");
         let is_python = entry.manifest.module.starts_with("python:");

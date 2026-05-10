@@ -3,26 +3,37 @@
 //! Pins the `[providers.<name>]` budget gate inserted at the top of
 //! the kernel's three dispatch paths in `kernel/messaging.rs`:
 //!
-//!   1. `send_message_ephemeral` — `/btw` side question
-//!   2. `send_message`           — full agent message
-//!   3. streaming                — exercised via the same gate code
+//!   1. `send_message_ephemeral`  — `/btw` side question
+//!   2. `send_message`            — full agent message
+//!   3. `send_message_streaming`  — streaming agent message
 //!
-//! Each test configures a provider budget with `max_cost_per_hour_usd
-//! = 1.0`, records a usage row that exceeds it, registers an agent
-//! that targets the same provider, and asserts the kernel rejects the
-//! call with `LibreFangError::QuotaExceeded` BEFORE any LLM round-trip
-//! happens.
+//! All three paths call the shared helper `check_provider_budget_for`
+//! BEFORE acquiring any token or USD reservation, so a rejection
+//! cannot leak the per-agent burst window or the in-memory pending
+//! USD ledger. Each test below configures a provider budget with
+//! `max_cost_per_hour_usd = 1.0`, records a usage row that exceeds
+//! it, registers an agent that targets the same provider, and asserts
+//! the kernel rejects the call with `LibreFangError::QuotaExceeded`
+//! BEFORE any LLM round-trip happens.
+//!
+//! `full_path_does_not_leak_reservations_on_repeated_rejection`
+//! additionally asserts the no-leak contract directly: after three
+//! back-to-back denials, both the global `pending_reserved_usd()`
+//! ledger and the per-agent `scheduler.total_tokens` counter remain
+//! at zero. Any future regression that moves the gate AFTER a
+//! reservation without restoring an explicit rollback would flip
+//! either of those values to non-zero and fail the test.
 //!
 //! Refs #4828 (gate placement), #4800 (the underlying issue this PR
 //! is closing), CLAUDE.md #3721 (mandatory integration test for any
 //! kernel/route wiring change).
 
 use librefang_kernel::error::KernelError;
-use librefang_kernel::{KernelApi, LibreFangKernel};
+use librefang_kernel::{KernelApi, LibreFangKernel, MeteringSubsystemApi};
 use librefang_memory::usage::{UsageRecord, UsageStore};
 use librefang_testing::MockKernelBuilder;
 use librefang_types::agent::{
-    AgentEntry, AgentId, AgentManifest, AgentMode, AgentState, SessionId,
+    AgentEntry, AgentId, AgentManifest, AgentMode, AgentState, ResourceQuota, SessionId,
 };
 use librefang_types::config::ProviderBudget;
 use librefang_types::error::LibreFangError;
@@ -36,6 +47,10 @@ const MODEL: &str = "test-model";
 ///   - The default model points at `PROVIDER` / `MODEL` so any agent
 ///     registered without an explicit model inherits that pair.
 ///   - `[providers.ollama]` carries a `$1.00 / hour` cost limit.
+///   - The global `[budget]` carries a `$100 / hour` cap so
+///     `reserve_global_budget` actually charges the in-memory pending
+///     ledger — a leaked reservation would then surface via
+///     `pending_reserved_usd() > 0` after the call returns.
 fn build_kernel() -> (Arc<LibreFangKernel>, TempDir) {
     MockKernelBuilder::new()
         .with_config(|cfg| {
@@ -55,6 +70,7 @@ fn build_kernel() -> (Arc<LibreFangKernel>, TempDir) {
                     ..Default::default()
                 },
             );
+            cfg.budget.max_hourly_usd = 100.0;
         })
         .build()
 }
@@ -73,6 +89,20 @@ fn exhaust_provider_budget(kernel: &LibreFangKernel) {
 /// Register an agent whose manifest targets `PROVIDER` so the gate
 /// looks up the budget for the right provider name.
 fn register_agent(kernel: &LibreFangKernel) -> AgentId {
+    register_agent_with_quota(kernel, 0, false)
+}
+
+/// Like [`register_agent`] but optionally sets a non-default
+/// `manifest.model.max_tokens` and installs a per-agent
+/// `ResourceQuota` on the scheduler. Used by the no-leak test so the
+/// scheduler's `total_tokens` counter is observable via
+/// `scheduler_ref().get_usage(agent_id)` (the counter only exists
+/// after a `register` on the scheduler).
+fn register_agent_with_quota(
+    kernel: &LibreFangKernel,
+    max_tokens: u32,
+    install_scheduler_quota: bool,
+) -> AgentId {
     let id = AgentId::new();
     let mut manifest = AgentManifest {
         name: "budget-test".to_string(),
@@ -83,6 +113,9 @@ fn register_agent(kernel: &LibreFangKernel) -> AgentId {
     };
     manifest.model.provider = PROVIDER.to_string();
     manifest.model.model = MODEL.to_string();
+    if max_tokens > 0 {
+        manifest.model.max_tokens = max_tokens;
+    }
     let entry = AgentEntry {
         id,
         name: "budget-test".to_string(),
@@ -95,6 +128,15 @@ fn register_agent(kernel: &LibreFangKernel) -> AgentId {
         ..Default::default()
     };
     kernel.agent_registry().register(entry).unwrap();
+    if install_scheduler_quota {
+        kernel.scheduler_ref().register(
+            id,
+            ResourceQuota {
+                max_llm_tokens_per_hour: Some(20_000),
+                ..Default::default()
+            },
+        );
+    }
     id
 }
 
@@ -140,24 +182,63 @@ async fn full_path_rejects_when_provider_hourly_budget_exhausted() {
     assert_quota_exceeded(err, "full");
 }
 
-/// The streaming path runs the gate AFTER `check_quota_and_reserve`,
-/// so a rejection MUST release the `token_reservation` — otherwise a
-/// hot loop of denied calls slowly drains the per-agent burst window.
-/// Pin the rollback by calling the same gated entry twice in a row:
-/// a leaking reservation would surface as a different error class on
-/// the second attempt (the scheduler would saturate before the gate
-/// got a chance to fire), instead of the identical `QuotaExceeded`
-/// the gate produces on a clean reservation slot.
+/// Direct streaming-path test. `send_message_streaming` is a sync
+/// entry that returns `KernelResult<(Receiver, JoinHandle)>` — gate
+/// rejection comes back synchronously, before the spawn, so the
+/// receiver doesn't need to be driven at all.
 #[tokio::test(flavor = "multi_thread")]
-async fn full_path_releases_reservations_on_repeated_rejection() {
+async fn streaming_path_rejects_when_provider_hourly_budget_exhausted() {
     let (kernel, _tmp) = build_kernel();
     exhaust_provider_budget(&kernel);
     let agent_id = register_agent(&kernel);
+
+    let err = kernel
+        .send_message_streaming(agent_id, "ping", None)
+        .expect_err("streaming path must refuse over-budget call");
+    assert_quota_exceeded(err, "streaming");
+}
+
+/// No-leak contract: 3 back-to-back denied full-path calls must NOT
+/// poison the global pending USD ledger or the per-agent scheduler
+/// `total_tokens` counter. Setup tightens both:
+///
+///   - `cfg.budget.max_hourly_usd = $100` so `reserve_global_budget`
+///     would actually charge the in-memory pending ledger if it ran.
+///   - Per-agent `ResourceQuota::max_llm_tokens_per_hour = 20_000`
+///     plus `manifest.model.max_tokens = 2000` so a successful
+///     `check_quota_and_reserve` would pre-charge 2000 tokens visible
+///     via `scheduler_ref().get_usage(...).total_tokens`.
+///
+/// With the gate placed BEFORE both reservations, none of the three
+/// denied calls ever reaches `reserve_global_budget` or
+/// `check_quota_and_reserve` — both ledgers stay at 0. Any future
+/// regression that moves the gate back AFTER either reservation
+/// without restoring an explicit rollback would flip the snapshots
+/// to non-zero and fail the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn full_path_does_not_leak_reservations_on_repeated_rejection() {
+    let (kernel, _tmp) = build_kernel();
+    exhaust_provider_budget(&kernel);
+    let agent_id = register_agent_with_quota(&kernel, 2000, true);
 
     for attempt in 1..=3 {
         let err = kernel.send_message(agent_id, "ping").await.unwrap_err();
         assert_quota_exceeded(err, &format!("attempt {attempt}"));
     }
+
+    assert_eq!(
+        kernel.metering_engine().pending_reserved_usd(),
+        0.0,
+        "pending USD ledger must be empty after 3 denied calls"
+    );
+    let usage = kernel
+        .scheduler_ref()
+        .get_usage(agent_id)
+        .expect("scheduler usage tracker is created by register()");
+    assert_eq!(
+        usage.total_tokens, 0,
+        "scheduler total_tokens must be 0 after 3 denied calls — leak suspected"
+    );
 }
 
 /// Negative test: with no usage on file the gate must NOT fire. We
