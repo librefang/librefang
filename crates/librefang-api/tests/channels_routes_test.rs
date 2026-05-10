@@ -301,6 +301,250 @@ async fn channels_test_unknown_channel_returns_404() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Per-instance endpoints (#4837)
+//
+// The legacy `/configure` endpoints treat every channel as a single
+// `[channels.<name>]` table. The new `/instances` endpoints let the
+// dashboard manage `[[channels.<name>]]` array entries — supporting two
+// Telegram bots, three Slack workspaces, etc. on the same channel type.
+//
+// As with `/configure`, we deliberately do NOT exercise happy-path WRITES
+// here. POST/PUT mutate `~/.librefang/secrets.env` and process-wide env
+// vars (`std::env::set_var`), which would race with parallel tests. The
+// underlying TOML write logic is covered by the unit tests in
+// `routes::skills::tests::{append,update,remove}_channel_instance_*`.
+// What we DO cover here:
+//   - GET /instances reflects the seeded `OneOrMany<T>` from KernelConfig
+//   - All four routes 404 on unknown channel
+//   - POST/PUT 400 on missing `fields`
+//   - PUT/DELETE 404 when the instance index is out of range
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_instances_list_empty_when_unconfigured() {
+    let h = boot().await;
+    let (status, body) =
+        json_request(&h, Method::GET, "/api/channels/telegram/instances", None).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["channel"], "telegram");
+    assert_eq!(body["total"], 0);
+    let arr = body["items"].as_array().expect("items must be array");
+    assert!(arr.is_empty(), "no instances seeded → items must be empty");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_instances_list_returns_seeded_instances() {
+    // Seed two telegram instances and assert both come through with
+    // their configured fields and `index` values.
+    let channels = ChannelsConfig {
+        telegram: OneOrMany(vec![
+            TelegramConfig {
+                bot_token_env: "TG_SUPPORT".into(),
+                ..TelegramConfig::default()
+            },
+            TelegramConfig {
+                bot_token_env: "TG_OPS".into(),
+                ..TelegramConfig::default()
+            },
+        ]),
+        ..ChannelsConfig::default()
+    };
+    let h = boot_with_channels(channels).await;
+
+    let (status, body) =
+        json_request(&h, Method::GET, "/api/channels/telegram/instances", None).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["total"], 2, "two instances seeded: {body}");
+    let arr = body["items"].as_array().expect("items array");
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["index"], 0);
+    assert_eq!(arr[1]["index"], 1);
+    assert_eq!(arr[0]["config"]["bot_token_env"], "TG_SUPPORT");
+    assert_eq!(arr[1]["config"]["bot_token_env"], "TG_OPS");
+    // Each instance must carry the field schema so the dashboard can
+    // render the form without an extra `/api/channels/{name}` round-trip.
+    assert!(
+        arr[0]["fields"].is_array(),
+        "fields schema must travel with each instance"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_instances_list_unknown_channel_returns_404() {
+    let h = boot().await;
+    let (status, body) =
+        json_request(&h, Method::GET, "/api/channels/not-a-real/instances", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Unknown channel"),
+        "error must mention 'Unknown channel': {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_create_instance_unknown_channel_returns_404() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/channels/not-a-real/instances",
+        Some(serde_json::json!({"fields": {}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_create_instance_missing_fields_returns_400() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/channels/telegram/instances",
+        Some(serde_json::json!({"not_fields": "oops"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("fields"),
+        "error must mention 'fields': {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_update_instance_unknown_channel_returns_404() {
+    let h = boot().await;
+    let (status, _body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/channels/not-a-real/instances/0",
+        Some(serde_json::json!({"fields": {}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_update_instance_out_of_range_returns_404() {
+    // Seed one instance, then try to PUT index 7. The handler must reject
+    // before touching disk because the index is out of range.
+    let channels = ChannelsConfig {
+        telegram: OneOrMany(vec![TelegramConfig::default()]),
+        ..ChannelsConfig::default()
+    };
+    let h = boot_with_channels(channels).await;
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/channels/telegram/instances/7",
+        Some(serde_json::json!({"fields": {"default_agent": "x"}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("out of range"),
+        "error must mention 'out of range': {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_update_instance_missing_fields_returns_400() {
+    let channels = ChannelsConfig {
+        telegram: OneOrMany(vec![TelegramConfig::default()]),
+        ..ChannelsConfig::default()
+    };
+    let h = boot_with_channels(channels).await;
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/channels/telegram/instances/0",
+        Some(serde_json::json!({"not_fields": "oops"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_delete_instance_unknown_channel_returns_404() {
+    let h = boot().await;
+    let (status, _body) = json_request(
+        &h,
+        Method::DELETE,
+        "/api/channels/not-a-real/instances/0",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_delete_instance_out_of_range_returns_404() {
+    let channels = ChannelsConfig {
+        telegram: OneOrMany(vec![TelegramConfig::default()]),
+        ..ChannelsConfig::default()
+    };
+    let h = boot_with_channels(channels).await;
+    let (status, body) = json_request(
+        &h,
+        Method::DELETE,
+        "/api/channels/telegram/instances/3",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("out of range"),
+        "error must mention 'out of range': {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_list_includes_instance_count() {
+    // The dashboard's card subtitle ("Telegram · 2 bots") depends on
+    // `instance_count` riding alongside the existing `configured` flag.
+    let channels = ChannelsConfig {
+        telegram: OneOrMany(vec![
+            TelegramConfig::default(),
+            TelegramConfig::default(),
+            TelegramConfig::default(),
+        ]),
+        ..ChannelsConfig::default()
+    };
+    let h = boot_with_channels(channels).await;
+    let (status, body) = json_request(&h, Method::GET, "/api/channels", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body["items"].as_array().expect("items");
+    let telegram = arr
+        .iter()
+        .find(|r| r["name"] == "telegram")
+        .expect("telegram row");
+    assert_eq!(
+        telegram["instance_count"], 3,
+        "telegram seeded with 3 instances must report instance_count=3: {telegram}"
+    );
+    let discord = arr
+        .iter()
+        .find(|r| r["name"] == "discord")
+        .expect("discord row");
+    assert_eq!(
+        discord["instance_count"], 0,
+        "discord untouched must report instance_count=0: {discord}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_test_known_channel_with_no_creds_reports_missing_env() {
     // #3507 reshaped this handler so the HTTP status reflects the actual
