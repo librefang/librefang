@@ -1689,6 +1689,16 @@ impl WorkflowEngine {
                 None
             };
             if let Some(pause) = pending_pause {
+                // Persist the Paused state immediately. Without this, a
+                // SIGKILL between here and the end-of-execute_run batch
+                // persist would lose the resume_token — the contract
+                // handed to the operator on a pause-for-approval flow.
+                // Mirrors the create_run / recover_stale_running_runs
+                // wiring; remaining per-step Failed/Completed
+                // transitions are tracked separately (see PR body).
+                if let Some(run) = self.runs.get(&run_id) {
+                    self.upsert_run_to_store(&run);
+                }
                 info!(
                     run_id = %run_id,
                     resume_step = i,

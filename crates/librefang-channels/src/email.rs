@@ -52,10 +52,14 @@ pub struct EmailAdapter {
     smtp_host: String,
     /// SMTP port (587 for STARTTLS, 465 for implicit TLS).
     smtp_port: u16,
-    /// Email address (used for both IMAP and SMTP).
-    username: String,
-    /// SECURITY: Password is zeroized on drop.
-    password: Zeroizing<String>,
+    /// IMAP username (may differ from SMTP username).
+    imap_username: String,
+    /// SECURITY: IMAP password is zeroized on drop.
+    imap_password: Zeroizing<String>,
+    /// SMTP username (may differ from IMAP username).
+    smtp_username: String,
+    /// SECURITY: SMTP password is zeroized on drop.
+    smtp_password: Zeroizing<String>,
     /// How often to check for new emails.
     poll_interval: Duration,
     /// Which IMAP folders to monitor.
@@ -84,8 +88,10 @@ impl EmailAdapter {
         imap_port: u16,
         smtp_host: String,
         smtp_port: u16,
-        username: String,
-        password: String,
+        imap_username: String,
+        imap_password: String,
+        smtp_username: String,
+        smtp_password: String,
         poll_interval_secs: u64,
         folders: Vec<String>,
         allowed_senders: Vec<String>,
@@ -96,8 +102,10 @@ impl EmailAdapter {
             imap_port,
             smtp_host,
             smtp_port,
-            username,
-            password: Zeroizing::new(password),
+            imap_username,
+            imap_password: Zeroizing::new(imap_password),
+            smtp_username,
+            smtp_password: Zeroizing::new(smtp_password),
             poll_interval: Duration::from_secs(poll_interval_secs),
             folders: if folders.is_empty() {
                 vec!["INBOX".to_string()]
@@ -176,7 +184,10 @@ impl EmailAdapter {
             );
         }
 
-        let creds = Credentials::new(self.username.clone(), self.password.as_str().to_string());
+        let creds = Credentials::new(
+            self.smtp_username.clone(),
+            self.smtp_password.as_str().to_string(),
+        );
 
         let transport = if self.smtp_port == 465 {
             // Implicit TLS (port 465)
@@ -523,8 +534,8 @@ impl ChannelAdapter for EmailAdapter {
         let poll_interval = self.poll_interval;
         let imap_host = self.imap_host.clone();
         let imap_port = self.imap_port;
-        let username = self.username.clone();
-        let password = self.password.clone();
+        let username = self.imap_username.clone();
+        let password = self.imap_password.clone();
         let folders = self.folders.clone();
         let allowed_senders = self.allowed_senders.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
@@ -689,9 +700,9 @@ impl ChannelAdapter for EmailAdapter {
                     .map_err(|e| format!("Invalid recipient email '{}': {}", to_addr, e))?;
 
                 let from_mailbox: Mailbox = self
-                    .username
+                    .smtp_username
                     .parse()
-                    .map_err(|e| format!("Invalid sender email '{}': {}", self.username, e))?;
+                    .map_err(|e| format!("Invalid sender email '{}': {}", self.smtp_username, e))?;
 
                 // Extract subject from text body convention: "Subject: ...\n\n..."
                 let (subject, body) = if text.starts_with("Subject: ") {
@@ -771,6 +782,8 @@ mod tests {
             587,
             "user@gmail.com".to_string(),
             "password".to_string(),
+            "user@gmail.com".to_string(),
+            "password".to_string(),
             30,
             vec![],
             vec![],
@@ -788,6 +801,8 @@ mod tests {
             587,
             "bot@example.com".to_string(),
             "pass".to_string(),
+            "bot@example.com".to_string(),
+            "pass".to_string(),
             30,
             vec![],
             vec!["boss@company.com".to_string()],
@@ -800,6 +815,8 @@ mod tests {
             993,
             "smtp.example.com".to_string(),
             587,
+            "bot@example.com".to_string(),
+            "pass".to_string(),
             "bot@example.com".to_string(),
             "pass".to_string(),
             30,
@@ -962,6 +979,8 @@ mod tests {
             587,
             "bot@example.com".to_string(),
             "password".to_string(),
+            "bot@example.com".to_string(),
+            "password".to_string(),
             30,
             vec![],
             vec![],
@@ -1089,6 +1108,8 @@ mod tests {
             993,
             host,
             port,
+            "bot@example.com".to_string(),
+            "password".to_string(),
             "bot@example.com".to_string(),
             "password".to_string(),
             30,

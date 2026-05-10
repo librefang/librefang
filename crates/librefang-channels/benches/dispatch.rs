@@ -73,7 +73,7 @@ fn bench_router_resolve_direct(c: &mut Criterion) {
     let mut router = AgentRouter::new();
     let agent = AgentId::new();
     router.set_default(agent);
-    router.set_direct_route("Telegram".to_string(), "user-42".to_string(), agent);
+    router.set_direct_route("telegram".to_string(), "user-42".to_string(), agent);
 
     c.bench_function("router_resolve_direct", |b| {
         b.iter(|| {

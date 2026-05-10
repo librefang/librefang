@@ -3406,44 +3406,48 @@ async fn tool_shell_exec(
     // session interrupt fires while the command is running.  Using `output()`
     // instead would block until the process *completes*, meaning cancel() would
     // never be observed mid-execution — the whole point of this feature.
-    let mut child = match cmd.spawn() {
+    let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return Err(format!("Failed to execute command: {e}")),
     };
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
-    // Poll for completion, interrupt, or timeout.  We use a short sleep so we
-    // don't burn CPU in a tight loop; 50 ms is imperceptible to users but still
-    // gives responsive cancellation.
+    // Drive `wait_with_output()` directly: it owns the stdout/stderr pipes and
+    // drains them concurrently with reaping the child. The previous
+    // `try_wait`-with-50 ms-sleep poll loop did NOT drain pipes — so any child
+    // that wrote more than the OS pipe buffer (often 8–16 KB on container
+    // kernels) would deadlock on `write()`, never reach `try_wait → Some`, and
+    // the loop would burn the full timeout. Confirmed reproducer:
+    // `yes hello | head -c 30000` deadlocks at the 8 KB pipe boundary on this
+    // box.
+    //
+    // Cancel-cascade preserved by select-ing the wait future against a 100 ms
+    // periodic interrupt poll. If interrupt fires (or the deadline lapses),
+    // dropping the wait future cancels the underlying child handle —
+    // `kill_on_drop(true)` set above ensures the OS process is reaped.
+    let interrupt_clone = interrupt.clone();
+    let mut interrupt_tick = tokio::time::interval(std::time::Duration::from_millis(100));
+    interrupt_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let wait_fut = child.wait_with_output();
+    tokio::pin!(wait_fut);
+
     let output = loop {
-        // Has the process already finished?
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                // Process exited; collect its output.
-                match child.wait_with_output().await {
-                    Ok(o) => break Ok(o),
-                    Err(e) => break Err(format!("Failed to collect output: {e}")),
+        tokio::select! {
+            biased;
+            // Process exited (with pipes drained — that's the bug fix). Take the result.
+            res = &mut wait_fut => break res.map_err(|e| format!("Failed to collect output: {e}")),
+            // Periodic interrupt + deadline check. We drop wait_fut on either,
+            // which kills the child via kill_on_drop.
+            _ = interrupt_tick.tick() => {
+                if interrupt_clone.as_ref().is_some_and(|i| i.is_cancelled()) {
+                    return Err("[interrupted]".to_string());
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(format!("Command timed out after {timeout_secs}s"));
                 }
             }
-            Ok(None) => {} // still running
-            Err(e) => break Err(format!("Failed to wait on child: {e}")),
         }
-
-        // Did the session get cancelled while the command was running?
-        if interrupt.as_ref().is_some_and(|i| i.is_cancelled()) {
-            // Best-effort kill; ignore errors (process may have already exited).
-            let _ = child.kill().await;
-            return Err("[interrupted]".to_string());
-        }
-
-        // Timed out?
-        if tokio::time::Instant::now() >= deadline {
-            let _ = child.kill().await;
-            return Err(format!("Command timed out after {timeout_secs}s"));
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
 
     match output {
@@ -9317,6 +9321,87 @@ mod tests {
             librefang_types::tool::ToolExecutionStatus::WaitingApproval
         );
         assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
+    }
+
+    /// Regression: shell_exec must NOT deadlock when a child writes more
+    /// stdout than the OS pipe buffer can hold. Container kernels often have
+    /// 8 KB pipe buffers; the previous implementation polled `try_wait()`
+    /// without draining stdout/stderr, so any child that exceeded the buffer
+    /// blocked on `write()` forever and only timed out at `timeout_secs`.
+    /// This test produces ~30 KB of stdout — well past 8 KB but well under
+    /// the 100 KB result cap — and asserts that it returns quickly with all
+    /// bytes preserved. Without the fix this test hangs the full
+    /// `timeout_secs` (set short here so a regression fails CI fast).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_shell_exec_drains_pipe_above_buffer_size() {
+        let approval_requests = Arc::new(AtomicUsize::new(0));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::clone(&approval_requests),
+            user_gate_override: None,
+        });
+        let policy = librefang_types::config::ExecPolicy {
+            mode: librefang_types::config::ExecSecurityMode::Full,
+            timeout_secs: 5, // Short timeout — regression hangs at this value.
+            ..Default::default()
+        };
+        let workspace = tempfile::tempdir().expect("tempdir");
+
+        let started = std::time::Instant::now();
+        let result = execute_tool(
+            "test-id",
+            "shell_exec",
+            // ~30 KB of stdout — 4× the typical 8 KB container pipe buffer.
+            &serde_json::json!({"command": "yes hello | head -c 30000"}),
+            Some(&kernel),
+            None,
+            Some("agent-1"),
+            None,
+            None,
+            None,
+            None, // allowed_skills
+            None,
+            None,
+            Some(workspace.path()),
+            None, // media_engine
+            None, // media_drivers
+            Some(&policy),
+            None,
+            None,
+            None,
+            None,
+            None, // sender_id
+            None, // channel
+            None, // checkpoint_manager
+            None, // interrupt
+            None, // session_id
+            None, // dangerous_command_checker
+            None, // available_tools
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            !result.is_error,
+            "shell_exec must not error on >pipe-buffer output, got: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("timed out"),
+            "shell_exec must not time out on drainable output, got: {}",
+            result.content
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "shell_exec finished in {elapsed:?}; expected sub-second on drainable output. Pipe drain regression?"
+        );
+        // 30000 'hello' chars (5 bytes + newline = 6 each), so output count
+        // is in the same order — assert > buffer size, < truncation cap.
+        let len = result.content.len();
+        assert!(
+            len > 8_000 && len < 100_000,
+            "expected output between 8 KB and 100 KB, got {len} bytes"
+        );
     }
 
     // ---- RBAC M3 — per-user tool policy gate (#3054) ----

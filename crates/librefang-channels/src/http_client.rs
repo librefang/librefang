@@ -32,6 +32,40 @@ pub fn new_client() -> reqwest::Client {
         .expect("HTTP client with bundled CA roots should always build")
 }
 
+/// Process-wide HTTP client used by [`fetch_url_bytes`] for safe
+/// outbound media fetches.
+///
+/// Configured with a `redirect::Policy::custom` that re-runs
+/// [`validate_url_for_fetch`] on every redirect target, refusing the
+/// hop if the new URL points at a private/loopback/metadata host or a
+/// non-`http(s)` scheme. Without this, reqwest's default
+/// follow-up-to-10-redirects behaviour would let a `302 Location:
+/// http://169.254.169.254/...` smuggle past the entry-time guard.
+///
+/// `OnceLock`-backed so the redirect policy and bundled TLS roots are
+/// initialised once per process; multiple concurrent media fetches
+/// share the connection pool.
+fn safe_fetch_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        client_builder()
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 5 {
+                    return attempt.error("too many redirects (cap: 5)");
+                }
+                let url_str = attempt.url().as_str().to_string();
+                if let Err(reason) = validate_url_for_fetch(&url_str) {
+                    return attempt.error(format!(
+                        "SSRF guard refused redirect to '{url_str}': {reason}"
+                    ));
+                }
+                attempt.follow()
+            }))
+            .build()
+            .expect("safe fetch client builds with bundled roots")
+    })
+}
+
 // ---------------------------------------------------------------------------
 // SSRF guard
 // ---------------------------------------------------------------------------
@@ -265,12 +299,11 @@ impl std::error::Error for FetchError {}
 /// Mitigate at the network layer or with a resolving SSRF proxy if the
 /// threat model requires it.
 pub async fn fetch_url_bytes(
-    client: &reqwest::Client,
     url: &str,
     max_bytes: usize,
 ) -> Result<(Vec<u8>, Option<String>), FetchError> {
     validate_url_for_fetch(url).map_err(FetchError::Rejected)?;
-    fetch_url_bytes_unchecked(client, url, max_bytes).await
+    fetch_url_bytes_unchecked(safe_fetch_client(), url, max_bytes).await
 }
 
 /// Send the GET and apply the size cap. Skips the SSRF guard.
@@ -491,8 +524,7 @@ mod tests {
     async fn fetch_url_bytes_rejects_blocked_url_before_dialing() {
         // No mock server stood up — if the SSRF guard didn't fire we'd see a
         // connection error, not the scheme/host rejection.
-        let client = new_client();
-        let err = fetch_url_bytes(&client, "http://127.0.0.1/", 1024)
+        let err = fetch_url_bytes("http://127.0.0.1/", 1024)
             .await
             .unwrap_err();
         match &err {
@@ -503,7 +535,7 @@ mod tests {
             other => panic!("expected Rejected, got: {other:?}"),
         }
 
-        let err = fetch_url_bytes(&client, "file:///etc/passwd", 1024)
+        let err = fetch_url_bytes("file:///etc/passwd", 1024)
             .await
             .unwrap_err();
         match &err {
@@ -511,6 +543,66 @@ mod tests {
                 assert!(msg.contains("scheme"), "expected scheme reject, got: {msg}")
             }
             other => panic!("expected Rejected, got: {other:?}"),
+        }
+    }
+
+    /// Regression for the redirect-bypass attack: a public URL that
+    /// `validate_url_for_fetch` accepts at entry returns 302 to a
+    /// private/loopback host. Without the `Policy::custom` revalidator
+    /// reqwest's default 10-redirect follower would happily fetch the
+    /// IMDS / loopback target. With it, the redirect is refused.
+    #[tokio::test]
+    async fn fetch_url_bytes_refuses_redirect_to_private_host() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        // Hand-rolled HTTP/1.1 server that 302s to http://127.0.0.1:1/
+        // — a private IPv4 the entry-time guard would have refused had
+        // it been the original URL. The listener binds on 127.0.0.1:0
+        // (the test fixture is the redirect ORIGIN, not the redirect
+        // TARGET — the target is what must be refused).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let resp = b"HTTP/1.1 302 Found\r\n\
+                    Location: http://127.0.0.1:1/loot\r\n\
+                    Content-Length: 0\r\n\
+                    \r\n";
+                let _ = sock.write_all(resp).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        // The original URL is a literal IPv4 that `validate_url_for_fetch`
+        // would refuse — so we can't use it as the entry-point. Instead
+        // we have to bypass the entry-time guard by calling the
+        // unchecked-on-entry path with a private origin, but we still
+        // want the redirect-policy revalidator to fire. Use the safe
+        // client directly with a pre-validated URL skip.
+        //
+        // For the entry-point check: the test fixture itself binds
+        // 127.0.0.1:0, so the entry-time guard would also refuse. To
+        // exercise ONLY the redirect policy, drive the safe_fetch_client
+        // directly with the bound listener URL.
+        let client = safe_fetch_client();
+        let url = format!("http://{addr}/start");
+        let resp = client.get(&url).send().await;
+        let _ = handle.await;
+        match resp {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("SSRF") || msg.contains("redirect"),
+                    "redirect rejection should mention SSRF or redirect, got: {msg}"
+                );
+            }
+            Ok(r) => panic!(
+                "expected redirect to be refused, got status {} (redirected to a private host!)",
+                r.status()
+            ),
         }
     }
 

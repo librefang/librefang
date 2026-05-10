@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { WorkflowsPage } from "./WorkflowsPage";
 import {
   useWorkflows,
+  useWorkflowDetail,
   useWorkflowRuns,
   useWorkflowRunDetail,
   useWorkflowTemplates,
@@ -18,6 +19,7 @@ import { useCreateSchedule } from "../lib/mutations/schedules";
 
 vi.mock("../lib/queries/workflows", () => ({
   useWorkflows: vi.fn(),
+  useWorkflowDetail: vi.fn(),
   useWorkflowRuns: vi.fn(),
   useWorkflowRunDetail: vi.fn(),
   useWorkflowTemplates: vi.fn(),
@@ -60,6 +62,7 @@ vi.mock("react-i18next", async () => {
 });
 
 const useWorkflowsMock = useWorkflows as unknown as ReturnType<typeof vi.fn>;
+const useWorkflowDetailMock = useWorkflowDetail as unknown as ReturnType<typeof vi.fn>;
 const useWorkflowRunsMock = useWorkflowRuns as unknown as ReturnType<typeof vi.fn>;
 const useWorkflowRunDetailMock = useWorkflowRunDetail as unknown as ReturnType<typeof vi.fn>;
 const useWorkflowTemplatesMock = useWorkflowTemplates as unknown as ReturnType<typeof vi.fn>;
@@ -152,6 +155,7 @@ describe("WorkflowsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     setMutationDefaults();
+    useWorkflowDetailMock.mockReturnValue(makeQuery(undefined));
     useWorkflowRunsMock.mockReturnValue(makeQuery([]));
     useWorkflowRunDetailMock.mockReturnValue(makeQuery(undefined));
     useWorkflowTemplatesMock.mockReturnValue(makeQuery([]));
@@ -307,6 +311,101 @@ describe("WorkflowsPage", () => {
     // Verify the template was stashed in sessionStorage for the canvas.
     const stored = sessionStorage.getItem("workflowTemplate");
     expect(stored).toContain("PreviewTpl");
+  });
+
+  it("renders parameter form fields when workflow detail has template placeholders", () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    useWorkflowDetailMock.mockReturnValue(
+      makeQuery({
+        ...sampleWorkflow,
+        steps: [
+          { name: "step1", prompt_template: "Summarize {{topic}} for {{audience}}" },
+        ],
+      }),
+    );
+    renderPage();
+
+    // Parameter fields should be rendered with labels.
+    expect(screen.getByText("topic")).toBeInTheDocument();
+    expect(screen.getByText("audience")).toBeInTheDocument();
+    // The textarea should show the "additional context" placeholder
+    // when parameters are present.
+    expect(
+      screen.getByPlaceholderText("Additional context (optional)..."),
+    ).toBeInTheDocument();
+  });
+
+  it("does not render parameter fields when workflow has no template placeholders", () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    useWorkflowDetailMock.mockReturnValue(
+      makeQuery({
+        ...sampleWorkflow,
+        steps: [
+          { name: "step1", prompt_template: "Do the thing with {{input}}" },
+        ],
+      }),
+    );
+    renderPage();
+
+    // {{input}} is a reserved variable — should not become a form field.
+    expect(screen.queryByText("Parameters")).not.toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("canvas.run_input_placeholder"),
+    ).toBeInTheDocument();
+  });
+
+  it("excludes step output variable names from detected parameters", () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    useWorkflowDetailMock.mockReturnValue(
+      makeQuery({
+        ...sampleWorkflow,
+        steps: [
+          { name: "research", prompt_template: "Research {{topic}}" },
+          { name: "summarize", prompt_template: "Summarize {{research}} for {{audience}}" },
+        ],
+      }),
+    );
+    renderPage();
+
+    // "topic" and "audience" should be rendered as parameter fields.
+    expect(screen.getByText("topic")).toBeInTheDocument();
+    expect(screen.getByText("audience")).toBeInTheDocument();
+    // "research" is a step name (output var) — should NOT appear as a
+    // parameter field label.  The description hints mention step names but
+    // never as a standalone label element.
+    const paramSection = screen.getByText("Parameters").parentElement!;
+    const labels = paramSection.querySelectorAll("label > span");
+    const labelTexts = Array.from(labels).map((el) => el.textContent?.replace("*", "").trim());
+    expect(labelTexts).toContain("topic");
+    expect(labelTexts).toContain("audience");
+    expect(labelTexts).not.toContain("research");
+  });
+
+  it("includes param values in the run input when parameters are filled", async () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    useWorkflowDetailMock.mockReturnValue(
+      makeQuery({
+        ...sampleWorkflow,
+        steps: [
+          { name: "step1", prompt_template: "Tell me about {{topic}}" },
+        ],
+      }),
+    );
+    const mutations = setMutationDefaults();
+    renderPage();
+
+    // Fill in the parameter field.
+    const topicInput = screen.getByPlaceholderText("Parameter 'topic' used in step 'step1'");
+    fireEvent.change(topicInput, { target: { value: "quantum computing" } });
+
+    fireEvent.click(screen.getByText("canvas.run_now"));
+
+    expect(mutations.run.mutateAsync).toHaveBeenCalledTimes(1);
+    const callArgs = mutations.run.mutateAsync.mock.calls[0][0];
+    expect(callArgs.workflowId).toBe("wf-1");
+    // The input should contain the parameter value as JSON.
+    expect(callArgs.input).toContain("quantum computing");
+    expect(callArgs.input).toContain("topic");
   });
 
   it("filters templates by the active category pill", () => {
