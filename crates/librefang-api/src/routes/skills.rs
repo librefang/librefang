@@ -5503,6 +5503,15 @@ pub(crate) fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(),
 
 // ── Config.toml channel management helpers ──────────────────────────
 
+/// Sentinel error message produced by `upsert_channel_config` and
+/// `remove_channel_config` when the channel is in `[[channels.<name>]]`
+/// (array-of-tables) shape. The handler matches on this prefix to map the
+/// failure to 409 Conflict instead of 500. Multi-instance channels must
+/// use the per-instance API (`/api/channels/<name>/instances/...`); the
+/// legacy single-instance `/configure` endpoint cannot represent them
+/// without silently dropping every instance after the first (#4865).
+pub(crate) const CHANNEL_AOT_CONFLICT_PREFIX: &str = "channel-is-multi-instance:";
+
 /// Upsert a `[channels.<name>]` section in config.toml with the given non-secret fields.
 ///
 /// Uses `toml_edit::DocumentMut` to preserve comments, key ordering, and
@@ -5511,6 +5520,11 @@ pub(crate) fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(),
 /// channel write — see issue #3183. Callers must hold
 /// `AppState::config_write_lock` to serialize against `POST /api/config/set`,
 /// which performs an asymmetric read-modify-write on the same file.
+///
+/// Refuses to write when the channel already exists as `[[channels.<name>]]`
+/// (multi-instance) — the legacy single-table write would silently delete
+/// every instance after the first. Callers must route to the per-instance
+/// API in that case (#4865).
 pub(crate) fn upsert_channel_config(
     config_path: &std::path::Path,
     channel_name: &str,
@@ -5538,6 +5552,19 @@ pub(crate) fn upsert_channel_config(
         .as_table_mut()
         .ok_or("channels is not a table")?;
 
+    // Refuse to clobber an existing `[[channels.<name>]]` array. The
+    // legacy single-table replace path below would otherwise silently drop
+    // every instance after the first — see issue #4865.
+    if matches!(
+        channels_table.get(channel_name),
+        Some(toml_edit::Item::ArrayOfTables(_))
+    ) {
+        return Err(format!(
+            "{CHANNEL_AOT_CONFLICT_PREFIX}channel '{channel_name}' has multiple instances; use the per-instance API"
+        )
+        .into());
+    }
+
     // Build channel sub-table with correct TOML types
     let ch_table = build_channel_toml_table(fields);
     channels_table.insert(channel_name, toml_edit::Item::Table(ch_table));
@@ -5555,6 +5582,11 @@ pub(crate) fn upsert_channel_config(
 ///
 /// Mirrors `upsert_channel_config`: format-preserving via `toml_edit`, and
 /// callers must hold `AppState::config_write_lock`.
+///
+/// Refuses to delete when the channel exists as `[[channels.<name>]]`
+/// (multi-instance) — the bulk delete would silently nuke every instance.
+/// Callers must use `DELETE /api/channels/<name>/instances/<id>` to remove
+/// instances individually (#4865).
 pub(crate) fn remove_channel_config(
     config_path: &std::path::Path,
     channel_name: &str,
@@ -5573,6 +5605,15 @@ pub(crate) fn remove_channel_config(
     let mut doc: toml_edit::DocumentMut = content.parse()?;
 
     if let Some(channels) = doc.get_mut("channels").and_then(|i| i.as_table_mut()) {
+        if matches!(
+            channels.get(channel_name),
+            Some(toml_edit::Item::ArrayOfTables(_))
+        ) {
+            return Err(format!(
+                "{CHANNEL_AOT_CONFLICT_PREFIX}channel '{channel_name}' has multiple instances; use the per-instance API"
+            )
+            .into());
+        }
         channels.remove(channel_name);
     }
 
@@ -6925,5 +6966,84 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
             err.to_string().contains("out of bounds"),
             "out-of-range remove should error: {err}"
         );
+    }
+
+    /// Regression for #4865: legacy `POST /api/channels/<name>/configure`
+    /// silently replaced the entire `[[channels.<name>]]` array with a
+    /// single `[channels.<name>]` table, losing every instance after the
+    /// first. The helper must refuse with the AoT-conflict sentinel so the
+    /// handler can map to 409 Conflict.
+    #[test]
+    fn upsert_channel_config_refuses_when_aot_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[channels.telegram]]\nbot_token_env = \"TG_A\"\n\n\
+             [[channels.telegram]]\nbot_token_env = \"TG_B\"\n",
+        )
+        .unwrap();
+        let mut fields: HashMap<String, (String, FieldType)> = HashMap::new();
+        fields.insert(
+            "bot_token_env".to_string(),
+            ("TG_REPLACEMENT".to_string(), FieldType::Text),
+        );
+        let err = upsert_channel_config(&path, "telegram", &fields).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with(CHANNEL_AOT_CONFLICT_PREFIX),
+            "expected AoT-conflict sentinel, got: {msg}"
+        );
+        // Disk must be untouched — both original instances still present.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("TG_A"), "instance A was clobbered: {raw}");
+        assert!(raw.contains("TG_B"), "instance B was clobbered: {raw}");
+        assert!(
+            !raw.contains("TG_REPLACEMENT"),
+            "refused write must not appear on disk: {raw}"
+        );
+    }
+
+    /// Regression for #4865: `DELETE /api/channels/<name>/configure` would
+    /// drop the entire `[[channels.<name>]]` array, including instances the
+    /// user had created via the per-instance API. Helper must refuse.
+    #[test]
+    fn remove_channel_config_refuses_when_aot_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[channels.telegram]]\nbot_token_env = \"TG_A\"\n\n\
+             [[channels.telegram]]\nbot_token_env = \"TG_B\"\n",
+        )
+        .unwrap();
+        let err = remove_channel_config(&path, "telegram").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with(CHANNEL_AOT_CONFLICT_PREFIX),
+            "expected AoT-conflict sentinel, got: {msg}"
+        );
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("TG_A"), "instance A was clobbered: {raw}");
+        assert!(raw.contains("TG_B"), "instance B was clobbered: {raw}");
+    }
+
+    /// Single-instance legacy table form must keep working with /configure
+    /// (the back-compat path). The AoT-refusal must NOT trigger when the
+    /// channel is stored as a single table.
+    #[test]
+    fn upsert_channel_config_still_replaces_legacy_single_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "[channels.telegram]\nbot_token_env = \"OLD\"\n").unwrap();
+        let mut fields: HashMap<String, (String, FieldType)> = HashMap::new();
+        fields.insert(
+            "bot_token_env".to_string(),
+            ("NEW_TOKEN".to_string(), FieldType::Text),
+        );
+        upsert_channel_config(&path, "telegram", &fields).expect("legacy single-table replace");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("NEW_TOKEN"), "replacement must land: {raw}");
+        assert!(!raw.contains("OLD"), "old value must be gone: {raw}");
     }
 }

@@ -471,12 +471,14 @@ describe("ChannelsPage", () => {
             fields: [],
             config: { bot_token_env: "TELEGRAM_BOT_TOKEN" },
             has_token: true,
+            signature: "sig-instance-0",
           },
           {
             index: 1,
             fields: [],
             config: { bot_token_env: "TELEGRAM_BOT_TOKEN_2" },
             has_token: false,
+            signature: "sig-instance-1",
           },
         ],
         total: 2,
@@ -492,7 +494,8 @@ describe("ChannelsPage", () => {
     expect(within(drawer).getByText(/TELEGRAM_BOT_TOKEN_2/)).toBeInTheDocument();
 
     // Delete the second instance — first click stages confirmation, second
-    // click fires the mutation.
+    // click fires the mutation. Mutation must include the per-instance
+    // signature CAS token (#4865) so the server can detect concurrent edits.
     const deleteButtons = within(drawer).getAllByLabelText("common.delete");
     expect(deleteButtons).toHaveLength(2);
     fireEvent.click(deleteButtons[1]);
@@ -500,7 +503,11 @@ describe("ChannelsPage", () => {
 
     expect(muts.remove.mutate).toHaveBeenCalledTimes(1);
     const [args] = muts.remove.mutate.mock.calls[0];
-    expect(args).toEqual({ channelName: "telegram", index: 1 });
+    expect(args).toEqual({
+      channelName: "telegram",
+      index: 1,
+      signature: "sig-instance-1",
+    });
   });
 
   it("refetches channels when the header refresh action fires", () => {

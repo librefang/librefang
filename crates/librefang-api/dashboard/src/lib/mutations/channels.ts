@@ -55,11 +55,20 @@ export function useUpdateChannelInstance() {
       channelName,
       index,
       fields,
+      signature,
+      clearSecrets,
     }: {
       channelName: string;
       index: number;
       fields: Record<string, unknown>;
-    }) => updateChannelInstance(channelName, index, fields),
+      /** CAS token from the list response. The server rejects the PUT with
+       *  409 if a concurrent edit shifted indices or modified this row. */
+      signature: string;
+      /** Field keys whose secret env-var ref should be actively dropped
+       *  (and the env-var line removed from secrets.env, if no sibling
+       *  instance still references it). */
+      clearSecrets?: string[];
+    }) => updateChannelInstance(channelName, index, fields, signature, clearSecrets),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: channelKeys.all });
     },
@@ -72,10 +81,13 @@ export function useDeleteChannelInstance() {
     mutationFn: ({
       channelName,
       index,
+      signature,
     }: {
       channelName: string;
       index: number;
-    }) => deleteChannelInstance(channelName, index),
+      /** CAS token from the list response — see `useUpdateChannelInstance`. */
+      signature: string;
+    }) => deleteChannelInstance(channelName, index, signature),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: channelKeys.all });
     },

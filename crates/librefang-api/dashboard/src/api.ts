@@ -163,6 +163,10 @@ export interface ChannelInstance {
   /** True iff every required secret env var (the env var the instance's
    *  field points at) is present and non-empty. */
   has_token: boolean;
+  /** Compare-and-swap token. Send back unchanged on PUT/DELETE so the
+   *  server can reject the write if a concurrent edit shifted indices
+   *  or modified this instance after the list was read (#4865). */
+  signature: string;
 }
 
 export interface ChannelInstancesResponse {
@@ -1738,18 +1742,24 @@ export async function updateChannelInstance(
   channelName: string,
   index: number,
   fields: Record<string, unknown>,
+  signature: string,
+  clearSecrets?: string[],
 ): Promise<{ index: number; activated: boolean; started_channels: string[] }> {
+  const body: Record<string, unknown> = { fields, signature };
+  if (clearSecrets && clearSecrets.length > 0) body.clear_secrets = clearSecrets;
   return put<{ index: number; activated: boolean; started_channels: string[] }>(
     `/api/channels/${encodeURIComponent(channelName)}/instances/${index}`,
-    { fields },
+    body,
   );
 }
 
 export async function deleteChannelInstance(
   channelName: string,
   index: number,
+  signature: string,
 ): Promise<void> {
-  await del<void>(`/api/channels/${encodeURIComponent(channelName)}/instances/${index}`);
+  const qs = `?signature=${encodeURIComponent(signature)}`;
+  await del<void>(`/api/channels/${encodeURIComponent(channelName)}/instances/${index}${qs}`);
 }
 
 export interface QrStartResponse {

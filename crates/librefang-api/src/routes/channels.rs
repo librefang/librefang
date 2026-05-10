@@ -50,9 +50,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
 use super::skills::{
     append_channel_instance, remove_channel_config, remove_channel_instance, remove_secret_env,
     update_channel_instance, upsert_channel_config, validate_env_var, write_secret_env,
+    CHANNEL_AOT_CONFLICT_PREFIX,
 };
 use super::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -1597,6 +1598,12 @@ pub async fn configure_channel(
     {
         let _config_guard = state.config_write_lock.lock().await;
         if let Err(e) = upsert_channel_config(&config_path, &name, &config_fields) {
+            let msg = e.to_string();
+            if let Some(rest) = msg.strip_prefix(CHANNEL_AOT_CONFLICT_PREFIX) {
+                return ApiErrorResponse::bad_request(rest.to_string())
+                    .with_status(StatusCode::CONFLICT)
+                    .into_json_tuple();
+            }
             return ApiErrorResponse::internal(format!("Failed to write config: {e}"))
                 .into_json_tuple();
         }
@@ -1680,6 +1687,12 @@ pub async fn remove_channel(
     {
         let _config_guard = state.config_write_lock.lock().await;
         if let Err(e) = remove_channel_config(&config_path, &name) {
+            let msg = e.to_string();
+            if let Some(rest) = msg.strip_prefix(CHANNEL_AOT_CONFLICT_PREFIX) {
+                return ApiErrorResponse::bad_request(rest.to_string())
+                    .with_status(StatusCode::CONFLICT)
+                    .into_json_tuple();
+            }
             return ApiErrorResponse::internal(format!("Failed to remove config: {e}"))
                 .into_json_tuple();
         }
@@ -1762,22 +1775,164 @@ fn build_instance_fields_json(
     fields
 }
 
-/// Process the submitted `fields` object into:
-///   1. a `config_fields` map ready to write to TOML,
-///   2. a side-effecting set of `secrets.env` writes for any secret values
-///      provided in the request.
+/// Resolve secret env var name overrides for a write to instance
+/// `target_index` of `channel`.
 ///
-/// `secret_env_overrides` lets per-instance handlers pick a custom env var
-/// name (e.g. `TELEGRAM_BOT_TOKEN_2` for the second instance) instead of
-/// the field schema's default. When the override is `None`, the schema
-/// default is used — this matches the legacy single-instance flow.
-async fn process_fields_for_write(
+/// Two cases:
+///
+///   - `target_index == existing_instances.len()` → caller is appending a new
+///     instance. `existing_instances.get(target_index)` returns `None`, so we
+///     fall through to the suffix-search branch and pick the lowest unused
+///     `<env>_<N>` name (or the bare default name when free).
+///   - `target_index < existing_instances.len()` → caller is updating an
+///     existing instance. We preserve whatever env-var name that instance is
+///     already pointing at, so re-typing the secret writes to the SAME
+///     env var (rotation in place) rather than allocating a fresh suffix
+///     that may collide with siblings or leak a stale env var.
+///
+/// The previous implementation always synthesised `<env>_<index+1>` and
+/// blindly wrote there. After deleting a middle instance, indices shift, so
+/// "add a new instance" would land on a suffix already in use by a survivor
+/// — silently overwriting the live token (#4865).
+fn resolve_secret_env_overrides(
+    meta: &ChannelMeta,
+    existing_instances: &[serde_json::Value],
+    target_index: usize,
+) -> HashMap<String, String> {
+    let mut overrides = HashMap::new();
+    for field_def in meta.fields {
+        let Some(default_env) = field_def.env_var else {
+            continue;
+        };
+
+        // Update path: preserve the env-var name the existing instance is
+        // already pointing at.
+        if let Some(existing_name) = existing_instances
+            .get(target_index)
+            .and_then(|i| i.as_object())
+            .and_then(|o| o.get(field_def.key))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            overrides.insert(field_def.key.to_string(), existing_name.to_string());
+            continue;
+        }
+
+        // Create path (or update on an instance that has no env-var ref yet):
+        // pick the lowest-unused `<env>_<N>` name across siblings.
+        let used: std::collections::HashSet<String> = existing_instances
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != target_index)
+            .filter_map(|(_, inst)| {
+                inst.as_object()
+                    .and_then(|o| o.get(field_def.key))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        let chosen = if !used.contains(default_env) {
+            default_env.to_string()
+        } else {
+            (2..)
+                .map(|n| format!("{default_env}_{n}"))
+                .find(|name| !used.contains(name))
+                .expect("counter is unbounded")
+        };
+        overrides.insert(field_def.key.to_string(), chosen);
+    }
+    overrides
+}
+
+/// Canonical JSON serialisation with object keys sorted lexicographically and
+/// no whitespace, so the same logical config always produces byte-identical
+/// output. Used as the input to `instance_signature` for an opaque-content
+/// fingerprint (CAS token) of each channel instance.
+fn canonical_json(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<(&String, &serde_json::Value)> = map.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            let parts: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap_or_default(),
+                        canonical_json(v)
+                    )
+                })
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
+        serde_json::Value::Array(arr) => {
+            let parts: Vec<String> = arr.iter().map(canonical_json).collect();
+            format!("[{}]", parts.join(","))
+        }
+        _ => serde_json::to_string(v).unwrap_or_default(),
+    }
+}
+
+/// SHA-256 of `canonical_json(instance)`, hex-encoded. The dashboard receives
+/// this as `signature` on every list response and echoes it back on PUT/DELETE
+/// so the server can detect when an intervening write moved or modified the
+/// instance the client thought it was operating on (compare-and-swap).
+fn instance_signature(instance: &serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+    let canonical = canonical_json(instance);
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Re-deserialise `[channels]` from disk under the write lock, so handlers
+/// validate against the authoritative on-disk state rather than the stale
+/// in-memory `state.channels_config` snapshot (which only catches up after
+/// the post-write hot-reload). Without this, two concurrent PUT/DELETE
+/// requests can both pass an in-memory range check, then race to write a
+/// shifted disk view — the second write lands on the wrong instance.
+fn read_disk_channels(
+    config_path: &std::path::Path,
+) -> Result<librefang_types::config::ChannelsConfig, Box<dyn std::error::Error + Send + Sync>> {
+    if !config_path.exists() {
+        return Ok(librefang_types::config::ChannelsConfig::default());
+    }
+    let content = std::fs::read_to_string(config_path)?;
+    if content.trim().is_empty() {
+        return Ok(librefang_types::config::ChannelsConfig::default());
+    }
+    let root: toml::Value = toml::from_str(&content)?;
+    let Some(channels_val) = root.get("channels") else {
+        return Ok(librefang_types::config::ChannelsConfig::default());
+    };
+    let channels: librefang_types::config::ChannelsConfig = channels_val.clone().try_into()?;
+    Ok(channels)
+}
+
+/// Pure pre-write validation: run the user-submitted `fields` through the
+/// channel schema, resolve each secret field's effective env-var name from
+/// `secret_env_overrides`, and accumulate (a) the TOML config payload and
+/// (b) the side-effecting secret writes that need to land in `secrets.env`.
+///
+/// No I/O happens here — secrets are NOT written until `apply_secret_writes`
+/// is called, which lets handlers defer the writes until they are inside the
+/// `config_write_lock` critical section and have verified the CAS signature.
+struct PreparedWrite {
+    config_fields: HashMap<String, (String, FieldType)>,
+    /// `(env_var_name, value)` pairs to write to `secrets.env`. Distinct from
+    /// `config_fields` because the same env-var name could be referenced by
+    /// multiple fields (defensive — the schema does not currently allow it).
+    secret_writes: Vec<(String, String)>,
+}
+
+fn prepare_fields_write(
     meta: &ChannelMeta,
     fields: &serde_json::Map<String, serde_json::Value>,
-    secrets_path: &std::path::Path,
     secret_env_overrides: &HashMap<String, String>,
-) -> Result<HashMap<String, (String, FieldType)>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<PreparedWrite, (StatusCode, Json<serde_json::Value>)> {
     let mut config_fields: HashMap<String, (String, FieldType)> = HashMap::new();
+    let mut secret_writes: Vec<(String, String)> = Vec::new();
 
     for field_def in meta.fields {
         let value = fields
@@ -1789,37 +1944,16 @@ async fn process_fields_for_write(
         }
 
         if let Some(default_env_var) = field_def.env_var {
-            // Resolve the env var name to write under: per-instance override
-            // wins, else fall back to the field schema's default.
             let env_var_name = secret_env_overrides
                 .get(field_def.key)
                 .cloned()
                 .unwrap_or_else(|| default_env_var.to_string());
 
-            // Validate the resolved env var name + secret value before
-            // touching the filesystem.
             if let Err(msg) = validate_env_var(&env_var_name, value) {
                 return Err(ApiErrorResponse::bad_request(msg).into_json_tuple());
             }
-            if let Err(e) = write_secret_env(secrets_path, &env_var_name, value) {
-                return Err(
-                    ApiErrorResponse::internal(format!("Failed to write secret: {e}"))
-                        .into_json_tuple(),
-                );
-            }
-            // `std::env::set_var` is not thread-safe inside the multithreaded
-            // tokio runtime; delegate to a blocking thread to avoid UB.
-            {
-                let env_var_owned = env_var_name.clone();
-                let value_owned = value.to_string();
-                let _ = tokio::task::spawn_blocking(move || {
-                    // SAFETY: single mutation on a dedicated blocking thread.
-                    unsafe { std::env::set_var(&env_var_owned, &value_owned) };
-                })
-                .await;
-            }
-            // Store the env var NAME (not the value) in TOML so the kernel
-            // knows which env var to read when activating the instance.
+
+            secret_writes.push((env_var_name.clone(), value.to_string()));
             config_fields.insert(field_def.key.to_string(), (env_var_name, FieldType::Text));
         } else {
             config_fields.insert(
@@ -1829,33 +1963,37 @@ async fn process_fields_for_write(
         }
     }
 
-    Ok(config_fields)
+    Ok(PreparedWrite {
+        config_fields,
+        secret_writes,
+    })
 }
 
-/// Compute per-instance secret env var name overrides for instance `index`.
-///
-/// Index 0 keeps the field's default env var name (e.g. `TELEGRAM_BOT_TOKEN`)
-/// for backwards compatibility with the legacy single-instance flow. Index
-/// N>0 appends `_<N+1>` so writes don't collide:
-///   - instance 0 → `TELEGRAM_BOT_TOKEN`
-///   - instance 1 → `TELEGRAM_BOT_TOKEN_2`
-///   - instance 2 → `TELEGRAM_BOT_TOKEN_3`
-///
-/// If the user wants a custom env var name they can edit `secrets.env`
-/// directly and update the per-instance `bot_token_env` field; the dashboard
-/// surfaces the resolved env var name in the form so this is discoverable.
-fn default_secret_env_overrides(meta: &ChannelMeta, index: usize) -> HashMap<String, String> {
-    let mut overrides = HashMap::new();
-    if index == 0 {
-        return overrides;
-    }
-    let suffix = format!("_{}", index + 1);
-    for field_def in meta.fields {
-        if let Some(env_var) = field_def.env_var {
-            overrides.insert(field_def.key.to_string(), format!("{env_var}{suffix}"));
+/// Apply the deferred secret writes from `prepare_fields_write` under the
+/// `config_write_lock` critical section. Each pair is written to
+/// `secrets.env` and pushed into the running process's environment via a
+/// dedicated blocking thread (`std::env::set_var` is not thread-safe in the
+/// async runtime).
+async fn apply_secret_writes(
+    secrets_path: &std::path::Path,
+    secret_writes: &[(String, String)],
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    for (env_var, value) in secret_writes {
+        if let Err(e) = write_secret_env(secrets_path, env_var, value) {
+            return Err(
+                ApiErrorResponse::internal(format!("Failed to write secret: {e}"))
+                    .into_json_tuple(),
+            );
         }
+        let env_var_owned = env_var.clone();
+        let value_owned = value.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            // SAFETY: single mutation on a dedicated blocking thread.
+            unsafe { std::env::set_var(&env_var_owned, &value_owned) };
+        })
+        .await;
     }
-    overrides
+    Ok(())
 }
 
 #[utoipa::path(
@@ -1907,11 +2045,16 @@ pub async fn list_channel_instances(
                         .map(|v| !v.is_empty())
                         .unwrap_or(false)
                 });
+            // CAS token. The dashboard echoes this back on PUT/DELETE so the
+            // server can reject writes that target an instance that has been
+            // moved or modified since the client read it (#4865).
+            let signature = instance_signature(inst);
             serde_json::json!({
                 "index": idx,
                 "fields": fields,
                 "config": inst,
                 "has_token": has_token,
+                "signature": signature,
             })
         })
         .collect();
@@ -1943,6 +2086,12 @@ pub async fn list_channel_instances(
     )
 )]
 /// POST /api/channels/{name}/instances — Append a new `[[channels.<name>]]`.
+///
+/// The whole "compute target index → resolve env-var name overrides → write
+/// secrets → append config" sequence runs inside the `config_write_lock`
+/// critical section, against a freshly re-read on-disk view of `[channels]`,
+/// so two concurrent creates can't pick the same suffix or land at the same
+/// index (#4865).
 pub async fn create_channel_instance(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -1962,24 +2111,33 @@ pub async fn create_channel_instance(
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
 
-    // Compute the index this new instance will land at (under the live
-    // channels read lock for a consistent snapshot — `config_write_lock`
-    // below serialises against concurrent writers).
-    let next_index = {
-        let live_channels = state.channels_config.read().await;
-        channel_instance_count(&live_channels, meta.name)
-    };
-    let overrides = default_secret_env_overrides(meta, next_index);
+    let written_index = {
+        let _config_guard = state.config_write_lock.lock().await;
 
-    let config_fields =
-        match process_fields_for_write(meta, fields, &secrets_path, &overrides).await {
-            Ok(f) => f,
+        // Re-read `[channels]` from disk under the lock, so override resolution
+        // sees the authoritative state (the in-memory snapshot only catches
+        // up after the post-write hot-reload).
+        let disk_channels = match read_disk_channels(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return ApiErrorResponse::internal(format!("Failed to read config: {e}"))
+                    .into_json_tuple();
+            }
+        };
+        let existing_instances = channel_instances_serialized(&disk_channels, meta.name);
+        let next_index = existing_instances.len();
+        let overrides = resolve_secret_env_overrides(meta, &existing_instances, next_index);
+
+        let prepared = match prepare_fields_write(meta, fields, &overrides) {
+            Ok(p) => p,
             Err(resp) => return resp,
         };
 
-    let written_index = {
-        let _config_guard = state.config_write_lock.lock().await;
-        match append_channel_instance(&config_path, &name, &config_fields) {
+        if let Err(resp) = apply_secret_writes(&secrets_path, &prepared.secret_writes).await {
+            return resp;
+        }
+
+        match append_channel_instance(&config_path, &name, &prepared.config_fields) {
             Ok(idx) => idx,
             Err(e) => {
                 return ApiErrorResponse::internal(format!("Failed to append instance: {e}"))
@@ -2026,6 +2184,27 @@ pub async fn create_channel_instance(
     )
 )]
 /// PUT /api/channels/{name}/instances/{index} — Replace one instance's fields.
+///
+/// Body shape:
+/// ```json
+/// {
+///   "fields": { "bot_token_env": "...", "default_agent": "assistant" },
+///   "signature": "<hex from GET response>",
+///   "clear_secrets": ["bot_token_env"]   // optional
+/// }
+/// ```
+///
+/// `signature` is REQUIRED and acts as a compare-and-swap token: the server
+/// re-reads disk under the write lock, computes the signature of the
+/// instance currently at `index`, and rejects with 409 Conflict if it
+/// doesn't match. This eliminates the silent-wrong-write bug where a
+/// concurrent delete on a sibling row shifted indices between the client's
+/// list-fetch and its PUT (#4865).
+///
+/// `clear_secrets` lets the caller actively drop a secret reference instead
+/// of preserving it. Listed keys have their `<key>_env` field removed from
+/// the rebuilt instance and, when no sibling instance references the same
+/// env-var name, the env-var line is also removed from `secrets.env`.
 pub async fn update_channel_instance_handler(
     State(state): State<Arc<AppState>>,
     Path((name, index)): Path<(String, usize)>,
@@ -2041,67 +2220,141 @@ pub async fn update_channel_instance_handler(
         None => return ApiErrorResponse::bad_request("Missing 'fields' object").into_json_tuple(),
     };
 
-    // Range-check before touching the filesystem so a 404 is clean.
-    let current_count = {
-        let live_channels = state.channels_config.read().await;
-        channel_instance_count(&live_channels, meta.name)
+    // Required CAS token. Reject before touching disk so a missing field is
+    // a clean 400 rather than an opaque race surface.
+    let client_signature = match body.get("signature").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return ApiErrorResponse::bad_request(
+                "Missing 'signature' (compare-and-swap token from list response)",
+            )
+            .into_json_tuple();
+        }
     };
-    if index >= current_count {
-        return ApiErrorResponse::not_found(format!(
-            "Instance {index} out of range (have {current_count} instance(s))"
-        ))
-        .into_json_tuple();
-    }
+
+    let clear_secrets: Vec<String> = body
+        .get("clear_secrets")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let home = librefang_home();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
 
-    let overrides = default_secret_env_overrides(meta, index);
-    let mut config_fields =
-        match process_fields_for_write(meta, fields, &secrets_path, &overrides).await {
-            Ok(f) => f,
+    {
+        let _config_guard = state.config_write_lock.lock().await;
+
+        // Re-read disk so range/CAS check + override resolution see the
+        // authoritative state.
+        let disk_channels = match read_disk_channels(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return ApiErrorResponse::internal(format!("Failed to read config: {e}"))
+                    .into_json_tuple();
+            }
+        };
+        let existing_instances = channel_instances_serialized(&disk_channels, meta.name);
+        if index >= existing_instances.len() {
+            return ApiErrorResponse::not_found(format!(
+                "Instance {index} out of range (have {} instance(s))",
+                existing_instances.len()
+            ))
+            .into_json_tuple();
+        }
+
+        let on_disk_signature = instance_signature(&existing_instances[index]);
+        if on_disk_signature != client_signature {
+            return ApiErrorResponse::bad_request(
+                "Instance has been modified or moved since the list was read; refresh and retry",
+            )
+            .with_status(StatusCode::CONFLICT)
+            .into_json_tuple();
+        }
+
+        let overrides = resolve_secret_env_overrides(meta, &existing_instances, index);
+        let mut prepared = match prepare_fields_write(meta, fields, &overrides) {
+            Ok(p) => p,
             Err(resp) => return resp,
         };
 
-    // Preserve the existing instance's secret-field env-var-name reference
-    // when the user didn't retype the secret. Without this, the form's
-    // "leave empty to keep" placeholder would lie: editing any non-secret
-    // field while leaving the bot token blank would drop `bot_token_env`
-    // from the rebuilt entry, breaking authentication. Only secret fields
-    // get this treatment because the form pre-fills non-secret fields with
-    // their saved values, so they round-trip naturally.
-    let existing_instance = {
-        let live_channels = state.channels_config.read().await;
-        channel_instances_serialized(&live_channels, meta.name)
-            .get(index)
-            .cloned()
-    };
-    if let Some(obj) = existing_instance.as_ref().and_then(|v| v.as_object()) {
-        for field_def in meta.fields {
-            if field_def.field_type != FieldType::Secret {
-                continue;
+        // Preserve the existing instance's secret-field env-var-name when the
+        // user didn't retype the secret AND didn't list it under
+        // `clear_secrets`. Without this, editing any non-secret field while
+        // leaving a secret blank would silently drop the env-var ref, breaking
+        // authentication.
+        if let Some(obj) = existing_instances[index].as_object() {
+            for field_def in meta.fields {
+                if field_def.field_type != FieldType::Secret {
+                    continue;
+                }
+                if prepared.config_fields.contains_key(field_def.key) {
+                    continue;
+                }
+                if clear_secrets.iter().any(|k| k == field_def.key) {
+                    continue;
+                }
+                let existing_env_name = obj
+                    .get(field_def.key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if existing_env_name.is_empty() {
+                    continue;
+                }
+                prepared.config_fields.insert(
+                    field_def.key.to_string(),
+                    (existing_env_name.to_string(), FieldType::Text),
+                );
             }
-            if config_fields.contains_key(field_def.key) {
-                continue;
-            }
-            let existing_env_name = obj
-                .get(field_def.key)
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if existing_env_name.is_empty() {
-                continue;
-            }
-            config_fields.insert(
-                field_def.key.to_string(),
-                (existing_env_name.to_string(), FieldType::Text),
-            );
         }
-    }
 
-    {
-        let _config_guard = state.config_write_lock.lock().await;
-        if let Err(e) = update_channel_instance(&config_path, &name, index, &config_fields) {
+        // For each cleared secret: drop the env-var line from secrets.env if
+        // no sibling instance still references the same env-var name. This
+        // avoids leaving stale tokens on disk after the user has removed an
+        // instance's auth, while preventing collateral damage to siblings
+        // that happen to share the env-var name.
+        if !clear_secrets.is_empty() {
+            if let Some(obj) = existing_instances[index].as_object() {
+                let sibling_env_refs: std::collections::HashSet<String> = existing_instances
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != index)
+                    .filter_map(|(_, inst)| inst.as_object())
+                    .flat_map(|o| o.values())
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+                for key in &clear_secrets {
+                    let Some(env_name) = obj.get(key).and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    if env_name.is_empty() || sibling_env_refs.contains(env_name) {
+                        continue;
+                    }
+                    if let Err(e) = remove_secret_env(&secrets_path, env_name) {
+                        tracing::warn!(error = %e, env_var = %env_name, "Failed to remove cleared secret env var");
+                    }
+                    let env_owned = env_name.to_string();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        // SAFETY: single mutation on a dedicated blocking thread.
+                        unsafe { std::env::remove_var(&env_owned) };
+                    })
+                    .await;
+                }
+            }
+        }
+
+        if let Err(resp) = apply_secret_writes(&secrets_path, &prepared.secret_writes).await {
+            return resp;
+        }
+
+        if let Err(e) = update_channel_instance(&config_path, &name, index, &prepared.config_fields)
+        {
             return ApiErrorResponse::internal(format!("Failed to update instance: {e}"))
                 .into_json_tuple();
         }
@@ -2142,36 +2395,68 @@ pub async fn update_channel_instance_handler(
         (status = 500, description = "Internal server error", body = crate::types::JsonObject)
     )
 )]
-/// DELETE /api/channels/{name}/instances/{index} — Remove a single instance.
+/// DELETE /api/channels/{name}/instances/{index}?signature=<hex>
+///
+/// `signature` is REQUIRED (query string) and acts as a compare-and-swap
+/// token: the server re-reads disk under the write lock and rejects with
+/// 409 Conflict if the instance currently at `index` doesn't match the
+/// signature the client read from the GET response (#4865).
 ///
 /// Note: this does NOT clear the secret env var the instance pointed at —
 /// the env var may be shared with another instance, and we don't want to
-/// silently break a running bot. The user can clear stale entries from
-/// `secrets.env` manually.
+/// silently break a running bot. To explicitly clear secrets while editing,
+/// use PUT with `clear_secrets`.
 pub async fn delete_channel_instance(
     State(state): State<Arc<AppState>>,
     Path((name, index)): Path<(String, usize)>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if find_channel_meta(&name).is_none() {
-        return ApiErrorResponse::not_found("Unknown channel").into_json_tuple();
+    let meta = match find_channel_meta(&name) {
+        Some(m) => m,
+        None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
     };
 
-    let current_count = {
-        let live_channels = state.channels_config.read().await;
-        channel_instance_count(&live_channels, &name)
+    let client_signature = match query.get("signature") {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => {
+            return ApiErrorResponse::bad_request(
+                "Missing 'signature' query parameter (compare-and-swap token from list response)",
+            )
+            .into_json_tuple();
+        }
     };
-    if index >= current_count {
-        return ApiErrorResponse::not_found(format!(
-            "Instance {index} out of range (have {current_count} instance(s))"
-        ))
-        .into_json_tuple();
-    }
 
     let home = librefang_home();
     let config_path = home.join("config.toml");
 
     {
         let _config_guard = state.config_write_lock.lock().await;
+
+        let disk_channels = match read_disk_channels(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return ApiErrorResponse::internal(format!("Failed to read config: {e}"))
+                    .into_json_tuple();
+            }
+        };
+        let existing_instances = channel_instances_serialized(&disk_channels, meta.name);
+        if index >= existing_instances.len() {
+            return ApiErrorResponse::not_found(format!(
+                "Instance {index} out of range (have {} instance(s))",
+                existing_instances.len()
+            ))
+            .into_json_tuple();
+        }
+
+        let on_disk_signature = instance_signature(&existing_instances[index]);
+        if on_disk_signature != client_signature {
+            return ApiErrorResponse::bad_request(
+                "Instance has been modified or moved since the list was read; refresh and retry",
+            )
+            .with_status(StatusCode::CONFLICT)
+            .into_json_tuple();
+        }
+
         if let Err(e) = remove_channel_instance(&config_path, &name, index) {
             return ApiErrorResponse::internal(format!("Failed to remove instance: {e}"))
                 .into_json_tuple();
@@ -2901,5 +3186,133 @@ mod test_channel_status_tests {
             StatusCode::OK,
             "downstream send failure must NOT be reported as 200"
         );
+    }
+}
+
+#[cfg(test)]
+mod instance_helper_tests {
+    //! Unit coverage for the per-instance write helpers added in #4865:
+    //! `resolve_secret_env_overrides` and `instance_signature`. Both
+    //! eliminate silent-data-loss footguns the original PR shipped with
+    //! and have no business reaching production untested.
+    use super::*;
+
+    fn telegram_meta() -> &'static ChannelMeta {
+        find_channel_meta("telegram").expect("telegram is in the registry")
+    }
+
+    fn inst_with_env(env_name: &str) -> serde_json::Value {
+        serde_json::json!({ "bot_token_env": env_name })
+    }
+
+    /// First-instance create on an empty channel returns the bare default
+    /// env-var name (no suffix), matching the legacy single-instance flow.
+    #[test]
+    fn resolve_overrides_picks_default_for_first_instance() {
+        let meta = telegram_meta();
+        let overrides = resolve_secret_env_overrides(meta, &[], 0);
+        assert_eq!(
+            overrides.get("bot_token_env").map(|s| s.as_str()),
+            Some("TELEGRAM_BOT_TOKEN"),
+            "first instance must use the bare default env-var name: {overrides:?}"
+        );
+    }
+
+    /// After deleting the middle of three instances, the survivors point at
+    /// `_BOT_TOKEN` and `_BOT_TOKEN_3`. Adding a new instance must NOT pick
+    /// `_BOT_TOKEN_3` (which would silently overwrite the surviving instance
+    /// at idx 1) — it must pick `_BOT_TOKEN_2`, the lowest unused suffix.
+    #[test]
+    fn resolve_overrides_picks_lowest_unused_suffix_after_middle_delete() {
+        let meta = telegram_meta();
+        let existing = vec![
+            inst_with_env("TELEGRAM_BOT_TOKEN"),
+            inst_with_env("TELEGRAM_BOT_TOKEN_3"),
+        ];
+        let overrides = resolve_secret_env_overrides(meta, &existing, existing.len());
+        assert_eq!(
+            overrides.get("bot_token_env").map(|s| s.as_str()),
+            Some("TELEGRAM_BOT_TOKEN_2"),
+            "must reuse the freed `_2` slot, not append `_3` and clobber the survivor: {overrides:?}"
+        );
+    }
+
+    /// Update on an existing instance preserves the env-var name that
+    /// instance is already pointing at — no fresh suffix allocated, no
+    /// drift onto a sibling's env var. This is what makes "rotate the
+    /// bot token in place" actually rotate in place.
+    #[test]
+    fn resolve_overrides_preserves_existing_env_name_on_update() {
+        let meta = telegram_meta();
+        let existing = vec![
+            inst_with_env("TELEGRAM_BOT_TOKEN"),
+            inst_with_env("MY_CUSTOM_TG_TOKEN"),
+        ];
+        let overrides = resolve_secret_env_overrides(meta, &existing, 1);
+        assert_eq!(
+            overrides.get("bot_token_env").map(|s| s.as_str()),
+            Some("MY_CUSTOM_TG_TOKEN"),
+            "update path must preserve the instance's existing env-var name: {overrides:?}"
+        );
+    }
+
+    /// Sibling-set excludes the target index. An update should not skip
+    /// `_BOT_TOKEN_2` just because the row being updated currently points
+    /// at it (we'd never reach the suffix branch for a non-empty existing
+    /// ref anyway, but a future caller passing target_index for an empty
+    /// row should still be allowed to pick its own slot).
+    #[test]
+    fn resolve_overrides_excludes_target_index_from_sibling_set() {
+        let meta = telegram_meta();
+        let existing = vec![
+            inst_with_env("TELEGRAM_BOT_TOKEN"),
+            inst_with_env(""), // empty — falls through to suffix search
+            inst_with_env("TELEGRAM_BOT_TOKEN_3"),
+        ];
+        let overrides = resolve_secret_env_overrides(meta, &existing, 1);
+        // Slot 1 is empty, so we go to suffix search. Used by siblings: KEY,
+        // KEY_3. Lowest unused: KEY_2.
+        assert_eq!(
+            overrides.get("bot_token_env").map(|s| s.as_str()),
+            Some("TELEGRAM_BOT_TOKEN_2")
+        );
+    }
+
+    /// Signature is stable across object-key insertion order, so two
+    /// processes seeing identical content always emit the same hex string.
+    #[test]
+    fn instance_signature_stable_across_key_order() {
+        let a = serde_json::json!({ "x": 1, "y": "two", "z": [3, 4] });
+        let b = serde_json::json!({ "z": [3, 4], "y": "two", "x": 1 });
+        assert_eq!(
+            instance_signature(&a),
+            instance_signature(&b),
+            "signature must be canonical across key order"
+        );
+    }
+
+    /// Any content change flips the signature so the CAS check fires.
+    #[test]
+    fn instance_signature_detects_mutation() {
+        let a = serde_json::json!({ "bot_token_env": "TG_TOKEN", "default_agent": "alice" });
+        let b = serde_json::json!({ "bot_token_env": "TG_TOKEN", "default_agent": "bob" });
+        assert_ne!(
+            instance_signature(&a),
+            instance_signature(&b),
+            "signature must change when any field changes"
+        );
+    }
+
+    /// Output is hex (so the dashboard can put it in a JSON string and
+    /// query string without escaping concerns).
+    #[test]
+    fn instance_signature_is_lowercase_hex() {
+        let sig = instance_signature(&serde_json::json!({ "x": 1 }));
+        assert!(
+            sig.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+            "signature must be lowercase hex: {sig}"
+        );
+        assert_eq!(sig.len(), 64, "sha-256 hex length: {sig}");
     }
 }

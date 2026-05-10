@@ -513,8 +513,28 @@ function InstancesDialog({
   const handleUpdate = useCallback(
     (payload: Record<string, string>) => {
       if (editIndex === null) return;
+      const target = instances[editIndex];
+      if (!target) {
+        // Defensive: the list refetch races with the edit form's submit.
+        // If the row vanished, surface the 409-equivalent inline instead of
+        // sending an unsigned PUT.
+        addToast(
+          t("channels.instance_stale", {
+            defaultValue: "Instance was removed by another tab; refresh and retry",
+          }),
+          "error",
+        );
+        setPhase("list");
+        setEditIndex(null);
+        return;
+      }
       updateMut.mutate(
-        { channelName: channel.name, index: editIndex, fields: payload },
+        {
+          channelName: channel.name,
+          index: editIndex,
+          fields: payload,
+          signature: target.signature,
+        },
         {
           onSuccess: () => {
             addToast(
@@ -532,13 +552,24 @@ function InstancesDialog({
         },
       );
     },
-    [updateMut, channel.name, channelLabel, editIndex, addToast, t],
+    [updateMut, channel.name, channelLabel, editIndex, instances, addToast, t],
   );
 
   const handleDelete = useCallback(
     (idx: number) => {
+      const target = instances[idx];
+      if (!target) {
+        addToast(
+          t("channels.instance_stale", {
+            defaultValue: "Instance was removed by another tab; refresh and retry",
+          }),
+          "error",
+        );
+        setPendingDelete(null);
+        return;
+      }
       deleteMut.mutate(
-        { channelName: channel.name, index: idx },
+        { channelName: channel.name, index: idx, signature: target.signature },
         {
           onSuccess: () => {
             addToast(
@@ -557,7 +588,7 @@ function InstancesDialog({
         },
       );
     },
-    [deleteMut, channel.name, channelLabel, addToast, t],
+    [deleteMut, channel.name, channelLabel, instances, addToast, t],
   );
 
   const fieldsForEdit: ChannelField[] = useMemo(() => {

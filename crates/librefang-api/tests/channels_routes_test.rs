@@ -434,7 +434,10 @@ async fn channels_update_instance_unknown_channel_returns_404() {
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_update_instance_out_of_range_returns_404() {
     // Seed one instance, then try to PUT index 7. The handler must reject
-    // before touching disk because the index is out of range.
+    // because the index is out of range. The body carries a placeholder
+    // signature — the post-#4865 PUT requires the CAS field, but a stale
+    // value here is fine since the range check fires first under the
+    // write lock.
     let channels = ChannelsConfig {
         telegram: OneOrMany(vec![TelegramConfig::default()]),
         ..ChannelsConfig::default()
@@ -444,7 +447,10 @@ async fn channels_update_instance_out_of_range_returns_404() {
         &h,
         Method::PUT,
         "/api/channels/telegram/instances/7",
-        Some(serde_json::json!({"fields": {"default_agent": "x"}})),
+        Some(serde_json::json!({
+            "fields": {"default_agent": "x"},
+            "signature": "stale-signature",
+        })),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
@@ -454,6 +460,34 @@ async fn channels_update_instance_out_of_range_returns_404() {
             .unwrap_or("")
             .contains("out of range"),
         "error must mention 'out of range': {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_update_instance_missing_signature_returns_400() {
+    // The post-#4865 PUT requires a `signature` body field for CAS so the
+    // server can reject writes that target an instance which has been
+    // moved or modified since the client read it. A missing signature is
+    // a clean 400 — the handler must not silently fall through to a write.
+    let channels = ChannelsConfig {
+        telegram: OneOrMany(vec![TelegramConfig::default()]),
+        ..ChannelsConfig::default()
+    };
+    let h = boot_with_channels(channels).await;
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/channels/telegram/instances/0",
+        Some(serde_json::json!({"fields": {"default_agent": "x"}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("signature"),
+        "error must call out the missing 'signature' field: {body}"
     );
 }
 
@@ -494,10 +528,12 @@ async fn channels_delete_instance_out_of_range_returns_404() {
         ..ChannelsConfig::default()
     };
     let h = boot_with_channels(channels).await;
+    // Post-#4865 DELETE requires `?signature=` for CAS — a stale value
+    // here is fine, the range check fires first under the write lock.
     let (status, body) = json_request(
         &h,
         Method::DELETE,
-        "/api/channels/telegram/instances/3",
+        "/api/channels/telegram/instances/3?signature=stale",
         None,
     )
     .await;
@@ -508,6 +544,34 @@ async fn channels_delete_instance_out_of_range_returns_404() {
             .unwrap_or("")
             .contains("out of range"),
         "error must mention 'out of range': {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_delete_instance_missing_signature_returns_400() {
+    // The post-#4865 DELETE requires `?signature=` query parameter for
+    // CAS. Without it the handler must reject with 400 before touching
+    // disk — silently deleting based on an index alone is the bug class
+    // the CAS token closes off.
+    let channels = ChannelsConfig {
+        telegram: OneOrMany(vec![TelegramConfig::default()]),
+        ..ChannelsConfig::default()
+    };
+    let h = boot_with_channels(channels).await;
+    let (status, body) = json_request(
+        &h,
+        Method::DELETE,
+        "/api/channels/telegram/instances/0",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("signature"),
+        "error must call out the missing 'signature' query parameter: {body}"
     );
 }
 
