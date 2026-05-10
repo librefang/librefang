@@ -2895,10 +2895,23 @@ export async function getUsageDaily(): Promise<UsageDailyResponse> {
   return get<UsageDailyResponse>("/api/usage/daily");
 }
 
+// Mirrors the kernel-side `BudgetStatus` (crates/librefang-kernel-metering)
+// which the API layer returns directly from `GET /api/budget`. The field
+// names are deliberately *not* the `BudgetConfig` names — they include the
+// current `*_spend` and `*_pct` rollups computed against the live
+// `usage_events` table. Issue #4797 (the dashboard read these as
+// `max_hourly_usd` etc.) was a typed-shape regression that always
+// rendered "-" for the operator's configured caps.
 export interface BudgetStatus {
-  max_hourly_usd?: number;
-  max_daily_usd?: number;
-  max_monthly_usd?: number;
+  hourly_spend?: number;
+  hourly_limit?: number;
+  hourly_pct?: number;
+  daily_spend?: number;
+  daily_limit?: number;
+  daily_pct?: number;
+  monthly_spend?: number;
+  monthly_limit?: number;
+  monthly_pct?: number;
   alert_threshold?: number;
   default_max_llm_tokens_per_hour?: number;
   [key: string]: unknown;

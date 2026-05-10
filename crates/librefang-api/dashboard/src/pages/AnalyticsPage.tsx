@@ -428,9 +428,14 @@ export function AnalyticsPage() {
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
               {([
-                { key: "hourly", label: t("analytics.hourly_limit"), current: budgetQuery.data?.max_hourly_usd, unit: "$/hr" },
-                { key: "daily", label: t("analytics.daily_limit"), current: budgetQuery.data?.max_daily_usd, unit: "$/day" },
-                { key: "monthly", label: t("analytics.monthly_limit"), current: budgetQuery.data?.max_monthly_usd, unit: "$/mo" },
+                // `GET /api/budget` returns the kernel-side `BudgetStatus`
+                // shape (`*_limit` / `*_spend` / `*_pct`), NOT the on-disk
+                // `BudgetConfig` field names — issue #4797 was a typo here
+                // that always rendered "-" for configured caps because
+                // `max_hourly_usd` is undefined on the response payload.
+                { key: "hourly", label: t("analytics.hourly_limit"), current: budgetQuery.data?.hourly_limit, unit: "$/hr" },
+                { key: "daily", label: t("analytics.daily_limit"), current: budgetQuery.data?.daily_limit, unit: "$/day" },
+                { key: "monthly", label: t("analytics.monthly_limit"), current: budgetQuery.data?.monthly_limit, unit: "$/mo" },
                 { key: "tokens", label: t("analytics.token_limit"), current: budgetQuery.data?.default_max_llm_tokens_per_hour, unit: "tok/hr" },
                 { key: "alert", label: t("analytics.alert_threshold"), current: budgetQuery.data?.alert_threshold, unit: "0-1" },
               ] as { key: keyof BudgetForm; label: string; current: number | undefined; unit: string }[]).map(f => (

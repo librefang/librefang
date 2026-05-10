@@ -97,6 +97,17 @@ async fn boot() -> Harness {
             ..Default::default()
         };
     }));
+
+    // Persist the seed config so `update_budget` round-trips through a
+    // real file on disk (mirrors how the daemon runs in production).
+    // Without this, the post-#4797 PUT path would write a doc containing
+    // only `[budget]` to a freshly-created `config.toml` and the
+    // subsequent `reload_config()` would diff every other section back
+    // to defaults — `default_model` reverting from `ollama/test-model`
+    // to the compiled default would be the loudest fallout.
+    let config_path = test.tmp_path().join("config.toml");
+    let test = test.with_config_path(config_path);
+
     let state = test.state.clone();
     let app = Router::new()
         .nest("/api", routes::budget::router())
@@ -238,6 +249,71 @@ async fn budget_put_with_empty_object_is_noop() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["hourly_limit"], 1.0);
     assert_eq!(body["daily_limit"], 10.0);
+}
+
+// ---------------------------------------------------------------------------
+// PUT /api/budget — persistence round-trip (#4797)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn budget_put_persists_to_config_toml() {
+    // Issue #4797: pre-fix the PUT handler only mutated the in-memory
+    // `BudgetConfig` snapshot, so a daemon restart silently dropped the
+    // operator's edit. The bug report says "after click `save`, …
+    // config.toml is not updated" — pin the on-disk file as the source
+    // of truth here so a future regression to in-memory-only fails this
+    // assertion before the user notices.
+    let h = boot().await;
+    let config_path = h._test.tmp_path().join("config.toml");
+
+    let (status, _body) = request(
+        &h,
+        Method::PUT,
+        "/api/budget",
+        Some(serde_json::json!({
+            "max_hourly_usd": 7.5,
+            "max_daily_usd": 75.0,
+            "max_monthly_usd": 750.0,
+            "alert_threshold": 0.6,
+            "default_max_llm_tokens_per_hour": 250_000,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 1. On-disk `[budget]` table reflects the PUT — parse the raw file
+    //    rather than `state.kernel.config_ref()` so this proves the disk
+    //    write actually happened, not just the in-memory ArcSwap.
+    let raw = std::fs::read_to_string(&config_path).expect("read config.toml");
+    let parsed: librefang_types::config::KernelConfig =
+        toml::from_str(&raw).expect("parse persisted config");
+    assert!((parsed.budget.max_hourly_usd - 7.5).abs() < f64::EPSILON);
+    assert!((parsed.budget.max_daily_usd - 75.0).abs() < f64::EPSILON);
+    assert!((parsed.budget.max_monthly_usd - 750.0).abs() < f64::EPSILON);
+    assert!((parsed.budget.alert_threshold - 0.6).abs() < f64::EPSILON);
+    assert_eq!(parsed.budget.default_max_llm_tokens_per_hour, 250_000);
+
+    // 2. Sibling sections (e.g. `default_model`) survive the rewrite —
+    //    `persist_budget` must replace only the `[budget]` table, never
+    //    rewrite the whole document. Without this guard, a
+    //    `toml_edit::ser::to_document(&kernel_config)` shortcut would
+    //    silently clobber operator-managed sections.
+    assert_eq!(parsed.default_model.provider, "ollama");
+    assert_eq!(parsed.default_model.model, "test-model");
+
+    // 3. In-memory `MeteringSubsystem.budget_config` reflects the PUT —
+    //    proves `HotAction::UpdateBudget` fired during the reload that
+    //    follows the disk write. Pre-fix this would have stayed at the
+    //    boot-time budget after a `reload_config()` call.
+    let live = h.state.kernel.budget_config();
+    assert!((live.max_hourly_usd - 7.5).abs() < f64::EPSILON);
+    assert!((live.alert_threshold - 0.6).abs() < f64::EPSILON);
+
+    // 4. GET reflects the persisted state immediately (no client-side
+    //    cache lag — the metering subsystem reads from the same ArcSwap).
+    let (_, body) = request(&h, Method::GET, "/api/budget", None).await;
+    assert_eq!(body["hourly_limit"], 7.5);
+    assert_eq!(body["alert_threshold"], 0.6);
 }
 
 // ---------------------------------------------------------------------------

@@ -330,19 +330,29 @@ pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
     Json(serde_json::to_value(&status).unwrap_or_default())
 }
 
-/// PUT /api/budget — Update global budget limits (in-memory only, not persisted to config.toml).
+/// PUT /api/budget — Update global budget limits and persist to `config.toml`.
+///
+/// Issue #4797: prior behaviour mutated only the in-memory `BudgetConfig`
+/// snapshot, so changes were lost on the next daemon restart and the
+/// on-disk config silently disagreed with the runtime state. This handler
+/// now rewrites the `[budget]` table in `config.toml` (preserving comments
+/// and unrelated sections via `toml_edit`) and triggers a hot-reload so
+/// the new caps reach the metering subsystem on the next LLM call.
 #[utoipa::path(
     put,
     path = "/api/budget",
     tag = "budget",
     request_body(content = crate::types::JsonObject, description = "Partial budget config (max_hourly_usd / max_daily_usd / max_monthly_usd / alert_threshold / default_max_llm_tokens_per_hour)"),
-    responses((status = 200, description = "Updated global budget status", body = crate::types::JsonObject))
+    responses(
+        (status = 200, description = "Updated global budget status", body = crate::types::JsonObject),
+        (status = 500, description = "Persist or reload failed", body = crate::types::JsonObject),
+    )
 )]
 pub async fn update_budget(
     State(state): State<Arc<AppState>>,
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> Response {
     let api_user_ref = api_user.as_ref().map(|e| &e.0);
     // Capture OLD config BEFORE the mutation so the audit row can carry
     // an old→new diff. Without this the chain only records the forward
@@ -350,34 +360,45 @@ pub async fn update_budget(
     // what the operator actually changed.
     let old_budget = state.kernel.budget_config();
 
-    // Apply updates — accept both config field names (max_hourly_usd) and
-    // GET response field names (hourly_limit) so read-modify-write works.
-    state.kernel.update_budget_config(&|budget| {
-        if let Some(v) = body["max_hourly_usd"]
-            .as_f64()
-            .or_else(|| body["hourly_limit"].as_f64())
-        {
-            budget.max_hourly_usd = v;
-        }
-        if let Some(v) = body["max_daily_usd"]
-            .as_f64()
-            .or_else(|| body["daily_limit"].as_f64())
-        {
-            budget.max_daily_usd = v;
-        }
-        if let Some(v) = body["max_monthly_usd"]
-            .as_f64()
-            .or_else(|| body["monthly_limit"].as_f64())
-        {
-            budget.max_monthly_usd = v;
-        }
-        if let Some(v) = body["alert_threshold"].as_f64() {
-            budget.alert_threshold = v.clamp(0.0, 1.0);
-        }
-        if let Some(v) = body["default_max_llm_tokens_per_hour"].as_u64() {
-            budget.default_max_llm_tokens_per_hour = v;
-        }
-    });
+    // Build the target budget by merging body fields onto the live snapshot.
+    // Accept both the config-side keys (`max_hourly_usd`) and the GET-shape
+    // aliases (`hourly_limit`) so a read-modify-write client that pipes GET
+    // into PUT works without renaming.
+    let mut new_budget = old_budget.clone();
+    if let Some(v) = body["max_hourly_usd"]
+        .as_f64()
+        .or_else(|| body["hourly_limit"].as_f64())
+    {
+        new_budget.max_hourly_usd = v;
+    }
+    if let Some(v) = body["max_daily_usd"]
+        .as_f64()
+        .or_else(|| body["daily_limit"].as_f64())
+    {
+        new_budget.max_daily_usd = v;
+    }
+    if let Some(v) = body["max_monthly_usd"]
+        .as_f64()
+        .or_else(|| body["monthly_limit"].as_f64())
+    {
+        new_budget.max_monthly_usd = v;
+    }
+    if let Some(v) = body["alert_threshold"].as_f64() {
+        new_budget.alert_threshold = v.clamp(0.0, 1.0);
+    }
+    if let Some(v) = body["default_max_llm_tokens_per_hour"].as_u64() {
+        new_budget.default_max_llm_tokens_per_hour = v;
+    }
+
+    // Persist the new `[budget]` table to `config.toml` and reload so the
+    // metering subsystem swaps in the new caps. Persisting first means a
+    // disk-write failure leaves both disk and runtime untouched; reload
+    // then synchronises the in-memory `MeteringSubsystem.budget_config`
+    // ArcSwap (via `HotAction::UpdateBudget`) without us having to mutate
+    // it twice.
+    if let Err(e) = persist_budget(&state, &new_budget).await {
+        return ApiErrorResponse::internal(format!("persist budget failed: {e}")).into_response();
+    }
 
     let new_budget = state.kernel.budget_config();
     state.kernel.audit().record_with_context(
@@ -393,7 +414,85 @@ pub async fn update_budget(
     );
 
     let status = state.kernel.metering_ref().budget_status(&new_budget);
-    Json(serde_json::to_value(&status).unwrap_or_default())
+    Json(serde_json::to_value(&status).unwrap_or_default()).into_response()
+}
+
+/// Replace the `[budget]` table in `config.toml` with the serialised form
+/// of `new_budget`, preserving comments and unrelated sections, then call
+/// `reload_config()` so the metering subsystem picks up the change.
+///
+/// Mirrors the `users::persist_users` pattern (lock → read → toml_edit →
+/// validate → atomic write → reload). The validate step rejects writes
+/// that would produce a TOML the kernel can't parse; on error neither the
+/// disk file nor the in-memory snapshot move forward.
+async fn persist_budget(
+    state: &Arc<AppState>,
+    new_budget: &librefang_types::config::BudgetConfig,
+) -> Result<(), String> {
+    let _guard = state.config_write_lock.lock().await;
+
+    let config_path = state.kernel.home_dir().join("config.toml");
+    if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml")
+        || config_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err("invalid config file path".to_string());
+    }
+
+    // Read the existing file. A read failure on an existing file MUST
+    // abort — falling back to "" would silently drop every other section
+    // (`[[users]]`, `[mcp_servers]`, `[[taint_rules]]`, …) on the next
+    // write, exactly the failure mode `persist_users` documents.
+    let raw = if config_path.exists() {
+        std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("could not read existing config.toml: {e}"))?
+    } else {
+        String::new()
+    };
+    let mut doc: toml_edit::DocumentMut = raw
+        .parse()
+        .map_err(|e| format!("config.toml is not valid TOML — refusing to overwrite: {e}"))?;
+
+    // Serialise `BudgetConfig` to a TOML table and replace the existing
+    // `[budget]` table. `toml_edit::ser::to_document` reorders mixed
+    // scalar/table layouts that the strict `toml` crate rejects with
+    // `ValueAfterTable`, which matters here because `providers` is a
+    // nested map sitting alongside scalar f64 fields.
+    let serialised =
+        toml_edit::ser::to_document(new_budget).map_err(|e| format!("serialize budget: {e}"))?;
+    doc.insert(
+        "budget",
+        toml_edit::Item::Table(serialised.as_table().clone()),
+    );
+
+    let new_toml = doc.to_string();
+    let mut parsed: librefang_types::config::KernelConfig =
+        toml::from_str(&new_toml).map_err(|e| format!("invalid config after edit: {e}"))?;
+    parsed.clamp_bounds();
+    if let Err(errors) = state.kernel.validate_config_for_reload(&parsed) {
+        return Err(format!("invalid config: {}", errors.join("; ")));
+    }
+
+    if config_path.exists() {
+        if let Some(home_dir) = config_path.parent() {
+            let backups_dir = home_dir.join("backups");
+            if std::fs::create_dir_all(&backups_dir).is_ok() {
+                let _ = std::fs::copy(&config_path, backups_dir.join("config.toml.prev"));
+            }
+        }
+    }
+
+    crate::atomic_write(&config_path, new_toml.as_bytes())
+        .map_err(|e| format!("write failed: {e}"))?;
+
+    state
+        .kernel
+        .reload_config()
+        .await
+        .map_err(|e| format!("reload failed: {e}"))?;
+
+    Ok(())
 }
 
 /// GET /api/budget/agents/{id} — Per-agent budget/quota status.

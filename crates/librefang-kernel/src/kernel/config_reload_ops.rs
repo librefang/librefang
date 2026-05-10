@@ -479,6 +479,18 @@ impl LibreFangKernel {
                          restart required for the new filter to take effect"
                     ),
                 },
+                HotAction::UpdateBudget => {
+                    info!(
+                        "Hot-reload: updating budget caps (hourly=${}, daily=${}, monthly=${}, alert={})",
+                        new_config.budget.max_hourly_usd,
+                        new_config.budget.max_daily_usd,
+                        new_config.budget.max_monthly_usd,
+                        new_config.budget.alert_threshold,
+                    );
+                    let new_budget = new_config.budget.clone();
+                    self.metering
+                        .update_budget(|current| *current = new_budget.clone());
+                }
                 HotAction::UpdateQueueConcurrency => {
                     use librefang_runtime::command_lane::Lane;
                     let cc = &new_config.queue.concurrency;
