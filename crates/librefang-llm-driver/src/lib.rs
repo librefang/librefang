@@ -176,7 +176,14 @@ impl LlmError {
 }
 
 /// A request to an LLM for completion.
-#[derive(Debug, Clone)]
+///
+/// `Default` is implemented to make field-by-field construction at the
+/// many call sites cheap when only a few fields differ from the zero
+/// values, and so that adding a new field in the future does not
+/// require touching every construction site again. The default is *not*
+/// a usable request — `model` is empty and `messages` is empty — every
+/// real caller still has to set those explicitly.
+#[derive(Debug, Clone, Default)]
 pub struct CompletionRequest {
     /// Model identifier.
     pub model: String,
