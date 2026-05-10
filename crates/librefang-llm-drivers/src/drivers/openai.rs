@@ -329,6 +329,14 @@ impl OpenAIDriver {
     /// detection on the model name. The fallback exists so unknown / user-
     /// defined / pre-policy-registry models keep working — see
     /// librefang/librefang#4842 for the migration plan.
+    ///
+    /// **Limitation during the bridge stage**: an explicit `None` from the
+    /// catalog is indistinguishable from "field absent" and still triggers
+    /// the substring fallback. A registry author cannot currently say
+    /// "this kimi-named model genuinely has no special handling" — they
+    /// will get [`ReasoningEchoPolicy::EmptyString`] from the fallback.
+    /// This goes away once every `CompletionRequest` construction site
+    /// reads from the catalog and the fallback path is removed.
     fn effective_reasoning_echo_policy(
         &self,
         request: &CompletionRequest,
@@ -3083,12 +3091,19 @@ mod tests {
     /// NOT recognize must produce the Kimi wire shape: empty-string
     /// reasoning_content on tool_calls turns + thinking disabled wire-side
     /// + temperature pinned to 0.6.
+    ///
+    /// The model name and base URL are deliberately picked to miss every
+    /// substring rule (no `kimi`, no `moonshot`, no `deepseek-r1` /
+    /// `-reasoner` / `-v4`), so the only path that can produce the Kimi
+    /// wire shape is `request.reasoning_echo_policy` — proving the catalog
+    /// override actually wins over the fallback rather than coincidentally
+    /// agreeing with it.
     #[test]
     fn test_catalog_empty_string_policy_overrides_unmatched_substring() {
         use librefang_types::model_catalog::ReasoningEchoPolicy;
         let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
         let req = build_catalog_policy_test_request(
-            "mystery-kimi-clone",
+            "mystery-multi-turn-clone",
             ReasoningEchoPolicy::EmptyString,
         );
         let oai = driver.build_request(&req).expect("build_request");

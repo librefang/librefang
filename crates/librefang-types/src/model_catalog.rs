@@ -212,7 +212,12 @@ pub struct ModelCatalogEntry {
 /// * [`Self::Strip`] — historical `reasoning_content` MUST be stripped from
 ///   request payloads. DeepSeek-R1 / `deepseek-reasoner` is the canonical
 ///   case: the API rejects requests carrying `reasoning_content` from a
-///   previous assistant turn.
+///   previous assistant turn. The variant *also* implies "force a non-null
+///   `content` field on assistant turns whose `text_parts` would otherwise
+///   be empty" — DeepSeek R1's other multi-turn quirk has always
+///   co-occurred with the strip rule, so the two share one knob. A future
+///   provider that needs only one of the two behaviours will require a
+///   new variant (`#[non_exhaustive]` is set for that reason).
 /// * [`Self::Echo`] — the original thinking text MUST be echoed back on
 ///   assistant turns containing `tool_calls`, otherwise the API returns
 ///   400. DeepSeek V4 Flash (thinking-mode-on) requires this — see
