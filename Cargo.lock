@@ -4824,6 +4824,7 @@ dependencies = [
  "http",
  "librefang-http",
  "librefang-types",
+ "psl",
  "rand 0.10.1",
  "reqwest",
  "rmcp",
