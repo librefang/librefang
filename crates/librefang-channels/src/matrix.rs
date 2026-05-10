@@ -263,6 +263,33 @@ fn media_group_item_to_channel_content(
     }
 }
 
+/// Fetch bytes from a URL for outbound media upload.
+///
+/// In production: goes through [`crate::http_client::fetch_url_bytes`] which
+/// applies the SSRF guard + redirect re-validation before any I/O.
+///
+/// In tests: bypasses the SSRF guard via
+/// [`crate::http_client::fetch_url_bytes_unchecked`] so wiremock servers on
+/// `127.0.0.1` work without a resolving SSRF proxy.
+async fn fetch_outbound_media(
+    url: &str,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(not(test))]
+    {
+        Ok(crate::http_client::fetch_url_bytes(url, max_bytes).await?)
+    }
+    #[cfg(test)]
+    {
+        Ok(crate::http_client::fetch_url_bytes_unchecked(
+            crate::http_client::safe_fetch_client(),
+            url,
+            max_bytes,
+        )
+        .await?)
+    }
+}
+
 /// Render `text` followed by `[Label]` hints for each button row.
 /// Used for outbound EditInteractive / Interactive on Matrix, which has
 /// no native interactive button support — text suffix is the standard fallback.
@@ -274,8 +301,12 @@ fn format_with_button_hints(
         return text.to_string();
     }
     let mut out = String::from(text);
-    for row in buttons {
-        out.push('\n');
+    for (i, row) in buttons.iter().enumerate() {
+        // Skip the leading newline only when the body is empty and this is
+        // the first row — otherwise every row starts on its own line.
+        if i > 0 || !out.is_empty() {
+            out.push('\n');
+        }
         for btn in row {
             out.push_str(&format!("[{}] ", btn.label));
         }
@@ -842,8 +873,11 @@ impl ChannelAdapter for MatrixAdapter {
                 caption,
                 mime_type,
             } => {
-                let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
-                let mt = mime_type.clone().unwrap_or(mt);
+                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let mt = mime_type
+                    .clone()
+                    .or(ct)
+                    .unwrap_or_else(|| "application/octet-stream".to_string());
                 let fname = caption.clone().unwrap_or_else(|| "image".to_string());
                 let size = bytes.len();
                 let mxc = self.api_upload_media(bytes, &fname, &mt).await?;
@@ -858,7 +892,8 @@ impl ChannelAdapter for MatrixAdapter {
                     .await?;
             }
             ChannelContent::File { url, filename } => {
-                let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
+                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let mt = ct.unwrap_or_else(|| "application/octet-stream".to_string());
                 let size = bytes.len();
                 let mxc = self.api_upload_media(bytes, &filename, &mt).await?;
                 let body = serde_json::json!({
@@ -894,7 +929,8 @@ impl ChannelAdapter for MatrixAdapter {
                 duration_seconds,
                 ..
             } => {
-                let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
+                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let mt = ct.unwrap_or_else(|| "application/octet-stream".to_string());
                 let fname = caption.clone().unwrap_or_else(|| "audio".to_string());
                 let size = bytes.len();
                 let mxc = self.api_upload_media(bytes, &fname, &mt).await?;
@@ -917,7 +953,8 @@ impl ChannelAdapter for MatrixAdapter {
                 caption,
                 duration_seconds,
             } => {
-                let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
+                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let mt = ct.unwrap_or_else(|| "application/octet-stream".to_string());
                 let fname = caption.clone().unwrap_or_else(|| "voice".to_string());
                 let size = bytes.len();
                 let mxc = self.api_upload_media(bytes, &fname, &mt).await?;
@@ -942,7 +979,8 @@ impl ChannelAdapter for MatrixAdapter {
                 duration_seconds,
                 filename,
             } => {
-                let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
+                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let mt = ct.unwrap_or_else(|| "application/octet-stream".to_string());
                 let fname = filename
                     .unwrap_or_else(|| caption.clone().unwrap_or_else(|| "video".to_string()));
                 let size = bytes.len();
@@ -966,7 +1004,8 @@ impl ChannelAdapter for MatrixAdapter {
                 caption,
                 duration_seconds: _,
             } => {
-                let (bytes, mt) = crate::http_client::fetch_url_bytes(&self.client, &url).await?;
+                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let mt = ct.unwrap_or_else(|| "application/octet-stream".to_string());
                 let fname = caption.clone().unwrap_or_else(|| "animation".to_string());
                 let size = bytes.len();
                 let mxc = self.api_upload_media(bytes, &fname, &mt).await?;
@@ -1287,6 +1326,47 @@ mod tests {
             .contains("<strong>bold</strong>"));
         assert_eq!(v["m.relates_to"]["rel_type"], "m.replace");
         assert_eq!(v["m.relates_to"]["event_id"], "$x");
+    }
+
+    #[test]
+    fn test_format_with_button_hints_multi_row_each_on_own_line() {
+        let btn = |label: &str| crate::types::InteractiveButton {
+            label: label.to_string(),
+            action: label.to_string(),
+            style: None,
+            url: None,
+        };
+        // Two rows: the second row must appear on its own line, not appended
+        // to the first row's trailing space.
+        let result = format_with_button_hints(
+            "Pick one:",
+            &[vec![btn("Yes"), btn("No")], vec![btn("Cancel")]],
+        );
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 3, "expected 3 lines, got: {result:?}");
+        assert_eq!(lines[0], "Pick one:");
+        assert!(lines[1].contains("[Yes]") && lines[1].contains("[No]"));
+        assert!(
+            lines[2].contains("[Cancel]"),
+            "row 2 must be on its own line, got: {result:?}"
+        );
+
+        // Empty body: no leading blank line before first row.
+        let result_empty = format_with_button_hints("", &[vec![btn("A")], vec![btn("B")]]);
+        assert!(
+            !result_empty.starts_with('\n'),
+            "empty body must not produce a leading newline, got: {result_empty:?}"
+        );
+        let empty_lines: Vec<&str> = result_empty.lines().collect();
+        assert_eq!(
+            empty_lines.len(),
+            2,
+            "expected 2 lines, got: {result_empty:?}"
+        );
+        assert!(
+            empty_lines[1].contains("[B]"),
+            "second row must be on its own line"
+        );
     }
 
     #[tokio::test]
