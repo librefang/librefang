@@ -104,6 +104,9 @@ the agent's manifest on disk and bumps the per-agent reload generation.
 - **Reading "what MCP tools does agent X see right now".** Snapshot
   the registry from `effective_mcp_servers`, filter through the
   agent's manifest allowlist. The filtered view is never cached
-  across turns beyond the `mcp_summary_cache`, which is keyed on
-  `(allowlist, mcp_generation)` so registry hot-reloads invalidate
-  it.
+  across turns beyond the `mcp_summary_cache`. That cache is a
+  `DashMap<String, (u64, String)>` keyed on the sorted allowlist;
+  each entry stores `(mcp_generation, rendered_string)`. A registry
+  hot-reload bumps `mcp_generation`, so the next read sees the stored
+  generation no longer matches and re-renders, overwriting the stale
+  entry — `prompt_context.rs:252-285`.

@@ -90,6 +90,8 @@ agent 端的白名单从不流经这个 crate。修改白名单是一次 kernel 
   **不要**改任何 agent manifest。
 - **读取"agent X 当前能看到哪些 MCP 工具"：** 从
   `effective_mcp_servers` 取注册表快照，再用 agent 的 manifest 白名单
-  过滤。过滤后的视图除了 `mcp_summary_cache` 之外不会跨轮缓存，而该
-  缓存的 key 是 `(allowlist, mcp_generation)`，注册表热重载会自然
-  使其失效。
+  过滤。过滤后的视图除了 `mcp_summary_cache` 之外不会跨轮缓存。该
+  缓存是一个 `DashMap<String, (u64, String)>`，key 是排序后的白名单，
+  value 存 `(mcp_generation, rendered_string)`。注册表热重载会递增
+  `mcp_generation`，下一次读取会发现存储的代际不再匹配，重新渲染
+  并覆盖旧条目 —— 见 `prompt_context.rs:252-285`。
