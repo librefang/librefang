@@ -349,16 +349,17 @@ pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
             OR the matching `BudgetStatus` GET-shape alias (`hourly_limit` / `daily_limit` \
             / `monthly_limit`); when both appear in the same body, the canonical name \
             wins. The alias path lets a read-modify-write client PUT the GET response \
-            unchanged. `alert_threshold` (clamped to 0.0–1.0) and \
+            unchanged. `alert_threshold` (finite number in `[0.0, 1.0]`) and \
             `default_max_llm_tokens_per_hour` have no alias. Any provided cap field \
             must be a finite, non-negative JSON number; NaN, infinity, negative values, \
-            or non-numeric types are rejected with 400 (post-#4797 these values now \
-            persist to `config.toml` and survive a daemon restart, so silent coercion \
-            would corrupt the budget gate's enforcement state)."
+            non-numeric types, and (for `alert_threshold`) values outside `[0.0, 1.0]` \
+            are rejected with 400 (post-#4797 these values now persist to `config.toml` \
+            and survive a daemon restart, so silent coercion would corrupt the budget \
+            gate's enforcement state)."
     ),
     responses(
         (status = 200, description = "Updated global budget status", body = crate::types::JsonObject),
-        (status = 400, description = "Submitted budget is malformed (NaN/infinity/negative cap, non-numeric type, or post-merge config rejected by the kernel reload validator)", body = crate::types::JsonObject),
+        (status = 400, description = "Submitted budget is malformed (NaN/infinity/negative cap, alert_threshold outside [0.0, 1.0], non-numeric type, or post-merge config rejected by the kernel reload validator)", body = crate::types::JsonObject),
         (status = 500, description = "Persist or reload failed", body = crate::types::JsonObject),
     )
 )]
@@ -425,19 +426,23 @@ pub async fn update_budget(
         Ok(None) => {}
         Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
     }
-    // alert_threshold: still clamped to [0.0, 1.0] for the legacy
-    // permissive shape (the `budget_put_clamps_alert_threshold_to_unit_range`
-    // test pins this), but NaN / Inf / non-numeric still 400 — clamping a
-    // NaN would propagate quiet poison into the budget gate's threshold
-    // arithmetic.
+    // alert_threshold: reject out-of-range explicitly instead of silently
+    // clamping. A clamped 2.5 → 1.0 returns 200 + the dashboard shows 1.0,
+    // which looks like the operator's edit took effect when the typed value
+    // never reached the budget gate as written. Post-#4797 the value also
+    // persists to `config.toml`, so a clamp would burn an operator's typo
+    // into disk indefinitely. The reject-with-400 path mirrors the cap-
+    // field validator above: bad input → loud failure, never quiet coercion.
     if let Some(raw) = body.get("alert_threshold") {
         if !raw.is_null() {
-            let n = raw
-                .as_f64()
-                .ok_or_else(|| format!("alert_threshold must be a JSON number (got {raw})"));
-            let n = match n {
-                Ok(v) => v,
-                Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+            let n = match raw.as_f64() {
+                Some(v) => v,
+                None => {
+                    return ApiErrorResponse::bad_request(format!(
+                        "alert_threshold must be a JSON number (got {raw})"
+                    ))
+                    .into_response();
+                }
             };
             if n.is_nan() || n.is_infinite() {
                 return ApiErrorResponse::bad_request(format!(
@@ -445,7 +450,13 @@ pub async fn update_budget(
                 ))
                 .into_response();
             }
-            new_budget.alert_threshold = n.clamp(0.0, 1.0);
+            if !(0.0..=1.0).contains(&n) {
+                return ApiErrorResponse::bad_request(format!(
+                    "alert_threshold must be in [0.0, 1.0] (got {n})"
+                ))
+                .into_response();
+            }
+            new_budget.alert_threshold = n;
         }
     }
     if let Some(raw) = body.get("default_max_llm_tokens_per_hour") {

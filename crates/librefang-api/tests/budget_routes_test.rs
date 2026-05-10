@@ -219,25 +219,45 @@ async fn budget_put_accepts_response_shape_aliases() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn budget_put_clamps_alert_threshold_to_unit_range() {
+async fn budget_put_rejects_out_of_range_alert_threshold() {
+    // Pre-#4864 the handler silently clamped `alert_threshold` into
+    // `[0.0, 1.0]` (e.g. 5.0 → 1.0, -0.5 → 0.0) and returned 200. With
+    // persistence wired up that meant an operator typo got burned into
+    // `config.toml` as the nearest in-range value, looking like the edit
+    // landed when the typed input never reached the budget gate as
+    // written. Reject loudly instead — the dashboard already handles 400
+    // responses with field-named messages, so the operator sees the
+    // problem in the same form they typed it into.
     let h = boot().await;
-    let (_, body) = request(
+    let (status, body) = request(
         &h,
         Method::PUT,
         "/api/budget",
         Some(serde_json::json!({"alert_threshold": 5.0})),
     )
     .await;
-    assert_eq!(body["alert_threshold"], 1.0);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body:?}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("alert_threshold"),
+        "error must name the offending field: {body:?}"
+    );
 
-    let (_, body) = request(
+    let (status, _) = request(
         &h,
         Method::PUT,
         "/api/budget",
         Some(serde_json::json!({"alert_threshold": -0.5})),
     )
     .await;
-    assert_eq!(body["alert_threshold"], 0.0);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Live snapshot is untouched — the rejected PUT must not have moved
+    // the threshold off its boot value (0.8).
+    let live = h.state.kernel.budget_config();
+    assert!((live.alert_threshold - 0.8).abs() < f64::EPSILON);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -473,10 +493,10 @@ async fn budget_put_rejects_negative_via_alias() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn budget_put_rejects_nan_alert_threshold() {
-    // alert_threshold is otherwise clamped into [0.0, 1.0]; clamping a
-    // NaN propagates quiet poison into the gate's threshold arithmetic
-    // (NaN comparisons are always false), so NaN explicitly fails 400
-    // even though out-of-range numerics clamp.
+    // Non-numeric input on `alert_threshold` (here a string masquerading
+    // as NaN) takes the type-mismatch branch and 400s before the range
+    // check fires — sibling of `budget_put_rejects_out_of_range_alert_threshold`
+    // for non-numeric vs numeric-but-out-of-range inputs.
     let h = boot().await;
     let (status, _body) = request(
         &h,
