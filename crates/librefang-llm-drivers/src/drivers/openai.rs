@@ -3087,6 +3087,110 @@ mod tests {
         );
     }
 
+    /// Strip policy's *second* contract: force non-null `content` on
+    /// historical assistant turns even when the turn carries no tool_calls
+    /// and no text — DeepSeek-R1 rejects multi-turn requests where any
+    /// historical assistant message has a null `content`. The shared
+    /// [`build_catalog_policy_test_request`] helper produces a turn with
+    /// tool_calls, which would route through the `has_tool_calls` branch
+    /// and mask the Strip-specific forcing. This test uses a thinking-only
+    /// assistant message followed by a user message (so the assistant
+    /// turn isn't trailing and survives `strip_trailing_empty_assistant`),
+    /// so the only path that can produce `content: Some("")` on the
+    /// historical assistant is `force_nonnull_content`.
+    #[test]
+    fn test_catalog_strip_policy_forces_nonnull_content_without_tool_calls() {
+        use librefang_llm_driver::CompletionRequest;
+        use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+
+        let assistant = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::Thinking {
+                thinking: "deliberation".to_string(),
+                provider_metadata: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        };
+        let user_followup = Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::Text {
+                text: "follow-up".to_string(),
+                provider_metadata: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        };
+        let make_req = |policy: ReasoningEchoPolicy| CompletionRequest {
+            model: "mystery-reasoner".to_string(),
+            messages: std::sync::Arc::new(vec![assistant.clone(), user_followup.clone()]),
+            tools: std::sync::Arc::new(Vec::new()),
+            max_tokens: 128,
+            temperature: 0.7,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+            session_id: None,
+            step_id: None,
+            reasoning_echo_policy: policy,
+        };
+        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
+
+        // Baseline: default `None` policy on the same fixture must leave
+        // `content` null on the historical assistant. Without this
+        // assertion the Strip branch below could pass coincidentally if
+        // some unrelated branch were forcing non-null content for everyone.
+        let baseline = driver
+            .build_request(&make_req(ReasoningEchoPolicy::None))
+            .expect("build_request");
+        let baseline_assistant = baseline
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert!(
+            baseline_assistant.content.is_none(),
+            "default policy on a thinking-only historical assistant turn must \
+             produce null content; got {:?}",
+            baseline_assistant.content
+        );
+        assert!(
+            baseline_assistant
+                .tool_calls
+                .as_ref()
+                .is_none_or(|t| t.is_empty()),
+            "fixture must not carry tool_calls — otherwise the has_tool_calls branch \
+             would mask the Strip-specific content forcing"
+        );
+
+        // Strip policy on the same fixture must force `content: Some("")`
+        // on the historical assistant turn.
+        let strip = driver
+            .build_request(&make_req(ReasoningEchoPolicy::Strip))
+            .expect("build_request");
+        let strip_assistant = strip
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert!(
+            matches!(
+                strip_assistant.content,
+                Some(OaiMessageContent::Text(ref s)) if s.is_empty()
+            ),
+            "Strip policy must force non-null empty content on a historical \
+             assistant turn even when text_parts is empty and there are no \
+             tool_calls; got {:?}",
+            strip_assistant.content
+        );
+    }
+
     /// Catalog `EmptyString` policy on a model the substring fallback would
     /// NOT recognize must produce the Kimi wire shape: empty-string
     /// reasoning_content on tool_calls turns + thinking disabled wire-side
