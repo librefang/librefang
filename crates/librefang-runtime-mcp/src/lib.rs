@@ -2579,6 +2579,10 @@ fn format_spawn_error(resolved_command: &str, e: &std::io::Error) -> String {
         .unwrap_or(resolved_command);
     // Strip a trailing `.cmd` / `.bat` / `.exe` so the Windows resolved form
     // (`npx.cmd`) classifies the same way as the bare command (`npx`).
+    // The Windows resolver at `connect_stdio` only ever appends `.cmd`, but
+    // `.bat` is accepted for operator-supplied configs that pre-resolve a
+    // batch wrapper, and `.exe` is covered defensively so a hand-written
+    // `python.exe` config still classifies as Python.
     let runtime = match basename.rsplit_once('.') {
         Some((stem, ext))
             if ext.eq_ignore_ascii_case("cmd")
@@ -2604,6 +2608,19 @@ fn format_spawn_error(resolved_command: &str, e: &std::io::Error) -> String {
                 "deno" => "install Deno (https://deno.com/) and ensure it is on the daemon's PATH",
                 "bun" | "bunx" => {
                     "install Bun (https://bun.sh/) and ensure it is on the daemon's PATH"
+                }
+                "ruby" | "gem" | "bundle" => {
+                    "install Ruby and ensure it is on the daemon's PATH"
+                }
+                "go" => "install Go (https://go.dev/) and ensure it is on the daemon's PATH",
+                "cargo" => {
+                    "install the Rust toolchain (https://rustup.rs/) and ensure 'cargo' is on the daemon's PATH"
+                }
+                "dotnet" => {
+                    "install the .NET SDK (https://dotnet.microsoft.com/) and ensure 'dotnet' is on the daemon's PATH"
+                }
+                "java" => {
+                    "install a JDK and ensure 'java' is on the daemon's PATH"
                 }
                 _ => "install the required runtime and ensure it is on the daemon's PATH",
             };
@@ -4248,6 +4265,41 @@ mod tests {
             "non-NotFound errors must passthrough: {msg}"
         );
         assert!(msg.contains("Failed to spawn MCP server 'npx'"));
+    }
+
+    #[test]
+    fn format_spawn_error_not_found_ruby_mentions_ruby() {
+        // Sample of a runtime added after the initial review (#4867) — guards
+        // against a future refactor that drops it back to the generic hint.
+        let msg = format_spawn_error("ruby", &io_error(std::io::ErrorKind::NotFound));
+        assert!(msg.contains("Ruby"), "ruby hint must point at Ruby: {msg}");
+    }
+
+    /// End-to-end guard that the spawn site at `connect_stdio` actually
+    /// routes through `format_spawn_error`. The unit tests above only
+    /// exercise the helper in isolation; without this test, a regression
+    /// that reverts the call site to the bare `format!("Failed to spawn
+    /// MCP server '{}': {e}")` would not be caught. (#4836 / #4867 review)
+    #[tokio::test]
+    async fn connect_stdio_routes_not_found_through_format_spawn_error() {
+        // A command guaranteed not to exist on any reasonable host. The UUID
+        // suffix prevents collision with an exotic developer setup.
+        let bogus = "librefang-mcp-runtime-that-does-not-exist-1c9a186cf5d68d93";
+        let result = McpConnection::connect_stdio(bogus, &[], &[], Vec::new()).await;
+        // The Ok variant `(McpInner, Option<Vec<Tool>>)` doesn't implement
+        // Debug, so unwrap via `match` rather than `.expect_err`.
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("spawn must fail for a non-existent command"),
+        };
+        assert!(
+            err.contains("not found in PATH"),
+            "spawn site must use format_spawn_error's NotFound branch: {err}"
+        );
+        assert!(
+            err.contains(bogus),
+            "error must echo the command the operator configured: {err}"
+        );
     }
 
     // ── read_response_bytes_capped tests (#3801) ──────────────────────────
