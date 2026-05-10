@@ -1138,7 +1138,7 @@ impl McpConnection {
         )
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to spawn MCP server '{resolved_command}': {e}"))?;
+        .map_err(|e| format_spawn_error(&resolved_command, &e))?;
 
         // Drain the child's stderr in a background task, logging each line at
         // DEBUG level.  This prevents the pipe buffer from filling (which would
@@ -2553,6 +2553,74 @@ fn expand_leading_tilde(input: &str) -> String {
     }
     let trimmed = home.trim_end_matches(['/', '\\']);
     format!("{trimmed}/{rest}")
+}
+
+/// Convert a child-process spawn failure into an actionable error string for
+/// MCP stdio-transport connections.
+///
+/// On a fresh server (e.g., GCP Free Tier image, plain Docker base, a systemd
+/// unit with the default minimal PATH), the dominant reason an MCP server
+/// won't start is that its declared runtime — typically `npx`, `node`,
+/// `python`, `uvx`, etc. — is not installed or not on the daemon's PATH.
+/// The bare `io::Error` ("No such file or directory (os error 2)") doesn't
+/// tell the operator what to do; users mistake it for a path bug in the
+/// MCP server config.
+///
+/// This helper recognises `ErrorKind::NotFound` and emits a hint pointing at
+/// the runtime that needs installing. `PermissionDenied` is surfaced as
+/// "exists but isn't executable". Anything else is passed through with the
+/// original message so unusual errors (e.g., resource exhaustion) are
+/// preserved verbatim. (#4836)
+fn format_spawn_error(resolved_command: &str, e: &std::io::Error) -> String {
+    use std::io::ErrorKind;
+    let basename = std::path::Path::new(resolved_command)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(resolved_command);
+    // Strip a trailing `.cmd` / `.bat` / `.exe` so the Windows resolved form
+    // (`npx.cmd`) classifies the same way as the bare command (`npx`).
+    let runtime = match basename.rsplit_once('.') {
+        Some((stem, ext))
+            if ext.eq_ignore_ascii_case("cmd")
+                || ext.eq_ignore_ascii_case("bat")
+                || ext.eq_ignore_ascii_case("exe") =>
+        {
+            stem
+        }
+        _ => basename,
+    };
+    match e.kind() {
+        ErrorKind::NotFound => {
+            let hint = match runtime.to_ascii_lowercase().as_str() {
+                "npx" | "node" | "npm" => {
+                    "install Node.js (https://nodejs.org/) and ensure it is on the daemon's PATH"
+                }
+                "python" | "python3" | "pip" | "pip3" | "pipx" => {
+                    "install Python and ensure it is on the daemon's PATH"
+                }
+                "uv" | "uvx" => {
+                    "install uv (https://docs.astral.sh/uv/) and ensure it is on the daemon's PATH"
+                }
+                "deno" => "install Deno (https://deno.com/) and ensure it is on the daemon's PATH",
+                "bun" | "bunx" => {
+                    "install Bun (https://bun.sh/) and ensure it is on the daemon's PATH"
+                }
+                _ => "install the required runtime and ensure it is on the daemon's PATH",
+            };
+            format!(
+                "MCP server command '{resolved_command}' not found in PATH — {hint}. \
+                 Note: a daemon launched by systemd or Docker often runs with a stripped-down \
+                 PATH that excludes nvm/asdf/per-user installs; add 'Environment=PATH=...' to \
+                 the unit (or set PATH on the daemon's process) if the runtime is installed \
+                 under a non-default prefix."
+            )
+        }
+        ErrorKind::PermissionDenied => format!(
+            "MCP server command '{resolved_command}' is not executable — \
+             check file permissions (chmod +x) and that the path is not on a noexec mount"
+        ),
+        _ => format!("Failed to spawn MCP server '{resolved_command}': {e}"),
+    }
 }
 
 #[cfg(test)]
@@ -4071,6 +4139,115 @@ mod tests {
             expand_leading_tilde("@scope/pkg@latest"),
             "@scope/pkg@latest"
         );
+    }
+
+    // ── format_spawn_error tests (#4836) ──────────────────────────────────
+
+    fn io_error(kind: std::io::ErrorKind) -> std::io::Error {
+        std::io::Error::new(kind, "synthetic")
+    }
+
+    #[test]
+    fn format_spawn_error_not_found_npx_mentions_node() {
+        let msg = format_spawn_error("npx", &io_error(std::io::ErrorKind::NotFound));
+        assert!(
+            msg.contains("'npx'") && msg.contains("not found in PATH"),
+            "must surface command + cause: {msg}"
+        );
+        assert!(
+            msg.contains("Node.js"),
+            "npx hint must point at Node.js: {msg}"
+        );
+    }
+
+    #[test]
+    fn format_spawn_error_not_found_strips_path_to_basename() {
+        // An absolute path to npx still classifies as a Node.js runtime.
+        let msg = format_spawn_error("/usr/bin/npx", &io_error(std::io::ErrorKind::NotFound));
+        assert!(
+            msg.contains("Node.js"),
+            "absolute-path npx must still get Node.js hint: {msg}"
+        );
+    }
+
+    #[test]
+    fn format_spawn_error_not_found_handles_windows_cmd_extension() {
+        // Windows resolves `npx` to `npx.cmd`; the hint must classify the same
+        // way as the bare command name.
+        let msg = format_spawn_error("npx.cmd", &io_error(std::io::ErrorKind::NotFound));
+        assert!(
+            msg.contains("Node.js"),
+            "npx.cmd must classify as Node.js runtime: {msg}"
+        );
+    }
+
+    #[test]
+    fn format_spawn_error_not_found_python_mentions_python() {
+        let msg = format_spawn_error("python3", &io_error(std::io::ErrorKind::NotFound));
+        assert!(
+            msg.contains("Python"),
+            "python3 hint must point at Python: {msg}"
+        );
+    }
+
+    #[test]
+    fn format_spawn_error_not_found_uvx_mentions_uv() {
+        let msg = format_spawn_error("uvx", &io_error(std::io::ErrorKind::NotFound));
+        assert!(msg.contains("uv"), "uvx hint must point at uv: {msg}");
+    }
+
+    #[test]
+    fn format_spawn_error_not_found_unknown_runtime_uses_generic_hint() {
+        let msg = format_spawn_error("custom-mcp-bin", &io_error(std::io::ErrorKind::NotFound));
+        assert!(
+            msg.contains("install the required runtime"),
+            "unknown runtime falls back to generic hint: {msg}"
+        );
+        // Must NOT misclassify under a specific runtime.
+        assert!(!msg.contains("Node.js"));
+        assert!(!msg.contains("Python"));
+    }
+
+    #[test]
+    fn format_spawn_error_not_found_mentions_systemd_path_pitfall() {
+        // The most common failure mode in the issue (#4836) is a stripped-down
+        // PATH on managed VMs / systemd units. The error must surface that
+        // pitfall so operators look in the right place.
+        let msg = format_spawn_error("npx", &io_error(std::io::ErrorKind::NotFound));
+        assert!(
+            msg.to_ascii_lowercase().contains("systemd")
+                || msg.to_ascii_lowercase().contains("path"),
+            "must hint at PATH/systemd pitfall: {msg}"
+        );
+    }
+
+    #[test]
+    fn format_spawn_error_permission_denied_distinct_from_not_found() {
+        let msg = format_spawn_error(
+            "/opt/bin/server",
+            &io_error(std::io::ErrorKind::PermissionDenied),
+        );
+        assert!(
+            msg.contains("not executable") || msg.contains("permissions"),
+            "permission-denied path must surface chmod hint: {msg}"
+        );
+        // PermissionDenied must NOT trigger the install-runtime hint — the
+        // file already exists.
+        assert!(!msg.contains("not found in PATH"));
+    }
+
+    #[test]
+    fn format_spawn_error_other_kind_passes_through_original_message() {
+        // Any kind we don't special-case must preserve the underlying io error
+        // verbatim, so unusual failures (e.g., resource exhaustion on tiny VMs)
+        // surface exactly what the OS reported instead of being rewritten.
+        let inner = std::io::Error::other("out of memory");
+        let msg = format_spawn_error("npx", &inner);
+        assert!(
+            msg.contains("out of memory"),
+            "non-NotFound errors must passthrough: {msg}"
+        );
+        assert!(msg.contains("Failed to spawn MCP server 'npx'"));
     }
 
     // ── read_response_bytes_capped tests (#3801) ──────────────────────────
