@@ -370,6 +370,24 @@ fn shares_registrable_domain(endpoint_host: &str, server_host: &str) -> bool {
 /// metadata would later be POSTed to over cleartext (the SSRF guard
 /// `is_ssrf_blocked_url` allows both http and https). Pinning the
 /// scheme keeps the #3713 floor on the dimension Rule 2 must not loosen.
+///
+/// **Port is not pinned on Rule 2** — only scheme and registrable
+/// domain. A metadata document on `https://example.com:8443/token` is
+/// accepted against `https://example.com/mcp` (origin differs by port,
+/// so Rule 1 fails; eTLD+1 + scheme match, so Rule 2 accepts). The
+/// reasoning is that the same registrable domain implies the same
+/// org, and an org running an OAuth endpoint on a non-default port
+/// within its own domain is legitimate. If a future threat model
+/// requires per-port pinning, tighten Rule 2 to compare
+/// `parsed.port_or_known_default()` as well — see the
+/// `accepts_same_etld1_different_port` test for the contract this
+/// documents.
+///
+/// **Maintenance:** this Rule 1 + Rule 2 + IP-carve-out policy is
+/// duplicated in api-side `librefang_api::routes::mcp_auth::
+/// token_endpoint_host_matches` (host-only there — no scheme floor).
+/// Both sides must change together, otherwise discovery and
+/// token-exchange will disagree on what's an acceptable endpoint.
 pub fn validate_metadata_endpoints(
     metadata: &OAuthMetadata,
     server_url: &str,
@@ -1303,6 +1321,32 @@ mod tests {
             server_url: "https://mcp.bbc.co.uk/mcp".to_string(),
         };
         assert!(validate_metadata_endpoints(&meta, "https://mcp.bbc.co.uk/mcp").is_ok());
+    }
+
+    #[test]
+    fn validate_metadata_endpoints_accepts_same_etld1_different_port() {
+        // Server URL on the default https port, endpoint on a non-default
+        // port within the same registrable domain. Url::origin() normalises
+        // default ports to the scheme's default, so origins differ — Rule 1
+        // fails. eTLD+1 + scheme match — Rule 2 accepts.
+        //
+        // Pins the policy from the validate_metadata_endpoints doc comment:
+        // port is NOT compared on Rule 2. If a future threat model demands
+        // per-port pinning, that change must update this test (and the
+        // matching api-side `token_endpoint_host_matches`) together.
+        let meta = OAuthMetadata {
+            authorization_endpoint: "https://example.com/auth".to_string(),
+            token_endpoint: "https://example.com:8443/token".to_string(),
+            client_id: None,
+            registration_endpoint: None,
+            scopes: Vec::new(),
+            user_scopes: Vec::new(),
+            server_url: "https://example.com/mcp".to_string(),
+        };
+        assert!(
+            validate_metadata_endpoints(&meta, "https://example.com/mcp").is_ok(),
+            "expected same-eTLD+1 different-port to be accepted under Rule 2"
+        );
     }
 
     #[test]
