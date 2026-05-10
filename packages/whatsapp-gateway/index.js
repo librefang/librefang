@@ -2195,15 +2195,34 @@ async function startConnection() {
         // trailing or glued to an emoji it would otherwise reach WhatsApp.
         const response = markdownToWhatsApp(stripNoReply(rawResponse));
 
-        // Helper: send a new message or edit the streamed one for final delivery
+        // Helper: send a new message or edit the streamed one for final delivery.
+        //
+        // Snapshot `sock` once at entry — the streaming `onProgress`
+        // callback already does this for per-chunk edits, but the final
+        // delivery here lands AFTER the LLM stream completes, which is a
+        // much wider window for a concurrent reconnect to call
+        // `cleanupSocket()` and null out the global. Without the
+        // snapshot the awaits below race the reconnect and either throw
+        // a "Cannot read properties of null" or send through a
+        // half-closed socket.
         const sendOrEdit = async (jid, finalText) => {
+          const s = sock;
+          if (!s) {
+            console.warn(JSON.stringify({
+              event: 'send_message_outbound',
+              kind: 'sock_unavailable_at_send',
+              jid,
+              had_stream: Boolean(streamMsgKey),
+            }));
+            return streamMsgKey || null;
+          }
           if (streamMsgKey && jid === sender) {
             // Edit-only on the streamed message. A new-message fallback
             // would duplicate the partial chunk the user already sees
             // when the edit fails (stale key, sock drop mid-stream); we
             // accept the last visible chunk as final instead.
             try {
-              await sock.sendMessage(jid, { text: finalText, edit: streamMsgKey });
+              await s.sendMessage(jid, { text: finalText, edit: streamMsgKey });
               if (ECHO_TRACKER_ENABLED) echoTracker.track(finalText);
               console.log(JSON.stringify({
                 event: 'send_message_outbound',
@@ -2223,7 +2242,7 @@ async function startConnection() {
             }
           }
           // No streaming happened (fallback path) — send new message
-          const sent = await sock.sendMessage(jid, { text: finalText });
+          const sent = await s.sendMessage(jid, { text: finalText });
           if (ECHO_TRACKER_ENABLED) echoTracker.track(finalText);
           console.log(JSON.stringify({
             event: 'send_message_outbound',
