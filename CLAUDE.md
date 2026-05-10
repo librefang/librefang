@@ -242,10 +242,17 @@ The daemon command is `start` (not `daemon`).
   cap. See `docs/architecture/trigger-dispatch-concurrency.md`.
 - **Skill workshop** (#3328) passively captures teaching signals from
   successful turns into draft skills under
-  `~/.librefang/skills/pending/<agent>/<uuid>.toml`. **Default-on with
-  the conservative knob set**: `enabled=true`, `auto_capture=true`,
-  `review_mode="heuristic"` (no LLM call), `approval_policy="pending"`
-  (every candidate waits for human approve / reject), `max_pending=20`.
+  `~/.librefang/skills/pending/<agent>/<uuid>.toml`. **Default-OFF —
+  opt-in per agent** by setting `[skill_workshop] enabled = true` in
+  the agent's manifest (`agent.toml`, or the matching `[agents.<name>]`
+  section of a `HAND.toml`). Once enabled, the conservative knob set
+  applies by default: `auto_capture = true`,
+  `review_mode = "heuristic"` (no LLM call),
+  `approval_policy = "pending"` (every candidate waits for human
+  approve / reject), `max_pending = 20`. Source of truth is
+  `SkillWorkshopConfig::default()` in
+  `crates/librefang-types/src/agent.rs` — `enabled: false` per the
+  original #3328 acceptance criteria.
   Three signals — `ExplicitInstruction` ("from now on always …"),
   `UserCorrection` ("no, do it like …"), `RepeatedToolPattern` (same
   tool sequence ≥ 3 turns). Approval routes through
