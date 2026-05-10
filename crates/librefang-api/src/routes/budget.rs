@@ -350,11 +350,15 @@ pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
             / `monthly_limit`); when both appear in the same body, the canonical name \
             wins. The alias path lets a read-modify-write client PUT the GET response \
             unchanged. `alert_threshold` (clamped to 0.0–1.0) and \
-            `default_max_llm_tokens_per_hour` have no alias."
+            `default_max_llm_tokens_per_hour` have no alias. Any provided cap field \
+            must be a finite, non-negative JSON number; NaN, infinity, negative values, \
+            or non-numeric types are rejected with 400 (post-#4797 these values now \
+            persist to `config.toml` and survive a daemon restart, so silent coercion \
+            would corrupt the budget gate's enforcement state)."
     ),
     responses(
         (status = 200, description = "Updated global budget status", body = crate::types::JsonObject),
-        (status = 400, description = "Submitted budget produced an invalid config", body = crate::types::JsonObject),
+        (status = 400, description = "Submitted budget is malformed (NaN/infinity/negative cap, non-numeric type, or post-merge config rejected by the kernel reload validator)", body = crate::types::JsonObject),
         (status = 500, description = "Persist or reload failed", body = crate::types::JsonObject),
     )
 )]
@@ -374,30 +378,89 @@ pub async fn update_budget(
     // Accept both the config-side keys (`max_hourly_usd`) and the GET-shape
     // aliases (`hourly_limit`) so a read-modify-write client that pipes GET
     // into PUT works without renaming.
+    //
+    // Each cap field is validated at the boundary: the pre-#4797 handler
+    // only mutated the in-memory `BudgetConfig` ArcSwap, so a NaN /
+    // negative / non-numeric body silently no-op'd or corrupted the live
+    // snapshot (wiped at restart). Post-fix the value is serialised into
+    // `config.toml` and survives restarts, so a bad input now poisons the
+    // budget gate persistently — return 400 instead. Mirrors the
+    // `update_user_budget` validation shape below.
+    //
+    // Treat missing keys as "no change" (the partial-PUT contract the
+    // `budget_put_with_empty_object_is_noop` test pins). A literal JSON
+    // `null` is also "no change" so `{...,"max_hourly_usd":null}` is a
+    // legal way to spell "leave this cap alone" — matches what most JSON
+    // form serialisers emit for an unset numeric input.
+    let parse_cap = |canonical: &str, alias: &str| -> Result<Option<f64>, String> {
+        let raw = body.get(canonical).or_else(|| body.get(alias));
+        let Some(v) = raw else { return Ok(None) };
+        if v.is_null() {
+            return Ok(None);
+        }
+        let n = v
+            .as_f64()
+            .ok_or_else(|| format!("{canonical} must be a JSON number (got {v})"))?;
+        if n.is_nan() || n.is_infinite() || n < 0.0 {
+            return Err(format!(
+                "{canonical} must be a finite, non-negative number (got {n})"
+            ));
+        }
+        Ok(Some(n))
+    };
+
     let mut new_budget = old_budget.clone();
-    if let Some(v) = body["max_hourly_usd"]
-        .as_f64()
-        .or_else(|| body["hourly_limit"].as_f64())
-    {
-        new_budget.max_hourly_usd = v;
+    match parse_cap("max_hourly_usd", "hourly_limit") {
+        Ok(Some(v)) => new_budget.max_hourly_usd = v,
+        Ok(None) => {}
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
     }
-    if let Some(v) = body["max_daily_usd"]
-        .as_f64()
-        .or_else(|| body["daily_limit"].as_f64())
-    {
-        new_budget.max_daily_usd = v;
+    match parse_cap("max_daily_usd", "daily_limit") {
+        Ok(Some(v)) => new_budget.max_daily_usd = v,
+        Ok(None) => {}
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
     }
-    if let Some(v) = body["max_monthly_usd"]
-        .as_f64()
-        .or_else(|| body["monthly_limit"].as_f64())
-    {
-        new_budget.max_monthly_usd = v;
+    match parse_cap("max_monthly_usd", "monthly_limit") {
+        Ok(Some(v)) => new_budget.max_monthly_usd = v,
+        Ok(None) => {}
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
     }
-    if let Some(v) = body["alert_threshold"].as_f64() {
-        new_budget.alert_threshold = v.clamp(0.0, 1.0);
+    // alert_threshold: still clamped to [0.0, 1.0] for the legacy
+    // permissive shape (the `budget_put_clamps_alert_threshold_to_unit_range`
+    // test pins this), but NaN / Inf / non-numeric still 400 — clamping a
+    // NaN would propagate quiet poison into the budget gate's threshold
+    // arithmetic.
+    if let Some(raw) = body.get("alert_threshold") {
+        if !raw.is_null() {
+            let n = raw
+                .as_f64()
+                .ok_or_else(|| format!("alert_threshold must be a JSON number (got {raw})"));
+            let n = match n {
+                Ok(v) => v,
+                Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+            };
+            if n.is_nan() || n.is_infinite() {
+                return ApiErrorResponse::bad_request(format!(
+                    "alert_threshold must be a finite number (got {n})"
+                ))
+                .into_response();
+            }
+            new_budget.alert_threshold = n.clamp(0.0, 1.0);
+        }
     }
-    if let Some(v) = body["default_max_llm_tokens_per_hour"].as_u64() {
-        new_budget.default_max_llm_tokens_per_hour = v;
+    if let Some(raw) = body.get("default_max_llm_tokens_per_hour") {
+        if !raw.is_null() {
+            let v = match raw.as_u64() {
+                Some(v) => v,
+                None => {
+                    return ApiErrorResponse::bad_request(format!(
+                        "default_max_llm_tokens_per_hour must be a non-negative integer (got {raw})"
+                    ))
+                    .into_response();
+                }
+            };
+            new_budget.default_max_llm_tokens_per_hour = v;
+        }
     }
 
     // Persist the new `[budget]` table to `config.toml` and reload so the
@@ -426,11 +489,15 @@ pub async fn update_budget(
             Some("api".to_string()),
         );
         return match e {
-            // Operator submitted a budget that, when serialised back into
-            // `config.toml`, fails `validate_config_for_reload` (e.g.
-            // would touch a restart-only field). Surface as 400 so the
-            // dashboard renders a "your input was rejected" toast rather
-            // than a generic 500 "we broke something" alert.
+            // `validate_config_for_reload` rejected the merged config.
+            // Today the validator only inspects `api_listen` / cron caps /
+            // approval policy / network secret, so this arm is unlikely
+            // to fire on a `[budget]`-only edit — the request-shape
+            // validation above intercepts most client-fixable errors at
+            // 400 before we get here. The split is kept so a future
+            // budget-aware check inside `validate_config_for_reload` (or
+            // a peer section that the merged TOML touches incidentally)
+            // surfaces a 400 instead of a misleading 500.
             PersistBudgetError::BadRequest(m) => ApiErrorResponse::bad_request(m).into_response(),
             PersistBudgetError::Internal(m) => ApiErrorResponse::internal(m).into_response(),
         };
@@ -456,10 +523,22 @@ pub async fn update_budget(
     Json(serde_json::to_value(&status).unwrap_or_default()).into_response()
 }
 
-/// Failure modes for [`persist_budget`]. Split from the generic `String`
-/// return so the handler can return 400 for client-fixable input (the
-/// submitted config doesn't validate) and 500 for genuine I/O / kernel
-/// failures the operator can't influence.
+/// Failure modes for [`persist_budget`].
+///
+/// `BadRequest` covers post-merge configs that `validate_config_for_reload`
+/// rejects — currently a narrow surface (the validator only checks
+/// `api_listen` / `max_cron_jobs` / approval policy / `network_enabled →
+/// shared_secret`, none of which depend on `[budget]`), so the variant is
+/// rarely reachable from a budget-only edit. The split is retained as
+/// future-proofing: if `validate_config_for_reload` ever grows
+/// budget-relevant checks, or if the persisted TOML accidentally trips
+/// validation on an unrelated section, the handler will return 400
+/// instead of 500. Most client-fixable errors (NaN / negative caps /
+/// non-numeric types) are caught earlier by the request-shape validation
+/// in [`update_budget`] and never reach this enum.
+///
+/// `Internal` covers genuine I/O / kernel failures the operator can't
+/// influence: read / write / reload / serialise errors.
 enum PersistBudgetError {
     BadRequest(String),
     Internal(String),

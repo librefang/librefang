@@ -305,15 +305,28 @@ async fn budget_put_persists_to_config_toml() {
     //    proves `HotAction::UpdateBudget` fired during the reload that
     //    follows the disk write. Pre-fix this would have stayed at the
     //    boot-time budget after a `reload_config()` call.
+    //
+    //    Including `default_max_llm_tokens_per_hour` here on purpose:
+    //    that field drives the same budget gate that surfaces the
+    //    "Token quota exceeded" symptom in #4797's bug report, and is
+    //    bound to the dashboard form's "Token Limit" input. A regression
+    //    that drops it from `BudgetStatus` (or the on-disk `[budget]`
+    //    table) would silently put the form back to "-" and unset the
+    //    cap that drives the gate — both invisible without an assertion.
     let live = h.state.kernel.budget_config();
     assert!((live.max_hourly_usd - 7.5).abs() < f64::EPSILON);
     assert!((live.alert_threshold - 0.6).abs() < f64::EPSILON);
+    assert_eq!(live.default_max_llm_tokens_per_hour, 250_000);
 
     // 4. GET reflects the persisted state immediately (no client-side
     //    cache lag — the metering subsystem reads from the same ArcSwap).
+    //    Asserting `default_max_llm_tokens_per_hour` on the response
+    //    shape catches a regression where the field is dropped from
+    //    `BudgetStatus` even though it's still on `BudgetConfig`.
     let (_, body) = request(&h, Method::GET, "/api/budget", None).await;
     assert_eq!(body["hourly_limit"], 7.5);
     assert_eq!(body["alert_threshold"], 0.6);
+    assert_eq!(body["default_max_llm_tokens_per_hour"], 250_000);
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +371,191 @@ async fn budget_put_accepts_get_shape_aliases() {
     assert_eq!(body["hourly_limit"], 4.4);
     assert_eq!(body["daily_limit"], 44.0);
     assert_eq!(body["monthly_limit"], 440.0);
+}
+
+// ---------------------------------------------------------------------------
+// PUT /api/budget — input validation (#4864 follow-up)
+// ---------------------------------------------------------------------------
+//
+// Pre-#4797 the PUT handler only mutated the in-memory `BudgetConfig`
+// snapshot, so a NaN / negative / non-numeric body silently no-op'd or
+// corrupted the live snapshot until restart. Post-#4797 the value
+// persists to `config.toml`, so a bad input now poisons the budget gate
+// indefinitely. These cases pin the boundary check that returns 400
+// before persist runs.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn budget_put_rejects_negative_cap() {
+    let h = boot().await;
+    let (status, body) = request(
+        &h,
+        Method::PUT,
+        "/api/budget",
+        Some(serde_json::json!({"max_hourly_usd": -1.0})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body:?}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("max_hourly_usd"),
+        "error must name the offending field: {body:?}"
+    );
+    // Live snapshot is untouched — neither the persisted file nor the
+    // ArcSwap moved forward.
+    let live = h.state.kernel.budget_config();
+    assert!((live.max_hourly_usd - 1.0).abs() < f64::EPSILON);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn budget_put_rejects_nan_cap() {
+    // `serde_json::Value` cannot directly carry NaN (the spec rejects
+    // it), but a body like `{"max_hourly_usd": "NaN"}` is a likely
+    // shape from a JS client that fed `Number.NaN.toString()` into a
+    // form. Since strings aren't numbers, the type-mismatch branch
+    // fires — validate the rejection path covers it.
+    let h = boot().await;
+    let (status, body) = request(
+        &h,
+        Method::PUT,
+        "/api/budget",
+        Some(serde_json::json!({"max_daily_usd": "NaN"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body:?}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("max_daily_usd"),
+        "error must name the offending field: {body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn budget_put_rejects_non_numeric_cap() {
+    let h = boot().await;
+    let (status, body) = request(
+        &h,
+        Method::PUT,
+        "/api/budget",
+        Some(serde_json::json!({"max_monthly_usd": "ten dollars"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body:?}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("must be a json number"),
+        "error must mention the type expectation: {body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn budget_put_rejects_negative_via_alias() {
+    // Aliases (`hourly_limit` / `daily_limit` / `monthly_limit`) go
+    // through the same validator as the canonical names — pin that the
+    // 400 path doesn't have an alias-only escape hatch a malicious
+    // client could exploit.
+    let h = boot().await;
+    let (status, _body) = request(
+        &h,
+        Method::PUT,
+        "/api/budget",
+        Some(serde_json::json!({"daily_limit": -5.0})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn budget_put_rejects_nan_alert_threshold() {
+    // alert_threshold is otherwise clamped into [0.0, 1.0]; clamping a
+    // NaN propagates quiet poison into the gate's threshold arithmetic
+    // (NaN comparisons are always false), so NaN explicitly fails 400
+    // even though out-of-range numerics clamp.
+    let h = boot().await;
+    let (status, _body) = request(
+        &h,
+        Method::PUT,
+        "/api/budget",
+        Some(serde_json::json!({"alert_threshold": "not a number"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn budget_put_rejects_negative_token_cap() {
+    // `default_max_llm_tokens_per_hour` is `u64`-typed — a JSON `-1`
+    // simply isn't representable, and `as_u64()` returns None. Verify
+    // the response is 400 not silent skip.
+    let h = boot().await;
+    let (status, _body) = request(
+        &h,
+        Method::PUT,
+        "/api/budget",
+        Some(serde_json::json!({"default_max_llm_tokens_per_hour": -1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn budget_put_treats_null_as_no_change() {
+    // A literal JSON `null` is treated as "leave this cap alone" so
+    // form serialisers that emit `null` for an unset numeric field
+    // don't accidentally round-trip into a 400. Pin the contract.
+    let h = boot().await;
+    let (status, body) = request(
+        &h,
+        Method::PUT,
+        "/api/budget",
+        Some(serde_json::json!({
+            "max_hourly_usd": null,
+            "max_daily_usd": 42.0,
+            "alert_threshold": null,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+    let live = h.state.kernel.budget_config();
+    // Hourly stays at boot value (1.0); daily moves to 42; alert
+    // unchanged (0.8).
+    assert!((live.max_hourly_usd - 1.0).abs() < f64::EPSILON);
+    assert!((live.max_daily_usd - 42.0).abs() < f64::EPSILON);
+    assert!((live.alert_threshold - 0.8).abs() < f64::EPSILON);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn budget_put_rejection_does_not_persist() {
+    // Belt-and-suspenders: a rejected PUT must NEVER advance the
+    // on-disk `[budget]` table. This is what makes the validation
+    // useful — a regression that wires the validator after the persist
+    // step would still corrupt config.toml even though the response is
+    // 400. Read the file directly (not the ArcSwap) to catch that
+    // failure mode.
+    let h = boot().await;
+    let config_path = h._test.tmp_path().join("config.toml");
+    let raw_before = std::fs::read_to_string(&config_path).expect("read config.toml");
+
+    let (status, _body) = request(
+        &h,
+        Method::PUT,
+        "/api/budget",
+        Some(serde_json::json!({"max_hourly_usd": -99.0})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let raw_after = std::fs::read_to_string(&config_path).expect("read config.toml");
+    assert_eq!(
+        raw_before, raw_after,
+        "config.toml must be byte-identical after a rejected PUT"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
