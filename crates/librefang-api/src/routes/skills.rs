@@ -5503,6 +5503,15 @@ pub(crate) fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(),
 
 // ── Config.toml channel management helpers ──────────────────────────
 
+/// Sentinel error message produced by `upsert_channel_config` and
+/// `remove_channel_config` when the channel is in `[[channels.<name>]]`
+/// (array-of-tables) shape. The handler matches on this prefix to map the
+/// failure to 409 Conflict instead of 500. Multi-instance channels must
+/// use the per-instance API (`/api/channels/<name>/instances/...`); the
+/// legacy single-instance `/configure` endpoint cannot represent them
+/// without silently dropping every instance after the first (#4865).
+pub(crate) const CHANNEL_AOT_CONFLICT_PREFIX: &str = "channel-is-multi-instance:";
+
 /// Upsert a `[channels.<name>]` section in config.toml with the given non-secret fields.
 ///
 /// Uses `toml_edit::DocumentMut` to preserve comments, key ordering, and
@@ -5511,6 +5520,11 @@ pub(crate) fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(),
 /// channel write — see issue #3183. Callers must hold
 /// `AppState::config_write_lock` to serialize against `POST /api/config/set`,
 /// which performs an asymmetric read-modify-write on the same file.
+///
+/// Refuses to write when the channel already exists as `[[channels.<name>]]`
+/// (multi-instance) — the legacy single-table write would silently delete
+/// every instance after the first. Callers must route to the per-instance
+/// API in that case (#4865).
 pub(crate) fn upsert_channel_config(
     config_path: &std::path::Path,
     channel_name: &str,
@@ -5538,31 +5552,21 @@ pub(crate) fn upsert_channel_config(
         .as_table_mut()
         .ok_or("channels is not a table")?;
 
-    // Build channel sub-table with correct TOML types
-    let mut ch_table = toml_edit::Table::new();
-    for (k, (v, ft)) in fields {
-        let item = match ft {
-            FieldType::Number => {
-                if let Ok(n) = v.parse::<i64>() {
-                    toml_edit::value(n)
-                } else {
-                    toml_edit::value(v.clone())
-                }
-            }
-            FieldType::List => {
-                // Always store list items as strings so that numeric IDs
-                // (e.g. Discord guild snowflakes, Telegram user IDs) are
-                // deserialized correctly into Vec<String> config fields.
-                let mut arr = toml_edit::Array::new();
-                for s in v.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                    arr.push(s);
-                }
-                toml_edit::value(arr)
-            }
-            _ => toml_edit::value(v.clone()),
-        };
-        ch_table.insert(k, item);
+    // Refuse to clobber an existing `[[channels.<name>]]` array. The
+    // legacy single-table replace path below would otherwise silently drop
+    // every instance after the first — see issue #4865.
+    if matches!(
+        channels_table.get(channel_name),
+        Some(toml_edit::Item::ArrayOfTables(_))
+    ) {
+        return Err(format!(
+            "{CHANNEL_AOT_CONFLICT_PREFIX}channel '{channel_name}' has multiple instances; use the per-instance API"
+        )
+        .into());
     }
+
+    // Build channel sub-table with correct TOML types
+    let ch_table = build_channel_toml_table(fields);
     channels_table.insert(channel_name, toml_edit::Item::Table(ch_table));
 
     // Ensure parent directory exists
@@ -5578,6 +5582,11 @@ pub(crate) fn upsert_channel_config(
 ///
 /// Mirrors `upsert_channel_config`: format-preserving via `toml_edit`, and
 /// callers must hold `AppState::config_write_lock`.
+///
+/// Refuses to delete when the channel exists as `[[channels.<name>]]`
+/// (multi-instance) — the bulk delete would silently nuke every instance.
+/// Callers must use `DELETE /api/channels/<name>/instances/<id>` to remove
+/// instances individually (#4865).
 pub(crate) fn remove_channel_config(
     config_path: &std::path::Path,
     channel_name: &str,
@@ -5596,10 +5605,276 @@ pub(crate) fn remove_channel_config(
     let mut doc: toml_edit::DocumentMut = content.parse()?;
 
     if let Some(channels) = doc.get_mut("channels").and_then(|i| i.as_table_mut()) {
+        if matches!(
+            channels.get(channel_name),
+            Some(toml_edit::Item::ArrayOfTables(_))
+        ) {
+            return Err(format!(
+                "{CHANNEL_AOT_CONFLICT_PREFIX}channel '{channel_name}' has multiple instances; use the per-instance API"
+            )
+            .into());
+        }
         channels.remove(channel_name);
     }
 
     std::fs::write(config_path, doc.to_string())?;
+    Ok(())
+}
+
+/// Build a TOML table from a `(key, (value, field_type))` field map.
+///
+/// Shared between `upsert_channel_config` and the per-instance helpers
+/// (`append_channel_instance`, `update_channel_instance`) so number / list
+/// coercion stays consistent across all channel write paths.
+fn build_channel_toml_table(fields: &HashMap<String, (String, FieldType)>) -> toml_edit::Table {
+    let mut ch_table = toml_edit::Table::new();
+    for (k, (v, ft)) in fields {
+        let item = match ft {
+            FieldType::Number => {
+                if let Ok(n) = v.parse::<i64>() {
+                    toml_edit::value(n)
+                } else {
+                    toml_edit::value(v.clone())
+                }
+            }
+            FieldType::List => {
+                let mut arr = toml_edit::Array::new();
+                for s in v.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    arr.push(s);
+                }
+                toml_edit::value(arr)
+            }
+            _ => toml_edit::value(v.clone()),
+        };
+        ch_table.insert(k, item);
+    }
+    ch_table
+}
+
+/// Open `config.toml` as a `DocumentMut` (creating an empty doc if the file
+/// is absent or empty) and return both the doc and the parent dir to create
+/// before writing back. Centralises the read-validate-parse boilerplate
+/// shared by every channel-instance helper.
+fn open_config_doc(
+    config_path: &std::path::Path,
+) -> Result<toml_edit::DocumentMut, Box<dyn std::error::Error>> {
+    validate_static_file_path(config_path, "config.toml")
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let content = if config_path.exists() {
+        std::fs::read_to_string(config_path)?
+    } else {
+        String::new()
+    };
+    let doc: toml_edit::DocumentMut = if content.trim().is_empty() {
+        toml_edit::DocumentMut::new()
+    } else {
+        content.parse()?
+    };
+    Ok(doc)
+}
+
+fn write_config_doc(
+    config_path: &std::path::Path,
+    doc: &toml_edit::DocumentMut,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(config_path, doc.to_string())?;
+    Ok(())
+}
+
+/// Append a new `[[channels.<name>]]` instance to config.toml.
+///
+/// Auto-promotes a single `[channels.<name>]` table to an `ArrayOfTables`
+/// containing the previous entry plus the new one, so the user can keep
+/// the channel they configured via the legacy `/configure` endpoint and
+/// still add another instance on top. Callers must hold
+/// `AppState::config_write_lock` (same locking discipline as
+/// `upsert_channel_config` — see issue #3183).
+pub(crate) fn append_channel_instance(
+    config_path: &std::path::Path,
+    channel_name: &str,
+    fields: &HashMap<String, (String, FieldType)>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut doc = open_config_doc(config_path)?;
+
+    if !doc.contains_table("channels") {
+        doc["channels"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let channels_table = doc["channels"]
+        .as_table_mut()
+        .ok_or("channels is not a table")?;
+
+    let new_entry = build_channel_toml_table(fields);
+
+    // Resolve the existing item under channels.<name>, if any. Three shapes
+    // are possible:
+    //   - missing: create a new ArrayOfTables containing the new entry
+    //   - single Table (legacy `[channels.<name>]`): promote to
+    //     ArrayOfTables = [old, new]
+    //   - existing ArrayOfTables: push the new entry
+    let new_index = match channels_table.remove(channel_name) {
+        None => {
+            let mut aot = toml_edit::ArrayOfTables::new();
+            aot.push(new_entry);
+            channels_table.insert(channel_name, toml_edit::Item::ArrayOfTables(aot));
+            0
+        }
+        Some(toml_edit::Item::Table(existing)) => {
+            let mut aot = toml_edit::ArrayOfTables::new();
+            aot.push(existing);
+            aot.push(new_entry);
+            channels_table.insert(channel_name, toml_edit::Item::ArrayOfTables(aot));
+            1
+        }
+        Some(toml_edit::Item::ArrayOfTables(mut aot)) => {
+            aot.push(new_entry);
+            let idx = aot.len() - 1;
+            channels_table.insert(channel_name, toml_edit::Item::ArrayOfTables(aot));
+            idx
+        }
+        Some(other) => {
+            // Re-insert what we removed so the file isn't accidentally mutated.
+            channels_table.insert(channel_name, other);
+            return Err(format!(
+                "channels.{channel_name} has an unsupported TOML shape (expected table or array of tables)"
+            )
+            .into());
+        }
+    };
+
+    write_config_doc(config_path, &doc)?;
+    Ok(new_index)
+}
+
+/// Replace a single `[[channels.<name>]]` instance at `index`.
+///
+/// Accepts either the legacy single-table form (when `index == 0`) or an
+/// `ArrayOfTables`. Returns `Err` if the index is out of bounds or the
+/// channel is not present in the document. Callers must hold
+/// `AppState::config_write_lock`.
+pub(crate) fn update_channel_instance(
+    config_path: &std::path::Path,
+    channel_name: &str,
+    index: usize,
+    fields: &HashMap<String, (String, FieldType)>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut doc = open_config_doc(config_path)?;
+
+    let channels_table = doc
+        .get_mut("channels")
+        .and_then(|i| i.as_table_mut())
+        .ok_or_else(|| format!("channels.{channel_name} is not configured"))?;
+
+    let new_entry = build_channel_toml_table(fields);
+
+    match channels_table.get_mut(channel_name) {
+        None => {
+            return Err(format!("channels.{channel_name} is not configured").into());
+        }
+        Some(toml_edit::Item::Table(table)) => {
+            if index != 0 {
+                return Err(format!(
+                    "channels.{channel_name}[{index}] is out of bounds (only one instance configured)"
+                )
+                .into());
+            }
+            *table = new_entry;
+        }
+        Some(toml_edit::Item::ArrayOfTables(aot)) => {
+            if index >= aot.len() {
+                return Err(format!(
+                    "channels.{channel_name}[{index}] is out of bounds (have {} instance(s))",
+                    aot.len()
+                )
+                .into());
+            }
+            // ArrayOfTables doesn't expose direct index assignment, so rebuild
+            // by iterating: collect the existing entries, swap at `index`, and
+            // reinsert the rebuilt array.
+            let mut rebuilt = toml_edit::ArrayOfTables::new();
+            for (i, existing) in aot.iter().enumerate() {
+                if i == index {
+                    rebuilt.push(new_entry.clone());
+                } else {
+                    rebuilt.push(existing.clone());
+                }
+            }
+            *aot = rebuilt;
+        }
+        Some(_other) => {
+            return Err(format!(
+                "channels.{channel_name} has an unsupported TOML shape (expected table or array of tables)"
+            )
+            .into());
+        }
+    }
+
+    write_config_doc(config_path, &doc)?;
+    Ok(())
+}
+
+/// Remove the `[[channels.<name>]]` instance at `index`.
+///
+/// If the channel is stored as a single legacy table, the entire section is
+/// removed when `index == 0`. If stored as an `ArrayOfTables` and the array
+/// becomes empty, the whole `channels.<name>` key is removed. Callers must
+/// hold `AppState::config_write_lock`.
+pub(crate) fn remove_channel_instance(
+    config_path: &std::path::Path,
+    channel_name: &str,
+    index: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut doc = open_config_doc(config_path)?;
+
+    let channels_table = match doc.get_mut("channels").and_then(|i| i.as_table_mut()) {
+        Some(t) => t,
+        None => return Err(format!("channels.{channel_name} is not configured").into()),
+    };
+
+    match channels_table.get_mut(channel_name) {
+        None => {
+            return Err(format!("channels.{channel_name} is not configured").into());
+        }
+        Some(toml_edit::Item::Table(_)) => {
+            if index != 0 {
+                return Err(format!(
+                    "channels.{channel_name}[{index}] is out of bounds (only one instance configured)"
+                )
+                .into());
+            }
+            channels_table.remove(channel_name);
+        }
+        Some(toml_edit::Item::ArrayOfTables(aot)) => {
+            if index >= aot.len() {
+                return Err(format!(
+                    "channels.{channel_name}[{index}] is out of bounds (have {} instance(s))",
+                    aot.len()
+                )
+                .into());
+            }
+            let mut rebuilt = toml_edit::ArrayOfTables::new();
+            for (i, existing) in aot.iter().enumerate() {
+                if i != index {
+                    rebuilt.push(existing.clone());
+                }
+            }
+            if rebuilt.is_empty() {
+                channels_table.remove(channel_name);
+            } else {
+                *aot = rebuilt;
+            }
+        }
+        Some(_other) => {
+            return Err(format!(
+                "channels.{channel_name} has an unsupported TOML shape (expected table or array of tables)"
+            )
+            .into());
+        }
+    }
+
+    write_config_doc(config_path, &doc)?;
     Ok(())
 }
 
@@ -6469,5 +6744,306 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
             !path.exists(),
             "secrets.env must not be created on validation error"
         );
+    }
+
+    // ── Channel instance helpers (#4837) ────────────────────────────────
+
+    fn fields_for(values: &[(&str, &str, FieldType)]) -> HashMap<String, (String, FieldType)> {
+        values
+            .iter()
+            .map(|(k, v, ft)| (k.to_string(), (v.to_string(), *ft)))
+            .collect()
+    }
+
+    #[test]
+    fn append_channel_instance_creates_array_of_tables_from_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let f = fields_for(&[
+            ("bot_token_env", "TELEGRAM_BOT_TOKEN", FieldType::Text),
+            ("default_agent", "support", FieldType::Text),
+        ]);
+        let idx = append_channel_instance(&path, "telegram", &f).unwrap();
+        assert_eq!(idx, 0, "first append must land at index 0");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("[[channels.telegram]]"),
+            "first append should write [[channels.telegram]] (array of tables): {raw}"
+        );
+        assert!(raw.contains("bot_token_env = \"TELEGRAM_BOT_TOKEN\""));
+    }
+
+    #[test]
+    fn append_channel_instance_promotes_legacy_single_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        // Seed with a legacy `[channels.telegram]` single-table layout — the
+        // shape produced by every previous version of the dashboard.
+        std::fs::write(
+            &path,
+            "[channels.telegram]\nbot_token_env = \"FIRST\"\ndefault_agent = \"alpha\"\n",
+        )
+        .unwrap();
+        let f = fields_for(&[
+            ("bot_token_env", "SECOND", FieldType::Text),
+            ("default_agent", "beta", FieldType::Text),
+        ]);
+        let idx = append_channel_instance(&path, "telegram", &f).unwrap();
+        assert_eq!(idx, 1, "appending to single table should land at index 1");
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        // Must now be an array-of-tables — the single-table form cannot
+        // coexist with a second instance.
+        assert!(
+            raw.contains("[[channels.telegram]]"),
+            "single Table must be promoted to ArrayOfTables: {raw}"
+        );
+        assert!(
+            raw.contains("FIRST"),
+            "legacy entry must be preserved: {raw}"
+        );
+        assert!(raw.contains("SECOND"), "new entry must be present: {raw}");
+
+        // Round-trip through the typed config to make sure the kernel will
+        // see both instances post-promotion.
+        #[derive(serde::Deserialize)]
+        struct Doc {
+            channels: librefang_types::config::ChannelsConfig,
+        }
+        let parsed: Doc = toml::from_str(&raw).unwrap();
+        assert_eq!(parsed.channels.telegram.len(), 2);
+    }
+
+    #[test]
+    fn append_channel_instance_pushes_to_existing_array() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[channels.telegram]]\nbot_token_env = \"A\"\n\n[[channels.telegram]]\nbot_token_env = \"B\"\n",
+        )
+        .unwrap();
+        let f = fields_for(&[("bot_token_env", "C", FieldType::Text)]);
+        let idx = append_channel_instance(&path, "telegram", &f).unwrap();
+        assert_eq!(idx, 2, "third instance must land at index 2");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        for needle in ["\"A\"", "\"B\"", "\"C\""] {
+            assert!(raw.contains(needle), "{needle} must be present: {raw}");
+        }
+    }
+
+    #[test]
+    fn update_channel_instance_replaces_array_entry_at_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[channels.telegram]]\nbot_token_env = \"A\"\n\n[[channels.telegram]]\nbot_token_env = \"B\"\n",
+        )
+        .unwrap();
+        let f = fields_for(&[
+            ("bot_token_env", "B_UPDATED", FieldType::Text),
+            ("default_agent", "ops", FieldType::Text),
+        ]);
+        update_channel_instance(&path, "telegram", 1, &f).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"A\""), "instance 0 must be preserved: {raw}");
+        assert!(
+            raw.contains("B_UPDATED"),
+            "instance 1 must reflect update: {raw}"
+        );
+        assert!(
+            !raw.contains("\"B\"\n"),
+            "old instance 1 value must be gone: {raw}"
+        );
+    }
+
+    #[test]
+    fn update_channel_instance_replaces_legacy_single_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "[channels.telegram]\nbot_token_env = \"OLD\"\n").unwrap();
+        let f = fields_for(&[("bot_token_env", "NEW", FieldType::Text)]);
+        update_channel_instance(&path, "telegram", 0, &f).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("NEW"),
+            "legacy single-table edit at idx 0 should land: {raw}"
+        );
+        assert!(!raw.contains("OLD"), "legacy value must be replaced: {raw}");
+    }
+
+    #[test]
+    fn update_channel_instance_out_of_bounds_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "[[channels.telegram]]\nbot_token_env = \"A\"\n").unwrap();
+        let f = fields_for(&[("bot_token_env", "X", FieldType::Text)]);
+        let err = update_channel_instance(&path, "telegram", 5, &f).unwrap_err();
+        assert!(
+            err.to_string().contains("out of bounds"),
+            "out-of-range update should error: {err}"
+        );
+    }
+
+    #[test]
+    fn update_channel_instance_unknown_channel_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "[other]\nx = 1\n").unwrap();
+        let f = fields_for(&[("bot_token_env", "X", FieldType::Text)]);
+        let err = update_channel_instance(&path, "telegram", 0, &f).unwrap_err();
+        assert!(
+            err.to_string().contains("not configured"),
+            "unconfigured channel update should error: {err}"
+        );
+    }
+
+    #[test]
+    fn remove_channel_instance_drops_one_array_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[channels.telegram]]\nbot_token_env = \"A\"\n\n[[channels.telegram]]\nbot_token_env = \"B\"\n\n[[channels.telegram]]\nbot_token_env = \"C\"\n",
+        )
+        .unwrap();
+        remove_channel_instance(&path, "telegram", 1).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"A\""));
+        assert!(raw.contains("\"C\""));
+        assert!(
+            !raw.contains("\"B\""),
+            "removed instance must be gone: {raw}"
+        );
+
+        #[derive(serde::Deserialize)]
+        struct Doc {
+            channels: librefang_types::config::ChannelsConfig,
+        }
+        let parsed: Doc = toml::from_str(&raw).unwrap();
+        assert_eq!(parsed.channels.telegram.len(), 2);
+    }
+
+    #[test]
+    fn remove_channel_instance_drops_section_when_array_empties() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "[[channels.telegram]]\nbot_token_env = \"ONLY\"\n").unwrap();
+        remove_channel_instance(&path, "telegram", 0).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        // Either the channels.telegram entry is gone entirely, or the channels
+        // table itself is empty — both forms parse back to zero instances.
+        #[derive(serde::Deserialize, Default)]
+        struct Doc {
+            #[serde(default)]
+            channels: librefang_types::config::ChannelsConfig,
+        }
+        let parsed: Doc = toml::from_str(&raw).unwrap_or_default();
+        assert_eq!(parsed.channels.telegram.len(), 0);
+    }
+
+    #[test]
+    fn remove_channel_instance_drops_legacy_single_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "[channels.telegram]\nbot_token_env = \"OLD\"\n").unwrap();
+        remove_channel_instance(&path, "telegram", 0).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("bot_token_env"),
+            "legacy single-table delete at idx 0 must remove the section: {raw}"
+        );
+    }
+
+    #[test]
+    fn remove_channel_instance_out_of_bounds_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "[[channels.telegram]]\nbot_token_env = \"A\"\n").unwrap();
+        let err = remove_channel_instance(&path, "telegram", 7).unwrap_err();
+        assert!(
+            err.to_string().contains("out of bounds"),
+            "out-of-range remove should error: {err}"
+        );
+    }
+
+    /// Regression for #4865: legacy `POST /api/channels/<name>/configure`
+    /// silently replaced the entire `[[channels.<name>]]` array with a
+    /// single `[channels.<name>]` table, losing every instance after the
+    /// first. The helper must refuse with the AoT-conflict sentinel so the
+    /// handler can map to 409 Conflict.
+    #[test]
+    fn upsert_channel_config_refuses_when_aot_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[channels.telegram]]\nbot_token_env = \"TG_A\"\n\n\
+             [[channels.telegram]]\nbot_token_env = \"TG_B\"\n",
+        )
+        .unwrap();
+        let mut fields: HashMap<String, (String, FieldType)> = HashMap::new();
+        fields.insert(
+            "bot_token_env".to_string(),
+            ("TG_REPLACEMENT".to_string(), FieldType::Text),
+        );
+        let err = upsert_channel_config(&path, "telegram", &fields).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with(CHANNEL_AOT_CONFLICT_PREFIX),
+            "expected AoT-conflict sentinel, got: {msg}"
+        );
+        // Disk must be untouched — both original instances still present.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("TG_A"), "instance A was clobbered: {raw}");
+        assert!(raw.contains("TG_B"), "instance B was clobbered: {raw}");
+        assert!(
+            !raw.contains("TG_REPLACEMENT"),
+            "refused write must not appear on disk: {raw}"
+        );
+    }
+
+    /// Regression for #4865: `DELETE /api/channels/<name>/configure` would
+    /// drop the entire `[[channels.<name>]]` array, including instances the
+    /// user had created via the per-instance API. Helper must refuse.
+    #[test]
+    fn remove_channel_config_refuses_when_aot_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[channels.telegram]]\nbot_token_env = \"TG_A\"\n\n\
+             [[channels.telegram]]\nbot_token_env = \"TG_B\"\n",
+        )
+        .unwrap();
+        let err = remove_channel_config(&path, "telegram").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with(CHANNEL_AOT_CONFLICT_PREFIX),
+            "expected AoT-conflict sentinel, got: {msg}"
+        );
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("TG_A"), "instance A was clobbered: {raw}");
+        assert!(raw.contains("TG_B"), "instance B was clobbered: {raw}");
+    }
+
+    /// Single-instance legacy table form must keep working with /configure
+    /// (the back-compat path). The AoT-refusal must NOT trigger when the
+    /// channel is stored as a single table.
+    #[test]
+    fn upsert_channel_config_still_replaces_legacy_single_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "[channels.telegram]\nbot_token_env = \"OLD\"\n").unwrap();
+        let mut fields: HashMap<String, (String, FieldType)> = HashMap::new();
+        fields.insert(
+            "bot_token_env".to_string(),
+            ("NEW_TOKEN".to_string(), FieldType::Text),
+        );
+        upsert_channel_config(&path, "telegram", &fields).expect("legacy single-table replace");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("NEW_TOKEN"), "replacement must land: {raw}");
+        assert!(!raw.contains("OLD"), "old value must be gone: {raw}");
     }
 }

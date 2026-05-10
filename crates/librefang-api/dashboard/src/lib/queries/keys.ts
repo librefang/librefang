@@ -72,6 +72,12 @@ export const providerKeys = {
 export const channelKeys = {
   all: ["channels"] as const,
   lists: () => [...channelKeys.all, "list"] as const,
+  // Per-instance keys (#4837). Hierarchical so
+  // `invalidateQueries({ queryKey: channelKeys.all })` from any
+  // instance mutation also clears the channel list/snapshot
+  // (`instance_count` changes on every CRUD).
+  instances: (name: string) =>
+    [...channelKeys.all, "instances", name] as const,
 };
 
 export const commsKeys = {

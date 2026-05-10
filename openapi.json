@@ -4224,6 +4224,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Channel is in multi-instance form; use the per-instance API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       },
@@ -4257,6 +4267,306 @@
           },
           "404": {
             "description": "Unknown channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Channel is in multi-instance form; use the per-instance API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/channels/{name}/instances": {
+      "get": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "GET /api/channels/{name}/instances — List every configured instance.",
+        "operationId": "list_channel_instances",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Channel adapter name (e.g. telegram, discord)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List configured instances",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "POST /api/channels/{name}/instances — Append a new `[[channels.<name>]]`.",
+        "description": "The whole \"compute target index → resolve env-var name overrides → write\nsecrets → append config\" sequence runs inside the `config_write_lock`\ncritical section, against a freshly re-read on-disk view of `[channels]`,\nso two concurrent creates can't pick the same suffix or land at the same\nindex (#4865).",
+        "operationId": "create_channel_instance",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Channel adapter name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Instance created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/channels/{name}/instances/{index}": {
+      "put": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "PUT /api/channels/{name}/instances/{index} — Replace one instance's fields.",
+        "description": "Body shape:\n```json\n{\n  \"fields\": { \"bot_token_env\": \"...\", \"default_agent\": \"assistant\" },\n  \"signature\": \"<hex from GET response>\",\n  \"clear_secrets\": [\"bot_token_env\"]   // optional\n}\n```\n\n`signature` is REQUIRED and acts as a compare-and-swap token: the server\nre-reads disk under the write lock, computes the signature of the\ninstance currently at `index`, and rejects with 409 Conflict if it\ndoesn't match. This eliminates the silent-wrong-write bug where a\nconcurrent delete on a sibling row shifted indices between the client's\nlist-fetch and its PUT (#4865).\n\n`clear_secrets` lets the caller actively drop a secret reference instead\nof preserving it. Listed keys have their `<key>_env` field removed from\nthe rebuilt instance and, when no sibling instance references the same\nenv-var name, the env-var line is also removed from `secrets.env`.",
+        "operationId": "update_channel_instance_handler",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Channel adapter name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "index",
+            "in": "path",
+            "description": "Instance array index (0-based)",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "REQUIRED body fields: `fields` (object of channel-schema fields) and `signature` (hex CAS token from the matching `GET /instances` item, used to detect concurrent edits — mismatch yields 409). OPTIONAL: `clear_secrets` (array of secret-field keys to actively drop).",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Instance updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request (missing fields or signature)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown channel or instance index out of range",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Signature mismatch — instance was modified or moved by another writer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "DELETE /api/channels/{name}/instances/{index}?signature=<hex>",
+        "description": "`signature` is REQUIRED (query string) and acts as a compare-and-swap\ntoken: the server re-reads disk under the write lock and rejects with\n409 Conflict if the instance currently at `index` doesn't match the\nsignature the client read from the GET response (#4865).\n\nNote: this does NOT clear the secret env var the instance pointed at —\nthe env var may be shared with another instance, and we don't want to\nsilently break a running bot. To explicitly clear secrets while editing,\nuse PUT with `clear_secrets`.",
+        "operationId": "delete_channel_instance",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Channel adapter name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "index",
+            "in": "path",
+            "description": "Instance array index (0-based)",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "signature",
+            "in": "query",
+            "description": "REQUIRED hex CAS token from the matching `GET /instances` item; mismatch yields 409 (#4865)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Instance removed"
+          },
+          "400": {
+            "description": "Missing `signature` query parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown channel or instance index out of range",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Signature mismatch — instance was modified or moved by another writer",
             "content": {
               "application/json": {
                 "schema": {
