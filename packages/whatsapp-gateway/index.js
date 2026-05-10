@@ -2241,17 +2241,38 @@ async function startConnection() {
               return streamMsgKey;
             }
           }
-          // No streaming happened (fallback path) — send new message
-          const sent = await s.sendMessage(jid, { text: finalText });
-          if (ECHO_TRACKER_ENABLED) echoTracker.track(finalText);
-          console.log(JSON.stringify({
-            event: 'send_message_outbound',
-            kind: 'new_message',
-            jid,
-            len: finalText.length,
-            msg_id: sent?.key?.id || null,
-          }));
-          return sent?.key;
+          // No streaming happened (fallback path) — send new message.
+          //
+          // Mirror the edit branch's catch-arm: if the snapshot was
+          // non-null at entry but the underlying connection has since
+          // half-closed (cleanupSocket() racing the await), Baileys
+          // will throw here. The edit branch swallows the same throw
+          // and returns the streamed key; without an equivalent
+          // try/catch the new-message path would propagate the
+          // exception up to the message-handler scope and drop the
+          // entire delivery. Catch + log + return null so the caller
+          // sees the failure as a soft "nothing sent" (same shape it
+          // already handles when sendOrEdit's entry-snapshot was null).
+          try {
+            const sent = await s.sendMessage(jid, { text: finalText });
+            if (ECHO_TRACKER_ENABLED) echoTracker.track(finalText);
+            console.log(JSON.stringify({
+              event: 'send_message_outbound',
+              kind: 'new_message',
+              jid,
+              len: finalText.length,
+              msg_id: sent?.key?.id || null,
+            }));
+            return sent?.key;
+          } catch (err) {
+            console.warn(JSON.stringify({
+              event: 'send_message_outbound',
+              kind: 'new_message_failed',
+              jid,
+              error: err && err.message ? err.message : String(err),
+            }));
+            return null;
+          }
         };
 
         if (response && sock) {

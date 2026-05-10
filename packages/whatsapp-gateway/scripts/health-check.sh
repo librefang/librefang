@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # WhatsApp Gateway Health Check
 #
+# Linux + PM2 only. Uses GNU `stat -c %s` (not BSD `stat -f %z`) and
+# `nslookup -timeout=3` (GNU resolver flag). Will not run as-is on a macOS
+# dev host; intended target is the production Linux box where pm2 manages
+# the gateway. If you need a macOS-runnable variant for local debugging,
+# fork it — don't paper over the differences inline.
+#
 # Designed to run every 5 minutes from an external scheduler (LibreFang cron
 # or system cron). Distinguishes between gateway-process failures (which a
 # restart can fix) and network/DNS failures (which a restart cannot fix), and
@@ -119,7 +125,13 @@ pm2_restart() {
     log "[health] pm2 binary not found in PATH"
     return 1
   fi
+  # `pm2 ... | while read` would let the pipeline's exit status drop pm2's
+  # real exit code (the `while`/`done` always returns 0) — the boolean
+  # signal callers may eventually want is then a lie. With `pipefail`
+  # already set at the top of the script, capture pm2's status via
+  # PIPESTATUS so the function returns a faithful success/failure.
   pm2 restart whatsapp-gateway 2>&1 | while read -r line; do log "[pm2] $line"; done
+  return "${PIPESTATUS[0]}"
 }
 
 write_flag() {
