@@ -193,8 +193,50 @@ fn is_private_hostname(host: &str) -> bool {
 // Bounded fetch
 // ---------------------------------------------------------------------------
 
-/// Fetch the body of an `http(s)` URL with both the SSRF guard and a hard
-/// in-memory size cap.
+/// Errors returned by [`fetch_url_bytes`].
+///
+/// Three variants by design — callers usually need to distinguish:
+///
+/// * a pre-network rejection (SSRF guard, scheme),
+/// * a size-cap hit (so the caller can phrase its own "too large"
+///   message and surface the real or the limit byte count), and
+/// * any other failure (transport, non-2xx status, mid-stream read).
+#[derive(Debug)]
+pub enum FetchError {
+    /// `validate_url_for_fetch` refused the URL before any I/O.
+    Rejected(String),
+    /// Body would exceed `max_bytes`. `actual` carries the
+    /// `Content-Length` value when the pre-check tripped, and is
+    /// `None` when the mid-stream accumulator tripped (no honest
+    /// total available). `limit` is the cap that was passed in.
+    TooLarge { actual: Option<u64>, limit: usize },
+    /// Anything else: transport error, non-2xx status, mid-stream
+    /// read failure, ...
+    Failed(String),
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(s) => write!(f, "{s}"),
+            Self::TooLarge {
+                actual: Some(len),
+                limit,
+            } => write!(f, "Content-Length {len} exceeds cap of {limit} bytes"),
+            Self::TooLarge {
+                actual: None,
+                limit,
+            } => write!(f, "response exceeds cap of {limit} bytes mid-stream"),
+            Self::Failed(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl std::error::Error for FetchError {}
+
+/// Fetch the body of an `http(s)` URL with both the SSRF guard and a
+/// hard in-memory size cap, returning the body and the optional
+/// `Content-Type` header.
 ///
 /// Two layers of defense:
 ///
@@ -213,16 +255,21 @@ fn is_private_hostname(host: &str) -> bool {
 /// default; security utilities should make the cap a deliberate decision
 /// of the caller.
 ///
+/// The returned `Option<String>` is the response's `Content-Type`
+/// header (raw, including any `; charset=...` / `; boundary=...`
+/// parameters). Callers that need to dispatch on media type should
+/// strip parameters and validate the prefix themselves — see the image
+/// download path in `bridge.rs` for an example.
+///
 /// **DNS rebinding is out of scope** — same as `validate_url_for_fetch`.
 /// Mitigate at the network layer or with a resolving SSRF proxy if the
 /// threat model requires it.
-#[allow(dead_code)]
 pub async fn fetch_url_bytes(
     client: &reqwest::Client,
     url: &str,
     max_bytes: usize,
-) -> Result<Vec<u8>, String> {
-    validate_url_for_fetch(url)?;
+) -> Result<(Vec<u8>, Option<String>), FetchError> {
+    validate_url_for_fetch(url).map_err(FetchError::Rejected)?;
     fetch_url_bytes_unchecked(client, url, max_bytes).await
 }
 
@@ -237,23 +284,33 @@ async fn fetch_url_bytes_unchecked(
     client: &reqwest::Client,
     url: &str,
     max_bytes: usize,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, Option<String>), FetchError> {
     let resp = client
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("fetch failed: {e}"))?;
+        .map_err(|e| FetchError::Failed(format!("fetch failed: {e}")))?;
     if !resp.status().is_success() {
-        return Err(format!("fetch returned status {}", resp.status()));
+        return Err(FetchError::Failed(format!(
+            "fetch returned status {}",
+            resp.status()
+        )));
     }
 
     if let Some(len) = resp.content_length() {
         if len > max_bytes as u64 {
-            return Err(format!(
-                "Content-Length {len} exceeds cap of {max_bytes} bytes"
-            ));
+            return Err(FetchError::TooLarge {
+                actual: Some(len),
+                limit: max_bytes,
+            });
         }
     }
+
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     let cap = max_bytes;
     let prealloc = resp
@@ -262,13 +319,20 @@ async fn fetch_url_bytes_unchecked(
         .unwrap_or(0);
     let mut body = Vec::with_capacity(prealloc);
     let mut resp = resp;
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("read chunk: {e}"))? {
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| FetchError::Failed(format!("read chunk: {e}")))?
+    {
         if body.len().saturating_add(chunk.len()) > cap {
-            return Err(format!("response exceeds cap of {cap} bytes mid-stream"));
+            return Err(FetchError::TooLarge {
+                actual: None,
+                limit: cap,
+            });
         }
         body.extend_from_slice(&chunk);
     }
-    Ok(body)
+    Ok((body, content_type))
 }
 
 // ---------------------------------------------------------------------------
@@ -431,15 +495,23 @@ mod tests {
         let err = fetch_url_bytes(&client, "http://127.0.0.1/", 1024)
             .await
             .unwrap_err();
-        assert!(
-            err.contains("private/reserved"),
-            "expected SSRF guard message, got: {err}"
-        );
+        match &err {
+            FetchError::Rejected(msg) => assert!(
+                msg.contains("private/reserved"),
+                "expected SSRF guard message, got: {msg}"
+            ),
+            other => panic!("expected Rejected, got: {other:?}"),
+        }
 
         let err = fetch_url_bytes(&client, "file:///etc/passwd", 1024)
             .await
             .unwrap_err();
-        assert!(err.contains("scheme"), "expected scheme reject, got: {err}");
+        match &err {
+            FetchError::Rejected(msg) => {
+                assert!(msg.contains("scheme"), "expected scheme reject, got: {msg}")
+            }
+            other => panic!("expected Rejected, got: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -448,16 +520,24 @@ mod tests {
         let body = b"hello world".to_vec();
         Mock::given(method("GET"))
             .and(path("/file"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/plain; charset=utf-8")
+                    .set_body_bytes(body.clone()),
+            )
             .mount(&server)
             .await;
 
         let client = new_client();
         let url = format!("{}/file", server.uri());
-        let got = fetch_url_bytes_unchecked(&client, &url, 1024)
+        let (got, content_type) = fetch_url_bytes_unchecked(&client, &url, 1024)
             .await
             .unwrap();
         assert_eq!(got, body);
+        // The Content-Type header is surfaced verbatim — caller is
+        // responsible for stripping `;` parameters and validating the
+        // prefix. Asserting raw form pins that contract.
+        assert_eq!(content_type.as_deref(), Some("text/plain; charset=utf-8"));
     }
 
     #[tokio::test]
@@ -475,10 +555,16 @@ mod tests {
         let err = fetch_url_bytes_unchecked(&client, &url, 1024)
             .await
             .unwrap_err();
-        assert!(
-            err.contains("Content-Length"),
-            "expected Content-Length reject, got: {err}"
-        );
+        match err {
+            FetchError::TooLarge {
+                actual: Some(len),
+                limit,
+            } => {
+                assert_eq!(len, 4096);
+                assert_eq!(limit, 1024);
+            }
+            other => panic!("expected TooLarge {{ actual: Some(..), .. }}, got: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -525,10 +611,13 @@ mod tests {
         let err = fetch_url_bytes_unchecked(&client, &url, 800)
             .await
             .unwrap_err();
-        assert!(
-            err.contains("mid-stream"),
-            "expected mid-stream cap reject, got: {err}"
-        );
+        match err {
+            FetchError::TooLarge {
+                actual: None,
+                limit,
+            } => assert_eq!(limit, 800),
+            other => panic!("expected TooLarge {{ actual: None, .. }}, got: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -545,7 +634,12 @@ mod tests {
         let err = fetch_url_bytes_unchecked(&client, &url, 1024)
             .await
             .unwrap_err();
-        assert!(err.contains("404"), "expected 404 in error, got: {err}");
+        match &err {
+            FetchError::Failed(msg) => {
+                assert!(msg.contains("404"), "expected 404 in error, got: {msg}")
+            }
+            other => panic!("expected Failed, got: {other:?}"),
+        }
     }
 
     // -------- ct_eq --------------------------------------------------------
