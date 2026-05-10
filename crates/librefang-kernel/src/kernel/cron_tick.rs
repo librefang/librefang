@@ -390,11 +390,14 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                                                     keep_recent_cfg,
                                                     keep_count,
                                                 );
+                                                let echo_policy =
+                                                    kernel_job.lookup_reasoning_echo_policy(&model);
                                                 match try_summarize_trim(
                                                     &session.messages,
                                                     effective_keep_recent,
                                                     driver,
                                                     &model,
+                                                    echo_policy,
                                                 )
                                                 .await
                                                 {

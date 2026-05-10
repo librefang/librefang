@@ -99,6 +99,7 @@ pub async fn fold_stale_tool_results(
     model: &str,
     aux_client: Option<&AuxClient>,
     driver: Arc<dyn LlmDriver>,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> (Vec<Message>, FoldResult) {
     if fold_after_turns == 0 {
         return (messages, FoldResult::default());
@@ -150,7 +151,14 @@ pub async fn fold_stale_tool_results(
     for (g_idx, group) in groups.iter().enumerate() {
         let count = group.len();
         let group_msgs: Vec<&Message> = group.iter().map(|&i| &messages[i]).collect();
-        let summary = summarise_group(group_msgs.as_slice(), model, &*summary_driver, g_idx).await;
+        let summary = summarise_group(
+            group_msgs.as_slice(),
+            model,
+            &*summary_driver,
+            g_idx,
+            reasoning_echo_policy,
+        )
+        .await;
         let text = match summary {
             Ok(text) => {
                 info!(
@@ -305,6 +313,7 @@ async fn summarise_group(
     model: &str,
     driver: &dyn LlmDriver,
     group_idx: usize,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Result<String, String> {
     // Render the group to a compact text block.
     let mut text = format!("Tool results group {}:\n", group_idx + 1);
@@ -370,7 +379,7 @@ async fn summarise_group(
         agent_id: None,
         session_id: None,
         step_id: None,
-        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+        reasoning_echo_policy,
     };
 
     match driver.complete(request).await {
@@ -510,8 +519,16 @@ mod tests {
         let pre_ids: Vec<Vec<String>> = messages.iter().map(tool_use_ids_in).collect();
         let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver("nice summary".to_string()));
 
-        let (out, result) =
-            fold_stale_tool_results(messages, 8, 1, "test-model", None, driver).await;
+        let (out, result) = fold_stale_tool_results(
+            messages,
+            8,
+            1,
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
 
         assert!(
             result.groups_folded >= 1,
@@ -541,8 +558,16 @@ mod tests {
         let original_len = messages.len();
         let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver("summary".to_string()));
 
-        let (out, result) =
-            fold_stale_tool_results(messages, 8, 1, "test-model", None, driver).await;
+        let (out, result) = fold_stale_tool_results(
+            messages,
+            8,
+            1,
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
 
         assert_eq!(result.groups_folded, 0);
         assert_eq!(result.messages_replaced, 0);
@@ -555,8 +580,16 @@ mod tests {
         let messages = build_history(10);
         let driver: Arc<dyn LlmDriver> = Arc::new(FailDriver);
 
-        let (out, result) =
-            fold_stale_tool_results(messages, 8, 1, "test-model", None, driver).await;
+        let (out, result) = fold_stale_tool_results(
+            messages,
+            8,
+            1,
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
 
         // Should still fold (with fallback stubs).
         assert!(
@@ -618,7 +651,16 @@ mod tests {
             msgs.push(tool_result_msg("recent_tool", &format!("recent {i}")));
         }
         let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver("compact summary".to_string()));
-        let (out, _result) = fold_stale_tool_results(msgs, 2, 1, "test-model", None, driver).await;
+        let (out, _result) = fold_stale_tool_results(
+            msgs,
+            2,
+            1,
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
 
         // The stale ToolResult must still exist with its tool_use_id intact,
         // only `content` rewritten — without this the assistant's ToolUse{
@@ -657,8 +699,16 @@ mod tests {
         let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver(
             "should never be called — fold should skip below batch threshold".to_string(),
         ));
-        let (out, result) =
-            fold_stale_tool_results(messages.clone(), 8, 4, "test-model", None, driver).await;
+        let (out, result) = fold_stale_tool_results(
+            messages.clone(),
+            8,
+            4,
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
 
         assert_eq!(
             result.groups_folded, 0,
@@ -724,7 +774,16 @@ mod tests {
             msgs.push(tool_result_msg("shell", &format!("output {i}")));
         }
         let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver("new summary".to_string()));
-        let (out, result) = fold_stale_tool_results(msgs, 8, 1, "test-model", None, driver).await;
+        let (out, result) = fold_stale_tool_results(
+            msgs,
+            8,
+            1,
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
 
         // The existing fold stub must still be present in the output unchanged.
         let prior_stub_present = out.iter().any(|m| match &m.content {

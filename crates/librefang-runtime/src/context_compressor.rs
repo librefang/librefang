@@ -383,8 +383,17 @@ impl ContextCompressor {
             ..CompactionConfig::default()
         };
 
-        let result =
-            compactor::compact_session(driver, model, &temp_session, &compaction_config).await?;
+        let result = compactor::compact_session(
+            driver,
+            model,
+            &temp_session,
+            &compaction_config,
+            // ContextCompressor doesn't carry a catalog reference; the
+            // OpenAI driver's substring fallback resolves the policy by
+            // model name when needed.
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await?;
 
         // Choose the summary message role to maintain User/Assistant alternation.
         //

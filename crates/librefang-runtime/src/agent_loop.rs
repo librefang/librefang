@@ -2840,6 +2840,7 @@ async fn generate_search_queries(
     manifest: &AgentManifest,
     session_messages: &[Message],
     user_message: &str,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Option<Vec<String>> {
     // Build a compact conversation summary from the last few messages
     let recent: Vec<&Message> = session_messages
@@ -2885,7 +2886,7 @@ async fn generate_search_queries(
         agent_id: None,
         session_id: None,
         step_id: None,
-        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+        reasoning_echo_policy,
     };
 
     let response =
@@ -2938,6 +2939,7 @@ async fn web_search_augment(
     web_ctx: Option<&WebToolsContext>,
     driver: &dyn LlmDriver,
     session_messages: &[Message],
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Option<String> {
     if !should_augment_web_search(manifest) {
         return None;
@@ -2946,12 +2948,19 @@ async fn web_search_augment(
 
     // Try LLM-based query generation.
     // Some(vec![...]) = generated queries, Some(vec![]) = no search needed, None = generation failed
-    let queries =
-        match generate_search_queries(driver, manifest, session_messages, user_message).await {
-            Some(q) if q.is_empty() => return None, // LLM says no search needed
-            Some(q) => q,
-            None => vec![user_message.to_string()], // Generation failed, fall back to raw message
-        };
+    let queries = match generate_search_queries(
+        driver,
+        manifest,
+        session_messages,
+        user_message,
+        reasoning_echo_policy,
+    )
+    .await
+    {
+        Some(q) if q.is_empty() => return None, // LLM says no search needed
+        Some(q) => q,
+        None => vec![user_message.to_string()], // Generation failed, fall back to raw message
+    };
 
     // Search with each query and collect results
     let mut all_results = String::new();
@@ -3289,6 +3298,7 @@ async fn maybe_fold_stale_tool_results(
     aux_client: Option<&crate::aux_client::AuxClient>,
     driver: Arc<dyn LlmDriver>,
     streaming: bool,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Vec<Message> {
     // Fast-path: a fold pass needs at least `fold_after_turns` *recent*
     // assistant turns plus one stale turn — i.e. more than
@@ -3305,6 +3315,7 @@ async fn maybe_fold_stale_tool_results(
         model,
         aux_client,
         driver,
+        reasoning_echo_policy,
     )
     .await;
     if fold_result.groups_folded > 0 {
@@ -3571,12 +3582,17 @@ pub async fn run_agent_loop(
 
     // Web search augmentation: generate search queries via LLM, search the web,
     // and inject results into context for models without tool/function calling.
+    let web_search_echo_policy = kernel
+        .as_ref()
+        .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
+        .unwrap_or_default();
     if let Some(search_results) = web_search_augment(
         manifest,
         user_message,
         web_ctx,
         driver.as_ref(),
         &session.messages,
+        web_search_echo_policy,
     )
     .await
     {
@@ -3780,6 +3796,10 @@ pub async fn run_agent_loop(
         // before context assembly so the LLM never sees raw bulk payloads
         // from old turns.  Runs fold first, then the compressor, mirroring
         // the ordering rationale in `history_fold`'s module-level doc.
+        let fold_echo_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
+            .unwrap_or_default();
         messages = maybe_fold_stale_tool_results(
             messages,
             tr_fold_after_turns,
@@ -3788,6 +3808,7 @@ pub async fn run_agent_loop(
             opts.aux_client.as_deref(),
             driver.clone(),
             false,
+            fold_echo_policy,
         )
         .await;
 
@@ -5073,12 +5094,17 @@ pub async fn run_agent_loop_streaming(
 
     // Web search augmentation: generate search queries via LLM, search the web,
     // and inject results into context for models without tool/function calling.
+    let web_search_echo_policy = kernel
+        .as_ref()
+        .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
+        .unwrap_or_default();
     if let Some(search_results) = web_search_augment(
         manifest,
         user_message,
         web_ctx,
         driver.as_ref(),
         &session.messages,
+        web_search_echo_policy,
     )
     .await
     {
@@ -5262,6 +5288,10 @@ pub async fn run_agent_loop_streaming(
         // History fold (#3347 3/N): rewrite stale tool-result blocks in place
         // before context assembly — streaming path mirrors non-streaming via
         // `maybe_fold_stale_tool_results` (#4 review-followup DRY).
+        let fold_echo_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
+            .unwrap_or_default();
         messages = maybe_fold_stale_tool_results(
             messages,
             tr_fold_after_turns,
@@ -5270,6 +5300,7 @@ pub async fn run_agent_loop_streaming(
             opts.aux_client.as_deref(),
             driver.clone(),
             true,
+            fold_echo_policy,
         )
         .await;
 

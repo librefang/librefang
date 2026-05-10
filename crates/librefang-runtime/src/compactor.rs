@@ -645,6 +645,7 @@ async fn summarize_messages(
     model: &str,
     messages: &[Message],
     config: &CompactionConfig,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Result<String, String> {
     let mut conversation_text = build_conversation_text(messages, config);
 
@@ -699,7 +700,7 @@ async fn summarize_messages(
         agent_id: None,
         session_id: None,
         step_id: None,
-        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+        reasoning_echo_policy,
     };
 
     // Retry logic for transient failures
@@ -737,6 +738,7 @@ async fn summarize_in_chunks(
     model: &str,
     messages: &[Message],
     config: &CompactionConfig,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Result<String, String> {
     let chunk_ratio = compute_adaptive_chunk_ratio(messages, config);
     let chunk_size = (messages.len() as f64 * chunk_ratio).ceil() as usize;
@@ -751,7 +753,8 @@ async fn summarize_in_chunks(
     let mut success_count = 0usize;
     let mut last_chunk_error = String::new();
     for (i, chunk) in messages.chunks(chunk_size).enumerate() {
-        match summarize_messages(driver.clone(), model, chunk, config).await {
+        match summarize_messages(driver.clone(), model, chunk, config, reasoning_echo_policy).await
+        {
             Ok(summary) => {
                 info!(chunk = i, summary_len = summary.len(), "Chunk summarized");
                 summaries.push(summary);
@@ -828,7 +831,7 @@ async fn summarize_in_chunks(
         agent_id: None,
         session_id: None,
         step_id: None,
-        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+        reasoning_echo_policy,
     };
 
     match driver.complete(merge_request).await {
@@ -865,8 +868,16 @@ pub async fn compact_session(
     model: &str,
     session: &Session,
     config: &CompactionConfig,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Result<CompactionResult, String> {
-    compact_messages(driver, model, &session.messages, config).await
+    compact_messages(
+        driver,
+        model,
+        &session.messages,
+        config,
+        reasoning_echo_policy,
+    )
+    .await
 }
 
 /// Same as [`compact_session`] but takes a raw message slice instead of a
@@ -890,6 +901,7 @@ pub async fn compact_messages(
     model: &str,
     messages: &[Message],
     config: &CompactionConfig,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Result<CompactionResult, String> {
     let msg_count = messages.len();
     if msg_count <= config.keep_recent {
@@ -924,7 +936,15 @@ pub async fn compact_messages(
     let compacted_count = to_compact.len();
 
     // Stage 1: Try full single-pass summarization
-    match summarize_messages(driver.clone(), model, to_compact, config).await {
+    match summarize_messages(
+        driver.clone(),
+        model,
+        to_compact,
+        config,
+        reasoning_echo_policy,
+    )
+    .await
+    {
         Ok(summary) => {
             info!(
                 summary_len = summary.len(),
@@ -945,7 +965,15 @@ pub async fn compact_messages(
     }
 
     // Stage 2: Chunked summarization with adaptive ratio
-    match summarize_in_chunks(driver.clone(), model, to_compact, config).await {
+    match summarize_in_chunks(
+        driver.clone(),
+        model,
+        to_compact,
+        config,
+        reasoning_echo_policy,
+    )
+    .await
+    {
         Ok(summary) => {
             let chunk_ratio = compute_adaptive_chunk_ratio(to_compact, config);
             let chunk_size = (to_compact.len() as f64 * chunk_ratio).ceil() as usize;
@@ -1087,9 +1115,15 @@ mod tests {
         };
 
         // With only 2 messages and keep_recent=10, nothing should be compacted
-        let result = compact_session(Arc::new(FakeDriver), "test-model", &session, &config)
-            .await
-            .unwrap();
+        let result = compact_session(
+            Arc::new(FakeDriver),
+            "test-model",
+            &session,
+            &config,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.compacted_count, 0);
         assert_eq!(result.kept_messages.len(), 2);
         assert_eq!(result.chunks_used, 0);
@@ -1182,9 +1216,15 @@ mod tests {
             ..CompactionConfig::default()
         };
 
-        let result = compact_session(Arc::new(FakeDriver), "test-model", &session, &config)
-            .await
-            .unwrap();
+        let result = compact_session(
+            Arc::new(FakeDriver),
+            "test-model",
+            &session,
+            &config,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await
+        .unwrap();
         assert!(result.compacted_count > 0);
         assert!(result.summary.contains("tools"));
         assert_eq!(result.chunks_used, 1);
@@ -1256,9 +1296,15 @@ mod tests {
             ..CompactionConfig::default()
         };
 
-        let result = compact_session(Arc::new(FakeDriver), "test-model", &session, &config)
-            .await
-            .unwrap();
+        let result = compact_session(
+            Arc::new(FakeDriver),
+            "test-model",
+            &session,
+            &config,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.compacted_count, 90);
         assert_eq!(result.kept_messages.len(), 10);
         assert!(result.summary.contains("Summary"));
@@ -1386,9 +1432,15 @@ mod tests {
             ..CompactionConfig::default()
         };
 
-        let result = compact_session(Arc::new(FailingDriver), "test-model", &session, &config)
-            .await
-            .unwrap();
+        let result = compact_session(
+            Arc::new(FailingDriver),
+            "test-model",
+            &session,
+            &config,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await
+        .unwrap();
 
         assert!(result.used_fallback, "Should have used fallback");
         assert_eq!(result.chunks_used, 0, "Fallback uses 0 chunks");
@@ -1446,10 +1498,15 @@ mod tests {
             .collect();
         let config = CompactionConfig::default();
 
-        let result =
-            summarize_in_chunks(Arc::new(CountingDriver), "test-model", &messages, &config)
-                .await
-                .unwrap();
+        let result = summarize_in_chunks(
+            Arc::new(CountingDriver),
+            "test-model",
+            &messages,
+            &config,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await
+        .unwrap();
 
         let calls = CALL_COUNT.load(Ordering::SeqCst);
         // With base_chunk_ratio=0.4, chunk_size = ceil(20*0.4) = 8, so 3 chunks + 1 merge = 4 calls

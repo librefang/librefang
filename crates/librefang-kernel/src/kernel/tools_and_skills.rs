@@ -591,6 +591,11 @@ impl LibreFangKernel {
         // configured default) but broke MiniMax with
         // `unknown model '' (2013)` at the 400 boundary.
         let model_for_review = strip_provider_prefix(&default_model.model, &default_model.provider);
+        let echo_policy = kernel_weak
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .map(|k| k.lookup_reasoning_echo_policy(&model_for_review))
+            .unwrap_or_default();
         let request = CompletionRequest {
             model: model_for_review,
             messages: std::sync::Arc::new(vec![Message::user(user_msg)]),
@@ -607,7 +612,7 @@ impl LibreFangKernel {
             agent_id: None,
             session_id: None,
             step_id: None,
-            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+            reasoning_echo_policy: echo_policy,
         };
 
         let start = std::time::Instant::now();

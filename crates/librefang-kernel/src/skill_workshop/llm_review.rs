@@ -100,6 +100,7 @@ pub async fn review_candidate(
     model: &str,
     hit: &HeuristicHit,
     attribution: ReviewAttribution<'_>,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> ReviewDecision {
     let user_prompt = build_user_prompt(hit);
     let request = CompletionRequest {
@@ -127,7 +128,7 @@ pub async fn review_candidate(
         agent_id: Some(attribution.agent_id.to_string()),
         session_id: attribution.session_id.map(str::to_string),
         step_id: attribution.candidate_id.map(str::to_string),
-        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
+        reasoning_echo_policy,
     };
 
     let response = match driver.complete(request).await {
@@ -303,7 +304,14 @@ mod tests {
     #[tokio::test]
     async fn accept_plain_json() {
         let raw = r#"{"accept": true, "reason": "useful rule"}"#;
-        let dec = review_candidate(driver(raw), "haiku", &fixture_hit(), test_attribution()).await;
+        let dec = review_candidate(
+            driver(raw),
+            "haiku",
+            &fixture_hit(),
+            test_attribution(),
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
         match dec {
             ReviewDecision::Accept {
                 refined_name,
@@ -320,7 +328,14 @@ mod tests {
     #[tokio::test]
     async fn accept_with_refinements() {
         let raw = r#"{"accept": true, "refined_name": "always_fmt", "refined_description": "Run cargo fmt before staging.", "reason": "ok"}"#;
-        let dec = review_candidate(driver(raw), "haiku", &fixture_hit(), test_attribution()).await;
+        let dec = review_candidate(
+            driver(raw),
+            "haiku",
+            &fixture_hit(),
+            test_attribution(),
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
         match dec {
             ReviewDecision::Accept {
                 refined_name,
@@ -340,7 +355,14 @@ mod tests {
     #[tokio::test]
     async fn reject_returns_reason() {
         let raw = r#"{"accept": false, "reason": "too situational"}"#;
-        let dec = review_candidate(driver(raw), "haiku", &fixture_hit(), test_attribution()).await;
+        let dec = review_candidate(
+            driver(raw),
+            "haiku",
+            &fixture_hit(),
+            test_attribution(),
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
         match dec {
             ReviewDecision::Reject { reason } => {
                 assert_eq!(reason, "too situational");
@@ -356,6 +378,7 @@ mod tests {
             "haiku",
             &fixture_hit(),
             test_attribution(),
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
         )
         .await;
         assert!(matches!(dec, ReviewDecision::Indeterminate { .. }));
@@ -364,7 +387,14 @@ mod tests {
     #[tokio::test]
     async fn handles_json_fences() {
         let raw = "```json\n{\"accept\": true, \"reason\": \"ok\"}\n```";
-        let dec = review_candidate(driver(raw), "haiku", &fixture_hit(), test_attribution()).await;
+        let dec = review_candidate(
+            driver(raw),
+            "haiku",
+            &fixture_hit(),
+            test_attribution(),
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
         assert!(matches!(dec, ReviewDecision::Accept { .. }));
     }
 
@@ -372,7 +402,14 @@ mod tests {
     async fn handles_preamble_then_object() {
         let raw =
             "Sure, here is the result:\n{\"accept\": false, \"reason\": \"trivial\"}\nLet me know.";
-        let dec = review_candidate(driver(raw), "haiku", &fixture_hit(), test_attribution()).await;
+        let dec = review_candidate(
+            driver(raw),
+            "haiku",
+            &fixture_hit(),
+            test_attribution(),
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
         assert!(matches!(dec, ReviewDecision::Reject { .. }));
     }
 
@@ -383,6 +420,7 @@ mod tests {
             "haiku",
             &fixture_hit(),
             test_attribution(),
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
         )
         .await;
         assert!(matches!(dec, ReviewDecision::Indeterminate { .. }));
@@ -400,7 +438,14 @@ mod tests {
     #[tokio::test]
     async fn multiple_json_blocks_does_not_promote_reject_to_accept() {
         let raw = r#"{"accept": false, "reason": "trivial"} btw {"accept": true, "reason": "ok"}"#;
-        let dec = review_candidate(driver(raw), "haiku", &fixture_hit(), test_attribution()).await;
+        let dec = review_candidate(
+            driver(raw),
+            "haiku",
+            &fixture_hit(),
+            test_attribution(),
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
         assert!(
             !matches!(dec, ReviewDecision::Accept { .. }),
             "must never accept on multi-JSON output (got {dec:?})"
