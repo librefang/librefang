@@ -317,6 +317,79 @@ async fn budget_put_persists_to_config_toml() {
 }
 
 // ---------------------------------------------------------------------------
+// PUT /api/budget — read-modify-write alias path (GET-shape names accepted)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn budget_put_accepts_get_shape_aliases() {
+    // The handler accepts both the canonical `BudgetConfig` keys
+    // (`max_hourly_usd`) and the matching `BudgetStatus` GET-shape
+    // aliases (`hourly_limit`) so a client can take a GET response,
+    // edit fields, and PUT it back unchanged. This pins that contract:
+    // without it a future "let's drop the dual lookup" refactor would
+    // silently break read-modify-write callers, and the OpenAPI body
+    // description (which advertises both names) would lie about what
+    // the route actually accepts.
+    let h = boot().await;
+
+    let (status, _body) = request(
+        &h,
+        Method::PUT,
+        "/api/budget",
+        Some(serde_json::json!({
+            "hourly_limit": 4.4,
+            "daily_limit": 44.0,
+            "monthly_limit": 440.0,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Aliases reach the same `BudgetConfig` fields as the canonical
+    // names — verify via the metering ArcSwap, not just the GET
+    // round-trip, so a regression that accepts the field but never
+    // assigns it (e.g. a typo'd `or_else` branch) still fails.
+    let live = h.state.kernel.budget_config();
+    assert!((live.max_hourly_usd - 4.4).abs() < f64::EPSILON);
+    assert!((live.max_daily_usd - 44.0).abs() < f64::EPSILON);
+    assert!((live.max_monthly_usd - 440.0).abs() < f64::EPSILON);
+
+    let (_, body) = request(&h, Method::GET, "/api/budget", None).await;
+    assert_eq!(body["hourly_limit"], 4.4);
+    assert_eq!(body["daily_limit"], 44.0);
+    assert_eq!(body["monthly_limit"], 440.0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn budget_put_canonical_name_wins_over_alias() {
+    // When a body carries BOTH the canonical name and the alias for
+    // the same cap, the canonical name takes precedence — matches the
+    // doc-string contract and prevents a client that mixes the two
+    // (e.g. dashboard sending `max_hourly_usd` while a proxy injects
+    // `hourly_limit`) from seeing nondeterministic which-wins behaviour.
+    let h = boot().await;
+
+    let (status, _body) = request(
+        &h,
+        Method::PUT,
+        "/api/budget",
+        Some(serde_json::json!({
+            "max_hourly_usd": 9.0,
+            "hourly_limit": 1.0,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let live = h.state.kernel.budget_config();
+    assert!(
+        (live.max_hourly_usd - 9.0).abs() < f64::EPSILON,
+        "canonical max_hourly_usd must win over the alias hourly_limit, got {}",
+        live.max_hourly_usd
+    );
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/budget/agents — ranking shape, empty + populated
 // ---------------------------------------------------------------------------
 

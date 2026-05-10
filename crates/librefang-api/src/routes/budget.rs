@@ -342,7 +342,16 @@ pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
     put,
     path = "/api/budget",
     tag = "budget",
-    request_body(content = crate::types::JsonObject, description = "Partial budget config (max_hourly_usd / max_daily_usd / max_monthly_usd / alert_threshold / default_max_llm_tokens_per_hour)"),
+    request_body(
+        content = crate::types::JsonObject,
+        description = "Partial budget config. Each cap field accepts EITHER its canonical \
+            `BudgetConfig` name (`max_hourly_usd` / `max_daily_usd` / `max_monthly_usd`) \
+            OR the matching `BudgetStatus` GET-shape alias (`hourly_limit` / `daily_limit` \
+            / `monthly_limit`); when both appear in the same body, the canonical name \
+            wins. The alias path lets a read-modify-write client PUT the GET response \
+            unchanged. `alert_threshold` (clamped to 0.0–1.0) and \
+            `default_max_llm_tokens_per_hour` have no alias."
+    ),
     responses(
         (status = 200, description = "Updated global budget status", body = crate::types::JsonObject),
         (status = 400, description = "Submitted budget produced an invalid config", body = crate::types::JsonObject),
@@ -398,6 +407,24 @@ pub async fn update_budget(
     // ArcSwap (via `HotAction::UpdateBudget`) without us having to mutate
     // it twice.
     if let Err(e) = persist_budget(&state, &new_budget).await {
+        // Audit the *attempt* even on failure. Without this row, the
+        // chain only records successful budget edits — forensics has
+        // no trace that an operator tried to set caps that the kernel
+        // rejected (validate failure) or that an I/O fault swallowed
+        // (write/reload failure). The detail carries both the
+        // intended diff (so reviewers see what was tried) and the
+        // server-side reason (so they know why it didn't take).
+        state.kernel.audit().record_with_context(
+            "system",
+            librefang_kernel::audit::AuditAction::ConfigChange,
+            format!(
+                "global_budget update rejected ({e}): attempted {}",
+                fmt_global_budget_diff(&old_budget, &new_budget)
+            ),
+            "error",
+            api_user_ref.map(|u| u.user_id),
+            Some("api".to_string()),
+        );
         return match e {
             // Operator submitted a budget that, when serialised back into
             // `config.toml`, fails `validate_config_for_reload` (e.g.
