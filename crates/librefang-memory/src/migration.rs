@@ -1360,7 +1360,9 @@ fn migrate_v37(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE INDEX IF NOT EXISTS idx_workflow_runs_state
             ON workflow_runs(state);
         CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id
-            ON workflow_runs(workflow_id);",
+            ON workflow_runs(workflow_id);
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_started_at
+            ON workflow_runs(started_at DESC);",
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \

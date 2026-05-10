@@ -908,6 +908,18 @@ impl WorkflowEngine {
             paused_current_input: None,
         };
 
+        // Persist the freshly-created Pending row before it goes into
+        // the DashMap. The batch `persist_runs` family deliberately
+        // skips Pending — without an explicit per-row upsert here, a
+        // newly created run that crashes before being dispatched
+        // disappears entirely on restart. The store happens to be cheap
+        // enough (one indexed insert) that doing it inline is fine; if
+        // it ever becomes hot, the right move is to debounce the
+        // upsert, not drop it.
+        if self.store.is_some() {
+            self.upsert_run_to_store(&run);
+        }
+
         self.runs.insert(run_id, run);
 
         // Evict oldest completed/failed runs when we exceed the cap
@@ -982,6 +994,14 @@ impl WorkflowEngine {
             run.error = Some("Interrupted by daemon restart".to_string());
             run.completed_at = Some(now);
             run.clear_pause_state();
+            // Persist the recovered Failed state immediately. Without
+            // this, the run lives in the DashMap as Failed but the
+            // SQLite row is whatever was on disk before recovery — so a
+            // second crash before the next batch persist would resurface
+            // the same run as a stale Running again.
+            if self.store.is_some() {
+                self.upsert_run_to_store(run);
+            }
             recovered += 1;
         }
         recovered
@@ -5183,6 +5203,68 @@ prompt_template = "do {{x}}"
             other => panic!("expected Paused after reload, got {:?}", other),
         }
         assert_eq!(run.paused_step_index, Some(0));
+    }
+
+    /// A Pending run created on engine #1 must survive a crash that
+    /// happens before any state transition or `persist_runs` call.
+    /// This exercises the create_run -> upsert_run_to_store wiring; the
+    /// batch `persist_runs_to_sqlite` only fires at end-of-execute_run /
+    /// end-of-resume / drain_on_shutdown, so without per-row upsert at
+    /// create time, a crash in the dispatch window loses the run.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pending_run_survives_crash_before_first_persist() {
+        use r2d2::Pool;
+        use r2d2_sqlite::SqliteConnectionManager;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("workflows.db");
+
+        let make_store = || {
+            let pool = Pool::builder()
+                .max_size(2)
+                .build(SqliteConnectionManager::file(&db_path))
+                .unwrap();
+            librefang_memory::migration::run_migrations(&pool.get().unwrap())
+                .expect("migrations must apply");
+            librefang_memory::WorkflowStore::new(pool)
+        };
+
+        let original_run_id: WorkflowRunId;
+
+        // Phase 1: create a Pending run, then drop the engine WITHOUT
+        // calling execute_run / persist_runs. The crash window we care
+        // about is between insert into the DashMap and first dispatch
+        // — historically a daemon kill here lost the run.
+        {
+            let store = make_store();
+            let engine = WorkflowEngine::new_with_store(store, tmp.path());
+            let wf_id = engine.register(test_workflow()).await;
+            original_run_id = engine
+                .create_run(wf_id, "data".to_string())
+                .await
+                .expect("create_run must succeed");
+            // Confirm the run is Pending in memory.
+            let run = engine.get_run(original_run_id).await.unwrap();
+            assert!(matches!(run.state, WorkflowRunState::Pending));
+            // Engine drops here. No `persist_runs_async`. No execute.
+        }
+
+        // Phase 2: re-open the SAME database file with a fresh store
+        // and engine, load runs, assert the Pending row came back.
+        let store = make_store();
+        let engine = WorkflowEngine::new_with_store(store, tmp.path());
+        let count =
+            tokio::task::block_in_place(|| engine.load_runs()).expect("load_runs must succeed");
+        assert_eq!(count, 1, "expected exactly one persisted run");
+        let run = engine
+            .get_run(original_run_id)
+            .await
+            .expect("Pending run must be reloadable");
+        assert!(
+            matches!(run.state, WorkflowRunState::Pending),
+            "expected Pending after reload, got {:?}",
+            run.state
+        );
     }
 
     #[tokio::test]
