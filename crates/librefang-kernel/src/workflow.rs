@@ -458,19 +458,96 @@ fn split_outside_quotes(s: &str, delimiter: &str) -> Option<Vec<String>> {
 
 /// Compute the backoff duration for a workflow step retry.
 ///
-/// Errors that mention "burst" or "rate limit" indicate the provider's sliding
-/// window (typically 60 s) is exhausted.  We wait 65 s (60 s window + 5 s
-/// safety margin) regardless of the attempt number.  All other errors use
-/// standard exponential backoff capped at 60 s.
+/// Resolution order (first match wins):
+///
+/// 1. **`Retry-After:` value embedded in the error string.** Provider
+///    drivers in `librefang-llm-drivers` surface `429`/`503` responses
+///    with the upstream `Retry-After` header inlined into the error
+///    text (`"Retry-After: 120"` or `"retry_after_ms=8000"`); honour
+///    it directly so a server asking for 120 s isn't retried at 65 s
+///    and 429ed again. Parses both seconds and millisecond variants.
+///    Capped at 5 minutes to keep a misbehaving server from holding
+///    a step open indefinitely.
+/// 2. **Burst / rate-limit substring (case-insensitive).** Anthropic
+///    emits `"rate limit"`, OpenAI emits `"rate_limit"` /
+///    `"Rate limit"`, Gemini emits `"RATE_LIMIT_EXCEEDED"`. The
+///    case-sensitive check that shipped with the first version of
+///    this classifier silently fell through on every variant except
+///    Anthropic's. Lowercasing once at entry covers all of them and
+///    pins the 65 s sliding-window backoff (60 s window + 5 s
+///    safety margin).
+/// 3. **Everything else** uses exponential backoff `2^attempt`
+///    capped at 60 s — the historical default for transient network
+///    errors.
 fn classify_backoff(err: &str, attempt: u32) -> std::time::Duration {
     /// 60-second sliding window + 5-second safety margin.
     const BURST_WINDOW_BACKOFF: std::time::Duration = std::time::Duration::from_secs(65);
-    let needs_window_clear = err.contains("burst") || err.contains("rate limit");
-    if needs_window_clear {
-        BURST_WINDOW_BACKOFF
-    } else {
-        std::time::Duration::from_secs(2u64.saturating_pow(attempt).min(60))
+    /// Upper bound on a server-supplied `Retry-After` so a hostile or
+    /// misconfigured provider can't park a workflow indefinitely.
+    const RETRY_AFTER_CAP: std::time::Duration = std::time::Duration::from_secs(300);
+
+    if let Some(d) = parse_retry_after(err) {
+        return d.min(RETRY_AFTER_CAP);
     }
+
+    let lowered = err.to_ascii_lowercase();
+    let needs_window_clear = lowered.contains("burst")
+        || lowered.contains("rate limit")
+        || lowered.contains("rate_limit");
+    if needs_window_clear {
+        return BURST_WINDOW_BACKOFF;
+    }
+
+    std::time::Duration::from_secs(2u64.saturating_pow(attempt).min(60))
+}
+
+/// Extract a `Retry-After` value from an error message string.
+///
+/// Recognises the shapes LLM drivers in this workspace produce when
+/// surfacing a `429` / `503` to the kernel:
+///
+///   - `"Retry-After: 120"`     (RFC 7231 seconds form, case-insensitive)
+///   - `"retry_after_ms=8000"`  (millisecond form used by some drivers)
+///   - `"retry_after = 120s"`   (key=value form used by some drivers)
+///
+/// Returns `None` for anything else; callers fall back to the
+/// burst/rate-limit branch or the exponential default.
+fn parse_retry_after(err: &str) -> Option<std::time::Duration> {
+    let lowered = err.to_ascii_lowercase();
+
+    // Millisecond form first — it's the most specific and we don't want a
+    // bare `retry_after` substring matching the seconds form by accident.
+    if let Some(rest) = lowered.split("retry_after_ms").nth(1) {
+        if let Some(ms) = scan_unsigned(rest) {
+            return Some(std::time::Duration::from_millis(ms));
+        }
+    }
+
+    // RFC 7231 `Retry-After: <seconds>` and the `retry_after = <seconds>s`
+    // variants both leave the digits after the next `:` or `=`.
+    for needle in ["retry-after", "retry_after"] {
+        if let Some(rest) = lowered.split(needle).nth(1) {
+            if let Some(secs) = scan_unsigned(rest) {
+                return Some(std::time::Duration::from_secs(secs));
+            }
+        }
+    }
+
+    None
+}
+
+/// Pull the first run of ASCII decimal digits out of `s` and parse them
+/// as `u64`. Skips leading non-digit chars (`": "`, `"= "`, etc.) so
+/// callers don't have to normalise.
+fn scan_unsigned(s: &str) -> Option<u64> {
+    let bytes = s.as_bytes();
+    let start = bytes.iter().position(|b| b.is_ascii_digit())?;
+    let end = bytes[start..]
+        .iter()
+        .position(|b| !b.is_ascii_digit())
+        .map(|p| start + p)
+        .unwrap_or(bytes.len());
+    std::str::from_utf8(&bytes[start..end]).ok()?.parse().ok()
 }
 
 impl WorkflowEngine {
@@ -5134,6 +5211,81 @@ prompt_template = "do {{x}}"
     fn classify_backoff_rate_limit_always_65s() {
         assert_eq!(
             classify_backoff("Tool call rate limit exceeded: 10 per minute", 0),
+            std::time::Duration::from_secs(65)
+        );
+    }
+
+    /// Provider error strings come in every casing under the sun
+    /// (Anthropic: "rate limit", OpenAI: "Rate limit"/"rate_limit",
+    /// Gemini: "RATE_LIMIT_EXCEEDED"). Without case-insensitive matching
+    /// the burst window kicks in only for Anthropic and everything else
+    /// falls through to exponential — exactly the bug v1 of this
+    /// classifier shipped with.
+    #[test]
+    fn classify_backoff_rate_limit_is_case_insensitive() {
+        for variant in [
+            "Rate Limit Exceeded",
+            "RATE LIMIT EXCEEDED",
+            "rate_limit_exceeded",
+            "RATE_LIMIT_EXCEEDED",
+            "OpenAI: Rate limit reached for gpt-4",
+            "Gemini error: RATE_LIMIT_EXCEEDED for project foo",
+            "Token Burst Limit Reached",
+        ] {
+            assert_eq!(
+                classify_backoff(variant, 0),
+                std::time::Duration::from_secs(65),
+                "expected 65s burst-window backoff for variant: {variant}"
+            );
+        }
+    }
+
+    /// `Retry-After` from the upstream provider beats the constant 65s.
+    /// A server explicitly asking for 120s must NOT be retried at 65s
+    /// and 429ed again — that's exactly the loop the original v1
+    /// classifier failed to break.
+    #[test]
+    fn classify_backoff_honours_retry_after_seconds() {
+        assert_eq!(
+            classify_backoff("HTTP 429 from provider — Retry-After: 120 (rate limit)", 0),
+            std::time::Duration::from_secs(120)
+        );
+        // Prefix variant a Gemini driver might emit.
+        assert_eq!(
+            classify_backoff("retry_after = 30s, please slow down", 0),
+            std::time::Duration::from_secs(30)
+        );
+    }
+
+    /// Millisecond form is explicit and must be parsed before the
+    /// seconds form (sharing the `retry_after` prefix).
+    #[test]
+    fn classify_backoff_honours_retry_after_milliseconds() {
+        assert_eq!(
+            classify_backoff("Anthropic 429 — retry_after_ms=8000 (overloaded)", 0),
+            std::time::Duration::from_millis(8000)
+        );
+    }
+
+    /// A hostile or buggy provider returning Retry-After: 86400 (one
+    /// day) must not park a workflow indefinitely. Cap at 5 minutes
+    /// and let the next attempt re-classify.
+    #[test]
+    fn classify_backoff_caps_retry_after_at_five_minutes() {
+        assert_eq!(
+            classify_backoff("Retry-After: 86400", 0),
+            std::time::Duration::from_secs(300)
+        );
+    }
+
+    /// Plain rate-limit text without a Retry-After value still routes
+    /// through the burst branch, NOT the millisecond branch — pin
+    /// against a regression where `retry_after_ms` matched a substring
+    /// of `rate_limit_exceeded` or similar.
+    #[test]
+    fn classify_backoff_no_retry_after_falls_back_to_burst_branch() {
+        assert_eq!(
+            classify_backoff("Plain rate_limit error, no header info", 0),
             std::time::Duration::from_secs(65)
         );
     }
