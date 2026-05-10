@@ -1520,7 +1520,8 @@ pub async fn get_channel(
     responses(
         (status = 200, description = "Channel configured successfully", body = crate::types::JsonObject),
         (status = 400, description = "Bad request", body = crate::types::JsonObject),
-        (status = 404, description = "Unknown channel", body = crate::types::JsonObject)
+        (status = 404, description = "Unknown channel", body = crate::types::JsonObject),
+        (status = 409, description = "Channel is in multi-instance form; use the per-instance API", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/{name}/configure — Save channel secrets + config fields.
@@ -1652,6 +1653,7 @@ pub async fn configure_channel(
     responses(
         (status = 200, description = "Channel removed successfully", body = crate::types::JsonObject),
         (status = 404, description = "Unknown channel", body = crate::types::JsonObject),
+        (status = 409, description = "Channel is in multi-instance form; use the per-instance API", body = crate::types::JsonObject),
         (status = 500, description = "Internal server error", body = crate::types::JsonObject)
     )
 )]
@@ -1849,6 +1851,18 @@ fn resolve_secret_env_overrides(
 /// no whitespace, so the same logical config always produces byte-identical
 /// output. Used as the input to `instance_signature` for an opaque-content
 /// fingerprint (CAS token) of each channel instance.
+///
+/// **Invariant for signature stability:** both the GET-side hash (computed
+/// over `channel_instances_serialized(...)` of in-memory `ChannelsConfig`)
+/// and the recomputed PUT/DELETE-side hash (computed over
+/// `channel_instances_serialized(...)` of `read_disk_channels(...)`) must
+/// flow through the SAME serialiser. Concretely: never mix a hash computed
+/// over a `toml_edit::Table` with one computed over `serde_json::Value`
+/// — `OneOrMany`'s deserialiser coerces TOML integers to JSON strings in
+/// some fields (see `librefang-types/src/config/serde_helpers.rs`), and
+/// the two views diverge. All sites that build the hash today route
+/// through `serde_json::to_value(&TelegramConfig)` (and friends) so this
+/// holds; the test `instance_signature_stable_across_key_order` pins it.
 fn canonical_json(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::Object(map) => {
@@ -1892,6 +1906,17 @@ fn instance_signature(instance: &serde_json::Value) -> String {
 /// the post-write hot-reload). Without this, two concurrent PUT/DELETE
 /// requests can both pass an in-memory range check, then race to write a
 /// shifted disk view — the second write lands on the wrong instance.
+///
+/// **Dual-parser note:** the WRITE path (`update_channel_instance`,
+/// `remove_channel_instance` in skills.rs) parses with
+/// `toml_edit::DocumentMut` to preserve comments/key-order; this READ
+/// path parses with `toml::from_str` → `try_into::<ChannelsConfig>` so it
+/// can use the canonical struct definitions. Both grammars are TOML and
+/// agree on the channel-section shape; the downstream signature CAS only
+/// compares the read-side serialisation against itself (GET + recompute
+/// both go through this fn → `channel_instances_serialized`), so even an
+/// edge-case parser disagreement on a non-channel section can't cause a
+/// false 409.
 fn read_disk_channels(
     config_path: &std::path::Path,
 ) -> Result<librefang_types::config::ChannelsConfig, Box<dyn std::error::Error + Send + Sync>> {
@@ -2175,11 +2200,15 @@ pub async fn create_channel_instance(
         ("name" = String, Path, description = "Channel adapter name"),
         ("index" = usize, Path, description = "Instance array index (0-based)")
     ),
-    request_body = crate::types::JsonObject,
+    request_body(
+        content = crate::types::JsonObject,
+        description = "REQUIRED body fields: `fields` (object of channel-schema fields) and `signature` (hex CAS token from the matching `GET /instances` item, used to detect concurrent edits — mismatch yields 409). OPTIONAL: `clear_secrets` (array of secret-field keys to actively drop)."
+    ),
     responses(
         (status = 200, description = "Instance updated", body = crate::types::JsonObject),
-        (status = 400, description = "Bad request", body = crate::types::JsonObject),
+        (status = 400, description = "Bad request (missing fields or signature)", body = crate::types::JsonObject),
         (status = 404, description = "Unknown channel or instance index out of range", body = crate::types::JsonObject),
+        (status = 409, description = "Signature mismatch — instance was modified or moved by another writer", body = crate::types::JsonObject),
         (status = 500, description = "Internal server error", body = crate::types::JsonObject)
     )
 )]
@@ -2387,11 +2416,14 @@ pub async fn update_channel_instance_handler(
     tag = "channels",
     params(
         ("name" = String, Path, description = "Channel adapter name"),
-        ("index" = usize, Path, description = "Instance array index (0-based)")
+        ("index" = usize, Path, description = "Instance array index (0-based)"),
+        ("signature" = String, Query, description = "REQUIRED hex CAS token from the matching `GET /instances` item; mismatch yields 409 (#4865)")
     ),
     responses(
         (status = 204, description = "Instance removed"),
+        (status = 400, description = "Missing `signature` query parameter", body = crate::types::JsonObject),
         (status = 404, description = "Unknown channel or instance index out of range", body = crate::types::JsonObject),
+        (status = 409, description = "Signature mismatch — instance was modified or moved by another writer", body = crate::types::JsonObject),
         (status = 500, description = "Internal server error", body = crate::types::JsonObject)
     )
 )]

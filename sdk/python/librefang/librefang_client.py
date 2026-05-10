@@ -473,8 +473,8 @@ class _ChannelsResource(_Resource):
     def update_channel_instance_handler(self, name: str, index: str, **data):
         return self._c._request("PUT", f"/api/channels/{name}/instances/{index}", data)
 
-    def delete_channel_instance(self, name: str, index: str):
-        return self._c._request("DELETE", f"/api/channels/{name}/instances/{index}")
+    def delete_channel_instance(self, name: str, index: str, signature: Any = None):
+        return self._c._request("DELETE", f"/api/channels/{name}/instances/{index}", None, query={"signature": signature})
 
     def test_channel(self, name: str, **data):
         return self._c._request("POST", f"/api/channels/{name}/test", data)

@@ -571,8 +571,8 @@ class ChannelsResource {
     return this._c._request("PUT", `/api/channels/${name}/instances/${index}`, data, undefined);
   }
 
-  async deleteChannelInstance(name, index) {
-    return this._c._request("DELETE", `/api/channels/${name}/instances/${index}`);
+  async deleteChannelInstance(name, index, query) {
+    return this._c._request("DELETE", `/api/channels/${name}/instances/${index}`, undefined, query);
   }
 
   async testChannel(name, data) {

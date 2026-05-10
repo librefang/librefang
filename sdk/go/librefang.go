@@ -694,8 +694,8 @@ func (r *ChannelsResource) UpdateChannelInstanceHandler(name string, index strin
 	return r.client.request("PUT", fmt.Sprintf("/api/channels/%s/instances/%s", name, index), data, nil)
 }
 
-func (r *ChannelsResource) DeleteChannelInstance(name string, index string) (interface{}, error) {
-	return r.client.request("DELETE", fmt.Sprintf("/api/channels/%s/instances/%s", name, index), nil, nil)
+func (r *ChannelsResource) DeleteChannelInstance(name string, index string, query map[string]string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/channels/%s/instances/%s", name, index), nil, query)
 }
 
 func (r *ChannelsResource) TestChannel(name string, data map[string]interface{}) (interface{}, error) {

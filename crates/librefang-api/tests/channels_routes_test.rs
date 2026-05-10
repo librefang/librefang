@@ -30,8 +30,65 @@ use axum::Router;
 use librefang_api::routes::{self, AppState};
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use librefang_types::config::{ChannelsConfig, OneOrMany, TelegramConfig};
+use std::path::Path;
 use std::sync::Arc;
 use tower::ServiceExt;
+
+/// Serialises every test in this binary that touches `LIBREFANG_HOME`.
+/// The handlers added in #4865 read `[channels]` from disk under the
+/// `config_write_lock`, so any test that needs to drive that path must
+/// own the env var for its full duration. Tests that don't read disk
+/// run in parallel as before — they're insensitive to whatever
+/// `LIBREFANG_HOME` happens to point at because they fail-fast at
+/// validation before reaching the disk read. (#4865)
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Drop guard that points `LIBREFANG_HOME` at a tempdir for the
+/// duration of a test and restores the previous value on drop. Must be
+/// constructed only while `ENV_LOCK` is held.
+struct DiskHomeGuard {
+    tmp: tempfile::TempDir,
+    prev: Option<String>,
+}
+
+impl DiskHomeGuard {
+    fn new() -> Self {
+        let prev = std::env::var("LIBREFANG_HOME").ok();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // SAFETY: serialised via `ENV_LOCK`. Caller holds the lock.
+        unsafe {
+            std::env::set_var("LIBREFANG_HOME", tmp.path());
+        }
+        Self { tmp, prev }
+    }
+
+    fn home(&self) -> &Path {
+        self.tmp.path()
+    }
+}
+
+impl Drop for DiskHomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: same reasoning as `new`.
+        unsafe {
+            match &self.prev {
+                Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+                None => std::env::remove_var("LIBREFANG_HOME"),
+            }
+        }
+    }
+}
+
+/// Write a `config.toml` containing one `[[channels.telegram]]` per pair.
+/// Used by the disk-roundtrip tests below.
+fn write_telegram_instances(home: &Path, instances: &[&str]) {
+    let mut content = String::new();
+    for env_name in instances {
+        content.push_str("[[channels.telegram]]\n");
+        content.push_str(&format!("bot_token_env = \"{env_name}\"\n\n"));
+    }
+    std::fs::write(home.join("config.toml"), content).expect("write config.toml");
+}
 
 struct Harness {
     app: Router,
@@ -572,6 +629,269 @@ async fn channels_delete_instance_missing_signature_returns_400() {
             .unwrap_or("")
             .contains("signature"),
         "error must call out the missing 'signature' query parameter: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Per-instance CAS round-trip (#4865)
+// ---------------------------------------------------------------------------
+//
+// These tests own `LIBREFANG_HOME` (via `ENV_LOCK` + `DiskHomeGuard`) so
+// they can seed an actual `config.toml` and drive the post-#4865 handler
+// flow that re-reads disk under the `config_write_lock`. Cheaper unit-
+// level coverage of the same primitives lives next to the helpers in
+// `routes::channels::instance_helper_tests` and `routes::skills::tests`;
+// these guard the HTTP-layer wiring.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_update_instance_signature_mismatch_returns_409() {
+    let _lock = ENV_LOCK.lock().await;
+    let guard = DiskHomeGuard::new();
+    write_telegram_instances(guard.home(), &["TG_DISK_A"]);
+
+    let h = boot_with_channels(ChannelsConfig {
+        telegram: OneOrMany(vec![TelegramConfig {
+            bot_token_env: "TG_DISK_A".into(),
+            ..TelegramConfig::default()
+        }]),
+        ..ChannelsConfig::default()
+    })
+    .await;
+
+    // PUT idx=0 with a deliberately stale signature. After #4865 the
+    // handler re-reads disk, recomputes the signature for the current
+    // disk-side instance, and rejects on mismatch with 409 Conflict.
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/channels/telegram/instances/0",
+        Some(serde_json::json!({
+            "fields": { "default_agent": "smoke" },
+            "signature": "0".repeat(64),
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "stale signature must yield 409, not 500/200: {body:?}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("modified or moved"),
+        "error must explain the conflict so the dashboard can surface a refresh prompt: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_delete_instance_signature_mismatch_returns_409() {
+    let _lock = ENV_LOCK.lock().await;
+    let guard = DiskHomeGuard::new();
+    write_telegram_instances(guard.home(), &["TG_DISK_B", "TG_DISK_C"]);
+
+    let h = boot_with_channels(ChannelsConfig {
+        telegram: OneOrMany(vec![
+            TelegramConfig {
+                bot_token_env: "TG_DISK_B".into(),
+                ..TelegramConfig::default()
+            },
+            TelegramConfig {
+                bot_token_env: "TG_DISK_C".into(),
+                ..TelegramConfig::default()
+            },
+        ]),
+        ..ChannelsConfig::default()
+    })
+    .await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::DELETE,
+        "/api/channels/telegram/instances/0?signature=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "stale signature on DELETE must yield 409, not silently delete: {body:?}"
+    );
+    // Disk must be untouched — both instances still present after the
+    // rejected delete.
+    let raw = std::fs::read_to_string(guard.home().join("config.toml")).expect("read config.toml");
+    assert!(
+        raw.contains("TG_DISK_B"),
+        "rejected DELETE must leave instance 0 intact: {raw}"
+    );
+    assert!(
+        raw.contains("TG_DISK_C"),
+        "rejected DELETE must leave instance 1 intact: {raw}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_update_instance_round_trips_real_signature() {
+    let _lock = ENV_LOCK.lock().await;
+    let guard = DiskHomeGuard::new();
+    write_telegram_instances(guard.home(), &["TG_DISK_D"]);
+
+    let h = boot_with_channels(ChannelsConfig {
+        telegram: OneOrMany(vec![TelegramConfig {
+            bot_token_env: "TG_DISK_D".into(),
+            ..TelegramConfig::default()
+        }]),
+        ..ChannelsConfig::default()
+    })
+    .await;
+
+    // GET the list to obtain the server-computed signature for the row
+    // we're about to update.
+    let (list_status, list_body) =
+        json_request(&h, Method::GET, "/api/channels/telegram/instances", None).await;
+    assert_eq!(list_status, StatusCode::OK);
+    let signature = list_body["items"][0]["signature"]
+        .as_str()
+        .expect("list must surface a per-item signature post-#4865")
+        .to_string();
+    assert_eq!(signature.len(), 64, "signature must be sha-256 hex");
+
+    // Echo it back on PUT — the handler must accept this round-trip.
+    // (Failure here is a regression on the canonical-JSON ↔ disk-reread
+    // invariant documented in `canonical_json` / `read_disk_channels`.)
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/channels/telegram/instances/0",
+        Some(serde_json::json!({
+            "fields": { "default_agent": "rotated" },
+            "signature": signature,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "round-tripped signature must be accepted: {body:?}"
+    );
+
+    // Disk now reflects the new agent name.
+    let raw = std::fs::read_to_string(guard.home().join("config.toml")).expect("read config.toml");
+    assert!(
+        raw.contains("default_agent = \"rotated\""),
+        "PUT must have written the new field to disk: {raw}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_update_instance_clear_secrets_drops_orphan_env_var() {
+    let _lock = ENV_LOCK.lock().await;
+    let guard = DiskHomeGuard::new();
+    write_telegram_instances(guard.home(), &["TG_LONELY"]);
+    // Prime `secrets.env` with the env var the instance is pointing at,
+    // so we can assert the cleanup loop actually removed it.
+    std::fs::write(guard.home().join("secrets.env"), "TG_LONELY=fake-token\n")
+        .expect("seed secrets.env");
+
+    let h = boot_with_channels(ChannelsConfig {
+        telegram: OneOrMany(vec![TelegramConfig {
+            bot_token_env: "TG_LONELY".into(),
+            ..TelegramConfig::default()
+        }]),
+        ..ChannelsConfig::default()
+    })
+    .await;
+
+    let (_, list_body) =
+        json_request(&h, Method::GET, "/api/channels/telegram/instances", None).await;
+    let signature = list_body["items"][0]["signature"]
+        .as_str()
+        .expect("signature must be present")
+        .to_string();
+
+    // PUT with `clear_secrets` listing the secret key. The instance's
+    // `bot_token_env` ref must drop, AND because no sibling references
+    // `TG_LONELY` the env-var line must be scrubbed from `secrets.env`.
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/channels/telegram/instances/0",
+        Some(serde_json::json!({
+            "fields": { "default_agent": "no-auth" },
+            "signature": signature,
+            "clear_secrets": ["bot_token_env"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let cfg = std::fs::read_to_string(guard.home().join("config.toml")).expect("read config.toml");
+    assert!(
+        !cfg.contains("bot_token_env"),
+        "cleared secret ref must be dropped from the rebuilt instance: {cfg}"
+    );
+    let secrets =
+        std::fs::read_to_string(guard.home().join("secrets.env")).expect("read secrets.env");
+    assert!(
+        !secrets.contains("TG_LONELY"),
+        "orphan env-var line must be scrubbed when no sibling references it: {secrets}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_update_instance_clear_secrets_preserves_shared_env_var() {
+    let _lock = ENV_LOCK.lock().await;
+    let guard = DiskHomeGuard::new();
+    // Two instances, BOTH pointing at the same env var (a possible
+    // user setup if they hand-edited secrets.env). Clearing one
+    // instance's ref must NOT remove the env var, since the sibling
+    // is still using it.
+    write_telegram_instances(guard.home(), &["TG_SHARED", "TG_SHARED"]);
+    std::fs::write(guard.home().join("secrets.env"), "TG_SHARED=fake\n").expect("seed secrets.env");
+
+    let h = boot_with_channels(ChannelsConfig {
+        telegram: OneOrMany(vec![
+            TelegramConfig {
+                bot_token_env: "TG_SHARED".into(),
+                ..TelegramConfig::default()
+            },
+            TelegramConfig {
+                bot_token_env: "TG_SHARED".into(),
+                ..TelegramConfig::default()
+            },
+        ]),
+        ..ChannelsConfig::default()
+    })
+    .await;
+
+    let (_, list_body) =
+        json_request(&h, Method::GET, "/api/channels/telegram/instances", None).await;
+    let signature = list_body["items"][0]["signature"]
+        .as_str()
+        .expect("signature")
+        .to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/channels/telegram/instances/0",
+        Some(serde_json::json!({
+            "fields": { "default_agent": "no-auth" },
+            "signature": signature,
+            "clear_secrets": ["bot_token_env"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let secrets =
+        std::fs::read_to_string(guard.home().join("secrets.env")).expect("read secrets.env");
+    assert!(
+        secrets.contains("TG_SHARED"),
+        "shared env var must survive — sibling instance still references it: {secrets}"
     );
 }
 
