@@ -64,6 +64,16 @@ impl WorkflowStore {
     /// future foreign keys. When the run reaches a terminal state
     /// (Completed / Failed / Paused), the caller should follow up with
     /// [`Self::wal_checkpoint`] to flush the WAL.
+    ///
+    /// `created_at` is intentionally omitted from the INSERT column
+    /// list — the schema default `datetime('now')` fires once on the
+    /// first INSERT and is preserved across subsequent UPDATEs (which
+    /// excludes it from `DO UPDATE SET`). This means `created_at`
+    /// reflects the row's actual SQLite-insert time rather than
+    /// `started_at`, which is what callers want for audit / list-by-
+    /// creation-time queries. The migration path (`bulk_upsert_runs`)
+    /// keeps the column because it's importing existing JSON state
+    /// where `created_at` is meaningful history.
     pub fn upsert_run(&self, row: &WorkflowRunRow) -> LibreFangResult<()> {
         let c = self.pool.get().map_err(LibreFangError::memory)?;
         c.execute(
@@ -71,12 +81,12 @@ impl WorkflowStore {
                 id, workflow_id, workflow_name, state, input, output, error,
                 resume_token, pause_reason, paused_at, paused_step_index,
                 paused_variables, paused_current_input,
-                step_results, started_at, completed_at, created_at
+                step_results, started_at, completed_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                 ?8, ?9, ?10, ?11,
                 ?12, ?13,
-                ?14, ?15, ?16, ?17
+                ?14, ?15, ?16
             ) ON CONFLICT(id) DO UPDATE SET
                 state = excluded.state,
                 input = excluded.input,
@@ -107,7 +117,6 @@ impl WorkflowStore {
                 row.step_results,
                 row.started_at,
                 row.completed_at,
-                row.created_at,
             ],
         )
         .map_err(|e| LibreFangError::memory_msg(format!("workflow upsert failed: {e}")))?;
@@ -492,15 +501,35 @@ mod tests {
 
     #[test]
     fn started_at_and_created_at_are_distinct() {
+        // After dropping `created_at` from the INSERT column list, the
+        // schema default `datetime('now')` fires at first insert and is
+        // preserved across UPDATEs. The caller-supplied `row.created_at`
+        // is no longer plumbed through `upsert_run` — the field is
+        // populated only on read. This pins the contract: started_at
+        // (caller-supplied) and created_at (db-managed insert time) are
+        // independent values.
         let store = in_memory_store();
         let mut row = sample_row("r1", "running");
         row.started_at = "2026-05-06T01:00:00Z".to_string();
+        // Caller-supplied created_at is intentionally something the
+        // schema default would never produce — confirms it's ignored.
         row.created_at = "2026-05-06T00:30:00Z".to_string();
         store.upsert_run(&row).unwrap();
 
         let loaded = store.get_run("r1").unwrap().unwrap();
         assert_eq!(loaded.started_at, "2026-05-06T01:00:00Z");
-        assert_eq!(loaded.created_at, "2026-05-06T00:30:00Z");
+        assert_ne!(
+            loaded.created_at, "2026-05-06T00:30:00Z",
+            "caller-supplied created_at must be ignored by upsert_run"
+        );
+        assert_ne!(
+            loaded.created_at, loaded.started_at,
+            "schema-default created_at must differ from caller-supplied started_at"
+        );
+        assert!(
+            !loaded.created_at.is_empty(),
+            "schema default datetime('now') must populate created_at"
+        );
     }
 
     #[test]
@@ -531,21 +560,33 @@ mod tests {
 
     #[test]
     fn on_conflict_preserves_created_at() {
+        // `created_at` is set by the schema default at first INSERT
+        // (because `upsert_run` no longer carries it in the column
+        // list) and is excluded from `DO UPDATE SET`. Therefore the
+        // value seen after the first upsert must persist verbatim
+        // across any number of subsequent upserts on the same id.
         let store = in_memory_store();
-        let mut row = sample_row("r1", "running");
-        row.created_at = "2026-05-06T00:00:00Z".to_string();
+        let row = sample_row("r1", "running");
         store.upsert_run(&row).unwrap();
+        let initial_created_at = store.get_run("r1").unwrap().unwrap().created_at;
+        assert!(
+            !initial_created_at.is_empty(),
+            "first upsert must populate created_at via schema default"
+        );
 
-        // Update with a different created_at — ON CONFLICT must NOT
-        // overwrite created_at (it is excluded from the DO UPDATE SET).
-        row.state = "completed".to_string();
-        row.created_at = "2099-01-01T00:00:00Z".to_string();
-        store.upsert_run(&row).unwrap();
+        // Subsequent upsert with the same id, mutated state — and a
+        // caller-supplied created_at the schema default would never
+        // produce. Both must be ignored: state changes (it's in the
+        // DO UPDATE SET), created_at does not.
+        let mut updated = row.clone();
+        updated.state = "completed".to_string();
+        updated.created_at = "2099-01-01T00:00:00Z".to_string();
+        store.upsert_run(&updated).unwrap();
 
         let loaded = store.get_run("r1").unwrap().unwrap();
         assert_eq!(loaded.state, "completed");
         assert_eq!(
-            loaded.created_at, "2026-05-06T00:00:00Z",
+            loaded.created_at, initial_created_at,
             "created_at must be immutable after first insert"
         );
     }

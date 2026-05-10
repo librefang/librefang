@@ -2464,6 +2464,21 @@ impl WorkflowEngine {
         if let Some(ref store) = self.store {
             let row = workflow_run_to_row(run);
             if let Err(e) = store.upsert_run(&row) {
+                // The caller (`create_run` / `recover_stale_running_runs` / state
+                // transitions) has already updated the in-memory DashMap, so the
+                // run looks persisted from outside, but a crash before the next
+                // batch persist would lose this state. Bumping a counter here
+                // gives ops a Prometheus signal beyond log inspection — log
+                // sampling under load tends to drop exactly the failures we
+                // care about. The caller signature is intentionally not
+                // changed to `Result<(), _>` because that would ripple
+                // through every state-transition site for marginal gain
+                // over a counter + warn.
+                metrics::counter!(
+                    "librefang_kernel_workflow_upsert_failed_total",
+                    "phase" => "upsert_run",
+                )
+                .increment(1);
                 warn!(run_id = %run.id, error = %e, "Immediate SQLite upsert failed");
             }
             if matches!(
@@ -2473,6 +2488,11 @@ impl WorkflowEngine {
                     | WorkflowRunState::Paused { .. }
             ) {
                 if let Err(e) = store.wal_checkpoint() {
+                    metrics::counter!(
+                        "librefang_kernel_workflow_upsert_failed_total",
+                        "phase" => "wal_checkpoint",
+                    )
+                    .increment(1);
                     warn!("WAL checkpoint after terminal upsert failed: {e}");
                 }
             }
@@ -3082,12 +3102,33 @@ fn row_to_workflow_run(row: &WorkflowRunRow) -> Result<WorkflowRun, String> {
         })
         .transpose()?;
 
-    let step_results: Vec<StepResult> = serde_json::from_str(&row.step_results).unwrap_or_default();
+    let step_results: Vec<StepResult> = serde_json::from_str(&row.step_results).unwrap_or_else(|e| {
+        // Corrupted JSON should never happen given workflow_run_to_row
+        // serializes from a typed Vec<StepResult>, but if it does, log
+        // the run_id rather than silently zero out the history. The
+        // alternative (returning Err) would block boot recovery on a
+        // single bad row, which is worse than visible truncation.
+        warn!(
+            run_id = %row.id,
+            error = %e,
+            "row_to_workflow_run: step_results JSON failed to parse; reloading run with empty history"
+        );
+        Vec::new()
+    });
 
     let paused_variables: BTreeMap<String, String> = row
         .paused_variables
         .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
+        .map(|s| {
+            serde_json::from_str(s).unwrap_or_else(|e| {
+                warn!(
+                    run_id = %row.id,
+                    error = %e,
+                    "row_to_workflow_run: paused_variables JSON failed to parse; reloading run with empty variables"
+                );
+                BTreeMap::new()
+            })
+        })
         .unwrap_or_default();
 
     Ok(WorkflowRun {
