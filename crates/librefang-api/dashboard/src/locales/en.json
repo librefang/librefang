@@ -1369,6 +1369,8 @@
     "search_placeholder": "Search workflows...",
     "empty_title": "No workflows yet",
     "empty_desc": "Create your first workflow from a template or start from scratch.",
+    "parameters": "Parameters",
+    "additional_context_placeholder": "Additional context (optional)...",
     "template_details": {
       "content_pipeline": "Content Pipeline",
       "content_pipeline_desc": "Research → Write → Edit, produce polished articles",

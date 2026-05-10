@@ -324,8 +324,11 @@ export function WorkflowsPage() {
   // render and never seeded again, which silently lost every
   // `p.default` on the first selection. Track which workflow we've
   // seeded for instead, and seed only after detail data has actually
-  // arrived (or, when the workflow truly has no parameters, leave
-  // `paramValues` empty — there's nothing to seed).
+  // arrived. When the destination workflow truly has zero parameters,
+  // clear `paramValues` outright — otherwise stale values from the
+  // previously selected (parameterised) workflow would linger and any
+  // future code that reads `paramValues` directly without re-deriving
+  // from `detectedParams` would silently see them.
   const seededForRef = useRef<string | null>(null);
   useEffect(() => {
     if (!selectedWorkflowId) {
@@ -333,14 +336,29 @@ export function WorkflowsPage() {
       return;
     }
     if (seededForRef.current === selectedWorkflowId) return;
-    if (detectedParams.length === 0) return; // wait for detail to load
+    // Wait for detail data to actually arrive before deciding whether
+    // this workflow has parameters. `useWorkflowDetail.isFetching`
+    // distinguishes "still loading" from "loaded with zero params".
+    if (workflowDetailQuery.isFetching || workflowDetailQuery.isLoading) return;
+    if (detectedParams.length === 0) {
+      // Loaded, no params — clear any stale values from a previously
+      // selected workflow.
+      setParamValues({});
+      seededForRef.current = selectedWorkflowId;
+      return;
+    }
     const defaults: Record<string, string> = {};
     for (const p of detectedParams) {
       if (p.default != null) defaults[p.name] = String(p.default);
     }
     setParamValues(defaults);
     seededForRef.current = selectedWorkflowId;
-  }, [selectedWorkflowId, detectedParams]);
+  }, [
+    selectedWorkflowId,
+    detectedParams,
+    workflowDetailQuery.isFetching,
+    workflowDetailQuery.isLoading,
+  ]);
 
   // First-time visitors with no workflows configured land on the
   // marketplace tab — instantiating a template is the obvious next

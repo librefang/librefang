@@ -1370,6 +1370,8 @@
     "runs_label": "次运行",
     "empty_title": "还没有工作流",
     "empty_desc": "从模板快速创建，或从空白开始设计。",
+    "parameters": "参数",
+    "additional_context_placeholder": "附加说明（可选）...",
     "template_details": {
       "content_pipeline": "内容创作流水线",
       "content_pipeline_desc": "调研 → 写作 → 编辑，产出精品文章",
