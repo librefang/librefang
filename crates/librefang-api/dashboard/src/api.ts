@@ -129,6 +129,9 @@ export interface ChannelItem {
   name: string;
   display_name?: string;
   configured?: boolean;
+  /** Number of `[[channels.<name>]]` instances currently configured (#4837).
+   *  `0` means no instances; `1` matches the legacy single-instance shape. */
+  instance_count?: number;
   has_token?: boolean;
   category?: string;
   description?: string;
@@ -146,6 +149,26 @@ export interface ChannelItem {
    *  the `channel` column. Surfaced as the `kind · N msgs/24h`
    *  meta-line on the Channels page card. */
   msgs_24h?: number;
+}
+
+/** One configured `[[channels.<name>]]` instance. (#4837) */
+export interface ChannelInstance {
+  /** Array index — stable within a session, may shift after a delete.
+   *  Always re-fetch the list after a mutation. */
+  index: number;
+  /** Field schema with per-instance `value` and `has_value` populated. */
+  fields: ChannelField[];
+  /** Raw per-instance config map keyed by field. */
+  config: Record<string, unknown>;
+  /** True iff every required secret env var (the env var the instance's
+   *  field points at) is present and non-empty. */
+  has_token: boolean;
+}
+
+export interface ChannelInstancesResponse {
+  channel: string;
+  items: ChannelInstance[];
+  total: number;
 }
 
 export interface SkillItem {
@@ -1686,6 +1709,47 @@ export async function configureChannel(channelName: string, config: Record<strin
 
 export async function reloadChannels(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/channels/reload", {});
+}
+
+// Per-instance channel management (#4837).
+//
+// The legacy `configureChannel` overwrites the single `[channels.<name>]`
+// section. The four functions below let the dashboard manage individual
+// `[[channels.<name>]]` array entries — supporting multiple Telegram bots,
+// Slack workspaces, etc. on the same channel type.
+
+export async function listChannelInstances(channelName: string): Promise<ChannelInstancesResponse> {
+  return get<ChannelInstancesResponse>(
+    `/api/channels/${encodeURIComponent(channelName)}/instances`,
+  );
+}
+
+export async function createChannelInstance(
+  channelName: string,
+  fields: Record<string, unknown>,
+): Promise<{ index: number; activated: boolean; started_channels: string[] }> {
+  return post<{ index: number; activated: boolean; started_channels: string[] }>(
+    `/api/channels/${encodeURIComponent(channelName)}/instances`,
+    { fields },
+  );
+}
+
+export async function updateChannelInstance(
+  channelName: string,
+  index: number,
+  fields: Record<string, unknown>,
+): Promise<{ index: number; activated: boolean; started_channels: string[] }> {
+  return put<{ index: number; activated: boolean; started_channels: string[] }>(
+    `/api/channels/${encodeURIComponent(channelName)}/instances/${index}`,
+    { fields },
+  );
+}
+
+export async function deleteChannelInstance(
+  channelName: string,
+  index: number,
+): Promise<void> {
+  await del<void>(`/api/channels/${encodeURIComponent(channelName)}/instances/${index}`);
 }
 
 export interface QrStartResponse {

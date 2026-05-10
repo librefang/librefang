@@ -36,6 +36,7 @@ export {
   getBudgetStatus,
   // channels & comms
   listChannels,
+  listChannelInstances,
   getCommsTopology,
   listCommsEvents,
   // config & registry
@@ -157,6 +158,8 @@ export type {
   UserBudgetWindow,
   UserBudgetPayload,
   ListSessionsResult,
+  ChannelInstance,
+  ChannelInstancesResponse,
 } from "../../api";
 
 // ---------------------------------------------------------------------------
@@ -194,6 +197,9 @@ export {
   updateBudget,
   // channels & comms
   configureChannel,
+  createChannelInstance,
+  updateChannelInstance,
+  deleteChannelInstance,
   testChannel,
   reloadChannels,
   sendCommsMessage,
