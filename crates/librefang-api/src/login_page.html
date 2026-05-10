@@ -106,9 +106,16 @@
         var d = res.data || {};
         if (d.ok && d.token) {
           try { localStorage.setItem('librefang-api-key', d.token); } catch (e) {}
-          // Preserve the original destination when possible.
-          var target = location.pathname + location.search + location.hash;
-          if (!target || target === '/') target = '/dashboard/';
+          // Preserve the original destination when possible. The SPA shell is
+          // served at `/`, not `/dashboard` or `/dashboard/` — those paths only
+          // exist to host the inline login page (and SPA build assets under
+          // `/dashboard/<asset>`), so redirecting back to them lands on a 404.
+          // See #4860.
+          var path = location.pathname;
+          var target = path + location.search + location.hash;
+          if (!path || path === '/' || path === '/dashboard' || path === '/dashboard/') {
+            target = '/';
+          }
           location.replace(target);
           return;
         }

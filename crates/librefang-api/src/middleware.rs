@@ -2715,4 +2715,22 @@ mod tests {
             );
         }
     }
+
+    /// Regression for #4860: the inline login page must redirect to `/`
+    /// (the SPA shell) when it was itself served at `/`, `/dashboard`, or
+    /// `/dashboard/`. The router only registers `/` and
+    /// `/dashboard/{*path}`, so redirecting back to `/dashboard` or
+    /// `/dashboard/` after a successful sign-in lands on a 404.
+    #[test]
+    fn login_page_redirects_dashboard_root_to_spa_shell() {
+        let html = super::LOGIN_PAGE_HTML;
+        assert!(
+            html.contains("path === '/dashboard'") && html.contains("path === '/dashboard/'"),
+            "login page must collapse /dashboard and /dashboard/ to the SPA shell at /"
+        );
+        assert!(
+            !html.contains("target = '/dashboard/';"),
+            "login page must not redirect to /dashboard/ — that path 404s (#4860)"
+        );
+    }
 }
