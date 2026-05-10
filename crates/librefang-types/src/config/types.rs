@@ -6260,6 +6260,10 @@ pub struct EmailConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Accept invalid TLS certificates (self-signed, expired) for IMAP.
+    /// Default: false. NOT recommended for production.
+    #[serde(default)]
+    pub tls_accept_invalid_certs: bool,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -6283,6 +6287,7 @@ impl Default for EmailConfig {
             allowed_senders: vec![],
             account_id: None,
             default_agent: None,
+            tls_accept_invalid_certs: false,
             overrides: ChannelOverrides::default(),
         }
     }

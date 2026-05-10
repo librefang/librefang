@@ -4,6 +4,44 @@
 //! Uses the subject line for agent routing (e.g., "\[coder\] Fix this bug").
 
 use crate::types::{ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser};
+
+/// TLS certificate verifier that accepts everything (for self-signed/expired certs).
+#[derive(Debug)]
+struct NoVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for NoVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
@@ -78,6 +116,8 @@ pub struct EmailAdapter {
     /// only path: tests set this via `with_plain_smtp` so `send()`
     /// can talk to a hand-rolled local SMTP fixture without TLS.
     smtp_use_plain: bool,
+    /// Accept invalid TLS certificates (self-signed, expired) for IMAP.
+    tls_accept_invalid_certs: bool,
 }
 
 impl EmailAdapter {
@@ -118,8 +158,15 @@ impl EmailAdapter {
             shutdown_rx,
             reply_ctx: Arc::new(DashMap::new()),
             smtp_use_plain: false,
+            tls_accept_invalid_certs: false,
         }
     }
+    /// Accept invalid TLS certificates for IMAP connections.
+    pub fn with_tls_accept_invalid_certs(mut self, accept: bool) -> Self {
+        self.tls_accept_invalid_certs = accept;
+        self
+    }
+
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
@@ -308,11 +355,21 @@ fn fetch_unseen_emails(
     username: &str,
     password: &str,
     folders: &[String],
+    accept_invalid_certs: bool,
 ) -> Result<Vec<FetchedEmail>, String> {
     let tcp = std::net::TcpStream::connect((host, port))
         .map_err(|e| format!("TCP connect failed: {e}"))?;
-    let tls = rustls_connector::RustlsConnector::new_with_native_certs()
-        .map_err(|e| format!("TLS connector error: {e}"))?;
+    let tls = if accept_invalid_certs {
+        tracing::warn!("IMAP TLS certificate validation disabled — not recommended for production");
+        let config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(NoVerifier))
+            .with_no_client_auth();
+        rustls_connector::RustlsConnector::from(config)
+    } else {
+        rustls_connector::RustlsConnector::new_with_native_certs()
+            .map_err(|e| format!("TLS connector error: {e}"))?
+    };
     let tls_stream = tls
         .connect(host, tcp)
         .map_err(|e| format!("TLS handshake failed: {e}"))?;
@@ -463,14 +520,23 @@ fn mark_uids_outcome(
     username: &str,
     password: &str,
     items: Vec<(String, u32, UidOutcome)>,
+    accept_invalid_certs: bool,
 ) -> Result<(), String> {
     if items.is_empty() {
         return Ok(());
     }
     let tcp = std::net::TcpStream::connect((host, port))
         .map_err(|e| format!("TCP connect failed: {e}"))?;
-    let tls = rustls_connector::RustlsConnector::new_with_native_certs()
-        .map_err(|e| format!("TLS connector error: {e}"))?;
+    let tls = if accept_invalid_certs {
+        let config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(NoVerifier))
+            .with_no_client_auth();
+        rustls_connector::RustlsConnector::from(config)
+    } else {
+        rustls_connector::RustlsConnector::new_with_native_certs()
+            .map_err(|e| format!("TLS connector error: {e}"))?
+    };
     let tls_stream = tls
         .connect(host, tcp)
         .map_err(|e| format!("TLS handshake failed: {e}"))?;
@@ -541,6 +607,7 @@ impl ChannelAdapter for EmailAdapter {
         let mut shutdown_rx = self.shutdown_rx.clone();
         let reply_ctx = self.reply_ctx.clone();
         let account_id = self.account_id.clone();
+        let accept_invalid_certs = self.tls_accept_invalid_certs;
 
         info!(
             "Starting email adapter (IMAP: {}:{}, SMTP: {}:{}, polling every {:?})",
@@ -565,7 +632,14 @@ impl ChannelAdapter for EmailAdapter {
                 let fldrs = folders.clone();
 
                 let emails = tokio::task::spawn_blocking(move || {
-                    fetch_unseen_emails(&host, port, &user, pass.as_str(), &fldrs)
+                    fetch_unseen_emails(
+                        &host,
+                        port,
+                        &user,
+                        pass.as_str(),
+                        &fldrs,
+                        accept_invalid_certs,
+                    )
                 })
                 .await;
 
@@ -655,7 +729,14 @@ impl ChannelAdapter for EmailAdapter {
                             let p = password.clone();
                             let updates = std::mem::take(&mut flag_updates);
                             let _ = tokio::task::spawn_blocking(move || {
-                                mark_uids_outcome(&h, imap_port, &u, p.as_str(), updates)
+                                mark_uids_outcome(
+                                    &h,
+                                    imap_port,
+                                    &u,
+                                    p.as_str(),
+                                    updates,
+                                    accept_invalid_certs,
+                                )
                             })
                             .await;
                         }
@@ -672,7 +753,14 @@ impl ChannelAdapter for EmailAdapter {
                     let p = password.clone();
                     let updates = std::mem::take(&mut flag_updates);
                     if let Err(e) = tokio::task::spawn_blocking(move || {
-                        mark_uids_outcome(&h, imap_port, &u, p.as_str(), updates)
+                        mark_uids_outcome(
+                            &h,
+                            imap_port,
+                            &u,
+                            p.as_str(),
+                            updates,
+                            accept_invalid_certs,
+                        )
                     })
                     .await
                     .unwrap_or_else(|join_err| Err(format!("spawn_blocking panic: {join_err}")))
