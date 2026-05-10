@@ -323,6 +323,26 @@ impl OpenAIDriver {
         m.contains("deepseek-reasoner") || m.contains("deepseek-r1")
     }
 
+    /// True if this DeepSeek model has thinking mode on by default and the
+    /// API **requires** `reasoning_content` to be echoed back on historical
+    /// assistant messages that contain `tool_calls`. Currently matches
+    /// DeepSeek V4 Flash.
+    ///
+    /// Per the DeepSeek thinking-mode docs:
+    /// > For turns that do perform tool calls, the `reasoning_content` must
+    /// > be fully passed back to the API in all subsequent requests. If your
+    /// > code does not correctly pass back `reasoning_content`, the API will
+    /// > return a 400 error.
+    ///
+    /// This is the **opposite** of [`Self::is_deepseek_reasoner`] (R1), which
+    /// must strip `reasoning_content` from historical messages, and distinct
+    /// from Kimi which sends an empty string. V4 Flash needs the original
+    /// thinking text round-tripped intact (#4842).
+    fn is_deepseek_v4_thinking_with_tools(&self, model: &str) -> bool {
+        let m = model.to_lowercase();
+        m.contains("deepseek-v4-flash")
+    }
+
     /// Create a driver with additional HTTP headers (e.g. for Copilot IDE auth).
     pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
         self.extra_headers = headers;
@@ -817,6 +837,7 @@ impl OpenAIDriver {
                 (Role::Assistant, MessageContent::Blocks(blocks)) => {
                     let mut text_parts = Vec::new();
                     let mut tool_calls = Vec::new();
+                    let mut thinking_parts: Vec<String> = Vec::new();
                     for block in blocks {
                         match block {
                             ContentBlock::Text { text, .. } => text_parts.push(text.clone()),
@@ -832,12 +853,16 @@ impl OpenAIDriver {
                                     },
                                 });
                             }
-                            ContentBlock::Thinking { .. } => {}
+                            ContentBlock::Thinking { thinking, .. } => {
+                                thinking_parts.push(thinking.clone());
+                            }
                             _ => {}
                         }
                     }
                     let has_tool_calls = !tool_calls.is_empty();
                     let is_deepseek_r = self.is_deepseek_reasoner(&request.model);
+                    let is_deepseek_v4_thinking =
+                        self.is_deepseek_v4_thinking_with_tools(&request.model);
                     oai_messages.push(OaiMessage {
                         role: "assistant".to_string(),
                         // ZHIPU (GLM) rejects assistant messages where content is
@@ -861,15 +886,26 @@ impl OpenAIDriver {
                             Some(tool_calls)
                         },
                         tool_call_id: None,
-                        // DeepSeek-reasoner: MUST omit reasoning_content on
-                        // all previous assistant messages — the API rejects it.
-                        // Kimi: requires an empty-string reasoning_content when
-                        // tool_calls are present (thinking is disabled for
-                        // multi-turn compatibility).
+                        // Provider-specific reasoning_content rules on historical
+                        // assistant turns:
+                        //   * DeepSeek-reasoner (R1): MUST be omitted — the API
+                        //     rejects requests that include it (#XXXX).
+                        //   * DeepSeek V4 Flash: MUST be echoed back on turns
+                        //     with tool_calls — the API returns 400 otherwise
+                        //     (#4842). Thinking mode is on by default and the
+                        //     spec requires the original reasoning text to be
+                        //     round-tripped.
+                        //   * Kimi: requires an empty-string reasoning_content
+                        //     when tool_calls are present (thinking is disabled
+                        //     wire-side for multi-turn compatibility).
                         reasoning_content: if is_deepseek_r {
-                            // Always None — DeepSeek rejects reasoning_content
-                            // on historical assistant turns.
                             None
+                        } else if has_tool_calls && is_deepseek_v4_thinking {
+                            // Empty Thinking blocks (or no Thinking block at
+                            // all) still need reasoning_content present — V4
+                            // Flash rejects the field being missing on a
+                            // tool_calls turn, but accepts an empty string.
+                            Some(thinking_parts.join(""))
                         } else if has_tool_calls
                             && self.kimi_needs_reasoning_content(&request.model)
                         {
@@ -2660,6 +2696,248 @@ mod tests {
             reasoning_content.is_none(),
             "deepseek-reasoner must never send reasoning_content on assistant messages"
         );
+    }
+
+    // ----- is_deepseek_v4_thinking_with_tools tests (#4842) -----
+
+    #[test]
+    fn test_is_deepseek_v4_thinking_with_tools_matches_v4_flash() {
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        assert!(driver.is_deepseek_v4_thinking_with_tools("deepseek-v4-flash"));
+        assert!(driver.is_deepseek_v4_thinking_with_tools("DeepSeek-V4-Flash"));
+        // Hypothetical pinned variants — substring match keeps us forward-
+        // compatible with date-stamped releases like deepseek-v4-flash-0501.
+        assert!(driver.is_deepseek_v4_thinking_with_tools("deepseek-v4-flash-0501"));
+    }
+
+    #[test]
+    fn test_is_deepseek_v4_thinking_with_tools_does_not_match_others() {
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        // V4 Pro is reported as working out-of-the-box (#4842 workaround
+        // section) — must not be lumped in with V4 Flash.
+        assert!(!driver.is_deepseek_v4_thinking_with_tools("deepseek-v4-pro"));
+        assert!(!driver.is_deepseek_v4_thinking_with_tools("deepseek-chat"));
+        assert!(!driver.is_deepseek_v4_thinking_with_tools("deepseek-reasoner"));
+        assert!(!driver.is_deepseek_v4_thinking_with_tools("deepseek-r1"));
+        assert!(!driver.is_deepseek_v4_thinking_with_tools("gpt-4o"));
+        assert!(!driver.is_deepseek_v4_thinking_with_tools("kimi-k2"));
+    }
+
+    /// #4842: V4 Flash assistant turns that contain `tool_calls` MUST round-trip
+    /// the original `reasoning_content` (the thinking text) on subsequent
+    /// requests, otherwise the DeepSeek API returns 400.
+    #[test]
+    fn test_deepseek_v4_flash_round_trips_reasoning_content_on_tool_calls() {
+        use librefang_llm_driver::CompletionRequest;
+        use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        let assistant = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Thinking {
+                    thinking: "Let me check the user's memory store first.".to_string(),
+                    provider_metadata: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "call_abc".to_string(),
+                    name: "memory_search".to_string(),
+                    input: serde_json::json!({"query": "preferences"}),
+                    provider_metadata: None,
+                },
+            ]),
+            pinned: false,
+            timestamp: None,
+        };
+        let req = CompletionRequest {
+            model: "deepseek-v4-flash".to_string(),
+            messages: std::sync::Arc::new(vec![assistant]),
+            tools: std::sync::Arc::new(Vec::new()),
+            max_tokens: 128,
+            temperature: 0.7,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+            session_id: None,
+            step_id: None,
+        };
+        let oai = driver.build_request(&req).expect("build_request");
+        let assistant_msg = oai
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert_eq!(
+            assistant_msg.reasoning_content.as_deref(),
+            Some("Let me check the user's memory store first."),
+            "V4 Flash MUST echo back reasoning_content on tool_calls turns"
+        );
+    }
+
+    /// #4842: V4 Flash with a tool_calls turn that has no Thinking block must
+    /// still emit `reasoning_content` (empty string). The API rejects requests
+    /// where the field is missing on a tool_calls turn even when the model
+    /// produced no thinking that turn.
+    #[test]
+    fn test_deepseek_v4_flash_emits_empty_reasoning_when_no_thinking_block() {
+        use librefang_llm_driver::CompletionRequest;
+        use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        let assistant = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: "call_xyz".to_string(),
+                name: "shell_exec".to_string(),
+                input: serde_json::json!({"command": "ls"}),
+                provider_metadata: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        };
+        let req = CompletionRequest {
+            model: "deepseek-v4-flash".to_string(),
+            messages: std::sync::Arc::new(vec![assistant]),
+            tools: std::sync::Arc::new(Vec::new()),
+            max_tokens: 128,
+            temperature: 0.7,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+            session_id: None,
+            step_id: None,
+        };
+        let oai = driver.build_request(&req).expect("build_request");
+        let assistant_msg = oai
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert_eq!(
+            assistant_msg.reasoning_content.as_deref(),
+            Some(""),
+            "V4 Flash tool_calls turn without thinking still needs the field present"
+        );
+    }
+
+    /// #4842: V4 Flash assistant turns *without* tool_calls (text-only response)
+    /// don't need reasoning_content — the constraint is specifically on
+    /// tool_calls turns.
+    #[test]
+    fn test_deepseek_v4_flash_omits_reasoning_on_text_only_turn() {
+        use librefang_llm_driver::CompletionRequest;
+        use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        let assistant = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Thinking {
+                    thinking: "thinking out loud".to_string(),
+                    provider_metadata: None,
+                },
+                ContentBlock::Text {
+                    text: "Hello!".to_string(),
+                    provider_metadata: None,
+                },
+            ]),
+            pinned: false,
+            timestamp: None,
+        };
+        let req = CompletionRequest {
+            model: "deepseek-v4-flash".to_string(),
+            messages: std::sync::Arc::new(vec![assistant]),
+            tools: std::sync::Arc::new(Vec::new()),
+            max_tokens: 128,
+            temperature: 0.7,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+            session_id: None,
+            step_id: None,
+        };
+        let oai = driver.build_request(&req).expect("build_request");
+        let assistant_msg = oai
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert!(
+            assistant_msg.reasoning_content.is_none(),
+            "text-only V4 Flash assistant turn doesn't need reasoning_content round-trip"
+        );
+    }
+
+    /// Models other than V4 Flash / Kimi must NOT emit reasoning_content on
+    /// historical turns — most providers reject the unknown field, and
+    /// deepseek-reasoner explicitly rejects it.
+    #[test]
+    fn test_other_models_omit_reasoning_content_even_with_thinking_blocks() {
+        use librefang_llm_driver::CompletionRequest;
+        use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        let assistant = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Thinking {
+                    thinking: "private reasoning".to_string(),
+                    provider_metadata: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "noop".to_string(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                },
+            ]),
+            pinned: false,
+            timestamp: None,
+        };
+        for model in ["deepseek-chat", "deepseek-reasoner", "gpt-4o"] {
+            let req = CompletionRequest {
+                model: model.to_string(),
+                messages: std::sync::Arc::new(vec![assistant.clone()]),
+                tools: std::sync::Arc::new(Vec::new()),
+                max_tokens: 128,
+                temperature: 0.7,
+                system: None,
+                thinking: None,
+                prompt_caching: false,
+                cache_ttl: None,
+                response_format: None,
+                timeout_secs: None,
+                extra_body: None,
+                agent_id: None,
+                session_id: None,
+                step_id: None,
+            };
+            let oai = driver.build_request(&req).expect("build_request");
+            let assistant_msg = oai
+                .messages
+                .iter()
+                .find(|m| m.role == "assistant")
+                .expect("assistant message");
+            assert!(
+                assistant_msg.reasoning_content.is_none(),
+                "{model}: must not echo reasoning_content on historical assistant turns"
+            );
+        }
     }
 
     /// Verify that deepseek-reasoner assistant messages always get a non-null
