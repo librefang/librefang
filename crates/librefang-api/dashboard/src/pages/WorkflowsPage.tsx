@@ -317,17 +317,29 @@ export function WorkflowsPage() {
     return extractWorkflowParams(detail.steps as WorkflowStep[]);
   }, [workflowDetailQuery.data]);
 
-  // Reset parameter values when the selected workflow changes, pre-filling
-  // defaults where available.
-  const prevWorkflowIdRef = useRef(selectedWorkflowId);
+  // Seed parameter values once per workflow when its detected params
+  // first become available. The `useWorkflowDetail` query is async, so
+  // on first render `selectedWorkflowId` is set but `detectedParams`
+  // is still empty — a naive `prev !== cur` ref bailed out on initial
+  // render and never seeded again, which silently lost every
+  // `p.default` on the first selection. Track which workflow we've
+  // seeded for instead, and seed only after detail data has actually
+  // arrived (or, when the workflow truly has no parameters, leave
+  // `paramValues` empty — there's nothing to seed).
+  const seededForRef = useRef<string | null>(null);
   useEffect(() => {
-    if (prevWorkflowIdRef.current === selectedWorkflowId) return;
-    prevWorkflowIdRef.current = selectedWorkflowId;
+    if (!selectedWorkflowId) {
+      seededForRef.current = null;
+      return;
+    }
+    if (seededForRef.current === selectedWorkflowId) return;
+    if (detectedParams.length === 0) return; // wait for detail to load
     const defaults: Record<string, string> = {};
     for (const p of detectedParams) {
       if (p.default != null) defaults[p.name] = String(p.default);
     }
     setParamValues(defaults);
+    seededForRef.current = selectedWorkflowId;
   }, [selectedWorkflowId, detectedParams]);
 
   // First-time visitors with no workflows configured land on the
@@ -367,20 +379,36 @@ export function WorkflowsPage() {
     }
   }, [allWorkflows, workflows, selectedWorkflowId, workflowsQuery.isSuccess]);
 
-  // Build the effective input string for a run.  When the workflow has
-  // detected parameters the user filled in, we prepend them as a JSON
-  // object so the prompt templates can reference the structured data.
-  // The free-text textarea value is appended after the parameters.
+  // Build the effective input string for a run.
+  //
+  // **Important contract caveat.** The kernel's workflow templating
+  // only substitutes `{{input}}` (the run's input field) plus the
+  // names of prior step outputs (per a step's `output_var`). It does
+  // NOT bind arbitrary `{{var}}` placeholders that this UI extracts
+  // from `prompt_template` strings — those exist only as a UX hint
+  // for the user. So the values typed into the per-parameter form
+  // fields below are NOT resolved into `{{topic}}` etc. directly;
+  // they are concatenated with the free-text textarea and the whole
+  // block is delivered to the kernel as `{{input}}`.
+  //
+  // Practical guidance for prompt-template authors using this form:
+  // reference `{{input}}` (not `{{topic}}`) in your steps and parse
+  // the labelled key/value lines yourself, or wait for #4835 (a
+  // structured run-input parameter map on the backend) to land.
   const buildRunInput = useCallback((): string => {
     const hasParams = detectedParams.length > 0 &&
       Object.values(paramValues).some((v) => v.trim() !== "");
     if (!hasParams) return runInput;
-    const paramsObj: Record<string, string> = {};
+    // Labelled `key: value` lines are easier for an LLM to parse out
+    // of the resulting `{{input}}` block than a JSON.stringify dump,
+    // which often gets confused with code in the prompt context.
+    const lines: string[] = [];
     for (const p of detectedParams) {
       const val = paramValues[p.name]?.trim() ?? "";
-      if (val) paramsObj[p.name] = val;
+      if (val) lines.push(`${p.name}: ${val}`);
     }
-    const parts: string[] = [JSON.stringify(paramsObj, null, 2)];
+    const parts: string[] = [];
+    if (lines.length > 0) parts.push(lines.join("\n"));
     if (runInput.trim()) parts.push(runInput.trim());
     return parts.join("\n\n");
   }, [detectedParams, paramValues, runInput]);
