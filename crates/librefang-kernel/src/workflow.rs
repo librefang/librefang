@@ -460,14 +460,17 @@ fn split_outside_quotes(s: &str, delimiter: &str) -> Option<Vec<String>> {
 ///
 /// Resolution order (first match wins):
 ///
-/// 1. **`Retry-After:` value embedded in the error string.** Provider
-///    drivers in `librefang-llm-drivers` surface `429`/`503` responses
-///    with the upstream `Retry-After` header inlined into the error
-///    text (`"Retry-After: 120"` or `"retry_after_ms=8000"`); honour
-///    it directly so a server asking for 120 s isn't retried at 65 s
-///    and 429ed again. Parses both seconds and millisecond variants.
-///    Capped at 5 minutes to keep a misbehaving server from holding
-///    a step open indefinitely.
+/// 1. **Explicit retry hint embedded in the error string.** Driver-side
+///    `LlmError::RateLimited` / `LlmError::Overloaded` Display formats
+///    embed `retry after Nms`, and provider 429 messages frequently
+///    inline `Retry-After: N` from the upstream HTTP header. Both are
+///    parsed by [`librefang_llm_driver::llm_errors::extract_retry_delay`]
+///    (the canonical, single-source-of-truth parser already used by the
+///    driver retry layer — keeps kernel and driver semantics in lockstep
+///    instead of maintaining a second regex here). Returns ms; we honour
+///    it directly so a server asking for 120 s isn't retried at 65 s and
+///    429ed again. Capped at 5 minutes; a value over the cap is WARN'd
+///    so operators can spot a hostile or misconfigured provider.
 /// 2. **Burst / rate-limit substring (case-insensitive).** Anthropic
 ///    emits `"rate limit"`, OpenAI emits `"rate_limit"` /
 ///    `"Rate limit"`, Gemini emits `"RATE_LIMIT_EXCEEDED"`. The
@@ -482,12 +485,21 @@ fn split_outside_quotes(s: &str, delimiter: &str) -> Option<Vec<String>> {
 fn classify_backoff(err: &str, attempt: u32) -> std::time::Duration {
     /// 60-second sliding window + 5-second safety margin.
     const BURST_WINDOW_BACKOFF: std::time::Duration = std::time::Duration::from_secs(65);
-    /// Upper bound on a server-supplied `Retry-After` so a hostile or
+    /// Upper bound on a server-supplied retry hint so a hostile or
     /// misconfigured provider can't park a workflow indefinitely.
     const RETRY_AFTER_CAP: std::time::Duration = std::time::Duration::from_secs(300);
 
-    if let Some(d) = parse_retry_after(err) {
-        return d.min(RETRY_AFTER_CAP);
+    if let Some(ms) = librefang_llm_driver::llm_errors::extract_retry_delay(err) {
+        let asked = std::time::Duration::from_millis(ms);
+        if asked > RETRY_AFTER_CAP {
+            warn!(
+                asked_ms = ms,
+                cap_ms = RETRY_AFTER_CAP.as_millis() as u64,
+                "Provider retry hint exceeds workflow cap; clamping"
+            );
+            return RETRY_AFTER_CAP;
+        }
+        return asked;
     }
 
     let lowered = err.to_ascii_lowercase();
@@ -499,55 +511,6 @@ fn classify_backoff(err: &str, attempt: u32) -> std::time::Duration {
     }
 
     std::time::Duration::from_secs(2u64.saturating_pow(attempt).min(60))
-}
-
-/// Extract a `Retry-After` value from an error message string.
-///
-/// Recognises the shapes LLM drivers in this workspace produce when
-/// surfacing a `429` / `503` to the kernel:
-///
-///   - `"Retry-After: 120"`     (RFC 7231 seconds form, case-insensitive)
-///   - `"retry_after_ms=8000"`  (millisecond form used by some drivers)
-///   - `"retry_after = 120s"`   (key=value form used by some drivers)
-///
-/// Returns `None` for anything else; callers fall back to the
-/// burst/rate-limit branch or the exponential default.
-fn parse_retry_after(err: &str) -> Option<std::time::Duration> {
-    let lowered = err.to_ascii_lowercase();
-
-    // Millisecond form first — it's the most specific and we don't want a
-    // bare `retry_after` substring matching the seconds form by accident.
-    if let Some(rest) = lowered.split("retry_after_ms").nth(1) {
-        if let Some(ms) = scan_unsigned(rest) {
-            return Some(std::time::Duration::from_millis(ms));
-        }
-    }
-
-    // RFC 7231 `Retry-After: <seconds>` and the `retry_after = <seconds>s`
-    // variants both leave the digits after the next `:` or `=`.
-    for needle in ["retry-after", "retry_after"] {
-        if let Some(rest) = lowered.split(needle).nth(1) {
-            if let Some(secs) = scan_unsigned(rest) {
-                return Some(std::time::Duration::from_secs(secs));
-            }
-        }
-    }
-
-    None
-}
-
-/// Pull the first run of ASCII decimal digits out of `s` and parse them
-/// as `u64`. Skips leading non-digit chars (`": "`, `"= "`, etc.) so
-/// callers don't have to normalise.
-fn scan_unsigned(s: &str) -> Option<u64> {
-    let bytes = s.as_bytes();
-    let start = bytes.iter().position(|b| b.is_ascii_digit())?;
-    let end = bytes[start..]
-        .iter()
-        .position(|b| !b.is_ascii_digit())
-        .map(|p| start + p)
-        .unwrap_or(bytes.len());
-    std::str::from_utf8(&bytes[start..end]).ok()?.parse().ok()
 }
 
 impl WorkflowEngine {
@@ -5243,27 +5206,45 @@ prompt_template = "do {{x}}"
     /// `Retry-After` from the upstream provider beats the constant 65s.
     /// A server explicitly asking for 120s must NOT be retried at 65s
     /// and 429ed again — that's exactly the loop the original v1
-    /// classifier failed to break.
+    /// classifier failed to break. Driver 429 messages frequently inline
+    /// the upstream HTTP `Retry-After` header value.
     #[test]
     fn classify_backoff_honours_retry_after_seconds() {
         assert_eq!(
             classify_backoff("HTTP 429 from provider — Retry-After: 120 (rate limit)", 0),
             std::time::Duration::from_secs(120)
         );
-        // Prefix variant a Gemini driver might emit.
-        assert_eq!(
-            classify_backoff("retry_after = 30s, please slow down", 0),
-            std::time::Duration::from_secs(30)
-        );
     }
 
-    /// Millisecond form is explicit and must be parsed before the
-    /// seconds form (sharing the `retry_after` prefix).
+    /// `LlmError::RateLimited` and `LlmError::Overloaded` Display as
+    /// `"... retry after Nms ..."`. The kernel sees this string verbatim
+    /// (the runtime stringifies the driver error before bubbling). Pin
+    /// the contract against the *real* driver Display output — using a
+    /// synthetic `retry_after_ms=N` form here would silently let the two
+    /// parsers drift, which is exactly the gap that motivated this test.
     #[test]
-    fn classify_backoff_honours_retry_after_milliseconds() {
+    fn classify_backoff_honours_llm_error_display_strings() {
+        use librefang_llm_driver::LlmError;
+
+        let rate_limited = LlmError::RateLimited {
+            retry_after_ms: 8000,
+            message: Some("hit your limit · resets 10am".to_string()),
+        };
         assert_eq!(
-            classify_backoff("Anthropic 429 — retry_after_ms=8000 (overloaded)", 0),
-            std::time::Duration::from_millis(8000)
+            classify_backoff(&rate_limited.to_string(), 0),
+            std::time::Duration::from_millis(8000),
+            "RateLimited Display: {}",
+            rate_limited
+        );
+
+        let overloaded = LlmError::Overloaded {
+            retry_after_ms: 12_000,
+        };
+        assert_eq!(
+            classify_backoff(&overloaded.to_string(), 0),
+            std::time::Duration::from_millis(12_000),
+            "Overloaded Display: {}",
+            overloaded
         );
     }
 
@@ -5278,10 +5259,10 @@ prompt_template = "do {{x}}"
         );
     }
 
-    /// Plain rate-limit text without a Retry-After value still routes
-    /// through the burst branch, NOT the millisecond branch — pin
-    /// against a regression where `retry_after_ms` matched a substring
-    /// of `rate_limit_exceeded` or similar.
+    /// Plain rate-limit text without an embedded retry hint still
+    /// routes through the burst branch — pin against a regression
+    /// where `extract_retry_delay` over-matches a `rate_limit` /
+    /// `rate-limit` substring as if it were a `retry-after` prefix.
     #[test]
     fn classify_backoff_no_retry_after_falls_back_to_burst_branch() {
         assert_eq!(
