@@ -699,6 +699,7 @@ async fn summarize_messages(
         agent_id: None,
         session_id: None,
         step_id: None,
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
     };
 
     // Retry logic for transient failures
@@ -827,6 +828,7 @@ async fn summarize_in_chunks(
         agent_id: None,
         session_id: None,
         step_id: None,
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
     };
 
     match driver.complete(merge_request).await {

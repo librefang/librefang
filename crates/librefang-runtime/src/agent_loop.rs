@@ -2885,6 +2885,7 @@ async fn generate_search_queries(
         agent_id: None,
         session_id: None,
         step_id: None,
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
     };
 
     let response =
@@ -3915,6 +3916,7 @@ pub async fn run_agent_loop(
             agent_id: Some(agent_id_str.clone()),
             session_id: Some(session.id.to_string()),
             step_id: Some(iteration.to_string()),
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
 
         // Notify phase: Thinking
@@ -5394,6 +5396,7 @@ pub async fn run_agent_loop_streaming(
             agent_id: Some(agent_id_str.clone()),
             session_id: Some(session.id.to_string()),
             step_id: Some(iteration.to_string()),
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
 
         // Notify phase: on first iteration emit Streaming; on subsequent

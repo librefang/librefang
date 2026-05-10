@@ -92,6 +92,8 @@ impl LibreFangKernel {
                 agent_id: Some(agent_id.to_string()),
                 session_id: Some(session_id.0.to_string()),
                 step_id: None,
+                reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(
+                ),
             };
 
             let resp = match tokio::time::timeout(
@@ -175,6 +177,7 @@ impl LibreFangKernel {
             agent_id: None,
             session_id: None,
             step_id: None,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
 
         let result = match tokio::time::timeout(

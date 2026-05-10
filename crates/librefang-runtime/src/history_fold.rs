@@ -370,6 +370,7 @@ async fn summarise_group(
         agent_id: None,
         session_id: None,
         step_id: None,
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
     };
 
     match driver.complete(request).await {

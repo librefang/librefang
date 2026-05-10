@@ -418,6 +418,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             agent_id: None,
             session_id: None,
             step_id: None,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
 
         let response = self.driver.complete(request).await.map_err(|e| {
@@ -575,6 +576,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             agent_id: None,
             session_id: None,
             step_id: None,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
 
         match self.driver.complete(request).await {

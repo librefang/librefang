@@ -127,6 +127,7 @@ pub async fn review_candidate(
         agent_id: Some(attribution.agent_id.to_string()),
         session_id: attribution.session_id.map(str::to_string),
         step_id: attribution.candidate_id.map(str::to_string),
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
     };
 
     let response = match driver.complete(request).await {

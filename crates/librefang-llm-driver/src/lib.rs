@@ -273,6 +273,18 @@ pub struct CompletionRequest {
     /// wire as `x-librefang-step-id`. `None` for callers that don't
     /// distinguish between steps.
     pub step_id: Option<String>,
+    /// How the OpenAI-compat driver should handle `reasoning_content` on
+    /// historical assistant turns for this request's model.
+    ///
+    /// Sourced from the model catalog (`ModelCatalogEntry.reasoning_echo_policy`)
+    /// at request-construction time. When the field is left at its default
+    /// ([`ReasoningEchoPolicy::None`]) the OpenAI driver falls back to
+    /// substring-based detection — see librefang/librefang#4842 for the
+    /// migration plan.
+    ///
+    /// Drivers that don't speak the OpenAI-compatible chat-completions wire
+    /// format (Anthropic, Gemini, etc.) ignore this field.
+    pub reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 }
 
 /// A response from an LLM completion.
@@ -815,6 +827,7 @@ mod tests {
             agent_id: None,
             session_id: None,
             step_id: None,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
 
         let response = driver.stream(request, tx).await.unwrap();
@@ -879,6 +892,7 @@ mod tests {
             agent_id: None,
             session_id: None,
             step_id: None,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let err = driver.stream(request, tx).await.unwrap_err();
         assert!(
