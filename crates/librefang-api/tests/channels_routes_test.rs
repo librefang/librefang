@@ -46,6 +46,16 @@ static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Drop guard that points `LIBREFANG_HOME` at a tempdir for the
 /// duration of a test and restores the previous value on drop. Must be
 /// constructed only while `ENV_LOCK` is held.
+///
+/// **Footgun for future tests:** `std::env::set_var` is process-global.
+/// Any new test in this binary that boots a server exercising a
+/// disk-touching handler (anything reaching `librefang_home()` — i.e.
+/// any of the `/configure`, `/instances`, or QR flow handlers) MUST
+/// acquire `ENV_LOCK` before constructing this guard, otherwise it will
+/// race with the disk-roundtrip tests below and see the tempdir's
+/// `config.toml` instead of `~/.librefang`. Tests that only exercise
+/// validation paths (unknown channel, missing field) fail-fast before
+/// reaching `librefang_home()` and are safe without the lock.
 struct DiskHomeGuard {
     tmp: tempfile::TempDir,
     prev: Option<String>,
