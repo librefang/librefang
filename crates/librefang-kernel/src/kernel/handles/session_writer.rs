@@ -9,6 +9,24 @@ use librefang_runtime::kernel_handle;
 use super::super::LibreFangKernel;
 
 impl kernel_handle::SessionWriter for LibreFangKernel {
+    /// **Concurrency caveat — pre-existing substrate gap, shared with
+    /// `inject_attachment_blocks`.** This method does a read-modify-write
+    /// (`get_session` → `push_message` → `save_session`) without acquiring
+    /// `session_msg_locks[session_id]`. If the inbound router or another
+    /// `append_to_session` call races on the same `session_id`, the later
+    /// `save_session` wins and the earlier append is lost — `save_session`
+    /// is an unconditional `INSERT ON CONFLICT DO UPDATE`
+    /// (`librefang-memory/src/session.rs::SessionStore::save_session`), no
+    /// `messages_generation` CAS.
+    ///
+    /// Acceptable for the channel-mirror use case because:
+    ///   1. Mirrored turns are `system`-role context, not user-facing;
+    ///   2. The trait is sync and `session_msg_locks` uses `tokio::sync::Mutex`
+    ///      (async-only), so a proper fix needs either trait async-ification
+    ///      or `blocking_lock` + `spawn_blocking` plumbing across every
+    ///      existing caller of `inject_attachment_blocks`.
+    /// Both methods will be migrated together when the substrate moves to
+    /// async I/O (#3579 in the trait doc-comment).
     fn append_to_session(
         &self,
         session_id: librefang_types::agent::SessionId,
