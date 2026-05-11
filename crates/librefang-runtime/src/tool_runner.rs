@@ -7038,6 +7038,21 @@ mod tests {
         assert_eq!(audio_mime_from_ext("OGA"), None);
     }
 
+    #[test]
+    fn supported_audio_exts_doc_lists_every_implemented_extension() {
+        let exts: Vec<&str> = SUPPORTED_AUDIO_EXTS_DOC
+            .split(", ")
+            .map(|s| s.trim())
+            .collect();
+        assert!(!exts.is_empty(), "const must list at least one extension");
+        for ext in &exts {
+            assert!(
+                audio_mime_from_ext(ext).is_some(),
+                "SUPPORTED_AUDIO_EXTS_DOC lists '{ext}' but audio_mime_from_ext does not map it"
+            );
+        }
+    }
+
     // ── check_taint_outbound_text ────────────────────────────────────────
 
     #[test]
