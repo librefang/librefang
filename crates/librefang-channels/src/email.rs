@@ -346,11 +346,26 @@ fn build_imap_tls_connector(
     use rustls::RootCertStore;
 
     if opts.accept_invalid_certs {
+        // Field is named `intended_host` because when validation is off the
+        // actual peer can be anyone — `host` would falsely imply "the cert
+        // was for this name."
         warn!(
-            host = %host,
+            intended_host = %host,
             "IMAP TLS certificate validation DISABLED (tls_accept_invalid_certs = true). \
              The connection is vulnerable to MITM and will accept any cert. Do not use in production."
         );
+        // Surface the silent precedence: an operator who set both knobs
+        // probably wanted both to do something, but accept_invalid_certs is
+        // a superset (accepts everything), so the pinned CA is redundant.
+        if let Some(ref ca_path) = opts.root_ca_path {
+            warn!(
+                intended_host = %host,
+                ca_path = %ca_path.display(),
+                "tls_root_ca_path is ignored because tls_accept_invalid_certs = true \
+                 (the no-op verifier accepts every cert, so the pinned CA does nothing). \
+                 Unset tls_accept_invalid_certs to actually use the pinned CA."
+            );
+        }
         let config = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(std::sync::Arc::new(NoCertVerification))
@@ -1414,6 +1429,30 @@ mod tests {
             "accept_invalid_certs=true",
             &ImapTlsOptions {
                 root_ca_path: None,
+                accept_invalid_certs: true,
+            },
+        );
+    }
+
+    #[test]
+    fn build_imap_tls_connector_accept_invalid_certs_wins_over_root_ca_path() {
+        // When both knobs are set, accept_invalid_certs takes the early
+        // return (its no-op verifier is a strict superset of any CA pin).
+        // The accompanying "tls_root_ca_path is ignored ..." WARN is best-
+        // tested by manual inspection; here we pin that the path with both
+        // set still successfully builds a connector — i.e. setting
+        // root_ca_path doesn't trip the rustls_pemfile loader on what would
+        // otherwise be a valid file path.
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        // Write garbage into the file: if we accidentally took the
+        // CA-loading path, this would Err.
+        let mut file = file;
+        writeln!(file, "not a PEM block").unwrap();
+        file.flush().unwrap();
+        assert_connector_built(
+            "both knobs set",
+            &ImapTlsOptions {
+                root_ca_path: Some(file.path().to_path_buf()),
                 accept_invalid_certs: true,
             },
         );
