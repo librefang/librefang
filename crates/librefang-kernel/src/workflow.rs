@@ -407,6 +407,8 @@ pub struct WorkflowEngine {
     /// through SQLite instead of the JSON file. The JSON path is still
     /// kept for the one-time migration (`migrate_from_json`).
     store: Option<WorkflowStore>,
+    /// Directory for persisting workflow definitions (`~/.librefang/workflows/`).
+    workflows_dir: Option<PathBuf>,
     /// Kernel-level default total timeout for workflow runs (seconds).
     /// Individual workflows can override this via `Workflow::total_timeout_secs`.
     /// `None` means unbounded.
@@ -636,6 +638,7 @@ impl WorkflowEngine {
             persist_path: None,
             persist_lock: Arc::new(std::sync::Mutex::new(())),
             store: None,
+            workflows_dir: None,
             default_total_timeout_secs: None,
             cancel_notify: Arc::new(DashMap::new()),
         }
@@ -651,6 +654,7 @@ impl WorkflowEngine {
             persist_path: Some(home_dir.join("data").join("workflow_runs.json")),
             persist_lock: Arc::new(std::sync::Mutex::new(())),
             store: None,
+            workflows_dir: Some(home_dir.join("workflows")),
             default_total_timeout_secs: None,
             cancel_notify: Arc::new(DashMap::new()),
         }
@@ -668,6 +672,7 @@ impl WorkflowEngine {
             persist_path: Some(home_dir.join("data").join("workflow_runs.json")),
             persist_lock: Arc::new(std::sync::Mutex::new(())),
             store: Some(store),
+            workflows_dir: Some(home_dir.join("workflows")),
             default_total_timeout_secs: None,
             cancel_notify: Arc::new(DashMap::new()),
         }
@@ -897,9 +902,26 @@ impl WorkflowEngine {
         }
     }
 
-    /// Register a new workflow definition.
+    /// Register a new workflow definition and persist it to disk.
     pub async fn register(&self, workflow: Workflow) -> WorkflowId {
         let id = workflow.id;
+        if let Some(ref dir) = self.workflows_dir {
+            let path = dir.join(format!("{id}.workflow.json"));
+            match serde_json::to_string_pretty(&workflow) {
+                Ok(json) => {
+                    if let Err(e) = tokio::fs::create_dir_all(dir).await {
+                        warn!(workflow_id = %id, error = %e, "Failed to create workflows dir");
+                    } else if let Err(e) = tokio::fs::write(&path, &json).await {
+                        warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition");
+                    } else {
+                        debug!(workflow_id = %id, path = %path.display(), "Persisted workflow definition");
+                    }
+                }
+                Err(e) => {
+                    warn!(workflow_id = %id, error = %e, "Failed to serialize workflow definition");
+                }
+            }
+        }
         self.workflows.write().await.insert(id, workflow);
         info!(workflow_id = %id, "Workflow registered");
         id
@@ -1041,9 +1063,20 @@ impl WorkflowEngine {
         }
     }
 
-    /// Remove a workflow definition.
+    /// Remove a workflow definition and its persisted file.
     pub async fn remove_workflow(&self, id: WorkflowId) -> bool {
-        self.workflows.write().await.remove(&id).is_some()
+        let removed = self.workflows.write().await.remove(&id).is_some();
+        if removed {
+            if let Some(ref dir) = self.workflows_dir {
+                let path = dir.join(format!("{id}.workflow.json"));
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        warn!(workflow_id = %id, error = %e, "Failed to delete workflow definition file");
+                    }
+                }
+            }
+        }
+        removed
     }
 
     /// Maximum number of retained workflow runs. Oldest completed/failed
