@@ -291,10 +291,9 @@ describe("MemoryPage (redesigned)", () => {
 
   it("switches to KV tab when the KV tab button is clicked", () => {
     renderPage();
-    // The TabBar button's accessible name is exactly "KV"; the agent rail's
-    // "All agents" row also contains "KV" in its subtitle ("0 mem · 0 KV"),
-    // so match exactly.
-    fireEvent.click(screen.getByRole("button", { name: "KV" }));
+    // TabBar buttons now carry role="tab" (added for a11y); the rail rows
+    // are still role="button". Match the tab role explicitly.
+    fireEvent.click(screen.getByRole("tab", { name: "KV" }));
     expect(navigateMock).toHaveBeenCalled();
     const call = navigateMock.mock.calls[0][0];
     expect(typeof call.search).toBe("function");

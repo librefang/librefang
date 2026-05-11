@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useQueries } from "@tanstack/react-query";
+import { useQueries, type UseQueryResult } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { Database, FileText, HeartPulse, KeyRound, Moon, Settings } from "lucide-react";
 import { PageHeader } from "../../components/ui/PageHeader";
@@ -18,7 +18,7 @@ import { useAutoDreamStatus } from "../../lib/queries/autoDream";
 import { useDeleteMemory } from "../../lib/mutations/memory";
 import { useUIStore } from "../../lib/store";
 import { useCreateShortcut } from "../../lib/useCreateShortcut";
-import type { MemoryItem } from "../../api";
+import type { AgentKvPair, MemoryItem } from "../../api";
 
 import { AgentRail } from "./AgentRail";
 import { ScopeSummary } from "./ScopeSummary";
@@ -84,11 +84,23 @@ export function MemoryPage() {
   }, [memoryQuery.data]);
   const totalRecords = memoryQuery.data?.memories?.length ?? 0;
 
-  // Per-agent KV counts: one query observer per agent, results flattened
-  // into a Map for the rail and scope summary.
+  // Per-agent KV: one `useQueries` observer set, owned at the page level so
+  // the rail + scope summary + KV tab all share the same observers. Without
+  // this, the KV tab would mount its own parallel `useQueries` and pay double
+  // re-render cost on every cache update (the network fetch is deduped by
+  // React Query, but observer overhead is per call site).
   const kvQueries = useQueries({
     queries: agents.map((agent) => agentKvMemoryQueryOptions(agent.id)),
   });
+  // Zip results into a Map keyed by agent id so consumers don't have to
+  // re-derive the agent→index alignment with O(n²) `findIndex` lookups.
+  const kvQueryByAgentId = useMemo(() => {
+    const m = new Map<string, UseQueryResult<AgentKvPair[]>>();
+    agents.forEach((agent, idx) => {
+      m.set(agent.id, kvQueries[idx]);
+    });
+    return m;
+  }, [agents, kvQueries]);
   const kvCountByAgentId = useMemo(() => {
     const m = new Map<string, number>();
     agents.forEach((agent, idx) => {
@@ -134,6 +146,20 @@ export function MemoryPage() {
       },
     });
   };
+
+  // Stale-URL guard: if the URL points at an agent that no longer exists
+  // (deleted out from under us, or a shared link from a different
+  // workspace), silently fall back to the aggregate scope. Without this the
+  // page would render "All agents" labels but with the deleted agent's
+  // zero-count stats response, which is worse than just showing aggregate.
+  useEffect(() => {
+    if (!agentsQuery.isSuccess) return;
+    if (!selectedAgentId) return;
+    if (agents.some((a) => a.id === selectedAgentId)) return;
+    setSearchParam({ agent: undefined });
+    // setSearchParam closes over `navigate` only; it's stable across renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentsQuery.isSuccess, selectedAgentId, agents]);
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -188,10 +214,13 @@ export function MemoryPage() {
                   ? (recordsByAgentId.get(selectedAgentId) ?? 0)
                   : totalRecords,
               kv: scopedKvCount,
+              // Dreams badge counts ENROLLED agents only — total agents would
+              // include never-enrolled ones, which inflates the number past
+              // what an operator means by "agents currently dreaming".
               dreams:
                 selectedAgentId
-                  ? (dreamForAgent ? 1 : 0)
-                  : (autoDreamQuery.data?.agents.length ?? 0),
+                  ? (dreamForAgent?.auto_dream_enabled ? 1 : 0)
+                  : (autoDreamQuery.data?.agents.filter((a) => a.auto_dream_enabled).length ?? 0),
               health: 0,
             }}
             onSelect={(tab) => setSearchParam({ tab })}
@@ -208,7 +237,11 @@ export function MemoryPage() {
               />
             )}
             {activeTab === "kv" && (
-              <KvTab agents={agents} scopedAgentId={selectedAgentId} />
+              <KvTab
+                agents={agents}
+                scopedAgentId={selectedAgentId}
+                kvQueryByAgentId={kvQueryByAgentId}
+              />
             )}
             {activeTab === "dreams" && (
               <AutoDreamTab agents={agents} scopedAgentId={selectedAgentId} />
@@ -287,13 +320,19 @@ function TabBar({ activeTab, counts, onSelect }: TabBarProps) {
 
   return (
     <Card padding="sm">
-      <div className="flex gap-1 overflow-x-auto scrollbar-thin">
+      <div
+        role="tablist"
+        aria-label={t("memory.tab_aria_label", { defaultValue: "Memory views" })}
+        className="flex gap-1 overflow-x-auto scrollbar-thin"
+      >
         {tabs.map((tab) => {
           const active = tab.key === activeTab;
           const count = counts[tab.key];
           return (
             <button
               key={tab.key}
+              role="tab"
+              aria-selected={active}
               onClick={() => onSelect(tab.key)}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-colors shrink-0 ${
                 active

@@ -20,9 +20,15 @@ export function formatRelativeMs(
   now: number,
   locale: string,
   tNever: () => string,
+  tJustNow?: () => string,
 ): string {
   if (ts === undefined || ts === 0) return tNever();
   const diff = ts - now;
+  const absSeconds = Math.abs(diff) / 1000;
+  // Anything within ~30s reads as "just now" rather than "in 0 minutes" /
+  // "this minute" — Intl.RelativeTimeFormat with numeric:"auto" produces
+  // locale-dependent and frequently awkward strings at the zero-crossing.
+  if (absSeconds < 30) return tJustNow ? tJustNow() : "just now";
   const absMinutes = Math.abs(diff) / 60_000;
   const rtf = getRelativeTimeFormat(locale);
   if (absMinutes < 60) {

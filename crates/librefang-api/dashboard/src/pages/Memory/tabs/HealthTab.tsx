@@ -22,20 +22,24 @@ export function HealthTab({ onOpenConfig }: Props) {
   const dream = dreamQuery.data;
   const now = Date.now();
   const tNever = () => t("common.never", { defaultValue: "never" });
+  const tJustNow = () => t("common.just_now", { defaultValue: "just now" });
 
   // Roll up the per-agent dream timestamps into a single "system" view:
   //   - lastConsolidatedAt: most recent successful consolidation across all
   //     opted-in agents (zero if nothing has ever fired).
-  //   - dreamFailures: count of agents whose most recent run errored.
-  // These two numbers are what an operator actually wants to glance at on a
-  // dashboard ("are dreams happening / are any broken?").
+  //   - dreamFailures: count of CURRENTLY ENROLLED agents whose most recent
+  //     run terminated in `failed` or `aborted`. Both are treated as broken
+  //     from an operator's POV — `aborted` only happens because something
+  //     wrong (or a user mashing Stop) triggered the abort path. Scoped to
+  //     opted-in so a since-disabled agent doesn't haunt the rollup with a
+  //     stale `failed` snapshot forever.
   const optedIn = dream?.agents.filter((a) => a.auto_dream_enabled) ?? [];
   const lastConsolidatedAt = optedIn.reduce(
     (max, a) => Math.max(max, a.last_consolidated_at_ms ?? 0),
     0,
   );
-  const dreamFailures = (dream?.agents ?? []).filter(
-    (a) => a.progress?.status === "failed",
+  const dreamFailures = optedIn.filter(
+    (a) => a.progress?.status === "failed" || a.progress?.status === "aborted",
   ).length;
 
   const embeddingTone = embeddingAvailable ? "success" : "warning";
@@ -142,10 +146,12 @@ export function HealthTab({ onOpenConfig }: Props) {
           label={t("memory.health_dream_last", {
             defaultValue: "Last successful consolidation",
           })}
-          value={formatRelativeMs(lastConsolidatedAt, now, i18n.language, tNever)}
+          value={formatRelativeMs(lastConsolidatedAt, now, i18n.language, tNever, tJustNow)}
         />
         <DefRow
-          label={t("memory.health_dream_failed", { defaultValue: "Most recent runs failed" })}
+          label={t("memory.health_dream_failed", {
+            defaultValue: "Enrolled agents with broken last run",
+          })}
           value={String(dreamFailures)}
           tone={dreamFailures > 0 ? "warning" : undefined}
         />
@@ -154,7 +160,7 @@ export function HealthTab({ onOpenConfig }: Props) {
             <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
             {t("memory.health_dream_warn", {
               defaultValue:
-                "One or more agents' last dream ended in error. Open the Auto-Dream tab and check the per-agent error message.",
+                "One or more enrolled agents' last dream ended in failure or abort. Open the Auto-Dream tab and check the per-agent error message.",
             })}
           </p>
         )}

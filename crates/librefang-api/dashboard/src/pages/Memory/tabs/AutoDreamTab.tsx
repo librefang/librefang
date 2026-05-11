@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { CheckCircle, Moon, XCircle } from "lucide-react";
+import { Moon } from "lucide-react";
 import { Card } from "../../../components/ui/Card";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import { Badge } from "../../../components/ui/Badge";
@@ -11,6 +11,7 @@ import {
   useSetAutoDreamEnabled,
 } from "../../../lib/mutations/autoDream";
 import type { AgentItem, AutoDreamAgentStatus } from "../../../api";
+import { useUIStore } from "../../../lib/store";
 import { AutoDreamAgentRow } from "../components/AutoDreamAgentRow";
 
 interface Props {
@@ -20,12 +21,11 @@ interface Props {
 
 export function AutoDreamTab({ agents, scopedAgentId }: Props) {
   const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
   const dreamStatusQuery = useAutoDreamStatus();
   const dreamTrigger = useTriggerAutoDream();
   const dreamAbort = useAbortAutoDream();
   const dreamSetEnabled = useSetAutoDreamEnabled();
-  const [dreamError, setDreamError] = useState<string | null>(null);
-  const [dreamMsg, setDreamMsg] = useState<string | null>(null);
 
   const dreamStatus = dreamStatusQuery.data;
   const dreamByAgentId = useMemo(() => {
@@ -34,48 +34,49 @@ export function AutoDreamTab({ agents, scopedAgentId }: Props) {
     return m;
   }, [dreamStatus]);
 
+  // All three actions surface feedback through the global toast queue so the
+  // page is consistent with every other action (RecordsTab cleanup, the
+  // dialogs, etc.). Local error/msg state would be inconsistent and would
+  // also be lost when the user navigates between tabs.
   const onTrigger = async (agentId: string) => {
-    setDreamError(null);
-    setDreamMsg(null);
     try {
       const outcome = await dreamTrigger.mutateAsync(agentId);
-      setDreamMsg(
+      addToast(
         outcome.fired
           ? t("settings.auto_dream_fired", "Consolidation fired")
           : outcome.reason,
+        outcome.fired ? "success" : "info",
       );
     } catch (e) {
-      setDreamError(e instanceof Error ? e.message : String(e));
+      addToast(e instanceof Error ? e.message : String(e), "error");
     }
   };
 
   const onAbort = async (agentId: string) => {
-    setDreamError(null);
-    setDreamMsg(null);
     try {
       const outcome = await dreamAbort.mutateAsync(agentId);
-      setDreamMsg(
+      addToast(
         outcome.aborted
           ? t("settings.auto_dream_aborted", "Abort signalled")
           : outcome.reason,
+        outcome.aborted ? "success" : "info",
       );
     } catch (e) {
-      setDreamError(e instanceof Error ? e.message : String(e));
+      addToast(e instanceof Error ? e.message : String(e), "error");
     }
   };
 
   const onToggle = async (agentId: string, enabled: boolean) => {
-    setDreamError(null);
-    setDreamMsg(null);
     try {
       await dreamSetEnabled.mutateAsync({ agentId, enabled });
-      setDreamMsg(
+      addToast(
         enabled
           ? t("settings.auto_dream_enrolled_ok", "Agent enrolled")
           : t("settings.auto_dream_unenrolled_ok", "Agent unenrolled"),
+        "success",
       );
     } catch (e) {
-      setDreamError(e instanceof Error ? e.message : String(e));
+      addToast(e instanceof Error ? e.message : String(e), "error");
     }
   };
 
@@ -175,18 +176,6 @@ export function AutoDreamTab({ agents, scopedAgentId }: Props) {
       {dreamStatusQuery.isError && (
         <p className="text-xs text-red-500">
           {t("settings.auto_dream_load_err", "Failed to load auto-dream status")}
-        </p>
-      )}
-      {dreamMsg && (
-        <p className="text-xs text-green-500">
-          <CheckCircle className="w-3 h-3 inline mr-1" />
-          {dreamMsg}
-        </p>
-      )}
-      {dreamError && (
-        <p className="text-xs text-red-500">
-          <XCircle className="w-3 h-3 inline mr-1" />
-          {dreamError}
         </p>
       )}
     </div>

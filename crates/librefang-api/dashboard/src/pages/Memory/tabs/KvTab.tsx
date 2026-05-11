@@ -1,10 +1,9 @@
 import { useTranslation } from "react-i18next";
-import { useQueries } from "@tanstack/react-query";
+import type { UseQueryResult } from "@tanstack/react-query";
 import { Database } from "lucide-react";
 import { Card } from "../../../components/ui/Card";
 import { EmptyState } from "../../../components/ui/EmptyState";
-import { agentKvMemoryQueryOptions } from "../../../lib/queries/memory";
-import type { AgentItem } from "../../../api";
+import type { AgentItem, AgentKvPair } from "../../../api";
 import { AgentKvRows } from "../components/AgentKvRows";
 
 interface Props {
@@ -12,16 +11,14 @@ interface Props {
   // When defined, only that agent's card is rendered. Otherwise every agent
   // gets a card (the aggregate view).
   scopedAgentId: string | undefined;
+  // Pre-computed Map of agent.id → KV query result. Owned by the page entry
+  // so this tab can stay presentational (no second `useQueries` observer set
+  // duplicating subscriptions on every cache update). See `pages/Memory/index.tsx`.
+  kvQueryByAgentId: Map<string, UseQueryResult<AgentKvPair[]>>;
 }
 
-export function KvTab({ agents, scopedAgentId }: Props) {
+export function KvTab({ agents, scopedAgentId, kvQueryByAgentId }: Props) {
   const { t } = useTranslation();
-
-  // Always observe all agents so switching scope doesn't re-issue requests
-  // already in cache. Cheap — one observer, one re-render boundary.
-  const kvQueries = useQueries({
-    queries: agents.map((agent) => agentKvMemoryQueryOptions(agent.id)),
-  });
 
   const visibleAgents = scopedAgentId
     ? agents.filter((a) => a.id === scopedAgentId)
@@ -50,8 +47,7 @@ export function KvTab({ agents, scopedAgentId }: Props) {
   return (
     <div className="grid gap-4">
       {visibleAgents.map((agent) => {
-        const idx = agents.findIndex((a) => a.id === agent.id);
-        const kvQuery = kvQueries[idx];
+        const kvQuery = kvQueryByAgentId.get(agent.id);
         return (
           <Card key={agent.id} padding="md">
             <div className="flex items-center gap-2 mb-3 flex-wrap">
@@ -79,7 +75,15 @@ export function KvTab({ agents, scopedAgentId }: Props) {
                   </tr>
                 </thead>
                 <tbody>
-                  <AgentKvRows kvQuery={kvQuery} />
+                  {kvQuery ? (
+                    <AgentKvRows kvQuery={kvQuery} />
+                  ) : (
+                    <tr>
+                      <td colSpan={4} className="px-3 py-2 text-xs text-text-dim/60 italic">
+                        {t("memory.kv_empty", { defaultValue: "No KV entries" })}
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>

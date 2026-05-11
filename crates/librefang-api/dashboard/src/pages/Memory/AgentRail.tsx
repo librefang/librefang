@@ -132,6 +132,7 @@ function AgentRailRow({ icon, name, idHint, subtitle, selected, onClick }: RowPr
   return (
     <button
       onClick={onClick}
+      aria-pressed={selected}
       className={`w-full text-left rounded-lg px-2 py-2 transition-colors flex items-start gap-2 ${
         selected
           ? "bg-brand/10 border border-brand/40"

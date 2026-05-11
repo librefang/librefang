@@ -40,6 +40,7 @@ export function AutoDreamAgentRow({
   const lastTurn = progress?.turns[progress.turns.length - 1];
   const optedIn = agent.auto_dream_enabled;
   const tNever = () => t("common.never", { defaultValue: "never" });
+  const tJustNow = () => t("common.just_now", { defaultValue: "just now" });
   const durationUnits = {
     minute: t("settings.auto_dream_dur_minute"),
     hour: t("settings.auto_dream_dur_hour"),
@@ -84,10 +85,10 @@ export function AutoDreamAgentRow({
             {optedIn ? (
               <p className="text-[11px] text-text-dim mt-0.5">
                 {t("settings.auto_dream_last", "Last")}:{" "}
-                {formatRelativeMs(agent.last_consolidated_at_ms, now, i18n.language, tNever)}
+                {formatRelativeMs(agent.last_consolidated_at_ms, now, i18n.language, tNever, tJustNow)}
                 {" · "}
                 {t("settings.auto_dream_next", "Next")}:{" "}
-                {formatRelativeMs(agent.next_eligible_at_ms, now, i18n.language, tNever)}
+                {formatRelativeMs(agent.next_eligible_at_ms, now, i18n.language, tNever, tJustNow)}
                 {" · "}
                 {agent.effective_min_sessions > 0 ? (
                   <span

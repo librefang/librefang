@@ -29,6 +29,7 @@ export function ScopeSummary({
   const { t, i18n } = useTranslation();
   const now = Date.now();
   const tNever = () => t("common.never", { defaultValue: "never" });
+  const tJustNow = () => t("common.just_now", { defaultValue: "just now" });
 
   const totalMemories = agentStats?.total ?? 0;
 
@@ -138,6 +139,7 @@ export function ScopeSummary({
                     now,
                     i18n.language,
                     tNever,
+                    tJustNow,
                   )}
                   {" · "}
                   {t("settings.auto_dream_next", "Next")}:{" "}
@@ -146,6 +148,7 @@ export function ScopeSummary({
                     now,
                     i18n.language,
                     tNever,
+                    tJustNow,
                   )}
                 </span>
               )}

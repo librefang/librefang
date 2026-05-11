@@ -227,23 +227,31 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
     });
   }, [configQuery.data, form]);
 
+  // Surface numeric input errors explicitly instead of silently snapping back
+  // to defaults — clearing the field, pasting garbage, or typing out-of-range
+  // values should be visible to the user, not hidden by a fallback.
+  const decayParsed = form ? Number(form.decay_rate) : NaN;
+  const decayValid = Number.isFinite(decayParsed) && decayParsed >= 0 && decayParsed <= 1;
+  const maxRetrieveParsed = form ? Number.parseInt(form.pm_max_retrieve, 10) : NaN;
+  const maxRetrieveValid =
+    Number.isFinite(maxRetrieveParsed) && maxRetrieveParsed >= 1 && maxRetrieveParsed <= 50;
+  const numericFieldsValid = decayValid && maxRetrieveValid;
+
   const handleSave = async () => {
     if (!form) return;
+    if (!numericFieldsValid) return;
     try {
-      const decayRate = Number(form.decay_rate);
-      const maxRetrieve = Number.parseInt(form.pm_max_retrieve, 10);
-
       await updateConfig.mutateAsync({
         embedding_provider: form.embedding_provider || undefined,
         embedding_model: form.embedding_model || undefined,
         embedding_api_key_env: form.embedding_api_key_env || undefined,
-        decay_rate: Number.isFinite(decayRate) ? decayRate : 0.05,
+        decay_rate: decayParsed,
         proactive_memory: {
           enabled: form.pm_enabled,
           auto_memorize: form.pm_auto_memorize,
           auto_retrieve: form.pm_auto_retrieve,
           extraction_model: form.pm_extraction_model || undefined,
-          max_retrieve: Number.isFinite(maxRetrieve) ? maxRetrieve : 10,
+          max_retrieve: maxRetrieveParsed,
         },
       });
       addToast(t("common.success"), "success");
@@ -493,7 +501,15 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                     value={form.pm_max_retrieve ?? 10}
                     onChange={(e) => setForm({ ...form, pm_max_retrieve: e.target.value })}
                     className={inputCls}
+                    aria-invalid={!maxRetrieveValid}
                   />
+                  {!maxRetrieveValid && (
+                    <p className="text-[11px] text-error mt-1">
+                      {t("memory.max_retrieve_invalid", {
+                        defaultValue: "Must be an integer between 1 and 50.",
+                      })}
+                    </p>
+                  )}
                 </div>
               </div>
             </section>
@@ -511,13 +527,22 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                 value={form.decay_rate ?? 0.05}
                 onChange={(e) => setForm({ ...form, decay_rate: e.target.value })}
                 className={inputCls}
+                aria-invalid={!decayValid}
               />
-              <p className="text-xs text-text-dim mt-1">
-                {t("memory.decay_rate_hint", {
-                  defaultValue:
-                    "Per-day decay applied to memory confidence. Lower = memories age more slowly.",
-                })}
-              </p>
+              {!decayValid ? (
+                <p className="text-[11px] text-error mt-1">
+                  {t("memory.decay_rate_invalid", {
+                    defaultValue: "Must be a number between 0 and 1.",
+                  })}
+                </p>
+              ) : (
+                <p className="text-xs text-text-dim mt-1">
+                  {t("memory.decay_rate_hint", {
+                    defaultValue:
+                      "Per-day decay applied to memory confidence. Lower = memories age more slowly.",
+                  })}
+                </p>
+              )}
             </section>
           </div>
         )}
@@ -527,7 +552,7 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
             variant="primary"
             className="flex-1"
             onClick={handleSave}
-            disabled={updateConfig.isPending}
+            disabled={updateConfig.isPending || !numericFieldsValid}
           >
             {updateConfig.isPending ? (
               <Loader2 className="w-4 h-4 animate-spin" />
