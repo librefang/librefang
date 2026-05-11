@@ -548,6 +548,7 @@ async fn auto_policy_promotes_to_active_and_reloads_registry() {
         ],
         context_window_tokens: 0,
         label: None,
+        model_override: None,
         messages_generation: 1,
         last_repaired_generation: None,
     };
@@ -729,6 +730,7 @@ async fn auto_policy_recovers_orphaned_pending_via_retry() {
         messages: vec![Message::user(user_msg), Message::assistant("Got it.")],
         context_window_tokens: 0,
         label: None,
+        model_override: None,
         messages_generation: 1,
         last_repaired_generation: None,
     };
