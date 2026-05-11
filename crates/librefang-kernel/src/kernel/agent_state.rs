@@ -3,7 +3,7 @@
 //! Hosts dashboard-driven manifest mutation flows:
 //! `persist_manifest_to_disk`, `set_agent_model`, `reload_agent_from_disk`,
 //! `update_manifest`, `set_agent_skills`, `set_agent_mcp_servers`,
-//! `set_agent_tool_filters`. Each public entry point applies the change
+//! `set_agent_channels`, `set_agent_tool_filters`. Each public entry point applies the change
 //! to the in-memory `AgentRegistry` entry, invalidates relevant prompt
 //! caches, and persists the resulting manifest back to `agent.toml`.
 //!
@@ -485,6 +485,36 @@ impl LibreFangKernel {
         self.prompt_metadata_cache.tools.remove(&agent_id);
 
         info!(agent_id = %agent_id, servers = ?servers, "Agent MCP servers updated");
+        Ok(())
+    }
+
+    /// Update an agent's channel allowlist. Empty = all channels (backward compat).
+    pub fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()> {
+        // Snapshot previous channel allowlist for rollback on DB persist failure.
+        let prev_channels = self
+            .agents
+            .registry
+            .get(agent_id)
+            .map(|e| e.manifest.channels.clone());
+
+        self.agents
+            .registry
+            .update_channels(agent_id, channels.clone())
+            .map_err(KernelError::LibreFang)?;
+
+        if let Some(entry) = self.agents.registry.get(agent_id) {
+            if let Err(e) = self.memory.substrate.save_agent(&entry) {
+                if let Some(p_channels) = prev_channels {
+                    let _ = self.agents.registry.update_channels(agent_id, p_channels);
+                }
+                return Err(KernelError::LibreFang(e));
+            }
+        }
+
+        // Invalidate cached tool list — channel allowlist change may affect routing
+        self.prompt_metadata_cache.tools.remove(&agent_id);
+
+        info!(agent_id = %agent_id, channels = ?channels, "Agent channels updated");
         Ok(())
     }
 

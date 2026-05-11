@@ -1409,7 +1409,7 @@ export async function clearHandAgentRuntimeConfig(agentId: string): Promise<void
 /** PATCH /api/agents/{id} — manifest-level partial updates (name, description,
  * system_prompt, mcp_servers, model). Distinct from `/agents/{id}/config`
  * which only accepts the model-tuning subset. */
-export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[] }): Promise<ApiActionResponse> {
+export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[]; schedule?: string | { continuous: { check_interval_secs: number } } }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
 }
 
@@ -1444,6 +1444,22 @@ export async function getAgentSkills(agentId: string): Promise<AgentSkillsRespon
 /** PUT /api/agents/{id}/skills — update the agent's skill allowlist. */
 export async function setAgentSkills(agentId: string, skills: string[]): Promise<ApiActionResponse> {
   return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/skills`, { skills });
+}
+
+/** GET /api/agents/{id}/channels — agent channel assignment info. */
+export interface AgentChannelsResponse {
+  assigned: string[];
+  available: string[];
+  mode: "all" | "allowlist";
+}
+
+export async function getAgentChannels(agentId: string): Promise<AgentChannelsResponse> {
+  return get<AgentChannelsResponse>(`/api/agents/${encodeURIComponent(agentId)}/channels`);
+}
+
+/** PUT /api/agents/{id}/channels — update the agent's channel allowlist. */
+export async function setAgentChannels(agentId: string, channels: string[]): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/channels`, { channels });
 }
 
 export interface AgentToolsResponse {

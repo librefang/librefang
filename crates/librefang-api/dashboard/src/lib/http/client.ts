@@ -131,6 +131,8 @@ export {
   getAgentMcpServers,
   // agent-level skills
   getAgentSkills,
+  // agent-level channels
+  getAgentChannels,
   // overview
   loadDashboardSnapshot,
   getVersionInfo,
@@ -240,6 +242,8 @@ export {
   setAgentMcpServers,
   // agent-level skills
   setAgentSkills,
+  // agent-level channels
+  setAgentChannels,
   // mcp
   addMcpServer,
   updateMcpServer,
@@ -392,4 +396,6 @@ export type {
   AgentMcpServersResponse,
   // agent-level skills
   AgentSkillsResponse,
+  // agent-level channels
+  AgentChannelsResponse,
 } from "../../api";

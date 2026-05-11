@@ -246,6 +246,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn update_manifest(&self, agent_id: AgentId, new_manifest: AgentManifest) -> KernelResult<()>;
     fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()>;
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()>;
+    fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()>;
     fn set_agent_tool_filters(
         &self,
         agent_id: AgentId,
@@ -842,6 +843,9 @@ impl KernelApi for LibreFangKernel {
     }
     fn set_agent_mcp_servers(&self, agent_id: AgentId, servers: Vec<String>) -> KernelResult<()> {
         Self::set_agent_mcp_servers(self, agent_id, servers)
+    }
+    fn set_agent_channels(&self, agent_id: AgentId, channels: Vec<String>) -> KernelResult<()> {
+        Self::set_agent_channels(self, agent_id, channels)
     }
     fn set_agent_tool_filters(
         &self,

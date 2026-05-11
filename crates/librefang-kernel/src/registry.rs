@@ -496,6 +496,16 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Update an agent's channel allowlist.
+    pub fn update_channels(&self, id: AgentId, channels: Vec<String>) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.channels = channels;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Update an agent's declared tools and/or allowlist/blocklist in a
     /// single registry lock. Fields left as `None` are not modified.
     pub fn update_tool_config(

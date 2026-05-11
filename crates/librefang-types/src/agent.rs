@@ -858,6 +858,9 @@ pub struct AgentManifest {
     /// MCP server allowlist (empty = all connected MCP servers available).
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub mcp_servers: Vec<String>,
+    /// Channel allowlist (empty = agent can use all configured channels).
+    #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
+    pub channels: Vec<String>,
     /// Custom metadata.
     #[serde(default, deserialize_with = "crate::serde_compat::map_lenient")]
     pub metadata: HashMap<String, serde_json::Value>,
@@ -1126,6 +1129,7 @@ impl Default for AgentManifest {
             skills: Vec::new(),
             skills_disabled: false,
             mcp_servers: Vec::new(),
+            channels: Vec::new(),
             metadata: HashMap::new(),
             tags: Vec::new(),
             routing: None,

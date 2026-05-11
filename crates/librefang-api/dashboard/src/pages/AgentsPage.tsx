@@ -27,7 +27,7 @@ import { PromptsExperimentsModal } from "../components/PromptsExperimentsModal";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, Plug } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, Plug, Radio } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
 import { getStatusVariant } from "../lib/status";
@@ -58,6 +58,7 @@ import {
   useAgentTools,
   useAgentMcpServers,
   useAgentSkills,
+  useAgentChannels,
   useTools,
 } from "../lib/queries/agents";
 import {
@@ -74,6 +75,7 @@ import {
   useUpdateAgentTools,
   useSetAgentMcpServers,
   useSetAgentSkills,
+  useSetAgentChannels,
 } from "../lib/mutations/agents";
 
 /**
@@ -226,7 +228,7 @@ export function AgentsPage() {
   // Tab switcher inside the inline detail panel.  Mirrors the design's
   // five sections (Conversation / Memory / Skills / Schedule / Logs).
   const [agentTab, setAgentTab] = useState<
-    "conversation" | "memory" | "skills" | "mcp" | "schedule" | "logs"
+    "conversation" | "memory" | "skills" | "mcp" | "channels" | "schedule" | "logs"
   >("conversation");
   // Whether the deep-edit drawer is open. Decoupled from `detailAgent` so
   // selecting an agent in the list shows the inline detail panel without
@@ -512,6 +514,10 @@ export function AgentsPage() {
     enabled: !!detailAgent && agentTab === "skills",
   });
   const setAgentSkillsMutation = useSetAgentSkills();
+  const agentChannelsQuery = useAgentChannels(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "channels",
+  });
+  const setAgentChannelsMutation = useSetAgentChannels();
   // Per-agent session list — Conversation tab uses this directly. The
   // global /api/sessions used previously was paginated to 50, so the
   // agent's latest session was often not in the page.
@@ -777,6 +783,7 @@ export function AgentsPage() {
       { id: "memory",       label: t("agents.tab.memory",       { defaultValue: "Memory" }),       Icon: Database },
       { id: "skills",       label: t("agents.tab.skills",       { defaultValue: "Skills" }),       Icon: Sparkles },
       { id: "mcp",          label: t("agents.tab.mcp",          { defaultValue: "MCP" }),          Icon: Plug },
+      { id: "channels",     label: t("agents.tab.channels",     { defaultValue: "Channels" }),     Icon: Radio },
       { id: "schedule",     label: t("agents.tab.schedule",     { defaultValue: "Schedule" }),     Icon: Clock },
       { id: "logs",         label: t("agents.tab.logs",         { defaultValue: "Logs" }),         Icon: FileText },
     ];
@@ -1016,6 +1023,7 @@ export function AgentsPage() {
       case "memory":            return renderMemoryTab(agent);
       case "skills":            return renderSkillsTab(agent);
       case "mcp":               return renderMcpTab(agent);
+      case "channels":          return renderChannelsTab(agent);
       case "schedule":          return renderScheduleTab(agent);
       case "logs":              return renderLogsTab(agent);
     }
@@ -1509,6 +1517,164 @@ export function AgentsPage() {
     );
   };
 
+  // ---------- Channels tab — same pattern as MCP tab
+  const renderChannelsTab = (agent: AgentDetail) => {
+    const chData = agentChannelsQuery.data;
+    const assigned: string[] = chData?.assigned ?? [];
+    const available: string[] = chData?.available ?? [];
+    const mode: string = chData?.mode ?? "all";
+    const usesAll = mode === "all";
+    const isLoading = agentChannelsQuery.isLoading;
+
+    const handleToggleChannel = (channelName: string) => {
+      if (!agent.id) return;
+      const isAssigned = assigned.includes(channelName);
+      const next = isAssigned
+        ? assigned.filter((c) => c !== channelName)
+        : [...assigned, channelName];
+      setAgentChannelsMutation.mutate({ agentId: agent.id, channels: next }, {
+        onSuccess: () => addToast(t("agents.detail.channels_saved", { defaultValue: "Channel assignment saved" }), "success"),
+      });
+    };
+
+    const handleUseAll = () => {
+      if (!agent.id) return;
+      setAgentChannelsMutation.mutate({ agentId: agent.id, channels: [] }, {
+        onSuccess: () => addToast(t("agents.detail.channels_saved", { defaultValue: "Channel assignment saved" }), "success"),
+      });
+    };
+
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+            {t("agents.detail.connected_channels", { defaultValue: "Connected channels" })}
+            {" · "}
+            {usesAll
+              ? t("agents.detail.channels_all", { defaultValue: "all" })
+              : assigned.length}
+          </div>
+        </div>
+        {isLoading ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
+            <Loader2 className="w-4 h-4 animate-spin text-text-dim" />
+          </div>
+        ) : usesAll ? (
+          available.length > 0 ? (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {available.map((c) => (
+                  <div
+                    key={c}
+                    className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 flex items-start justify-between gap-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{c}</div>
+                      <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                        {t("agents.detail.channel_included", { defaultValue: "included" })}
+                      </div>
+                    </div>
+                    <Radio className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+                  </div>
+                ))}
+              </div>
+              <button
+                onClick={() => {
+                  if (!agent.id) return;
+                  setAgentChannelsMutation.mutate({ agentId: agent.id, channels: [...available] }, {
+                    onSuccess: () => addToast(t("agents.detail.channels_saved", { defaultValue: "Channel assignment saved" }), "success"),
+                  });
+                }}
+                className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+              >
+                {t("agents.detail.channels_customize", { defaultValue: "Customize — switch to allowlist" })}
+              </button>
+            </>
+          ) : (
+            <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
+              <Radio className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
+              <div className="min-w-0 flex-1">
+                <div className="font-mono text-[12.5px] font-medium text-text-main">
+                  {t("agents.detail.channels_all_title", { defaultValue: "Using all connected channels" })}
+                </div>
+                <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                  {t("agents.detail.channels_all_desc", {
+                    defaultValue: "no channels connected yet",
+                  })}
+                </div>
+              </div>
+            </div>
+          )
+        ) : assigned.length === 0 && available.length === 0 ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+            {t("agents.detail.no_channels", { defaultValue: "No channels connected." })}
+          </div>
+        ) : (
+          <>
+            {assigned.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {assigned.map((c) => (
+                  <div
+                    key={c}
+                    className="px-3 py-2.5 rounded-md border border-brand/30 bg-main/40 flex items-start justify-between gap-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{c}</div>
+                      <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                        {t("agents.detail.channel_assigned", { defaultValue: "assigned" })}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => handleToggleChannel(c)}
+                      className="text-text-dim hover:text-red-400 transition-colors shrink-0 mt-0.5"
+                      title={t("agents.detail.channel_remove", { defaultValue: "Remove from allowlist" })}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {available.filter((c) => !assigned.includes(c)).length > 0 && (
+              <>
+                <div className="text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim mt-1">
+                  {t("agents.detail.channels_available", { defaultValue: "Available" })}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {available
+                    .filter((c) => !assigned.includes(c))
+                    .map((c) => (
+                      <div
+                        key={c}
+                        onClick={() => handleToggleChannel(c)}
+                        className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 cursor-pointer hover:border-brand/40 transition-colors flex items-start justify-between gap-2"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{c}</div>
+                          <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                            {t("agents.detail.channel_click_assign", { defaultValue: "click to assign" })}
+                          </div>
+                        </div>
+                        <Radio className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+                      </div>
+                    ))}
+                </div>
+              </>
+            )}
+            {!usesAll && (
+              <button
+                onClick={handleUseAll}
+                className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+              >
+                {t("agents.detail.channels_reset_to_all", { defaultValue: "Reset to use all channels" })}
+              </button>
+            )}
+          </>
+        )}
+      </div>
+    );
+  };
+
   // ---------- Schedule tab — trigger card + 14-run bar chart per design canvas
   const renderScheduleTab = (agent: AgentDetail) => {
     const cron = cronJobsQuery.data ?? [];
@@ -1544,8 +1710,49 @@ export function AgentsPage() {
     const hasSchedule = cron.length > 0 || triggers.length > 0;
     const scheduleMode = (agent as AgentDetail).schedule;
     const isScheduleReactive = !scheduleMode || scheduleMode === "manual";
+    const isContinuous = typeof scheduleMode === "string" && scheduleMode.startsWith("continuous");
+    const continuousMatch = scheduleMode?.match(/(\d+)s/);
+    const continuousInterval = continuousMatch ? Number(continuousMatch[1]) : 120;
     return (
       <div className="flex flex-col gap-3">
+        <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+          {t("agents.detail.schedule_mode", { defaultValue: "Mode" })}
+        </div>
+        <div className="px-3.5 py-3 rounded-lg border border-border-subtle bg-main/40 flex items-center gap-3">
+          <div className="w-8 h-8 rounded-md bg-brand/10 text-brand grid place-items-center shrink-0">
+            {isContinuous ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="font-mono text-[13px] text-text-main">
+              {isContinuous
+                ? `${t("agents.detail.schedule_continuous", { defaultValue: "Continuous" })} (${continuousInterval}s)`
+                : t("agents.detail.schedule_manual", { defaultValue: "Manual" })}
+            </div>
+            <div className="text-[11px] text-text-dim/80 mt-0.5">
+              {isContinuous
+                ? t("agents.detail.schedule_continuous_desc", { defaultValue: "agent checks for work on a fixed interval" })
+                : t("agents.detail.schedule_manual_desc", { defaultValue: "wakes on messages and events only" })}
+            </div>
+          </div>
+          {isContinuous ? (
+            <Button variant="ghost" size="sm" onClick={() => {
+              patchAgentMutation.mutate({ agentId: agent.id, body: { schedule: "manual" } }, {
+                onSuccess: () => addToast(t("agents.detail.schedule_updated", { defaultValue: "Schedule updated" }), "success"),
+              });
+            }}>
+              {t("agents.detail.switch_to_manual", { defaultValue: "Switch to manual" })}
+            </Button>
+          ) : (
+            <Button variant="ghost" size="sm" onClick={() => {
+              patchAgentMutation.mutate({ agentId: agent.id, body: { schedule: { continuous: { check_interval_secs: 120 } } } }, {
+                onSuccess: () => addToast(t("agents.detail.schedule_updated", { defaultValue: "Schedule updated" }), "success"),
+              });
+            }}>
+              {t("agents.detail.switch_to_continuous", { defaultValue: "Switch to continuous" })}
+            </Button>
+          )}
+        </div>
+
         <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
           {t("agents.detail.trigger", { defaultValue: "Trigger" })}
         </div>
