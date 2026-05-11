@@ -1606,8 +1606,14 @@ pub async fn set_provider_url(
             if let Some(ref pu) = proxy_url_for_closure {
                 catalog.set_provider_proxy_url(&name_for_closure, pu);
             }
-            catalog.unsuppress_provider(&name_for_closure);
-            catalog.save_suppressed(&suppressed_path);
+            // Skip the unsuppress + disk write when nothing is suppressed —
+            // otherwise every URL edit (including those on already-active
+            // providers) issues a no-op `remove_file` on
+            // `suppressed_providers.json`.
+            if catalog.is_suppressed(&name_for_closure) {
+                catalog.unsuppress_provider(&name_for_closure);
+                catalog.save_suppressed(&suppressed_path);
+            }
             catalog.detect_auth();
         });
     }

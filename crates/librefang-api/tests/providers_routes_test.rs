@@ -728,6 +728,12 @@ use librefang_types::model_catalog::{
 /// Boot a harness seeded with a single named provider in the given
 /// initial `auth_status`. Lets each test stage the "configured" state
 /// the pre-fix bug failed to leave.
+///
+/// Intentionally single-provider. Multi-provider scenarios (e.g.
+/// "suppressing A does not affect B") should build a custom seed via
+/// `MockKernelBuilder::with_catalog_seed` rather than extending this
+/// helper — keeping it 1-to-1 with the test intent makes the asserts
+/// easy to read.
 fn boot_with_provider(provider: ProviderInfo) -> Harness {
     let id = provider.id.clone();
     let model = ModelCatalogEntry {
