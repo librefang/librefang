@@ -186,9 +186,10 @@ interface MemoryConfigForm {
 }
 
 // Known embedding model names per provider. Used to populate the embedding
-// model `<datalist>` suggestions. Local providers (ollama/vllm/lmstudio) load
-// arbitrary user-pulled models, so the suggestions there are just common
-// defaults — the input remains free-form for everyone.
+// model `<select>` options. Local providers (ollama/vllm/lmstudio) load
+// arbitrary user-pulled models, so the listed entries there are just common
+// defaults — users with non-listed models pick the "Custom…" option to
+// reveal a free-text input.
 const KNOWN_EMBEDDING_MODELS: Record<string, string[]> = {
   openai: ["text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"],
   gemini: ["text-embedding-004", "embedding-001"],
@@ -214,6 +215,17 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
 
   const embeddingProviderSuggestions =
     KNOWN_EMBEDDING_MODELS[form?.embedding_provider ?? ""] ?? [];
+  // Sentinel value for the "Custom…" option in the model `<select>`s. Picking
+  // it switches the field into a free-text input rendered alongside the
+  // select; an existing stored value that isn't in the catalog is also
+  // treated as custom so the user can see and edit it.
+  const CUSTOM_OPTION = "__custom__";
+  const embeddingKnownSet = new Set(embeddingProviderSuggestions);
+  const embeddingIsCustom =
+    !!form?.embedding_model && !embeddingKnownSet.has(form.embedding_model);
+  const chatModelIdSet = new Set(chatModels.map((m) => m.id));
+  const extractionIsCustom =
+    !!form?.pm_extraction_model && !chatModelIdSet.has(form.pm_extraction_model);
 
   useEffect(() => {
     if (!configQuery.data || form) return;
@@ -286,18 +298,36 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
               </div>
               <div>
                 <span className={labelCls}>{t("memory.model", { defaultValue: "Model" })}</span>
-                <input
-                  list="memory-embedding-model-options"
-                  value={form.embedding_model ?? ""}
-                  onChange={e => setForm({ ...form, embedding_model: e.target.value })}
-                  placeholder="text-embedding-3-small"
+                <select
+                  value={embeddingIsCustom ? CUSTOM_OPTION : (form.embedding_model ?? "")}
+                  onChange={e => {
+                    const v = e.target.value;
+                    if (v === CUSTOM_OPTION) {
+                      // Switching to custom from a known option clears the value
+                      // so the input starts empty; if we were already custom, the
+                      // typed-in value is preserved.
+                      if (!embeddingIsCustom) setForm({ ...form, embedding_model: "" });
+                    } else {
+                      setForm({ ...form, embedding_model: v });
+                    }
+                  }}
                   className={inputCls}
-                />
-                <datalist id="memory-embedding-model-options">
+                >
+                  <option value="">{t("memory.embedding_model_default", { defaultValue: "Auto / provider default" })}</option>
                   {embeddingProviderSuggestions.map(name => (
-                    <option key={name} value={name} />
+                    <option key={name} value={name}>{name}</option>
                   ))}
-                </datalist>
+                  <option value={CUSTOM_OPTION}>{t("memory.custom_model_option", { defaultValue: "Custom…" })}</option>
+                </select>
+                {embeddingIsCustom && (
+                  <input
+                    value={form.embedding_model ?? ""}
+                    onChange={e => setForm({ ...form, embedding_model: e.target.value })}
+                    placeholder="text-embedding-3-small"
+                    className={`${inputCls} mt-2`}
+                    autoFocus
+                  />
+                )}
               </div>
             </div>
             <div className="mt-2">
@@ -333,20 +363,37 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
               <div>
                 <span className={labelCls}>{t("memory.extraction_model_label", { defaultValue: "Extraction Model" })}</span>
-                <input
-                  list="memory-extraction-model-options"
-                  value={form.pm_extraction_model ?? ""}
-                  onChange={e => setForm({ ...form, pm_extraction_model: e.target.value })}
-                  placeholder={t("memory.extraction_model_placeholder", { defaultValue: "Leave empty to use default" })}
+                <select
+                  value={extractionIsCustom ? CUSTOM_OPTION : (form.pm_extraction_model ?? "")}
+                  onChange={e => {
+                    const v = e.target.value;
+                    if (v === CUSTOM_OPTION) {
+                      if (!extractionIsCustom) setForm({ ...form, pm_extraction_model: "" });
+                    } else {
+                      setForm({ ...form, pm_extraction_model: v });
+                    }
+                  }}
                   className={inputCls}
-                />
-                <datalist id="memory-extraction-model-options">
+                >
+                  <option value="">{t("memory.extraction_model_default", { defaultValue: "Use kernel default" })}</option>
                   {chatModels.map(m => (
                     <option key={m.id} value={m.id}>
-                      {m.display_name && m.display_name !== m.id ? `${m.display_name} (${m.provider})` : m.provider}
+                      {m.display_name && m.display_name !== m.id
+                        ? `${m.display_name} (${m.provider})`
+                        : `${m.id} (${m.provider})`}
                     </option>
                   ))}
-                </datalist>
+                  <option value={CUSTOM_OPTION}>{t("memory.custom_model_option", { defaultValue: "Custom…" })}</option>
+                </select>
+                {extractionIsCustom && (
+                  <input
+                    value={form.pm_extraction_model ?? ""}
+                    onChange={e => setForm({ ...form, pm_extraction_model: e.target.value })}
+                    placeholder={t("memory.extraction_model_placeholder", { defaultValue: "e.g. openai/gpt-4o-mini" })}
+                    className={`${inputCls} mt-2`}
+                    autoFocus
+                  />
+                )}
               </div>
               <div>
                 <span className={labelCls}>{t("memory.max_retrieve", { defaultValue: "Max Retrieve" })}</span>
