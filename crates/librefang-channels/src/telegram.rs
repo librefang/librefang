@@ -244,7 +244,19 @@ pub struct TelegramAdapter {
     /// Bot commands registered in the Telegram command menu.
     commands: Vec<BotCommand>,
     poll_contexts: Arc<DashMap<String, PollContext>>,
+    /// Outbound media upload size cap (bytes) for the private-URL
+    /// multipart-fallback path. Defaults to
+    /// `DEFAULT_TELEGRAM_UPLOAD_BYTES` (50 MiB — Telegram bot API
+    /// ceiling) — operators override via
+    /// `[channels].file_upload_max_bytes` in `config.toml`, plumbed in
+    /// by the bridge through `with_max_upload_bytes`.
+    max_upload_bytes: usize,
 }
+
+/// Default outbound media upload cap for Telegram (50 MiB, the bot
+/// API ceiling). Per-instance override via
+/// `TelegramAdapter::with_max_upload_bytes`.
+const DEFAULT_TELEGRAM_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 
 struct PollContext {
     question: String,
@@ -298,6 +310,7 @@ impl TelegramAdapter {
             clear_done_reaction: false,
             commands: Vec::new(),
             poll_contexts: Arc::new(DashMap::new()),
+            max_upload_bytes: DEFAULT_TELEGRAM_UPLOAD_BYTES,
         }
     }
 
@@ -337,6 +350,15 @@ impl TelegramAdapter {
     /// Set thread-based agent routing. Returns self for builder chaining.
     pub fn with_thread_routes(mut self, thread_routes: HashMap<String, String>) -> Self {
         self.thread_routes = thread_routes;
+        self
+    }
+
+    /// Override the outbound media upload size cap. Returns self for
+    /// builder chaining. Bridge plumbs the operator's
+    /// `[channels].file_upload_max_bytes` here so a single config knob
+    /// applies to every Telegram bot instance.
+    pub fn with_max_upload_bytes(mut self, max_upload_bytes: usize) -> Self {
+        self.max_upload_bytes = max_upload_bytes;
         self
     }
 
@@ -544,9 +566,13 @@ impl TelegramAdapter {
                 url = document_url,
                 "Private URL detected on sendDocument, falling back to multipart upload"
             );
-            let (bytes, ct) =
-                fetch_url_bytes_unchecked(safe_fetch_client(), document_url, 50 * 1024 * 1024, &[])
-                    .await?;
+            let (bytes, ct) = fetch_url_bytes_unchecked(
+                safe_fetch_client(),
+                document_url,
+                self.max_upload_bytes,
+                &[],
+            )
+            .await?;
             let mime = ct.unwrap_or_else(|| "application/octet-stream".to_string());
             return self
                 .api_send_media_upload(
@@ -691,9 +717,13 @@ impl TelegramAdapter {
                 url = voice_url,
                 "Private URL detected on sendVoice, falling back to multipart upload"
             );
-            let (bytes, ct) =
-                fetch_url_bytes_unchecked(safe_fetch_client(), voice_url, 50 * 1024 * 1024, &[])
-                    .await?;
+            let (bytes, ct) = fetch_url_bytes_unchecked(
+                safe_fetch_client(),
+                voice_url,
+                self.max_upload_bytes,
+                &[],
+            )
+            .await?;
             let mime = ct.unwrap_or_else(|| "audio/ogg".to_string());
             let filename = url_filename(voice_url, "voice.ogg");
             let mut extra: Vec<(&str, String)> = Vec::new();
@@ -741,9 +771,13 @@ impl TelegramAdapter {
                 url = audio_url,
                 "Private URL detected on sendAudio, falling back to multipart upload"
             );
-            let (bytes, ct) =
-                fetch_url_bytes_unchecked(safe_fetch_client(), audio_url, 50 * 1024 * 1024, &[])
-                    .await?;
+            let (bytes, ct) = fetch_url_bytes_unchecked(
+                safe_fetch_client(),
+                audio_url,
+                self.max_upload_bytes,
+                &[],
+            )
+            .await?;
             let mime = ct.unwrap_or_else(|| "audio/mpeg".to_string());
             let filename = url_filename(audio_url, "audio.mp3");
             let mut extra: Vec<(&str, String)> = Vec::new();

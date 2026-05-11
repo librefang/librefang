@@ -20,7 +20,11 @@ use zeroize::Zeroizing;
 /// Matrix /sync long-polling timeout in milliseconds.
 const SYNC_TIMEOUT_MS: u64 = 30000;
 const MAX_MESSAGE_LEN: usize = 4096;
-const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
+/// Default outbound media upload cap (50 MiB). Matches both the
+/// historical hardcoded value and the Matrix homeserver convention.
+/// Per-instance override via `MatrixAdapter::with_max_upload_bytes`
+/// (sourced from `[channels].file_upload_max_bytes` in `config.toml`).
+const DEFAULT_MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 // Tightened from 1500ms / 256 chars after the Synapse rate-limit lift
 // (rc_message: 5/s, burst 60). The previous values produced "first +
 // final only" cadence on typical 2-3s responses (~150 chars/sec). At
@@ -441,6 +445,11 @@ pub struct MatrixAdapter {
     /// Rooms we've already warned about being E2EE.
     /// First encrypted event in each room emits a WARN; subsequent ones are silent.
     pub(crate) e2ee_warned_rooms: Arc<RwLock<std::collections::HashSet<String>>>,
+    /// Outbound media upload size cap (bytes). Defaults to
+    /// `DEFAULT_MAX_UPLOAD_BYTES` (50 MiB) — operators override via
+    /// `[channels].file_upload_max_bytes` in `config.toml`, plumbed in
+    /// by the bridge through `with_max_upload_bytes`.
+    max_upload_bytes: usize,
 }
 
 impl MatrixAdapter {
@@ -468,6 +477,7 @@ impl MatrixAdapter {
             since_token: Arc::new(RwLock::new(None)),
             phase_reactions: Arc::new(RwLock::new(std::collections::VecDeque::new())),
             e2ee_warned_rooms: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -480,6 +490,15 @@ impl MatrixAdapter {
     pub fn with_backoff(mut self, initial_backoff_secs: u64, max_backoff_secs: u64) -> Self {
         self.initial_backoff = Duration::from_secs(initial_backoff_secs);
         self.max_backoff = Duration::from_secs(max_backoff_secs);
+        self
+    }
+
+    /// Override the outbound media upload size cap. Returns self for
+    /// builder chaining. Bridge plumbs the operator's
+    /// `[channels].file_upload_max_bytes` here so a single config knob
+    /// applies to every Matrix bot instance.
+    pub fn with_max_upload_bytes(mut self, max_upload_bytes: usize) -> Self {
+        self.max_upload_bytes = max_upload_bytes;
         self
     }
 
@@ -650,11 +669,11 @@ impl MatrixAdapter {
         filename: &str,
         mime_type: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        if bytes.len() > MAX_UPLOAD_BYTES {
+        if bytes.len() > self.max_upload_bytes {
             return Err(format!(
                 "Matrix upload size {} exceeds {} byte limit",
                 bytes.len(),
-                MAX_UPLOAD_BYTES
+                self.max_upload_bytes
             )
             .into());
         }
@@ -1005,7 +1024,7 @@ impl ChannelAdapter for MatrixAdapter {
                 caption,
                 mime_type,
             } => {
-                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let (bytes, ct) = fetch_outbound_media(&url, self.max_upload_bytes).await?;
                 let mt = mime_type
                     .clone()
                     .or(ct)
@@ -1024,7 +1043,7 @@ impl ChannelAdapter for MatrixAdapter {
                     .await?;
             }
             ChannelContent::File { url, filename } => {
-                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let (bytes, ct) = fetch_outbound_media(&url, self.max_upload_bytes).await?;
                 let mt = ct.unwrap_or_else(|| "application/octet-stream".to_string());
                 let size = bytes.len();
                 let mxc = self.api_upload_media(bytes, &filename, &mt).await?;
@@ -1061,7 +1080,7 @@ impl ChannelAdapter for MatrixAdapter {
                 duration_seconds,
                 ..
             } => {
-                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let (bytes, ct) = fetch_outbound_media(&url, self.max_upload_bytes).await?;
                 let mt = ct.unwrap_or_else(|| "application/octet-stream".to_string());
                 let fname = caption.clone().unwrap_or_else(|| "audio".to_string());
                 let size = bytes.len();
@@ -1085,7 +1104,7 @@ impl ChannelAdapter for MatrixAdapter {
                 caption,
                 duration_seconds,
             } => {
-                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let (bytes, ct) = fetch_outbound_media(&url, self.max_upload_bytes).await?;
                 let mt = ct.unwrap_or_else(|| "application/octet-stream".to_string());
                 let fname = caption.clone().unwrap_or_else(|| "voice".to_string());
                 let size = bytes.len();
@@ -1111,7 +1130,7 @@ impl ChannelAdapter for MatrixAdapter {
                 duration_seconds,
                 filename,
             } => {
-                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let (bytes, ct) = fetch_outbound_media(&url, self.max_upload_bytes).await?;
                 let mt = ct.unwrap_or_else(|| "application/octet-stream".to_string());
                 let fname = filename
                     .unwrap_or_else(|| caption.clone().unwrap_or_else(|| "video".to_string()));
@@ -1136,7 +1155,7 @@ impl ChannelAdapter for MatrixAdapter {
                 caption,
                 duration_seconds: _,
             } => {
-                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let (bytes, ct) = fetch_outbound_media(&url, self.max_upload_bytes).await?;
                 let mt = ct.unwrap_or_else(|| "application/octet-stream".to_string());
                 let fname = caption.clone().unwrap_or_else(|| "animation".to_string());
                 let size = bytes.len();
@@ -1930,6 +1949,29 @@ mod tests {
         assert!(
             format!("{err}").to_lowercase().contains("size"),
             "err should mention size: {err}"
+        );
+    }
+
+    /// Regression for the `[channels].file_upload_max_bytes` config knob
+    /// (#4882 Tier 4-2). The bridge plumbs the operator's value through
+    /// `with_max_upload_bytes`, so a lower-than-default cap MUST be
+    /// honored by `api_upload_media` instead of the const default. Pin
+    /// both the override (1 KiB rejects 2 KiB) and that the rejection
+    /// message reports the overridden value, so a regression where the
+    /// builder is silently dropped fails loud rather than re-introducing
+    /// the hardcoded 50 MiB.
+    #[tokio::test]
+    async fn test_with_max_upload_bytes_overrides_default_cap() {
+        let adapter = make_adapter("http://unused".to_string()).with_max_upload_bytes(1024);
+        let too_big = vec![0u8; 2048];
+        let err = adapter
+            .api_upload_media(too_big, "x.bin", "application/octet-stream")
+            .await
+            .expect_err("2 KiB must be rejected when cap is 1 KiB");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("1024"),
+            "err should mention the overridden cap (1024), got: {msg}"
         );
     }
 

@@ -2577,7 +2577,8 @@ pub async fn start_channel_bridge_with_config(
                     tg_config.max_backoff_secs,
                     tg_config.long_poll_timeout_secs,
                 )
-                .with_clear_done_reaction(tg_config.overrides.clear_done_reaction),
+                .with_clear_done_reaction(tg_config.overrides.clear_done_reaction)
+                .with_max_upload_bytes(config.file_upload_max_bytes as usize),
             );
             adapters.push((
                 adapter,
@@ -2708,7 +2709,8 @@ pub async fn start_channel_bridge_with_config(
                     mx_config.auto_accept_invites,
                 )
                 .with_account_id(mx_config.account_id.clone())
-                .with_backoff(mx_config.initial_backoff_secs, mx_config.max_backoff_secs),
+                .with_backoff(mx_config.initial_backoff_secs, mx_config.max_backoff_secs)
+                .with_max_upload_bytes(config.file_upload_max_bytes as usize),
             );
             adapters.push((
                 adapter,
