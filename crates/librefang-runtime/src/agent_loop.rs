@@ -130,14 +130,30 @@ const MAX_CONCURRENT_LLM_CALLS: usize = 5;
 static LLM_CONCURRENCY: std::sync::LazyLock<tokio::sync::Semaphore> =
     std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_LLM_CALLS));
 
-/// Default ceiling for message history before auto-trimming. With tool
-/// calls each user turn can consume 4–6 messages, so 40 gives roughly
-/// 7–10 real conversation turns instead of the previous 3–5. Override
-/// per-agent via `AgentManifest.max_history_messages` or globally via
-/// `KernelConfig.max_history_messages`; resolved at loop entry by
-/// `resolve_max_history`. Values below `MIN_HISTORY_MESSAGES` are
-/// clamped up at runtime.
-pub const DEFAULT_MAX_HISTORY_MESSAGES: usize = 40;
+/// Default ceiling for message history before auto-trimming.
+///
+/// The earlier value of 40 assumed "tool calls consume 4–6 messages per
+/// user turn → 7–10 conversation turns", which held for chat-style
+/// agents but underestimated coordinator hands. In production logs we
+/// observed `creator:creator-hand` (polling `video_status` every 15-20s)
+/// trimming every turn at total_messages=41 with `hit_ratio=0.0` — the
+/// trim was invalidating the prompt-cache prefix on every turn because
+/// the cap was too tight for the actual workflow length. Survey of the
+/// librefang-registry hands shows `max_iterations` of 50–80 is the
+/// norm; at ~8 messages per real turn that fills the bucket in 5
+/// turns, far less than the 7–10 the comment claimed.
+///
+/// 60 gives ~7–10 real turns for those heavier workflows and leaves
+/// the prompt-cache prefix stable across normal back-and-forth.
+/// Long-workflow hands (researcher / creator / devops / predictor)
+/// still set explicit per-hand `max_history_messages` overrides in the
+/// registry to push their headroom higher.
+///
+/// Override per-agent via `AgentManifest.max_history_messages` or
+/// globally via `KernelConfig.max_history_messages`; resolved at loop
+/// entry by `resolve_max_history`. Values below `MIN_HISTORY_MESSAGES`
+/// are clamped up at runtime.
+pub const DEFAULT_MAX_HISTORY_MESSAGES: usize = 60;
 
 /// Floor for the message-history cap. Values below this are clamped up
 /// with a warning log: `safe_trim_messages` re-validates the trimmed
@@ -7830,7 +7846,7 @@ mod tests {
 
     #[test]
     fn test_max_history_messages() {
-        assert_eq!(DEFAULT_MAX_HISTORY_MESSAGES, 40);
+        assert_eq!(DEFAULT_MAX_HISTORY_MESSAGES, 60);
     }
 
     #[test]
@@ -8543,11 +8559,17 @@ mod tests {
         // turn's user message, which is what the old code used.
         let old_messages_before = session_messages.len();
 
-        // Push the current turn's user message. At this point
-        // len = 26 + 14 + 1 = 41, which is > DEFAULT_MAX_HISTORY_MESSAGES=40 and
-        // will trigger safe_trim_messages.
+        // Push the current turn's user message. At this point len = 26
+        // + 14 + 1 = 41. The cap is pinned to the literal 40 (the
+        // original #2067 reproduction shape) rather than
+        // `DEFAULT_MAX_HISTORY_MESSAGES` because this is a regression
+        // test for a specific historical bug — the safe-trim index
+        // arithmetic is what's being pinned, not whatever the current
+        // default happens to be. Recap if the default ever moves up
+        // past 40: this test stays at cap=40 by intention.
+        const ISSUE_2067_CAP: usize = 40;
         session_messages.push(Message::user("current turn"));
-        assert!(session_messages.len() > DEFAULT_MAX_HISTORY_MESSAGES);
+        assert!(session_messages.len() > ISSUE_2067_CAP);
 
         let mut llm_messages = session_messages.clone();
         safe_trim_messages(
@@ -8555,7 +8577,7 @@ mod tests {
             &mut session_messages,
             "test-agent",
             "current turn",
-            DEFAULT_MAX_HISTORY_MESSAGES,
+            ISSUE_2067_CAP,
         );
 
         // The forward scan in find_safe_trim_point skipped past the tool-pair
@@ -8630,15 +8652,16 @@ mod tests {
 
         let prior_len = session.messages.len();
         session.messages.push(Message::user("current turn"));
+        // Cap pinned to 40 (literal) rather than DEFAULT_MAX_HISTORY_MESSAGES.
+        // The construction above produces 41 messages — chosen to be just over
+        // the historical default of 40, which is the shape that triggers the
+        // post-trim invariant this test pins. If the kernel default later
+        // moved above 41, the trim wouldn't fire and the invariant under
+        // test would be vacuous.
+        const TRIM_CAP: usize = 40;
         let PreparedMessages {
             new_messages_start, ..
-        } = prepare_llm_messages(
-            &manifest,
-            &mut session,
-            "current turn",
-            None,
-            DEFAULT_MAX_HISTORY_MESSAGES,
-        );
+        } = prepare_llm_messages(&manifest, &mut session, "current turn", None, TRIM_CAP);
 
         assert!(prior_len > new_messages_start);
         let tail = &session.messages[new_messages_start..];
@@ -8701,6 +8724,15 @@ mod tests {
 
         session.messages.push(Message::user("current turn"));
 
+        // Cap pinned to 40 (literal) — same rationale as the sibling
+        // `..._keeps_full_turn_after_trim` test: the 41-message
+        // construction above is sized to trigger trim only when the cap
+        // is at the historical default of 40. The invariants being
+        // pinned (canonical-context / memory-context injection
+        // stripped, new_messages_start points at the tail) are about
+        // the trim path, so we keep this test under trim by fixing the
+        // cap rather than scaling the construction.
+        const TRIM_CAP: usize = 40;
         let PreparedMessages {
             messages,
             new_messages_start,
@@ -8710,10 +8742,10 @@ mod tests {
             &mut session,
             "current turn",
             Some("memory context".to_string()),
-            DEFAULT_MAX_HISTORY_MESSAGES,
+            TRIM_CAP,
         );
 
-        assert!(messages.len() <= DEFAULT_MAX_HISTORY_MESSAGES);
+        assert!(messages.len() <= TRIM_CAP);
         assert!(messages.iter().all(|msg| {
             let text = msg.content.text_content();
             text != "canonical context"
@@ -10197,7 +10229,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_history_messages_constant() {
-        assert_eq!(DEFAULT_MAX_HISTORY_MESSAGES, 40);
+        assert_eq!(DEFAULT_MAX_HISTORY_MESSAGES, 60);
     }
 
     #[tokio::test]
