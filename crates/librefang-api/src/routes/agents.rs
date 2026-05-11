@@ -3446,6 +3446,17 @@ pub async fn reset_session(
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "message": "Session reset"})),
         ),
+        Err(crate::error::KernelError::LibreFang(
+            librefang_types::error::LibreFangError::InvalidInput(msg),
+        )) => {
+            let t = ErrorTranslator::new(l);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &msg)])}),
+                ),
+            )
+        }
         Err(e) => {
             let t = ErrorTranslator::new(l);
             (
@@ -3499,6 +3510,17 @@ pub async fn reboot_session(
                 serde_json::json!({"status": "ok", "message": "Session rebooted. Context cleared."}),
             ),
         ),
+        Err(crate::error::KernelError::LibreFang(
+            librefang_types::error::LibreFangError::InvalidInput(msg),
+        )) => {
+            let t = ErrorTranslator::new(l);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &msg)])}),
+                ),
+            )
+        }
         Err(e) => {
             let t = ErrorTranslator::new(l);
             (

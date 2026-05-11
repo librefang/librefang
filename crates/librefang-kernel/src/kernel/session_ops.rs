@@ -212,32 +212,54 @@ impl LibreFangKernel {
     /// Implementation of [`ResetScope::Agent`] — wipe every session for this
     /// agent. `save_summary` distinguishes reset (true) vs. reboot (false).
     ///
-    /// Acquires `agents.agent_msg_locks[agent_id]` before deleting so an
-    /// in-flight inbound turn (which holds the same lock — see
-    /// `messaging.rs::send_message_full`) cannot resurrect the session
-    /// with stale history after the reset completes (#4868 review).
+    /// Lock discipline (#4868 review): `send_message_full` and the streaming
+    /// path acquire EITHER `agent_msg_locks[agent_id]` OR
+    /// `session_msg_locks[sid]` depending on whether the caller supplied a
+    /// `session_id_override` (multi-tab WS / scoped HTTP — #2959). Holding
+    /// just the agent lock would leave a revive-after-delete window for
+    /// any concurrent override-using turn: it could finish its work and
+    /// UPSERT a deleted session row back into existence. So we acquire the
+    /// agent lock, snapshot the live sids under it, then take every
+    /// per-session lock (sorted to keep a deterministic order across
+    /// callers). All guards are held through the delete + recreate.
     async fn reset_all_sessions(
         &self,
         agent_id: AgentId,
         entry: &AgentEntry,
         save_summary: bool,
     ) -> KernelResult<()> {
-        let lock = self
+        let agent_lock = self
             .agents
             .agent_msg_locks
             .entry(agent_id)
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone();
-        let _guard = lock.lock().await;
+        let _agent_guard = agent_lock.lock_owned().await;
 
         // Auto-save session summaries for ALL sessions (default + per-channel)
         // before clearing, so no channel's conversation history is silently lost.
         // Also emit session:end for each active session before deletion.
-        let pre_delete_sids = self
+        let mut pre_delete_sids = self
             .memory
             .substrate
             .get_agent_session_ids(agent_id)
             .unwrap_or_default();
+        // Sort so two concurrent agent-wide resets on different agents that
+        // somehow shared a sid (impossible today — sids hash in agent_id —
+        // but cheap insurance) can never form a deadlock cycle on the
+        // session locks.
+        pre_delete_sids.sort_by_key(|s| s.0);
+        let mut _session_guards: Vec<tokio::sync::OwnedMutexGuard<()>> =
+            Vec::with_capacity(pre_delete_sids.len());
+        for sid in &pre_delete_sids {
+            let lock = self
+                .agents
+                .session_msg_locks
+                .entry(*sid)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            _session_guards.push(lock.lock_owned().await);
+        }
         for sid in &pre_delete_sids {
             if let Ok(Some(old_session)) = self.memory.substrate.get_session(*sid) {
                 // Fire session:end before removing the old session.
@@ -308,7 +330,8 @@ impl LibreFangKernel {
         info!(
             agent_id = %agent_id,
             save_summary,
-            "Agent-wide session reset"
+            op = if save_summary { "reset" } else { "reboot" },
+            "Agent-wide session wipe complete"
         );
         Ok(())
     }
@@ -322,14 +345,14 @@ impl LibreFangKernel {
     /// — the next inbound message on that channel will resolve back to the
     /// same id and we want it to land on a fresh empty session, not a 404.
     ///
-    /// Lock discipline (#4868 review, lock-race fix): an in-flight turn on
-    /// this agent holds either `agent_msg_locks[agent_id]` (the common
-    /// channel-inbound path with no explicit session_id_override) or
-    /// `session_msg_locks[sid]` (the multi-tab HTTP path with an explicit
-    /// override). Without acquiring both, the in-flight turn's later
-    /// `save_session` UPSERT would silently revive the just-deleted row.
-    /// We acquire both in the same agent-then-session order
-    /// `send_message_full` uses, so no deadlock can form.
+    /// Lock discipline (#4868 review, lock-race fix): `send_message_full`
+    /// acquires EITHER `agent_msg_locks[agent_id]` OR `session_msg_locks[sid]`
+    /// — never both, branching on `session_id_override`. Without acquiring
+    /// both here, an in-flight turn on either path could finish after the
+    /// delete and UPSERT the row back via `save_session`. We take agent
+    /// then session; no deadlock cycle is possible because
+    /// `send_message_full` only ever holds one of the two, so the second
+    /// lock here is never blocked by a caller already holding the first.
     ///
     /// JSONL asymmetry: the recreated empty session is persisted to SQL
     /// but its `<workspace>/sessions/{sid}.jsonl` mirror is intentionally
@@ -468,7 +491,8 @@ impl LibreFangKernel {
             session_id = %sid,
             existed = old_session.is_some(),
             save_summary,
-            "Per-session reset complete (sibling sessions untouched)"
+            op = if save_summary { "reset" } else { "reboot" },
+            "Per-session wipe complete (sibling sessions untouched)"
         );
         Ok(())
     }
