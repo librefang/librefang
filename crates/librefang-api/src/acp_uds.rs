@@ -150,7 +150,50 @@ async fn bind_atomic_owner_only(final_path: &Path) -> std::io::Result<UnixListen
         let _ = tokio::fs::remove_file(&tmp_path).await;
         return Err(e);
     }
+
+    // Sweep stale orphan tempfiles left by previous daemon runs.
+    //
+    // On macOS Docker Desktop bind-mount volumes, `rename(2)` succeeds on
+    // the host side but the source file is never unlinked from the
+    // container's view of the directory, so `.acp.sock.<pid>.<nanos>`
+    // tempfiles accumulate across restarts. Now that the rename has
+    // succeeded the live socket is at `final_path`; anything in the parent
+    // directory that still matches `.<stem>.<digits>.<digits>` is a stale
+    // orphan from a previous run. Best-effort removal — ignore every error
+    // (permission races, cross-device issues) because cleanup must never
+    // prevent a successful bind.
+    sweep_stale_orphans(&parent, &stem).await;
+
     Ok(listener)
+}
+
+/// Best-effort removal of `.<stem>.<pid>.<nanos>` orphan tempfiles in `parent`.
+async fn sweep_stale_orphans(parent: &Path, stem: &str) {
+    let prefix = format!(".{stem}.");
+    let mut rd = match tokio::fs::read_dir(parent).await {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        // Match `.<stem>.<pid>.<nanos>` — three dot-separated segments
+        // where the last two are pure decimal digits.
+        if !name_str.starts_with(&prefix) {
+            continue;
+        }
+        let rest = &name_str[prefix.len()..];
+        let mut parts = rest.splitn(2, '.');
+        let pid_part = parts.next().unwrap_or("");
+        let nanos_part = parts.next().unwrap_or("");
+        if pid_part.chars().all(|c| c.is_ascii_digit())
+            && nanos_part.chars().all(|c| c.is_ascii_digit())
+            && !pid_part.is_empty()
+            && !nanos_part.is_empty()
+        {
+            let _ = tokio::fs::remove_file(entry.path()).await;
+        }
+    }
 }
 
 /// Process effective uid. We compare against this on every accepted
@@ -206,5 +249,52 @@ mod tests {
         let _listener = bind_atomic_owner_only(&sock).await.expect("rebind");
         let meta = tokio::fs::metadata(&sock).await.expect("stat");
         assert_eq!(meta.mode() & 0o777, 0o600);
+    }
+
+    #[tokio::test]
+    async fn bind_atomic_owner_only_sweeps_orphan_tempfiles() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("acp.sock");
+
+        // Plant orphan tempfiles that look like previous-run leftovers.
+        let orphans = [
+            ".acp.sock.999.123456789",
+            ".acp.sock.12345.987654321",
+            ".acp.sock.1.1",
+        ];
+        for name in &orphans {
+            tokio::fs::write(dir.path().join(name), b"orphan")
+                .await
+                .expect("seed orphan");
+        }
+
+        // An unrelated file that must NOT be removed.
+        tokio::fs::write(dir.path().join("unrelated.txt"), b"keep")
+            .await
+            .expect("seed unrelated");
+
+        let _listener = bind_atomic_owner_only(&sock).await.expect("bind");
+
+        // The live socket must exist.
+        assert!(
+            tokio::fs::metadata(&sock).await.is_ok(),
+            "live socket must exist"
+        );
+
+        // All orphans must be gone.
+        for name in &orphans {
+            assert!(
+                tokio::fs::metadata(dir.path().join(name)).await.is_err(),
+                "orphan {name} must have been swept"
+            );
+        }
+
+        // The unrelated file must survive.
+        assert!(
+            tokio::fs::metadata(dir.path().join("unrelated.txt"))
+                .await
+                .is_ok(),
+            "unrelated.txt must not be removed"
+        );
     }
 }
