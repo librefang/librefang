@@ -332,4 +332,79 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
             .remove_member(channel, chat_id, user_id);
         Ok(())
     }
+
+    fn resolve_channel_owner(
+        &self,
+        channel: &str,
+        _chat_id: &str,
+    ) -> Option<librefang_types::agent::AgentId> {
+        let cfg = self.config.load_full();
+        let channels = &cfg.channels;
+
+        // Scan each channel type for the first instance whose `default_agent`
+        // names this channel.  Mirror of `resolve_agent_home_channel`, but
+        // inverted: channel name → agent name → AgentId.
+        macro_rules! check {
+            ($field:ident, $channel_name:literal) => {{
+                if channel == $channel_name {
+                    for entry in channels.$field.iter() {
+                        if let Some(agent_name) = entry.default_agent.as_deref() {
+                            if let Some(registry_entry) =
+                                self.agents.registry.find_by_name(agent_name)
+                            {
+                                return Some(registry_entry.id);
+                            }
+                        }
+                    }
+                }
+            }};
+        }
+
+        check!(telegram, "telegram");
+        check!(discord, "discord");
+        check!(slack, "slack");
+        check!(whatsapp, "whatsapp");
+        check!(signal, "signal");
+        check!(matrix, "matrix");
+        check!(email, "email");
+        check!(teams, "teams");
+        check!(mattermost, "mattermost");
+        check!(irc, "irc");
+        check!(google_chat, "google_chat");
+        check!(twitch, "twitch");
+        check!(rocketchat, "rocketchat");
+        check!(zulip, "zulip");
+        check!(xmpp, "xmpp");
+        check!(line, "line");
+        check!(viber, "viber");
+        check!(messenger, "messenger");
+        check!(reddit, "reddit");
+        check!(mastodon, "mastodon");
+        check!(bluesky, "bluesky");
+        check!(feishu, "feishu");
+        check!(revolt, "revolt");
+        check!(nextcloud, "nextcloud");
+        check!(guilded, "guilded");
+        check!(keybase, "keybase");
+        check!(threema, "threema");
+        check!(nostr, "nostr");
+        check!(webex, "webex");
+        check!(pumble, "pumble");
+        check!(flock, "flock");
+        check!(twist, "twist");
+        check!(mumble, "mumble");
+        check!(dingtalk, "dingtalk");
+        check!(qq, "qq");
+        check!(discourse, "discourse");
+        check!(gitter, "gitter");
+        check!(ntfy, "ntfy");
+        check!(gotify, "gotify");
+        check!(webhook, "webhook");
+        check!(voice, "voice");
+        check!(linkedin, "linkedin");
+        check!(wechat, "wechat");
+        check!(wecom, "wecom");
+
+        None
+    }
 }

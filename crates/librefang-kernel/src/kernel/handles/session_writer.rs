@@ -9,6 +9,47 @@ use librefang_runtime::kernel_handle;
 use super::super::LibreFangKernel;
 
 impl kernel_handle::SessionWriter for LibreFangKernel {
+    fn append_to_session(
+        &self,
+        session_id: librefang_types::agent::SessionId,
+        agent_id: librefang_types::agent::AgentId,
+        message: librefang_types::message::Message,
+    ) {
+        // Load existing session or create a fresh one for this (agent, session) pair.
+        let mut session = match self.memory.substrate.get_session(session_id) {
+            Ok(Some(s)) => s,
+            _ => librefang_memory::session::Session {
+                id: session_id,
+                agent_id,
+                messages: Vec::new(),
+                context_window_tokens: 0,
+                label: None,
+                messages_generation: 0,
+                last_repaired_generation: None,
+            },
+        };
+
+        session.push_message(message);
+        let total_messages = session.messages.len();
+
+        if let Err(e) = self.memory.substrate.save_session(&session) {
+            tracing::warn!(
+                agent_id = ?agent_id,
+                session_id = ?session_id,
+                total_messages,
+                error = %e,
+                "append_to_session: failed to save session"
+            );
+        } else {
+            tracing::debug!(
+                agent_id = ?agent_id,
+                session_id = ?session_id,
+                total_messages,
+                "append_to_session: mirrored channel_send into session"
+            );
+        }
+    }
+
     fn inject_attachment_blocks(
         &self,
         agent_id: librefang_types::agent::AgentId,

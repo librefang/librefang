@@ -1118,7 +1118,15 @@ pub async fn execute_tool_raw(
         "channel_send" => {
             let extra = named_ws_prefixes(*kernel, *caller_agent_id);
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
-            tool_channel_send(input, *kernel, *workspace_root, *sender_id, &extra_refs).await
+            tool_channel_send(
+                input,
+                *kernel,
+                *workspace_root,
+                *sender_id,
+                *caller_agent_id,
+                &extra_refs,
+            )
+            .await
         }
 
         // Persistent process tools
@@ -4913,11 +4921,71 @@ fn parse_poll_options(raw: Option<&serde_json::Value>) -> Result<Vec<String>, St
     Ok(out)
 }
 
+/// Mirror a successfully-sent `channel_send` message into the inbound-routing
+/// session of the channel-owning agent so it has context for the user's reply.
+///
+/// This is **best-effort**: any failure is logged at `warn!` level and does NOT
+/// propagate — the platform send already succeeded.
+///
+/// Decision summary (issue #4824):
+/// 1. Mirror unconditionally — even when caller == channel owner.
+/// 2. Role = `system` with structured JSON content.
+/// 3. Mirror on partial-failure (platform delivery succeeded, ack lost).
+/// 4. Written directly to session storage; no adapter re-emit.
+fn mirror_channel_send_to_session(
+    kh: &Arc<dyn KernelHandle>,
+    caller_agent_id: Option<&str>,
+    channel: &str,
+    recipient: &str,
+    body: &str,
+) {
+    use librefang_types::agent::SessionId;
+    use librefang_types::message::{Message, MessageContent, Role};
+
+    let owner_id = kh.resolve_channel_owner(channel, recipient);
+
+    let owner = match owner_id {
+        Some(id) => id,
+        None => {
+            // No channel-owning agent configured — nothing to mirror.
+            tracing::debug!(
+                channel,
+                recipient,
+                "channel_send mirror: no channel owner agent found, skipping"
+            );
+            return;
+        }
+    };
+
+    // session_id mirrors the inbound-routing path in messaging.rs:
+    // `SessionId::for_sender_scope(owner, channel, Some(recipient))`
+    let session_id = SessionId::for_sender_scope(owner, channel, Some(recipient));
+
+    let sent_at = chrono::Utc::now();
+    let mirror_content = serde_json::json!({
+        "from_agent_id": caller_agent_id.unwrap_or("unknown"),
+        "channel": channel,
+        "chat_id": recipient,
+        "body": body,
+        "sent_at": sent_at.to_rfc3339(),
+    });
+
+    let msg = Message {
+        role: Role::System,
+        content: MessageContent::Text(mirror_content.to_string()),
+        pinned: false,
+        timestamp: Some(sent_at),
+    };
+
+    kh.append_to_session(session_id, owner, msg);
+}
+
 async fn tool_channel_send(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     workspace_root: Option<&Path>,
     sender_id: Option<&str>,
+    caller_agent_id: Option<&str>,
     additional_roots: &[&Path],
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
@@ -4958,12 +5026,17 @@ async fn tool_channel_send(
                 return Err(violation);
             }
         }
-        return kh
+        let result = kh
             .send_channel_media(
                 &channel, recipient, "image", url, caption, None, thread_id, account_id,
             )
             .await
             .map_err(|e| e.to_string());
+        if result.is_ok() {
+            let body = caption.unwrap_or(url);
+            mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, body);
+        }
+        return result;
     }
 
     if let Some(url) = file_url {
@@ -4974,12 +5047,17 @@ async fn tool_channel_send(
                 return Err(violation);
             }
         }
-        return kh
+        let result = kh
             .send_channel_media(
                 &channel, recipient, "file", url, caption, filename, thread_id, account_id,
             )
             .await
             .map_err(|e| e.to_string());
+        if result.is_ok() {
+            let body = caption.unwrap_or(url);
+            mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, body);
+        }
+        return result;
     }
 
     // Local file attachment: read from disk and send as FileData. Honor named
@@ -5037,7 +5115,7 @@ async fn tool_channel_send(
         // `Bytes::from(Vec<u8>)` is O(1) — it takes ownership of the
         // Vec's allocation without copying. Subsequent clones (retry,
         // metering wrappers, fan-out) become refcount bumps. See #3553.
-        return kh
+        let result = kh
             .send_channel_file_data(
                 &channel,
                 recipient,
@@ -5049,6 +5127,10 @@ async fn tool_channel_send(
             )
             .await
             .map_err(|e| e.to_string());
+        if result.is_ok() {
+            mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, &filename);
+        }
+        return result;
     }
 
     if let Some(poll_question) = input.get("poll_question").and_then(|v| v.as_str()) {
@@ -5120,6 +5202,8 @@ async fn tool_channel_send(
         .await
         .map_err(|e| e.to_string())?;
 
+        mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, poll_question);
+
         let mut result = format!("Poll sent to {recipient} on {channel}: {poll_question}");
         if is_quiz {
             result.push_str(" (quiz mode)");
@@ -5159,9 +5243,14 @@ async fn tool_channel_send(
         return Err(violation);
     }
 
-    kh.send_channel_message(&channel, recipient, &final_message, thread_id, account_id)
+    let result = kh
+        .send_channel_message(&channel, recipient, &final_message, thread_id, account_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    if result.is_ok() {
+        mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, &final_message);
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -7329,7 +7418,7 @@ mod tests {
             "recipient": "@user",
             "message": "here is the api_key=sk-abcdefghijklmnop",
         });
-        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), &[])
+        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), None, &[])
             .await
             .expect_err("channel_send must reject tainted message");
         assert!(
@@ -7350,7 +7439,7 @@ mod tests {
             "image_url": "https://example.com/cat.png",
             "message": "see attached. token=sk-abcdefghijklmnop",
         });
-        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), &[])
+        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), None, &[])
             .await
             .expect_err("image caption must be sink-checked");
         assert!(
@@ -7371,7 +7460,7 @@ mod tests {
             "poll_question": "guess my api_key=sk-abcdefghijklmnop",
             "poll_options": ["yes", "no"],
         });
-        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), &[])
+        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), None, &[])
             .await
             .expect_err("poll question must be sink-checked");
         assert!(
@@ -7393,10 +7482,17 @@ mod tests {
             "message": "Hello from auto-reply!",
         });
         // This should NOT error with "Missing recipient" because sender_id is provided
-        // It will error with "Channel file data send not available" because the mock kernel
+        // It will error with "Channel send not available" because the mock kernel
         // doesn't implement channel_send, but that's expected
-        let result =
-            tool_channel_send(&input, Some(&kernel), None, Some("12345_telegram"), &[]).await;
+        let result = tool_channel_send(
+            &input,
+            Some(&kernel),
+            None,
+            Some("12345_telegram"),
+            None,
+            &[],
+        )
+        .await;
         // The error should NOT be about missing recipient
         let err_msg = result.unwrap_err();
         assert!(
@@ -7417,7 +7513,7 @@ mod tests {
             // recipient intentionally omitted
             "message": "Hello!",
         });
-        let err = tool_channel_send(&input, Some(&kernel), None, None, &[])
+        let err = tool_channel_send(&input, Some(&kernel), None, None, None, &[])
             .await
             .expect_err("channel_send must require recipient without sender_id");
         assert!(
@@ -7425,6 +7521,274 @@ mod tests {
             "Expected missing recipient error, got: {err}"
         );
     }
+
+    // ── channel_send mirror tests ────────────────────────────────────────────
+
+    /// A minimal kernel for mirror tests.
+    ///
+    /// - `send_channel_message` always succeeds (returns Ok).
+    /// - `resolve_channel_owner` returns the configured `owner_id`.
+    /// - `append_to_session` records calls into `appended`.
+    /// - `fail_append` makes `append_to_session` simulate a save failure (warn path).
+    struct MirrorKernel {
+        owner_id: Option<librefang_types::agent::AgentId>,
+        appended: Arc<std::sync::Mutex<Vec<librefang_types::message::Message>>>,
+        fail_append: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentControl for MirrorKernel {
+        async fn spawn_agent(
+            &self,
+            _manifest_toml: &str,
+            _parent_id: Option<&str>,
+        ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        async fn send_to_agent(
+            &self,
+            _agent_id: &str,
+            _message: &str,
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        fn list_agents(&self) -> Vec<AgentInfo> {
+            vec![]
+        }
+        fn kill_agent(
+            &self,
+            _agent_id: &str,
+        ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            vec![]
+        }
+    }
+    impl MemoryAccess for MirrorKernel {
+        fn memory_store(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _peer_id: Option<&str>,
+        ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        fn memory_recall(
+            &self,
+            _key: &str,
+            _peer_id: Option<&str>,
+        ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        fn memory_list(
+            &self,
+            _peer_id: Option<&str>,
+        ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+    }
+    impl WikiAccess for MirrorKernel {}
+    impl KnowledgeGraph for MirrorKernel {}
+    impl TaskQueue for MirrorKernel {}
+    impl ApprovalGate for MirrorKernel {}
+    impl CronControl for MirrorKernel {}
+    impl HandsControl for MirrorKernel {}
+    impl A2ARegistry for MirrorKernel {}
+    impl PromptStore for MirrorKernel {}
+    impl WorkflowRunner for MirrorKernel {}
+    impl GoalControl for MirrorKernel {}
+    impl ToolPolicy for MirrorKernel {}
+    impl librefang_kernel_handle::CatalogQuery for MirrorKernel {}
+    impl ApiAuth for MirrorKernel {
+        fn auth_snapshot(&self) -> ApiAuthSnapshot {
+            ApiAuthSnapshot::default()
+        }
+    }
+    impl AcpFsBridge for MirrorKernel {}
+    impl AcpTerminalBridge for MirrorKernel {}
+
+    #[async_trait::async_trait]
+    impl EventBus for MirrorKernel {
+        async fn publish_event(
+            &self,
+            _event_type: &str,
+            _payload: serde_json::Value,
+        ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChannelSender for MirrorKernel {
+        async fn send_channel_message(
+            &self,
+            channel: &str,
+            recipient: &str,
+            _message: &str,
+            _thread_id: Option<&str>,
+            _account_id: Option<&str>,
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Ok(format!("sent to {recipient} on {channel}"))
+        }
+
+        fn resolve_channel_owner(
+            &self,
+            _channel: &str,
+            _chat_id: &str,
+        ) -> Option<librefang_types::agent::AgentId> {
+            self.owner_id
+        }
+    }
+
+    impl SessionWriter for MirrorKernel {
+        fn inject_attachment_blocks(
+            &self,
+            _agent_id: librefang_types::agent::AgentId,
+            _blocks: Vec<librefang_types::message::ContentBlock>,
+        ) {
+        }
+
+        fn append_to_session(
+            &self,
+            _session_id: librefang_types::agent::SessionId,
+            _agent_id: librefang_types::agent::AgentId,
+            message: librefang_types::message::Message,
+        ) {
+            if self.fail_append {
+                // Simulate a save failure — caller should not see this error.
+                tracing::warn!("MirrorKernel: simulated append_to_session failure");
+                return;
+            }
+            self.appended.lock().unwrap().push(message);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_channel_send_mirrors_to_channel_owner_session() {
+        use librefang_types::agent::AgentId;
+        use librefang_types::message::Role;
+
+        let owner = AgentId(uuid::Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap());
+        let appended = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(MirrorKernel {
+            owner_id: Some(owner),
+            appended: Arc::clone(&appended),
+            fail_append: false,
+        });
+
+        let input = serde_json::json!({
+            "channel": "telegram",
+            "recipient": "99999",
+            "message": "Hello from cron agent",
+        });
+
+        let result = tool_channel_send(
+            &input,
+            Some(&kernel),
+            None,
+            Some("99999"),
+            Some("caller-agent-id"),
+            &[],
+        )
+        .await;
+
+        assert!(result.is_ok(), "send should succeed: {:?}", result);
+
+        let msgs = appended.lock().unwrap();
+        assert_eq!(msgs.len(), 1, "exactly one message should be mirrored");
+        assert_eq!(
+            msgs[0].role,
+            Role::System,
+            "mirrored message must use system role"
+        );
+
+        let content = msgs[0].content.text_content();
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("content is JSON");
+        assert_eq!(parsed["from_agent_id"], "caller-agent-id");
+        assert_eq!(parsed["channel"], "telegram");
+        assert_eq!(parsed["chat_id"], "99999");
+        assert_eq!(parsed["body"], "Hello from cron agent");
+        assert!(parsed["sent_at"].is_string(), "sent_at must be present");
+    }
+
+    #[tokio::test]
+    async fn test_channel_send_mirrors_when_caller_is_channel_owner() {
+        // Decision 1: mirror unconditionally, even when caller == owner.
+        use librefang_types::agent::AgentId;
+        use librefang_types::message::Role;
+
+        let owner = AgentId(uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap());
+        let appended = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(MirrorKernel {
+            owner_id: Some(owner),
+            appended: Arc::clone(&appended),
+            fail_append: false,
+        });
+
+        let input = serde_json::json!({
+            "channel": "telegram",
+            "recipient": "42",
+            "message": "Self-mirror test",
+        });
+
+        // caller_agent_id could be the same agent as the channel owner
+        let result = tool_channel_send(
+            &input,
+            Some(&kernel),
+            None,
+            Some("42"),
+            Some("same-agent"),
+            &[],
+        )
+        .await;
+
+        assert!(result.is_ok(), "send should succeed: {:?}", result);
+        let msgs = appended.lock().unwrap();
+        assert_eq!(msgs.len(), 1, "mirror must land even when caller == owner");
+        assert_eq!(msgs[0].role, Role::System);
+    }
+
+    #[tokio::test]
+    async fn test_channel_send_succeeds_even_when_mirror_fails() {
+        // Decision 3: mirror failure must not fail the tool call.
+        let owner = librefang_types::agent::AgentId(
+            uuid::Uuid::parse_str("ffffffff-ffff-ffff-ffff-ffffffffffff").unwrap(),
+        );
+        let appended = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(MirrorKernel {
+            owner_id: Some(owner),
+            appended: Arc::clone(&appended),
+            fail_append: true, // simulates a save error
+        });
+
+        let input = serde_json::json!({
+            "channel": "telegram",
+            "recipient": "77",
+            "message": "Mirror failure test",
+        });
+
+        let result = tool_channel_send(
+            &input,
+            Some(&kernel),
+            None,
+            Some("77"),
+            Some("caller-id"),
+            &[],
+        )
+        .await;
+
+        // Platform send must still succeed even though append failed.
+        assert!(
+            result.is_ok(),
+            "tool call must succeed despite mirror failure"
+        );
+        // fail_append returns without pushing — confirm nothing was appended.
+        let msgs = appended.lock().unwrap();
+        assert!(msgs.is_empty(), "no message appended on simulated failure");
+    }
+
+    // ── end channel_send mirror tests ────────────────────────────────────────
 
     struct ApprovalKernel {
         approval_requests: Arc<AtomicUsize>,
