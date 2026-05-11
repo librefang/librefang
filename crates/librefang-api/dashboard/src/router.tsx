@@ -67,7 +67,7 @@ const CommsPage = lazyWithReload(() => import("./pages/CommsPage").then(m => ({ 
 const GoalsPage = lazyWithReload(() => import("./pages/GoalsPage").then(m => ({ default: m.GoalsPage })));
 const HandsPage = lazyWithReload(() => import("./pages/HandsPage").then(m => ({ default: m.HandsPage })));
 const LogsPage = lazyWithReload(() => import("./pages/LogsPage").then(m => ({ default: m.LogsPage })));
-const MemoryPage = lazyWithReload(() => import("./pages/MemoryPage").then(m => ({ default: m.MemoryPage })));
+const MemoryPage = lazyWithReload(() => import("./pages/Memory").then(m => ({ default: m.MemoryPage })));
 const ProvidersPage = lazyWithReload(() => import("./pages/ProvidersPage").then(m => ({ default: m.ProvidersPage })));
 const RuntimePage = lazyWithReload(() => import("./pages/RuntimePage").then(m => ({ default: m.RuntimePage })));
 const SchedulerPage = lazyWithReload(() => import("./pages/SchedulerPage").then(m => ({ default: m.SchedulerPage })));
@@ -216,6 +216,14 @@ const analyticsRoute = createRoute({
 const memoryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/memory",
+  validateSearch: (search: Record<string, unknown>): { agent?: string; tab?: "records" | "kv" | "dreams" | "health" } => {
+    const out: { agent?: string; tab?: "records" | "kv" | "dreams" | "health" } = {};
+    if (typeof search.agent === "string") out.agent = search.agent;
+    if (search.tab === "records" || search.tab === "kv" || search.tab === "dreams" || search.tab === "health") {
+      out.tab = search.tab;
+    }
+    return out;
+  },
   component: () => <LazyRouteBoundary><MemoryPage /></LazyRouteBoundary>
 });
 
