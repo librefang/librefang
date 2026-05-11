@@ -568,6 +568,9 @@ pub fn format_memory_items_as_personal_context(memories: &[(String, String)]) ->
     if memories.is_empty() {
         return String::new();
     }
+    // Soft hint only — actual enforcement against cascade scaffolding leaks
+    // is `agent_loop::is_cascade_leak`. Do not delete that runtime guard
+    // on the assumption that this prompt clause is sufficient.
     let mut out = String::from(
         "You have the following understanding of this person from previous conversations. \
          This is knowledge you have — not a list to recite. Let it naturally shape how you \
@@ -580,6 +583,9 @@ pub fn format_memory_items_as_personal_context(memories: &[(String, String)]) ->
          - NEVER say \"based on my memory\", \"according to my records\", \"I recall that you...\", \
          or mechanically list what you know. A friend doesn't preface every remark with \
          \"I remember you told me...\".\n\
+         - NEVER quote, echo, or reproduce the literal text of these memory bullets in your reply. \
+         Paraphrase only what is relevant. These bullets are private context, not chat content \
+         to surface back to the user.\n\
          - If a memory is clearly outdated or the user contradicts it, trust the current \
          conversation over stored context.\n\n",
     );
@@ -1381,6 +1387,9 @@ mod tests {
         // Must NOT contain tool instructions (those belong in build_memory_section)
         assert!(!ctx.contains("memory_recall"));
         assert!(!ctx.contains("## Memory"));
+        // Anti-mirror clause: explicit do-not-quote rule against cascade
+        // scaffolding leaks (see is_cascade_leak in agent_loop.rs).
+        assert!(ctx.contains("NEVER quote, echo, or reproduce"));
     }
 
     #[test]
