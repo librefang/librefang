@@ -813,21 +813,11 @@ impl LibreFangKernel {
         let messages = session.messages.clone();
         let session_id = session.id;
 
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            // No tokio runtime — fall back to the trivial summary
-            // synchronously so the on-reset write still happens.
-            let summary = build_trivial_session_summary(&messages);
-            persist_session_summary(
-                memory.as_ref(),
-                agent_id,
-                session_id,
-                workspace.as_deref(),
-                &summary,
-            );
-            return;
-        };
-
-        handle.spawn(async move {
+        // `reset_session` is only reached from an axum handler, so the
+        // tokio runtime is always present. `Handle::current()` panics
+        // if that invariant breaks — louder than silently degrading
+        // and easier to spot in tests.
+        tokio::runtime::Handle::current().spawn(async move {
             let summary = build_session_summary(
                 aux.as_ref(),
                 catalog.as_ref(),
@@ -848,11 +838,13 @@ impl LibreFangKernel {
     }
 }
 
-/// Maximum characters of conversation text fed to the aux LLM. Keeps
+/// Maximum byte length of conversation text fed to the aux LLM. Keeps
 /// the prompt within a haiku-class context window even on very long
-/// sessions; everything past the cap is dropped from the tail of the
-/// rendered transcript (most-recent context is what we want to keep).
-const MAX_SUMMARY_INPUT_CHARS: usize = 48_000;
+/// sessions; when the transcript exceeds this, content is dropped
+/// from the **head** so the most-recent context (the load-bearing
+/// part for a summary) survives. Named in bytes — not characters —
+/// because `String::len` is the unit we actually measure against.
+const MAX_SUMMARY_INPUT_BYTES: usize = 48_000;
 
 /// Cap on the bytes we write to `kv_store` / `memory/*.md`. Aux models
 /// rarely emit more than a few kB of summary, but a misbehaving model
@@ -892,7 +884,7 @@ async fn build_session_summary(
         return build_trivial_session_summary(messages);
     }
 
-    let transcript = render_session_transcript(messages, MAX_SUMMARY_INPUT_CHARS);
+    let transcript = render_session_transcript(messages, MAX_SUMMARY_INPUT_BYTES);
     if transcript.is_empty() {
         return build_trivial_session_summary(messages);
     }
@@ -940,11 +932,31 @@ async fn build_session_summary(
         reasoning_echo_policy: echo_policy,
     };
 
-    let outcome = tokio::time::timeout(
+    invoke_summary_driver(
+        resolution.driver.as_ref(),
+        req,
         std::time::Duration::from_secs(SESSION_SUMMARY_LLM_TIMEOUT_SECS),
-        resolution.driver.complete(req),
+        agent_id,
+        session_id,
+        messages,
     )
-    .await;
+    .await
+}
+
+/// Drive the aux LLM call for a session summary and translate the four
+/// terminal states (ok-text, ok-empty, driver error, timeout) into
+/// either the model's text or the trivial fallback. Extracted from
+/// [`build_session_summary`] so tests can inject a `MockLlmDriver`
+/// without standing up an `AuxClient`.
+async fn invoke_summary_driver(
+    driver: &dyn librefang_runtime::llm_driver::LlmDriver,
+    req: librefang_runtime::llm_driver::CompletionRequest,
+    timeout: std::time::Duration,
+    agent_id: AgentId,
+    session_id: SessionId,
+    fallback_messages: &[librefang_types::message::Message],
+) -> String {
+    let outcome = tokio::time::timeout(timeout, driver.complete(req)).await;
 
     match outcome {
         Ok(Ok(resp)) => {
@@ -955,7 +967,7 @@ async fn build_session_summary(
                     session_id = %session_id.0,
                     "Session-summary aux LLM returned empty text; falling back to trivial summary"
                 );
-                build_trivial_session_summary(messages)
+                build_trivial_session_summary(fallback_messages)
             } else {
                 text
             }
@@ -967,27 +979,30 @@ async fn build_session_summary(
                 error = %e,
                 "Session-summary aux LLM call failed; falling back to trivial summary"
             );
-            build_trivial_session_summary(messages)
+            build_trivial_session_summary(fallback_messages)
         }
         Err(_) => {
             warn!(
                 agent_id = %agent_id,
                 session_id = %session_id.0,
-                timeout_secs = SESSION_SUMMARY_LLM_TIMEOUT_SECS,
+                timeout_ms = timeout.as_millis() as u64,
                 "Session-summary aux LLM call timed out; falling back to trivial summary"
             );
-            build_trivial_session_summary(messages)
+            build_trivial_session_summary(fallback_messages)
         }
     }
 }
 
 /// Render every message in the session as plain text — including
-/// tool-use and tool-result blocks — capped at `max_chars`. The tail is
-/// preserved because the most recent turns are usually the most
-/// load-bearing for a summary (final decisions, last file edits).
+/// tool-use and tool-result blocks — capped at `max_bytes` of UTF-8
+/// (matches `String::len`). The **head** is dropped when the
+/// transcript overflows, because the most recent turns are usually
+/// the most load-bearing for a summary (final decisions, last file
+/// edits). `ContentBlock::Thinking` is intentionally excluded so
+/// private chain-of-thought never reaches the on-disk summary.
 fn render_session_transcript(
     messages: &[librefang_types::message::Message],
-    max_chars: usize,
+    max_bytes: usize,
 ) -> String {
     use librefang_types::message::{ContentBlock, MessageContent, Role};
 
@@ -1011,8 +1026,14 @@ fn render_session_transcript(
                         ContentBlock::ToolResult { content, .. } => {
                             parts.push(format!("[tool_result: {content}]"));
                         }
-                        ContentBlock::Thinking { thinking, .. } => {
-                            parts.push(format!("[thinking: {thinking}]"));
+                        ContentBlock::Thinking { .. } => {
+                            // Internal model reasoning is intentionally
+                            // dropped: a session summary lands in
+                            // `kv_store` and `{workspace}/memory/*.md`,
+                            // both of which persist across sessions.
+                            // Chain-of-thought traces are private to
+                            // the originating turn and must not leak
+                            // there.
                         }
                         ContentBlock::Image { .. } | ContentBlock::ImageFile { .. } => {
                             parts.push("[image]".to_string());
@@ -1031,9 +1052,9 @@ fn render_session_transcript(
     }
 
     let mut out = rendered.join("\n\n");
-    if out.len() > max_chars {
+    if out.len() > max_bytes {
         // Drop from the head — keep the recent context the summary cares about.
-        let overflow = out.len() - max_chars;
+        let overflow = out.len() - max_bytes;
         let mut split = overflow;
         while split < out.len() && !out.is_char_boundary(split) {
             split += 1;
@@ -1292,6 +1313,220 @@ mod session_summary_tests {
         assert!(
             rendered.contains("turn 199:"),
             "tail (recent context) must survive the cap"
+        );
+    }
+
+    #[test]
+    fn render_transcript_omits_thinking_blocks() {
+        // Internal chain-of-thought must not reach kv_store or the
+        // workspace markdown — the session summary persists across
+        // sessions and would leak private reasoning otherwise.
+        let messages = vec![
+            Message::user("What's 2+2?"),
+            Message {
+                role: Role::Assistant,
+                content: librefang_types::message::MessageContent::Blocks(vec![
+                    ContentBlock::Thinking {
+                        thinking: "SECRET_REASONING_should_not_leak".to_string(),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::Text {
+                        text: "Four.".to_string(),
+                        provider_metadata: None,
+                    },
+                ]),
+                pinned: false,
+                timestamp: None,
+            },
+        ];
+        let rendered = render_session_transcript(&messages, 10_000);
+        assert!(
+            !rendered.contains("SECRET_REASONING_should_not_leak"),
+            "thinking text must never appear in the rendered transcript"
+        );
+        assert!(
+            !rendered.contains("[thinking"),
+            "no thinking placeholder either — the block is dropped entirely"
+        );
+        assert!(
+            rendered.contains("Four."),
+            "visible assistant text still survives"
+        );
+    }
+
+    // --- aux-LLM driver invocation path ---------------------------------
+    //
+    // The four terminal states of `invoke_summary_driver`:
+    //   ok-text  → return the model's text verbatim
+    //   ok-empty → warn + fall back to trivial digest
+    //   error    → warn + fall back to trivial digest
+    //   timeout  → warn + fall back to trivial digest
+    //
+    // Pre-#4869 there was no aux call at all, so these are the load-
+    // bearing new branches.
+
+    use super::invoke_summary_driver;
+    use async_trait::async_trait;
+    use librefang_runtime::llm_driver::{
+        CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent,
+    };
+    use librefang_testing::{FailingLlmDriver, MockLlmDriver};
+    use librefang_types::agent::{AgentId, SessionId};
+    use librefang_types::message::{StopReason, TokenUsage};
+    use std::time::Duration;
+
+    fn dummy_request() -> CompletionRequest {
+        CompletionRequest {
+            model: "test-model".to_string(),
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
+            tools: std::sync::Arc::new(vec![]),
+            max_tokens: 256,
+            temperature: 0.2,
+            system: Some("system".to_string()),
+            thinking: None,
+            prompt_caching: false,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: Some(5),
+            extra_body: None,
+            agent_id: None,
+            session_id: None,
+            step_id: None,
+            reasoning_echo_policy: Default::default(),
+        }
+    }
+
+    fn trivial_signal_messages() -> Vec<Message> {
+        // Trivial summary should be recognisable so tests can tell
+        // "the fallback ran" from "the driver text was used".
+        vec![
+            Message::user("FALLBACK_FIRST_GOAL_MARKER"),
+            Message::assistant("ok"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn invoke_summary_driver_returns_aux_text_when_ok() {
+        let driver = MockLlmDriver::with_response("- bullet one\n- bullet two");
+        let messages = trivial_signal_messages();
+        let out = invoke_summary_driver(
+            &driver,
+            dummy_request(),
+            Duration::from_secs(5),
+            AgentId::new(),
+            SessionId::new(),
+            &messages,
+        )
+        .await;
+        assert_eq!(out, "- bullet one\n- bullet two");
+        assert!(
+            !out.contains("FALLBACK_FIRST_GOAL_MARKER"),
+            "trivial fallback must not run on the happy path"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_summary_driver_falls_back_when_text_empty() {
+        let driver = MockLlmDriver::with_response("");
+        let messages = trivial_signal_messages();
+        let out = invoke_summary_driver(
+            &driver,
+            dummy_request(),
+            Duration::from_secs(5),
+            AgentId::new(),
+            SessionId::new(),
+            &messages,
+        )
+        .await;
+        assert!(
+            out.contains("FALLBACK_FIRST_GOAL_MARKER"),
+            "empty aux response should produce the trivial fallback (got: {out:?})"
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_summary_driver_falls_back_on_driver_error() {
+        let driver = FailingLlmDriver::new("simulated 500");
+        let messages = trivial_signal_messages();
+        let out = invoke_summary_driver(
+            &driver,
+            dummy_request(),
+            Duration::from_secs(5),
+            AgentId::new(),
+            SessionId::new(),
+            &messages,
+        )
+        .await;
+        assert!(
+            out.contains("FALLBACK_FIRST_GOAL_MARKER"),
+            "driver error should produce the trivial fallback (got: {out:?})"
+        );
+    }
+
+    /// Driver whose `complete` future never resolves within the test
+    /// timeout — pins the `tokio::time::timeout` arm.
+    struct SleepyDriver {
+        sleep_for: Duration,
+    }
+
+    #[async_trait]
+    impl LlmDriver for SleepyDriver {
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            tokio::time::sleep(self.sleep_for).await;
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: "too-late".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                },
+            })
+        }
+
+        async fn stream(
+            &self,
+            request: CompletionRequest,
+            _tx: tokio::sync::mpsc::Sender<StreamEvent>,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.complete(request).await
+        }
+
+        fn is_configured(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_summary_driver_falls_back_on_timeout() {
+        let driver = SleepyDriver {
+            sleep_for: Duration::from_secs(60),
+        };
+        let messages = trivial_signal_messages();
+        let out = invoke_summary_driver(
+            &driver,
+            dummy_request(),
+            Duration::from_millis(50),
+            AgentId::new(),
+            SessionId::new(),
+            &messages,
+        )
+        .await;
+        assert!(
+            out.contains("FALLBACK_FIRST_GOAL_MARKER"),
+            "timeout should produce the trivial fallback (got: {out:?})"
+        );
+        assert!(
+            !out.contains("too-late"),
+            "the never-resolving driver text must not leak through"
         );
     }
 }
