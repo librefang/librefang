@@ -1282,7 +1282,8 @@ impl BridgeManager {
                                     let image_blocks = if let ChannelContent::Image {
                                         ref url, ref caption, ref mime_type
                                     } = message.content {
-                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), &upload_dir).await {
+                                        let extra_headers = adapter_clone.fetch_headers_for(url);
+                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), &upload_dir, &extra_headers).await {
                                             blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::ImageFile { .. })) => Some(blocks),
                                             _ => None,
                                         }
@@ -2192,10 +2193,36 @@ fn default_output_format_for_channel(channel_type: &str) -> OutputFormat {
 
 /// Send a lifecycle reaction (best-effort, non-blocking for supported adapters).
 ///
-/// Errors are logged at debug level — reactions are non-critical UX polish, but
-/// repeated failures can hint at adapter / permission issues worth investigating.
-/// For Telegram, the underlying HTTP call is already fire-and-forget (spawned internally),
-/// so this await returns almost immediately.
+/// Extract the tool name from a `\n\n🔧 toolname\n\n` progress marker
+/// emitted by `librefang_api::channel_bridge` in response to a kernel
+/// `StreamEvent::ToolUseStart` event. Returns `None` for plain text
+/// deltas, the trailing-`⚠️`-error marker, the context-warning marker,
+/// or anything that doesn't exactly match the prefix+suffix wrapping —
+/// the api channel bridge sends each marker as its own dedicated
+/// `tx.send(line)` so an exact-match strip is the right shape (we
+/// would NOT want to grab a `🔧` that appeared inside model prose).
+fn extract_tool_marker_name(delta: &str) -> Option<String> {
+    let prefix = "\n\n🔧 ";
+    let suffix = "\n\n";
+    let inner = delta.strip_prefix(prefix)?.strip_suffix(suffix)?;
+    let trimmed = inner.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Errors are logged at WARN — reactions are best-effort UX polish, but a
+/// silent failure mode masks real problems. The original `debug!` here hid
+/// per-room rate-limit drops on Matrix (`M_LIMIT_EXCEEDED`) where the
+/// trailing `✅ Done` reaction was being silently swallowed at default
+/// verbosity, and made the lifecycle-reaction feature look broken even
+/// when it was working. WARN is the right level: a single failure tells
+/// an operator "your homeserver is rate-limiting the bot", which is
+/// exactly the actionable diagnosis we want surfaced.
+/// For Telegram, the underlying HTTP call is already fire-and-forget
+/// (spawned internally), so this await returns almost immediately.
 async fn send_lifecycle_reaction(
     adapter: &dyn ChannelAdapter,
     user: &ChannelUser,
@@ -2208,12 +2235,12 @@ async fn send_lifecycle_reaction(
         remove_previous: true,
     };
     if let Err(e) = adapter.send_reaction(user, message_id, &reaction).await {
-        debug!(
+        warn!(
             adapter = adapter.name(),
             message_id = message_id,
             phase = ?phase,
             error = %e,
-            "Lifecycle reaction send failed (best-effort, ignored)",
+            "Lifecycle reaction send failed (best-effort, not retried)",
         );
     }
 }
@@ -2791,9 +2818,15 @@ async fn dispatch_message(
     } = message.content
     {
         let upload_dir = handle.effective_channels_download_dir();
-        let blocks =
-            download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), &upload_dir)
-                .await;
+        let extra_headers = adapter.fetch_headers_for(url);
+        let blocks = download_image_to_blocks(
+            url,
+            caption.as_deref(),
+            mime_type.as_deref(),
+            &upload_dir,
+            &extra_headers,
+        )
+        .await;
         if blocks.iter().any(|b| {
             matches!(
                 b,
@@ -2830,7 +2863,9 @@ async fn dispatch_message(
         let max_bytes = handle
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
-        let blocks = download_file_to_blocks(url, filename, max_bytes, &download_dir).await;
+        let extra_headers = adapter.fetch_headers_for(url);
+        let blocks =
+            download_file_to_blocks(url, filename, max_bytes, &download_dir, &extra_headers).await;
         if has_file_saved_block(&blocks) {
             dispatch_with_blocks(
                 blocks,
@@ -2864,7 +2899,9 @@ async fn dispatch_message(
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
         let filename = filename_from_url(url).unwrap_or_else(|| "voice.ogg".to_string());
-        let mut blocks = download_file_to_blocks(url, &filename, max_bytes, &download_dir).await;
+        let extra_headers = adapter.fetch_headers_for(url);
+        let mut blocks =
+            download_file_to_blocks(url, &filename, max_bytes, &download_dir, &extra_headers).await;
         if has_file_saved_block(&blocks) {
             // Prepend a context block carrying duration + caption so the
             // model knows this is voice (not an arbitrary file) and any
@@ -2917,7 +2954,9 @@ async fn dispatch_message(
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
         let filename = filename_from_url(url).unwrap_or_else(|| "audio.mp3".to_string());
-        let mut blocks = download_file_to_blocks(url, &filename, max_bytes, &download_dir).await;
+        let extra_headers = adapter.fetch_headers_for(url);
+        let mut blocks =
+            download_file_to_blocks(url, &filename, max_bytes, &download_dir, &extra_headers).await;
         if has_file_saved_block(&blocks) {
             let mut header = format!("[Audio ({duration_seconds}s)");
             match (title.as_deref(), performer.as_deref()) {
@@ -2978,8 +3017,15 @@ async fn dispatch_message(
             .clone()
             .or_else(|| filename_from_url(url))
             .unwrap_or_else(|| "video.mp4".to_string());
-        let mut blocks =
-            download_file_to_blocks(url, &resolved_filename, max_bytes, &download_dir).await;
+        let extra_headers = adapter.fetch_headers_for(url);
+        let mut blocks = download_file_to_blocks(
+            url,
+            &resolved_filename,
+            max_bytes,
+            &download_dir,
+            &extra_headers,
+        )
+        .await;
         if has_file_saved_block(&blocks) {
             let context = match caption {
                 Some(c) if !c.is_empty() => {
@@ -3624,42 +3670,54 @@ async fn dispatch_message(
 
                 // Tee: forward deltas to the adapter while buffering a copy.
                 // If send_streaming fails, the buffer lets us fall back to send().
+                //
+                // Drain runs as a sibling future via `tokio::join!` (not a
+                // detached `tokio::spawn`) so it shares the dispatch task's
+                // borrow of `adapter`. That lets us call
+                // `send_lifecycle_reaction(adapter, ...)` from inside the
+                // drain when we observe the api/channel_bridge's
+                // `\n\n🔧 toolname\n\n` text marker — a turn that runs a
+                // tool now flips the trigger-message reaction to ⚙️ for the
+                // duration of the call, instead of staying stuck on ✍️.
                 let (adapter_tx, adapter_rx) = mpsc::channel::<String>(64);
-                let mut buffered_text = String::new();
-                let buffer_handle = tokio::spawn({
-                    let prefix_chunk = prefix_chunk.clone();
+                let prefix_chunk_owned = prefix_chunk.clone();
+                let drain_fut = async {
                     let mut buffered = String::new();
-                    async move {
-                        // Inject the prefix as the first delta so it becomes
-                        // part of the streamed message. Mirror it into the
-                        // buffer so the stream-fail fallback path's
-                        // idempotency check (`apply_agent_prefix`) sees an
-                        // already-prefixed buffer and skips re-prefixing.
-                        if let Some(ref p) = prefix_chunk {
-                            buffered.push_str(p);
-                            if adapter_tx.send(p.clone()).await.is_err() {
-                                return buffered;
-                            }
+                    // Inject the prefix as the first delta so it becomes
+                    // part of the streamed message. Mirror it into the
+                    // buffer so the stream-fail fallback path's
+                    // idempotency check (`apply_agent_prefix`) sees an
+                    // already-prefixed buffer and skips re-prefixing.
+                    if let Some(ref p) = prefix_chunk_owned {
+                        buffered.push_str(p);
+                        if adapter_tx.send(p.clone()).await.is_err() {
+                            return buffered;
                         }
-                        while let Some(delta) = delta_rx.recv().await {
-                            buffered.push_str(&delta);
-                            // Best-effort forward — if adapter dropped rx, stop.
-                            if adapter_tx.send(delta).await.is_err() {
-                                break;
-                            }
-                        }
-                        buffered
                     }
-                });
+                    while let Some(delta) = delta_rx.recv().await {
+                        buffered.push_str(&delta);
+                        if let Some(name) = extract_tool_marker_name(&delta) {
+                            send_lifecycle_reaction(
+                                adapter,
+                                &message.sender,
+                                msg_id,
+                                &AgentPhase::tool_use(&name),
+                            )
+                            .await;
+                        }
+                        // Best-effort forward — if adapter dropped rx, stop.
+                        if adapter_tx.send(delta).await.is_err() {
+                            break;
+                        }
+                    }
+                    drop(adapter_tx);
+                    buffered
+                };
 
-                let stream_result = adapter
-                    .send_streaming(&message.sender, adapter_rx, thread_id)
-                    .await;
-
-                // Collect the buffered text (always succeeds unless the task panicked).
-                if let Ok(text) = buffer_handle.await {
-                    buffered_text = text;
-                }
+                let (stream_result, buffered_text) = tokio::join!(
+                    adapter.send_streaming(&message.sender, adapter_rx, thread_id),
+                    drain_fut
+                );
 
                 // Status is sent after the text channel fully drains, so
                 // awaiting here will not block longer than the stream itself.
@@ -4055,6 +4113,7 @@ async fn download_file_to_blocks(
     filename: &str,
     max_bytes: u64,
     download_dir: &std::path::Path,
+    extra_headers: &[(String, String)],
 ) -> Vec<ContentBlock> {
     // Validate URL scheme
     if let Err(reason) = validate_url_scheme(url) {
@@ -4066,12 +4125,11 @@ async fn download_file_to_blocks(
     }
 
     let client = crate::http_client::new_client();
-    let resp = match client
-        .get(url)
-        .timeout(std::time::Duration::from_secs(60))
-        .send()
-        .await
-    {
+    let mut req = client.get(url).timeout(std::time::Duration::from_secs(60));
+    for (name, value) in extra_headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+    let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             warn!("Failed to download file from channel: {e}");
@@ -4081,6 +4139,26 @@ async fn download_file_to_blocks(
             }];
         }
     };
+
+    // Fail closed on non-2xx. Without this the body of a 4xx/5xx (e.g.
+    // Synapse's `M_NOT_FOUND` JSON, ~45 bytes) streams straight into
+    // `<uuid>.<ext>` and the agent then sees a "PDF" that's actually an
+    // error envelope.
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let preview: String = body.chars().take(200).collect();
+        warn!(
+            status = %status,
+            body_preview = %preview,
+            url = %url,
+            "File download returned non-success status"
+        );
+        return vec![ContentBlock::Text {
+            text: format!("[File download failed: HTTP {status} ({filename})]"),
+            provider_metadata: None,
+        }];
+    }
 
     // Fast-reject via Content-Length header when available.
     if let Some(cl) = resp.content_length() {
@@ -4271,67 +4349,116 @@ async fn download_image_to_blocks(
     caption: Option<&str>,
     mime_type_hint: Option<&str>,
     upload_dir: &std::path::Path,
+    extra_headers: &[(String, String)],
 ) -> Vec<ContentBlock> {
     use base64::Engine;
 
     // 5 MB limit to prevent memory abuse from oversized images
     const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
-    // SSRF guard (#3442) + size cap (5 MiB, in-memory) + Content-Type
-    // capture, all behind one helper. The helper rejects non-http(s)
-    // schemes and any host literally in a private/loopback/metadata
-    // range BEFORE opening a socket — so a forged
-    // `http://169.254.169.254/...` never produces an "image" block in
-    // the agent's LLM context. The size cap enforces both a
-    // Content-Length pre-check and a streaming-accumulator mid-fetch
-    // bound, so a chunked-transfer "lying" length cannot bypass it.
-    let (buf, response_content_type) =
-        match crate::http_client::fetch_url_bytes(url, MAX_IMAGE_BYTES).await {
-            Ok(t) => t,
-            Err(crate::http_client::FetchError::Rejected(reason)) => {
-                warn!("Rejecting image download: {reason}");
-                return vec![ContentBlock::Text {
-                    text: format!("[Image download rejected: {reason}]"),
-                    provider_metadata: None,
-                }];
-            }
-            Err(crate::http_client::FetchError::TooLarge { actual, limit }) => {
-                let reported_kb = actual
-                    .map(|a| a / 1024)
-                    .unwrap_or_else(|| (limit as u64) / 1024);
-                match actual {
-                    Some(len) => warn!(
-                    "Image Content-Length ({len} bytes) exceeds limit, rejecting before download"
+    // SSRF guard (#3442) + size cap (5 MiB) + redirect validation, all
+    // on the safe_fetch_client() which re-runs validate_url_for_fetch on
+    // every redirect hop. When extra_headers are present (MSC3916 Bearer
+    // token for authenticated Matrix media), we validate first then send
+    // a custom request through the same redirect-safe client.
+    if let Err(reason) = crate::http_client::validate_url_for_fetch(url) {
+        warn!("Rejecting image download: {reason}");
+        return vec![ContentBlock::Text {
+            text: format!("[Image download rejected: {reason}]"),
+            provider_metadata: None,
+        }];
+    }
+
+    let client = crate::http_client::safe_fetch_client();
+    let mut req = client.get(url);
+    for (name, value) in extra_headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Failed to download image from channel: {e}");
+            return vec![ContentBlock::Text {
+                text: format!("[Image download failed: {e}]"),
+                provider_metadata: None,
+            }];
+        }
+    };
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let preview: String = body.chars().take(200).collect();
+        warn!(
+            status = %status,
+            body_preview = %preview,
+            url = %url,
+            "Image download returned non-success status"
+        );
+        return vec![ContentBlock::Text {
+            text: format!("[Image download failed: HTTP {status}]"),
+            provider_metadata: None,
+        }];
+    }
+
+    // Early rejection if Content-Length header exceeds limit
+    if let Some(len) = resp.content_length() {
+        if len as usize > MAX_IMAGE_BYTES {
+            warn!("Image Content-Length ({len} bytes) exceeds limit, rejecting before download");
+            let desc = match caption {
+                Some(c) => format!(
+                    "[Image too large for vision ({} KB)]\nCaption: {c}",
+                    len / 1024
                 ),
-                    None => warn!("Image stream exceeded {limit} byte limit, aborting download"),
-                }
-                let desc = match caption {
-                    Some(c) => {
-                        format!("[Image too large for vision ({reported_kb} KB)]\nCaption: {c}")
-                    }
-                    None => format!("[Image too large for vision ({reported_kb} KB)]"),
-                };
-                return vec![ContentBlock::Text {
-                    text: desc,
-                    provider_metadata: None,
-                }];
-            }
-            Err(crate::http_client::FetchError::Failed(reason)) => {
-                warn!("Image download failed: {reason}");
-                return vec![ContentBlock::Text {
-                    text: format!("[Image download failed: {reason}]"),
-                    provider_metadata: None,
-                }];
-            }
-        };
+                None => format!("[Image too large for vision ({} KB)]", len / 1024),
+            };
+            return vec![ContentBlock::Text {
+                text: desc,
+                provider_metadata: None,
+            }];
+        }
+    }
 
     // Detect media type from Content-Type header — but only trust it if it's
     // actually an image/* type. Many APIs (Telegram, S3 pre-signed URLs) return
     // `application/octet-stream` for all files, which breaks vision.
-    let header_type = response_content_type
-        .as_deref()
+    let header_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
         .map(|ct| ct.split(';').next().unwrap_or(ct).trim().to_string())
         .filter(|ct| ct.starts_with("image/"));
+
+    // Stream body with size accumulator to enforce limit even without Content-Length
+    let mut stream = resp.bytes_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to read image bytes: {e}");
+                return vec![ContentBlock::Text {
+                    text: format!("[Image download failed: {e}]"),
+                    provider_metadata: None,
+                }];
+            }
+        };
+        if buf.len().saturating_add(chunk.len()) > MAX_IMAGE_BYTES {
+            warn!("Image stream exceeded {MAX_IMAGE_BYTES} byte limit, aborting download");
+            let desc = match caption {
+                Some(c) => format!(
+                    "[Image too large for vision ({} KB)]\nCaption: {c}",
+                    MAX_IMAGE_BYTES / 1024
+                ),
+                None => format!("[Image too large for vision ({} KB)]", MAX_IMAGE_BYTES / 1024),
+            };
+            return vec![ContentBlock::Text {
+                text: desc,
+                provider_metadata: None,
+            }];
+        }
+        buf.extend_from_slice(&chunk);
+    }
 
     let bytes = bytes::Bytes::from(buf);
 
@@ -7038,9 +7165,14 @@ mod tests {
         #[tokio::test]
         async fn test_file_download_rejects_bad_scheme() {
             let dir = std::env::temp_dir().join("librefang_test_download");
-            let blocks =
-                download_file_to_blocks("ftp://evil.com/malware.exe", "malware.exe", 1024, &dir)
-                    .await;
+            let blocks = download_file_to_blocks(
+                "ftp://evil.com/malware.exe",
+                "malware.exe",
+                1024,
+                &dir,
+                &[],
+            )
+            .await;
             assert_eq!(blocks.len(), 1);
             match &blocks[0] {
                 ContentBlock::Text { text, .. } => {
@@ -7051,6 +7183,73 @@ mod tests {
                 }
                 other => panic!("Expected Text block, got: {other:?}"),
             }
+        }
+    }
+
+    mod tool_marker_extraction {
+        use super::super::extract_tool_marker_name;
+
+        #[test]
+        fn extracts_simple_tool_name() {
+            assert_eq!(
+                extract_tool_marker_name("\n\n🔧 system_time\n\n"),
+                Some("system_time".to_string())
+            );
+        }
+
+        #[test]
+        fn extracts_pretty_tool_name_with_spaces() {
+            // `prettify_tool_name` upstream may render `web_fetch` as
+            // `Web Fetch` — the marker passes through whatever upstream
+            // emits. Trim whitespace but preserve the inner text.
+            assert_eq!(
+                extract_tool_marker_name("\n\n🔧 Web Fetch\n\n"),
+                Some("Web Fetch".to_string())
+            );
+        }
+
+        #[test]
+        fn rejects_plain_text_delta() {
+            assert_eq!(extract_tool_marker_name("Hello world"), None);
+            assert_eq!(extract_tool_marker_name(""), None);
+        }
+
+        #[test]
+        fn rejects_error_marker() {
+            // `\n\n⚠️ tool failed\n\n` is a different signal — it MUST
+            // not be misread as a ToolUse start (would fire ⚙️ on a
+            // tool that just errored).
+            assert_eq!(
+                extract_tool_marker_name("\n\n⚠️ system_time failed\n\n"),
+                None
+            );
+        }
+
+        #[test]
+        fn rejects_marker_inside_prose() {
+            // We rely on the api channel bridge sending each marker as
+            // its own `tx.send(line)` — a `🔧` literal that appears
+            // inside model-authored prose must NOT be treated as a
+            // marker, since we'd extract the wrong "tool name" and
+            // fire a phantom reaction.
+            assert_eq!(
+                extract_tool_marker_name("Sure, I'll use 🔧 to fix it."),
+                None
+            );
+        }
+
+        #[test]
+        fn rejects_marker_missing_suffix() {
+            // The api bridge always emits `\n\n…\n\n`. If the suffix
+            // is missing the delta is malformed; fail closed rather
+            // than guess.
+            assert_eq!(extract_tool_marker_name("\n\n🔧 system_time"), None);
+        }
+
+        #[test]
+        fn rejects_empty_tool_name() {
+            assert_eq!(extract_tool_marker_name("\n\n🔧 \n\n"), None);
+            assert_eq!(extract_tool_marker_name("\n\n🔧    \n\n"), None);
         }
     }
 }

@@ -45,7 +45,7 @@ pub fn new_client() -> reqwest::Client {
 /// `OnceLock`-backed so the redirect policy and bundled TLS roots are
 /// initialised once per process; multiple concurrent media fetches
 /// share the connection pool.
-fn safe_fetch_client() -> &'static reqwest::Client {
+pub(crate) fn safe_fetch_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         client_builder()
@@ -235,6 +235,10 @@ fn is_private_hostname(host: &str) -> bool {
 /// * a size-cap hit (so the caller can phrase its own "too large"
 ///   message and surface the real or the limit byte count), and
 /// * any other failure (transport, non-2xx status, mid-stream read).
+///
+/// Used by channel modules behind `channel-*` feature flags; the `#[allow]`
+/// keeps it available without forcing a `cfg(any(...))` here.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum FetchError {
     /// `validate_url_for_fetch` refused the URL before any I/O.
@@ -298,6 +302,10 @@ impl std::error::Error for FetchError {}
 /// **DNS rebinding is out of scope** — same as `validate_url_for_fetch`.
 /// Mitigate at the network layer or with a resolving SSRF proxy if the
 /// threat model requires it.
+///
+/// Used by channel modules behind `channel-*` feature flags; the `#[allow]`
+/// keeps it available without forcing a `cfg(any(...))` here.
+#[allow(dead_code)]
 pub async fn fetch_url_bytes(
     url: &str,
     max_bytes: usize,
@@ -313,7 +321,7 @@ pub async fn fetch_url_bytes(
 /// `127.0.0.1`, refused by `validate_url_for_fetch`). Production paths
 /// MUST go through [`fetch_url_bytes`].
 #[allow(dead_code)]
-async fn fetch_url_bytes_unchecked(
+pub(crate) async fn fetch_url_bytes_unchecked(
     client: &reqwest::Client,
     url: &str,
     max_bytes: usize,

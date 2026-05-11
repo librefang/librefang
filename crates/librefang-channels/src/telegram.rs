@@ -5,6 +5,7 @@
 
 use crate::bridge::SENDER_USER_ID_KEY;
 use crate::formatter;
+use crate::http_client::{fetch_url_bytes_unchecked, safe_fetch_client};
 use crate::message_truncator::{split_to_utf16_chunks, TELEGRAM_MESSAGE_LIMIT};
 use crate::types::{
     truncate_utf8, ChannelAdapter, ChannelContent, ChannelMessage, ChannelRoleQuery, ChannelType,
@@ -93,31 +94,6 @@ fn url_filename(url_str: &str, fallback: &str) -> String {
                 .filter(|s| !s.is_empty())
         })
         .unwrap_or_else(|| fallback.to_string())
-}
-
-/// Fetch bytes from an internal-network URL for re-upload via multipart.
-/// Returns the body plus the `Content-Type` header (falling back to
-/// `application/octet-stream` when the origin doesn't announce one).
-async fn fetch_url_bytes(
-    client: &reqwest::Client,
-    url_str: &str,
-) -> Result<(Vec<u8>, String), Box<dyn std::error::Error + Send + Sync>> {
-    let resp = client.get(url_str).send().await?;
-    if !resp.status().is_success() {
-        return Err(format!(
-            "Failed to fetch {url_str} for multipart fallback: HTTP {}",
-            resp.status()
-        )
-        .into());
-    }
-    let mime = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
-    let bytes = resp.bytes().await?.to_vec();
-    Ok((bytes, mime))
 }
 
 /// A Telegram bot command definition for the command menu.
@@ -568,7 +544,10 @@ impl TelegramAdapter {
                 url = document_url,
                 "Private URL detected on sendDocument, falling back to multipart upload"
             );
-            let (bytes, mime) = fetch_url_bytes(&self.client, document_url).await?;
+            let (bytes, ct) =
+                fetch_url_bytes_unchecked(safe_fetch_client(), document_url, 50 * 1024 * 1024)
+                    .await?;
+            let mime = ct.unwrap_or_else(|| "application/octet-stream".to_string());
             return self
                 .api_send_media_upload(
                     "sendDocument",
@@ -712,7 +691,9 @@ impl TelegramAdapter {
                 url = voice_url,
                 "Private URL detected on sendVoice, falling back to multipart upload"
             );
-            let (bytes, mime) = fetch_url_bytes(&self.client, voice_url).await?;
+            let (bytes, ct) =
+                fetch_url_bytes_unchecked(safe_fetch_client(), voice_url, 50 * 1024 * 1024).await?;
+            let mime = ct.unwrap_or_else(|| "audio/ogg".to_string());
             let filename = url_filename(voice_url, "voice.ogg");
             let mut extra: Vec<(&str, String)> = Vec::new();
             if let Some(cap) = caption {
@@ -759,7 +740,9 @@ impl TelegramAdapter {
                 url = audio_url,
                 "Private URL detected on sendAudio, falling back to multipart upload"
             );
-            let (bytes, mime) = fetch_url_bytes(&self.client, audio_url).await?;
+            let (bytes, ct) =
+                fetch_url_bytes_unchecked(safe_fetch_client(), audio_url, 50 * 1024 * 1024).await?;
+            let mime = ct.unwrap_or_else(|| "audio/mpeg".to_string());
             let filename = url_filename(audio_url, "audio.mp3");
             let mut extra: Vec<(&str, String)> = Vec::new();
             if let Some(cap) = caption {
