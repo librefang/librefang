@@ -31,7 +31,7 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
             .structured_set(agent_id, &scoped, value)
             .map_err(|e| KernelOpError::Internal(format!("Memory store failed: {e}")))?;
 
-        tracing::debug!(
+        tracing::info!(
             key = %scoped,
             peer_id = ?peer_id,
             "memory_store: wrote key to shared KV namespace"
