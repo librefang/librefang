@@ -26,14 +26,26 @@ const MIN_WIDTH: Record<DrawerSize, string> = {
   "5xl": "lg:min-w-[1280px]",
 };
 
+// Mirrors the `--breakpoint-lg: 1000px` override in index.css (#4873) so
+// JS- and CSS-driven layout decisions never disagree at the iPad portrait
+// boundary. Kept in px (not rem) deliberately: `window.matchMedia` does
+// not scale with the root font-size, so a px-vs-rem mix between CSS
+// (`lg:` variant) and JS (this hook) would diverge under iOS text-zoom.
+// If you change one, change the other.
+const MOBILE_QUERY = "(max-width: 999px)";
+
+function readIsMobile(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+  return window.matchMedia(MOBILE_QUERY).matches;
+}
+
 function useIsMobile() {
-  const [isMobile, setIsMobile] = useState(false);
+  // Lazy-init from matchMedia at first render so we don't flash a desktop
+  // focus-trap target on a phone for one frame before the effect runs.
+  const [isMobile, setIsMobile] = useState(readIsMobile);
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return;
-    // Mirrors the `--breakpoint-lg: 1000px` override in index.css (#4873)
-    // so JS- and CSS-driven layout decisions never disagree at the iPad
-    // portrait boundary. If you change one, change the other.
-    const mql = window.matchMedia("(max-width: 999px)");
+    const mql = window.matchMedia(MOBILE_QUERY);
     setIsMobile(mql.matches);
     const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
     mql.addEventListener("change", handler);
