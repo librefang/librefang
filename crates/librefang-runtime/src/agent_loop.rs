@@ -383,23 +383,10 @@ fn is_progress_text_leak(text: &str) -> bool {
     t.ends_with("...") || t.ends_with("…")
 }
 
-/// Channel-envelope prefixes the gateway prepends to inbound text.
-/// Single source of truth for both `sanitize_for_memory` (strip on persist)
-/// and `is_cascade_leak`'s structural-marker set (drop on output). A unit
-/// test pins the invariant so the two sides cannot drift.
-const ENVELOPE_LINE_PREFIXES: &[&str] = &[
-    "[Group message from ",
-    // Covers both "[In risposta a: ...]" and the no-space variant some
-    // JS template literals emit.
-    "[In risposta a:",
-    "[Replying to:",
-    "[Stranger from ",
-];
-
-/// Standalone envelope markers that occupy their own line. Matched as
-/// exact-line equality after trim so `"[User] follow-up question"` keeps
-/// the body.
-const ENVELOPE_STANDALONE_MARKERS: &[&str] = &["[Stranger]", "[Forwarded]", "[User]"];
+// Canonical envelope prefix/marker arrays live in `silent_response` so both
+// the drop-on-output guard (`is_cascade_leak`) and the strip-on-persist path
+// here share a single source of truth.
+use crate::silent_response::{ENVELOPE_LINE_PREFIXES, ENVELOPE_STANDALONE_MARKERS};
 
 /// Strip channel-envelope prefixes from a user-message or agent-response
 /// string before persisting it as long-term episodic memory.
@@ -454,56 +441,11 @@ fn sanitize_for_memory(text: &str) -> Option<String> {
     }
 }
 
-/// Detect a cascade scaffolding leak: an agent response that contains
-/// scaffolding markers in a configuration real replies almost never
-/// produce. Observed in a real WhatsApp group incident where an agent
-/// dumped `User asked: …\nI responded: …\n[Group message from …]` into
-/// chat in response to an emoji-only inbound.
-///
-/// Markers split into two classes:
-/// - **Structural** — turn frames (`User asked:`, `I responded:`,
-///   `[Past exchange]`) and channel-envelope prefixes shared via
-///   `ENVELOPE_LINE_PREFIXES`. Exotic; real replies almost never contain one.
-/// - **Thematic** — prompt section headers (`## Sender`, `## Today`,
-///   `## Calendar`, `## Tasks`, `## Response Style`). Common markdown;
-///   legitimate help replies routinely use them.
-///
-/// Trip condition: **2+ structural** OR **1 structural + 1 thematic**.
-/// `2+ thematic alone` is intentionally NOT a leak (pinned by the
-/// `thematic_headers_alone_are_legitimate` regression test).
+/// Thin delegate to the canonical cascade-leak detector in `silent_response`.
+/// See `crates/librefang-runtime/src/silent_response.rs` for full docs,
+/// marker lists, and trip-condition rationale.
 fn is_cascade_leak(text: &str) -> bool {
-    const STRUCTURAL_TURN_FRAMES: &[&str] = &["User asked:", "I responded:", "[Past exchange]"];
-    const THEMATIC_HEADERS: &[&str] = &[
-        "## Sender",
-        "## Today",
-        "## Calendar",
-        "## Tasks",
-        "## Response Style",
-    ];
-
-    let mut structural_hits = 0u8;
-
-    // Pass 1: structural markers (turn frames + envelope prefixes +
-    // envelope standalones). Early-exit at 2+ structural.
-    for m in STRUCTURAL_TURN_FRAMES
-        .iter()
-        .chain(ENVELOPE_LINE_PREFIXES.iter())
-        .chain(ENVELOPE_STANDALONE_MARKERS.iter())
-    {
-        if text.contains(m) {
-            structural_hits += 1;
-            if structural_hits >= 2 {
-                return true;
-            }
-        }
-    }
-
-    // Pass 2: thematic markers only matter when paired with a structural
-    // hit — skip the scan entirely when structural is zero.
-    if structural_hits == 0 {
-        return false;
-    }
-    THEMATIC_HEADERS.iter().any(|m| text.contains(m))
+    crate::silent_response::is_cascade_leak(text)
 }
 
 /// Returns true if this tool-error content is a "soft" error — one the LLM is
@@ -5007,13 +4949,33 @@ async fn call_with_retry(
 /// Call an LLM driver in streaming mode with automatic retry on rate-limit and overload errors.
 ///
 /// Uses the `llm_errors` classifier and `ProviderCooldown` circuit breaker.
+/// Result of a `stream_with_retry` call.
+struct StreamWithRetryResult {
+    response: crate::llm_driver::CompletionResponse,
+    /// True when the incremental cascade-leak guard fired mid-stream:
+    /// TextDelta forwarding was stopped early and the partial response
+    /// must be treated as a silent drop (system-prompt regurgitation).
+    cascade_leak_aborted: bool,
+}
+
+/// Stream an LLM completion with retry logic and an incremental cascade-leak
+/// guard.
+///
+/// A proxy channel sits between the driver's raw `TextDelta` events and the
+/// outer `tx`. Each delta is appended to an in-memory accumulator and
+/// `is_cascade_leak` is run against it. On the first hit:
+/// - Forwarding of further `TextDelta` events stops immediately (no more
+///   tokens reach the wire).
+/// - All other event types (`ToolUseStart`, `ContentComplete`, …) are still
+///   forwarded so the driver loop terminates cleanly.
+/// - `cascade_leak_aborted = true` is returned to the caller.
 async fn stream_with_retry(
     driver: &dyn LlmDriver,
     request: CompletionRequest,
     tx: mpsc::Sender<StreamEvent>,
     provider: Option<&str>,
     cooldown: Option<&ProviderCooldown>,
-) -> LibreFangResult<crate::llm_driver::CompletionResponse> {
+) -> LibreFangResult<StreamWithRetryResult> {
     check_retry_cooldown(
         provider,
         cooldown,
@@ -5029,12 +4991,56 @@ async fn stream_with_retry(
             .acquire()
             .await
             .expect("LLM_CONCURRENCY semaphore closed");
-        match driver.stream(request.clone(), tx.clone()).await {
+
+        // Proxy channel: driver writes to `proxy_tx`; we forward events to
+        // `tx` with incremental cascade-leak scanning on TextDelta.
+        let (proxy_tx, mut proxy_rx) = mpsc::channel::<StreamEvent>(64);
+        let outer_tx = tx.clone();
+
+        // Spawn a forwarding task that accumulates text and checks for leaks.
+        let forward_task = tokio::spawn(async move {
+            let mut accumulated = String::new();
+            let mut leak_fired = false;
+            while let Some(event) = proxy_rx.recv().await {
+                match &event {
+                    StreamEvent::TextDelta { text } if !leak_fired => {
+                        accumulated.push_str(text);
+                        if crate::silent_response::is_cascade_leak(&accumulated) {
+                            leak_fired = true;
+                            // Stop forwarding TextDelta — do not send this
+                            // token to the wire. Other event types continue.
+                            continue;
+                        }
+                        // Forward the delta; ignore send errors (client gone).
+                        let _ = outer_tx
+                            .send(StreamEvent::TextDelta { text: text.clone() })
+                            .await;
+                    }
+                    StreamEvent::TextDelta { .. } => {
+                        // leak_fired: swallow remaining text tokens silently.
+                    }
+                    other => {
+                        let _ = outer_tx.send(other.clone()).await;
+                    }
+                }
+            }
+            leak_fired
+        });
+
+        match driver.stream(request.clone(), proxy_tx).await {
             Ok(response) => {
                 record_retry_success(provider, cooldown);
-                return Ok(response);
+                let cascade_leak_aborted = forward_task.await.unwrap_or(false);
+                return Ok(StreamWithRetryResult {
+                    response,
+                    cascade_leak_aborted,
+                });
             }
             Err(LlmError::RateLimited { retry_after_ms, .. }) => {
+                // proxy_tx is dropped (driver returned Err), forward_task
+                // will drain and finish. Await before the next retry
+                // iteration to avoid task accumulation.
+                let _ = forward_task.await;
                 last_error = Some(
                     handle_retryable_llm_error(
                         attempt,
@@ -5049,6 +5055,7 @@ async fn stream_with_retry(
                 );
             }
             Err(LlmError::Overloaded { retry_after_ms }) => {
+                let _ = forward_task.await;
                 last_error = Some(
                     handle_retryable_llm_error(
                         attempt,
@@ -5078,6 +5085,8 @@ async fn stream_with_retry(
                 // classification, log lines, error stringification through
                 // `LibreFangError::LlmDriver(e.to_string())`) only ever read
                 // `partial_text_len` and pay nothing for the body.
+                // forward_task has finished (proxy_tx was dropped by driver).
+                let _ = forward_task.await;
                 if let Some(body) = partial_text.as_deref() {
                     if !body.is_empty() {
                         let _ = tx
@@ -5102,6 +5111,7 @@ async fn stream_with_retry(
                         error = %err_str,
                         "LLM stream died with transient error, retrying"
                     );
+                    let _ = forward_task.await;
                     last_error = Some("Transient stream error".to_string());
                     tokio::time::sleep(Duration::from_millis(
                         BASE_RETRY_DELAY_MS * 2u64.pow(attempt),
@@ -5109,6 +5119,7 @@ async fn stream_with_retry(
                     .await;
                     continue;
                 }
+                let _ = forward_task.await;
                 let (is_billing, err) =
                     build_user_facing_llm_error(&e, "LLM stream error classified");
                 record_retry_failure(provider, cooldown, is_billing);
@@ -5742,7 +5753,7 @@ pub async fn run_agent_loop_streaming(
 
         // Stream LLM call with retry, error classification, and circuit breaker
         let provider_name = manifest.model.provider.as_str();
-        let mut response = match stream_with_retry(
+        let stream_result = match stream_with_retry(
             &*driver,
             request,
             stream_tx.clone(),
@@ -5751,7 +5762,7 @@ pub async fn run_agent_loop_streaming(
         )
         .await
         {
-            Ok(resp) => resp,
+            Ok(r) => r,
             Err(e) => {
                 let err_str = e.to_string();
                 if err_str.contains("timed out") {
@@ -5785,6 +5796,39 @@ pub async fn run_agent_loop_streaming(
                 return Err(e);
             }
         };
+
+        // Incremental cascade-leak guard fired mid-stream: the forward task
+        // already stopped emitting TextDelta. Treat the turn as a silent
+        // drop — do not deliver any response text to the user, do not
+        // persist the partial reply, and prune it from session history.
+        if stream_result.cascade_leak_aborted {
+            warn!(
+                event = "system_prompt_regurgitated",
+                agent = %manifest.name,
+                source = "agent_loop.streaming.incremental",
+                "Incremental cascade-leak guard fired mid-stream — aborting, delivering generic replacement"
+            );
+            session
+                .messages
+                .push(Message::assistant("[no reply needed]".to_string()));
+            if !opts.is_fork && !opts.incognito {
+                memory
+                    .save_session_async(session)
+                    .await
+                    .map_err(LibreFangError::memory)?;
+            }
+            return Ok(build_silent_agent_loop_result(
+                total_usage,
+                iteration + 1,
+                Default::default(),
+                decision_traces,
+                memories_used.clone(),
+                experiment_context.clone(),
+                new_messages_start,
+            ));
+        }
+
+        let mut response = stream_result.response;
 
         accumulate_token_usage(&mut total_usage, &response.usage);
 
