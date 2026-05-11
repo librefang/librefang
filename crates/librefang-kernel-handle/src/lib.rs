@@ -850,6 +850,30 @@ pub trait PromptStore: Send + Sync {
 // 12. WorkflowRunner — declarative workflow execution
 // ============================================================================
 
+/// Summary of a registered workflow definition, used by `workflow_list`.
+#[derive(Debug, Clone)]
+pub struct WorkflowSummary {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub step_count: usize,
+}
+
+/// Summary of a workflow run instance, used by `workflow_status`.
+#[derive(Debug, Clone)]
+pub struct WorkflowRunSummary {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub state: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub output: Option<String>,
+    pub error: Option<String>,
+    pub step_count: usize,
+    pub last_step_name: Option<String>,
+}
+
 #[async_trait]
 pub trait WorkflowRunner: Send + Sync {
     /// Run a workflow by ID or name. The `workflow_id` can be a UUID string or a
@@ -862,6 +886,18 @@ pub trait WorkflowRunner: Send + Sync {
     ) -> Result<(String, String), KernelOpError> {
         let _ = (workflow_id, input);
         Err(KernelOpError::unavailable("Workflow engine"))
+    }
+
+    /// List all registered workflow definitions, sorted by name for determinism.
+    async fn list_workflows(&self) -> Vec<WorkflowSummary> {
+        Vec::new()
+    }
+
+    /// Get the status of a workflow run by its UUID string.
+    /// Returns `None` if the run ID is not found (including UUID parse failure).
+    async fn get_workflow_run(&self, run_id: &str) -> Option<WorkflowRunSummary> {
+        let _ = run_id;
+        None
     }
 }
 
@@ -1361,7 +1397,7 @@ pub mod prelude {
         ApiUserConfigSnapshot, ApprovalGate, CatalogQuery, ChannelSender, CronControl,
         DashboardRawConfig, EventBus, GoalControl, HandsControl, KernelHandle, KnowledgeGraph,
         MemoryAccess, PromptStore, SessionWriter, TaskQueue, ToolPolicy, WikiAccess,
-        WorkflowRunner,
+        WorkflowRunSummary, WorkflowRunner, WorkflowSummary,
     };
 }
 
