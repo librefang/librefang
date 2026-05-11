@@ -3311,6 +3311,15 @@ async fn finalize_successful_end_turn(
 /// runs from scratch every turn — see `history_fold.rs` module doc.
 /// `streaming` flips the log target so operators can grep `"streaming"`
 /// vs `"non-streaming"` in production.
+///
+/// **Ordering note** — when soft-compression later in this same loop
+/// iteration fires `session.set_messages(messages.clone())`, it writes
+/// the (already-folded) working copy back over `session.messages`, so
+/// the explicit replay above is redundant on that path.  The replay is
+/// load-bearing only on the no-compression path; keeping it on both
+/// paths keeps session-mutation semantics uniform and removes a foot-gun
+/// for future refactors that move the fold call out from under the
+/// compression step.
 // Eight args because every parameter is genuinely distinct (working
 // messages, durable session, knobs, model, aux+primary driver chain,
 // streaming flag, reasoning policy) and bundling them into a context
@@ -9876,6 +9885,161 @@ mod tests {
                 .map(|m| format!("{:?}: {:?}", m.role, m.content))
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// Axis-2 wiring regression for #4866: `maybe_fold_stale_tool_results`
+    /// must replay the fold rewrites onto `session.messages` (not just the
+    /// working clone) AND advance `messages_generation` via
+    /// `mark_messages_mutated()` so `save_session_async` persists the
+    /// rewrite.  A future refactor in this wrapper could silently drop
+    /// either of those steps; the unit tests inside `history_fold` cover
+    /// the function in isolation and would not catch that.
+    #[tokio::test]
+    async fn maybe_fold_stale_tool_results_persists_rewrites_to_session_messages() {
+        use crate::history_fold::FoldConfig;
+        use librefang_types::tool::ToolExecutionStatus;
+
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+        };
+        // 10 turns of (assistant, tool_result) — under fold_after=2 every
+        // tool_result older than the last two assistant turns is stale.
+        session
+            .messages
+            .push(librefang_types::message::Message::user("start"));
+        for i in 0..10 {
+            session
+                .messages
+                .push(librefang_types::message::Message::assistant(format!(
+                    "asst {i}"
+                )));
+            session.messages.push(librefang_types::message::Message {
+                role: librefang_types::message::Role::User,
+                content: librefang_types::message::MessageContent::Blocks(vec![
+                    librefang_types::message::ContentBlock::ToolResult {
+                        tool_use_id: format!("tid_{i}"),
+                        tool_name: "shell".to_string(),
+                        content: format!("output {i}"),
+                        is_error: false,
+                        status: ToolExecutionStatus::Completed,
+                        approval_request_id: None,
+                    },
+                ]),
+                pinned: false,
+                timestamp: None,
+            });
+        }
+        let pre_generation = session.messages_generation;
+        let working = session.messages.clone();
+
+        // Aux driver returns plain prose — fold falls back to bulk
+        // summary across every block.  The persistence wiring is what
+        // we are testing, NOT the JSON path; using the prose driver
+        // makes the assertion shape independent of JSON formatting.
+        let aux_driver: Arc<dyn LlmDriver> = Arc::new(FoldSummaryDriver);
+        let aux_client = crate::aux_client::AuxClient::with_primary_only(Arc::clone(&aux_driver));
+
+        let folded = maybe_fold_stale_tool_results(
+            working,
+            &mut session,
+            FoldConfig {
+                fold_after_turns: 2,
+                min_batch_size: 1,
+            },
+            "test-model",
+            Some(&aux_client),
+            aux_driver,
+            false,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        // (1) The working clone must carry the stubs (sanity).
+        let working_stubs = folded
+            .iter()
+            .filter(|m| match &m.content {
+                librefang_types::message::MessageContent::Blocks(blocks) => {
+                    blocks.iter().any(|b| {
+                        matches!(
+                            b,
+                            librefang_types::message::ContentBlock::ToolResult { content, .. }
+                                if content.starts_with("[history-fold]")
+                        )
+                    })
+                }
+                _ => false,
+            })
+            .count();
+        assert!(working_stubs >= 8, "expected working copy to be folded");
+
+        // (2) `session.messages` must ALSO carry the stubs — without
+        // this, every subsequent turn refolds from scratch (the bug).
+        let durable_stubs = session
+            .messages
+            .iter()
+            .filter(|m| match &m.content {
+                librefang_types::message::MessageContent::Blocks(blocks) => {
+                    blocks.iter().any(|b| {
+                        matches!(
+                            b,
+                            librefang_types::message::ContentBlock::ToolResult { content, .. }
+                                if content.starts_with("[history-fold]")
+                        )
+                    })
+                }
+                _ => false,
+            })
+            .count();
+        assert!(
+            durable_stubs >= 8,
+            "fold must replay rewrites onto session.messages — without this the \
+             durable record stays raw and every subsequent turn refolds from scratch \
+             (issue #4866 axis 2). durable_stubs={durable_stubs}"
+        );
+
+        // (3) `messages_generation` must have advanced — without this
+        // `save_session_async` would NOT detect the mutation and the
+        // rewrite would be lost across save / reload.
+        assert!(
+            session.messages_generation > pre_generation,
+            "mark_messages_mutated must fire when fold rewrites are replayed; \
+             pre={pre_generation} post={post}",
+            post = session.messages_generation,
+        );
+
+        // (4) Every original `tool_use_id` must still be present in
+        // `session.messages` — pairing invariant.
+        let durable_ids: std::collections::BTreeSet<String> = session
+            .messages
+            .iter()
+            .flat_map(|m| match &m.content {
+                librefang_types::message::MessageContent::Blocks(blocks) => blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        librefang_types::message::ContentBlock::ToolResult {
+                            tool_use_id, ..
+                        } => Some(tool_use_id.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+        for i in 0..10 {
+            let expected = format!("tid_{i}");
+            assert!(
+                durable_ids.contains(&expected),
+                "fold must preserve every original tool_use_id in session.messages, \
+                 missing {expected}"
+            );
+        }
     }
 
     #[tokio::test]

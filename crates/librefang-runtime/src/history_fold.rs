@@ -220,6 +220,27 @@ pub async fn fold_stale_tool_results(
                 count = stale_count,
                 "history_fold: summarised tool-result(s) in 1 batched call"
             );
+            // Surface model-returned ids that do not match any stale
+            // tool_use_id.  Common failure modes: trailing whitespace,
+            // double-quoting (`"\"tid_3\""`), Unicode-normalised dash
+            // variants.  Without this warn the affected blocks silently
+            // fall back to `FALLBACK_SUMMARY` and operators have no way
+            // to spot the drift.
+            let stale_id_set: std::collections::BTreeSet<&str> = stale_blocks
+                .iter()
+                .map(|b| b.tool_use_id.as_str())
+                .collect();
+            let unmatched: Vec<&str> = map
+                .keys()
+                .map(String::as_str)
+                .filter(|id| !stale_id_set.contains(id))
+                .collect();
+            if !unmatched.is_empty() {
+                warn!(
+                    unmatched_ids = ?unmatched,
+                    "history_fold: model returned ids that did not match any stale tool_use_id — those blocks fall back to the static stub"
+                );
+            }
             (map, None)
         }
         Err(BatchSummariseFailure::Parse { raw, error }) => {
@@ -480,7 +501,13 @@ async fn summarise_batch(
     // Headroom for N short summaries plus the JSON wrapping.  256 was the
     // pre-#4866 per-group cap; with N blocks per call we need linear
     // headroom — 64 tokens per block is generous for 1-2 sentence outputs.
-    let max_tokens = std::cmp::max(256_usize, 64usize.saturating_mul(blocks.len())) as u32;
+    // Cap at 8192 because several providers (Groq Llama-3.1, Cerebras,
+    // older Anthropic SKUs) reject `max_tokens` above that with a 400 —
+    // and 1-2 sentences × ~125 blocks already saturates ~8k completion
+    // tokens, beyond which the per-block summary stops fitting anyway.
+    const MAX_FOLD_OUTPUT_TOKENS: usize = 8_192;
+    let max_tokens = std::cmp::max(256_usize, 64usize.saturating_mul(blocks.len()))
+        .min(MAX_FOLD_OUTPUT_TOKENS) as u32;
 
     let request = CompletionRequest {
         model: model.to_string(),
@@ -537,10 +564,21 @@ async fn summarise_batch(
 /// fenced output even when told not to.
 fn parse_labeled_summaries(text: &str) -> Result<BTreeMap<String, String>, String> {
     let body = strip_code_fence(text.trim()).unwrap_or_else(|| text.trim().to_string());
-    let parsed: Vec<serde_json::Value> =
+    let value: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| format!("JSON parse failed: {e}"))?;
+    // Accept both the documented JSON-array shape AND a bare single
+    // object — providers routinely emit `{...}` instead of `[{...}]`
+    // when only one stale block was supplied (after #4866 persistence
+    // most fold passes are exactly that case).  Lifting the object into
+    // a one-element vec preserves per-id granularity instead of
+    // degrading to bulk-summary on every size-1 pass.
+    let entries: Vec<serde_json::Value> = match value {
+        serde_json::Value::Array(arr) => arr,
+        serde_json::Value::Object(_) => vec![value],
+        _ => return Err("expected JSON array or object".into()),
+    };
     let mut out: BTreeMap<String, String> = BTreeMap::new();
-    for entry in parsed {
+    for entry in entries {
         if let (Some(id), Some(summary)) = (
             entry.get("id").and_then(|x| x.as_str()),
             entry.get("summary").and_then(|x| x.as_str()),
@@ -1147,6 +1185,52 @@ mod tests {
             Some("[history-fold] fenced ok"),
             "fenced JSON response should parse identically to bare JSON"
         );
+    }
+
+    /// Single-object JSON response (no surrounding `[]`) must still
+    /// produce a per-id summary.  Providers commonly emit a bare object
+    /// when only one stale block was supplied — which is the common
+    /// case after the #4866 persistence fix, since each subsequent fold
+    /// pass tends to carry exactly one newly-stale block.
+    #[tokio::test]
+    async fn json_response_single_object_is_lifted_to_one_element() {
+        let messages = build_history(5);
+        let single = r#"{"id":"tid_0","summary":"single-object reply"}"#;
+        let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver(single.to_string()));
+        let (out, result) = fold_stale_tool_results(
+            messages,
+            FoldConfig {
+                fold_after_turns: 2,
+                min_batch_size: 1,
+            },
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+        assert_eq!(
+            result.groups_used_fallback, 0,
+            "single-object happy path must NOT fall back to the static stub"
+        );
+        let tid_0_content = out.iter().find_map(|m| match &m.content {
+            MessageContent::Blocks(blocks) => blocks.iter().find_map(|b| match b {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } if tool_use_id == "tid_0" => Some(content.clone()),
+                _ => None,
+            }),
+            _ => None,
+        });
+        assert_eq!(
+            tid_0_content.as_deref(),
+            Some("[history-fold] single-object reply"),
+            "bare-object JSON response must be lifted into a single-element array \
+             so per-id granularity is preserved on size-1 fold passes"
+        );
+        assert!(result.rewrites.contains_key("tid_0"));
     }
 
     /// Non-JSON response should NOT crash the fold — degrade to Option-1
