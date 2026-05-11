@@ -539,6 +539,14 @@ pub struct ResourceQuota {
     /// - `Some(n)` = limit to `n` tokens per hour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_llm_tokens_per_hour: Option<u64>,
+    /// Fraction of the hourly token budget allowed in any single minute.
+    ///
+    /// - `None` = not configured (uses compiled default `0.2`, i.e. 1/5 of hourly budget).
+    /// - `Some(r)` = allow `r × max_llm_tokens_per_hour` tokens per minute.
+    ///
+    /// Clamped to `0.01..=1.0` at enforcement time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst_ratio: Option<f32>,
     /// Maximum network bytes per hour.
     pub max_network_bytes_per_hour: u64,
     /// Maximum cost in USD per hour.
@@ -547,10 +555,6 @@ pub struct ResourceQuota {
     pub max_cost_per_day_usd: f64,
     /// Maximum cost in USD per month (0.0 = unlimited).
     pub max_cost_per_month_usd: f64,
-    /// Per-agent burst ratio override. `None` = inherit global
-    /// `default_burst_ratio` (or compiled default 0.2).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub burst_ratio: Option<f32>,
 }
 
 impl Default for ResourceQuota {
@@ -560,11 +564,11 @@ impl Default for ResourceQuota {
             max_cpu_time_ms: 30_000,             // 30 seconds
             max_tool_calls_per_minute: 60,
             max_llm_tokens_per_hour: None, // inherit global default
+            burst_ratio: None,             // inherit compiled default (0.2 = 1/5)
             max_network_bytes_per_hour: 100 * 1024 * 1024, // 100 MB
             max_cost_per_hour_usd: 0.0,    // unlimited by default
             max_cost_per_day_usd: 0.0,     // unlimited
             max_cost_per_month_usd: 0.0,   // unlimited
-            burst_ratio: None,
         }
     }
 }

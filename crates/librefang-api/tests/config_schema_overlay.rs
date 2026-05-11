@@ -253,6 +253,7 @@ fn every_kernel_config_struct_field_is_exposed_via_overlay() {
         "max_agent_call_depth",
         "max_request_body_bytes",
         "workflow_stale_timeout_minutes",
+        "workflow_default_total_timeout_secs",
         "local_probe_interval_secs",
     ];
 

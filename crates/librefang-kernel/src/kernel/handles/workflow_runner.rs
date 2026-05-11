@@ -93,4 +93,114 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             last_step_name: run.step_results.last().map(|r| r.step_name.clone()),
         })
     }
+
+    async fn start_workflow_async(
+        &self,
+        workflow_id: &str,
+        input: &str,
+    ) -> Result<String, kernel_handle::KernelOpError> {
+        use crate::workflow::WorkflowId;
+        use kernel_handle::KernelOpError;
+
+        // Resolve workflow_id (UUID or name) — same logic as run_workflow.
+        let wf_id = if let Ok(uuid) = uuid::Uuid::parse_str(workflow_id) {
+            WorkflowId(uuid)
+        } else {
+            let name_lower = workflow_id.to_lowercase();
+            let workflows = self.workflows.engine.list_workflows().await;
+            workflows
+                .iter()
+                .find(|w| w.name.to_lowercase() == name_lower)
+                .map(|w| w.id)
+                .ok_or_else(|| {
+                    KernelOpError::Internal(format!("workflow `{}` not found", workflow_id))
+                })?
+        };
+
+        let run_id = self
+            .workflows
+            .engine
+            .create_run(wf_id, input.to_string())
+            .await
+            .ok_or_else(|| KernelOpError::Internal("Workflow not found".to_string()))?;
+
+        // Spawn execution in the background via self_handle (same pattern as
+        // trigger dispatch — upgrade the stored Weak<LibreFangKernel> so the
+        // spawned task can call send_message through the full kernel).
+        let kernel_arc = self
+            .self_handle
+            .get()
+            .and_then(|w| w.upgrade())
+            .ok_or_else(|| {
+                KernelOpError::Internal(
+                    "kernel not yet initialised for async workflow spawn".to_string(),
+                )
+            })?;
+
+        tokio::spawn(async move {
+            // Both closures must be `Fn` (not `FnOnce`), so we clone the Arc
+            // on each invocation rather than moving it into the closure body.
+            let k1 = std::sync::Arc::clone(&kernel_arc);
+            let k2 = std::sync::Arc::clone(&kernel_arc);
+            let resolver = move |agent_ref: &crate::workflow::StepAgent| {
+                use librefang_types::agent::AgentId;
+                match agent_ref {
+                    crate::workflow::StepAgent::ById { id } => {
+                        let agent_id: AgentId = id.parse().ok()?;
+                        let entry = k1.agents.registry.get(agent_id)?;
+                        let inherit = entry.manifest.inherit_parent_context;
+                        Some((agent_id, entry.name.clone(), inherit))
+                    }
+                    crate::workflow::StepAgent::ByName { name } => {
+                        let entry = k1.agents.registry.find_by_name(name)?;
+                        let inherit = entry.manifest.inherit_parent_context;
+                        Some((entry.id, entry.name.clone(), inherit))
+                    }
+                }
+            };
+            let send_message = move |agent_id: librefang_types::agent::AgentId, message: String| {
+                let k = std::sync::Arc::clone(&k2);
+                async move {
+                    k.send_message(agent_id, &message)
+                        .await
+                        .map(|r| {
+                            (
+                                r.response,
+                                r.total_usage.input_tokens,
+                                r.total_usage.output_tokens,
+                            )
+                        })
+                        .map_err(|e| format!("{e}"))
+                }
+            };
+            let _ = kernel_arc
+                .workflows
+                .engine
+                .execute_run(run_id, resolver, send_message)
+                .await;
+        });
+
+        Ok(run_id.0.to_string())
+    }
+
+    async fn cancel_workflow_run(&self, run_id: &str) -> Result<(), kernel_handle::KernelOpError> {
+        use crate::workflow::{CancelRunError, WorkflowRunId};
+        use kernel_handle::KernelOpError;
+
+        let uuid = uuid::Uuid::parse_str(run_id)
+            .map_err(|_| KernelOpError::Internal(format!("Invalid run_id UUID: {run_id}")))?;
+
+        self.workflows
+            .engine
+            .cancel_run(WorkflowRunId(uuid))
+            .await
+            .map_err(|e| match e {
+                CancelRunError::NotFound(_) => {
+                    KernelOpError::Internal(format!("workflow run not found: {run_id}"))
+                }
+                CancelRunError::AlreadyTerminal { state, .. } => {
+                    KernelOpError::Internal(format!("cannot cancel: run is already {state}"))
+                }
+            })
+    }
 }
