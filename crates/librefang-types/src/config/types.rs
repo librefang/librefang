@@ -1050,6 +1050,17 @@ pub enum AuxTask {
     /// can disable one without disabling the other; budget tooling sees
     /// distinct line items.
     SkillWorkshopReview,
+    /// Session-end summary (#4869): on `reset_session` / `/new`, the
+    /// kernel asks the auxiliary LLM to produce a real summary of the
+    /// session that's about to be deleted (`kv_store` keyed by the
+    /// session id, plus a markdown file in the agent's workspace). The
+    /// pre-#4869 implementation built the summary from the last 10
+    /// `Text`-only user messages, which collapsed to "thanks / sure"
+    /// pleasantries on any non-trivial conversation. Routing through
+    /// `[llm.auxiliary]` keeps the cost on the cheap tier; when no aux
+    /// chain resolves, the kernel falls back to the historical trivial
+    /// summary and logs a WARN so operators see the degraded path.
+    SessionSummary,
 }
 
 impl AuxTask {
@@ -1064,6 +1075,7 @@ impl AuxTask {
             AuxTask::Fold => "fold",
             AuxTask::SkillReview => "skill_review",
             AuxTask::SkillWorkshopReview => "skill_workshop_review",
+            AuxTask::SessionSummary => "session_summary",
         }
     }
 }

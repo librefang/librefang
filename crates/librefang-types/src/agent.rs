@@ -1002,6 +1002,17 @@ pub struct AgentManifest {
     /// per agent via `[skill_workshop]` in `agent.toml`.
     #[serde(default)]
     pub skill_workshop: SkillWorkshopConfig,
+    /// Per-agent override for the kernel-global `[proactive_memory]`
+    /// policy (#4870). Each field of
+    /// [`crate::memory::ProactiveMemoryOverrides`] is an `Option<bool>`
+    /// that, when set, supersedes the matching field in
+    /// `KernelConfig.proactive_memory` for this agent only. Default is
+    /// all-`None` (inherit global). Boot caveat: the global
+    /// `proactive_memory.enabled = false` still short-circuits store
+    /// construction, so this knob is primarily a per-agent opt-out
+    /// vector — see the struct doc for details.
+    #[serde(default)]
+    pub proactive_memory: crate::memory::ProactiveMemoryOverrides,
 }
 
 /// Access mode for a named workspace.
@@ -1108,6 +1119,7 @@ impl Default for AgentManifest {
             cache_context: false,
             tool_exec_backend: None,
             skill_workshop: SkillWorkshopConfig::default(),
+            proactive_memory: crate::memory::ProactiveMemoryOverrides::default(),
         }
     }
 }

@@ -3334,6 +3334,58 @@ async fn maybe_fold_stale_tool_results(
     folded
 }
 
+/// Gate the proactive-memory store for the *retrieve* side based on the
+/// per-agent override in `manifest.proactive_memory` (#4870).
+///
+/// Returns `Some(store)` when both the kernel-global config and the
+/// per-agent override allow `auto_retrieve`, else `None`. The store's
+/// internal gate also reads the global config, so the only case the
+/// outer gate covers that the inner doesn't is **per-agent opt-out**
+/// (the issue's primary use case: cron sub-agents that should skip
+/// retrieval entirely).
+fn gated_proactive_memory_for_retrieve<'a>(
+    manifest: &AgentManifest,
+    pm: Option<&'a Arc<librefang_memory::ProactiveMemoryStore>>,
+) -> Option<&'a Arc<librefang_memory::ProactiveMemoryStore>> {
+    let store = pm?;
+    if manifest.proactive_memory.is_empty() {
+        return Some(store);
+    }
+    let global = store.config();
+    if manifest.proactive_memory.resolve_auto_retrieve(&global) {
+        Some(store)
+    } else {
+        tracing::debug!(
+            agent = %manifest.name,
+            "Per-agent override disables auto_retrieve; skipping proactive memory retrieval"
+        );
+        None
+    }
+}
+
+/// Gate the proactive-memory store for the *memorize* side based on the
+/// per-agent override in `manifest.proactive_memory` (#4870). See
+/// [`gated_proactive_memory_for_retrieve`] for the rationale.
+fn gated_proactive_memory_for_memorize<'a>(
+    manifest: &AgentManifest,
+    pm: Option<&'a Arc<librefang_memory::ProactiveMemoryStore>>,
+) -> Option<&'a Arc<librefang_memory::ProactiveMemoryStore>> {
+    let store = pm?;
+    if manifest.proactive_memory.is_empty() {
+        return Some(store);
+    }
+    let global = store.config();
+    if manifest.proactive_memory.resolve_auto_memorize(&global) {
+        Some(store)
+    } else {
+        tracing::debug!(
+            agent = %manifest.name,
+            "Per-agent override disables auto_memorize; skipping proactive memory extraction"
+        );
+        None
+    }
+}
+
 /// Run the agent execution loop for a single user message.
 ///
 /// This is the core of LibreFang: it loads session context, recalls memories,
@@ -3442,7 +3494,7 @@ pub async fn run_agent_loop(
         user_message,
         memory,
         embedding_driver,
-        proactive_memory: proactive_memory.as_ref(),
+        proactive_memory: gated_proactive_memory_for_retrieve(manifest, proactive_memory.as_ref()),
         context_engine,
         sender_user_id: sender_user_id.as_deref(),
         sender_channel: sender_channel.as_deref(),
@@ -4172,7 +4224,10 @@ pub async fn run_agent_loop(
                         embedding_driver,
                         context_engine,
                         on_phase,
-                        proactive_memory: proactive_memory.as_ref(),
+                        proactive_memory: gated_proactive_memory_for_memorize(
+                            manifest,
+                            proactive_memory.as_ref(),
+                        ),
                         hooks,
                         agent_id_str: agent_id_str.as_str(),
                         user_message,
@@ -4956,7 +5011,7 @@ pub async fn run_agent_loop_streaming(
         user_message,
         memory,
         embedding_driver,
-        proactive_memory: proactive_memory.as_ref(),
+        proactive_memory: gated_proactive_memory_for_retrieve(manifest, proactive_memory.as_ref()),
         context_engine,
         sender_user_id: sender_user_id.as_deref(),
         sender_channel: sender_channel.as_deref(),
@@ -5710,7 +5765,10 @@ pub async fn run_agent_loop_streaming(
                         embedding_driver,
                         context_engine,
                         on_phase,
-                        proactive_memory: proactive_memory.as_ref(),
+                        proactive_memory: gated_proactive_memory_for_memorize(
+                            manifest,
+                            proactive_memory.as_ref(),
+                        ),
                         hooks,
                         agent_id_str: agent_id_str.as_str(),
                         user_message,
