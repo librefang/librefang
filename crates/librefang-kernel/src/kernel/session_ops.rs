@@ -813,28 +813,50 @@ impl LibreFangKernel {
         let messages = session.messages.clone();
         let session_id = session.id;
 
-        // `reset_session` is only reached from an axum handler, so the
-        // tokio runtime is always present. `Handle::current()` panics
-        // if that invariant breaks — louder than silently degrading
-        // and easier to spot in tests.
-        tokio::runtime::Handle::current().spawn(async move {
-            let summary = build_session_summary(
-                aux.as_ref(),
-                catalog.as_ref(),
-                agent_id,
-                session_id,
-                &agent_name,
-                &messages,
-            )
-            .await;
-            persist_session_summary(
-                memory.as_ref(),
-                agent_id,
-                session_id,
-                workspace.as_deref(),
-                &summary,
-            );
-        });
+        // Every production caller of `reset_session` runs inside an axum
+        // handler so a tokio runtime is present, but `reset_session` itself
+        // is sync (`pub fn`); a future sync caller would crash the daemon
+        // if we used `Handle::current()`. `try_current()` lets us spawn the
+        // aux-LLM path when a runtime is available and degrade to a
+        // synchronous trivial-digest write when it is not.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    let summary = build_session_summary(
+                        aux.as_ref(),
+                        catalog.as_ref(),
+                        agent_id,
+                        session_id,
+                        &agent_name,
+                        &messages,
+                    )
+                    .await;
+                    persist_session_summary(
+                        memory.as_ref(),
+                        agent_id,
+                        session_id,
+                        workspace.as_deref(),
+                        &summary,
+                    );
+                });
+            }
+            Err(_) => {
+                warn!(
+                    agent_id = %agent_id,
+                    session_id = %session_id.0,
+                    "save_session_summary called outside a tokio runtime; \
+                     writing trivial digest synchronously (aux-LLM path skipped)"
+                );
+                let summary = build_trivial_session_summary(&messages);
+                persist_session_summary(
+                    memory.as_ref(),
+                    agent_id,
+                    session_id,
+                    workspace.as_deref(),
+                    &summary,
+                );
+            }
+        }
     }
 }
 

@@ -259,7 +259,10 @@ impl Default for ProactiveMemoryConfig {
 /// Boot caveat: the global [`ProactiveMemoryConfig::enabled = false`]
 /// short-circuits store construction in
 /// `librefang_kernel::kernel::boot`; per-agent `enabled = Some(true)`
-/// cannot resurrect a non-existent store. The intended (and currently
+/// cannot resurrect a non-existent store. For the same reason, per-field
+/// overrides like `auto_memorize = Some(true)` or `auto_retrieve = Some(true)`
+/// against a globally-off config are dead letters — the gate they would
+/// flip never receives a store to act on. The intended (and currently
 /// supported) shape is **per-agent opt-out** when the global is on.
 ///
 /// Example in `agent.toml`:
