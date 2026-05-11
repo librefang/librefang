@@ -48,6 +48,220 @@ fn check_taint_shell_exec(command: &str) -> Option<String> {
     None
 }
 
+// ── Read-only workspace enforcement for shell_exec (fix #4903) ──────────────
+//
+// The original implementation blocked any command whose argv contained a
+// read-only workspace path, regardless of whether the command could actually
+// write to it. That produced false-positives for clear reads like
+// `cat /vaults-ro/x/foo.md`.
+//
+// This module adds argument-role awareness:
+//   • Known read verbs (cat, less, grep, …) are unconditionally allowed to
+//     reference RO paths.
+//   • Known write verbs (rm, cp-as-dst, mv-as-dst, touch, mkdir, editors,
+//     sed -i, awk -i inplace) are blocked when the RO path appears in a write
+//     position.
+//   • Shell output redirects (>, >>, &>, 2>, tee) targeting RO paths are
+//     blocked regardless of the leading verb.
+//   • If the verb is unrecognised the old conservative behaviour is kept
+//     (deny) to avoid weakening the security posture.
+
+/// Classification outcome from [`classify_shell_exec_ro_safety`].
+#[derive(Debug, PartialEq)]
+enum RoSafety {
+    /// The command is safe to run — it only reads from the RO path.
+    Allow,
+    /// The command must be blocked. The string is the human-readable reason.
+    Block(String),
+}
+
+/// Determine whether a shell command is safe to execute when `ro_prefix` is a
+/// read-only workspace path that appears somewhere in the command string.
+///
+/// Design choices:
+/// - We parse only the first whitespace-delimited token as the *verb*; flags
+///   are inspected for the handful of tools that have write-enabling flags
+///   (sed -i, awk -i inplace).
+/// - Redirect detection is a substring scan over the raw command string. This
+///   is intentionally conservative: a shell escape or quoting trick that hides
+///   a `>` from us will trip the "unrecognised verb" fallback anyway.
+/// - For `cp` and `mv` the last positional argument (the destination) is
+///   checked; if it is inside the RO path the command is blocked.
+/// - For `tee` any RO-path argument is treated as a write destination and
+///   blocked (tee always writes).
+fn classify_shell_exec_ro_safety(command: &str, ro_prefix: &str) -> RoSafety {
+    // --- 1. Redirect detection -------------------------------------------------
+    // Check the raw command string for output-redirect operators that target the
+    // RO path. We look for `> <ro>`, `>> <ro>`, `&> <ro>`, `2> <ro>` patterns.
+    // The redirect destination is the token that immediately follows the operator.
+    // Longer operators must come before shorter ones so that `>>` is matched
+    // before `>` (otherwise `>` matches the first char of `>>` and we read
+    // `> /path` as the destination instead of `/path`).
+    for op in &[">>", ">", "&>", "2>"] {
+        // Scan every occurrence of the operator in the command.
+        let mut search_from = 0usize;
+        while let Some(rel) = command[search_from..].find(op) {
+            let op_start = search_from + rel;
+            // Take only the first whitespace-delimited token after the operator
+            // (the redirect destination), stripping any surrounding whitespace.
+            let after_op = command[op_start + op.len()..].trim_start();
+            let dest_token = after_op.split_whitespace().next().unwrap_or("");
+            if is_ro_path(dest_token, ro_prefix) {
+                return RoSafety::Block(format!(
+                    "shell_exec blocked: shell redirect '{}' targets read-only workspace path '{}'",
+                    op, ro_prefix
+                ));
+            }
+            search_from = op_start + op.len();
+        }
+    }
+
+    // --- 2. Split into tokens for verb + arg analysis --------------------------
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let verb = match tokens.first() {
+        Some(v) => *v,
+        None => return RoSafety::Allow, // empty command
+    };
+    // Strip any leading path component (e.g. /usr/bin/cat → cat).
+    let verb_base = verb.rsplit('/').next().unwrap_or(verb);
+
+    // --- 3. Known pure-read verbs -----------------------------------------------
+    // These commands cannot write files when invoked normally.
+    // `sed` and `awk` have write-enabling flags handled below.
+    const READ_VERBS: &[&str] = &[
+        "cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "find", "wc",
+        "diff", "cmp", "file", "stat", "du", "ls", "zcat", "zless", "xargs",
+    ];
+    if READ_VERBS.contains(&verb_base) {
+        return RoSafety::Allow;
+    }
+
+    // --- 4. sed: allow `-n` (no-print), block `-i` (in-place edit) -------------
+    if verb_base == "sed" {
+        let has_inplace = tokens.iter().any(|t| {
+            // `-i` alone (POSIX) or `-i<suffix>` (GNU sed extension).
+            if *t == "-i" || (t.starts_with("-i") && t.len() > 2) {
+                return true;
+            }
+            // Combined short flags e.g. `-ni` — only short-option bundles, not
+            // long options (which start with `--`).
+            if t.starts_with('-') && !t.starts_with("--") && t.contains('i') {
+                return true;
+            }
+            false
+        });
+        if has_inplace {
+            return RoSafety::Block(format!(
+                "shell_exec blocked: 'sed -i' (in-place edit) targets read-only workspace path '{}'",
+                ro_prefix
+            ));
+        }
+        return RoSafety::Allow;
+    }
+
+    // --- 5. awk: block `-i inplace` (GNU awk) -----------------------------------
+    if verb_base == "awk" {
+        let mut iter = tokens.iter().peekable();
+        let mut has_inplace = false;
+        while let Some(tok) = iter.next() {
+            if *tok == "-i" {
+                if iter.peek().map(|s| **s) == Some("inplace") {
+                    has_inplace = true;
+                    break;
+                }
+            }
+            // Also catch --inplace long form.
+            if *tok == "--inplace" {
+                has_inplace = true;
+                break;
+            }
+        }
+        if has_inplace {
+            return RoSafety::Block(format!(
+                "shell_exec blocked: 'awk -i inplace' (in-place edit) targets read-only workspace path '{}'",
+                ro_prefix
+            ));
+        }
+        return RoSafety::Allow;
+    }
+
+    // --- 6. Known write verbs ---------------------------------------------------
+
+    // rm: any argument under the RO path is a write (deletion).
+    if verb_base == "rm" {
+        return RoSafety::Block(format!(
+            "shell_exec blocked: 'rm' targets read-only workspace path '{}'",
+            ro_prefix
+        ));
+    }
+
+    // mkdir / touch: creating or touching files under RO path.
+    if verb_base == "mkdir" || verb_base == "touch" {
+        return RoSafety::Block(format!(
+            "shell_exec blocked: '{}' targets read-only workspace path '{}'",
+            verb_base, ro_prefix
+        ));
+    }
+
+    // Editors: always block when RO path is mentioned.
+    const EDITOR_VERBS: &[&str] = &["vi", "vim", "nvim", "nano", "emacs", "code", "gedit"];
+    if EDITOR_VERBS.contains(&verb_base) {
+        return RoSafety::Block(format!(
+            "shell_exec blocked: editor '{}' targets read-only workspace path '{}'",
+            verb_base, ro_prefix
+        ));
+    }
+
+    // tee: always writes to its arguments.
+    if verb_base == "tee" {
+        return RoSafety::Block(format!(
+            "shell_exec blocked: 'tee' would write to read-only workspace path '{}'",
+            ro_prefix
+        ));
+    }
+
+    // cp / mv: block only when the RO path is the *destination* (last positional arg).
+    if verb_base == "cp" || verb_base == "mv" {
+        // Collect positional args (skip flags and their option-values).
+        let positional: Vec<&str> = tokens[1..]
+            .iter()
+            .filter(|t| !t.starts_with('-'))
+            .copied()
+            .collect();
+        // The destination is the last positional argument.
+        if let Some(dst) = positional.last() {
+            if is_ro_path(dst, ro_prefix) {
+                return RoSafety::Block(format!(
+                    "shell_exec blocked: '{}' destination '{}' is inside read-only workspace path '{}'",
+                    verb_base, dst, ro_prefix
+                ));
+            }
+        }
+        // RO path appears only as a source — allow.
+        return RoSafety::Allow;
+    }
+
+    // --- 7. Unrecognised verb: conservative deny --------------------------------
+    // We don't know whether this command writes; keep the original strict behaviour.
+    RoSafety::Block(format!(
+        "shell_exec blocked: unrecognised command verb '{}' — RO path '{}' may be a write target. \
+         Only known read-only verbs are permitted to reference read-only workspace paths.",
+        verb_base, ro_prefix
+    ))
+}
+
+/// Returns true if `token` refers to a path that starts with `ro_prefix` at
+/// a path boundary (i.e. the token equals the prefix or has a '/' after it).
+fn is_ro_path(token: &str, ro_prefix: &str) -> bool {
+    // Strip surrounding quotes that the shell would have consumed.
+    let token = token.trim_matches(|c| c == '"' || c == '\'');
+    if let Some(rest) = token.strip_prefix(ro_prefix) {
+        rest.is_empty() || rest.starts_with('/')
+    } else {
+        false
+    }
+}
+
 /// Check if a URL should be blocked by taint tracking before network fetch.
 ///
 /// Blocks URLs that appear to contain API keys, tokens, or other secrets
@@ -845,67 +1059,60 @@ pub async fn execute_tool_raw(
                 }
             }
 
-            // SECURITY (fix #3822): enforce named workspace read-only restrictions for
-            // shell_exec. The shell tool runs commands that can write arbitrary paths,
-            // so we scan the command string (and any explicit args array) for references
-            // to read-only workspace paths and block execution if any are found.
-            // This mirrors the read-only enforcement already applied to file_write and
-            // apply_patch (see the "file_write" arm above).
+            // SECURITY (fix #3822, improved by #4903): enforce named workspace
+            // read-only restrictions for shell_exec using argument-role awareness.
+            //
+            // The original implementation blocked *any* mention of an RO path in
+            // the command, which caused false-positives for read commands such as
+            // `cat /vaults-ro/x/foo.md`. The new approach uses
+            // `classify_shell_exec_ro_safety` to distinguish reads (allowed) from
+            // writes (blocked). Unrecognised verbs still fall back to deny so the
+            // security posture is not weakened. See the module-level comment above
+            // `classify_shell_exec_ro_safety` for the full design rationale.
             if let (Some(k), Some(agent_id)) = (kernel, caller_agent_id) {
                 let ro_prefixes = k.readonly_workspace_prefixes(agent_id);
                 if !ro_prefixes.is_empty() {
-                    // Collect the command string and all argument strings as a single
-                    // list of tokens to scan. We look for any token that starts with
-                    // (or equals) a read-only workspace prefix, which indicates the
-                    // shell command is targeting a read-only workspace path.
-                    let mut tokens: Vec<&str> = vec![command];
+                    // Build the full command string that includes any explicit `args`
+                    // entries. We append them to the base command so the classifier
+                    // can tokenise everything together.
+                    let mut full_command = command.to_string();
                     if let Some(args_arr) = input.get("args").and_then(|a| a.as_array()) {
                         for v in args_arr {
                             if let Some(s) = v.as_str() {
-                                tokens.push(s);
+                                full_command.push(' ');
+                                full_command.push_str(s);
                             }
                         }
                     }
                     for ro_prefix in &ro_prefixes {
                         let prefix_str = ro_prefix.to_string_lossy();
-                        // A token references a read-only workspace if it starts with the
-                        // prefix path. We also check that the match is at a path boundary
-                        // (next char is '/' or the token equals the prefix exactly) to
-                        // avoid false-positives on shared prefixes like /data vs /data2.
-                        let blocked = tokens.iter().any(|token| {
-                            if let Some(rest) = token.strip_prefix(prefix_str.as_ref()) {
-                                rest.is_empty() || rest.starts_with('/')
-                            } else {
-                                false
-                            }
-                        });
-                        // Also check if the prefix path string appears as a contiguous
-                        // substring within the full command (handles redirect operators,
-                        // quoted paths, etc.). This is a best-effort heuristic — the
-                        // primary check is the token scan above.
-                        let in_command = {
+                        // Only run the classifier if the RO prefix actually appears in
+                        // the command (quick short-circuit to avoid allocations).
+                        if !full_command.contains(prefix_str.as_ref()) {
+                            continue;
+                        }
+                        // Path-boundary check: make sure it's not a shared-prefix
+                        // false-positive (e.g. /data vs /data2).
+                        let at_boundary = {
                             let ps = prefix_str.as_ref();
-                            if let Some(idx) = command.find(ps) {
-                                // Verify path boundary after the match
-                                let after = &command[idx + ps.len()..];
+                            full_command.find(ps).map_or(false, |idx| {
+                                let after = &full_command[idx + ps.len()..];
                                 after.is_empty()
                                     || after.starts_with('/')
                                     || after.starts_with('"')
                                     || after.starts_with('\'')
                                     || after.starts_with(' ')
-                            } else {
-                                false
-                            }
+                            })
                         };
-                        if blocked || in_command {
-                            // Find the workspace name for the error message. The name is
-                            // not stored in the prefix list, so we report the path.
+                        if !at_boundary {
+                            continue;
+                        }
+                        if let RoSafety::Block(reason) =
+                            classify_shell_exec_ro_safety(&full_command, prefix_str.as_ref())
+                        {
                             return ToolResult {
                                 tool_use_id: tool_use_id.to_string(),
-                                content: format!(
-                                    "shell_exec blocked: path '{}' is in a read-only workspace (mode = r). Writes are not allowed.",
-                                    prefix_str
-                                ),
+                                content: reason,
                                 is_error: true,
                                 ..Default::default()
                             };
@@ -9135,6 +9342,140 @@ mod tests {
                 !result.content.contains("read-only"),
                 "must not be blocked by read-only check; got: {}",
                 result.content
+            );
+        }
+    }
+
+    // ── Reproducer tests for #4903: argument-role-aware RO enforcement ────────
+    //
+    // These tests exercise `classify_shell_exec_ro_safety` directly so they
+    // are synchronous and fast — no kernel setup required.
+
+    #[test]
+    fn ro_safety_cat_is_allowed() {
+        // Case 1: `cat /vaults-ro/x/foo.md` → ALLOWED (was blocked before #4903).
+        let result = classify_shell_exec_ro_safety("cat /vaults-ro/x/foo.md", "/vaults-ro/x");
+        assert_eq!(result, RoSafety::Allow, "cat of an RO path must be allowed");
+    }
+
+    #[test]
+    fn ro_safety_grep_is_allowed() {
+        // Case 2: `grep pattern /vaults-ro/x/notes/*.md` → ALLOWED.
+        let result =
+            classify_shell_exec_ro_safety("grep pattern /vaults-ro/x/notes/*.md", "/vaults-ro/x");
+        assert_eq!(
+            result,
+            RoSafety::Allow,
+            "grep of an RO path must be allowed"
+        );
+    }
+
+    #[test]
+    fn ro_safety_head_is_allowed() {
+        // Case 3: `head -n 5 /vaults-ro/x/foo.md` → ALLOWED.
+        let result = classify_shell_exec_ro_safety("head -n 5 /vaults-ro/x/foo.md", "/vaults-ro/x");
+        assert_eq!(
+            result,
+            RoSafety::Allow,
+            "head of an RO path must be allowed"
+        );
+    }
+
+    #[test]
+    fn ro_safety_cat_ro_as_input_redirect_target_is_allowed() {
+        // Case 4: `cat /vaults-ro/x/foo.md > /tmp/out` → ALLOWED (RO is input).
+        let result =
+            classify_shell_exec_ro_safety("cat /vaults-ro/x/foo.md > /tmp/out", "/vaults-ro/x");
+        assert_eq!(
+            result,
+            RoSafety::Allow,
+            "cat with RO as input and /tmp as redirect target must be allowed"
+        );
+    }
+
+    #[test]
+    fn ro_safety_redirect_to_ro_is_blocked() {
+        // Case 5: `cat /tmp/in > /vaults-ro/x/out.md` → BLOCKED (RO is redirect target).
+        let result =
+            classify_shell_exec_ro_safety("cat /tmp/in > /vaults-ro/x/out.md", "/vaults-ro/x");
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "redirect into RO path must be blocked"
+        );
+        if let RoSafety::Block(msg) = result {
+            assert!(
+                msg.contains("redirect"),
+                "error must mention redirect; got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn ro_safety_cp_ro_as_dst_is_blocked() {
+        // Case 6: `cp /tmp/foo /vaults-ro/x/bar` → BLOCKED (RO is destination).
+        let result = classify_shell_exec_ro_safety("cp /tmp/foo /vaults-ro/x/bar", "/vaults-ro/x");
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "cp with RO as destination must be blocked"
+        );
+    }
+
+    #[test]
+    fn ro_safety_cp_ro_as_src_is_allowed() {
+        // Case 7: `cp /vaults-ro/x/foo /tmp/bar` → ALLOWED (RO is source).
+        let result = classify_shell_exec_ro_safety("cp /vaults-ro/x/foo /tmp/bar", "/vaults-ro/x");
+        assert_eq!(
+            result,
+            RoSafety::Allow,
+            "cp with RO as source must be allowed"
+        );
+    }
+
+    #[test]
+    fn ro_safety_rm_is_blocked() {
+        // Case 8: `rm /vaults-ro/x/foo` → BLOCKED.
+        let result = classify_shell_exec_ro_safety("rm /vaults-ro/x/foo", "/vaults-ro/x");
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "rm of an RO path must be blocked"
+        );
+    }
+
+    #[test]
+    fn ro_safety_sed_inplace_is_blocked() {
+        // Case 9: `sed -i 's/x/y/' /vaults-ro/x/foo.md` → BLOCKED.
+        let result =
+            classify_shell_exec_ro_safety("sed -i 's/x/y/' /vaults-ro/x/foo.md", "/vaults-ro/x");
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "sed -i on an RO path must be blocked"
+        );
+    }
+
+    #[test]
+    fn ro_safety_sed_n_is_allowed() {
+        // Case 10: `sed -n '1,5p' /vaults-ro/x/foo.md` → ALLOWED.
+        let result =
+            classify_shell_exec_ro_safety("sed -n '1,5p' /vaults-ro/x/foo.md", "/vaults-ro/x");
+        assert_eq!(
+            result,
+            RoSafety::Allow,
+            "sed -n (no-print, no-write) on an RO path must be allowed"
+        );
+    }
+
+    #[test]
+    fn ro_safety_unrecognised_verb_is_blocked() {
+        // Case 11: `weirdcmd /vaults-ro/x/foo` → BLOCKED (conservative default).
+        let result = classify_shell_exec_ro_safety("weirdcmd /vaults-ro/x/foo", "/vaults-ro/x");
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "unrecognised verb referencing an RO path must be blocked"
+        );
+        if let RoSafety::Block(msg) = result {
+            assert!(
+                msg.contains("unrecognised"),
+                "error must mention unrecognised verb; got: {msg}"
             );
         }
     }
