@@ -2164,6 +2164,261 @@ mod tests {
         );
     }
 
+    // ----- end-to-end inbound POST handler tests (#4826) -----
+    //
+    // These tests exercise the full path that the three `cached_response_url_*`
+    // tests above deliberately skip: request decryption → signature validation
+    // → JSON parsing → cache insertion, all wired through the real axum router
+    // returned by `create_webhook_routes()`.
+    //
+    // Strategy: call `create_webhook_routes()` to obtain the `axum::Router`,
+    // drive it with `tower::ServiceExt::oneshot`, then inspect the shared
+    // `response_urls` BTreeMap that the adapter and the route handler both
+    // reference. Because `Mode::Callback { response_urls, .. }` is an `Arc`,
+    // the adapter sees exactly the same map the handler wrote into.
+
+    mod test_fixtures {
+        use super::*;
+        use base64::Engine;
+
+        /// Build an AES-CBC encrypted, PKCS#7-padded WeCom inbound payload.
+        ///
+        /// Returns `(encrypt_b64, msg_signature, timestamp, nonce)` — everything
+        /// the POST handler needs to verify and decrypt the message.
+        pub(super) fn build_signed_encrypted_payload(
+            encoding_aes_key: &str,
+            token: &str,
+            plaintext_json: &str,
+        ) -> (String, String, String, String) {
+            use base64::{
+                alphabet,
+                engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig},
+            };
+
+            let aes_key_engine = GeneralPurpose::new(
+                &alphabet::STANDARD,
+                GeneralPurposeConfig::new()
+                    .with_decode_padding_mode(DecodePaddingMode::RequireNone)
+                    .with_decode_allow_trailing_bits(true),
+            );
+            let aes_key = aes_key_engine
+                .decode(encoding_aes_key)
+                .expect("test AES key must decode");
+
+            // Build plaintext: 16-byte random prefix + 4-byte big-endian msg len + msg bytes
+            let msg_bytes = plaintext_json.as_bytes();
+            let random_prefix = [0x42u8; 16]; // deterministic for tests
+            let mut raw = Vec::new();
+            raw.extend_from_slice(&random_prefix);
+            raw.extend_from_slice(&(msg_bytes.len() as u32).to_be_bytes());
+            raw.extend_from_slice(msg_bytes);
+            // receiveid suffix is omitted (empty for intelligent bot callbacks)
+
+            let encrypted = encrypt_aes_cbc(&aes_key, &raw).expect("encrypt must succeed");
+            let encrypt_b64 = base64::engine::general_purpose::STANDARD.encode(&encrypted);
+
+            // Compute signature: SHA1(sort(token, timestamp, nonce, encrypt_b64))
+            let timestamp = "1710000000";
+            let nonce = "testnonce";
+            let mut parts = [token, timestamp, nonce, &encrypt_b64];
+            parts.sort_unstable();
+            let mut hasher = sha1::Sha1::new();
+            sha1::Digest::update(&mut hasher, parts.concat().as_bytes());
+            let sig = hex::encode(sha1::Digest::finalize(hasher));
+
+            (encrypt_b64, sig, timestamp.to_string(), nonce.to_string())
+        }
+    }
+
+    /// A fixed 43-character (no-padding) base64 AES-256 key used by the
+    /// handler round-trip tests. Decodes to 32 bytes.
+    const TEST_ENCODING_AES_KEY: &str = "ShlNaJ0PrdXQAuCDVqMki7c2JLNnY6mebvQodTv9qoV";
+    const TEST_TOKEN: &str = "test-token-4826";
+
+    #[tokio::test]
+    async fn inbound_post_handler_writes_response_url_to_cache_and_send_consumes_it() {
+        use tower::ServiceExt;
+
+        // Build a mock server to capture the outbound `send()` POST.
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/wecom-respond"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let response_url = format!("{}/wecom-respond", mock_server.uri());
+
+        // Build the encrypted POST body that the inbound handler will decrypt.
+        let user_id = "user-4826";
+        let chat_id = "chat-abc";
+        let plaintext_json = serde_json::json!({
+            "msgtype": "text",
+            "from": { "userid": user_id },
+            "chattype": "group",
+            "chatid": chat_id,
+            "msgid": "msg-001",
+            "text": { "content": "hello from e2e test" },
+            "response_url": response_url,
+        })
+        .to_string();
+
+        let (encrypt_b64, sig, timestamp, nonce) = test_fixtures::build_signed_encrypted_payload(
+            TEST_ENCODING_AES_KEY,
+            TEST_TOKEN,
+            &plaintext_json,
+        );
+
+        // Create the adapter and obtain its router.
+        let adapter = WeComAdapter::new_callback(
+            "bot-id".to_string(),
+            "secret".to_string(),
+            0, // port unused — we call create_webhook_routes(), not start_callback()
+            Some(TEST_TOKEN.to_string()),
+            Some(TEST_ENCODING_AES_KEY.to_string()),
+        );
+
+        let (router, _stream) = adapter
+            .create_webhook_routes()
+            .await
+            .expect("Callback mode must return webhook routes");
+
+        // POST the encrypted payload to the handler.
+        let url = format!(
+            "/webhook?msg_signature={}&timestamp={}&nonce={}",
+            sig, timestamp, nonce
+        );
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(&url)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "encrypt": encrypt_b64 }).to_string(),
+            ))
+            .expect("request must build");
+
+        let status = router.clone().oneshot(req).await.unwrap().status();
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "inbound POST must return 200"
+        );
+
+        // The handler must have inserted `user_id|chat_id` into the cache.
+        let expected_key = format!("{user_id}|{chat_id}");
+        assert_eq!(
+            response_url_cache_size(&adapter).await,
+            1,
+            "cache must hold exactly one entry after inbound POST"
+        );
+
+        // send() must consume the cached response_url — NOT fall back to webhook.
+        let user = wecom_user(&expected_key);
+        adapter
+            .send(&user, ChannelContent::Text("reply".into()))
+            .await
+            .expect("send must succeed via cached response_url");
+
+        // One-shot: cache is drained after send consumes the entry.
+        assert_eq!(
+            response_url_cache_size(&adapter).await,
+            0,
+            "cache must be empty after send consumed the response_url"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_post_from_different_chat_does_not_overwrite_first_cache_entry() {
+        use tower::ServiceExt;
+
+        let user_id = "user-4826";
+        let chat_id_a = "chat-aaa";
+        let chat_id_b = "chat-bbb";
+        let response_url_a = "https://example.invalid/respond-a";
+        let response_url_b = "https://example.invalid/respond-b";
+
+        let adapter = WeComAdapter::new_callback(
+            "bot-id".to_string(),
+            "secret".to_string(),
+            0,
+            Some(TEST_TOKEN.to_string()),
+            Some(TEST_ENCODING_AES_KEY.to_string()),
+        );
+
+        let (router, _stream) = adapter
+            .create_webhook_routes()
+            .await
+            .expect("Callback mode must return webhook routes");
+
+        // Helper: POST one encrypted callback for a given (user, chat, response_url).
+        let post_callback = |router: axum::Router, uid: &str, cid: &str, rurl: &str| {
+            let plaintext_json = serde_json::json!({
+                "msgtype": "text",
+                "from": { "userid": uid },
+                "chattype": "group",
+                "chatid": cid,
+                "msgid": format!("msg-{cid}"),
+                "text": { "content": "hello" },
+                "response_url": rurl,
+            })
+            .to_string();
+
+            let (encrypt_b64, sig, timestamp, nonce) =
+                test_fixtures::build_signed_encrypted_payload(
+                    TEST_ENCODING_AES_KEY,
+                    TEST_TOKEN,
+                    &plaintext_json,
+                );
+
+            let url = format!(
+                "/webhook?msg_signature={}&timestamp={}&nonce={}",
+                sig, timestamp, nonce
+            );
+            let body = serde_json::json!({ "encrypt": encrypt_b64 }).to_string();
+            let req = axum::http::Request::builder()
+                .method("POST")
+                .uri(&url)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body))
+                .expect("request must build");
+
+            async move { router.oneshot(req).await.unwrap().status() }
+        };
+
+        // POST from chat-A.
+        let status_a = post_callback(router.clone(), user_id, chat_id_a, response_url_a).await;
+        assert_eq!(status_a, axum::http::StatusCode::OK);
+
+        // POST from chat-B (same user_id, different chat_id).
+        let status_b = post_callback(router.clone(), user_id, chat_id_b, response_url_b).await;
+        assert_eq!(status_b, axum::http::StatusCode::OK);
+
+        // Both composite keys must coexist — chat-B must NOT have overwritten chat-A.
+        assert_eq!(
+            response_url_cache_size(&adapter).await,
+            2,
+            "cache must hold two independent entries for different chats of the same user"
+        );
+
+        // Verify that the correct URL is keyed under each composite id.
+        let key_a = format!("{user_id}|{chat_id_a}");
+        let key_b = format!("{user_id}|{chat_id_b}");
+        if let Mode::Callback { response_urls, .. } = &adapter.mode {
+            let guard = response_urls.read().await;
+            assert_eq!(
+                guard.get(&key_a).map(|(u, _)| u.as_str()),
+                Some(response_url_a),
+                "chat-A entry must be intact"
+            );
+            assert_eq!(
+                guard.get(&key_b).map(|(u, _)| u.as_str()),
+                Some(response_url_b),
+                "chat-B entry must be present independently"
+            );
+        }
+    }
+
     #[test]
     fn redact_credential_query_params_strips_response_code_and_key() {
         let url = "https://qyapi.weixin.qq.com/cgi-bin/aibot/response?response_code=SECRET-XYZ&other=keep";
