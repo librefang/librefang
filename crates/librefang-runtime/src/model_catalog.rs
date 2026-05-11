@@ -282,10 +282,20 @@ impl ModelCatalog {
     /// Only checks presence — never reads or stores the actual secret.
     pub fn detect_auth(&mut self) {
         for provider in &mut self.providers {
+            // Suppression — set by `delete_provider_key` when the user
+            // explicitly hides a provider from the configured page (#4803).
+            // For non-key-required providers (CLI, local HTTP) the rest of
+            // this loop would unconditionally re-detect them as available,
+            // defeating the user's intent. Honour suppression up front so
+            // "remove key" works regardless of provider shape.
+            let suppressed = self.suppressed_providers.contains(&provider.id);
+
             // CLI-based providers: no API key needed, but we probe for CLI
             // installation so the dashboard shows "Configured" vs "Not Installed".
             if crate::drivers::is_cli_provider(&provider.id) {
-                provider.auth_status = if crate::drivers::cli_provider_available(&provider.id) {
+                provider.auth_status = if suppressed {
+                    AuthStatus::Missing
+                } else if crate::drivers::cli_provider_available(&provider.id) {
                     AuthStatus::Configured
                 } else {
                     AuthStatus::CliNotInstalled
@@ -294,6 +304,13 @@ impl ModelCatalog {
             }
 
             if !provider.key_required {
+                if suppressed {
+                    // User explicitly hid this provider. Holding it as
+                    // Missing keeps it out of the configured grid until
+                    // `unsuppress_provider` runs (e.g. via `set_provider_url`).
+                    provider.auth_status = AuthStatus::Missing;
+                    continue;
+                }
                 // Local providers (ollama, vllm, etc.) have their status set by
                 // the async probe at startup. Only set NotRequired as a fallback
                 // when the probe hasn't run yet (status still Missing).
@@ -328,10 +345,6 @@ impl ModelCatalog {
             } else {
                 std::env::var(&provider.api_key_env).is_ok_and(|v| !v.trim().is_empty())
             };
-
-            // If the user explicitly removed this provider's key, skip
-            // alias detection — only honour the primary env var.
-            let suppressed = self.suppressed_providers.contains(&provider.id);
 
             // Secondary: recognised alias env var. Only officially documented
             // aliases count (e.g. Google AI Studio docs both `GEMINI_API_KEY`
@@ -1612,6 +1625,65 @@ id = "acme"
                 std::env::remove_var("GOOGLE_API_KEY");
             }
         }
+    }
+
+    /// Regression for #4803: pressing "remove key" on a CLI provider
+    /// (claude-code, codex-cli, gemini-cli, qwen-code) calls
+    /// `suppress_provider` + `detect_auth`. Pre-fix `detect_auth` ignored
+    /// suppression for CLI providers and re-detected them as Configured
+    /// whenever the CLI binary was on PATH, so the provider never left
+    /// the configured grid. The fix routes suppression through the CLI
+    /// branch.
+    #[test]
+    fn detect_auth_respects_suppression_for_cli_providers() {
+        let mut catalog = test_catalog();
+        // Whatever the host machine reports for these CLIs is fine — the
+        // assertion is that suppression dominates the auto-detection.
+        catalog.suppress_provider("claude-code");
+        catalog.suppress_provider("codex-cli");
+        catalog.detect_auth();
+
+        let claude = catalog.get_provider("claude-code").unwrap();
+        assert_eq!(
+            claude.auth_status,
+            AuthStatus::Missing,
+            "suppressed CLI provider must be Missing regardless of binary presence"
+        );
+        let codex = catalog.get_provider("codex-cli").unwrap();
+        assert_eq!(codex.auth_status, AuthStatus::Missing);
+
+        // A non-suppressed CLI provider is unaffected — proves we did not
+        // break the auto-detect path for the unsuppressed case.
+        let gemini_cli = catalog.get_provider("gemini-cli").unwrap();
+        assert!(matches!(
+            gemini_cli.auth_status,
+            AuthStatus::Configured | AuthStatus::CliNotInstalled
+        ));
+    }
+
+    /// Regression for #4803: pressing "remove key" on a local HTTP provider
+    /// (ollama, vllm, lmstudio, lemonade) similarly suppressed it but
+    /// `detect_auth` set it back to NotRequired on the next call, so the
+    /// provider never left the configured grid.
+    #[test]
+    fn detect_auth_respects_suppression_for_local_providers() {
+        let mut catalog = test_catalog();
+        catalog.suppress_provider("ollama");
+        catalog.detect_auth();
+
+        let ollama = catalog.get_provider("ollama").unwrap();
+        assert_eq!(
+            ollama.auth_status,
+            AuthStatus::Missing,
+            "suppressed local provider must be Missing instead of NotRequired"
+        );
+
+        // Un-suppressing restores the local default. This mirrors the
+        // `set_provider_url` re-enable path in the API layer.
+        catalog.unsuppress_provider("ollama");
+        catalog.detect_auth();
+        let ollama = catalog.get_provider("ollama").unwrap();
+        assert_eq!(ollama.auth_status, AuthStatus::NotRequired);
     }
 
     #[test]

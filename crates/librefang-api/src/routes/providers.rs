@@ -1587,16 +1587,28 @@ pub async fn set_provider_url(
         }
     }
 
-    // Update catalog in memory
+    // Update catalog in memory. Reconfiguring the URL is an explicit signal
+    // that the user wants this provider active, so undo any suppression set
+    // by a prior `delete_provider_key` (#4803) and refresh auth status —
+    // otherwise a suppressed local provider stays Missing even after the
+    // user re-points it at a reachable host.
     {
         let name_for_closure = name.clone();
         let base_url_for_closure = base_url.clone();
         let proxy_url_for_closure = proxy_url.clone();
+        let suppressed_path = state
+            .kernel
+            .home_dir()
+            .join("data")
+            .join("suppressed_providers.json");
         state.kernel.model_catalog_update(&mut move |catalog| {
             catalog.set_provider_url(&name_for_closure, &base_url_for_closure);
             if let Some(ref pu) = proxy_url_for_closure {
                 catalog.set_provider_proxy_url(&name_for_closure, pu);
             }
+            catalog.unsuppress_provider(&name_for_closure);
+            catalog.save_suppressed(&suppressed_path);
+            catalog.detect_auth();
         });
     }
 
