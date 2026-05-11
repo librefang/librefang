@@ -9,12 +9,6 @@ import {
   useTotpConfirm,
   useTotpRevoke,
 } from "../lib/mutations/approvals";
-import { useAutoDreamStatus } from "../lib/queries/autoDream";
-import {
-  useTriggerAutoDream,
-  useAbortAutoDream,
-  useSetAutoDreamEnabled,
-} from "../lib/mutations/autoDream";
 
 // Tests for #3853 — TOTP second-factor surface in SettingsPage. The
 // TotpSection lives inside SettingsPage and was completely uncovered.
@@ -29,16 +23,6 @@ vi.mock("../lib/mutations/approvals", () => ({
   useTotpSetup: vi.fn(),
   useTotpConfirm: vi.fn(),
   useTotpRevoke: vi.fn(),
-}));
-
-vi.mock("../lib/queries/autoDream", () => ({
-  useAutoDreamStatus: vi.fn(),
-}));
-
-vi.mock("../lib/mutations/autoDream", () => ({
-  useTriggerAutoDream: vi.fn(),
-  useAbortAutoDream: vi.fn(),
-  useSetAutoDreamEnabled: vi.fn(),
 }));
 
 vi.mock("react-i18next", async () => {
@@ -58,18 +42,6 @@ const useTotpStatusMock = useTotpStatus as unknown as ReturnType<typeof vi.fn>;
 const useTotpSetupMock = useTotpSetup as unknown as ReturnType<typeof vi.fn>;
 const useTotpConfirmMock = useTotpConfirm as unknown as ReturnType<typeof vi.fn>;
 const useTotpRevokeMock = useTotpRevoke as unknown as ReturnType<typeof vi.fn>;
-const useAutoDreamStatusMock = useAutoDreamStatus as unknown as ReturnType<
-  typeof vi.fn
->;
-const useTriggerAutoDreamMock = useTriggerAutoDream as unknown as ReturnType<
-  typeof vi.fn
->;
-const useAbortAutoDreamMock = useAbortAutoDream as unknown as ReturnType<
-  typeof vi.fn
->;
-const useSetAutoDreamEnabledMock = useSetAutoDreamEnabled as unknown as ReturnType<
-  typeof vi.fn
->;
 
 interface MutationStub {
   mutateAsync: ReturnType<typeof vi.fn>;
@@ -81,20 +53,6 @@ function makeMutation(impl?: (...args: unknown[]) => unknown): MutationStub {
     mutateAsync: vi.fn(impl ?? (async () => undefined)),
     isPending: false,
   };
-}
-
-function setAutoDreamDefaults(): void {
-  // SettingsPage renders an AutoDreamSection alongside the TotpSection.
-  // We don't exercise it here; just keep its hooks quiescent so the
-  // page renders cleanly.
-  useAutoDreamStatusMock.mockReturnValue({
-    data: { enabled: false, agents: [] },
-    isLoading: false,
-    isError: false,
-  });
-  useTriggerAutoDreamMock.mockReturnValue(makeMutation());
-  useAbortAutoDreamMock.mockReturnValue(makeMutation());
-  useSetAutoDreamEnabledMock.mockReturnValue(makeMutation());
 }
 
 function renderPage(): void {
@@ -111,7 +69,6 @@ function renderPage(): void {
 describe("SettingsPage TOTP section (#3853)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    setAutoDreamDefaults();
     useTotpSetupMock.mockReturnValue(makeMutation());
     useTotpConfirmMock.mockReturnValue(makeMutation());
     useTotpRevokeMock.mockReturnValue(makeMutation());
