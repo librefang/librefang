@@ -1194,17 +1194,23 @@ export function AgentsPage() {
       const next = isAssigned
         ? assigned.filter((s) => s !== skillName)
         : [...assigned, skillName];
-      setAgentSkillsMutation.mutate({ agentId: agent.id, skills: next });
+      setAgentSkillsMutation.mutate({ agentId: agent.id, skills: next }, {
+        onSuccess: () => addToast(t("agents.detail.skills_saved", { defaultValue: "Skills saved to agent.toml" }), "success"),
+      });
     };
 
     const handleCustomize = () => {
       if (!agent.id) return;
-      setAgentSkillsMutation.mutate({ agentId: agent.id, skills: [...available] });
+      setAgentSkillsMutation.mutate({ agentId: agent.id, skills: [...available] }, {
+        onSuccess: () => addToast(t("agents.detail.skills_saved", { defaultValue: "Skills saved to agent.toml" }), "success"),
+      });
     };
 
     const handleUseAll = () => {
       if (!agent.id) return;
-      setAgentSkillsMutation.mutate({ agentId: agent.id, skills: [] });
+      setAgentSkillsMutation.mutate({ agentId: agent.id, skills: [] }, {
+        onSuccess: () => addToast(t("agents.detail.skills_saved", { defaultValue: "Skills saved to agent.toml" }), "success"),
+      });
     };
 
     return (
@@ -1360,12 +1366,16 @@ export function AgentsPage() {
       const next = isAssigned
         ? assigned.filter((s) => s !== serverName)
         : [...assigned, serverName];
-      setAgentMcpServersMutation.mutate({ agentId: agent.id, servers: next });
+      setAgentMcpServersMutation.mutate({ agentId: agent.id, servers: next }, {
+        onSuccess: () => addToast(t("agents.detail.mcp_saved", { defaultValue: "MCP servers saved to agent.toml" }), "success"),
+      });
     };
 
     const handleUseAll = () => {
       if (!agent.id) return;
-      setAgentMcpServersMutation.mutate({ agentId: agent.id, servers: [] });
+      setAgentMcpServersMutation.mutate({ agentId: agent.id, servers: [] }, {
+        onSuccess: () => addToast(t("agents.detail.mcp_saved", { defaultValue: "MCP servers saved to agent.toml" }), "success"),
+      });
     };
 
     return (
@@ -1405,7 +1415,9 @@ export function AgentsPage() {
               <button
                 onClick={() => {
                   if (!agent.id) return;
-                  setAgentMcpServersMutation.mutate({ agentId: agent.id, servers: [...available] });
+                  setAgentMcpServersMutation.mutate({ agentId: agent.id, servers: [...available] }, {
+                    onSuccess: () => addToast(t("agents.detail.mcp_saved", { defaultValue: "MCP servers saved to agent.toml" }), "success"),
+                  });
                 }}
                 className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
               >

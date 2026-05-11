@@ -4124,10 +4124,13 @@ pub async fn set_agent_skills(
         })
         .unwrap_or_default();
     match state.kernel.set_agent_skills(agent_id, skills.clone()) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "ok", "skills": skills})),
-        ),
+        Ok(()) => {
+            state.kernel.persist_manifest_to_disk(agent_id);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "ok", "skills": skills})),
+            )
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(
@@ -4246,10 +4249,13 @@ pub async fn set_agent_mcp_servers(
         .kernel
         .set_agent_mcp_servers(agent_id, servers.clone())
     {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "ok", "mcp_servers": servers})),
-        ),
+        Ok(()) => {
+            state.kernel.persist_manifest_to_disk(agent_id);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "ok", "mcp_servers": servers})),
+            )
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(
