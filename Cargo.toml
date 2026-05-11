@@ -102,6 +102,8 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "str
 rustls = "0.23"
 webpki-roots = "1"
 rustls-native-certs = "0.8"
+# PEM parsing for user-supplied IMAP root CA certs (#4877). Tiny dep, no I/O.
+rustls-pemfile = "2"
 
 # Async trait
 async-trait = "0.1"

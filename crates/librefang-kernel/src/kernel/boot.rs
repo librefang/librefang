@@ -1308,24 +1308,65 @@ impl LibreFangKernel {
         // Uses extraction_model if set, otherwise falls back to agent's default model.
         // This allows using a cheap model (e.g., llama/haiku) for extraction while
         // keeping an expensive model (e.g., opus/gpt-4o) for agent responses.
+        //
+        // #4871: extraction_model accepts `provider:model` or `provider/model`
+        // when the prefix is a registered provider (matches AuxClient and
+        // alias.toml conventions, respectively). Bare model names continue to
+        // route through `default_driver` (legacy behaviour).
         let cfg = kernel.config.load();
         if cfg.proactive_memory.enabled {
             let pm_config = cfg.proactive_memory.clone();
-            let extraction_model = pm_config
+            let extraction_spec = pm_config
                 .extraction_model
                 .clone()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| cfg.default_model.model.clone());
-            // Strip provider prefix (e.g. "minimax/minimax-M2.5-highspeed" → "minimax-M2.5-highspeed")
-            // so the model name is valid for the upstream API.
-            let extraction_model = librefang_runtime::agent_loop::strip_provider_prefix(
-                &extraction_model,
+
+            let catalog = kernel.llm.model_catalog.load();
+            let (extraction_provider, extraction_model_name) = resolve_extraction_model_target(
+                &extraction_spec,
                 &cfg.default_model.provider,
+                |name| catalog.get_provider(name).is_some(),
             );
-            let llm = Some((
-                Arc::clone(&kernel.llm.default_driver) as _,
-                extraction_model,
-            ));
+            // Strip provider prefix (e.g. "minimax/minimax-M2.5-highspeed" → "minimax-M2.5-highspeed")
+            // so the model name is valid for the upstream API. Idempotent on
+            // strings that don't carry the prefix.
+            let extraction_model_name = librefang_runtime::agent_loop::strip_provider_prefix(
+                &extraction_model_name,
+                &extraction_provider,
+            );
+
+            // Build the extraction driver: reuse the kernel's default driver
+            // when extraction provider == default provider (no extra
+            // driver_cache entry); otherwise build a fresh driver for the
+            // named provider. On build failure, WARN and fall back to NO
+            // LLM extractor (proactive memory then uses substring fallback)
+            // — explicit visible degradation beats silently 404'ing the
+            // operator's named provider on every turn (the original #4871
+            // bug).
+            let llm: Option<(Arc<dyn librefang_runtime::llm_driver::LlmDriver>, String)> =
+                if extraction_provider == cfg.default_model.provider {
+                    Some((
+                        Arc::clone(&kernel.llm.default_driver) as _,
+                        extraction_model_name,
+                    ))
+                } else {
+                    match build_extraction_driver(&cfg, &extraction_provider, &mcp_bridge_cfg) {
+                        Ok(driver) => Some((driver, extraction_model_name)),
+                        Err(e) => {
+                            warn!(
+                                extraction_model = %extraction_spec,
+                                extraction_provider = %extraction_provider,
+                                error = %e,
+                                "Failed to build extraction LLM driver for the configured \
+                                 [proactive_memory] extraction_model; falling back to substring \
+                                 extraction. Check that the named provider has its API key + \
+                                 base URL configured."
+                            );
+                            None
+                        }
+                    }
+                };
             // Use the _with_extractor variant so we get the concrete
             // `LlmMemoryExtractor` back alongside the store. The extractor
             // needs a `Weak<dyn KernelHandle>` installed before its fork-
@@ -2052,5 +2093,191 @@ system_prompt = "You are a helpful assistant."
 
         info!("LibreFang kernel booted successfully");
         Ok(kernel)
+    }
+}
+
+/// Parse `[proactive_memory] extraction_model` into `(provider, model)` (#4871).
+///
+/// Three accepted forms, in priority order:
+///
+/// 1. `provider:model` — colon convention used by `[llm.auxiliary]` chains.
+/// 2. `provider/model` — slash convention used by `aliases.toml` and the
+///    `default_model` shape.
+/// 3. Bare model name — falls through to the kernel's default driver.
+///
+/// The provider prefix is honoured **only when the LHS is a registered
+/// provider** (per `is_known_provider`). This avoids misparsing OpenRouter-
+/// style model ids like `google/gemini-2.5-flash` (which do contain a `/`
+/// but where `google` is not a separate registered provider — the model id
+/// belongs to the OpenRouter provider verbatim).
+///
+/// Returns `(default_provider, spec)` for bare model names so the caller
+/// can route to the kernel's existing `default_driver` without further
+/// branching.
+fn resolve_extraction_model_target(
+    spec: &str,
+    default_provider: &str,
+    is_known_provider: impl Fn(&str) -> bool,
+) -> (String, String) {
+    if let Some((provider, model)) = spec.split_once(':') {
+        if !provider.is_empty() && !model.is_empty() && is_known_provider(provider) {
+            return (provider.to_string(), model.to_string());
+        }
+    }
+    if let Some((provider, model)) = spec.split_once('/') {
+        if !provider.is_empty() && !model.is_empty() && is_known_provider(provider) {
+            return (provider.to_string(), model.to_string());
+        }
+    }
+    (default_provider.to_string(), spec.to_string())
+}
+
+/// Build a fresh LLM driver for an explicit `[proactive_memory]
+/// extraction_model` provider that differs from the kernel's default
+/// (#4871). Mirrors the api-key / base-url / proxy / timeout resolution
+/// the boot path already performs for the primary driver. Returns the
+/// `String` error from `drivers::create_driver` verbatim so the caller's
+/// WARN log carries the upstream cause (missing key, unsupported provider).
+fn build_extraction_driver(
+    cfg: &KernelConfig,
+    provider: &str,
+    mcp_bridge_cfg: &librefang_llm_driver::McpBridgeConfig,
+) -> Result<Arc<dyn librefang_runtime::llm_driver::LlmDriver>, String> {
+    let api_key_env = cfg.resolve_api_key_env(provider);
+    let api_key = if api_key_env.is_empty() {
+        None
+    } else {
+        std::env::var(&api_key_env).ok().filter(|v| !v.is_empty())
+    };
+    let driver_config = DriverConfig {
+        provider: provider.to_string(),
+        api_key,
+        base_url: cfg.provider_urls.get(provider).cloned(),
+        vertex_ai: cfg.vertex_ai.clone(),
+        azure_openai: cfg.azure_openai.clone(),
+        skip_permissions: true,
+        message_timeout_secs: cfg.default_model.message_timeout_secs,
+        mcp_bridge: Some(mcp_bridge_cfg.clone()),
+        proxy_url: cfg.provider_proxy_urls.get(provider).cloned(),
+        request_timeout_secs: cfg.provider_request_timeout_secs.get(provider).copied(),
+        emit_caller_trace_headers: cfg.telemetry.emit_caller_trace_headers,
+    };
+    drivers::create_driver(&driver_config).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod extraction_model_tests {
+    use super::resolve_extraction_model_target;
+
+    /// Stand-in for the catalog lookup that boot.rs uses in production.
+    /// Returns a closure that owns the list of "registered" provider names.
+    /// Owned-vec form sidesteps lifetime gymnastics on the impl-trait return.
+    fn known_providers(names: &[&'static str]) -> impl Fn(&str) -> bool {
+        let owned: Vec<&'static str> = names.to_vec();
+        move |q: &str| owned.contains(&q)
+    }
+
+    #[test]
+    fn bare_model_routes_to_default_provider() {
+        let (p, m) = resolve_extraction_model_target(
+            "claude-haiku-4-5",
+            "ollama",
+            known_providers(&["anthropic", "openai", "ollama"]),
+        );
+        assert_eq!(p, "ollama");
+        assert_eq!(m, "claude-haiku-4-5");
+    }
+
+    #[test]
+    fn colon_form_with_registered_provider_routes_to_named_provider() {
+        let (p, m) = resolve_extraction_model_target(
+            "anthropic:haiku",
+            "ollama",
+            known_providers(&["anthropic", "openai", "ollama"]),
+        );
+        assert_eq!(p, "anthropic");
+        assert_eq!(m, "haiku");
+    }
+
+    #[test]
+    fn slash_form_with_registered_provider_routes_to_named_provider() {
+        // The shape called out by the #4871 issue body.
+        let (p, m) = resolve_extraction_model_target(
+            "anthropic/haiku",
+            "ollama",
+            known_providers(&["anthropic", "openai", "ollama"]),
+        );
+        assert_eq!(p, "anthropic");
+        assert_eq!(m, "haiku");
+    }
+
+    #[test]
+    fn slash_form_with_unknown_lhs_treats_whole_string_as_bare() {
+        // OpenRouter model ids contain `/` but `google` is not a separate
+        // provider — the whole string belongs to whatever the default
+        // provider is (e.g. configured as `openrouter`).
+        let (p, m) = resolve_extraction_model_target(
+            "google/gemini-2.5-flash",
+            "openrouter",
+            known_providers(&["openrouter", "anthropic"]),
+        );
+        assert_eq!(p, "openrouter");
+        assert_eq!(m, "google/gemini-2.5-flash");
+    }
+
+    #[test]
+    fn nested_slash_form_keeps_first_segment_as_provider() {
+        // openrouter/anthropic/claude-3-5-haiku → openrouter + anthropic/claude-3-5-haiku
+        let (p, m) = resolve_extraction_model_target(
+            "openrouter/anthropic/claude-3-5-haiku",
+            "ollama",
+            known_providers(&["openrouter", "anthropic"]),
+        );
+        assert_eq!(p, "openrouter");
+        assert_eq!(m, "anthropic/claude-3-5-haiku");
+    }
+
+    #[test]
+    fn colon_form_with_unknown_lhs_falls_through_to_bare() {
+        // Some quirky model IDs contain `:` literally (e.g. `qwen3:4b` is
+        // an ollama-tag suffix). When the LHS isn't a registered provider,
+        // do not split — let the default driver handle it verbatim.
+        let (p, m) = resolve_extraction_model_target(
+            "qwen3:4b",
+            "ollama",
+            known_providers(&["anthropic", "openai", "ollama"]),
+        );
+        assert_eq!(p, "ollama");
+        assert_eq!(m, "qwen3:4b");
+    }
+
+    #[test]
+    fn empty_sides_fall_through_to_bare() {
+        // ":foo", "foo:", "/foo", "foo/" — never a valid prefix split.
+        for spec in [":foo", "foo:", "/foo", "foo/"] {
+            let (p, m) = resolve_extraction_model_target(
+                spec,
+                "default-provider",
+                known_providers(&["foo", "anthropic"]),
+            );
+            assert_eq!(
+                p, "default-provider",
+                "spec {spec:?} should fall through to default provider"
+            );
+            assert_eq!(m, spec, "spec {spec:?} should remain verbatim as model");
+        }
+    }
+
+    #[test]
+    fn colon_takes_priority_over_slash_when_both_present_and_lhs_registered() {
+        // Edge case: "anthropic:weird/model" — colon wins because it's
+        // tried first AND `anthropic` is registered.
+        let (p, m) = resolve_extraction_model_target(
+            "anthropic:weird/model",
+            "ollama",
+            known_providers(&["anthropic"]),
+        );
+        assert_eq!(p, "anthropic");
+        assert_eq!(m, "weird/model");
     }
 }

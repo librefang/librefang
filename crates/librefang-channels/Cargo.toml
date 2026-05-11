@@ -72,7 +72,7 @@ channel-telegram = []
 channel-discord = []
 channel-slack = []
 channel-matrix = ["dep:pulldown-cmark"]
-channel-email = ["dep:lettre", "dep:imap", "dep:rustls-connector", "dep:mailparse"]
+channel-email = ["dep:lettre", "dep:imap", "dep:rustls-connector", "dep:mailparse", "dep:rustls-pemfile"]
 channel-webhook = []
 channel-whatsapp = []
 channel-signal = []
@@ -163,6 +163,7 @@ rumqttc = { workspace = true, optional = true }
 lettre = { workspace = true, optional = true }
 imap = { workspace = true, optional = true }
 rustls-connector = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
 mailparse = { workspace = true, optional = true }
 
 [dev-dependencies]

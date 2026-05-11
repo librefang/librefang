@@ -6307,6 +6307,23 @@ pub struct EmailConfig {
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// Path to a PEM file containing one or more CA certificates to trust
+    /// **in addition to** the system root store for the IMAP TLS connection
+    /// (#4877). Use this for self-hosted IMAP behind a private CA — strictly
+    /// preferred over [`Self::tls_accept_invalid_certs`] because hostname /
+    /// expiry / signature validation remain ON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_root_ca_path: Option<String>,
+    /// When `true`, the IMAP TLS connection accepts ANY server certificate —
+    /// hostname, expiry, signature, and chain are all ignored. **This makes
+    /// the connection vulnerable to MITM and exposes the entire mailbox.**
+    /// Provided as a last-resort dev escape hatch (e.g., expired self-signed
+    /// cert that cannot be renewed). Defaults to `false`. A WARN is logged
+    /// on every IMAP connect attempt while this is enabled, so the risk
+    /// stays visible in operator logs rather than being noticed once at
+    /// startup and then forgotten (#4877).
+    #[serde(default)]
+    pub tls_accept_invalid_certs: bool,
 }
 
 impl Default for EmailConfig {
@@ -6328,6 +6345,8 @@ impl Default for EmailConfig {
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
+            tls_root_ca_path: None,
+            tls_accept_invalid_certs: false,
         }
     }
 }
