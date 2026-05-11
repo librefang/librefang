@@ -421,15 +421,18 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
     let workflows = engine.list_workflows().await;
     let all_runs = engine.list_runs(None).await;
 
-    // Per-workflow run aggregates: total count, completed/failed counts (used
-    // for success_rate over terminal runs only — including running/paused
-    // would deflate the rate while a long run is in flight), and the most
-    // recent run summary for the row badge. Computed in one pass over
-    // `all_runs` to avoid N+1 scans across O(workflows × runs).
+    // Per-workflow run aggregates: total count, completed/failed/cancelled
+    // counts, and the most recent run summary for the row badge. Computed in
+    // one pass over `all_runs` to avoid N+1 scans across O(workflows × runs).
+    //
+    // `success_rate` = completed / (completed + failed). Cancelled runs are
+    // NOT included in the denominator — a user-initiated cancel is not a
+    // reliability signal for the workflow itself.
     struct RunAgg<'a> {
         total: usize,
         completed: usize,
         failed: usize,
+        cancelled: usize,
         latest: Option<&'a WorkflowRun>,
     }
     let mut agg: std::collections::HashMap<String, RunAgg> = std::collections::HashMap::new();
@@ -438,12 +441,14 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
             total: 0,
             completed: 0,
             failed: 0,
+            cancelled: 0,
             latest: None,
         });
         entry.total += 1;
         match &r.state {
             WorkflowRunState::Completed => entry.completed += 1,
-            WorkflowRunState::Failed | WorkflowRunState::Cancelled => entry.failed += 1,
+            WorkflowRunState::Failed => entry.failed += 1,
+            WorkflowRunState::Cancelled => entry.cancelled += 1,
             _ => {}
         }
         match entry.latest {
@@ -495,9 +500,11 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
                     "completed_at": r.completed_at.map(|t| t.to_rfc3339()),
                 })
             });
-            // success_rate is null until at least one run reached a terminal
-            // state — surfacing 0% on a workflow with only in-flight runs
-            // would be misleading.
+            // success_rate = completed / (completed + failed). Cancelled runs
+            // are excluded from the denominator — they are not a reliability
+            // signal. Null until at least one non-cancelled terminal run exists
+            // (surfacing 0% on a workflow with only in-flight/cancelled runs
+            // would be misleading).
             let success_rate = wf_agg.and_then(|a| {
                 let terminal = a.completed + a.failed;
                 (terminal > 0).then(|| a.completed as f32 / terminal as f32)
@@ -508,6 +515,7 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
                 "description": w.description,
                 "steps": w.steps.len(),
                 "run_count": run_count,
+                "cancelled_count": wf_agg.map(|a| a.cancelled).unwrap_or(0),
                 "created_at": w.created_at.to_rfc3339(),
                 "schedule": schedule_json,
                 "last_run": last_run_json,
@@ -912,7 +920,9 @@ pub async fn get_workflow_run(
 ///
 /// Transitions `Pending`, `Running`, or `Paused` runs to `Cancelled`.
 /// Returns 200 with `{"run_id": ..., "state": "cancelled"}` on success,
-/// 404 if the run does not exist, or 409 if the run is already terminal.
+/// 400 for a malformed run ID, 404 if the run does not exist, or 409 if
+/// the run is already in a terminal state (includes `{"state": <state>}`
+/// so callers can distinguish completed vs failed vs cancelled conflicts).
 #[utoipa::path(
     post,
     path = "/api/workflows/runs/{run_id}/cancel",
@@ -920,6 +930,7 @@ pub async fn get_workflow_run(
     params(("run_id" = String, Path, description = "Workflow run ID")),
     responses(
         (status = 200, description = "Run cancelled", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed run ID"),
         (status = 404, description = "Run not found"),
         (status = 409, description = "Run already in terminal state")
     )
@@ -928,23 +939,14 @@ pub async fn cancel_workflow_run(
     State(state): State<Arc<AppState>>,
     Path(run_id): Path<String>,
 ) -> impl IntoResponse {
+    use librefang_kernel::workflow::CancelRunError;
+
     let run_id = WorkflowRunId(match run_id.parse() {
         Ok(u) => u,
         Err(_) => {
             return ApiErrorResponse::bad_request("Invalid run ID").into_json_tuple();
         }
     });
-
-    // 404 fast-path: check existence before attempting cancel.
-    if state
-        .kernel
-        .workflow_engine()
-        .get_run(run_id)
-        .await
-        .is_none()
-    {
-        return ApiErrorResponse::not_found(format!("Run '{run_id}' not found")).into_json_tuple();
-    }
 
     match state.kernel.workflow_engine().cancel_run(run_id).await {
         Ok(()) => (
@@ -954,16 +956,17 @@ pub async fn cancel_workflow_run(
                 "state": "cancelled",
             })),
         ),
-        Err(e) => {
-            // cancel_run returns Err only for terminal-state conflicts.
-            (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "error": "conflict",
-                    "message": e,
-                })),
-            )
+        Err(CancelRunError::NotFound(_)) => {
+            ApiErrorResponse::not_found(format!("Run '{run_id}' not found")).into_json_tuple()
         }
+        Err(CancelRunError::AlreadyTerminal { state: s, .. }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "conflict",
+                "state": s,
+                "message": format!("Run '{run_id}' is already {s}"),
+            })),
+        ),
     }
 }
 

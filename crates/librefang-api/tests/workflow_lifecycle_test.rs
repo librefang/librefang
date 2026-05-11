@@ -230,7 +230,8 @@ async fn cancel_paused_run_clears_pause_snapshot() {
 }
 
 /// Cancelling a run that is already in a terminal state (`Cancelled`) returns
-/// 409 Conflict at the HTTP layer.
+/// 409 Conflict at the HTTP layer, with `state` echoed in the body so
+/// callers can distinguish completed vs failed vs cancelled conflicts.
 ///
 /// `Completed` and `Failed` runs can only reach those states via the executor
 /// (which requires LLM credentials). The 409 path for all three terminal
@@ -270,6 +271,12 @@ async fn cancel_terminal_run_returns_409() {
         body["error"].as_str().unwrap_or(""),
         "conflict",
         "error field must be 'conflict': {body:?}"
+    );
+    // R2: state field must be present and name the terminal state.
+    assert_eq!(
+        body["state"].as_str().unwrap_or(""),
+        "cancelled",
+        "state field must echo the terminal state: {body:?}"
     );
 }
 
@@ -560,4 +567,94 @@ async fn list_runs_state_filter_cancelled() {
 
     // run_b must not be in the cancelled list.
     assert_ne!(cancelled[0].id, run_b);
+}
+
+// ---------------------------------------------------------------------------
+// Q2 — success_rate excludes cancelled runs from denominator
+// ---------------------------------------------------------------------------
+
+/// Cancelled runs must not count toward the `success_rate` denominator.
+///
+/// Scenario: 3 completed + 3 cancelled. Completed runs are driven via
+/// `execute_run` with an in-process mock sender (no LLM credentials needed).
+/// Cancelled runs use `cancel_run` directly. success_rate must be 1.0
+/// (not 0.5). `cancelled_count` in the list response must be 3.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_workflows_success_rate_excludes_cancelled() {
+    use librefang_kernel::workflow::WorkflowId;
+    use librefang_types::agent::AgentId;
+
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    // Create a workflow via the API so it's registered in the engine.
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "rate-test",
+            "description": "success_rate test",
+            "steps": [{"name": "s1", "agent_id": agent_id, "prompt": "hi"}]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id_str = body["workflow_id"].as_str().unwrap().to_string();
+    let wf_id = WorkflowId(wf_id_str.parse().unwrap());
+
+    let engine = h.state.kernel.workflow_engine();
+
+    // Seed 3 Completed runs via execute_run with an in-process mock sender.
+    // No LLM needed — the closure runs entirely in-process.
+    for _ in 0..3 {
+        let run_id = engine
+            .create_run(wf_id, "input".to_string())
+            .await
+            .expect("create_run for completed");
+        engine
+            .execute_run(
+                run_id,
+                |_agent| Some((AgentId::new(), "mock".to_string(), false)),
+                |_id: AgentId, _msg: String| async move { Ok(("done".to_string(), 0u64, 0u64)) },
+            )
+            .await
+            .expect("execute_run must complete successfully");
+    }
+
+    // Seed 3 Cancelled runs via create_run + cancel_run.
+    for _ in 0..3 {
+        let run_id = engine
+            .create_run(wf_id, "input".to_string())
+            .await
+            .expect("create_run for cancelled");
+        engine.cancel_run(run_id).await.expect("cancel");
+    }
+
+    // GET /api/workflows — check aggregates.
+    let (status, body) = get(&h, "/api/workflows").await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let items = body["items"].as_array().expect("items array");
+    let wf_item = items
+        .iter()
+        .find(|item| item["id"].as_str() == Some(&wf_id_str))
+        .unwrap_or_else(|| panic!("workflow not in list: {body:?}"));
+
+    assert_eq!(
+        wf_item["run_count"].as_u64(),
+        Some(6),
+        "total run_count must be 6: {wf_item:?}"
+    );
+    assert_eq!(
+        wf_item["cancelled_count"].as_u64(),
+        Some(3),
+        "cancelled_count must be 3: {wf_item:?}"
+    );
+    let rate = wf_item["success_rate"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("success_rate must be present: {wf_item:?}"));
+    assert!(
+        (rate - 1.0_f64).abs() < 0.001,
+        "success_rate must be 1.0 (cancelled excluded from denominator), got {rate}: {wf_item:?}"
+    );
 }
