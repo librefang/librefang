@@ -309,12 +309,19 @@ impl std::error::Error for FetchError {}
 pub async fn fetch_url_bytes(
     url: &str,
     max_bytes: usize,
+    extra_headers: &[(String, String)],
 ) -> Result<(Vec<u8>, Option<String>), FetchError> {
     validate_url_for_fetch(url).map_err(FetchError::Rejected)?;
-    fetch_url_bytes_unchecked(safe_fetch_client(), url, max_bytes).await
+    fetch_url_bytes_unchecked(safe_fetch_client(), url, max_bytes, extra_headers).await
 }
 
 /// Send the GET and apply the size cap. Skips the SSRF guard.
+///
+/// `extra_headers` is attached to the outgoing request — caller is
+/// responsible for deciding whether the URL belongs to a trusted host
+/// (auth tokens MUST NOT be sent to a model-controlled hostname); see
+/// `ChannelAdapter::fetch_headers_for` for the gating contract that
+/// guards Matrix's MSC3916 Bearer-token path.
 ///
 /// **Do NOT call this directly from production code.** The only legitimate
 /// callers are unit tests pointing at a `wiremock` server (which binds
@@ -325,9 +332,13 @@ pub(crate) async fn fetch_url_bytes_unchecked(
     client: &reqwest::Client,
     url: &str,
     max_bytes: usize,
+    extra_headers: &[(String, String)],
 ) -> Result<(Vec<u8>, Option<String>), FetchError> {
-    let resp = client
-        .get(url)
+    let mut req = client.get(url);
+    for (name, value) in extra_headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| FetchError::Failed(format!("fetch failed: {e}")))?;
@@ -532,7 +543,7 @@ mod tests {
     async fn fetch_url_bytes_rejects_blocked_url_before_dialing() {
         // No mock server stood up — if the SSRF guard didn't fire we'd see a
         // connection error, not the scheme/host rejection.
-        let err = fetch_url_bytes("http://127.0.0.1/", 1024)
+        let err = fetch_url_bytes("http://127.0.0.1/", 1024, &[])
             .await
             .unwrap_err();
         match &err {
@@ -543,7 +554,7 @@ mod tests {
             other => panic!("expected Rejected, got: {other:?}"),
         }
 
-        let err = fetch_url_bytes("file:///etc/passwd", 1024)
+        let err = fetch_url_bytes("file:///etc/passwd", 1024, &[])
             .await
             .unwrap_err();
         match &err {
@@ -630,7 +641,7 @@ mod tests {
 
         let client = new_client();
         let url = format!("{}/file", server.uri());
-        let (got, content_type) = fetch_url_bytes_unchecked(&client, &url, 1024)
+        let (got, content_type) = fetch_url_bytes_unchecked(&client, &url, 1024, &[])
             .await
             .unwrap();
         assert_eq!(got, body);
@@ -652,7 +663,7 @@ mod tests {
 
         let client = new_client();
         let url = format!("{}/big", server.uri());
-        let err = fetch_url_bytes_unchecked(&client, &url, 1024)
+        let err = fetch_url_bytes_unchecked(&client, &url, 1024, &[])
             .await
             .unwrap_err();
         match err {
@@ -708,7 +719,7 @@ mod tests {
         let url = format!("http://{addr}/");
         // Cap = 800: pre-check has nothing to check (no Content-Length),
         // streaming accumulator sees the real 1200 bytes and rejects.
-        let err = fetch_url_bytes_unchecked(&client, &url, 800)
+        let err = fetch_url_bytes_unchecked(&client, &url, 800, &[])
             .await
             .unwrap_err();
         match err {
@@ -731,7 +742,7 @@ mod tests {
 
         let client = new_client();
         let url = format!("{}/missing", server.uri());
-        let err = fetch_url_bytes_unchecked(&client, &url, 1024)
+        let err = fetch_url_bytes_unchecked(&client, &url, 1024, &[])
             .await
             .unwrap_err();
         match &err {
@@ -740,6 +751,36 @@ mod tests {
             }
             other => panic!("expected Failed, got: {other:?}"),
         }
+    }
+
+    /// Regression for the Tier-4 dedup: confirm that `extra_headers`
+    /// attached at the public `fetch_url_bytes_*` boundary actually
+    /// reach the wire. Without this, the dedup would silently drop
+    /// Matrix's MSC3916 `Authorization: Bearer …` and inbound media
+    /// downloads would 401 on `enable_authenticated_media` homeservers.
+    #[tokio::test]
+    async fn fetch_url_bytes_unchecked_attaches_extra_headers() {
+        use wiremock::matchers::header;
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/secret"))
+            .and(header("Authorization", "Bearer t0p-s3cret"))
+            .and(header("X-Extra", "yes"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok".to_vec()))
+            .mount(&server)
+            .await;
+
+        let client = new_client();
+        let url = format!("{}/secret", server.uri());
+        let headers = vec![
+            ("Authorization".to_string(), "Bearer t0p-s3cret".to_string()),
+            ("X-Extra".to_string(), "yes".to_string()),
+        ];
+        let (got, _) = fetch_url_bytes_unchecked(&client, &url, 1024, &headers)
+            .await
+            .expect("auth'd request must succeed");
+        assert_eq!(got, b"ok");
     }
 
     // -------- ct_eq --------------------------------------------------------

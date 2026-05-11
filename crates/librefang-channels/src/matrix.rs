@@ -368,7 +368,7 @@ async fn fetch_outbound_media(
 ) -> Result<(Vec<u8>, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(not(test))]
     {
-        Ok(crate::http_client::fetch_url_bytes(url, max_bytes).await?)
+        Ok(crate::http_client::fetch_url_bytes(url, max_bytes, &[]).await?)
     }
     #[cfg(test)]
     {
@@ -376,6 +376,7 @@ async fn fetch_outbound_media(
             crate::http_client::safe_fetch_client(),
             url,
             max_bytes,
+            &[],
         )
         .await?)
     }

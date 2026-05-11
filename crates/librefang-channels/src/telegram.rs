@@ -545,7 +545,7 @@ impl TelegramAdapter {
                 "Private URL detected on sendDocument, falling back to multipart upload"
             );
             let (bytes, ct) =
-                fetch_url_bytes_unchecked(safe_fetch_client(), document_url, 50 * 1024 * 1024)
+                fetch_url_bytes_unchecked(safe_fetch_client(), document_url, 50 * 1024 * 1024, &[])
                     .await?;
             let mime = ct.unwrap_or_else(|| "application/octet-stream".to_string());
             return self
@@ -692,7 +692,8 @@ impl TelegramAdapter {
                 "Private URL detected on sendVoice, falling back to multipart upload"
             );
             let (bytes, ct) =
-                fetch_url_bytes_unchecked(safe_fetch_client(), voice_url, 50 * 1024 * 1024).await?;
+                fetch_url_bytes_unchecked(safe_fetch_client(), voice_url, 50 * 1024 * 1024, &[])
+                    .await?;
             let mime = ct.unwrap_or_else(|| "audio/ogg".to_string());
             let filename = url_filename(voice_url, "voice.ogg");
             let mut extra: Vec<(&str, String)> = Vec::new();
@@ -741,7 +742,8 @@ impl TelegramAdapter {
                 "Private URL detected on sendAudio, falling back to multipart upload"
             );
             let (bytes, ct) =
-                fetch_url_bytes_unchecked(safe_fetch_client(), audio_url, 50 * 1024 * 1024).await?;
+                fetch_url_bytes_unchecked(safe_fetch_client(), audio_url, 50 * 1024 * 1024, &[])
+                    .await?;
             let mime = ct.unwrap_or_else(|| "audio/mpeg".to_string());
             let filename = url_filename(audio_url, "audio.mp3");
             let mut extra: Vec<(&str, String)> = Vec::new();
