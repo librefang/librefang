@@ -1096,7 +1096,10 @@ impl WorkflowEngine {
         self.cancel_notify
             .insert(run_id, Arc::new(tokio::sync::Notify::new()));
 
-        // Evict oldest completed/failed runs when we exceed the cap
+        // Evict oldest terminal runs (Completed / Failed / Cancelled) when
+        // we exceed the cap. Cancelled must be included here, otherwise a
+        // burst of user-initiated cancels would pin those records in the
+        // DashMap forever and push out evictable Completed/Failed runs.
         if self.runs.len() > Self::MAX_RETAINED_RUNS {
             let mut evictable: Vec<(WorkflowRunId, DateTime<Utc>)> = self
                 .runs
@@ -1104,7 +1107,9 @@ impl WorkflowEngine {
                 .filter(|r| {
                     matches!(
                         r.state,
-                        WorkflowRunState::Completed | WorkflowRunState::Failed
+                        WorkflowRunState::Completed
+                            | WorkflowRunState::Failed
+                            | WorkflowRunState::Cancelled
                     )
                 })
                 .map(|r| (*r.key(), r.started_at))
@@ -6496,6 +6501,55 @@ prompt_template = "do {{x}}"
             matches!(run.state, WorkflowRunState::Cancelled),
             "state must be Cancelled, got {:?}",
             run.state
+        );
+    }
+
+    /// Regression: Cancelled runs must be evictable when the total exceeds
+    /// the retention cap (`MAX_RETAINED_RUNS`). Without this, a burst of
+    /// cancels would pin those records in the DashMap forever and push out
+    /// evictable Completed/Failed runs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_runs_are_evictable_when_over_cap() {
+        let engine = WorkflowEngine::new();
+        let wf = Workflow {
+            id: WorkflowId::new(),
+            name: "evict-test".to_string(),
+            description: "".to_string(),
+            steps: vec![WorkflowStep {
+                name: "s".to_string(),
+                agent: StepAgent::ByName {
+                    name: "a".to_string(),
+                },
+                prompt_template: "x".to_string(),
+                mode: StepMode::Sequential,
+                timeout_secs: 1,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+            }],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+        };
+        let wf_id = engine.register(wf).await;
+
+        // Create + immediately cancel well past the retention cap (200).
+        // Without Cancelled in the eviction filter, this loop grows the
+        // `runs` map unboundedly.
+        for _ in 0..250usize {
+            let run_id = engine
+                .create_run(wf_id, "x".to_string())
+                .await
+                .expect("create_run");
+            engine.cancel_run(run_id).await.expect("cancel_run");
+        }
+
+        let all_runs = engine.list_runs(None).await;
+        assert!(
+            all_runs.len() <= 200,
+            "cancelled runs over the cap must be evictable, retained {} (cap 200)",
+            all_runs.len()
         );
     }
 }
