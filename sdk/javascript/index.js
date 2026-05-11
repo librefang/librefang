@@ -809,6 +809,10 @@ class ModelsResource {
     return this._c._request("POST", `/api/providers/${name}/default`, data, undefined);
   }
 
+  async enableProvider(name) {
+    return this._c._request("POST", `/api/providers/${name}/enable`);
+  }
+
   async setProviderKey(name, data) {
     return this._c._request("POST", `/api/providers/${name}/key`, data, undefined);
   }
