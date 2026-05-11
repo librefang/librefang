@@ -2309,6 +2309,26 @@ impl ChannelAdapter for TelegramAdapter {
         }
         Ok(())
     }
+
+    /// Telegram approval-notification recipients are the configured
+    /// `allowed_users` (#4875). Only numeric entries are kept — Telegram
+    /// `sendMessage` requires a numeric `chat_id`, and a private chat's
+    /// `chat_id` equals the user's numeric `user_id`. Bare `@username`
+    /// entries are dropped here because there is no API call that resolves
+    /// a username to a `chat_id` without a prior message from that user.
+    /// An empty `allowed_users` list means "no operator inbox configured",
+    /// so we return an empty Vec rather than broadcasting to strangers.
+    fn notification_recipients(&self) -> Vec<ChannelUser> {
+        self.allowed_users
+            .iter()
+            .filter(|u| u.parse::<i64>().is_ok())
+            .map(|u| ChannelUser {
+                platform_id: u.clone(),
+                display_name: String::new(),
+                librefang_user: None,
+            })
+            .collect()
+    }
 }
 
 fn map_reaction_emoji(emoji: &str) -> &str {

@@ -1349,13 +1349,17 @@ impl BridgeManager {
     }
 
     /// Start listening for `ApprovalRequested` kernel events and forward them
-    /// to all running channel adapters as interactive approval messages.
+    /// to every running channel adapter as a text notification (#4875).
     ///
-    /// Each adapter receives a text notification about the pending approval.
-    /// Adapters that support inline keyboards (e.g. Telegram) can later be
-    /// extended to send interactive buttons; for now we send a text prompt
-    /// with the approval ID so users can `/approve <id>` or `/reject <id>`.
-    pub async fn start_approval_listener(&mut self, adapters: Vec<Arc<dyn ChannelAdapter>>) {
+    /// Per-adapter recipients come from
+    /// [`ChannelAdapter::notification_recipients`]. Adapters that return an
+    /// empty list (the default) silently skip the broadcast — that is the
+    /// correct behaviour for group-only / public-broadcast adapters that
+    /// have no stable operator inbox. The current payload is plain text
+    /// with the truncated approval ID and `/approve <id>` / `/reject <id>`
+    /// instructions; inline-keyboard support per adapter is a follow-on
+    /// (re-opens the delivery side of #2029).
+    pub async fn start_approval_listener(&mut self) {
         let maybe_rx = self.handle.subscribe_events().await;
         let Some(mut rx) = maybe_rx else {
             debug!("Event subscription not available — approval listener not started");
@@ -1364,6 +1368,7 @@ impl BridgeManager {
 
         let mut shutdown = self.shutdown_rx.clone();
         let handle = self.handle.clone();
+        let adapters = self.adapters.clone();
 
         let task = tokio::spawn(async move {
             loop {
@@ -1372,39 +1377,51 @@ impl BridgeManager {
                         match result {
                             Ok(event) => {
                                 if let librefang_types::event::EventPayload::ApprovalRequested(approval) = &event.payload {
+                                    let short_id = &approval.request_id[..8.min(approval.request_id.len())];
                                     let msg = format!(
                                         "Approval required for agent {}\n\
                                          Tool: {}\n\
                                          Risk: {}\n\
                                          {}\n\n\
-                                         Reply /approve {} or /reject {}",
+                                         Reply /approve {short_id} or /reject {short_id}",
                                         approval.agent_id,
                                         approval.tool_name,
                                         approval.risk_level,
                                         approval.description,
-                                        &approval.request_id[..8.min(approval.request_id.len())],
-                                        &approval.request_id[..8.min(approval.request_id.len())],
                                     );
 
-                                    // Send to all adapters (best-effort). Each adapter
-                                    // gets the notification so the user sees it on
-                                    // whichever channel they are active on.
                                     for adapter in &adapters {
-                                        // We don't have a specific user to send to, so
-                                        // this is a broadcast-style notification. Adapters
-                                        // that don't support broadcast will simply skip.
-                                        // For now, log the notification — concrete delivery
-                                        // requires per-adapter user tracking which is a
-                                        // follow-up feature.
-                                        info!(
-                                            adapter = adapter.name(),
-                                            request_id = %approval.request_id,
-                                            "Approval notification ready for channel adapter"
-                                        );
+                                        let recipients = adapter.notification_recipients();
+                                        if recipients.is_empty() {
+                                            debug!(
+                                                adapter = adapter.name(),
+                                                request_id = %approval.request_id,
+                                                "Adapter has no notification recipients — skipping approval broadcast"
+                                            );
+                                            continue;
+                                        }
+                                        for user in &recipients {
+                                            if let Err(e) = adapter
+                                                .send(user, ChannelContent::Text(msg.clone()))
+                                                .await
+                                            {
+                                                warn!(
+                                                    adapter = adapter.name(),
+                                                    request_id = %approval.request_id,
+                                                    recipient = %user.platform_id,
+                                                    error = %e,
+                                                    "Failed to deliver approval notification"
+                                                );
+                                            } else {
+                                                info!(
+                                                    adapter = adapter.name(),
+                                                    request_id = %approval.request_id,
+                                                    recipient = %user.platform_id,
+                                                    "Delivered approval notification"
+                                                );
+                                            }
+                                        }
                                     }
-
-                                    let _ = &msg; // Suppress unused variable warning
-                                    let _ = &handle;
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

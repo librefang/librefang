@@ -3828,6 +3828,13 @@ pub async fn start_channel_bridge_with_config(
     if started_names.is_empty() {
         (None, Vec::new(), webhook_router)
     } else {
+        // Forward `ApprovalRequested` kernel events to channel adapters so
+        // human approvers see a prompt in their configured chat instead of
+        // having to poll the dashboard (#4875). Started after the adapter
+        // registration loop so the listener captures the live `self.adapters`
+        // set; lifetime is tied to BridgeManager::shutdown_tx, so hot-reload
+        // cancels it together with the rest of the bridge tasks.
+        manager.start_approval_listener().await;
         (Some(manager), started_names, webhook_router)
     }
 }

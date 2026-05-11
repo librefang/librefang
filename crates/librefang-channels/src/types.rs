@@ -747,6 +747,17 @@ pub trait ChannelAdapter: Send + Sync {
         }
         Ok(())
     }
+
+    /// Recipients for non-conversational broadcasts originating outside an
+    /// active chat — currently just approval notifications (#4875). Default
+    /// returns an empty list, which is correct for adapters that don't know
+    /// a stable operator inbox (group-only integrations, public broadcast
+    /// platforms) and means those adapters silently skip the notification.
+    /// Adapters with a configured `allowed_users` / admin list should
+    /// override this to return those users so the bridge can deliver.
+    fn notification_recipients(&self) -> Vec<ChannelUser> {
+        Vec::new()
+    }
 }
 
 /// Split a message into chunks of at most `max_len` characters,

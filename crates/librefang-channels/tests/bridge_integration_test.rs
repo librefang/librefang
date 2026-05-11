@@ -1417,3 +1417,253 @@ async fn test_bridge_streaming_adapter_kernel_ok_transport_fail_records_clean_su
 
     manager.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// Approval listener (#4875)
+// ---------------------------------------------------------------------------
+//
+// Regression coverage for `BridgeManager::start_approval_listener`: prior to
+// #4875 the listener was dead code (no caller in the codebase), so approval
+// requests fired by the kernel never reached channel adapters.
+
+/// Mock kernel handle that exposes a real `tokio::broadcast` channel as its
+/// event bus. The accompanying `sender` lets tests inject `Event` instances
+/// as if the kernel had emitted them.
+struct EventBusHandle {
+    sender: tokio::sync::broadcast::Sender<Arc<librefang_types::event::Event>>,
+}
+
+impl EventBusHandle {
+    fn new() -> (
+        Self,
+        tokio::sync::broadcast::Sender<Arc<librefang_types::event::Event>>,
+    ) {
+        let (sender, _) = tokio::sync::broadcast::channel(16);
+        (
+            Self {
+                sender: sender.clone(),
+            },
+            sender,
+        )
+    }
+}
+
+#[async_trait]
+impl ChannelBridgeHandle for EventBusHandle {
+    async fn send_message(&self, _agent_id: AgentId, _message: &str) -> Result<String, String> {
+        Err("not used by approval-listener test".to_string())
+    }
+
+    async fn find_agent_by_name(&self, _name: &str) -> Result<Option<AgentId>, String> {
+        Ok(None)
+    }
+
+    async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+        Err("not used by approval-listener test".to_string())
+    }
+
+    fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
+
+    async fn subscribe_events(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<Arc<librefang_types::event::Event>>> {
+        Some(self.sender.subscribe())
+    }
+}
+
+/// Mock adapter that overrides `notification_recipients()` to expose a
+/// configured operator user, mirroring how `TelegramAdapter` exposes its
+/// `allowed_users`.
+struct NotifyingAdapter {
+    name: String,
+    recipients: Vec<ChannelUser>,
+    sent: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl NotifyingAdapter {
+    fn new(name: &str, recipients: Vec<ChannelUser>) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.to_string(),
+            recipients,
+            sent: Arc::new(Mutex::new(Vec::new())),
+        })
+    }
+
+    fn get_sent(&self) -> Vec<(String, String)> {
+        self.sent.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ChannelAdapter for NotifyingAdapter {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn channel_type(&self) -> ChannelType {
+        ChannelType::Telegram
+    }
+
+    async fn start(
+        &self,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        // No inbound messages — the listener test only exercises the outbound
+        // notification path. Return an immediately-closed stream so
+        // `start_adapter`'s dispatch loop is well-behaved.
+        let (_tx, rx) = mpsc::channel::<ChannelMessage>(1);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Box::pin(stream))
+    }
+
+    async fn send(
+        &self,
+        user: &ChannelUser,
+        content: ChannelContent,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let ChannelContent::Text(t) = content {
+            self.sent
+                .lock()
+                .unwrap()
+                .push((user.platform_id.clone(), t));
+        }
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+
+    fn notification_recipients(&self) -> Vec<ChannelUser> {
+        self.recipients.clone()
+    }
+}
+
+/// End-to-end check: with the listener wired up, an `ApprovalRequested`
+/// event flowing through the kernel's event bus reaches every channel
+/// adapter's configured recipients with a formatted text notification.
+#[tokio::test]
+async fn test_approval_listener_delivers_to_configured_recipients() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+    let router = Arc::new(AgentRouter::new());
+    let adapter = NotifyingAdapter::new(
+        "telegram-mock",
+        vec![ChannelUser {
+            platform_id: "555".to_string(),
+            display_name: String::new(),
+            librefang_user: None,
+        }],
+    );
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+    manager.start_approval_listener().await;
+
+    // Subscribers join the broadcast lazily — give the listener task a tick
+    // to wire itself up before we emit. Without this, the very first send()
+    // would race the spawn and silently drop.
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    let approval = ApprovalRequestedEvent {
+        request_id: "abcdef0123456789".to_string(),
+        agent_id: "agent-7".to_string(),
+        tool_name: "shell_exec".to_string(),
+        description: "rm -rf /tmp/foo".to_string(),
+        risk_level: "high".to_string(),
+    };
+    let event = Arc::new(Event::new(
+        AgentId::new(),
+        EventTarget::System,
+        EventPayload::ApprovalRequested(approval),
+    ));
+    event_tx
+        .send(event)
+        .expect("broadcast send: listener should be subscribed");
+
+    wait_until("approval notification delivered", || {
+        !adapter_ref.get_sent().is_empty()
+    })
+    .await;
+
+    let sent = adapter_ref.get_sent();
+    assert_eq!(sent.len(), 1, "expected one notification, got {sent:?}");
+    let (to, text) = &sent[0];
+    assert_eq!(to, "555", "notification went to wrong recipient");
+    assert!(
+        text.contains("abcdef01"),
+        "notification should include 8-char approval id prefix, got: {text}"
+    );
+    assert!(
+        text.contains("shell_exec"),
+        "notification should name the tool, got: {text}"
+    );
+    assert!(
+        text.contains("/approve") && text.contains("/reject"),
+        "notification should include approve/reject hints, got: {text}"
+    );
+
+    manager.stop().await;
+}
+
+/// Adapter with no configured recipients (empty `allowed_users` equivalent)
+/// must not crash the listener and must produce no `send()` calls — the
+/// approval has nowhere to land on that channel.
+#[tokio::test]
+async fn test_approval_listener_skips_adapter_without_recipients() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+    let router = Arc::new(AgentRouter::new());
+    let adapter = NotifyingAdapter::new("telegram-no-users", Vec::new());
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+    manager.start_approval_listener().await;
+
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(Event::new(
+            AgentId::new(),
+            EventTarget::System,
+            EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                request_id: "deadbeef".to_string(),
+                agent_id: "agent-1".to_string(),
+                tool_name: "shell_exec".to_string(),
+                description: "ls".to_string(),
+                risk_level: "low".to_string(),
+            }),
+        )))
+        .expect("broadcast send");
+
+    // Give the listener task time to process the event and skip delivery.
+    // 100ms is well above the in-process dispatch latency; a regression that
+    // mistakenly sends to an empty recipient list would already have written
+    // to `sent` by then.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        adapter_ref.get_sent().is_empty(),
+        "adapter with no recipients must not receive notifications, got: {:?}",
+        adapter_ref.get_sent()
+    );
+
+    manager.stop().await;
+}
