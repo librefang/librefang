@@ -2746,7 +2746,14 @@ pub async fn start_channel_bridge_with_config(
                 em_config.folders.clone(),
                 em_config.allowed_senders.clone(),
             )
-            .with_account_id(em_config.account_id.clone()),
+            .with_account_id(em_config.account_id.clone())
+            .with_tls_root_ca_path(
+                em_config
+                    .tls_root_ca_path
+                    .as_ref()
+                    .map(std::path::PathBuf::from),
+            )
+            .with_tls_accept_invalid_certs(em_config.tls_accept_invalid_certs),
         );
         adapters.push((
             adapter,

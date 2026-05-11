@@ -78,6 +78,23 @@ pub struct EmailAdapter {
     /// only path: tests set this via `with_plain_smtp` so `send()`
     /// can talk to a hand-rolled local SMTP fixture without TLS.
     smtp_use_plain: bool,
+    /// IMAP TLS options (#4877): optional additional root CA and a
+    /// last-resort accept-invalid-certs escape hatch. Defaults to the
+    /// safe, system-roots-only configuration.
+    imap_tls: ImapTlsOptions,
+}
+
+/// IMAP TLS knobs for [`EmailAdapter`] (#4877).
+///
+/// Default = system root store, full validation. Set
+/// [`Self::root_ca_path`] to trust a private CA on top of the system
+/// roots (preferred for self-hosted IMAP). Set
+/// [`Self::accept_invalid_certs`] only as a last resort — it disables
+/// hostname, expiry, signature, and chain validation entirely.
+#[derive(Debug, Clone, Default)]
+struct ImapTlsOptions {
+    root_ca_path: Option<std::path::PathBuf>,
+    accept_invalid_certs: bool,
 }
 
 impl EmailAdapter {
@@ -118,11 +135,30 @@ impl EmailAdapter {
             shutdown_rx,
             reply_ctx: Arc::new(DashMap::new()),
             smtp_use_plain: false,
+            imap_tls: ImapTlsOptions::default(),
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Trust an additional CA cert (PEM file) for the IMAP TLS connection
+    /// on top of the system root store (#4877). Hostname, expiry, signature,
+    /// and chain validation remain ON. Use this for self-hosted IMAP behind
+    /// a private CA. `None` = system roots only.
+    pub fn with_tls_root_ca_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.imap_tls.root_ca_path = path;
+        self
+    }
+
+    /// Disable IMAP TLS certificate validation entirely (#4877). Last-resort
+    /// dev escape hatch for expired self-signed certs. Defaults to `false`.
+    /// When `true`, every IMAP connect attempt logs a WARN so the risk
+    /// stays visible in operator logs.
+    pub fn with_tls_accept_invalid_certs(mut self, accept: bool) -> Self {
+        self.imap_tls.accept_invalid_certs = accept;
         self
     }
 
@@ -287,6 +323,146 @@ struct FetchedEmail {
     body: String,
 }
 
+/// Build the rustls connector for an IMAP TLS connection (#4877).
+///
+/// Two operator-controlled knobs sit on top of the system root store:
+///
+/// - `tls_root_ca_path` — additionally trust certificates from a PEM file.
+///   Hostname / expiry / signature / chain validation stay ON; this is the
+///   recommended path for self-hosted IMAP behind a private CA.
+/// - `tls_accept_invalid_certs` — disable validation entirely. Last-resort
+///   escape hatch for expired self-signed certs in dev / test. Emits a WARN
+///   on **every** connect attempt (i.e. every poll cycle and every flag
+///   update) so the risk stays visible in operator logs rather than being
+///   noticed once at startup and forgotten.
+///
+/// `host` is included in log fields purely for operator triage; it is not
+/// used for cert validation when `accept_invalid_certs` is true.
+fn build_imap_tls_connector(
+    host: &str,
+    opts: &ImapTlsOptions,
+) -> Result<rustls_connector::RustlsConnector, String> {
+    use rustls::pki_types::CertificateDer;
+    use rustls::RootCertStore;
+
+    if opts.accept_invalid_certs {
+        warn!(
+            host = %host,
+            "IMAP TLS certificate validation DISABLED (tls_accept_invalid_certs = true). \
+             The connection is vulnerable to MITM and will accept any cert. Do not use in production."
+        );
+        let config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(NoCertVerification))
+            .with_no_client_auth();
+        return Ok(rustls_connector::RustlsConnector::from(
+            std::sync::Arc::new(config),
+        ));
+    }
+
+    let mut roots = RootCertStore::empty();
+    let native = rustls_native_certs::load_native_certs();
+    let (added_native, _errs) = roots.add_parsable_certificates(native.certs);
+    if added_native == 0 {
+        // Minimal containers / musl / Termux: native store empty. Fall back
+        // to the bundled Mozilla roots so cloud IMAP still works.
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    }
+
+    if let Some(ref ca_path) = opts.root_ca_path {
+        let bytes = std::fs::read(ca_path)
+            .map_err(|e| format!("failed to read tls_root_ca_path {}: {e}", ca_path.display()))?;
+        let mut slice = bytes.as_slice();
+        let mut added_custom = 0usize;
+        for cert in rustls_pemfile::certs(&mut slice) {
+            let cert: CertificateDer<'_> = cert.map_err(|e| {
+                format!("invalid PEM in tls_root_ca_path {}: {e}", ca_path.display())
+            })?;
+            roots
+                .add(cert)
+                .map_err(|e| format!("failed to add CA cert from {}: {e}", ca_path.display()))?;
+            added_custom += 1;
+        }
+        if added_custom == 0 {
+            return Err(format!(
+                "no PEM certificates found in tls_root_ca_path {}",
+                ca_path.display()
+            ));
+        }
+        debug!(
+            host = %host,
+            ca_path = %ca_path.display(),
+            added = added_custom,
+            "Added custom CA certs to IMAP TLS root store"
+        );
+    }
+
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(rustls_connector::RustlsConnector::from(
+        std::sync::Arc::new(config),
+    ))
+}
+
+/// `ServerCertVerifier` that accepts every server certificate without
+/// inspection. Wired in only when the operator opts in via
+/// `tls_accept_invalid_certs = true` — see [`build_imap_tls_connector`].
+#[derive(Debug)]
+struct NoCertVerification;
+
+impl rustls::client::danger::ServerCertVerifier for NoCertVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        // We accept every signature anyway; advertising the full set keeps
+        // peers from filtering us out before the (no-op) verification runs.
+        use rustls::SignatureScheme::*;
+        vec![
+            RSA_PKCS1_SHA1,
+            ECDSA_SHA1_Legacy,
+            RSA_PKCS1_SHA256,
+            ECDSA_NISTP256_SHA256,
+            RSA_PKCS1_SHA384,
+            ECDSA_NISTP384_SHA384,
+            RSA_PKCS1_SHA512,
+            ECDSA_NISTP521_SHA512,
+            RSA_PSS_SHA256,
+            RSA_PSS_SHA384,
+            RSA_PSS_SHA512,
+            ED25519,
+            ED448,
+        ]
+    }
+}
+
 /// UID outcome for `mark_uids_outcome`.
 enum UidOutcome {
     /// Mark `\Seen` — the message was successfully delivered.
@@ -308,11 +484,11 @@ fn fetch_unseen_emails(
     username: &str,
     password: &str,
     folders: &[String],
+    tls_opts: &ImapTlsOptions,
 ) -> Result<Vec<FetchedEmail>, String> {
     let tcp = std::net::TcpStream::connect((host, port))
         .map_err(|e| format!("TCP connect failed: {e}"))?;
-    let tls = rustls_connector::RustlsConnector::new_with_native_certs()
-        .map_err(|e| format!("TLS connector error: {e}"))?;
+    let tls = build_imap_tls_connector(host, tls_opts)?;
     let tls_stream = tls
         .connect(host, tcp)
         .map_err(|e| format!("TLS handshake failed: {e}"))?;
@@ -463,14 +639,14 @@ fn mark_uids_outcome(
     username: &str,
     password: &str,
     items: Vec<(String, u32, UidOutcome)>,
+    tls_opts: &ImapTlsOptions,
 ) -> Result<(), String> {
     if items.is_empty() {
         return Ok(());
     }
     let tcp = std::net::TcpStream::connect((host, port))
         .map_err(|e| format!("TCP connect failed: {e}"))?;
-    let tls = rustls_connector::RustlsConnector::new_with_native_certs()
-        .map_err(|e| format!("TLS connector error: {e}"))?;
+    let tls = build_imap_tls_connector(host, tls_opts)?;
     let tls_stream = tls
         .connect(host, tcp)
         .map_err(|e| format!("TLS handshake failed: {e}"))?;
@@ -541,6 +717,7 @@ impl ChannelAdapter for EmailAdapter {
         let mut shutdown_rx = self.shutdown_rx.clone();
         let reply_ctx = self.reply_ctx.clone();
         let account_id = self.account_id.clone();
+        let imap_tls = self.imap_tls.clone();
 
         info!(
             "Starting email adapter (IMAP: {}:{}, SMTP: {}:{}, polling every {:?})",
@@ -564,8 +741,9 @@ impl ChannelAdapter for EmailAdapter {
                 let pass = password.clone();
                 let fldrs = folders.clone();
 
+                let tls_opts = imap_tls.clone();
                 let emails = tokio::task::spawn_blocking(move || {
-                    fetch_unseen_emails(&host, port, &user, pass.as_str(), &fldrs)
+                    fetch_unseen_emails(&host, port, &user, pass.as_str(), &fldrs, &tls_opts)
                 })
                 .await;
 
@@ -654,8 +832,9 @@ impl ChannelAdapter for EmailAdapter {
                             let u = username.clone();
                             let p = password.clone();
                             let updates = std::mem::take(&mut flag_updates);
+                            let tls_opts = imap_tls.clone();
                             let _ = tokio::task::spawn_blocking(move || {
-                                mark_uids_outcome(&h, imap_port, &u, p.as_str(), updates)
+                                mark_uids_outcome(&h, imap_port, &u, p.as_str(), updates, &tls_opts)
                             })
                             .await;
                         }
@@ -671,8 +850,9 @@ impl ChannelAdapter for EmailAdapter {
                     let u = username.clone();
                     let p = password.clone();
                     let updates = std::mem::take(&mut flag_updates);
+                    let tls_opts = imap_tls.clone();
                     if let Err(e) = tokio::task::spawn_blocking(move || {
-                        mark_uids_outcome(&h, imap_port, &u, p.as_str(), updates)
+                        mark_uids_outcome(&h, imap_port, &u, p.as_str(), updates, &tls_opts)
                     })
                     .await
                     .unwrap_or_else(|join_err| Err(format!("spawn_blocking panic: {join_err}")))
@@ -1153,5 +1333,185 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    // -- IMAP TLS options (#4877) ---------------------------------------------
+    //
+    // Cover the four interesting branches of `build_imap_tls_connector`:
+    // default-safe, accept-invalid-certs opt-in, custom CA happy path, and
+    // the three custom-CA error shapes (missing file, empty file, garbage).
+    //
+    // The happy-path test reuses a real cert from the host's native store
+    // re-encoded as PEM, so it works on every CI runner that has system
+    // certs available without pulling in `rcgen` for one test.
+
+    use base64::Engine as _;
+    use std::io::Write as _;
+
+    fn write_pem_cert_from_native_store(file: &mut tempfile::NamedTempFile) -> bool {
+        let bundle = rustls_native_certs::load_native_certs();
+        let Some(first) = bundle.certs.into_iter().next() else {
+            return false;
+        };
+        let b64 = base64::engine::general_purpose::STANDARD.encode(first.as_ref());
+        writeln!(file, "-----BEGIN CERTIFICATE-----").unwrap();
+        for chunk in b64.as_bytes().chunks(64) {
+            file.write_all(chunk).unwrap();
+            writeln!(file).unwrap();
+        }
+        writeln!(file, "-----END CERTIFICATE-----").unwrap();
+        file.flush().unwrap();
+        true
+    }
+
+    /// `rustls 0.23` requires a process-level `CryptoProvider` to be
+    /// installed before constructing `ClientConfig`. In production
+    /// `librefang-cli::main` installs `aws_lc_rs` before any TLS work; the
+    /// test binary doesn't run that path, so each test that builds a
+    /// connector must install one itself. `install_default()` is
+    /// idempotent at the process level (returns `Err` if already set), and
+    /// `Once` keeps us from racing on the install.
+    fn ensure_crypto_provider() {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
+    /// `RustlsConnector` doesn't impl `Debug`, so we can't use `{:?}` /
+    /// `expect_err`. This helper threads the result through a match so
+    /// `panic!` produces a helpful diagnostic on failure.
+    fn assert_connector_built(label: &str, opts: &ImapTlsOptions) {
+        ensure_crypto_provider();
+        match build_imap_tls_connector("imap.example.com", opts) {
+            Ok(_) => {}
+            Err(e) => panic!("{label}: build_imap_tls_connector unexpectedly failed: {e}"),
+        }
+    }
+
+    fn expect_connector_err(opts: &ImapTlsOptions) -> String {
+        ensure_crypto_provider();
+        match build_imap_tls_connector("imap.example.com", opts) {
+            Ok(_) => panic!("expected build_imap_tls_connector to Err, but it returned Ok"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn build_imap_tls_connector_defaults_to_validating_connector() {
+        // No CA pinned, validation ON — must produce a connector without
+        // attempting any I/O against the dummy host.
+        assert_connector_built("default opts", &ImapTlsOptions::default());
+    }
+
+    #[test]
+    fn build_imap_tls_connector_accept_invalid_certs_yields_connector() {
+        // Operator-opted-in escape hatch: must produce a connector. The
+        // WARN log fires inside the helper; we only assert the path doesn't
+        // error so callers can still attempt the handshake against an
+        // expired / self-signed server.
+        assert_connector_built(
+            "accept_invalid_certs=true",
+            &ImapTlsOptions {
+                root_ca_path: None,
+                accept_invalid_certs: true,
+            },
+        );
+    }
+
+    #[test]
+    fn build_imap_tls_connector_missing_ca_path_returns_err_with_path() {
+        let bogus = std::path::PathBuf::from("/nonexistent/path/to/ca-4877.pem");
+        let err = expect_connector_err(&ImapTlsOptions {
+            root_ca_path: Some(bogus.clone()),
+            accept_invalid_certs: false,
+        });
+        assert!(
+            err.contains("failed to read tls_root_ca_path"),
+            "error must mention the failing operation: {err}"
+        );
+        assert!(
+            err.contains(&bogus.display().to_string()),
+            "error must include the path so operators can locate the typo: {err}"
+        );
+    }
+
+    #[test]
+    fn build_imap_tls_connector_empty_ca_file_returns_err() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let err = expect_connector_err(&ImapTlsOptions {
+            root_ca_path: Some(file.path().to_path_buf()),
+            accept_invalid_certs: false,
+        });
+        assert!(
+            err.contains("no PEM certificates found"),
+            "empty file must report 'no PEM certificates': {err}"
+        );
+    }
+
+    #[test]
+    fn build_imap_tls_connector_garbage_ca_file_returns_err() {
+        // Plain text without any PEM block: rustls_pemfile::certs() returns
+        // an empty iterator, which we treat as "no PEM certificates found".
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        writeln!(file, "this is not a PEM file at all").unwrap();
+        file.flush().unwrap();
+        let err = expect_connector_err(&ImapTlsOptions {
+            root_ca_path: Some(file.path().to_path_buf()),
+            accept_invalid_certs: false,
+        });
+        assert!(
+            err.contains("no PEM certificates found"),
+            "garbage file must report 'no PEM certificates': {err}"
+        );
+    }
+
+    #[test]
+    fn build_imap_tls_connector_loads_valid_pem_ca() {
+        // Re-encode a real cert from the host's native store as PEM and
+        // confirm the loader accepts it without error.
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        if !write_pem_cert_from_native_store(&mut file) {
+            // Native store empty (e.g. minimal CI image without ca-certificates).
+            // Skip rather than failing — the empty / garbage / missing tests
+            // already cover the error shapes.
+            eprintln!("skipping: native cert store is empty");
+            return;
+        }
+        assert_connector_built(
+            "valid PEM CA",
+            &ImapTlsOptions {
+                root_ca_path: Some(file.path().to_path_buf()),
+                accept_invalid_certs: false,
+            },
+        );
+    }
+
+    #[test]
+    fn email_adapter_with_tls_builders_set_options() {
+        // Pin both knobs onto the adapter and confirm they survive the
+        // builder chain. Ensures `with_tls_*` actually mutates state and
+        // doesn't return a fresh default.
+        let adapter = EmailAdapter::new(
+            "imap.example.com".to_string(),
+            993,
+            "smtp.example.com".to_string(),
+            587,
+            "user@example.com".to_string(),
+            "pw".to_string(),
+            "user@example.com".to_string(),
+            "pw".to_string(),
+            30,
+            vec![],
+            vec![],
+        )
+        .with_tls_root_ca_path(Some(std::path::PathBuf::from("/etc/ca.pem")))
+        .with_tls_accept_invalid_certs(true);
+
+        assert_eq!(
+            adapter.imap_tls.root_ca_path.as_deref(),
+            Some(std::path::Path::new("/etc/ca.pem"))
+        );
+        assert!(adapter.imap_tls.accept_invalid_certs);
     }
 }
