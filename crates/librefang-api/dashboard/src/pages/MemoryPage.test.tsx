@@ -279,9 +279,10 @@ describe("MemoryPage", () => {
     });
     useAgentsMock.mockReturnValue({ data: [] });
 
-    // MemoryPage now renders <AutoDreamSection /> after AgentKvSection.
-    // Keep its hooks quiescent so the existing memory-focused assertions
-    // don't have to step around the section.
+    // MemoryPage now folds Auto-Dream into PerAgentMemorySection (one card
+    // per agent containing both KV memory and dream status). Keep these
+    // hooks quiescent so the existing memory-focused assertions don't have
+    // to step around the section.
     useAutoDreamStatusMock.mockReturnValue({
       data: { enabled: false, agents: [] },
       isLoading: false,

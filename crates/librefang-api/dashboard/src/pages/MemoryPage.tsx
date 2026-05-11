@@ -394,9 +394,9 @@ const KV_VALUE_TRUNCATE = 200;
 // inflating page memory for what's only meant to be a quick peek.
 const KV_TITLE_TRUNCATE = 2000;
 
-// Receives the per-agent KV query result from AgentKvSection (a single
-// `useQueries` observer batches all agents) so this row component stays
-// presentational — no per-row hook subscription, no N+1 churn.
+// Receives the per-agent KV query result from PerAgentMemorySection (a
+// single `useQueries` observer batches all agents) so this row component
+// stays presentational — no per-row hook subscription, no N+1 churn.
 function AgentKvRows({ kvQuery }: { kvQuery: UseQueryResult<AgentKvPair[]> }) {
   const { t } = useTranslation();
 
@@ -459,8 +459,75 @@ function AgentKvRows({ kvQuery }: { kvQuery: UseQueryResult<AgentKvPair[]> }) {
   );
 }
 
-function AgentKvSection({ agents }: { agents: AgentItem[] }) {
+// Unified per-agent memory section: each agent gets one card that holds both
+// its Auto-Dream status / enroll toggle / actions and its KV memory table.
+// Replaces the prior "AgentKvSection iterates agents → then AutoDreamSection
+// iterates agents again" split, which was hard to discover and made the page
+// read as two unrelated lists.
+function PerAgentMemorySection({ agents }: { agents: AgentItem[] }) {
   const { t } = useTranslation();
+
+  // Auto-Dream wiring. Lives alongside the KV table because the user thinks
+  // per-agent ("what's this agent's memory state?"), not per-feature ("show
+  // me KV everywhere, then separately show me dream status everywhere").
+  const dreamStatusQuery = useAutoDreamStatus();
+  const dreamTrigger = useTriggerAutoDream();
+  const dreamAbort = useAbortAutoDream();
+  const dreamSetEnabled = useSetAutoDreamEnabled();
+  const [dreamError, setDreamError] = useState<string | null>(null);
+  const [dreamMsg, setDreamMsg] = useState<string | null>(null);
+
+  const dreamStatus = dreamStatusQuery.data;
+  const dreamByAgentId = useMemo(() => {
+    const m = new Map<string, AutoDreamAgentStatus>();
+    dreamStatus?.agents.forEach((a) => m.set(a.agent_id, a));
+    return m;
+  }, [dreamStatus]);
+
+  const onDreamTrigger = async (agentId: string) => {
+    setDreamError(null);
+    setDreamMsg(null);
+    try {
+      const outcome = await dreamTrigger.mutateAsync(agentId);
+      setDreamMsg(
+        outcome.fired
+          ? t("settings.auto_dream_fired", "Consolidation fired")
+          : outcome.reason,
+      );
+    } catch (e) {
+      setDreamError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const onDreamAbort = async (agentId: string) => {
+    setDreamError(null);
+    setDreamMsg(null);
+    try {
+      const outcome = await dreamAbort.mutateAsync(agentId);
+      setDreamMsg(
+        outcome.aborted
+          ? t("settings.auto_dream_aborted", "Abort signalled")
+          : outcome.reason,
+      );
+    } catch (e) {
+      setDreamError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const onDreamToggle = async (agentId: string, enabled: boolean) => {
+    setDreamError(null);
+    setDreamMsg(null);
+    try {
+      await dreamSetEnabled.mutateAsync({ agentId, enabled });
+      setDreamMsg(
+        enabled
+          ? t("settings.auto_dream_enrolled_ok", "Agent enrolled")
+          : t("settings.auto_dream_unenrolled_ok", "Agent unenrolled"),
+      );
+    } catch (e) {
+      setDreamError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   // Batch every per-agent KV lookup into a single useQueries observer instead
   // of mounting one `useAgentKvMemory` hook per row. Same number of network
@@ -473,9 +540,26 @@ function AgentKvSection({ agents }: { agents: AgentItem[] }) {
 
   return (
     <div className="flex flex-col gap-3">
-      <h3 className="text-sm font-bold">
-        {t("memory.kv_section_title", { defaultValue: "Per-agent KV memory" })}
-      </h3>
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <h3 className="text-sm font-bold">
+          {t("memory.per_agent_section_title", { defaultValue: "Per-agent memory" })}
+        </h3>
+        {dreamStatus && (
+          <Badge variant={dreamStatus.enabled ? "success" : "default"}>
+            <Moon className="w-3 h-3 mr-1 inline" />
+            {dreamStatus.enabled
+              ? t("memory.auto_dream_on_badge", { defaultValue: "Auto-Dream enabled" })
+              : t("memory.auto_dream_off_badge", { defaultValue: "Auto-Dream disabled" })}
+          </Badge>
+        )}
+      </div>
+      <p className="text-xs text-text-dim">
+        {t("memory.per_agent_section_desc", {
+          defaultValue:
+            "KV memory snapshot and Auto-Dream consolidation status per agent. Toggle global Auto-Dream in config.toml under [auto_dream].",
+        })}
+      </p>
+
       {agents.length === 0 ? (
         <EmptyState
           title={t("memory.kv_no_agents", { defaultValue: "No agents available" })}
@@ -483,30 +567,72 @@ function AgentKvSection({ agents }: { agents: AgentItem[] }) {
         />
       ) : (
         <div className="grid gap-4">
-          {agents.map((agent, idx) => (
-            <Card key={agent.id} padding="md">
-              <div className="flex items-center gap-2 mb-3 flex-wrap">
-                <h4 className="text-xs font-bold">{agent.name}</h4>
-                <span className="text-[10px] font-mono text-text-dim">{agent.id.slice(0, 8)}</span>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left">
-                  <thead>
-                    <tr className="text-[10px] font-bold uppercase tracking-widest text-text-dim/60">
-                      <th className="px-3 py-2">{t("memory.kv_key", { defaultValue: "Key" })}</th>
-                      <th className="px-3 py-2">{t("memory.kv_value", { defaultValue: "Value" })}</th>
-                      <th className="px-3 py-2">{t("memory.kv_source", { defaultValue: "Source" })}</th>
-                      <th className="px-3 py-2">{t("memory.created", { defaultValue: "Created" })}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <AgentKvRows kvQuery={kvQueries[idx]} />
-                  </tbody>
-                </table>
-              </div>
-            </Card>
-          ))}
+          {agents.map((agent, idx) => {
+            const dream = dreamByAgentId.get(agent.id);
+            return (
+              <Card key={agent.id} padding="md">
+                <div className="flex items-center gap-2 mb-3 flex-wrap">
+                  <h4 className="text-xs font-bold">{agent.name}</h4>
+                  <span className="text-[10px] font-mono text-text-dim">{agent.id.slice(0, 8)}</span>
+                </div>
+                {dream && (
+                  <div className="mb-3">
+                    <AutoDreamAgentRow
+                      agent={dream}
+                      disabled={!dreamStatus?.enabled}
+                      onTrigger={onDreamTrigger}
+                      onAbort={onDreamAbort}
+                      onToggle={onDreamToggle}
+                      triggerPending={
+                        dreamTrigger.isPending && dreamTrigger.variables === dream.agent_id
+                      }
+                      abortPending={
+                        dreamAbort.isPending && dreamAbort.variables === dream.agent_id
+                      }
+                      togglePending={
+                        dreamSetEnabled.isPending &&
+                        dreamSetEnabled.variables?.agentId === dream.agent_id
+                      }
+                    />
+                  </div>
+                )}
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="text-[10px] font-bold uppercase tracking-widest text-text-dim/60">
+                        <th className="px-3 py-2">{t("memory.kv_key", { defaultValue: "Key" })}</th>
+                        <th className="px-3 py-2">{t("memory.kv_value", { defaultValue: "Value" })}</th>
+                        <th className="px-3 py-2">{t("memory.kv_source", { defaultValue: "Source" })}</th>
+                        <th className="px-3 py-2">{t("memory.created", { defaultValue: "Created" })}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <AgentKvRows kvQuery={kvQueries[idx]} />
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            );
+          })}
         </div>
+      )}
+
+      {dreamStatusQuery.isError && (
+        <p className="text-xs text-red-500">
+          {t("settings.auto_dream_load_err", "Failed to load auto-dream status")}
+        </p>
+      )}
+      {dreamMsg && (
+        <p className="text-xs text-green-500">
+          <CheckCircle className="w-3 h-3 inline mr-1" />
+          {dreamMsg}
+        </p>
+      )}
+      {dreamError && (
+        <p className="text-xs text-red-500">
+          <XCircle className="w-3 h-3 inline mr-1" />
+          {dreamError}
+        </p>
       )}
     </div>
   );
@@ -779,11 +905,8 @@ export function MemoryPage() {
         </>
       )}
 
-      {/* Per-agent KV memory — always shown */}
-      <AgentKvSection agents={agents} />
-
-      {/* Auto-Dream (background memory consolidation) */}
-      <AutoDreamSection />
+      {/* Per-agent memory — KV table + Auto-Dream status unified per agent */}
+      <PerAgentMemorySection agents={agents} />
 
       {/* Dialogs */}
       {showAddDialog && <AddMemoryDialog onClose={() => setShowAddDialog(false)} />}
@@ -1106,129 +1229,6 @@ function AutoDreamAgentRow({
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-function AutoDreamSection() {
-  const { t } = useTranslation();
-  const statusQuery = useAutoDreamStatus();
-  const trigger = useTriggerAutoDream();
-  const abort = useAbortAutoDream();
-  const setEnabled = useSetAutoDreamEnabled();
-  const [error, setError] = useState<string | null>(null);
-  const [lastMsg, setLastMsg] = useState<string | null>(null);
-
-  const status = statusQuery.data;
-
-  const onTrigger = async (agentId: string) => {
-    setError(null);
-    setLastMsg(null);
-    try {
-      const outcome = await trigger.mutateAsync(agentId);
-      setLastMsg(outcome.fired ? t("settings.auto_dream_fired", "Consolidation fired") : outcome.reason);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const onAbort = async (agentId: string) => {
-    setError(null);
-    setLastMsg(null);
-    try {
-      const outcome = await abort.mutateAsync(agentId);
-      setLastMsg(outcome.aborted ? t("settings.auto_dream_aborted", "Abort signalled") : outcome.reason);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  const onToggle = async (agentId: string, enabled: boolean) => {
-    setError(null);
-    setLastMsg(null);
-    try {
-      await setEnabled.mutateAsync({ agentId, enabled });
-      setLastMsg(
-        enabled
-          ? t("settings.auto_dream_enrolled_ok", "Agent enrolled")
-          : t("settings.auto_dream_unenrolled_ok", "Agent unenrolled"),
-      );
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  return (
-    <div className="rounded-2xl border border-border-subtle bg-surface">
-      <div className="px-5 py-3 border-b border-border-subtle/50 flex items-center justify-between">
-        <p className="text-[10px] font-black uppercase tracking-widest text-text-dim">
-          {t("settings.auto_dream", "Auto-Dream")}
-        </p>
-        {status && (
-          <Badge variant={status.enabled ? "success" : "default"}>
-            {status.enabled
-              ? t("settings.auto_dream_on", "Enabled")
-              : t("settings.auto_dream_off", "Disabled")}
-          </Badge>
-        )}
-      </div>
-      <div className="px-5 py-3">
-        <p className="text-xs text-text-dim mb-3">
-          {t(
-            "settings.auto_dream_desc",
-            "Periodically asks opt-in agents to consolidate their memory. Configure in config.toml via [auto_dream] enabled + per-agent auto_dream_enabled.",
-          )}
-        </p>
-
-        {statusQuery.isLoading && (
-          <p className="text-xs text-text-dim">{t("common.loading", "Loading…")}</p>
-        )}
-        {statusQuery.isError && (
-          <p className="text-xs text-red-500">
-            {t("settings.auto_dream_load_err", "Failed to load auto-dream status")}
-          </p>
-        )}
-
-        {status && status.agents.length === 0 && (
-          <p className="text-xs text-text-dim italic">
-            {t(
-              "settings.auto_dream_no_agents_registered",
-              "No agents registered yet. Create an agent first, then toggle it on here.",
-            )}
-          </p>
-        )}
-
-        {status && status.agents.length > 0 && (
-          <div className="space-y-2">
-            {status.agents.map((a) => (
-              <AutoDreamAgentRow
-                key={a.agent_id}
-                agent={a}
-                disabled={!status.enabled}
-                onTrigger={onTrigger}
-                onAbort={onAbort}
-                onToggle={onToggle}
-                triggerPending={trigger.isPending && trigger.variables === a.agent_id}
-                abortPending={abort.isPending && abort.variables === a.agent_id}
-                togglePending={setEnabled.isPending && setEnabled.variables?.agentId === a.agent_id}
-              />
-            ))}
-          </div>
-        )}
-
-        {lastMsg && (
-          <p className="text-xs text-green-500 mt-2">
-            <CheckCircle className="w-3 h-3 inline mr-1" />
-            {lastMsg}
-          </p>
-        )}
-        {error && (
-          <p className="text-xs text-red-500 mt-2">
-            <XCircle className="w-3 h-3 inline mr-1" />
-            {error}
-          </p>
-        )}
-      </div>
     </div>
   );
 }
