@@ -18,6 +18,10 @@ use uuid::Uuid;
 /// Default cooldown duration after a trigger fires (in seconds).
 const DEFAULT_COOLDOWN_SECS: u64 = 5;
 
+/// Maximum byte length of a `workflow_id` string on a trigger.
+/// Mirrors the same limit used for cron `CronAction::Workflow`.
+pub const MAX_WORKFLOW_ID_LEN: usize = 256;
+
 /// Default maximum number of triggers that can fire from a single event.
 const DEFAULT_MAX_TRIGGERS_PER_EVENT: usize = 10;
 
@@ -132,6 +136,20 @@ pub struct Trigger {
     /// in an older persisted file — `#[serde(default)]` handles both cases).
     #[serde(default)]
     pub last_fired_at: Option<DateTime<Utc>>,
+    /// If set, the trigger fires a workflow run (identified by this string,
+    /// resolved as a UUID first, then by name) instead of sending a prompt
+    /// to an agent via `send_message_full`.
+    ///
+    /// `prompt_template` is still rendered (with `{{event}}` substituted) and
+    /// used as the workflow's initial input string.
+    ///
+    /// `target_agent` and `workflow_id` may coexist — `target_agent` is used
+    /// for agent-path routing only and is ignored when `workflow_id` is set.
+    ///
+    /// `#[serde(default)]` ensures old persisted triggers (without this field)
+    /// deserialise cleanly as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
 }
 
 /// A trigger match result with optional session mode override.
@@ -143,6 +161,10 @@ pub struct TriggerMatch {
     pub message: String,
     /// Per-trigger session mode override (None = inherit from agent manifest).
     pub session_mode_override: Option<librefang_types::agent::SessionMode>,
+    /// If set, dispatch fires a workflow run instead of `send_message_full`.
+    pub workflow_id: Option<String>,
+    /// The trigger ID that produced this match, for telemetry.
+    pub trigger_id: TriggerId,
 }
 
 /// Patch payload for updating an existing trigger.
@@ -163,6 +185,9 @@ pub struct TriggerPatch {
     /// `Some(None)` clears the target (reverts to owner routing).
     /// `Some(Some(id))` sets a new cross-session wake target.
     pub target_agent: Option<Option<AgentId>>,
+    /// `Some(None)` clears the workflow_id (reverts to agent dispatch).
+    /// `Some(Some(s))` sets a new workflow target.
+    pub workflow_id: Option<Option<String>>,
 }
 
 /// The trigger engine manages event-to-agent routing.
@@ -370,6 +395,7 @@ impl TriggerEngine {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -378,6 +404,10 @@ impl TriggerEngine {
     /// When `target_agent` is `Some`, the triggered message is routed to that
     /// agent instead of the owner (`agent_id`). The owner still "owns" the
     /// trigger for management purposes (list, remove, etc.).
+    ///
+    /// When `workflow_id` is `Some`, a matching event fires a workflow run
+    /// instead of `send_message_full`. `prompt_template` is still rendered
+    /// and used as the workflow's initial input string.
     #[allow(clippy::too_many_arguments)]
     pub fn register_with_target(
         &self,
@@ -388,6 +418,7 @@ impl TriggerEngine {
         target_agent: Option<AgentId>,
         cooldown_secs: Option<u64>,
         session_mode: Option<librefang_types::agent::SessionMode>,
+        workflow_id: Option<String>,
     ) -> TriggerId {
         let trigger = Trigger {
             id: TriggerId::new(),
@@ -402,6 +433,7 @@ impl TriggerEngine {
             cooldown_secs,
             session_mode,
             last_fired_at: None,
+            workflow_id,
         };
         let id = trigger.id;
         self.triggers.insert(id, trigger);
@@ -420,7 +452,16 @@ impl TriggerEngine {
         pattern: TriggerPattern,
         prompt_template: String,
     ) -> TriggerId {
-        self.register_with_target(owner, pattern, prompt_template, 0, Some(target), None, None)
+        self.register_with_target(
+            owner,
+            pattern,
+            prompt_template,
+            0,
+            Some(target),
+            None,
+            None,
+            None,
+        )
     }
 
     /// Remove a trigger.
@@ -499,6 +540,7 @@ impl TriggerEngine {
                 cooldown_secs: old.cooldown_secs,
                 session_mode: old.session_mode,
                 last_fired_at: old.last_fired_at,
+                workflow_id: old.workflow_id,
             };
             self.triggers.insert(new_id, trigger);
             self.agent_triggers
@@ -588,6 +630,9 @@ impl TriggerEngine {
         }
         if let Some(target_agent) = patch.target_agent {
             t.target_agent = target_agent;
+        }
+        if let Some(workflow_id) = patch.workflow_id {
+            t.workflow_id = workflow_id;
         }
         let id = t.id;
         drop(entry);
@@ -739,6 +784,8 @@ impl TriggerEngine {
                     agent_id: recipient,
                     message,
                     session_mode_override: trigger.session_mode,
+                    workflow_id: trigger.workflow_id.clone(),
+                    trigger_id: trigger.id,
                 });
                 trigger.fire_count += 1;
                 state_mutated = true;
@@ -1308,6 +1355,7 @@ mod tests {
             Some(target),
             None,
             None,
+            None,
         );
 
         let event = Event::new(
@@ -1372,6 +1420,7 @@ mod tests {
             "sys: {{event}}".to_string(),
             0,
             Some(target),
+            None,
             None,
             None,
         );
@@ -1785,6 +1834,7 @@ mod tests {
             None,
             Some(0), // zero cooldown so the trigger fires immediately on every evaluation
             Some(SessionMode::New),
+            None,
         );
 
         let event = Event::new(
@@ -1854,6 +1904,7 @@ mod tests {
             None,
             Some(0),
             Some(SessionMode::Persistent),
+            None,
         );
 
         let event = Event::new(
@@ -1888,6 +1939,7 @@ mod tests {
             None,
             Some(0),
             None, // no per-trigger session mode
+            None,
         );
 
         let event = Event::new(
@@ -1963,6 +2015,7 @@ mod tests {
             None,
             Some(0),
             Some(SessionMode::New),
+            None,
         );
 
         // Sanity: override is present before the patch.
@@ -2015,6 +2068,7 @@ mod tests {
             0,
             None,
             Some(60),
+            None,
             None,
         );
 

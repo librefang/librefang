@@ -1160,6 +1160,29 @@ pub async fn create_trigger(
             },
         };
 
+    // Optional workflow_id: if set, the trigger fires a workflow run instead
+    // of dispatching a message to an agent via send_message_full.
+    let workflow_id: Option<String> = match req.get("workflow_id").and_then(|v| v.as_str()) {
+        None => None,
+        Some(s) => {
+            if s.is_empty() {
+                return ApiErrorResponse::bad_request(
+                    "workflow_id must not be empty when provided",
+                )
+                .into_json_tuple();
+            }
+            if s.len() > librefang_kernel::triggers::MAX_WORKFLOW_ID_LEN {
+                return ApiErrorResponse::bad_request(format!(
+                    "workflow_id too long ({} chars, max {})",
+                    s.len(),
+                    librefang_kernel::triggers::MAX_WORKFLOW_ID_LEN
+                ))
+                .into_json_tuple();
+            }
+            Some(s.to_string())
+        }
+    };
+
     match state.kernel.register_trigger_with_target(
         agent_id,
         pattern,
@@ -1168,6 +1191,7 @@ pub async fn create_trigger(
         target_agent,
         cooldown_secs,
         session_mode,
+        workflow_id.clone(),
     ) {
         Ok(trigger_id) => {
             let mut resp = serde_json::json!({
@@ -1176,6 +1200,9 @@ pub async fn create_trigger(
             });
             if let Some(target) = target_agent {
                 resp["target_agent_id"] = serde_json::json!(target.to_string());
+            }
+            if let Some(wid) = workflow_id {
+                resp["workflow_id"] = serde_json::json!(wid);
             }
             (StatusCode::CREATED, Json(resp))
         }
@@ -1212,6 +1239,9 @@ fn trigger_to_json(t: &Trigger) -> serde_json::Value {
     });
     if let Some(target) = &t.target_agent {
         v["target_agent_id"] = serde_json::json!(target.to_string());
+    }
+    if let Some(wid) = &t.workflow_id {
+        v["workflow_id"] = serde_json::json!(wid);
     }
     v
 }
@@ -1424,6 +1454,37 @@ pub async fn update_trigger(
         }
     }
 
+    // Parse workflow_id: absent = no change, null = clear, string = set
+    let workflow_id: Option<Option<String>> = if req.get("workflow_id").is_none() {
+        None
+    } else if req["workflow_id"].is_null() {
+        Some(None)
+    } else {
+        match req["workflow_id"].as_str() {
+            Some(s) => {
+                if s.is_empty() {
+                    return ApiErrorResponse::bad_request(
+                        "workflow_id must not be empty when provided",
+                    )
+                    .into_json_tuple();
+                }
+                if s.len() > librefang_kernel::triggers::MAX_WORKFLOW_ID_LEN {
+                    return ApiErrorResponse::bad_request(format!(
+                        "workflow_id too long ({} chars, max {})",
+                        s.len(),
+                        librefang_kernel::triggers::MAX_WORKFLOW_ID_LEN
+                    ))
+                    .into_json_tuple();
+                }
+                Some(Some(s.to_string()))
+            }
+            None => {
+                return ApiErrorResponse::bad_request("workflow_id must be a string or null")
+                    .into_json_tuple()
+            }
+        }
+    };
+
     let patch = TriggerPatch {
         pattern,
         prompt_template: req["prompt_template"].as_str().map(|s| s.to_string()),
@@ -1432,6 +1493,7 @@ pub async fn update_trigger(
         cooldown_secs,
         session_mode,
         target_agent,
+        workflow_id,
     };
 
     match state.kernel.update_trigger(trigger_id, patch) {

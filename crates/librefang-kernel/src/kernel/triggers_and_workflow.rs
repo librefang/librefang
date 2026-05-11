@@ -305,7 +305,12 @@ impl LibreFangKernel {
                 mode_override: Option<librefang_types::agent::SessionMode>,
                 session_id_override: Option<SessionId>,
                 trigger_sem: Arc<tokio::sync::Semaphore>,
-                agent_sem: Arc<tokio::sync::Semaphore>,
+                /// `Some` for agent-path dispatches; `None` for workflow-path
+                /// dispatches where no per-agent semaphore applies.
+                agent_sem: Option<Arc<tokio::sync::Semaphore>>,
+                /// When set, fire a workflow run instead of send_message_full.
+                workflow_id: Option<String>,
+                trigger_id: crate::triggers::TriggerId,
             }
 
             let mut dispatches: Vec<TriggerDispatch> = Vec::with_capacity(triggered.len());
@@ -317,26 +322,35 @@ impl LibreFangKernel {
                 let aid = trigger_match.agent_id;
                 let msg = trigger_match.message.clone();
                 let mode_override = trigger_match.session_mode_override;
+                let workflow_id = trigger_match.workflow_id.clone();
+                let trigger_id = trigger_match.trigger_id;
 
-                // Resolve the effective session mode now so we can decide
-                // whether to materialize a fresh session id. Skip dispatch
-                // if the agent has been deleted between trigger evaluation
-                // and dispatch — preserves prior behavior.
-                let manifest_mode = match kernel.agents.registry.get(aid) {
-                    Some(entry) => entry.manifest.session_mode,
-                    None => continue,
-                };
-                let effective_mode = mode_override.unwrap_or(manifest_mode);
-                let session_id_override = match effective_mode {
-                    librefang_types::agent::SessionMode::New => Some(SessionId::new()),
-                    librefang_types::agent::SessionMode::Persistent => None,
+                // For workflow-dispatch triggers, skip the agent-registry lookup —
+                // the agent_id on the TriggerMatch is the trigger owner and is not
+                // the dispatch target. For agent-dispatch triggers, look up the
+                // manifest session_mode and skip if the agent has been deleted.
+                let (session_id_override, agent_sem) = if workflow_id.is_some() {
+                    // Workflow path: no per-agent semaphore or session needed.
+                    (None, None)
+                } else {
+                    // Agent path: resolve effective session mode.
+                    let manifest_mode = match kernel.agents.registry.get(aid) {
+                        Some(entry) => entry.manifest.session_mode,
+                        None => continue,
+                    };
+                    let effective_mode = mode_override.unwrap_or(manifest_mode);
+                    let sid_override = match effective_mode {
+                        librefang_types::agent::SessionMode::New => Some(SessionId::new()),
+                        librefang_types::agent::SessionMode::Persistent => None,
+                    };
+                    let agent_sem = kernel.agent_concurrency_for(aid);
+                    (sid_override, Some(agent_sem))
                 };
 
                 let trigger_sem = kernel
                     .workflows
                     .command_queue
                     .semaphore_for_lane(librefang_runtime::command_lane::Lane::Trigger);
-                let agent_sem = kernel.agent_concurrency_for(aid);
 
                 dispatches.push(TriggerDispatch {
                     kernel,
@@ -346,6 +360,8 @@ impl LibreFangKernel {
                     session_id_override,
                     trigger_sem,
                     agent_sem,
+                    workflow_id,
+                    trigger_id,
                 });
             }
 
@@ -390,6 +406,8 @@ impl LibreFangKernel {
                                 session_id_override,
                                 trigger_sem,
                                 agent_sem,
+                                workflow_id,
+                                trigger_id,
                             } = d;
 
                             // (1) Global trigger lane permit.
@@ -397,46 +415,115 @@ impl LibreFangKernel {
                                 Ok(p) => p,
                                 Err(_) => return, // lane closed during shutdown
                             };
-                            // (2) Per-agent permit.
-                            let _agent_permit = match agent_sem.acquire_owned().await {
-                                Ok(p) => p,
-                                Err(_) => continue,
-                            };
-                            // (3) Inner per-session mutex applies inside
-                            //     send_message_full when session_id_override is Some.
-                            let handle = kernel.kernel_handle();
-                            let home_channel = kernel.resolve_agent_home_channel(aid);
-                            // Bound permit-hold duration so a stuck LLM
-                            // call cannot pin Lane::Trigger kernel-wide.
-                            // Note: timeout drops this future on expiry,
-                            // but any tokio::spawn'd child tasks inside
-                            // send_message_full are NOT cancelled — they
-                            // run to completion independently.
-                            match tokio::time::timeout(
-                                fire_timeout,
-                                kernel.send_message_full(
-                                    aid,
-                                    &msg,
-                                    handle,
-                                    None,
-                                    home_channel.as_ref(),
-                                    mode_override,
-                                    None,
-                                    session_id_override,
-                                ),
-                            )
-                            .await
-                            {
-                                Ok(Ok(_)) => {}
-                                Ok(Err(e)) => {
-                                    warn!(agent = %aid, "Trigger dispatch failed: {e}");
+                            // (2) Per-agent permit (agent path only; workflow path skips).
+                            let _agent_permit = if let Some(sem) = agent_sem {
+                                match sem.acquire_owned().await {
+                                    Ok(p) => Some(p),
+                                    Err(_) => continue,
                                 }
-                                Err(_) => {
-                                    warn!(
-                                        agent = %aid,
-                                        timeout_secs = fire_timeout.as_secs(),
-                                        "Trigger dispatch timed out; releasing lane permit"
-                                    );
+                            } else {
+                                None
+                            };
+
+                            if let Some(ref wid_str) = workflow_id {
+                                // Workflow dispatch path: resolve workflow by UUID then name,
+                                // create a run, and execute it in a separate task so it does
+                                // not block other trigger dispatches from the same event.
+                                let wid_str = wid_str.clone();
+                                let resolved_id = if let Ok(uuid) = wid_str.parse::<uuid::Uuid>() {
+                                    Some(crate::workflow::WorkflowId(uuid))
+                                } else {
+                                    let workflows = kernel.workflows.engine.list_workflows().await;
+                                    workflows
+                                        .iter()
+                                        .find(|w| w.name == wid_str)
+                                        .map(|w| w.id)
+                                };
+                                match resolved_id {
+                                    Some(wf_id) => {
+                                        info!(
+                                            trigger_id = %trigger_id,
+                                            workflow_id = %wid_str,
+                                            "Trigger fired workflow"
+                                        );
+                                        match tokio::time::timeout(
+                                            fire_timeout,
+                                            kernel.run_workflow(wf_id, msg),
+                                        )
+                                        .await
+                                        {
+                                            Ok(Ok((run_id, _output))) => {
+                                                info!(
+                                                    trigger_id = %trigger_id,
+                                                    run_id = %run_id,
+                                                    workflow_id = %wid_str,
+                                                    "Trigger workflow run completed"
+                                                );
+                                            }
+                                            Ok(Err(e)) => {
+                                                warn!(
+                                                    trigger_id = %trigger_id,
+                                                    workflow_id = %wid_str,
+                                                    "Trigger workflow run failed: {e}"
+                                                );
+                                            }
+                                            Err(_) => {
+                                                warn!(
+                                                    trigger_id = %trigger_id,
+                                                    workflow_id = %wid_str,
+                                                    timeout_secs = fire_timeout.as_secs(),
+                                                    "Trigger workflow run timed out; releasing lane permit"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                        warn!(
+                                            trigger_id = %trigger_id,
+                                            workflow_id = %wid_str,
+                                            run_id = "(unresolved)",
+                                            "Trigger: workflow not found, skipping dispatch"
+                                        );
+                                    }
+                                }
+                            } else {
+                                // Agent dispatch path (existing behavior).
+                                // (3) Inner per-session mutex applies inside
+                                //     send_message_full when session_id_override is Some.
+                                let handle = kernel.kernel_handle();
+                                let home_channel = kernel.resolve_agent_home_channel(aid);
+                                // Bound permit-hold duration so a stuck LLM
+                                // call cannot pin Lane::Trigger kernel-wide.
+                                // Note: timeout drops this future on expiry,
+                                // but any tokio::spawn'd child tasks inside
+                                // send_message_full are NOT cancelled — they
+                                // run to completion independently.
+                                match tokio::time::timeout(
+                                    fire_timeout,
+                                    kernel.send_message_full(
+                                        aid,
+                                        &msg,
+                                        handle,
+                                        None,
+                                        home_channel.as_ref(),
+                                        mode_override,
+                                        None,
+                                        session_id_override,
+                                    ),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(_)) => {}
+                                    Ok(Err(e)) => {
+                                        warn!(agent = %aid, "Trigger dispatch failed: {e}");
+                                    }
+                                    Err(_) => {
+                                        warn!(
+                                            agent = %aid,
+                                            timeout_secs = fire_timeout.as_secs(),
+                                            "Trigger dispatch timed out; releasing lane permit"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -464,6 +551,7 @@ impl LibreFangKernel {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -471,6 +559,10 @@ impl LibreFangKernel {
     ///
     /// When `target_agent` is `Some`, the triggered message is routed to that
     /// agent instead of the owner. Both owner and target must exist.
+    ///
+    /// When `workflow_id` is `Some`, a matching event fires a workflow run
+    /// (resolved by UUID then by name) instead of `send_message_full`.
+    /// `prompt_template` is rendered and used as the workflow's initial input.
     #[allow(clippy::too_many_arguments)]
     pub fn register_trigger_with_target(
         &self,
@@ -481,6 +573,7 @@ impl LibreFangKernel {
         target_agent: Option<AgentId>,
         cooldown_secs: Option<u64>,
         session_mode: Option<librefang_types::agent::SessionMode>,
+        workflow_id: Option<String>,
     ) -> KernelResult<TriggerId> {
         // Verify owner agent exists
         if self.agents.registry.get(agent_id).is_none() {
@@ -504,6 +597,7 @@ impl LibreFangKernel {
             target_agent,
             cooldown_secs,
             session_mode,
+            workflow_id,
         );
         if let Err(e) = self.workflows.triggers.persist() {
             warn!(trigger_id = %id, "Failed to persist trigger jobs after register: {e}");
