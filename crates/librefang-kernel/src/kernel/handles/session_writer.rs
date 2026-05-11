@@ -9,30 +9,38 @@ use librefang_runtime::kernel_handle;
 use super::super::LibreFangKernel;
 
 impl kernel_handle::SessionWriter for LibreFangKernel {
-    /// **Concurrency caveat — pre-existing substrate gap, shared with
-    /// `inject_attachment_blocks`.** This method does a read-modify-write
-    /// (`get_session` → `push_message` → `save_session`) without acquiring
-    /// `session_msg_locks[session_id]`. If the inbound router or another
-    /// `append_to_session` call races on the same `session_id`, the later
-    /// `save_session` wins and the earlier append is lost — `save_session`
-    /// is an unconditional `INSERT ON CONFLICT DO UPDATE`
-    /// (`librefang-memory/src/session.rs::SessionStore::save_session`), no
-    /// `messages_generation` CAS.
+    /// Acquires `session_msg_locks[session_id]` via `blocking_lock()` before
+    /// the read-modify-write so concurrent inbound-router writes to the same
+    /// session don't overwrite each other (`save_session` is an unconditional
+    /// `INSERT ON CONFLICT DO UPDATE` with no `messages_generation` CAS, so
+    /// last writer wins). Because `blocking_lock()` would panic if called
+    /// from a tokio runtime worker, every async caller (currently only
+    /// `mirror_channel_send_to_session` in librefang-runtime) MUST wrap the
+    /// invocation in `tokio::task::spawn_blocking` to move it onto a blocking
+    /// thread pool. The trait's existing "Blocking I/O notice" already
+    /// documents this contract.
     ///
-    /// Acceptable for the channel-mirror use case because:
-    ///   1. Mirrored turns are `system`-role context, not user-facing;
-    ///   2. The trait is sync and `session_msg_locks` uses `tokio::sync::Mutex`
-    ///      (async-only), so a proper fix needs either trait async-ification
-    ///      or `blocking_lock` + `spawn_blocking` plumbing across every
-    ///      existing caller of `inject_attachment_blocks`.
-    /// Both methods will be migrated together when the substrate moves to
-    /// async I/O (#3579 in the trait doc-comment).
+    /// `inject_attachment_blocks` carries the same race today but is **not**
+    /// fixed here — its callers (HTTP attachment upload path) would need
+    /// matching `spawn_blocking` wrappers and that is out of scope for #4824.
+    /// Both will graduate together when the substrate moves to async I/O.
     fn append_to_session(
         &self,
         session_id: librefang_types::agent::SessionId,
         agent_id: librefang_types::agent::AgentId,
         message: librefang_types::message::Message,
     ) {
+        // Serialize with the inbound-router and any concurrent mirror call
+        // on the same session id. See doc-comment for the spawn_blocking
+        // contract that makes `blocking_lock()` safe here.
+        let lock = self
+            .agents
+            .session_msg_locks
+            .entry(session_id)
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = lock.blocking_lock();
+
         // Load existing session or create a fresh one for this (agent, session) pair.
         let mut session = match self.memory.substrate.get_session(session_id) {
             Ok(Some(s)) => s,

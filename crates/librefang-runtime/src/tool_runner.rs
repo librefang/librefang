@@ -4932,7 +4932,7 @@ fn parse_poll_options(raw: Option<&serde_json::Value>) -> Result<Vec<String>, St
 /// 2. Role = `system` with structured JSON content.
 /// 3. Mirror on partial-failure (platform delivery succeeded, ack lost).
 /// 4. Written directly to session storage; no adapter re-emit.
-fn mirror_channel_send_to_session(
+async fn mirror_channel_send_to_session(
     kh: &Arc<dyn KernelHandle>,
     caller_agent_id: Option<&str>,
     channel: &str,
@@ -4977,7 +4977,15 @@ fn mirror_channel_send_to_session(
         timestamp: Some(sent_at),
     };
 
-    kh.append_to_session(session_id, owner, msg);
+    // `append_to_session` acquires `session_msg_locks[session_id]` via
+    // `blocking_lock()` so it must run on the blocking thread pool, not on
+    // a tokio runtime worker. Drop the JoinError on the floor — mirror is
+    // best-effort by design (#4824 design decision 3).
+    let kh_clone = Arc::clone(kh);
+    let _ = tokio::task::spawn_blocking(move || {
+        kh_clone.append_to_session(session_id, owner, msg);
+    })
+    .await;
 }
 
 async fn tool_channel_send(
@@ -5034,7 +5042,7 @@ async fn tool_channel_send(
             .map_err(|e| e.to_string());
         if result.is_ok() {
             let body = caption.unwrap_or(url);
-            mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, body);
+            mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, body).await;
         }
         return result;
     }
@@ -5055,7 +5063,7 @@ async fn tool_channel_send(
             .map_err(|e| e.to_string());
         if result.is_ok() {
             let body = caption.unwrap_or(url);
-            mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, body);
+            mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, body).await;
         }
         return result;
     }
@@ -5128,7 +5136,8 @@ async fn tool_channel_send(
             .await
             .map_err(|e| e.to_string());
         if result.is_ok() {
-            mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, &filename);
+            mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, &filename)
+                .await;
         }
         return result;
     }
@@ -5202,7 +5211,8 @@ async fn tool_channel_send(
         .await
         .map_err(|e| e.to_string())?;
 
-        mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, poll_question);
+        mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, poll_question)
+            .await;
 
         let mut result = format!("Poll sent to {recipient} on {channel}: {poll_question}");
         if is_quiz {
@@ -5248,7 +5258,8 @@ async fn tool_channel_send(
         .await
         .map_err(|e| e.to_string());
     if result.is_ok() {
-        mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, &final_message);
+        mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, &final_message)
+            .await;
     }
     result
 }
