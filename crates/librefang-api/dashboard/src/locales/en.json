@@ -1191,6 +1191,7 @@
     "decay_rate_hint": "Per-day decay applied to memory confidence. Lower = memories age more slowly.",
     "decay_rate_invalid": "Must be a number between 0 and 1.",
     "max_retrieve_invalid": "Must be an integer between 1 and 50.",
+    "config_invalid_stored": "Stored config has out-of-range numeric values. Fix the highlighted field(s) below to enable Save.",
     "delete_confirm_title": "Delete Memory",
     "delete_confirm_message": "This memory will be permanently deleted.",
     "proactive_disabled_notice": "Proactive memory is disabled in config — no records to show. KV memory and Auto-Dream still work.",

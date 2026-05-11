@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Loader2, Plus } from "lucide-react";
+import { AlertTriangle, Loader2, Plus } from "lucide-react";
 import { Button } from "../../components/ui/Button";
 import { DrawerPanel } from "../../components/ui/DrawerPanel";
 import { useUIStore } from "../../lib/store";
@@ -274,6 +274,22 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
             defaultValue: "Changes are written to config.toml. Restart required for full effect.",
           })}
         </p>
+
+        {/* Surface stored-config invalidity prominently at the top of the
+            dialog so a user opening it to edit an UNRELATED field (e.g.
+            embedding model) understands why Save is disabled even though
+            they haven't touched the numeric inputs. */}
+        {form && !numericFieldsValid && (
+          <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 mb-4 flex items-start gap-2">
+            <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0 mt-0.5" />
+            <p className="text-[11px] text-warning leading-relaxed">
+              {t("memory.config_invalid_stored", {
+                defaultValue:
+                  "Stored config has out-of-range numeric values. Fix the highlighted field(s) below to enable Save.",
+              })}
+            </p>
+          </div>
+        )}
 
         {configQuery.isLoading || !form ? (
           <div className="p-6 text-center">

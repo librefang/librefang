@@ -38,13 +38,18 @@ export function AutoDreamTab({ agents, scopedAgentId }: Props) {
   // page is consistent with every other action (RecordsTab cleanup, the
   // dialogs, etc.). Local error/msg state would be inconsistent and would
   // also be lost when the user navigates between tabs.
+  //
+  // `outcome.reason` is backend-supplied free text and CAN be null/undefined
+  // in edge cases; without a guard the toast would render the literal string
+  // "undefined" to the user.
+  const fallbackReason = () => t("common.unknown", { defaultValue: "Unknown" });
   const onTrigger = async (agentId: string) => {
     try {
       const outcome = await dreamTrigger.mutateAsync(agentId);
       addToast(
         outcome.fired
           ? t("settings.auto_dream_fired", "Consolidation fired")
-          : outcome.reason,
+          : (outcome.reason ?? fallbackReason()),
         outcome.fired ? "success" : "info",
       );
     } catch (e) {
@@ -58,7 +63,7 @@ export function AutoDreamTab({ agents, scopedAgentId }: Props) {
       addToast(
         outcome.aborted
           ? t("settings.auto_dream_aborted", "Abort signalled")
-          : outcome.reason,
+          : (outcome.reason ?? fallbackReason()),
         outcome.aborted ? "success" : "info",
       );
     } catch (e) {

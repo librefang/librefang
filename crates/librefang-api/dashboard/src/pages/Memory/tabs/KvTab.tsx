@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import type { UseQueryResult } from "@tanstack/react-query";
-import { Database } from "lucide-react";
+import { Database, Loader2 } from "lucide-react";
 import { Card } from "../../../components/ui/Card";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import type { AgentItem, AgentKvPair } from "../../../api";
@@ -78,9 +78,13 @@ export function KvTab({ agents, scopedAgentId, kvQueryByAgentId }: Props) {
                   {kvQuery ? (
                     <AgentKvRows kvQuery={kvQuery} />
                   ) : (
+                    // Map miss is a transient state during a render between
+                    // the agents list growing and `useQueries` / the
+                    // memoised Map updating. Render the loading spinner so
+                    // we don't mislabel "not registered yet" as "no data".
                     <tr>
-                      <td colSpan={4} className="px-3 py-2 text-xs text-text-dim/60 italic">
-                        {t("memory.kv_empty", { defaultValue: "No KV entries" })}
+                      <td colSpan={4} className="px-3 py-2 text-xs text-text-dim">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin inline" />
                       </td>
                     </tr>
                   )}
