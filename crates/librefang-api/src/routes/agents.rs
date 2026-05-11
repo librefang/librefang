@@ -201,7 +201,7 @@ use dashmap::DashMap;
 use librefang_channels::types::SenderContext;
 use librefang_kernel::kernel_handle::prelude::*;
 use librefang_kernel::kernel_handle::SessionWriter;
-use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest};
+use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest, ResetScope};
 use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
@@ -3420,27 +3420,41 @@ pub async fn reset_session(
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    // `ErrorTranslator` is `!Send` (per repo CLAUDE.md) — never hold it
+    // across an `.await`, or axum's `Handler` trait bound fails with a
+    // cryptic message. Same shape as `compact_session` below.
+    let l = super::resolve_lang(lang.as_ref());
+    let err_invalid_id = {
+        let t = ErrorTranslator::new(l);
+        t.t("api-error-agent-invalid-id")
+    };
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+                Json(serde_json::json!({"error": err_invalid_id})),
             )
         }
     };
-    match state.kernel.reset_session(agent_id) {
+    match state
+        .kernel
+        .reset_session(agent_id, ResetScope::Agent)
+        .await
+    {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "message": "Session reset"})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            let t = ErrorTranslator::new(l);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                ),
+            )
+        }
     }
 }
 
@@ -3459,29 +3473,41 @@ pub async fn reboot_session(
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    // `ErrorTranslator` is `!Send` — see note in `reset_session` above.
+    let l = super::resolve_lang(lang.as_ref());
+    let err_invalid_id = {
+        let t = ErrorTranslator::new(l);
+        t.t("api-error-agent-invalid-id")
+    };
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+                Json(serde_json::json!({"error": err_invalid_id})),
             )
         }
     };
-    match state.kernel.reboot_session(agent_id) {
+    match state
+        .kernel
+        .reboot_session(agent_id, ResetScope::Agent)
+        .await
+    {
         Ok(()) => (
             StatusCode::OK,
             Json(
                 serde_json::json!({"status": "ok", "message": "Session rebooted. Context cleared."}),
             ),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            let t = ErrorTranslator::new(l);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                ),
+            )
+        }
     }
 }
 
@@ -3500,33 +3526,44 @@ pub async fn clear_agent_history(
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    // `ErrorTranslator` is `!Send` — see note in `reset_session` above.
+    let l = super::resolve_lang(lang.as_ref());
+    let (err_invalid_id, err_not_found) = {
+        let t = ErrorTranslator::new(l);
+        (
+            t.t("api-error-agent-invalid-id"),
+            t.t("api-error-agent-not-found"),
+        )
+    };
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+                Json(serde_json::json!({"error": err_invalid_id})),
             )
         }
     };
     if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            Json(serde_json::json!({"error": err_not_found})),
         );
     }
-    match state.kernel.clear_agent_history(agent_id) {
+    match state.kernel.clear_agent_history(agent_id).await {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "message": "All history cleared"})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
-        ),
+        Err(e) => {
+            let t = ErrorTranslator::new(l);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                ),
+            )
+        }
     }
 }
 
