@@ -1373,6 +1373,19 @@ impl BridgeManager {
         let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
+                    // Bias toward shutdown so a stop() call wins deterministically
+                    // over an in-flight ApprovalRequested poll. Without this the
+                    // unbiased select can pick the broadcast arm on the same poll
+                    // that shutdown_tx fires, then call adapter.send() on an
+                    // adapter that stop() has already drained — benign (warn! +
+                    // continue) but spurious in shutdown logs.
+                    biased;
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            info!("Shutting down approval event listener");
+                            break;
+                        }
+                    }
                     result = rx.recv() => {
                         match result {
                             Ok(event) => {
@@ -1437,12 +1450,6 @@ impl BridgeManager {
                                 info!("Event bus closed — stopping approval listener");
                                 break;
                             }
-                        }
-                    }
-                    _ = shutdown.changed() => {
-                        if *shutdown.borrow() {
-                            info!("Shutting down approval event listener");
-                            break;
                         }
                     }
                 }
@@ -4467,7 +4474,10 @@ async fn download_image_to_blocks(
                     "[Image too large for vision ({} KB)]\nCaption: {c}",
                     MAX_IMAGE_BYTES / 1024
                 ),
-                None => format!("[Image too large for vision ({} KB)]", MAX_IMAGE_BYTES / 1024),
+                None => format!(
+                    "[Image too large for vision ({} KB)]",
+                    MAX_IMAGE_BYTES / 1024
+                ),
             };
             return vec![ContentBlock::Text {
                 text: desc,
