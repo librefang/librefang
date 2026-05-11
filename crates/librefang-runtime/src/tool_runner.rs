@@ -2263,7 +2263,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Path to the audio file (relative to workspace). Supported: mp3, wav, ogg, flac, m4a, webm." },
+                    "path": { "type": "string", "description": format!("Path to the audio file (relative to workspace). Supported: {SUPPORTED_AUDIO_EXTS_DOC}.") },
                     "language": { "type": "string", "description": "Optional ISO-639-1 language code (e.g., 'en', 'es', 'ja')" }
                 },
                 "required": ["path"]
@@ -2491,7 +2491,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "speech_to_text".to_string(),
-            description: "Transcribe audio to text using speech-to-text. Auto-selects Groq Whisper or OpenAI Whisper. Supported formats: mp3, wav, ogg, flac, m4a, webm.".to_string(),
+            description: format!("Transcribe audio to text using speech-to-text. Auto-selects Groq Whisper or OpenAI Whisper. Supported formats: {SUPPORTED_AUDIO_EXTS_DOC}."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -5559,6 +5559,30 @@ async fn tool_media_describe(
     serde_json::to_string_pretty(&understanding).map_err(|e| format!("Serialize error: {e}"))
 }
 
+/// Human-readable list of audio extensions accepted by `audio_mime_from_ext`,
+/// surfaced in `media_transcribe` / `speech_to_text` tool schema descriptions
+/// so the agent-facing format list cannot drift from the actual mapping.
+const SUPPORTED_AUDIO_EXTS_DOC: &str = "mp3, wav, ogg, oga, flac, m4a, webm";
+
+/// Map an audio file extension to the MIME type expected by
+/// `MediaEngine::transcribe_audio`. `.oga` is intentionally mapped to
+/// `audio/oga` (NOT `audio/ogg`) so the downstream transcode path in
+/// `media_understanding::transcribe_audio` re-muxes the container before
+/// the Whisper upload — Telegram voice notes are byte-identical Ogg/Opus
+/// under the `.oga` extension, but Whisper's format probe rejects them.
+fn audio_mime_from_ext(ext: &str) -> Option<&'static str> {
+    match ext {
+        "mp3" => Some("audio/mpeg"),
+        "wav" => Some("audio/wav"),
+        "ogg" => Some("audio/ogg"),
+        "oga" => Some("audio/oga"),
+        "flac" => Some("audio/flac"),
+        "m4a" => Some("audio/mp4"),
+        "webm" => Some("audio/webm"),
+        _ => None,
+    }
+}
+
 /// Transcribe audio to text using speech-to-text.
 async fn tool_media_transcribe(
     input: &serde_json::Value,
@@ -5587,15 +5611,8 @@ async fn tool_media_transcribe(
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    let mime = match ext.as_str() {
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "ogg" => "audio/ogg",
-        "flac" => "audio/flac",
-        "m4a" => "audio/mp4",
-        "webm" => "audio/webm",
-        _ => return Err(format!("Unsupported audio format: .{ext}")),
-    };
+    let mime =
+        audio_mime_from_ext(&ext).ok_or_else(|| format!("Unsupported audio format: .{ext}"))?;
 
     let attachment = librefang_types::media::MediaAttachment {
         media_type: librefang_types::media::MediaType::Audio,
@@ -6287,20 +6304,15 @@ async fn tool_speech_to_text(
         .await
         .map_err(|e| format!("Failed to read audio file: {e}"))?;
 
-    // Determine MIME type from extension
+    // Determine MIME type from extension. Unknown extensions fall back to
+    // audio/mpeg here (the speech_to_text path is permissive); the strict
+    // form lives in `tool_media_transcribe`, which rejects unknown formats.
     let ext = resolved
         .extension()
         .and_then(|e| e.to_str())
-        .unwrap_or("mp3");
-    let mime_type = match ext {
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "ogg" => "audio/ogg",
-        "flac" => "audio/flac",
-        "m4a" => "audio/mp4",
-        "webm" => "audio/webm",
-        _ => "audio/mpeg",
-    };
+        .unwrap_or("mp3")
+        .to_lowercase();
+    let mime_type = audio_mime_from_ext(&ext).unwrap_or("audio/mpeg");
 
     use librefang_types::media::{MediaAttachment, MediaSource, MediaType};
     let attachment = MediaAttachment {
@@ -7001,6 +7013,30 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    // ── audio_mime_from_ext ──────────────────────────────────────────────────
+
+    #[test]
+    fn audio_mime_from_ext_maps_known_audio_types() {
+        assert_eq!(audio_mime_from_ext("mp3"), Some("audio/mpeg"));
+        assert_eq!(audio_mime_from_ext("wav"), Some("audio/wav"));
+        assert_eq!(audio_mime_from_ext("ogg"), Some("audio/ogg"));
+        assert_eq!(audio_mime_from_ext("flac"), Some("audio/flac"));
+        assert_eq!(audio_mime_from_ext("m4a"), Some("audio/mp4"));
+        assert_eq!(audio_mime_from_ext("webm"), Some("audio/webm"));
+        // `.oga` is a distinct MIME on purpose — see fn doc-comment.
+        assert_eq!(audio_mime_from_ext("oga"), Some("audio/oga"));
+        assert_ne!(audio_mime_from_ext("oga"), audio_mime_from_ext("ogg"));
+    }
+
+    #[test]
+    fn audio_mime_from_ext_returns_none_for_unsupported() {
+        assert_eq!(audio_mime_from_ext(""), None);
+        assert_eq!(audio_mime_from_ext("txt"), None);
+        assert_eq!(audio_mime_from_ext("opus"), None);
+        // Caller is expected to lowercase before invoking.
+        assert_eq!(audio_mime_from_ext("OGA"), None);
+    }
 
     // ── check_taint_outbound_text ────────────────────────────────────────
 
