@@ -17,6 +17,7 @@ import {
   useMemorySearchOrList,
 } from "../lib/queries/memory";
 import { useAgents } from "../lib/queries/agents";
+import { useAutoDreamStatus } from "../lib/queries/autoDream";
 import {
   useAddMemory,
   useUpdateMemory,
@@ -24,6 +25,11 @@ import {
   useCleanupMemories,
   useUpdateMemoryConfig,
 } from "../lib/mutations/memory";
+import {
+  useTriggerAutoDream,
+  useAbortAutoDream,
+  useSetAutoDreamEnabled,
+} from "../lib/mutations/autoDream";
 
 vi.mock("../lib/queries/memory", () => ({
   useMemoryStats: vi.fn(),
@@ -50,6 +56,16 @@ vi.mock("../lib/mutations/memory", () => ({
   useDeleteMemory: vi.fn(),
   useCleanupMemories: vi.fn(),
   useUpdateMemoryConfig: vi.fn(),
+}));
+
+vi.mock("../lib/queries/autoDream", () => ({
+  useAutoDreamStatus: vi.fn(),
+}));
+
+vi.mock("../lib/mutations/autoDream", () => ({
+  useTriggerAutoDream: vi.fn(),
+  useAbortAutoDream: vi.fn(),
+  useSetAutoDreamEnabled: vi.fn(),
 }));
 
 vi.mock("../lib/useCreateShortcut", () => ({
@@ -148,6 +164,18 @@ const useCleanupMemoriesMock = useCleanupMemories as unknown as ReturnType<
   typeof vi.fn
 >;
 const useUpdateMemoryConfigMock = useUpdateMemoryConfig as unknown as ReturnType<
+  typeof vi.fn
+>;
+const useAutoDreamStatusMock = useAutoDreamStatus as unknown as ReturnType<
+  typeof vi.fn
+>;
+const useTriggerAutoDreamMock = useTriggerAutoDream as unknown as ReturnType<
+  typeof vi.fn
+>;
+const useAbortAutoDreamMock = useAbortAutoDream as unknown as ReturnType<
+  typeof vi.fn
+>;
+const useSetAutoDreamEnabledMock = useSetAutoDreamEnabled as unknown as ReturnType<
   typeof vi.fn
 >;
 
@@ -250,6 +278,27 @@ describe("MemoryPage", () => {
       refetch: vi.fn(),
     });
     useAgentsMock.mockReturnValue({ data: [] });
+
+    // MemoryPage now renders <AutoDreamSection /> after AgentKvSection.
+    // Keep its hooks quiescent so the existing memory-focused assertions
+    // don't have to step around the section.
+    useAutoDreamStatusMock.mockReturnValue({
+      data: { enabled: false, agents: [] },
+      isLoading: false,
+      isError: false,
+    });
+    useTriggerAutoDreamMock.mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    });
+    useAbortAutoDreamMock.mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    });
+    useSetAutoDreamEnabledMock.mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    });
   });
 
   it("renders KPI stats from useMemoryStats", () => {
