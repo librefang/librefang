@@ -1244,6 +1244,12 @@ export interface AgentDetail {
    *  - 'allowlist' — manifest pinned the list in `skills`.
    *  - 'none' — skills_disabled = true. */
   skills_mode?: "all" | "allowlist" | "none";
+  /** MCP servers assigned to this agent (allowlist). Empty = all. */
+  mcp_servers?: string[];
+  /** MCP server assignment mode:
+   *  - 'all' — manifest doesn't pin an allowlist (the default).
+   *  - 'allowlist' — manifest pinned the list in `mcp_servers`. */
+  mcp_servers_mode?: "all" | "allowlist";
   /** Human-readable schedule summary derived from manifest.schedule:
    *  'manual' for reactive, the cron expression, 'proactive', or
    *  'continuous · Ns'. Matches what `enrich_agent_json` puts on the
@@ -1405,6 +1411,22 @@ export async function clearHandAgentRuntimeConfig(agentId: string): Promise<void
  * which only accepts the model-tuning subset. */
 export async function patchAgent(agentId: string, body: { name?: string; description?: string; system_prompt?: string; model?: string; provider?: string; mcp_servers?: string[] }): Promise<ApiActionResponse> {
   return patch<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}`, body);
+}
+
+/** GET /api/agents/{id}/mcp_servers — agent MCP server assignment info. */
+export interface AgentMcpServersResponse {
+  assigned: string[];
+  available: string[];
+  mode: "all" | "allowlist";
+}
+
+export async function getAgentMcpServers(agentId: string): Promise<AgentMcpServersResponse> {
+  return get<AgentMcpServersResponse>(`/api/agents/${encodeURIComponent(agentId)}/mcp_servers`);
+}
+
+/** PUT /api/agents/{id}/mcp_servers — update the agent's MCP server allowlist. */
+export async function setAgentMcpServers(agentId: string, servers: string[]): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/mcp_servers`, { mcp_servers: servers });
 }
 
 export interface AgentToolsResponse {

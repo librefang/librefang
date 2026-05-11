@@ -127,6 +127,8 @@ export {
   listTools,
   getAgentTools,
   getAgentTemplateToml,
+  // agent-level mcp
+  getAgentMcpServers,
   // overview
   loadDashboardSnapshot,
   getVersionInfo,
@@ -232,6 +234,8 @@ export {
   setHandSecret,
   updateHandSettings,
   sendHandMessage,
+  // agent-level mcp
+  setAgentMcpServers,
   // mcp
   addMcpServer,
   updateMcpServer,
@@ -380,4 +384,6 @@ export type {
   EffectiveMemoryAccess,
   EffectiveBudget,
   EffectiveChannelToolPolicy,
+  // agent-level mcp
+  AgentMcpServersResponse,
 } from "../../api";

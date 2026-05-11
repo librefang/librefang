@@ -27,7 +27,7 @@ import { PromptsExperimentsModal } from "../components/PromptsExperimentsModal";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, Plug } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
 import { getStatusVariant } from "../lib/status";
@@ -56,6 +56,7 @@ import {
   useAgentStats,
   useAgentTemplates,
   useAgentTools,
+  useAgentMcpServers,
   useTools,
 } from "../lib/queries/agents";
 import {
@@ -70,6 +71,7 @@ import {
   useSpawnAgent,
   useSuspendAgent,
   useUpdateAgentTools,
+  useSetAgentMcpServers,
 } from "../lib/mutations/agents";
 
 /**
@@ -222,7 +224,7 @@ export function AgentsPage() {
   // Tab switcher inside the inline detail panel.  Mirrors the design's
   // five sections (Conversation / Memory / Skills / Schedule / Logs).
   const [agentTab, setAgentTab] = useState<
-    "conversation" | "memory" | "skills" | "schedule" | "logs"
+    "conversation" | "memory" | "skills" | "mcp" | "schedule" | "logs"
   >("conversation");
   // Whether the deep-edit drawer is open. Decoupled from `detailAgent` so
   // selecting an agent in the list shows the inline detail panel without
@@ -497,6 +499,13 @@ export function AgentsPage() {
   // (global audit) only had admin lifecycle entries, leaving the tab
   // blank for almost every agent.
   const agentEventsQuery = useAgentEvents(detailAgent?.id ?? "", 30);
+  // Per-agent MCP server assignment — backs the MCP tab. Fetches
+  // both the agent's assigned allowlist and all available MCP servers
+  // from the kernel so the tab can show the full picture.
+  const agentMcpServersQuery = useAgentMcpServers(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "mcp",
+  });
+  const setAgentMcpServersMutation = useSetAgentMcpServers();
   // Per-agent session list — Conversation tab uses this directly. The
   // global /api/sessions used previously was paginated to 50, so the
   // agent's latest session was often not in the page.
@@ -761,6 +770,7 @@ export function AgentsPage() {
       { id: "conversation", label: t("agents.tab.conversation", { defaultValue: "Conversation" }), Icon: MessageCircle },
       { id: "memory",       label: t("agents.tab.memory",       { defaultValue: "Memory" }),       Icon: Database },
       { id: "skills",       label: t("agents.tab.skills",       { defaultValue: "Skills" }),       Icon: Sparkles },
+      { id: "mcp",          label: t("agents.tab.mcp",          { defaultValue: "MCP" }),          Icon: Plug },
       { id: "schedule",     label: t("agents.tab.schedule",     { defaultValue: "Schedule" }),     Icon: Clock },
       { id: "logs",         label: t("agents.tab.logs",         { defaultValue: "Logs" }),         Icon: FileText },
     ];
@@ -999,6 +1009,7 @@ export function AgentsPage() {
       case "conversation":      return renderConversationTab(agent);
       case "memory":            return renderMemoryTab(agent);
       case "skills":            return renderSkillsTab(agent);
+      case "mcp":               return renderMcpTab(agent);
       case "schedule":          return renderScheduleTab(agent);
       case "logs":              return renderLogsTab(agent);
     }
@@ -1248,6 +1259,139 @@ export function AgentsPage() {
               </div>
             ))}
           </div>
+        )}
+      </div>
+    );
+  };
+
+  // ---------- MCP tab — connected MCP server cards per design canvas
+  const renderMcpTab = (agent: AgentDetail) => {
+    const mcpData = agentMcpServersQuery.data;
+    const assigned: string[] = mcpData?.assigned ?? (agent as AgentView).mcp_servers ?? [];
+    const available: string[] = mcpData?.available ?? [];
+    const mode: string = mcpData?.mode ?? (agent as AgentView).mcp_servers_mode ?? "all";
+    const usesAll = mode === "all" && assigned.length === 0;
+    const isLoading = agentMcpServersQuery.isLoading;
+
+    const handleToggleServer = (serverName: string) => {
+      if (!agent.id) return;
+      const isAssigned = assigned.includes(serverName);
+      const next = isAssigned
+        ? assigned.filter((s) => s !== serverName)
+        : [...assigned, serverName];
+      setAgentMcpServersMutation.mutate({ agentId: agent.id, servers: next });
+    };
+
+    const handleUseAll = () => {
+      if (!agent.id) return;
+      setAgentMcpServersMutation.mutate({ agentId: agent.id, servers: [] });
+    };
+
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+            {t("agents.detail.connected_mcp_servers", { defaultValue: "Connected MCP servers" })}
+            {" · "}
+            {usesAll
+              ? t("agents.detail.mcp_all", { defaultValue: "all" })
+              : assigned.length}
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            leftIcon={<Plus className="h-3.5 w-3.5" />}
+            onClick={() => navigate({ to: "/mcp-servers" })}
+          >
+            {t("agents.detail.manage_mcp", { defaultValue: "Manage" })}
+          </Button>
+        </div>
+        {isLoading ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
+            <Loader2 className="w-4 h-4 animate-spin text-text-dim" />
+          </div>
+        ) : usesAll ? (
+          <div
+            onClick={() => navigate({ to: "/mcp-servers" })}
+            className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3 cursor-pointer hover:border-brand/40 transition-colors"
+          >
+            <Plug className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1">
+              <div className="font-mono text-[12.5px] font-medium text-text-main">
+                {t("agents.detail.mcp_all_title", { defaultValue: "Using all connected MCP servers" })}
+              </div>
+              <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                {t("agents.detail.mcp_all_desc", {
+                  defaultValue: "manifest doesn't pin an allowlist — every connected MCP server is available",
+                })}
+              </div>
+            </div>
+          </div>
+        ) : assigned.length === 0 && available.length === 0 ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+            {t("agents.detail.no_mcp", { defaultValue: "No MCP servers connected." })}
+          </div>
+        ) : (
+          <>
+            {assigned.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {assigned.map((s) => (
+                  <div
+                    key={s}
+                    className="px-3 py-2.5 rounded-md border border-brand/30 bg-main/40 flex items-start justify-between gap-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
+                      <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                        {t("agents.detail.mcp_assigned", { defaultValue: "assigned" })}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => handleToggleServer(s)}
+                      className="text-text-dim hover:text-red-400 transition-colors shrink-0 mt-0.5"
+                      title={t("agents.detail.mcp_remove", { defaultValue: "Remove from allowlist" })}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {available.filter((s) => !assigned.includes(s)).length > 0 && (
+              <>
+                <div className="text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim mt-1">
+                  {t("agents.detail.mcp_available", { defaultValue: "Available" })}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {available
+                    .filter((s) => !assigned.includes(s))
+                    .map((s) => (
+                      <div
+                        key={s}
+                        onClick={() => handleToggleServer(s)}
+                        className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 cursor-pointer hover:border-brand/40 transition-colors flex items-start justify-between gap-2"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
+                          <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                            {t("agents.detail.mcp_click_assign", { defaultValue: "click to assign" })}
+                          </div>
+                        </div>
+                        <Plug className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+                      </div>
+                    ))}
+                </div>
+              </>
+            )}
+            {!usesAll && (
+              <button
+                onClick={handleUseAll}
+                className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+              >
+                {t("agents.detail.mcp_reset_to_all", { defaultValue: "Reset to use all servers" })}
+              </button>
+            )}
+          </>
         )}
       </div>
     );

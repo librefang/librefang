@@ -26,6 +26,7 @@ import {
   resetAgentSession,
   updateAgentTools,
   getAgentTemplateToml,
+  setAgentMcpServers,
 } from "../http/client";
 import type { PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
 import { clearChatSessionCacheForAgent } from "../chatSessionCache";
@@ -513,5 +514,23 @@ export function useUpdateAgentTools() {
 export function useAgentTemplateToml() {
   return useMutation({
     mutationFn: getAgentTemplateToml,
+  });
+}
+
+/** PUT /api/agents/{id}/mcp_servers — replace the agent's MCP server allowlist. */
+export function useSetAgentMcpServers() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      servers,
+    }: {
+      agentId: string;
+      servers: string[];
+    }) => setAgentMcpServers(agentId, servers),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
+    },
   });
 }
