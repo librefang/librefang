@@ -654,6 +654,9 @@ class _ModelsResource(_Resource):
     def set_default_provider(self, name: str, **data):
         return self._c._request("POST", f"/api/providers/{name}/default", data)
 
+    def enable_provider(self, name: str):
+        return self._c._request("POST", f"/api/providers/{name}/enable")
+
     def set_provider_key(self, name: str, **data):
         return self._c._request("POST", f"/api/providers/{name}/key", data)
 
