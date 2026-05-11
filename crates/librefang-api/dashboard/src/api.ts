@@ -58,6 +58,12 @@ export interface ProviderItem {
   is_custom?: boolean;
   error_message?: string;
   last_tested?: string;
+  /** True when the user explicitly suppressed this provider via
+   *  `DELETE /api/providers/{id}/key`. Pairs with the
+   *  `POST /api/providers/{id}/enable` endpoint that revives it.
+   *  Lets the dashboard distinguish "user-hidden" from "never configured"
+   *  for the otherwise indistinguishable `auth_status: "missing"`. */
+  suppressed?: boolean;
 }
 
 export interface MediaProvider {
@@ -1604,6 +1610,10 @@ export async function setProviderKey(providerId: string, key: string): Promise<A
 
 export async function deleteProviderKey(providerId: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/key`);
+}
+
+export async function enableProvider(providerId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/enable`, {});
 }
 
 export async function setProviderUrl(providerId: string, baseUrl: string, proxyUrl?: string): Promise<ApiActionResponse> {

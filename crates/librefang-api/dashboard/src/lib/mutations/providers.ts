@@ -3,6 +3,7 @@ import {
   testProvider,
   setProviderKey,
   deleteProviderKey,
+  enableProvider,
   setProviderUrl,
   setDefaultProvider,
   createRegistryContent,
@@ -40,6 +41,24 @@ export function useDeleteProviderKey() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => deleteProviderKey(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: providerKeys.all });
+      qc.invalidateQueries({ queryKey: modelKeys.lists() });
+    },
+  });
+}
+
+// Counterpart to `useDeleteProviderKey` — the dashboard's only way back
+// for CLI providers (claude-code, codex-cli, gemini-cli, qwen-code) that
+// have no key/URL to set. For non-CLI providers, the existing
+// set-key/set-url flows already un-suppress, but this hook is the
+// one-click "Re-enable" entry point that works uniformly. Invalidates
+// the same slices as the delete counterpart so the picker / configured
+// grid both refetch.
+export function useEnableProvider() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => enableProvider(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: providerKeys.all });
       qc.invalidateQueries({ queryKey: modelKeys.lists() });

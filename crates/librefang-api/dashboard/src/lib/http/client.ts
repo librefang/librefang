@@ -255,6 +255,7 @@ export {
   testProvider,
   setProviderKey,
   deleteProviderKey,
+  enableProvider,
   setProviderUrl,
   setDefaultProvider,
   // network / a2a
