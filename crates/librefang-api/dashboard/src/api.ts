@@ -2419,6 +2419,19 @@ export async function getHealthDetail(): Promise<HealthDetailResponse> {
   return get<HealthDetailResponse>("/api/health/detail");
 }
 
+/**
+ * Minimal liveness probe for the `<OfflineBanner />`. `/api/health` is
+ * always-public (load-balancer / probe contract) while `/api/health/detail`
+ * requires auth because its payload leaks operational telemetry. The
+ * banner only needs "is the daemon reachable" — anchor on the minimal
+ * probe so it never trips the auth gate pre-login and never receives
+ * sensitive data (#4868 review fix; #4893 attempted the inverse and
+ * silently broke the auth contract on the detail endpoint).
+ */
+export async function getHealth(): Promise<{ status?: string }> {
+  return get<{ status?: string }>("/api/health");
+}
+
 export interface MemoryConfigResponse {
   embedding_provider?: string;
   embedding_model?: string;

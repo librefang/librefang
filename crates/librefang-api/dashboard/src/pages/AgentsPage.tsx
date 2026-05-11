@@ -1126,7 +1126,7 @@ export function AgentsPage() {
             variant="ghost"
             size="sm"
             leftIcon={<Database className="h-3.5 w-3.5" />}
-            onClick={() => navigate({ to: "/memory", search: { agentId: agent.id } as never })}
+            onClick={() => navigate({ to: "/memory", search: { agent: agent.id } })}
           >
             {t("agents.detail.open_memory", { defaultValue: "Open" })}
           </Button>
