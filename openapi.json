@@ -7995,6 +7995,39 @@
         }
       }
     },
+    "/api/providers/{name}/enable": {
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "summary": "POST /api/providers/{name}/enable — Re-enable a previously suppressed\nprovider.",
+        "description": "Pairs with DELETE /api/providers/{name}/key, which writes the provider\nid into `suppressed_providers.json` so `detect_auth` stops promoting\nthe row back to `Configured` / `NotRequired` / `AutoDetected` via\nCLI binary probes, local HTTP probes, or alias env vars. For\nCLI-shape providers (`claude-code`, `codex-cli`, `gemini-cli`,\n`qwen-code`) the existing `set_provider_key` / `set_provider_url`\nun-suppress side-effects don't apply — there's no key or URL to\nset — so without this endpoint a user who clicked \"remove key\" on a\nCLI provider had no UI to revert. This endpoint is the explicit\nre-enable signal and works uniformly for every provider shape.\n\nIdempotent: calling on a non-suppressed provider is a no-op aside\nfrom the `detect_auth` refresh.",
+        "operationId": "enable_provider",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Provider name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Provider re-enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/providers/{name}/key": {
       "post": {
         "tags": [
