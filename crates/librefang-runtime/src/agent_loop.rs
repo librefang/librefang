@@ -1840,6 +1840,66 @@ pub fn strip_provider_prefix(model: &str, provider: &str) -> String {
     stripped
 }
 
+/// Apply a per-session model override string (#4898).
+///
+/// Format: `"<provider>/<model>"` (sets both provider and model) or
+/// `"<model>"` (model only, provider stays as the manifest default).
+/// Mirrors the cron `AgentTurn.model_override` resolution pattern.
+fn apply_session_model_override(manifest: &mut AgentManifest, override_str: &str) {
+    if let Some((provider, model)) = override_str.split_once('/') {
+        manifest.model.provider = provider.to_string();
+        manifest.model.model = model.to_string();
+    } else {
+        manifest.model.model = override_str.to_string();
+    }
+}
+
+#[cfg(test)]
+mod session_model_override_tests {
+    use super::*;
+    use librefang_types::agent::ModelConfig;
+
+    fn manifest_with(provider: &str, model: &str) -> AgentManifest {
+        AgentManifest {
+            model: ModelConfig {
+                provider: provider.to_string(),
+                model: model.to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn override_provider_and_model_when_slash_present() {
+        let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
+        apply_session_model_override(&mut m, "groq/llama-3.3-70b");
+        assert_eq!(m.model.provider, "groq");
+        assert_eq!(m.model.model, "llama-3.3-70b");
+    }
+
+    #[test]
+    fn override_model_only_when_no_slash() {
+        let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
+        apply_session_model_override(&mut m, "claude-haiku-4-5");
+        assert_eq!(
+            m.model.provider, "anthropic",
+            "provider must stay as manifest default when override has no slash"
+        );
+        assert_eq!(m.model.model, "claude-haiku-4-5");
+    }
+
+    #[test]
+    fn override_preserves_other_manifest_fields() {
+        let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
+        m.name = "agent-foo".to_string();
+        m.description = "test agent".to_string();
+        apply_session_model_override(&mut m, "groq/llama-3.3");
+        assert_eq!(m.name, "agent-foo");
+        assert_eq!(m.description, "test agent");
+    }
+}
+
 /// Providers that require model IDs in `org/model` format.
 fn needs_qualified_model_id(provider: &str) -> bool {
     matches!(
@@ -3612,6 +3672,15 @@ pub async fn run_agent_loop(
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
+    // Per-session model override (#4898). Shadow `manifest` so every
+    // downstream read of `manifest.model.{model,provider}` sees the
+    // resolved effective model. NULL override = original manifest.
+    let mut _eff_manifest = manifest.clone();
+    if let Some(override_str) = session.model_override.as_deref() {
+        apply_session_model_override(&mut _eff_manifest, override_str);
+    }
+    let manifest = &_eff_manifest;
+
     // Start index of new messages added during this turn. Initialized to
     // current session length so early returns (before the user message is
     // pushed) expose an empty slice to callers. Updated after
@@ -5164,6 +5233,15 @@ pub async fn run_agent_loop_streaming(
     opts: &LoopOptions,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting streaming agent loop");
+
+    // Per-session model override (#4898). Same pattern as run_agent_loop:
+    // shadow `manifest` so every downstream read of
+    // `manifest.model.{model,provider}` resolves to the effective model.
+    let mut _eff_manifest = manifest.clone();
+    if let Some(override_str) = session.model_override.as_deref() {
+        apply_session_model_override(&mut _eff_manifest, override_str);
+    }
+    let manifest = &_eff_manifest;
 
     // Start index of new messages added during this turn. See the matching
     // comment in run_agent_loop for details. Initialized to the current

@@ -82,17 +82,14 @@ pub struct Session {
     pub label: Option<String>,
     /// Per-session model override (issue #4898).
     ///
-    /// **Schema slice only — runtime integration is the follow-up PR.**
-    /// This column is persisted and round-trips through `get_session` /
-    /// `save_session`, but `execute_llm_agent` does NOT yet read it. The
-    /// 20+ dispatch sites in `crates/librefang-runtime/src/agent_loop.rs`
-    /// continue to read `manifest.model.{model,provider}` directly. A
-    /// follow-up PR will introduce `resolve_effective_model(session,
-    /// manifest, turn_override)` and replace those sites; until then,
-    /// setting this field has no effect on LLM dispatch.
+    /// When `Some`, `run_agent_loop` / `run_agent_loop_streaming` shadow
+    /// the agent manifest at entry and apply this override before any
+    /// LLM dispatch, so all 20+ `manifest.model.{model,provider}` read
+    /// sites in the loop transparently see the resolved effective model.
     ///
-    /// Intended format: `"<provider>/<model>"` or `"<model>"`, matching
-    /// the cron `AgentTurn.model_override` field. `None` = agent default.
+    /// Format: `"<provider>/<model>"` (sets both provider and model) or
+    /// `"<model>"` (model only — provider stays as agent manifest default).
+    /// `None` means "use the agent default" — fully backward compatible.
     pub model_override: Option<String>,
     /// Monotonically incremented on every mutation to `messages`.
     /// Used to skip redundant repair passes when the history hasn't changed.
