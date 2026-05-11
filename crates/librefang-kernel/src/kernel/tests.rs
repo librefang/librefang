@@ -1497,7 +1497,9 @@ async fn test_send_message_ephemeral_unknown_agent_returns_not_found() {
 
     // Use a random AgentId that doesn't exist
     let bogus_id = AgentId::new();
-    let result = kernel.send_message_ephemeral(bogus_id, "hello?").await;
+    let result = kernel
+        .send_message_ephemeral(bogus_id, "hello?", None)
+        .await;
     assert!(
         result.is_err(),
         "ephemeral message to unknown agent should error"
@@ -1536,7 +1538,7 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
     // Send ephemeral message (will fail because no LLM provider, but that's OK —
     // the point is the session should remain untouched)
     let _ = kernel
-        .send_message_ephemeral(agent_id, "what is 2+2?")
+        .send_message_ephemeral(agent_id, "what is 2+2?", None)
         .await;
 
     // Check session is unchanged
@@ -4967,7 +4969,7 @@ async fn before_prompt_build_hook_fires_for_ephemeral_with_call_site_and_user_me
     // is resolved. Both Ok and Err are acceptable here; we only care that
     // the recorder captured the hook payload.
     let _ = kernel
-        .send_message_ephemeral(agent_id, "hello from the test")
+        .send_message_ephemeral(agent_id, "hello from the test", None)
         .await;
 
     let data = recorder
@@ -5014,7 +5016,7 @@ async fn before_prompt_build_hook_unregistered_event_does_not_fire_provider() {
         recorder.clone(),
     );
 
-    let _ = kernel.send_message_ephemeral(agent_id, "hello").await;
+    let _ = kernel.send_message_ephemeral(agent_id, "hello", None).await;
 
     assert!(
         recorder.last_data.lock().unwrap().is_none(),

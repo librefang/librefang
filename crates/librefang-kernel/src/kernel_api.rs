@@ -271,6 +271,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         &self,
         agent_id: AgentId,
         message: &str,
+        sender_context: Option<&librefang_channels::types::SenderContext>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
 
     // ====================================================================
@@ -877,8 +878,9 @@ impl KernelApi for LibreFangKernel {
         &self,
         agent_id: AgentId,
         message: &str,
+        sender_context: Option<&librefang_channels::types::SenderContext>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
-        Self::send_message_ephemeral(self, agent_id, message).await
+        Self::send_message_ephemeral(self, agent_id, message, sender_context).await
     }
 
     // -- Hands --

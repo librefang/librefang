@@ -163,7 +163,7 @@ async fn ephemeral_path_rejects_when_provider_hourly_budget_exhausted() {
     let agent_id = register_agent(&kernel);
 
     let err = kernel
-        .send_message_ephemeral(agent_id, "ping")
+        .send_message_ephemeral(agent_id, "ping", None)
         .await
         .expect_err("ephemeral path must refuse over-budget call");
     assert_quota_exceeded(err, "ephemeral");
@@ -251,7 +251,7 @@ async fn ephemeral_path_passes_when_provider_budget_not_exhausted() {
     let (kernel, _tmp) = build_kernel();
     let agent_id = register_agent(&kernel);
 
-    let result = kernel.send_message_ephemeral(agent_id, "ping").await;
+    let result = kernel.send_message_ephemeral(agent_id, "ping", None).await;
     if let Err(KernelError::LibreFang(LibreFangError::QuotaExceeded(msg))) = &result {
         assert!(
             !msg.contains("hourly cost budget"),

@@ -844,10 +844,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         &self,
         agent_id: AgentId,
         message: &str,
+        sender: Option<&librefang_channels::types::SenderContext>,
     ) -> Result<String, String> {
         let result = self
             .kernel
-            .send_message_ephemeral(agent_id, message)
+            .send_message_ephemeral(agent_id, message, sender)
             .await
             .map_err(|e| format!("{e}"))?;
         if result.silent {
