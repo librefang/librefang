@@ -1795,11 +1795,8 @@ impl LibreFangKernel {
         } else {
             match sender_context {
                 Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
-                    let scope = match &ctx.chat_id {
-                        Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
-                        _ => ctx.channel.clone(),
-                    };
-                    let derived = SessionId::for_channel(agent_id, &scope);
+                    let derived =
+                        SessionId::for_sender_scope(agent_id, &ctx.channel, ctx.chat_id.as_deref());
                     // #3692: surface when the channel branch silently
                     // overrides a non-default manifest `session_mode`.
                     // Operators previously had no way to tell from logs

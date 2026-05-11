@@ -24,7 +24,7 @@ use librefang_channels::types::SenderContext;
 use librefang_kernel::kernel_handle::prelude::*;
 use librefang_kernel::llm_driver::{StreamEvent, PHASE_RESPONSE_COMPLETE};
 use librefang_kernel::llm_errors;
-use librefang_types::agent::{AgentId, SessionId};
+use librefang_types::agent::{AgentId, ResetScope, SessionId};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, SocketAddr};
@@ -1426,13 +1426,21 @@ async fn handle_command(
                 serde_json::json!({"type": "error", "content": format!("New session failed: {e}")})
             }
         },
-        "reset" => match state.kernel.reset_session(agent_id) {
+        "reset" => match state
+            .kernel
+            .reset_session(agent_id, ResetScope::Agent)
+            .await
+        {
             Ok(()) => {
                 serde_json::json!({"type": "command_result", "command": "reset", "message": "Session reset. Chat history cleared."})
             }
             Err(e) => serde_json::json!({"type": "error", "content": format!("Reset failed: {e}")}),
         },
-        "reboot" => match state.kernel.reboot_session(agent_id) {
+        "reboot" => match state
+            .kernel
+            .reboot_session(agent_id, ResetScope::Agent)
+            .await
+        {
             Ok(()) => {
                 serde_json::json!({"type": "command_result", "command": "reboot", "message": "Session rebooted. Context cleared."})
             }
