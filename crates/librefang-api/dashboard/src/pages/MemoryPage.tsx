@@ -199,6 +199,17 @@ const KNOWN_EMBEDDING_MODELS: Record<string, string[]> = {
   lmstudio: ["nomic-embed-text", "text-embedding-nomic-embed-text-v1.5"],
 };
 
+// Display labels for the embedding-provider optgroups shown when the
+// Provider field is "Auto-detect". Keys mirror KNOWN_EMBEDDING_MODELS.
+const EMBEDDING_PROVIDER_LABELS: Record<string, string> = {
+  openai: "OpenAI",
+  gemini: "Gemini",
+  minimax: "MiniMax",
+  ollama: "Ollama",
+  vllm: "vLLM",
+  lmstudio: "LM Studio",
+};
+
 function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
@@ -213,8 +224,17 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
 
   const [form, setForm] = useState<MemoryConfigForm | null>(null);
 
-  const embeddingProviderSuggestions =
-    KNOWN_EMBEDDING_MODELS[form?.embedding_provider ?? ""] ?? [];
+  // Suggestion list for the Embedding Model dropdown. When the provider is
+  // pinned and known, surface only that provider's catalog. When the
+  // provider is "Auto-detect" (empty) or a not-yet-known string, fall back
+  // to the union of every provider's catalog — otherwise a stored value
+  // like `text-embedding-3-small` would be flagged Custom whenever the user
+  // hasn't explicitly pinned `openai`, which is wrong and surprising.
+  const embeddingProvider = form?.embedding_provider ?? "";
+  const embeddingProviderKnown = embeddingProvider in KNOWN_EMBEDDING_MODELS;
+  const embeddingProviderSuggestions = embeddingProviderKnown
+    ? KNOWN_EMBEDDING_MODELS[embeddingProvider]
+    : Array.from(new Set(Object.values(KNOWN_EMBEDDING_MODELS).flat()));
   // Sentinel value for the "Custom…" option in the model `<select>`s. Picking
   // it switches the field into a free-text input rendered alongside the
   // select; an existing stored value that isn't in the catalog is also
@@ -224,8 +244,14 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
   const embeddingIsCustom =
     !!form?.embedding_model && !embeddingKnownSet.has(form.embedding_model);
   const chatModelIdSet = new Set(chatModels.map((m) => m.id));
+  // Guard on `isSuccess` so that the stored value doesn't flicker through
+  // Custom during the initial `useModels` fetch (chatModels is `[]` while
+  // loading, which would otherwise classify every saved model as custom
+  // for a frame).
   const extractionIsCustom =
-    !!form?.pm_extraction_model && !chatModelIdSet.has(form.pm_extraction_model);
+    modelsQuery.isSuccess &&
+    !!form?.pm_extraction_model &&
+    !chatModelIdSet.has(form.pm_extraction_model);
 
   useEffect(() => {
     if (!configQuery.data || form) return;
@@ -314,9 +340,19 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                   className={inputCls}
                 >
                   <option value="">{t("memory.embedding_model_default", { defaultValue: "Auto / provider default" })}</option>
-                  {embeddingProviderSuggestions.map(name => (
-                    <option key={name} value={name}>{name}</option>
-                  ))}
+                  {embeddingProviderKnown ? (
+                    embeddingProviderSuggestions.map(name => (
+                      <option key={name} value={name}>{name}</option>
+                    ))
+                  ) : (
+                    Object.entries(KNOWN_EMBEDDING_MODELS).map(([prov, names]) => (
+                      <optgroup key={prov} label={EMBEDDING_PROVIDER_LABELS[prov] ?? prov}>
+                        {names.map(name => (
+                          <option key={`${prov}:${name}`} value={name}>{name}</option>
+                        ))}
+                      </optgroup>
+                    ))
+                  )}
                   <option value={CUSTOM_OPTION}>{t("memory.custom_model_option", { defaultValue: "Custom…" })}</option>
                 </select>
                 {embeddingIsCustom && (
@@ -383,6 +419,15 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                         : `${m.id} (${m.provider})`}
                     </option>
                   ))}
+                  {/* While useModels() is still loading the catalog is empty;
+                      render the stored value as a transient option so the
+                      select's `value=` has something to match (otherwise
+                      React warns about an unmatched controlled value). */}
+                  {!modelsQuery.isSuccess &&
+                    form.pm_extraction_model &&
+                    !chatModelIdSet.has(form.pm_extraction_model) && (
+                      <option value={form.pm_extraction_model}>{form.pm_extraction_model}</option>
+                    )}
                   <option value={CUSTOM_OPTION}>{t("memory.custom_model_option", { defaultValue: "Custom…" })}</option>
                 </select>
                 {extractionIsCustom && (
