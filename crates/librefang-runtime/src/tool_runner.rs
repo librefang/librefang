@@ -1145,6 +1145,8 @@ pub async fn execute_tool_raw(
         "workflow_run" => tool_workflow_run(input, *kernel).await,
         "workflow_list" => tool_workflow_list(*kernel).await,
         "workflow_status" => tool_workflow_status(input, *kernel).await,
+        "workflow_start" => tool_workflow_start(input, *kernel).await,
+        "workflow_cancel" => tool_workflow_cancel(input, *kernel).await,
 
         // Browser automation tools
         "browser_navigate" => {
@@ -2615,6 +2617,29 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "run_id": { "type": "string", "description": "The workflow run UUID returned by workflow_run" }
+                },
+                "required": ["run_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "workflow_start".to_string(),
+            description: "Start a workflow asynchronously (fire-and-forget). Returns the run_id immediately without waiting for completion. Use workflow_status to poll progress. Differs from workflow_run which blocks until the workflow finishes.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "workflow_id": { "type": "string", "description": "The workflow UUID or registered name (e.g., 'bug-triage', 'code-review')" },
+                    "input": { "type": "object", "description": "Optional input parameters to pass to the workflow's first step (JSON object)" }
+                },
+                "required": ["workflow_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "workflow_cancel".to_string(),
+            description: "Cancel a running or paused workflow. Returns the run_id and final state on success. Returns an error if the run is not found or is already in a terminal state (completed, failed, cancelled).".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "run_id": { "type": "string", "description": "The workflow run UUID to cancel" }
                 },
                 "required": ["run_id"]
             }),
@@ -4325,6 +4350,64 @@ async fn tool_workflow_status(
         "last_step_name": summary.last_step_name,
     }))
     .map_err(|e| format!("Failed to serialize workflow status: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// workflow_start — fire-and-forget async workflow launch
+// ---------------------------------------------------------------------------
+
+async fn tool_workflow_start(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let workflow_id = input["workflow_id"]
+        .as_str()
+        .ok_or("Missing 'workflow_id' parameter")?;
+
+    // Serialize optional input object to a JSON string for the workflow engine.
+    let input_str = match input.get("input") {
+        Some(v) if v.is_object() => serde_json::to_string(v)
+            .map_err(|e| format!("Failed to serialize workflow input: {e}"))?,
+        Some(v) if v.is_null() => String::new(),
+        Some(_) => return Err("'input' must be a JSON object or null".to_string()),
+        None => String::new(),
+    };
+
+    let kh = require_kernel(kernel)?;
+    let run_id = kh
+        .start_workflow_async(workflow_id, &input_str)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({ "run_id": run_id }).to_string())
+}
+
+// ---------------------------------------------------------------------------
+// workflow_cancel — cancel a running or paused workflow run
+// ---------------------------------------------------------------------------
+
+async fn tool_workflow_cancel(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let run_id = input["run_id"]
+        .as_str()
+        .ok_or("Missing 'run_id' parameter")?;
+
+    // Validate UUID format before calling kernel.
+    uuid::Uuid::parse_str(run_id)
+        .map_err(|_| format!("Invalid run_id — must be a UUID: {run_id}"))?;
+
+    let kh = require_kernel(kernel)?;
+    kh.cancel_workflow_run(run_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "run_id": run_id,
+        "state": "cancelled",
+    })
+    .to_string())
 }
 
 // ---------------------------------------------------------------------------
