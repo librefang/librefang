@@ -90,6 +90,63 @@ enum RoSafety {
 /// - For `tee` any RO-path argument is treated as a write destination and
 ///   blocked (tee always writes).
 fn classify_shell_exec_ro_safety(command: &str, ro_prefix: &str) -> RoSafety {
+    // --- 0. Subshell / command-substitution guard -----------------------------
+    // `$( ... )` and backticks embed sub-commands that the verb classifier
+    // never reaches (sh evaluates them before exec). Fail-closed when the
+    // command contains them — the RO path may be touched by the embedded
+    // sub-command in a way no single-verb analysis can prove safe.
+    if command.contains("$(") || command.contains('`') {
+        return RoSafety::Block(format!(
+            "shell_exec blocked: command-substitution (`$(...)` or backtick) \
+             is not analyzable — RO path '{}' may be targeted by an embedded sub-command",
+            ro_prefix
+        ));
+    }
+
+    // --- 0b. Shell-chain split ------------------------------------------------
+    // `sh -c "<command>"` evaluates the whole string with shell parsing, so
+    // `&&`, `||`, `;`, and `|` introduce sub-commands that a single first-token
+    // verb check cannot see. Example bypass before this fix:
+    //   `cat /tmp/in && rm /vaults-ro/x/data`
+    //   → verb=`cat` → READ_VERB → Allow → sh still runs `rm`
+    // Split on those operators (order matters: `&&` / `||` before `|`) and
+    // classify each fragment independently. Pipes are treated the same way:
+    // each pipe stage is itself a self-contained invocation.
+    const CHAIN_OPS: &[&str] = &["&&", "||", "|", ";"];
+    if CHAIN_OPS.iter().any(|op| command.contains(op)) {
+        let mut normalized = command.to_string();
+        for op in CHAIN_OPS {
+            normalized = normalized.replace(op, "\u{0001}");
+        }
+        for fragment in normalized.split('\u{0001}') {
+            let trimmed = fragment.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // Segments that don't reference the RO path can never harm this
+            // RO mount; skip them so an unrecognised verb on an unrelated
+            // segment doesn't cause a false-positive deny.
+            if !trimmed.contains(ro_prefix) {
+                continue;
+            }
+            if let RoSafety::Block(reason) =
+                classify_shell_exec_ro_safety_segment(trimmed, ro_prefix)
+            {
+                return RoSafety::Block(reason);
+            }
+        }
+        return RoSafety::Allow;
+    }
+
+    classify_shell_exec_ro_safety_segment(command, ro_prefix)
+}
+
+/// Per-segment RO classification — the original single-verb analysis.
+/// Called either directly (no shell chain) or for each fragment after
+/// `classify_shell_exec_ro_safety` has split the command on `&&` / `||` /
+/// `;` / `|`. Subshells / command-substitution are rejected before reaching
+/// here, so this function can assume `command` is a single simple command.
+fn classify_shell_exec_ro_safety_segment(command: &str, ro_prefix: &str) -> RoSafety {
     // --- 1. Redirect detection -------------------------------------------------
     // Check the raw command string for output-redirect operators that target the
     // RO path. We look for `> <ro>`, `>> <ro>`, `&> <ro>`, `2> <ro>` patterns.
@@ -9481,6 +9538,94 @@ mod tests {
                 "error must mention unrecognised verb; got: {msg}"
             );
         }
+    }
+
+    // --- Shell-chain bypass regressions (depth-2 verb check) -------------------
+    //
+    // Pre-fix the verb classifier only inspected the first whitespace token,
+    // so a leading READ_VERB ushered any number of trailing write commands
+    // through `sh -c`. These tests pin the fix.
+
+    #[test]
+    fn ro_safety_chained_write_after_read_is_blocked() {
+        // `cat /tmp/in && rm /vaults-ro/x/data` — verb=`cat` (allowed), but
+        // the second segment is `rm` against the RO path. Must Block.
+        let result =
+            classify_shell_exec_ro_safety("cat /tmp/in && rm /vaults-ro/x/data", "/vaults-ro/x");
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "chained write after read must be blocked; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_pipe_of_reads_is_allowed() {
+        // `cat /vaults-ro/x/foo | grep needle` — both segments are reads.
+        let result =
+            classify_shell_exec_ro_safety("cat /vaults-ro/x/foo | grep needle", "/vaults-ro/x");
+        assert_eq!(
+            result,
+            RoSafety::Allow,
+            "pipe of two read verbs against an RO path must be allowed"
+        );
+    }
+
+    #[test]
+    fn ro_safety_semicolon_then_touch_in_ro_is_blocked() {
+        // `cat foo; touch /vaults-ro/x/marker` — `;` chains the touch write.
+        let result = classify_shell_exec_ro_safety(
+            "cat /vaults-ro/x/foo; touch /vaults-ro/x/marker",
+            "/vaults-ro/x",
+        );
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "`;`-chained `touch` under RO must be blocked; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_command_substitution_is_blocked() {
+        // `cat $(echo /vaults-ro/x/foo)` — sub-shell expansion is opaque to
+        // the verb classifier; must fail-closed.
+        let result = classify_shell_exec_ro_safety("cat $(echo /vaults-ro/x/foo)", "/vaults-ro/x");
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "`$(...)` substitution touching RO must be blocked; got {result:?}"
+        );
+        if let RoSafety::Block(msg) = result {
+            assert!(
+                msg.contains("command-substitution"),
+                "error must mention substitution; got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn ro_safety_backtick_substitution_is_blocked() {
+        // Same as the `$(...)` test but with the legacy backtick form.
+        let cmd = "cat `echo /vaults-ro/x/foo`";
+        let result = classify_shell_exec_ro_safety(cmd, "/vaults-ro/x");
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "backtick substitution touching RO must be blocked; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_unrelated_segment_does_not_false_positive() {
+        // `cat /vaults-ro/x/foo && echo done` — second segment doesn't
+        // touch the RO path, so an unrecognised verb on it must NOT cause
+        // a deny when the RO-touching segment is itself safe.
+        // (`echo` is intentionally not in READ_VERBS — see the unrecognised
+        // verb test above. We rely on the "skip segments without RO ref"
+        // fast path to keep this case allowed.)
+        let result =
+            classify_shell_exec_ro_safety("cat /vaults-ro/x/foo && echo done", "/vaults-ro/x");
+        assert_eq!(
+            result,
+            RoSafety::Allow,
+            "unrelated trailing segment must not deny a safe read of RO"
+        );
     }
 
     #[tokio::test]
