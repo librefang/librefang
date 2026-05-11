@@ -862,6 +862,10 @@ pub struct AgentManifest {
     /// MCP server allowlist (empty = all connected MCP servers available).
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub mcp_servers: Vec<String>,
+    /// Explicitly disable all MCP server tools for this agent. Mirrors
+    /// `skills_disabled` — `mcp_servers = []` means "all", this means "none".
+    #[serde(default)]
+    pub mcp_disabled: bool,
     /// Custom metadata.
     #[serde(default, deserialize_with = "crate::serde_compat::map_lenient")]
     pub metadata: HashMap<String, serde_json::Value>,
@@ -1130,6 +1134,7 @@ impl Default for AgentManifest {
             skills: Vec::new(),
             skills_disabled: false,
             mcp_servers: Vec::new(),
+            mcp_disabled: false,
             metadata: HashMap::new(),
             tags: Vec::new(),
             routing: None,
@@ -2667,5 +2672,70 @@ mount = "/abs"
         let s = "mode = \"r\"\n";
         let d: WorkspaceDecl = toml::from_str(s).unwrap();
         assert!(d.path.is_none() && d.mount.is_none());
+    }
+
+    // ── mcp_disabled field (#4808) ─────────────────────────────────────────
+
+    #[test]
+    fn mcp_disabled_default_is_false() {
+        let manifest = AgentManifest::default();
+        assert!(!manifest.mcp_disabled, "mcp_disabled must default to false");
+    }
+
+    #[test]
+    fn mcp_disabled_toml_roundtrip() {
+        let toml_str = r#"
+name = "no-mcp-agent"
+mcp_disabled = true
+
+[model]
+provider = "anthropic"
+model = "claude-3-haiku-20240307"
+"#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert!(
+            manifest.mcp_disabled,
+            "mcp_disabled must survive TOML deserialization"
+        );
+
+        let re_serialized = toml::to_string(&manifest).unwrap();
+        let re_parsed: AgentManifest = toml::from_str(&re_serialized).unwrap();
+        assert!(
+            re_parsed.mcp_disabled,
+            "mcp_disabled must survive TOML roundtrip"
+        );
+    }
+
+    #[test]
+    fn mcp_disabled_json_roundtrip() {
+        let manifest = AgentManifest {
+            mcp_disabled: true,
+            mcp_servers: vec!["foo".to_string()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&manifest).unwrap();
+        let back: AgentManifest = serde_json::from_str(&json).unwrap();
+        assert!(
+            back.mcp_disabled,
+            "mcp_disabled must survive JSON roundtrip"
+        );
+        assert_eq!(back.mcp_servers, vec!["foo".to_string()]);
+    }
+
+    #[test]
+    fn mcp_disabled_absent_from_toml_is_false() {
+        // When the field is omitted from TOML, serde(default) should give false.
+        let toml_str = r#"
+name = "normal-agent"
+
+[model]
+provider = "anthropic"
+model = "claude-3-haiku-20240307"
+"#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert!(
+            !manifest.mcp_disabled,
+            "mcp_disabled must be false when absent from TOML"
+        );
     }
 }

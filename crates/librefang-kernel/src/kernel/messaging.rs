@@ -503,7 +503,7 @@ impl LibreFangKernel {
                 skill_count: 0,
                 skill_prompt_context: String::new(),
                 skill_config_section: String::new(),
-                mcp_summary: if mcp_tool_count > 0 {
+                mcp_summary: if mcp_tool_count > 0 && !manifest.mcp_disabled {
                     self.build_mcp_summary(&manifest.mcp_servers)
                 } else {
                     String::new()
@@ -2059,7 +2059,7 @@ impl LibreFangKernel {
                     .as_ref()
                     .map(|s| s.skill_config_section.clone())
                     .unwrap_or_default(),
-                mcp_summary: if mcp_tool_count > 0 {
+                mcp_summary: if mcp_tool_count > 0 && !manifest.mcp_disabled {
                     self.build_mcp_summary(&manifest.mcp_servers)
                 } else {
                     String::new()

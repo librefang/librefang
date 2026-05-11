@@ -5227,6 +5227,113 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
     kernel.shutdown();
 }
 
+// ─── mcp_disabled (#4808) ─────────────────────────────────────────────────
+
+#[test]
+fn mcp_disabled_suppresses_all_mcp_tools() {
+    // Manifest with mcp_disabled = true + mcp_servers = ["foo"] must produce
+    // zero MCP tools even when MCP tools are registered in the kernel.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("librefang-mcp-disabled-test");
+    std::fs::create_dir_all(home.join("data")).unwrap();
+    let cfg = KernelConfig {
+        home_dir: home.clone(),
+        data_dir: home.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "no-mcp".to_string(),
+        description: "agent with mcp_disabled".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        mcp_disabled: true,
+        mcp_servers: vec!["foo".to_string()],
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    // Register some MCP tools in the kernel.
+    {
+        let mut tools = kernel.tools_ref().lock().unwrap();
+        tools.push(librefang_types::tool::ToolDefinition {
+            name: "mcp_foo_do_thing".to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        });
+    }
+    kernel
+        .mcp
+        .mcp_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let mcp_tools: Vec<_> = kernel
+        .available_tools(agent_id)
+        .iter()
+        .filter(|t| t.name.starts_with("mcp_"))
+        .map(|t| t.name.clone())
+        .collect();
+
+    assert!(
+        mcp_tools.is_empty(),
+        "mcp_disabled=true must produce zero MCP tools; got: {mcp_tools:?}"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn mcp_disabled_false_preserves_mcp_tools() {
+    // Regression lock: default manifest (mcp_disabled = false) still gets MCP tools.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("librefang-mcp-enabled-test");
+    std::fs::create_dir_all(home.join("data")).unwrap();
+    let cfg = KernelConfig {
+        home_dir: home.clone(),
+        data_dir: home.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "with-mcp".to_string(),
+        description: "agent with mcp enabled".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        mcp_disabled: false,
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    {
+        let mut tools = kernel.tools_ref().lock().unwrap();
+        tools.push(librefang_types::tool::ToolDefinition {
+            name: "mcp_bar_action".to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        });
+    }
+    kernel
+        .mcp
+        .mcp_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let mcp_tools: Vec<_> = kernel
+        .available_tools(agent_id)
+        .iter()
+        .filter(|t| t.name.starts_with("mcp_"))
+        .map(|t| t.name.clone())
+        .collect();
+
+    assert!(
+        !mcp_tools.is_empty(),
+        "mcp_disabled=false must not suppress MCP tools"
+    );
+
+    kernel.shutdown();
+}
+
 // ─── resolve_dispatch_session_id ──────────────────────────────────────────
 //
 // Backstop for the session-id-in-failure-log change: ensures the kernel
