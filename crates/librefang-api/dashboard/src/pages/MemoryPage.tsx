@@ -12,6 +12,7 @@ import {
 } from "../lib/queries/memory";
 import { useAgents } from "../lib/queries/agents";
 import { useAutoDreamStatus } from "../lib/queries/autoDream";
+import { useModels } from "../lib/queries/models";
 import { useAddMemory, useUpdateMemory, useDeleteMemory, useCleanupMemories, useUpdateMemoryConfig } from "../lib/mutations/memory";
 import { useTriggerAutoDream, useAbortAutoDream, useSetAutoDreamEnabled } from "../lib/mutations/autoDream";
 import type { AgentItem, AgentKvPair, AutoDreamAgentStatus } from "../api";
@@ -184,14 +185,35 @@ interface MemoryConfigForm {
   pm_max_retrieve: string;
 }
 
+// Known embedding model names per provider. Used to populate the embedding
+// model `<datalist>` suggestions. Local providers (ollama/vllm/lmstudio) load
+// arbitrary user-pulled models, so the suggestions there are just common
+// defaults — the input remains free-form for everyone.
+const KNOWN_EMBEDDING_MODELS: Record<string, string[]> = {
+  openai: ["text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"],
+  gemini: ["text-embedding-004", "embedding-001"],
+  minimax: ["embo-01"],
+  ollama: ["nomic-embed-text", "mxbai-embed-large", "all-minilm"],
+  vllm: ["nomic-embed-text", "BAAI/bge-large-en-v1.5"],
+  lmstudio: ["nomic-embed-text", "text-embedding-nomic-embed-text-v1.5"],
+};
+
 function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
 
   const configQuery = useMemoryConfig();
   const updateConfig = useUpdateMemoryConfig();
+  // Chat-model catalog for the Extraction Model suggestions. Unfiltered so
+  // configured-but-not-yet-probed providers still appear; the user is free to
+  // type any id the dropdown doesn't list.
+  const modelsQuery = useModels();
+  const chatModels = modelsQuery.data?.models ?? [];
 
   const [form, setForm] = useState<MemoryConfigForm | null>(null);
+
+  const embeddingProviderSuggestions =
+    KNOWN_EMBEDDING_MODELS[form?.embedding_provider ?? ""] ?? [];
 
   useEffect(() => {
     if (!configQuery.data || form) return;
@@ -263,8 +285,18 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
               </div>
               <div>
                 <span className={labelCls}>{t("memory.model", { defaultValue: "Model" })}</span>
-                <input value={form.embedding_model ?? ""} onChange={e => setForm({ ...form, embedding_model: e.target.value })}
-                  placeholder="text-embedding-3-small" className={inputCls} />
+                <input
+                  list="memory-embedding-model-options"
+                  value={form.embedding_model ?? ""}
+                  onChange={e => setForm({ ...form, embedding_model: e.target.value })}
+                  placeholder="text-embedding-3-small"
+                  className={inputCls}
+                />
+                <datalist id="memory-embedding-model-options">
+                  {embeddingProviderSuggestions.map(name => (
+                    <option key={name} value={name} />
+                  ))}
+                </datalist>
               </div>
             </div>
             <div className="mt-2">
@@ -300,8 +332,20 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
               <div>
                 <span className={labelCls}>{t("memory.extraction_model_label", { defaultValue: "Extraction Model" })}</span>
-                <input value={form.pm_extraction_model ?? ""} onChange={e => setForm({ ...form, pm_extraction_model: e.target.value })}
-                  placeholder="MiniMax-M2.7-highspeed" className={inputCls} />
+                <input
+                  list="memory-extraction-model-options"
+                  value={form.pm_extraction_model ?? ""}
+                  onChange={e => setForm({ ...form, pm_extraction_model: e.target.value })}
+                  placeholder={t("memory.extraction_model_placeholder", { defaultValue: "Leave empty to use default" })}
+                  className={inputCls}
+                />
+                <datalist id="memory-extraction-model-options">
+                  {chatModels.map(m => (
+                    <option key={m.id} value={m.id}>
+                      {m.display_name && m.display_name !== m.id ? `${m.display_name} (${m.provider})` : m.provider}
+                    </option>
+                  ))}
+                </datalist>
               </div>
               <div>
                 <span className={labelCls}>{t("memory.max_retrieve", { defaultValue: "Max Retrieve" })}</span>
