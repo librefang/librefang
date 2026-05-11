@@ -20,7 +20,11 @@ use zeroize::Zeroizing;
 /// Matrix /sync long-polling timeout in milliseconds.
 const SYNC_TIMEOUT_MS: u64 = 30000;
 const MAX_MESSAGE_LEN: usize = 4096;
-const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
+/// Default outbound media upload cap (50 MiB). Matches both the
+/// historical hardcoded value and the Matrix homeserver convention.
+/// Per-instance override via `MatrixAdapter::with_max_upload_bytes`
+/// (sourced from `[channels].file_upload_max_bytes` in `config.toml`).
+const DEFAULT_MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 // Tightened from 1500ms / 256 chars after the Synapse rate-limit lift
 // (rc_message: 5/s, burst 60). The previous values produced "first +
 // final only" cadence on typical 2-3s responses (~150 chars/sec). At
@@ -33,8 +37,109 @@ const STREAM_EDIT_CHAR_BUDGET: usize = 96;
 /// Maximum number of per-(room, target_event) lifecycle reaction entries to track.
 const PHASE_REACTIONS_CAPACITY: usize = 1024;
 
+/// 429 retry backoff envelope.
+///
+/// Synapse rate-limit replies usually carry `Retry-After` in seconds; we
+/// clamp the resulting sleep so a malformed / missing header (→ default)
+/// or an overlong cooldown (some homeservers send minutes) doesn't stall
+/// the streaming edit loop. Floor stops 0-second hints from turning the
+/// retry into a hot loop against the homeserver.
+const MIN_RETRY_BACKOFF_MS: u64 = 100;
+const MAX_RETRY_BACKOFF_MS: u64 = 5_000;
+const DEFAULT_RETRY_BACKOFF_MS: u64 = 500;
+
 /// Insertion-ordered cache mapping (room_id, target_event_id) -> reaction event_id.
 type PhaseReactionCache = Arc<RwLock<std::collections::VecDeque<((String, String), String)>>>;
+
+/// Outcome of a single Matrix HTTP call.
+///
+/// Carries the 429 case as a structured variant so the retry path in
+/// `api_edit_event_with_retry` doesn't have to parse error-message
+/// strings to recover `Retry-After`. Everything else funnels into
+/// `Other` and surfaces to public callers via the `From` impl below
+/// as the same boxed trait object they already expect.
+#[derive(Debug)]
+enum MatrixApiError {
+    RateLimited { retry_after_ms: Option<u64> },
+    Other(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl std::fmt::Display for MatrixApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RateLimited { retry_after_ms } => match retry_after_ms {
+                Some(ms) => write!(f, "Matrix rate-limited (429), Retry-After {ms}ms"),
+                None => write!(f, "Matrix rate-limited (429)"),
+            },
+            Self::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for MatrixApiError {}
+
+impl MatrixApiError {
+    /// Erase the typed wrapper into the `Box<dyn Error + Send + Sync>` shape
+    /// public callers already expect.
+    ///
+    /// `Other` is unwrapped (not re-wrapped) so existing call sites that
+    /// match on the underlying error-message string keep working — the
+    /// typed enum is internal-only, used by the retry path to recover
+    /// `Retry-After` without parsing strings. A blanket `From<E: Error>`
+    /// impl is supplied by std for any type implementing
+    /// `Error + Send + Sync`, so a custom `From<MatrixApiError>` here
+    /// would conflict — this named method is the explicit form.
+    fn into_boxed(self) -> Box<dyn std::error::Error + Send + Sync> {
+        match self {
+            Self::Other(inner) => inner,
+            rate => Box::new(rate),
+        }
+    }
+}
+
+/// Parse `Retry-After` as a delta-seconds integer. RFC 7231 also allows
+/// HTTP-date here but Synapse / Dendrite / Conduit all emit the integer
+/// form for `M_LIMIT_EXCEEDED`, and pulling in a date parser for the
+/// other shape isn't worth it. `None` → caller uses `DEFAULT_RETRY_BACKOFF_MS`.
+fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let v = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    let secs: u64 = v.trim().parse().ok()?;
+    Some(secs.saturating_mul(1000))
+}
+
+/// Build the `m.replace` edit body for a target event. Extracted so the
+/// retry wrapper can construct the body once and reuse it across both
+/// attempts under a single shared txn_id.
+///
+/// `MAX_MESSAGE_LEN` constrains only the plain `body` / `m.new_content.body`
+/// fields (UTF-8-safely truncated via `truncate_str`). The matching
+/// `formatted_body` is the markdown-rendered HTML and is intentionally
+/// NOT re-capped at `MAX_MESSAGE_LEN`: truncating HTML at a fixed byte
+/// budget would risk leaving a half-open tag and producing invalid
+/// markup, and Matrix's per-event JSON ceiling (~64 KiB) already bounds
+/// the whole event. Render expansion (e.g. `**bold**` → `<strong>bold</strong>`)
+/// is therefore allowed to push `formatted_body` past `MAX_MESSAGE_LEN`,
+/// but the homeserver-level event-size limit still applies.
+fn build_edit_body(target_event_id: &str, new_text: &str) -> serde_json::Value {
+    let safe_text = librefang_types::truncate_str(new_text, MAX_MESSAGE_LEN);
+    let html = markdown_to_matrix_html(safe_text);
+    serde_json::json!({
+        "msgtype": "m.text",
+        "body": format!("* {safe_text}"),
+        "format": "org.matrix.custom.html",
+        "formatted_body": format!("* {html}"),
+        "m.new_content": {
+            "msgtype": "m.text",
+            "body": safe_text,
+            "format": "org.matrix.custom.html",
+            "formatted_body": html,
+        },
+        "m.relates_to": {
+            "rel_type": "m.replace",
+            "event_id": target_event_id,
+        }
+    })
+}
 
 /// Render CommonMark `text` into the HTML subset Element/Matrix clients
 /// accept for `formatted_body` (per the Matrix spec's "client-server message
@@ -277,7 +382,7 @@ async fn fetch_outbound_media(
 ) -> Result<(Vec<u8>, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(not(test))]
     {
-        Ok(crate::http_client::fetch_url_bytes(url, max_bytes).await?)
+        Ok(crate::http_client::fetch_url_bytes(url, max_bytes, &[]).await?)
     }
     #[cfg(test)]
     {
@@ -285,6 +390,7 @@ async fn fetch_outbound_media(
             crate::http_client::safe_fetch_client(),
             url,
             max_bytes,
+            &[],
         )
         .await?)
     }
@@ -349,6 +455,11 @@ pub struct MatrixAdapter {
     /// Rooms we've already warned about being E2EE.
     /// First encrypted event in each room emits a WARN; subsequent ones are silent.
     pub(crate) e2ee_warned_rooms: Arc<RwLock<std::collections::HashSet<String>>>,
+    /// Outbound media upload size cap (bytes). Defaults to
+    /// `DEFAULT_MAX_UPLOAD_BYTES` (50 MiB) — operators override via
+    /// `[channels].file_upload_max_bytes` in `config.toml`, plumbed in
+    /// by the bridge through `with_max_upload_bytes`.
+    max_upload_bytes: usize,
 }
 
 impl MatrixAdapter {
@@ -376,6 +487,7 @@ impl MatrixAdapter {
             since_token: Arc::new(RwLock::new(None)),
             phase_reactions: Arc::new(RwLock::new(std::collections::VecDeque::new())),
             e2ee_warned_rooms: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -391,17 +503,32 @@ impl MatrixAdapter {
         self
     }
 
-    /// Send any client event to a Matrix room. Returns the server-assigned event_id.
+    /// Override the outbound media upload size cap. Returns self for
+    /// builder chaining. Bridge plumbs the operator's
+    /// `[channels].file_upload_max_bytes` here so a single config knob
+    /// applies to every Matrix bot instance.
+    pub fn with_max_upload_bytes(mut self, max_upload_bytes: usize) -> Self {
+        self.max_upload_bytes = max_upload_bytes;
+        self
+    }
+
+    /// Send a client event with a caller-supplied `txn_id`.
     ///
-    /// `event_type` is the Matrix event type, e.g. "m.room.message" or "m.reaction".
-    /// `body` is the event content JSON.
-    async fn api_send_event(
+    /// Used by both `api_send_event` (fresh txn_id per call) and
+    /// `api_edit_event_with_retry` (same txn_id across both attempts so
+    /// Matrix's (sender, txn_id) idempotency turns a delayed-success
+    /// race into a server-side no-op).
+    ///
+    /// Returns the structured `MatrixApiError` so retry callers can
+    /// distinguish 429 (with optional `Retry-After`) from terminal
+    /// errors without parsing error-message strings.
+    async fn send_event_inner(
         &self,
         room_id: &str,
         event_type: &str,
+        txn_id: &str,
         body: &serde_json::Value,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let txn_id = uuid::Uuid::new_v4().to_string();
+    ) -> Result<String, MatrixApiError> {
         let url = format!(
             "{}/_matrix/client/v3/rooms/{}/send/{}/{}",
             self.homeserver_url,
@@ -415,18 +542,44 @@ impl MatrixAdapter {
             .bearer_auth(&*self.access_token)
             .json(body)
             .send()
-            .await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("Matrix {event_type} failed {status}: {text}").into());
+            .await
+            .map_err(|e| MatrixApiError::Other(Box::new(e)))?;
+        let status = resp.status();
+        if status.as_u16() == 429 {
+            return Err(MatrixApiError::RateLimited {
+                retry_after_ms: parse_retry_after_ms(resp.headers()),
+            });
         }
-        let v: serde_json::Value = resp.json().await?;
-        let event_id = v["event_id"]
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(MatrixApiError::Other(
+                format!("Matrix {event_type} failed {status}: {text}").into(),
+            ));
+        }
+        let v: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| MatrixApiError::Other(Box::new(e)))?;
+        v["event_id"]
             .as_str()
-            .ok_or_else(|| "Matrix response missing event_id".to_string())?
-            .to_string();
-        Ok(event_id)
+            .map(String::from)
+            .ok_or_else(|| MatrixApiError::Other("Matrix response missing event_id".into()))
+    }
+
+    /// Send any client event to a Matrix room. Returns the server-assigned event_id.
+    ///
+    /// `event_type` is the Matrix event type, e.g. "m.room.message" or "m.reaction".
+    /// `body` is the event content JSON.
+    async fn api_send_event(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        body: &serde_json::Value,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let txn_id = uuid::Uuid::new_v4().to_string();
+        self.send_event_inner(room_id, event_type, &txn_id, body)
+            .await
+            .map_err(MatrixApiError::into_boxed)
     }
 
     /// Redact (delete) a previously sent event.
@@ -470,8 +623,11 @@ impl MatrixAdapter {
     }
 
     /// Look up our reaction event_id for (room, target). O(n).
-    #[allow(dead_code)]
-    pub(crate) async fn phase_reaction_lookup(&self, key: &(String, String)) -> Option<String> {
+    ///
+    /// Test-only — production code reads `phase_reactions` directly inside
+    /// `send_reaction` via the remove/insert helpers below.
+    #[cfg(test)]
+    async fn phase_reaction_lookup(&self, key: &(String, String)) -> Option<String> {
         self.phase_reactions
             .read()
             .await
@@ -481,8 +637,7 @@ impl MatrixAdapter {
     }
 
     /// Remove (room, target). Returns the previous reaction id if present. O(n).
-    #[allow(dead_code)]
-    pub(crate) async fn phase_reaction_remove(&self, key: &(String, String)) -> Option<String> {
+    async fn phase_reaction_remove(&self, key: &(String, String)) -> Option<String> {
         let mut w = self.phase_reactions.write().await;
         if let Some(pos) = w.iter().position(|(k, _)| k == key) {
             w.remove(pos).map(|(_, v)| v)
@@ -493,8 +648,7 @@ impl MatrixAdapter {
 
     /// Insert (room, target) -> reaction_id, evicting oldest if at capacity.
     /// If the key already exists, the value is replaced in place (preserving position).
-    #[allow(dead_code)]
-    pub(crate) async fn phase_reaction_insert(&self, key: (String, String), reaction_id: String) {
+    async fn phase_reaction_insert(&self, key: (String, String), reaction_id: String) {
         let mut w = self.phase_reactions.write().await;
         if let Some(pos) = w.iter().position(|(k, _)| k == &key) {
             w[pos].1 = reaction_id;
@@ -508,8 +662,12 @@ impl MatrixAdapter {
 
     /// Returns true the first time this room is observed as E2EE.
     /// Caller should emit a `warn!` log when it returns true.
-    #[allow(dead_code)]
-    pub(crate) async fn warn_e2ee_once_check(&self, room_id: &str) -> bool {
+    ///
+    /// Test-only — the production /sync loop manipulates the
+    /// `e2ee_warned_rooms` set directly so it can `drop(w)` before the
+    /// `warn!` macro fires without holding the write lock across the log.
+    #[cfg(test)]
+    async fn warn_e2ee_once_check(&self, room_id: &str) -> bool {
         let mut w = self.e2ee_warned_rooms.write().await;
         w.insert(room_id.to_string())
     }
@@ -521,11 +679,11 @@ impl MatrixAdapter {
         filename: &str,
         mime_type: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        if bytes.len() > MAX_UPLOAD_BYTES {
+        if bytes.len() > self.max_upload_bytes {
             return Err(format!(
                 "Matrix upload size {} exceeds {} byte limit",
                 bytes.len(),
-                MAX_UPLOAD_BYTES
+                self.max_upload_bytes
             )
             .into());
         }
@@ -557,58 +715,61 @@ impl MatrixAdapter {
 
     /// Edit an existing event in place via the m.replace relation.
     /// `new_text` is the new content. Returns the edit event_id.
+    ///
+    /// Inputs longer than `MAX_MESSAGE_LEN` are UTF-8-safely truncated
+    /// inside `build_edit_body`. An edit can only target one event_id, so
+    /// unlike `api_send_message` we cannot split into multiple events
+    /// here — callers that need to preserve every byte (streaming
+    /// overflow) must split BEFORE calling. This cap is defensive: it
+    /// stops `send(EditInteractive)` / `send(DeleteMessage)` paths from
+    /// producing an oversized `m.room.message` that Synapse would reject
+    /// with a hard-to-debug 413 / `M_TOO_LARGE`.
     async fn api_edit_event(
         &self,
         room_id: &str,
         target_event_id: &str,
         new_text: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let html = markdown_to_matrix_html(new_text);
-        let body = serde_json::json!({
-            "msgtype": "m.text",
-            "body": format!("* {new_text}"),
-            "format": "org.matrix.custom.html",
-            "formatted_body": format!("* {html}"),
-            "m.new_content": {
-                "msgtype": "m.text",
-                "body": new_text,
-                "format": "org.matrix.custom.html",
-                "formatted_body": html,
-            },
-            "m.relates_to": {
-                "rel_type": "m.replace",
-                "event_id": target_event_id,
-            }
-        });
+        let body = build_edit_body(target_event_id, new_text);
         self.api_send_event(room_id, "m.room.message", &body).await
     }
 
-    /// api_edit_event with one Retry-After-aware retry on 429. Returns Ok on
-    /// success, Err on second 429 / non-429 error. Used by send_streaming.
+    /// `api_edit_event` with one `Retry-After`-aware retry on 429.
+    ///
+    /// Mints ONE `txn_id` and threads it through both attempts so that
+    /// Matrix's `(sender, txn_id)` idempotency contract (server-side
+    /// dedup) protects against the delayed-success-then-retry race —
+    /// without this, a 429 that masks a quietly-successful first PUT
+    /// would land a duplicate `m.replace` event in the room.
+    ///
+    /// The retry-after value comes from the structured `RateLimited`
+    /// variant on `MatrixApiError` (no string-parsing of the boxed
+    /// error). Sleep is clamped to `[MIN_RETRY_BACKOFF_MS,
+    /// MAX_RETRY_BACKOFF_MS]` so a missing / zero / overlong header
+    /// doesn't either spam the homeserver or stall streaming.
     async fn api_edit_event_with_retry(
         &self,
         room_id: &str,
         target_event_id: &str,
         new_text: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let body = build_edit_body(target_event_id, new_text);
+        let txn_id = uuid::Uuid::new_v4().to_string();
         match self
-            .api_edit_event(room_id, target_event_id, new_text)
+            .send_event_inner(room_id, "m.room.message", &txn_id, &body)
             .await
         {
             Ok(id) => Ok(id),
-            Err(e) => {
-                let msg = format!("{e}");
-                if msg.contains("429") {
-                    // Conservative fixed backoff. We can't recover the
-                    // Retry-After header from the boxed error type today;
-                    // a richer error type is a deferred follow-up.
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    self.api_edit_event(room_id, target_event_id, new_text)
-                        .await
-                } else {
-                    Err(e)
-                }
+            Err(MatrixApiError::RateLimited { retry_after_ms }) => {
+                let sleep_ms = retry_after_ms
+                    .unwrap_or(DEFAULT_RETRY_BACKOFF_MS)
+                    .clamp(MIN_RETRY_BACKOFF_MS, MAX_RETRY_BACKOFF_MS);
+                tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                self.send_event_inner(room_id, "m.room.message", &txn_id, &body)
+                    .await
+                    .map_err(MatrixApiError::into_boxed)
             }
+            Err(other) => Err(other.into_boxed()),
         }
     }
 
@@ -873,7 +1034,7 @@ impl ChannelAdapter for MatrixAdapter {
                 caption,
                 mime_type,
             } => {
-                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let (bytes, ct) = fetch_outbound_media(&url, self.max_upload_bytes).await?;
                 let mt = mime_type
                     .clone()
                     .or(ct)
@@ -892,7 +1053,7 @@ impl ChannelAdapter for MatrixAdapter {
                     .await?;
             }
             ChannelContent::File { url, filename } => {
-                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let (bytes, ct) = fetch_outbound_media(&url, self.max_upload_bytes).await?;
                 let mt = ct.unwrap_or_else(|| "application/octet-stream".to_string());
                 let size = bytes.len();
                 let mxc = self.api_upload_media(bytes, &filename, &mt).await?;
@@ -929,7 +1090,7 @@ impl ChannelAdapter for MatrixAdapter {
                 duration_seconds,
                 ..
             } => {
-                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let (bytes, ct) = fetch_outbound_media(&url, self.max_upload_bytes).await?;
                 let mt = ct.unwrap_or_else(|| "application/octet-stream".to_string());
                 let fname = caption.clone().unwrap_or_else(|| "audio".to_string());
                 let size = bytes.len();
@@ -953,7 +1114,7 @@ impl ChannelAdapter for MatrixAdapter {
                 caption,
                 duration_seconds,
             } => {
-                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let (bytes, ct) = fetch_outbound_media(&url, self.max_upload_bytes).await?;
                 let mt = ct.unwrap_or_else(|| "application/octet-stream".to_string());
                 let fname = caption.clone().unwrap_or_else(|| "voice".to_string());
                 let size = bytes.len();
@@ -979,7 +1140,7 @@ impl ChannelAdapter for MatrixAdapter {
                 duration_seconds,
                 filename,
             } => {
-                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let (bytes, ct) = fetch_outbound_media(&url, self.max_upload_bytes).await?;
                 let mt = ct.unwrap_or_else(|| "application/octet-stream".to_string());
                 let fname = filename
                     .unwrap_or_else(|| caption.clone().unwrap_or_else(|| "video".to_string()));
@@ -1004,7 +1165,7 @@ impl ChannelAdapter for MatrixAdapter {
                 caption,
                 duration_seconds: _,
             } => {
-                let (bytes, ct) = fetch_outbound_media(&url, MAX_UPLOAD_BYTES).await?;
+                let (bytes, ct) = fetch_outbound_media(&url, self.max_upload_bytes).await?;
                 let mt = ct.unwrap_or_else(|| "application/octet-stream".to_string());
                 let fname = caption.clone().unwrap_or_else(|| "animation".to_string());
                 let size = bytes.len();
@@ -1245,7 +1406,6 @@ impl ChannelAdapter for MatrixAdapter {
             }
             let _ = flush(self, &user.platform_id, &mut placeholder_id, &mut buffer).await?;
         }
-        let _ = last_flushed_len; // last_flushed_len is loop-local state for the in-flight debounce; reads happen via saturating_sub above
         Ok(())
     }
 
@@ -1799,6 +1959,29 @@ mod tests {
         assert!(
             format!("{err}").to_lowercase().contains("size"),
             "err should mention size: {err}"
+        );
+    }
+
+    /// Regression for the `[channels].file_upload_max_bytes` config knob
+    /// (#4882 Tier 4-2). The bridge plumbs the operator's value through
+    /// `with_max_upload_bytes`, so a lower-than-default cap MUST be
+    /// honored by `api_upload_media` instead of the const default. Pin
+    /// both the override (1 KiB rejects 2 KiB) and that the rejection
+    /// message reports the overridden value, so a regression where the
+    /// builder is silently dropped fails loud rather than re-introducing
+    /// the hardcoded 50 MiB.
+    #[tokio::test]
+    async fn test_with_max_upload_bytes_overrides_default_cap() {
+        let adapter = make_adapter("http://unused".to_string()).with_max_upload_bytes(1024);
+        let too_big = vec![0u8; 2048];
+        let err = adapter
+            .api_upload_media(too_big, "x.bin", "application/octet-stream")
+            .await
+            .expect_err("2 KiB must be rejected when cap is 1 KiB");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("1024"),
+            "err should mention the overridden cap (1024), got: {msg}"
         );
     }
 
@@ -2944,6 +3127,192 @@ mod tests {
             send_calls.load(Ordering::SeqCst),
             3,
             "3 items -> 3 PUT events"
+        );
+    }
+
+    // ── PR #4831 follow-up: typed-error retry + idempotent txn_id ────────────
+
+    #[test]
+    fn test_parse_retry_after_ms_returns_seconds_form() {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("2"),
+        );
+        assert_eq!(parse_retry_after_ms(&h), Some(2_000));
+
+        // Whitespace tolerated.
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("  4  "),
+        );
+        assert_eq!(parse_retry_after_ms(&h), Some(4_000));
+    }
+
+    #[test]
+    fn test_parse_retry_after_ms_returns_none_for_invalid() {
+        // Missing header → None (caller falls back to default).
+        let h = reqwest::header::HeaderMap::new();
+        assert_eq!(parse_retry_after_ms(&h), None);
+
+        // HTTP-date form (RFC 7231 alternative) is intentionally unsupported —
+        // Synapse / Dendrite / Conduit emit the integer form for
+        // M_LIMIT_EXCEEDED.
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("Wed, 21 Oct 2026 07:28:00 GMT"),
+        );
+        assert_eq!(parse_retry_after_ms(&h), None);
+
+        // Garbage.
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("not-a-number"),
+        );
+        assert_eq!(parse_retry_after_ms(&h), None);
+    }
+
+    /// `api_edit_event` must defensively truncate oversized inputs so a
+    /// caller that hands it >4096 bytes (e.g. an `EditInteractive` with
+    /// a long body and many button-row hints) does NOT produce a
+    /// `m.room.message` that Synapse rejects with `M_TOO_LARGE`. The
+    /// fallback body has a `* ` prefix added on top so the truncation
+    /// must happen before that prefix is appended.
+    #[tokio::test]
+    async fn test_api_edit_event_truncates_at_max_len() {
+        use std::sync::Arc as StdArc;
+        use std::sync::Mutex as StdMutex;
+        let server = MockServer::start().await;
+        let captured: StdArc<StdMutex<Option<serde_json::Value>>> =
+            StdArc::new(StdMutex::new(None));
+        let cap = captured.clone();
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/.+/send/m\.room\.message/.+$",
+            ))
+            .respond_with(move |req: &wiremock::Request| {
+                if let Ok(b) = serde_json::from_slice::<serde_json::Value>(&req.body) {
+                    *cap.lock().unwrap() = Some(b);
+                }
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "event_id": "$edit:test"
+                }))
+            })
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        // 5000 ASCII bytes; well above MAX_MESSAGE_LEN (4096).
+        let oversized = "a".repeat(5000);
+        adapter
+            .api_edit_event("!room:test", "$orig:test", &oversized)
+            .await
+            .expect("edit must succeed");
+        let body = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("body must be captured");
+        // m.new_content.body is the truncated content (no `* ` prefix).
+        let new_body = body["m.new_content"]["body"]
+            .as_str()
+            .expect("m.new_content.body must be string");
+        assert_eq!(
+            new_body.len(),
+            MAX_MESSAGE_LEN,
+            "new_content.body must be exactly MAX_MESSAGE_LEN, was {}",
+            new_body.len()
+        );
+        // Outer body carries the `* ` edit fallback prefix on top of the
+        // truncated content, so it is MAX_MESSAGE_LEN + 2 bytes.
+        let outer_body = body["body"].as_str().expect("body must be string");
+        assert_eq!(
+            outer_body.len(),
+            MAX_MESSAGE_LEN + 2,
+            "outer body = '* ' + truncated content"
+        );
+    }
+
+    /// Regression for the txn_id idempotency gap flagged in the PR #4831
+    /// review. When `api_edit_event_with_retry` sees a 429 it must retry
+    /// with the SAME `txn_id` — Matrix dedupes on `(sender, txn_id)`, so
+    /// reusing it turns a delayed-success-then-retry race into a server
+    /// no-op rather than a duplicate `m.replace` event in the room.
+    #[tokio::test]
+    async fn test_api_edit_event_with_retry_reuses_txn_id_on_429() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+        use std::sync::Mutex as StdMutex;
+        let server = MockServer::start().await;
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let cc = calls.clone();
+        let captured_txns: StdArc<StdMutex<Vec<String>>> = StdArc::new(StdMutex::new(Vec::new()));
+        let tc = captured_txns.clone();
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/.+/send/m\.room\.message/.+$",
+            ))
+            .respond_with(move |req: &wiremock::Request| {
+                // The last path segment is the txn_id.
+                let path = req.url.path().to_string();
+                if let Some(txn) = path.rsplit('/').next() {
+                    tc.lock().unwrap().push(txn.to_string());
+                }
+                let n = cc.fetch_add(1, Ordering::SeqCst);
+                match n {
+                    0 => ResponseTemplate::new(429)
+                        .insert_header("Retry-After", "0")
+                        .set_body_string("{\"errcode\":\"M_LIMIT_EXCEEDED\"}"),
+                    _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "event_id": "$retry_ok:test"
+                    })),
+                }
+            })
+            .mount(&server)
+            .await;
+        let adapter = make_adapter(server.uri());
+        let id = adapter
+            .api_edit_event_with_retry("!room:test", "$orig:test", "retry me")
+            .await
+            .expect("second attempt must succeed");
+        assert_eq!(id, "$retry_ok:test");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "expected first 429 + one successful retry"
+        );
+        let txns = captured_txns.lock().unwrap().clone();
+        assert_eq!(txns.len(), 2, "two PUTs captured");
+        assert_eq!(
+            txns[0], txns[1],
+            "retry MUST reuse the first attempt's txn_id (Matrix dedupes on (sender, txn_id))"
+        );
+        // Sanity: the shared txn_id is a real UUID, not the empty string
+        // — a regression where we drop the txn_id entirely would also
+        // cause the equality check above to pass.
+        assert_eq!(txns[0].len(), 36, "txn_id should be UUID-shaped");
+    }
+
+    /// `MatrixApiError::From` unwraps `Other` so existing callers
+    /// matching on the underlying error-message text keep working —
+    /// only the `RateLimited` variant adds new wrapping. Pin both
+    /// behaviours.
+    #[test]
+    fn test_matrix_api_error_into_boxed_unwraps_other() {
+        let inner: Box<dyn std::error::Error + Send + Sync> = "boom".into();
+        let boxed = MatrixApiError::Other(inner).into_boxed();
+        assert_eq!(boxed.to_string(), "boom", "Other should unwrap, not wrap");
+
+        let boxed_rate = MatrixApiError::RateLimited {
+            retry_after_ms: Some(1500),
+        }
+        .into_boxed();
+        let msg = boxed_rate.to_string();
+        assert!(
+            msg.contains("429") && msg.contains("1500"),
+            "RateLimited display must mention 429 and the parsed Retry-After, got: {msg}"
         );
     }
 }

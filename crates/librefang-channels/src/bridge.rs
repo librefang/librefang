@@ -2215,8 +2215,6 @@ fn default_output_format_for_channel(channel_type: &str) -> OutputFormat {
     formatter::default_output_format_for_channel(channel_type)
 }
 
-/// Send a lifecycle reaction (best-effort, non-blocking for supported adapters).
-///
 /// Extract the tool name from a `\n\n🔧 toolname\n\n` progress marker
 /// emitted by `librefang_api::channel_bridge` in response to a kernel
 /// `StreamEvent::ToolUseStart` event. Returns `None` for plain text
@@ -2237,6 +2235,8 @@ fn extract_tool_marker_name(delta: &str) -> Option<String> {
     }
 }
 
+/// Send a lifecycle reaction (best-effort, non-blocking for supported adapters).
+///
 /// Errors are logged at WARN — reactions are best-effort UX polish, but a
 /// silent failure mode masks real problems. The original `debug!` here hid
 /// per-room rate-limit drops on Matrix (`M_LIMIT_EXCEEDED`) where the
@@ -4380,112 +4380,67 @@ async fn download_image_to_blocks(
     // 5 MB limit to prevent memory abuse from oversized images
     const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
-    // SSRF guard (#3442) + size cap (5 MiB) + redirect validation, all
-    // on the safe_fetch_client() which re-runs validate_url_for_fetch on
-    // every redirect hop. When extra_headers are present (MSC3916 Bearer
-    // token for authenticated Matrix media), we validate first then send
-    // a custom request through the same redirect-safe client.
-    if let Err(reason) = crate::http_client::validate_url_for_fetch(url) {
-        warn!("Rejecting image download: {reason}");
-        return vec![ContentBlock::Text {
-            text: format!("[Image download rejected: {reason}]"),
-            provider_metadata: None,
-        }];
-    }
-
-    let client = crate::http_client::safe_fetch_client();
-    let mut req = client.get(url);
-    for (name, value) in extra_headers {
-        req = req.header(name.as_str(), value.as_str());
-    }
-    let resp = match req.send().await {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("Failed to download image from channel: {e}");
-            return vec![ContentBlock::Text {
-                text: format!("[Image download failed: {e}]"),
-                provider_metadata: None,
-            }];
-        }
-    };
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        let preview: String = body.chars().take(200).collect();
-        warn!(
-            status = %status,
-            body_preview = %preview,
-            url = %url,
-            "Image download returned non-success status"
-        );
-        return vec![ContentBlock::Text {
-            text: format!("[Image download failed: HTTP {status}]"),
-            provider_metadata: None,
-        }];
-    }
-
-    // Early rejection if Content-Length header exceeds limit
-    if let Some(len) = resp.content_length() {
-        if len as usize > MAX_IMAGE_BYTES {
-            warn!("Image Content-Length ({len} bytes) exceeds limit, rejecting before download");
-            let desc = match caption {
-                Some(c) => format!(
-                    "[Image too large for vision ({} KB)]\nCaption: {c}",
-                    len / 1024
-                ),
-                None => format!("[Image too large for vision ({} KB)]", len / 1024),
-            };
-            return vec![ContentBlock::Text {
-                text: desc,
-                provider_metadata: None,
-            }];
-        }
-    }
-
-    // Detect media type from Content-Type header — but only trust it if it's
-    // actually an image/* type. Many APIs (Telegram, S3 pre-signed URLs) return
-    // `application/octet-stream` for all files, which breaks vision.
-    let header_type = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .map(|ct| ct.split(';').next().unwrap_or(ct).trim().to_string())
-        .filter(|ct| ct.starts_with("image/"));
-
-    // Stream body with size accumulator to enforce limit even without Content-Length
-    let mut stream = resp.bytes_stream();
-    let mut buf = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = match chunk {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("Failed to read image bytes: {e}");
+    // SSRF guard (#3442) + size cap (5 MiB, in-memory) + Content-Type
+    // capture, all behind one helper. The helper rejects non-http(s)
+    // schemes and any host literally in a private/loopback/metadata
+    // range BEFORE opening a socket — so a forged
+    // `http://169.254.169.254/...` never produces an "image" block in
+    // the agent's LLM context. The size cap enforces both a
+    // Content-Length pre-check and a streaming-accumulator mid-fetch
+    // bound, so a chunked-transfer "lying" length cannot bypass it.
+    //
+    // `extra_headers` is threaded through to attach auth (MSC3916
+    // Bearer for Matrix's authenticated media path); the adapter has
+    // already gated the URL host before producing the headers — see
+    // `ChannelAdapter::fetch_headers_for` for the credential-leak
+    // contract.
+    let (buf, response_content_type) =
+        match crate::http_client::fetch_url_bytes(url, MAX_IMAGE_BYTES, extra_headers).await {
+            Ok(t) => t,
+            Err(crate::http_client::FetchError::Rejected(reason)) => {
+                warn!("Rejecting image download: {reason}");
                 return vec![ContentBlock::Text {
-                    text: format!("[Image download failed: {e}]"),
+                    text: format!("[Image download rejected: {reason}]"),
+                    provider_metadata: None,
+                }];
+            }
+            Err(crate::http_client::FetchError::TooLarge { actual, limit }) => {
+                let reported_kb = actual
+                    .map(|a| a / 1024)
+                    .unwrap_or_else(|| (limit as u64) / 1024);
+                match actual {
+                    Some(len) => warn!(
+                    "Image Content-Length ({len} bytes) exceeds limit, rejecting before download"
+                ),
+                    None => warn!("Image stream exceeded {limit} byte limit, aborting download"),
+                }
+                let desc = match caption {
+                    Some(c) => {
+                        format!("[Image too large for vision ({reported_kb} KB)]\nCaption: {c}")
+                    }
+                    None => format!("[Image too large for vision ({reported_kb} KB)]"),
+                };
+                return vec![ContentBlock::Text {
+                    text: desc,
+                    provider_metadata: None,
+                }];
+            }
+            Err(crate::http_client::FetchError::Failed(reason)) => {
+                warn!("Image download failed: {reason}");
+                return vec![ContentBlock::Text {
+                    text: format!("[Image download failed: {reason}]"),
                     provider_metadata: None,
                 }];
             }
         };
-        if buf.len().saturating_add(chunk.len()) > MAX_IMAGE_BYTES {
-            warn!("Image stream exceeded {MAX_IMAGE_BYTES} byte limit, aborting download");
-            let desc = match caption {
-                Some(c) => format!(
-                    "[Image too large for vision ({} KB)]\nCaption: {c}",
-                    MAX_IMAGE_BYTES / 1024
-                ),
-                None => format!(
-                    "[Image too large for vision ({} KB)]",
-                    MAX_IMAGE_BYTES / 1024
-                ),
-            };
-            return vec![ContentBlock::Text {
-                text: desc,
-                provider_metadata: None,
-            }];
-        }
-        buf.extend_from_slice(&chunk);
-    }
+
+    // Detect media type from Content-Type header — but only trust it if it's
+    // actually an image/* type. Many APIs (Telegram, S3 pre-signed URLs) return
+    // `application/octet-stream` for all files, which breaks vision.
+    let header_type = response_content_type
+        .as_deref()
+        .map(|ct| ct.split(';').next().unwrap_or(ct).trim().to_string())
+        .filter(|ct| ct.starts_with("image/"));
 
     let bytes = bytes::Bytes::from(buf);
 

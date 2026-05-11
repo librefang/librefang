@@ -5765,10 +5765,35 @@ pub struct ChannelsConfig {
     /// When `None`, defaults to `std::env::temp_dir()/librefang_uploads`.
     #[serde(default)]
     pub file_download_dir: Option<String>,
+
+    // --- Global file-upload settings ---
+    /// Maximum file size in bytes for channel file uploads (bot → server),
+    /// applied uniformly by the Matrix and Telegram adapters before sending
+    /// outbound media (default: 50 MB).
+    ///
+    /// Distinct from `file_download_max_bytes` (inbound: server → agent →
+    /// disk). An operator who wants a larger inbound budget but a smaller
+    /// outbound budget — or vice versa — must set both independently. The
+    /// 50 MiB default matches both the Matrix homeserver convention and
+    /// Telegram's bot API ceiling, so omitting the field leaves behaviour
+    /// unchanged from the pre-#4882 hardcoded constants.
+    #[serde(default = "default_file_upload_max_bytes")]
+    pub file_upload_max_bytes: u64,
 }
 
 /// Default max file download size: 50 MB.
 fn default_file_download_max_bytes() -> u64 {
+    50 * 1024 * 1024
+}
+
+/// Default max file upload size: 50 MB.
+///
+/// Same numeric value as the download default but a separate function so
+/// the two can drift if the protocol ceilings ever diverge (Matrix's
+/// theoretical event-size limit is much higher than Telegram's bot API
+/// 50 MiB, but the conservative shared default protects operators from
+/// surprises on the smaller-cap side).
+fn default_file_upload_max_bytes() -> u64 {
     50 * 1024 * 1024
 }
 
@@ -5828,6 +5853,7 @@ impl Default for ChannelsConfig {
             wecom: OneOrMany::default(),
             file_download_max_bytes: default_file_download_max_bytes(),
             file_download_dir: None,
+            file_upload_max_bytes: default_file_upload_max_bytes(),
         }
     }
 }
