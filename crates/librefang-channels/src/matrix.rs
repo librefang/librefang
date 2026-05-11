@@ -110,6 +110,16 @@ fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
 /// Build the `m.replace` edit body for a target event. Extracted so the
 /// retry wrapper can construct the body once and reuse it across both
 /// attempts under a single shared txn_id.
+///
+/// `MAX_MESSAGE_LEN` constrains only the plain `body` / `m.new_content.body`
+/// fields (UTF-8-safely truncated via `truncate_str`). The matching
+/// `formatted_body` is the markdown-rendered HTML and is intentionally
+/// NOT re-capped at `MAX_MESSAGE_LEN`: truncating HTML at a fixed byte
+/// budget would risk leaving a half-open tag and producing invalid
+/// markup, and Matrix's per-event JSON ceiling (~64 KiB) already bounds
+/// the whole event. Render expansion (e.g. `**bold**` → `<strong>bold</strong>`)
+/// is therefore allowed to push `formatted_body` past `MAX_MESSAGE_LEN`,
+/// but the homeserver-level event-size limit still applies.
 fn build_edit_body(target_event_id: &str, new_text: &str) -> serde_json::Value {
     let safe_text = librefang_types::truncate_str(new_text, MAX_MESSAGE_LEN);
     let html = markdown_to_matrix_html(safe_text);
