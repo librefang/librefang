@@ -1735,12 +1735,13 @@ id = "acme"
     /// Regression for the #4803 follow-up — the periodic probe loop must
     /// not re-promote a suppressed local provider. Pre-fix the filter in
     /// `probe_all_local_providers_once` only checked `is_local_provider`
-    /// + non-empty `base_url`, so an ollama row that the user had hidden
-    /// via "remove key" would still be polled every ~60 s and have its
-    /// `auth_status` overwritten with `NotRequired` / `LocalOffline` via
-    /// `set_provider_auth_status` (which bypasses `detect_auth`). The
-    /// fix routes the filter through `local_provider_probe_targets`,
-    /// which excludes suppressed providers up front.
+    /// plus non-empty `base_url`, so an ollama row that the user had
+    /// hidden via "remove key" would still be polled every ~60 s and
+    /// have its `auth_status` overwritten with `NotRequired` /
+    /// `LocalOffline` via `set_provider_auth_status` (which bypasses
+    /// `detect_auth`). The fix routes the filter through
+    /// `local_provider_probe_targets`, which excludes suppressed
+    /// providers up front.
     #[test]
     fn local_provider_probe_targets_excludes_suppressed_providers() {
         let mut catalog = test_catalog();
