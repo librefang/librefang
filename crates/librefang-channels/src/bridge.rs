@@ -2215,8 +2215,6 @@ fn default_output_format_for_channel(channel_type: &str) -> OutputFormat {
     formatter::default_output_format_for_channel(channel_type)
 }
 
-/// Send a lifecycle reaction (best-effort, non-blocking for supported adapters).
-///
 /// Extract the tool name from a `\n\n🔧 toolname\n\n` progress marker
 /// emitted by `librefang_api::channel_bridge` in response to a kernel
 /// `StreamEvent::ToolUseStart` event. Returns `None` for plain text
@@ -2237,6 +2235,8 @@ fn extract_tool_marker_name(delta: &str) -> Option<String> {
     }
 }
 
+/// Send a lifecycle reaction (best-effort, non-blocking for supported adapters).
+///
 /// Errors are logged at WARN — reactions are best-effort UX polish, but a
 /// silent failure mode masks real problems. The original `debug!` here hid
 /// per-room rate-limit drops on Matrix (`M_LIMIT_EXCEEDED`) where the
