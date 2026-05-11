@@ -266,6 +266,29 @@ impl SessionId {
         ))
     }
 
+    /// Derive the per-channel `SessionId` for a `(channel, chat_id)` pair
+    /// using the canonical scope construction shared by the kernel's inbound
+    /// resolver and the channel-bridge `/new` / `/reboot` / `/compact`
+    /// commands. Empty `chat_id` collapses to channel-only — matching what
+    /// `build_sender_context` does when `sender.platform_id` is empty.
+    ///
+    /// This is the single source of truth for the scope formula. The
+    /// inbound message resolver (`kernel/messaging.rs::send_message_full`,
+    /// the dispatch resolver in `kernel/mod.rs::resolve_dispatch_session_id`,
+    /// and the agent-execution path in `kernel/agent_execution.rs`) plus
+    /// the channel-bridge reset helper in `librefang-api::channel_bridge`
+    /// all call this so they cannot drift. Without this helper, the
+    /// scope-derivation literal lived inline in 4 places — any one of
+    /// them silently disagreeing would re-introduce #4868 (channel `/new`
+    /// deleting the wrong sid).
+    pub fn for_sender_scope(agent_id: AgentId, channel: &str, chat_id: Option<&str>) -> Self {
+        let scope = match chat_id {
+            Some(cid) if !cid.is_empty() => format!("{channel}:{cid}"),
+            _ => channel.to_string(),
+        };
+        Self::for_channel(agent_id, &scope)
+    }
+
     /// Derive a per-fire cron session id keyed by `(agent, run_key)`.
     ///
     /// Used when a cron job is configured with `session_mode = "new"` and
@@ -342,6 +365,21 @@ impl std::fmt::Display for SessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
+}
+
+/// Scope passed to `reset_session` / `reboot_session` so callers can choose
+/// between agent-wide nuke and single-session reset (#4868).
+///
+/// Channel `/new` / `/reboot` use `Session(for_channel(agent, channel:chat))`
+/// so resetting in one chat does not wipe transcripts on every other surface
+/// the same agent serves. Dashboard / explicit "reset agent" surfaces use
+/// `Agent` to preserve the historical full-wipe semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResetScope {
+    /// Reset every session belonging to this agent (default + per-channel).
+    Agent,
+    /// Reset exactly one session id; sibling sessions are untouched.
+    Session(SessionId),
 }
 
 /// Snapshot of a single in-flight (agent, session) loop, returned by

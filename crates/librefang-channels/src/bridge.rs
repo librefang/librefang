@@ -165,18 +165,67 @@ pub trait ChannelBridgeHandle: Send + Sync {
         Err("Not implemented".to_string())
     }
 
-    /// Reset an agent's session (clear messages, fresh session ID).
+    /// Reset every session for an agent (default + per-channel + cron).
+    /// Used by surfaces that mean "wipe this agent" — dashboard / explicit
+    /// admin reset. Channel `/new` should call [`Self::reset_channel_session`]
+    /// instead so other surfaces are not collateral damage (#4868).
     async fn reset_session(&self, _agent_id: AgentId) -> Result<String, String> {
         Err("Not implemented".to_string())
     }
 
-    /// Hard-reboot an agent's session — full context clear without saving summary.
+    /// Hard-reboot every session for an agent — full context clear without
+    /// saving summaries. Channel `/reboot` should call
+    /// [`Self::reboot_channel_session`] instead (#4868).
     async fn reboot_session(&self, _agent_id: AgentId) -> Result<String, String> {
         Err("Not implemented".to_string())
     }
 
-    /// Trigger LLM-based session compaction for an agent.
+    /// Trigger LLM-based session compaction for an agent's registry-pointer
+    /// session. Channel `/compact` should call
+    /// [`Self::compact_channel_session`] instead so it operates on the
+    /// per-channel session the user is actually chatting in (#4868).
     async fn compact_session(&self, _agent_id: AgentId) -> Result<String, String> {
+        Err("Not implemented".to_string())
+    }
+
+    /// Reset only the session derived from `(channel, chat_id)` — the
+    /// per-channel session that channel `/new` actually means to clear
+    /// (#4868). Sibling sessions (other channels, dashboard) stay intact.
+    ///
+    /// `chat_id` follows the inbound-message convention: `None` for an
+    /// adapter that doesn't disambiguate by chat (the channel name itself
+    /// becomes the scope), `Some(<sender.platform_id>)` otherwise — the same
+    /// pair the channel resolver uses to derive
+    /// [`librefang_types::agent::SessionId::for_channel`] for inbound traffic.
+    async fn reset_channel_session(
+        &self,
+        _agent_id: AgentId,
+        _channel: &str,
+        _chat_id: Option<&str>,
+    ) -> Result<String, String> {
+        Err("Not implemented".to_string())
+    }
+
+    /// Hard-reboot only the per-channel session derived from
+    /// `(channel, chat_id)` — no summary saved (#4868).
+    async fn reboot_channel_session(
+        &self,
+        _agent_id: AgentId,
+        _channel: &str,
+        _chat_id: Option<&str>,
+    ) -> Result<String, String> {
+        Err("Not implemented".to_string())
+    }
+
+    /// Compact only the per-channel session derived from
+    /// `(channel, chat_id)` — operates on the session the channel user is
+    /// chatting in, not the agent's registry-pointer session (#4868).
+    async fn compact_channel_session(
+        &self,
+        _agent_id: AgentId,
+        _channel: &str,
+        _chat_id: Option<&str>,
+    ) -> Result<String, String> {
         Err("Not implemented".to_string())
     }
 
@@ -4837,17 +4886,29 @@ async fn handle_command(
             }
         }
         "new" => {
-            // Need to resolve the user's current agent
+            // Resolve the user's current agent and the channel-derived sid
+            // so /new only resets THIS chat (#4868). The (channel, chat_id)
+            // pair must match `build_sender_context` exactly so the sid we
+            // delete here equals the sid the next inbound message will
+            // resolve via `SessionId::for_channel`.
             let agent_id = router.resolve(
                 channel_type,
                 &sender.platform_id,
                 sender.librefang_user.as_deref(),
             );
             match agent_id {
-                Some(aid) => handle
-                    .reset_session(aid)
-                    .await
-                    .unwrap_or_else(|e| format!("Error: {e}")),
+                Some(aid) => {
+                    let ch = channel_type_str(channel_type);
+                    let chat = if sender.platform_id.is_empty() {
+                        None
+                    } else {
+                        Some(sender.platform_id.as_str())
+                    };
+                    handle
+                        .reset_channel_session(aid, ch, chat)
+                        .await
+                        .unwrap_or_else(|e| format!("Error: {e}"))
+                }
                 None => "No agent selected. Use /agent <name> first.".to_string(),
             }
         }
@@ -4858,10 +4919,18 @@ async fn handle_command(
                 sender.librefang_user.as_deref(),
             );
             match agent_id {
-                Some(aid) => handle
-                    .reboot_session(aid)
-                    .await
-                    .unwrap_or_else(|e| format!("Error: {e}")),
+                Some(aid) => {
+                    let ch = channel_type_str(channel_type);
+                    let chat = if sender.platform_id.is_empty() {
+                        None
+                    } else {
+                        Some(sender.platform_id.as_str())
+                    };
+                    handle
+                        .reboot_channel_session(aid, ch, chat)
+                        .await
+                        .unwrap_or_else(|e| format!("Error: {e}"))
+                }
                 None => "No agent selected. Use /agent <name> first.".to_string(),
             }
         }
@@ -4872,10 +4941,18 @@ async fn handle_command(
                 sender.librefang_user.as_deref(),
             );
             match agent_id {
-                Some(aid) => handle
-                    .compact_session(aid)
-                    .await
-                    .unwrap_or_else(|e| format!("Error: {e}")),
+                Some(aid) => {
+                    let ch = channel_type_str(channel_type);
+                    let chat = if sender.platform_id.is_empty() {
+                        None
+                    } else {
+                        Some(sender.platform_id.as_str())
+                    };
+                    handle
+                        .compact_channel_session(aid, ch, chat)
+                        .await
+                        .unwrap_or_else(|e| format!("Error: {e}"))
+                }
                 None => "No agent selected. Use /agent <name> first.".to_string(),
             }
         }

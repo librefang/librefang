@@ -332,7 +332,7 @@ use librefang_kernel::config::load_config as kernel_load_config;
 use librefang_kernel::llm_driver::StreamEvent;
 use librefang_kernel::DeliveryTracker;
 use librefang_kernel::KernelApi;
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentId, ResetScope, SessionId};
 use std::sync::Arc;
 #[cfg(feature = "channel-telegram")]
 use std::time::Duration;
@@ -1659,14 +1659,16 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     async fn reset_session(&self, agent_id: AgentId) -> Result<String, String> {
         self.kernel
-            .reset_session(agent_id)
+            .reset_session(agent_id, ResetScope::Agent)
+            .await
             .map_err(|e| format!("{e}"))?;
         Ok("Session reset. Chat history cleared.".to_string())
     }
 
     async fn reboot_session(&self, agent_id: AgentId) -> Result<String, String> {
         self.kernel
-            .reboot_session(agent_id)
+            .reboot_session(agent_id, ResetScope::Agent)
+            .await
             .map_err(|e| format!("{e}"))?;
         Ok("Session rebooted. Context cleared.".to_string())
     }
@@ -1674,6 +1676,51 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     async fn compact_session(&self, agent_id: AgentId) -> Result<String, String> {
         self.kernel
             .compact_agent_session(agent_id)
+            .await
+            .map_err(|e| format!("{e}"))
+    }
+
+    async fn reset_channel_session(
+        &self,
+        agent_id: AgentId,
+        channel: &str,
+        chat_id: Option<&str>,
+    ) -> Result<String, String> {
+        let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
+        self.kernel
+            .reset_session(agent_id, ResetScope::Session(sid))
+            .await
+            .map_err(|e| format!("{e}"))?;
+        Ok(format!(
+            "Session reset for this {channel} chat. Other surfaces untouched."
+        ))
+    }
+
+    async fn reboot_channel_session(
+        &self,
+        agent_id: AgentId,
+        channel: &str,
+        chat_id: Option<&str>,
+    ) -> Result<String, String> {
+        let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
+        self.kernel
+            .reboot_session(agent_id, ResetScope::Session(sid))
+            .await
+            .map_err(|e| format!("{e}"))?;
+        Ok(format!(
+            "Session rebooted for this {channel} chat. Other surfaces untouched."
+        ))
+    }
+
+    async fn compact_channel_session(
+        &self,
+        agent_id: AgentId,
+        channel: &str,
+        chat_id: Option<&str>,
+    ) -> Result<String, String> {
+        let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
+        self.kernel
+            .compact_agent_session_with_id(agent_id, Some(sid))
             .await
             .map_err(|e| format!("{e}"))
     }
@@ -4769,6 +4816,46 @@ mod tests {
             lookups.get(),
             1,
             "SMTP-side lookup must NOT run after IMAP fails — short-circuit via the `?` operator on the first read_env call"
+        );
+    }
+
+    /// `SessionId::for_sender_scope` is the SINGLE source of truth for the
+    /// channel-scope formula and is called by both ends of the round-trip
+    /// (the channel-bridge reset helpers and the four kernel inbound
+    /// resolvers — `kernel/messaging.rs::send_message_full`,
+    /// `kernel/agent_execution.rs`, `kernel/mod.rs::resolve_dispatch_session_id`).
+    /// This test pins its output: empty `chat_id` collapses to channel-only
+    /// (matching `build_sender_context`'s empty-platform-id case), and the
+    /// `format!("{ch}:{cid}")` joiner matches what the inline formulas
+    /// produced before extraction. If these inputs ever produce different
+    /// sids than the legacy formula did, channel `/new` will delete a
+    /// different sid than the one the next inbound message resolves to,
+    /// silently regressing #4868.
+    #[test]
+    fn for_sender_scope_matches_legacy_inline_formula() {
+        use librefang_types::agent::SessionId;
+        let agent = AgentId(uuid::Uuid::new_v4());
+
+        // Channel + chat — the most common case (Telegram, Slack, Discord).
+        let with_chat = SessionId::for_sender_scope(agent, "telegram", Some("chat-1"));
+        let legacy_with_chat = SessionId::for_channel(agent, "telegram:chat-1");
+        assert_eq!(
+            with_chat, legacy_with_chat,
+            "channel + chat sid must match the legacy inline scope formula (#4868)"
+        );
+
+        // Channel without chat (DM-style adapter that doesn't disambiguate).
+        let dm = SessionId::for_sender_scope(agent, "webhook", None);
+        let legacy_dm = SessionId::for_channel(agent, "webhook");
+        assert_eq!(dm, legacy_dm, "channel-only sid must match (#4868)");
+
+        // Empty chat_id is treated identically to None — same path the
+        // resolver hits when ctx.chat_id is Some("").
+        let empty = SessionId::for_sender_scope(agent, "discord", Some(""));
+        let legacy_empty = SessionId::for_channel(agent, "discord");
+        assert_eq!(
+            empty, legacy_empty,
+            "empty chat_id collapses to channel-only (#4868)"
         );
     }
 
