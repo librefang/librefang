@@ -613,6 +613,34 @@ impl ModelCatalog {
         self.suppressed_providers.remove(id);
     }
 
+    /// Whether `id` is currently in the suppressed-providers set.
+    ///
+    /// Background loops that bypass `detect_auth` (notably
+    /// `probe_all_local_providers_once`, which writes `set_provider_auth_status`
+    /// directly) need this check so an unrelated tick does not silently
+    /// un-do a user's "remove key" action.
+    pub fn is_suppressed(&self, id: &str) -> bool {
+        self.suppressed_providers.contains(id)
+    }
+
+    /// Return `(id, base_url)` for every local HTTP provider that the
+    /// periodic probe loop should poll. Filters out providers the user has
+    /// explicitly suppressed — without this, the next probe tick would
+    /// overwrite the `Missing` status set by `delete_provider_key` with
+    /// `NotRequired`/`LocalOffline` and the provider would re-appear in
+    /// the configured grid (#4803).
+    pub fn local_provider_probe_targets(&self) -> Vec<(String, String)> {
+        self.providers
+            .iter()
+            .filter(|p| {
+                crate::provider_health::is_local_provider(&p.id)
+                    && !p.base_url.is_empty()
+                    && !self.suppressed_providers.contains(&p.id)
+            })
+            .map(|p| (p.id.clone(), p.base_url.clone()))
+            .collect()
+    }
+
     /// Load the suppressed-providers list from a JSON file.
     pub fn load_suppressed(&mut self, path: &std::path::Path) {
         if let Ok(data) = std::fs::read_to_string(path) {
@@ -1684,6 +1712,68 @@ id = "acme"
         catalog.detect_auth();
         let ollama = catalog.get_provider("ollama").unwrap();
         assert_eq!(ollama.auth_status, AuthStatus::NotRequired);
+    }
+
+    /// `is_suppressed` reflects `suppress_provider` / `unsuppress_provider`
+    /// without going through `detect_auth`. This is the accessor the
+    /// `probe_and_update_local_provider` gate (#4803 follow-up) reads to
+    /// decide whether a probe write should be skipped, so a regression in
+    /// the lookup primitive would silently re-introduce the bug where
+    /// user-triggered Test on a suppressed provider re-flipped the catalog.
+    #[test]
+    fn is_suppressed_reflects_set_membership() {
+        let mut catalog = test_catalog();
+        assert!(!catalog.is_suppressed("ollama"));
+        catalog.suppress_provider("ollama");
+        assert!(catalog.is_suppressed("ollama"));
+        catalog.unsuppress_provider("ollama");
+        assert!(!catalog.is_suppressed("ollama"));
+        // Unknown id is just not-in-set, not a panic.
+        assert!(!catalog.is_suppressed("__no_such_provider__"));
+    }
+
+    /// Regression for the #4803 follow-up — the periodic probe loop must
+    /// not re-promote a suppressed local provider. Pre-fix the filter in
+    /// `probe_all_local_providers_once` only checked `is_local_provider`
+    /// + non-empty `base_url`, so an ollama row that the user had hidden
+    /// via "remove key" would still be polled every ~60 s and have its
+    /// `auth_status` overwritten with `NotRequired` / `LocalOffline` via
+    /// `set_provider_auth_status` (which bypasses `detect_auth`). The
+    /// fix routes the filter through `local_provider_probe_targets`,
+    /// which excludes suppressed providers up front.
+    #[test]
+    fn local_provider_probe_targets_excludes_suppressed_providers() {
+        let mut catalog = test_catalog();
+        let baseline = catalog.local_provider_probe_targets();
+        assert!(
+            baseline.iter().any(|(id, _)| id == "ollama"),
+            "ollama must be a probe target by default — sanity-check the seed catalog: {baseline:?}"
+        );
+
+        catalog.suppress_provider("ollama");
+        let filtered = catalog.local_provider_probe_targets();
+        assert!(
+            !filtered.iter().any(|(id, _)| id == "ollama"),
+            "suppressed local provider must be excluded from probe targets: {filtered:?}"
+        );
+
+        // Other local providers (e.g. vllm, lmstudio) stay in the list —
+        // suppression is per-provider, not a global kill switch.
+        for (id, _) in &baseline {
+            if id != "ollama" {
+                assert!(
+                    filtered.iter().any(|(fid, _)| fid == id),
+                    "non-suppressed local provider {id} must survive the filter"
+                );
+            }
+        }
+
+        catalog.unsuppress_provider("ollama");
+        let restored = catalog.local_provider_probe_targets();
+        assert!(
+            restored.iter().any(|(id, _)| id == "ollama"),
+            "un-suppressing must restore ollama as a probe target"
+        );
     }
 
     #[test]
