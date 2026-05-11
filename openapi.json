@@ -3776,7 +3776,7 @@
         "description": "Issue #4797: prior behaviour mutated only the in-memory `BudgetConfig`\nsnapshot, so changes were lost on the next daemon restart and the\non-disk config silently disagreed with the runtime state. This handler\nnow rewrites the `[budget]` table in `config.toml` (preserving comments\nand unrelated sections via `toml_edit`) and triggers a hot-reload so\nthe new caps reach the metering subsystem on the next LLM call.",
         "operationId": "update_budget",
         "requestBody": {
-          "description": "Partial budget config. Each cap field accepts EITHER its canonical `BudgetConfig` name (`max_hourly_usd` / `max_daily_usd` / `max_monthly_usd`) OR the matching `BudgetStatus` GET-shape alias (`hourly_limit` / `daily_limit` / `monthly_limit`); when both appear in the same body, the canonical name wins. The alias path lets a read-modify-write client PUT the GET response unchanged. `alert_threshold` (clamped to 0.0–1.0) and `default_max_llm_tokens_per_hour` have no alias. Any provided cap field must be a finite, non-negative JSON number; NaN, infinity, negative values, or non-numeric types are rejected with 400 (post-#4797 these values now persist to `config.toml` and survive a daemon restart, so silent coercion would corrupt the budget gate's enforcement state).",
+          "description": "Partial budget config. Each cap field accepts EITHER its canonical `BudgetConfig` name (`max_hourly_usd` / `max_daily_usd` / `max_monthly_usd`) OR the matching `BudgetStatus` GET-shape alias (`hourly_limit` / `daily_limit` / `monthly_limit`); when both appear in the same body, the canonical name wins. The alias path lets a read-modify-write client PUT the GET response unchanged. `alert_threshold` (finite number in `[0.0, 1.0]`) and `default_max_llm_tokens_per_hour` have no alias. Any provided cap field must be a finite, non-negative JSON number; NaN, infinity, negative values, non-numeric types, and (for `alert_threshold`) values outside `[0.0, 1.0]` are rejected with 400 (post-#4797 these values now persist to `config.toml` and survive a daemon restart, so silent coercion would corrupt the budget gate's enforcement state).",
           "content": {
             "application/json": {
               "schema": {
@@ -3798,7 +3798,7 @@
             }
           },
           "400": {
-            "description": "Submitted budget is malformed (NaN/infinity/negative cap, non-numeric type, or post-merge config rejected by the kernel reload validator)",
+            "description": "Submitted budget is malformed (NaN/infinity/negative cap, alert_threshold outside [0.0, 1.0], non-numeric type, or post-merge config rejected by the kernel reload validator)",
             "content": {
               "application/json": {
                 "schema": {
