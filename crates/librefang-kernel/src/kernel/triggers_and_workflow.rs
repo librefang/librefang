@@ -29,6 +29,7 @@ impl LibreFangKernel {
     pub fn spawn_session_label_generation(&self, agent_id: AgentId, session_id: SessionId) {
         let memory = Arc::clone(&self.memory.substrate);
         let aux = self.llm.aux_client.load_full();
+        let catalog = self.llm.model_catalog.load_full();
         tokio::spawn(async move {
             // Bail early if the label is already set — preserves user
             // overrides and prevents repeated billing on the same session.
@@ -70,6 +71,10 @@ impl LibreFangKernel {
                 asst = librefang_types::truncate_str(&assistant_text, 800),
             );
 
+            let echo_policy = catalog
+                .find_model(&model)
+                .map(|e| e.reasoning_echo_policy)
+                .unwrap_or_default();
             let req = CompletionRequest {
                 model,
                 messages: std::sync::Arc::new(vec![librefang_types::message::Message::user(
@@ -92,6 +97,7 @@ impl LibreFangKernel {
                 agent_id: Some(agent_id.to_string()),
                 session_id: Some(session_id.0.to_string()),
                 step_id: None,
+                reasoning_echo_policy: echo_policy,
             };
 
             let resp = match tokio::time::timeout(
@@ -159,6 +165,7 @@ impl LibreFangKernel {
         use librefang_runtime::llm_driver::CompletionRequest;
         use librefang_types::message::Message;
 
+        let echo_policy = self.lookup_reasoning_echo_policy(model);
         let request = CompletionRequest {
             model: model.to_string(),
             messages: std::sync::Arc::new(vec![Message::user(prompt.to_string())]),
@@ -175,6 +182,7 @@ impl LibreFangKernel {
             agent_id: None,
             session_id: None,
             step_id: None,
+            reasoning_echo_policy: echo_policy,
         };
 
         let result = match tokio::time::timeout(

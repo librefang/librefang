@@ -1390,6 +1390,7 @@ mod tests {
             agent_id: None,
             session_id: None,
             step_id: None,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1437,6 +1438,7 @@ mod tests {
             agent_id: None,
             session_id: None,
             step_id: None,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1501,6 +1503,7 @@ mod tests {
             agent_id: None,
             session_id: None,
             step_id: None,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1581,6 +1584,7 @@ mod tests {
             agent_id: None,
             session_id: None,
             step_id: None,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1807,6 +1811,7 @@ mod tests {
             agent_id: Some("agent-abc".to_string()),
             session_id: Some("sess-xyz".to_string()),
             step_id: Some("step-001".to_string()),
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         ClaudeCodeDriver::apply_caller_trace_envs(&mut cmd, &request);
         let envs: std::collections::HashMap<_, _> = cmd
@@ -1863,6 +1868,7 @@ mod tests {
             agent_id: None,
             session_id: Some(String::new()),
             step_id: None,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         ClaudeCodeDriver::apply_caller_trace_envs(&mut cmd, &request);
         let envs: std::collections::HashMap<_, _> = cmd

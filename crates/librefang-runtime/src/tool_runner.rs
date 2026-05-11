@@ -7447,6 +7447,7 @@ mod tests {
     impl WorkflowRunner for ApprovalKernel {}
     impl GoalControl for ApprovalKernel {}
     impl ToolPolicy for ApprovalKernel {}
+    impl librefang_kernel_handle::CatalogQuery for ApprovalKernel {}
     impl ApiAuth for ApprovalKernel {
         fn auth_snapshot(&self) -> ApiAuthSnapshot {
             ApiAuthSnapshot::default()
@@ -7675,6 +7676,7 @@ mod tests {
     impl WorkflowRunner for ForceHumanCapturingKernel {}
     impl GoalControl for ForceHumanCapturingKernel {}
     impl ToolPolicy for ForceHumanCapturingKernel {}
+    impl librefang_kernel_handle::CatalogQuery for ForceHumanCapturingKernel {}
     impl ApiAuth for ForceHumanCapturingKernel {
         fn auth_snapshot(&self) -> ApiAuthSnapshot {
             ApiAuthSnapshot::default()
@@ -8265,6 +8267,7 @@ mod tests {
     impl PromptStore for NamedWsKernel {}
     impl WorkflowRunner for NamedWsKernel {}
     impl GoalControl for NamedWsKernel {}
+    impl librefang_kernel_handle::CatalogQuery for NamedWsKernel {}
     impl ApiAuth for NamedWsKernel {
         fn auth_snapshot(&self) -> ApiAuthSnapshot {
             ApiAuthSnapshot::default()
@@ -11046,6 +11049,7 @@ mod tests {
     impl WorkflowRunner for SpawnCheckKernel {}
     impl GoalControl for SpawnCheckKernel {}
     impl ToolPolicy for SpawnCheckKernel {}
+    impl librefang_kernel_handle::CatalogQuery for SpawnCheckKernel {}
     impl ApiAuth for SpawnCheckKernel {
         fn auth_snapshot(&self) -> ApiAuthSnapshot {
             ApiAuthSnapshot::default()

@@ -681,8 +681,11 @@ impl LibreFangKernel {
             // Resolve aliases (e.g. "sonnet" -> "claude-sonnet-4-20250514") before scoring
             router.resolve_aliases(&self.llm.model_catalog.load());
             // Build a probe request to score complexity
+            let probe_model =
+                strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
+            let echo_policy = self.lookup_reasoning_echo_policy(&probe_model);
             let probe = CompletionRequest {
-                model: strip_provider_prefix(&manifest.model.model, &manifest.model.provider),
+                model: probe_model,
                 messages: std::sync::Arc::new(vec![librefang_types::message::Message::user(
                     message,
                 )]),
@@ -699,6 +702,7 @@ impl LibreFangKernel {
                 agent_id: None,
                 session_id: None,
                 step_id: None,
+                reasoning_echo_policy: echo_policy,
             };
             let (complexity, routed_model) = router.select_model(&probe);
             // Check if the routed model's provider has a valid API key.

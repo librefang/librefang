@@ -126,6 +126,7 @@ pub(super) async fn try_summarize_trim(
     keep_recent: usize,
     driver: std::sync::Arc<dyn librefang_runtime::llm_driver::LlmDriver>,
     model: &str,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Option<Vec<librefang_types::message::Message>> {
     use librefang_runtime::compactor::{
         adjust_split_for_tool_pair, compact_messages, CompactionConfig,
@@ -176,7 +177,15 @@ pub(super) async fn try_summarize_trim(
     // Only accept a real LLM summary — reject empty summaries and fallback
     // placeholders (used_fallback = true means the LLM was unavailable and
     // compact_messages substituted a synthetic "[Session compacted: ...]" stub).
-    match compact_messages(driver, model, to_summarize, &compact_cfg).await {
+    match compact_messages(
+        driver,
+        model,
+        to_summarize,
+        &compact_cfg,
+        reasoning_echo_policy,
+    )
+    .await
+    {
         Ok(result) if !result.summary.is_empty() && !result.used_fallback => {
             let summary_msg = Message {
                 role: Role::Assistant,

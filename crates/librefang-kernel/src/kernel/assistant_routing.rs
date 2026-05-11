@@ -103,6 +103,10 @@ impl LibreFangKernel {
             agent_id: None,
             session_id: None,
             step_id: None,
+            // Driver-default model; the lookup gracefully returns `None`
+            // for the empty-string id and the driver's fallback handles
+            // the actual model the driver substitutes.
+            reasoning_echo_policy: self.lookup_reasoning_echo_policy(""),
         };
 
         let result = match tokio::time::timeout(

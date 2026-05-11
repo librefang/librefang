@@ -276,6 +276,14 @@ pub struct LlmMemoryExtractor {
     /// debugging) should see proactive-memory requests also skip
     /// `cache_control`.
     prompt_caching: bool,
+    /// Weak reference to the kernel handle, used to look up the
+    /// catalog-driven `reasoning_echo_policy` for the extractor's model
+    /// (#4842). `None` when no handle has been installed (e.g. tests, or
+    /// callers that build the extractor without `install_kernel_handle`);
+    /// in that case the OpenAI driver's substring fallback resolves the
+    /// policy by model name.
+    kernel_handle:
+        std::sync::Mutex<Option<std::sync::Weak<dyn crate::kernel_handle::KernelHandle>>>,
 }
 
 impl LlmMemoryExtractor {
@@ -296,17 +304,42 @@ impl LlmMemoryExtractor {
             driver,
             model,
             prompt_caching,
+            kernel_handle: std::sync::Mutex::new(None),
         }
     }
 
-    /// No-op kept for backwards compatibility with kernel init which still
-    /// calls this on every extractor it constructs. Previous fork-based
-    /// extraction pathway was removed because it bypassed JSON mode; see
-    /// `extract_memories_with_agent_id` for details.
+    /// Store a weak handle to the kernel so the extractor can look up
+    /// catalog-driven metadata at request-build time (currently the
+    /// `reasoning_echo_policy` for #4842). Idempotent — overwrites any
+    /// previously installed handle.
+    ///
+    /// **History**: this method existed as a no-op before #4842 (kept for
+    /// backwards compatibility with kernel init which still calls it on
+    /// every extractor it constructs — the previous fork-based extraction
+    /// pathway it once supported was removed because it bypassed JSON
+    /// mode; see `extract_memories_with_agent_id` for details). #4842
+    /// repurposed the slot to actually store the handle.
     pub fn install_kernel_handle(
         &self,
-        _handle: std::sync::Weak<dyn crate::kernel_handle::KernelHandle>,
+        handle: std::sync::Weak<dyn crate::kernel_handle::KernelHandle>,
     ) {
+        if let Ok(mut slot) = self.kernel_handle.lock() {
+            *slot = Some(handle);
+        }
+    }
+
+    /// Resolve the `reasoning_echo_policy` for [`Self::model`] via the
+    /// installed kernel handle. Returns `None` (the safe default) when no
+    /// handle is installed, the kernel has been dropped, or the model
+    /// isn't in the catalog — the driver's substring fallback handles
+    /// those cases.
+    fn echo_policy(&self) -> librefang_types::model_catalog::ReasoningEchoPolicy {
+        self.kernel_handle
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref()?.upgrade())
+            .map(|k| k.reasoning_echo_policy_for(&self.model))
+            .unwrap_or_default()
     }
 }
 
@@ -418,6 +451,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             agent_id: None,
             session_id: None,
             step_id: None,
+            reasoning_echo_policy: self.echo_policy(),
         };
 
         let response = self.driver.complete(request).await.map_err(|e| {
@@ -575,6 +609,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             agent_id: None,
             session_id: None,
             step_id: None,
+            reasoning_echo_policy: self.echo_policy(),
         };
 
         match self.driver.complete(request).await {

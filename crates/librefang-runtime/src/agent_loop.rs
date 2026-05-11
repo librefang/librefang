@@ -2840,6 +2840,7 @@ async fn generate_search_queries(
     manifest: &AgentManifest,
     session_messages: &[Message],
     user_message: &str,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Option<Vec<String>> {
     // Build a compact conversation summary from the last few messages
     let recent: Vec<&Message> = session_messages
@@ -2885,6 +2886,7 @@ async fn generate_search_queries(
         agent_id: None,
         session_id: None,
         step_id: None,
+        reasoning_echo_policy,
     };
 
     let response =
@@ -2937,6 +2939,7 @@ async fn web_search_augment(
     web_ctx: Option<&WebToolsContext>,
     driver: &dyn LlmDriver,
     session_messages: &[Message],
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Option<String> {
     if !should_augment_web_search(manifest) {
         return None;
@@ -2945,12 +2948,19 @@ async fn web_search_augment(
 
     // Try LLM-based query generation.
     // Some(vec![...]) = generated queries, Some(vec![]) = no search needed, None = generation failed
-    let queries =
-        match generate_search_queries(driver, manifest, session_messages, user_message).await {
-            Some(q) if q.is_empty() => return None, // LLM says no search needed
-            Some(q) => q,
-            None => vec![user_message.to_string()], // Generation failed, fall back to raw message
-        };
+    let queries = match generate_search_queries(
+        driver,
+        manifest,
+        session_messages,
+        user_message,
+        reasoning_echo_policy,
+    )
+    .await
+    {
+        Some(q) if q.is_empty() => return None, // LLM says no search needed
+        Some(q) => q,
+        None => vec![user_message.to_string()], // Generation failed, fall back to raw message
+    };
 
     // Search with each query and collect results
     let mut all_results = String::new();
@@ -3282,28 +3292,30 @@ async fn finalize_successful_end_turn(
 /// operators can grep `"streaming"` vs `"non-streaming"` in production.
 async fn maybe_fold_stale_tool_results(
     messages: Vec<Message>,
-    fold_after_turns: u32,
-    fold_min_batch_size: u32,
+    fold_cfg: crate::history_fold::FoldConfig,
     model: &str,
     aux_client: Option<&crate::aux_client::AuxClient>,
     driver: Arc<dyn LlmDriver>,
     streaming: bool,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Vec<Message> {
     // Fast-path: a fold pass needs at least `fold_after_turns` *recent*
     // assistant turns plus one stale turn — i.e. more than
     // `fold_after_turns * 2` messages — before any tool-result can be
     // classified stale.  Skipping the call avoids even the index walk
     // inside `collect_stale_indices` on every short-session iteration.
-    if fold_after_turns == 0 || messages.len() <= (fold_after_turns as usize).saturating_mul(2) {
+    if fold_cfg.fold_after_turns == 0
+        || messages.len() <= (fold_cfg.fold_after_turns as usize).saturating_mul(2)
+    {
         return messages;
     }
     let (folded, fold_result) = crate::history_fold::fold_stale_tool_results(
         messages,
-        fold_after_turns,
-        fold_min_batch_size,
+        fold_cfg,
         model,
         aux_client,
         driver,
+        reasoning_echo_policy,
     )
     .await;
     if fold_result.groups_folded > 0 {
@@ -3570,12 +3582,17 @@ pub async fn run_agent_loop(
 
     // Web search augmentation: generate search queries via LLM, search the web,
     // and inject results into context for models without tool/function calling.
+    let web_search_echo_policy = kernel
+        .as_ref()
+        .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
+        .unwrap_or_default();
     if let Some(search_results) = web_search_augment(
         manifest,
         user_message,
         web_ctx,
         driver.as_ref(),
         &session.messages,
+        web_search_echo_policy,
     )
     .await
     {
@@ -3779,14 +3796,21 @@ pub async fn run_agent_loop(
         // before context assembly so the LLM never sees raw bulk payloads
         // from old turns.  Runs fold first, then the compressor, mirroring
         // the ordering rationale in `history_fold`'s module-level doc.
+        let fold_echo_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
+            .unwrap_or_default();
         messages = maybe_fold_stale_tool_results(
             messages,
-            tr_fold_after_turns,
-            tr_fold_min_batch_size,
+            crate::history_fold::FoldConfig {
+                fold_after_turns: tr_fold_after_turns,
+                min_batch_size: tr_fold_min_batch_size,
+            },
             &manifest.model.model,
             opts.aux_client.as_deref(),
             driver.clone(),
             false,
+            fold_echo_policy,
         )
         .await;
 
@@ -3891,6 +3915,15 @@ pub async fn run_agent_loop(
                 }
             });
 
+        // Catalog-driven reasoning_echo_policy lookup (#4842). Falls back
+        // to `None` when no kernel handle is wired or the model isn't in
+        // the catalog; the OpenAI driver then resolves the policy via its
+        // own substring fallback for backwards compatibility.
+        let reasoning_echo_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_echo_policy_for(&api_model))
+            .unwrap_or_default();
+
         // Wrap messages once per turn — call_with_retry's `request.clone()`
         // becomes a refcount bump instead of a deep clone of the history (#3766).
         let request = CompletionRequest {
@@ -3915,6 +3948,7 @@ pub async fn run_agent_loop(
             agent_id: Some(agent_id_str.clone()),
             session_id: Some(session.id.to_string()),
             step_id: Some(iteration.to_string()),
+            reasoning_echo_policy,
         };
 
         // Notify phase: Thinking
@@ -5062,12 +5096,17 @@ pub async fn run_agent_loop_streaming(
 
     // Web search augmentation: generate search queries via LLM, search the web,
     // and inject results into context for models without tool/function calling.
+    let web_search_echo_policy = kernel
+        .as_ref()
+        .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
+        .unwrap_or_default();
     if let Some(search_results) = web_search_augment(
         manifest,
         user_message,
         web_ctx,
         driver.as_ref(),
         &session.messages,
+        web_search_echo_policy,
     )
     .await
     {
@@ -5251,14 +5290,21 @@ pub async fn run_agent_loop_streaming(
         // History fold (#3347 3/N): rewrite stale tool-result blocks in place
         // before context assembly — streaming path mirrors non-streaming via
         // `maybe_fold_stale_tool_results` (#4 review-followup DRY).
+        let fold_echo_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
+            .unwrap_or_default();
         messages = maybe_fold_stale_tool_results(
             messages,
-            tr_fold_after_turns,
-            tr_fold_min_batch_size,
+            crate::history_fold::FoldConfig {
+                fold_after_turns: tr_fold_after_turns,
+                min_batch_size: tr_fold_min_batch_size,
+            },
             &manifest.model.model,
             opts.aux_client.as_deref(),
             driver.clone(),
             true,
+            fold_echo_policy,
         )
         .await;
 
@@ -5372,6 +5418,13 @@ pub async fn run_agent_loop_streaming(
                 }
             });
 
+        // Catalog-driven reasoning_echo_policy lookup (#4842), same as the
+        // non-streaming path above.
+        let reasoning_echo_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_echo_policy_for(&api_model))
+            .unwrap_or_default();
+
         // Same Arc-wrap as the non-streaming hot path (#3766).
         let request = CompletionRequest {
             model: api_model,
@@ -5394,6 +5447,7 @@ pub async fn run_agent_loop_streaming(
             agent_id: Some(agent_id_str.clone()),
             session_id: Some(session.id.to_string()),
             step_id: Some(iteration.to_string()),
+            reasoning_echo_policy,
         };
 
         // Notify phase: on first iteration emit Streaming; on subsequent

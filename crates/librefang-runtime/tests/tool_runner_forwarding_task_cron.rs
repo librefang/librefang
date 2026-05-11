@@ -218,6 +218,7 @@ impl PromptStore for CapturingKernel {}
 impl WorkflowRunner for CapturingKernel {}
 impl GoalControl for CapturingKernel {}
 impl ToolPolicy for CapturingKernel {}
+impl librefang_kernel_handle::CatalogQuery for CapturingKernel {}
 impl librefang_kernel_handle::ApiAuth for CapturingKernel {
     fn auth_snapshot(&self) -> librefang_kernel_handle::ApiAuthSnapshot {
         librefang_kernel_handle::ApiAuthSnapshot::default()

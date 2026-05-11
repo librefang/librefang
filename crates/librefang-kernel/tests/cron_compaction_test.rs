@@ -112,9 +112,15 @@ async fn summarize_trim_successful_llm_produces_summary_not_fallback() {
         summary: "Canned summary of older cron messages.".to_string(),
     });
 
-    let result = compact_session(driver, "test-model", &tmp_session, &compact_cfg)
-        .await
-        .expect("compact_session must succeed with FakeDriver");
+    let result = compact_session(
+        driver,
+        "test-model",
+        &tmp_session,
+        &compact_cfg,
+        librefang_types::model_catalog::ReasoningEchoPolicy::None,
+    )
+    .await
+    .expect("compact_session must succeed with FakeDriver");
 
     assert!(!result.summary.is_empty(), "summary must be non-empty");
     assert!(
@@ -191,6 +197,7 @@ async fn summarize_trim_llm_failure_sets_used_fallback_true() {
         "test-model",
         &tmp_session,
         &compact_cfg,
+        librefang_types::model_catalog::ReasoningEchoPolicy::None,
     )
     .await
     .expect("compact_session returns Ok even on LLM failure (stage-3 fallback)");

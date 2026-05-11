@@ -78,28 +78,48 @@ pub struct FoldResult {
     pub groups_used_fallback: usize,
 }
 
+/// Tuning knobs for a single [`fold_stale_tool_results`] pass.
+///
+/// Bundled so the function signature stays under clippy's
+/// `too_many_arguments` cap as new dispatch fields (e.g. catalog-driven
+/// `reasoning_echo_policy`, #4842) accrue.  Sourced from the kernel's
+/// runtime config — see `KernelConfig.history_fold` in
+/// `librefang-types`.
+#[derive(Debug, Clone, Copy)]
+pub struct FoldConfig {
+    /// Fold tool results older than this many assistant turns.
+    pub fold_after_turns: u32,
+    /// Only run a fold pass when at least this many newly-stale (i.e.
+    /// not already-folded) tool-result messages have accumulated.
+    /// Amortises the aux-LLM cost on long sessions where each new turn
+    /// would otherwise drag exactly one new message across the staleness
+    /// boundary and trigger another fold call. Set to `1` to disable the
+    /// batch threshold (fold every turn); `0` is treated as `1`.
+    pub min_batch_size: u32,
+}
+
 /// Fold stale tool-result messages in `messages`.
 ///
-/// `fold_after_turns` — fold tool results older than this many assistant turns.
-/// `min_batch_size` — only run a fold pass when at least this many newly-stale
-/// (i.e. not already-folded) tool-result messages have accumulated. Amortises
-/// the aux-LLM cost on long sessions where each new turn would otherwise drag
-/// exactly one new message across the staleness boundary and trigger another
-/// fold call. Set to `1` to disable the batch threshold (fold every turn);
-/// `0` is treated as `1`.
+/// `cfg` carries the fold-tuning knobs (see [`FoldConfig`]).
 /// `model` — model slug forwarded to the summariser.
 /// `aux_client` — optional aux-LLM client; when `None`, fallback text is used.
 /// `driver` — primary driver (used when aux chain resolves to primary).
+/// `reasoning_echo_policy` — catalog-driven dispatch hint for the
+/// OpenAI-compatible driver (#4842).
 ///
 /// Returns the (possibly modified) message list and a [`FoldResult`] summary.
 pub async fn fold_stale_tool_results(
     mut messages: Vec<Message>,
-    fold_after_turns: u32,
-    min_batch_size: u32,
+    cfg: FoldConfig,
     model: &str,
     aux_client: Option<&AuxClient>,
     driver: Arc<dyn LlmDriver>,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> (Vec<Message>, FoldResult) {
+    let FoldConfig {
+        fold_after_turns,
+        min_batch_size,
+    } = cfg;
     if fold_after_turns == 0 {
         return (messages, FoldResult::default());
     }
@@ -150,7 +170,14 @@ pub async fn fold_stale_tool_results(
     for (g_idx, group) in groups.iter().enumerate() {
         let count = group.len();
         let group_msgs: Vec<&Message> = group.iter().map(|&i| &messages[i]).collect();
-        let summary = summarise_group(group_msgs.as_slice(), model, &*summary_driver, g_idx).await;
+        let summary = summarise_group(
+            group_msgs.as_slice(),
+            model,
+            &*summary_driver,
+            g_idx,
+            reasoning_echo_policy,
+        )
+        .await;
         let text = match summary {
             Ok(text) => {
                 info!(
@@ -305,6 +332,7 @@ async fn summarise_group(
     model: &str,
     driver: &dyn LlmDriver,
     group_idx: usize,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Result<String, String> {
     // Render the group to a compact text block.
     let mut text = format!("Tool results group {}:\n", group_idx + 1);
@@ -370,6 +398,7 @@ async fn summarise_group(
         agent_id: None,
         session_id: None,
         step_id: None,
+        reasoning_echo_policy,
     };
 
     match driver.complete(request).await {
@@ -509,8 +538,18 @@ mod tests {
         let pre_ids: Vec<Vec<String>> = messages.iter().map(tool_use_ids_in).collect();
         let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver("nice summary".to_string()));
 
-        let (out, result) =
-            fold_stale_tool_results(messages, 8, 1, "test-model", None, driver).await;
+        let (out, result) = fold_stale_tool_results(
+            messages,
+            FoldConfig {
+                fold_after_turns: 8,
+                min_batch_size: 1,
+            },
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
 
         assert!(
             result.groups_folded >= 1,
@@ -540,8 +579,18 @@ mod tests {
         let original_len = messages.len();
         let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver("summary".to_string()));
 
-        let (out, result) =
-            fold_stale_tool_results(messages, 8, 1, "test-model", None, driver).await;
+        let (out, result) = fold_stale_tool_results(
+            messages,
+            FoldConfig {
+                fold_after_turns: 8,
+                min_batch_size: 1,
+            },
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
 
         assert_eq!(result.groups_folded, 0);
         assert_eq!(result.messages_replaced, 0);
@@ -554,8 +603,18 @@ mod tests {
         let messages = build_history(10);
         let driver: Arc<dyn LlmDriver> = Arc::new(FailDriver);
 
-        let (out, result) =
-            fold_stale_tool_results(messages, 8, 1, "test-model", None, driver).await;
+        let (out, result) = fold_stale_tool_results(
+            messages,
+            FoldConfig {
+                fold_after_turns: 8,
+                min_batch_size: 1,
+            },
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
 
         // Should still fold (with fallback stubs).
         assert!(
@@ -617,7 +676,18 @@ mod tests {
             msgs.push(tool_result_msg("recent_tool", &format!("recent {i}")));
         }
         let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver("compact summary".to_string()));
-        let (out, _result) = fold_stale_tool_results(msgs, 2, 1, "test-model", None, driver).await;
+        let (out, _result) = fold_stale_tool_results(
+            msgs,
+            FoldConfig {
+                fold_after_turns: 2,
+                min_batch_size: 1,
+            },
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
 
         // The stale ToolResult must still exist with its tool_use_id intact,
         // only `content` rewritten — without this the assistant's ToolUse{
@@ -656,8 +726,18 @@ mod tests {
         let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver(
             "should never be called — fold should skip below batch threshold".to_string(),
         ));
-        let (out, result) =
-            fold_stale_tool_results(messages.clone(), 8, 4, "test-model", None, driver).await;
+        let (out, result) = fold_stale_tool_results(
+            messages.clone(),
+            FoldConfig {
+                fold_after_turns: 8,
+                min_batch_size: 4,
+            },
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
 
         assert_eq!(
             result.groups_folded, 0,
@@ -723,7 +803,18 @@ mod tests {
             msgs.push(tool_result_msg("shell", &format!("output {i}")));
         }
         let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver("new summary".to_string()));
-        let (out, result) = fold_stale_tool_results(msgs, 8, 1, "test-model", None, driver).await;
+        let (out, result) = fold_stale_tool_results(
+            msgs,
+            FoldConfig {
+                fold_after_turns: 8,
+                min_batch_size: 1,
+            },
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
 
         // The existing fold stub must still be present in the output unchanged.
         let prior_stub_present = out.iter().any(|m| match &m.content {

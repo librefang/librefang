@@ -4084,8 +4084,14 @@ pub struct BudgetConfig {
     pub default_max_llm_tokens_per_hour: u64,
     /// Per-provider spending caps, keyed by provider id (e.g. `"moonshot"`,
     /// `"openai"`, `"litellm"`). Missing providers are unlimited.
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub providers: std::collections::HashMap<String, ProviderBudget>,
+    ///
+    /// `BTreeMap` so the serialised form is deterministic — `[budget].providers`
+    /// round-trips byte-identically across reloads, so `field_changed` in
+    /// `config_reload::build_reload_plan` (which compares JSON forms) does not
+    /// emit a spurious `HotAction::UpdateBudget` from HashMap iteration-order
+    /// drift when the operator hasn't actually touched the caps.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub providers: std::collections::BTreeMap<String, ProviderBudget>,
     /// Global default burst ratio for all agents (`0.0` = unset, use
     /// compiled default `0.2`). Overridden per-agent via
     /// `ResourceQuota.burst_ratio`.
@@ -4109,7 +4115,7 @@ impl Default for BudgetConfig {
             max_monthly_usd: 0.0,
             alert_threshold: 0.8,
             default_max_llm_tokens_per_hour: 0,
-            providers: std::collections::HashMap::new(),
+            providers: std::collections::BTreeMap::new(),
             default_burst_ratio: 0.0,
         }
     }

@@ -323,6 +323,51 @@ impl OpenAIDriver {
         m.contains("deepseek-reasoner") || m.contains("deepseek-r1")
     }
 
+    /// Resolve the [`ReasoningEchoPolicy`] for a request. Catalog metadata
+    /// on the request takes precedence; if it is the default
+    /// ([`ReasoningEchoPolicy::None`]) the driver falls back to substring
+    /// detection on the model name. The fallback exists so unknown / user-
+    /// defined / pre-policy-registry models keep working — see
+    /// librefang/librefang#4842 for the migration plan.
+    ///
+    /// **Limitation during the bridge stage**: an explicit `None` from the
+    /// catalog is indistinguishable from "field absent" and still triggers
+    /// the substring fallback. A registry author cannot currently say
+    /// "this kimi-named model genuinely has no special handling" — they
+    /// will get [`ReasoningEchoPolicy::EmptyString`] from the fallback.
+    /// This goes away once every `CompletionRequest` construction site
+    /// reads from the catalog and the fallback path is removed.
+    fn effective_reasoning_echo_policy(
+        &self,
+        request: &CompletionRequest,
+    ) -> librefang_types::model_catalog::ReasoningEchoPolicy {
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        match request.reasoning_echo_policy {
+            ReasoningEchoPolicy::None => self.fallback_reasoning_echo_policy(&request.model),
+            policy => policy,
+        }
+    }
+
+    /// Substring-based fallback for [`Self::effective_reasoning_echo_policy`].
+    /// Used when the request didn't carry an explicit policy (catalog miss
+    /// or pre-policy-registry build). Will be removed once every
+    /// `CompletionRequest` construction site reads from the catalog.
+    fn fallback_reasoning_echo_policy(
+        &self,
+        model: &str,
+    ) -> librefang_types::model_catalog::ReasoningEchoPolicy {
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        if self.is_deepseek_reasoner(model) {
+            ReasoningEchoPolicy::Strip
+        } else if self.is_deepseek_v4_thinking_with_tools(model) {
+            ReasoningEchoPolicy::Echo
+        } else if self.kimi_needs_reasoning_content(model) {
+            ReasoningEchoPolicy::EmptyString
+        } else {
+            ReasoningEchoPolicy::None
+        }
+    }
+
     /// True if this DeepSeek model has thinking mode on by default and the
     /// API **requires** `reasoning_content` to be echoed back on historical
     /// assistant messages that contain `tool_calls`. Currently matches
@@ -682,6 +727,8 @@ impl OpenAIDriver {
     /// Shared between `complete()` and `stream()`.  The caller sets
     /// `stream` / `stream_options` on the returned struct before sending.
     fn build_request(&self, request: &CompletionRequest) -> Result<OaiRequest, LlmError> {
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let echo_policy = self.effective_reasoning_echo_policy(request);
         let mut oai_messages: Vec<OaiMessage> = Vec::new();
 
         // Add system message if present
@@ -860,19 +907,18 @@ impl OpenAIDriver {
                         }
                     }
                     let has_tool_calls = !tool_calls.is_empty();
-                    let is_deepseek_r = self.is_deepseek_reasoner(&request.model);
-                    let is_deepseek_v4_thinking =
-                        self.is_deepseek_v4_thinking_with_tools(&request.model);
+                    let force_nonnull_content = echo_policy == ReasoningEchoPolicy::Strip;
                     oai_messages.push(OaiMessage {
                         role: "assistant".to_string(),
                         // ZHIPU (GLM) rejects assistant messages where content is
                         // null or omitted when tool_calls are present (error 1214).
-                        // DeepSeek-reasoner also requires a non-null content field
-                        // on all assistant messages in multi-turn conversations.
-                        // Always send an empty string for these providers so every
-                        // OpenAI-compat endpoint gets a valid payload.
+                        // DeepSeek-reasoner (Strip policy) also requires a
+                        // non-null content field on all assistant messages in
+                        // multi-turn conversations. Send an empty string for
+                        // these so every OpenAI-compat endpoint gets a valid
+                        // payload.
                         content: if text_parts.is_empty() {
-                            if has_tool_calls || is_deepseek_r {
+                            if has_tool_calls || force_nonnull_content {
                                 Some(OaiMessageContent::Text(String::new()))
                             } else {
                                 None
@@ -886,32 +932,31 @@ impl OpenAIDriver {
                             Some(tool_calls)
                         },
                         tool_call_id: None,
-                        // Provider-specific reasoning_content rules on historical
-                        // assistant turns:
-                        //   * DeepSeek-reasoner (R1): MUST be omitted — the API
-                        //     rejects requests that include it (#XXXX).
-                        //   * DeepSeek V4 Flash: MUST be echoed back on turns
-                        //     with tool_calls — the API returns 400 otherwise
-                        //     (#4842). Thinking mode is on by default and the
-                        //     spec requires the original reasoning text to be
-                        //     round-tripped.
-                        //   * Kimi: requires an empty-string reasoning_content
-                        //     when tool_calls are present (thinking is disabled
-                        //     wire-side for multi-turn compatibility).
-                        reasoning_content: if is_deepseek_r {
-                            None
-                        } else if has_tool_calls && is_deepseek_v4_thinking {
-                            // Empty Thinking blocks (or no Thinking block at
-                            // all) still need reasoning_content present — V4
-                            // Flash rejects the field being missing on a
-                            // tool_calls turn, but accepts an empty string.
-                            Some(thinking_parts.join(""))
-                        } else if has_tool_calls
-                            && self.kimi_needs_reasoning_content(&request.model)
-                        {
-                            Some(String::new())
-                        } else {
-                            None
+                        // Provider-specific reasoning_content rules on
+                        // historical assistant turns are dispatched by the
+                        // [`ReasoningEchoPolicy`] resolved at request build
+                        // time (catalog metadata, with substring fallback):
+                        //   * Strip       — omit (DeepSeek R1 rejects it).
+                        //   * Echo        — echo the original thinking text on
+                        //                   tool_calls turns (DeepSeek V4
+                        //                   Flash; #4842).
+                        //   * EmptyString — empty string on tool_calls turns
+                        //                   (Moonshot / Kimi K2; thinking is
+                        //                   also disabled wire-side below).
+                        //   * None        — omit (most providers).
+                        reasoning_content: match echo_policy {
+                            ReasoningEchoPolicy::Strip | ReasoningEchoPolicy::None => None,
+                            ReasoningEchoPolicy::Echo if has_tool_calls => {
+                                // Empty Thinking blocks (or no Thinking block
+                                // at all) still need reasoning_content present
+                                // — V4 Flash rejects the field being missing on
+                                // a tool_calls turn, but accepts empty string.
+                                Some(thinking_parts.join(""))
+                            }
+                            ReasoningEchoPolicy::EmptyString if has_tool_calls => {
+                                Some(String::new())
+                            }
+                            _ => None,
                         },
                     });
                 }
@@ -969,8 +1014,9 @@ impl OpenAIDriver {
             messages: oai_messages,
             max_tokens: mt,
             max_completion_tokens: mct,
-            temperature: if self.kimi_needs_reasoning_content(&request.model) {
-                // Kimi with thinking disabled uses fixed 0.6 for multi-turn compatibility.
+            temperature: if echo_policy == ReasoningEchoPolicy::EmptyString {
+                // Kimi (EmptyString policy) with thinking disabled uses fixed
+                // 0.6 for multi-turn compatibility.
                 Some(0.6)
             } else if temperature_must_be_one(&request.model) {
                 Some(1.0)
@@ -983,7 +1029,9 @@ impl OpenAIDriver {
             tool_choice,
             stream: false,
             stream_options: None,
-            thinking: if self.kimi_needs_reasoning_content(&request.model) {
+            // EmptyString policy disables thinking wire-side so multi-turn
+            // tool_calls don't require carrying back full reasoning_content.
+            thinking: if echo_policy == ReasoningEchoPolicy::EmptyString {
                 Some(serde_json::json!({"type": "disabled"}))
             } else {
                 None
@@ -2765,6 +2813,7 @@ mod tests {
             agent_id: None,
             session_id: None,
             step_id: None,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let oai = driver.build_request(&req).expect("build_request");
         let assistant_msg = oai
@@ -2816,6 +2865,7 @@ mod tests {
             agent_id: None,
             session_id: None,
             step_id: None,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let oai = driver.build_request(&req).expect("build_request");
         let assistant_msg = oai
@@ -2870,6 +2920,7 @@ mod tests {
             agent_id: None,
             session_id: None,
             step_id: None,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         let oai = driver.build_request(&req).expect("build_request");
         let assistant_msg = oai
@@ -2926,6 +2977,8 @@ mod tests {
                 agent_id: None,
                 session_id: None,
                 step_id: None,
+                reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(
+                ),
             };
             let oai = driver.build_request(&req).expect("build_request");
             let assistant_msg = oai
@@ -2938,6 +2991,337 @@ mod tests {
                 "{model}: must not echo reasoning_content on historical assistant turns"
             );
         }
+    }
+
+    // ----- Catalog ReasoningEchoPolicy override tests (#4842) -----
+    //
+    // These verify that an explicit policy on the request (sourced from the
+    // catalog metadata) overrides the model-name substring fallback. Each
+    // test uses a model name that the substring fallback would NOT match
+    // (`mystery-*`), so the only way the driver can produce the expected
+    // behaviour is by reading `request.reasoning_echo_policy`.
+
+    fn build_catalog_policy_test_request(
+        model: &str,
+        policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+    ) -> librefang_llm_driver::CompletionRequest {
+        use librefang_llm_driver::CompletionRequest;
+        use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+        let assistant = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Thinking {
+                    thinking: "deliberation".to_string(),
+                    provider_metadata: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "noop".to_string(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                },
+            ]),
+            pinned: false,
+            timestamp: None,
+        };
+        CompletionRequest {
+            model: model.to_string(),
+            messages: std::sync::Arc::new(vec![assistant]),
+            tools: std::sync::Arc::new(Vec::new()),
+            max_tokens: 128,
+            temperature: 0.7,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+            session_id: None,
+            step_id: None,
+            reasoning_echo_policy: policy,
+        }
+    }
+
+    /// Catalog `Echo` policy on a model the substring fallback would NOT
+    /// recognize must still produce the V4 Flash wire shape (echo thinking
+    /// text on tool_calls turns).
+    #[test]
+    fn test_catalog_echo_policy_overrides_unmatched_substring() {
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
+        let req =
+            build_catalog_policy_test_request("mystery-thinking-model", ReasoningEchoPolicy::Echo);
+        let oai = driver.build_request(&req).expect("build_request");
+        let assistant_msg = oai
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert_eq!(
+            assistant_msg.reasoning_content.as_deref(),
+            Some("deliberation"),
+            "catalog Echo policy must echo thinking text on tool_calls turn \
+             even when model name doesn't match any substring rule"
+        );
+    }
+
+    /// Catalog `Strip` policy on a model the substring fallback would NOT
+    /// recognize must produce the R1 wire shape (omit reasoning_content,
+    /// force non-null content).
+    #[test]
+    fn test_catalog_strip_policy_overrides_unmatched_substring() {
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
+        let req = build_catalog_policy_test_request("mystery-reasoner", ReasoningEchoPolicy::Strip);
+        let oai = driver.build_request(&req).expect("build_request");
+        let assistant_msg = oai
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert!(
+            assistant_msg.reasoning_content.is_none(),
+            "catalog Strip policy must omit reasoning_content"
+        );
+    }
+
+    /// Strip policy's *second* contract: force non-null `content` on
+    /// historical assistant turns even when the turn carries no tool_calls
+    /// and no text — DeepSeek-R1 rejects multi-turn requests where any
+    /// historical assistant message has a null `content`. The shared
+    /// [`build_catalog_policy_test_request`] helper produces a turn with
+    /// tool_calls, which would route through the `has_tool_calls` branch
+    /// and mask the Strip-specific forcing. This test uses a thinking-only
+    /// assistant message followed by a user message (so the assistant
+    /// turn isn't trailing and survives `strip_trailing_empty_assistant`),
+    /// so the only path that can produce `content: Some("")` on the
+    /// historical assistant is `force_nonnull_content`.
+    #[test]
+    fn test_catalog_strip_policy_forces_nonnull_content_without_tool_calls() {
+        use librefang_llm_driver::CompletionRequest;
+        use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+
+        let assistant = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::Thinking {
+                thinking: "deliberation".to_string(),
+                provider_metadata: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        };
+        let user_followup = Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::Text {
+                text: "follow-up".to_string(),
+                provider_metadata: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        };
+        let make_req = |policy: ReasoningEchoPolicy| CompletionRequest {
+            model: "mystery-reasoner".to_string(),
+            messages: std::sync::Arc::new(vec![assistant.clone(), user_followup.clone()]),
+            tools: std::sync::Arc::new(Vec::new()),
+            max_tokens: 128,
+            temperature: 0.7,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+            session_id: None,
+            step_id: None,
+            reasoning_echo_policy: policy,
+        };
+        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
+
+        // Baseline: default `None` policy on the same fixture must leave
+        // `content` null on the historical assistant. Without this
+        // assertion the Strip branch below could pass coincidentally if
+        // some unrelated branch were forcing non-null content for everyone.
+        let baseline = driver
+            .build_request(&make_req(ReasoningEchoPolicy::None))
+            .expect("build_request");
+        let baseline_assistant = baseline
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert!(
+            baseline_assistant.content.is_none(),
+            "default policy on a thinking-only historical assistant turn must \
+             produce null content; got {:?}",
+            baseline_assistant.content
+        );
+        assert!(
+            baseline_assistant
+                .tool_calls
+                .as_ref()
+                .is_none_or(|t| t.is_empty()),
+            "fixture must not carry tool_calls — otherwise the has_tool_calls branch \
+             would mask the Strip-specific content forcing"
+        );
+
+        // Strip policy on the same fixture must force `content: Some("")`
+        // on the historical assistant turn.
+        let strip = driver
+            .build_request(&make_req(ReasoningEchoPolicy::Strip))
+            .expect("build_request");
+        let strip_assistant = strip
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert!(
+            matches!(
+                strip_assistant.content,
+                Some(OaiMessageContent::Text(ref s)) if s.is_empty()
+            ),
+            "Strip policy must force non-null empty content on a historical \
+             assistant turn even when text_parts is empty and there are no \
+             tool_calls; got {:?}",
+            strip_assistant.content
+        );
+    }
+
+    /// Catalog `EmptyString` policy on a model the substring fallback would
+    /// NOT recognize must produce the Kimi wire shape: empty-string
+    /// reasoning_content on tool_calls turns + thinking disabled wire-side
+    /// + temperature pinned to 0.6.
+    ///
+    /// The model name and base URL are deliberately picked to miss every
+    /// substring rule (no `kimi`, no `moonshot`, no `deepseek-r1` /
+    /// `-reasoner` / `-v4`), so the only path that can produce the Kimi
+    /// wire shape is `request.reasoning_echo_policy` — proving the catalog
+    /// override actually wins over the fallback rather than coincidentally
+    /// agreeing with it.
+    #[test]
+    fn test_catalog_empty_string_policy_overrides_unmatched_substring() {
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
+        let req = build_catalog_policy_test_request(
+            "mystery-multi-turn-clone",
+            ReasoningEchoPolicy::EmptyString,
+        );
+        let oai = driver.build_request(&req).expect("build_request");
+        let assistant_msg = oai
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert_eq!(
+            assistant_msg.reasoning_content.as_deref(),
+            Some(""),
+            "catalog EmptyString policy must send empty reasoning_content"
+        );
+        assert_eq!(
+            oai.temperature,
+            Some(0.6),
+            "EmptyString policy must pin temperature to 0.6 for multi-turn compatibility"
+        );
+        assert_eq!(
+            oai.thinking,
+            Some(serde_json::json!({"type": "disabled"})),
+            "EmptyString policy must disable thinking wire-side"
+        );
+    }
+
+    /// Catalog `None` (the default) on a deepseek-v4-flash model name must
+    /// fall back to substring detection and still produce the Echo wire
+    /// shape — proves the fallback path is wired correctly.
+    #[test]
+    fn test_catalog_none_falls_back_to_substring_for_v4_flash() {
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        let req = build_catalog_policy_test_request("deepseek-v4-flash", ReasoningEchoPolicy::None);
+        let oai = driver.build_request(&req).expect("build_request");
+        let assistant_msg = oai
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert_eq!(
+            assistant_msg.reasoning_content.as_deref(),
+            Some("deliberation"),
+            "default policy must fall back to substring; v4-flash → Echo"
+        );
+    }
+
+    /// Catalog `None` on a `deepseek-reasoner` model name must fall back to
+    /// substring detection and produce the R1 wire shape: omitted
+    /// `reasoning_content`. Companion to the v4-flash fallback test;
+    /// covers the Strip path of the substring fallback.
+    #[test]
+    fn test_catalog_none_falls_back_to_substring_for_deepseek_reasoner() {
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        let req = build_catalog_policy_test_request("deepseek-reasoner", ReasoningEchoPolicy::None);
+        let oai = driver.build_request(&req).expect("build_request");
+        let assistant_msg = oai
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert!(
+            assistant_msg.reasoning_content.is_none(),
+            "default policy must fall back to substring; deepseek-reasoner → Strip (omit)"
+        );
+    }
+
+    /// Catalog `None` on a `kimi`-named model must fall back to substring
+    /// detection and produce the Kimi wire shape: empty-string
+    /// `reasoning_content` on tool_calls turns + temperature 0.6 +
+    /// thinking disabled. Covers the EmptyString path of the substring
+    /// fallback via the model-name branch (`model.contains("kimi")`).
+    #[test]
+    fn test_catalog_none_falls_back_to_substring_for_kimi_name() {
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
+        let req = build_catalog_policy_test_request("kimi-k2-instruct", ReasoningEchoPolicy::None);
+        let oai = driver.build_request(&req).expect("build_request");
+        let assistant_msg = oai
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert_eq!(
+            assistant_msg.reasoning_content.as_deref(),
+            Some(""),
+            "default policy must fall back to substring; kimi-name → EmptyString"
+        );
+        assert_eq!(oai.temperature, Some(0.6));
+        assert_eq!(oai.thinking, Some(serde_json::json!({"type": "disabled"})));
+    }
+
+    /// Catalog `None` on a non-kimi model name routed through a Moonshot
+    /// base URL must fall back to substring detection via the host-based
+    /// branch (`is_moonshot()`) and produce the Kimi wire shape — proves
+    /// the fallback's host-aware branch still triggers post-refactor.
+    #[test]
+    fn test_catalog_none_falls_back_to_substring_for_moonshot_host() {
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://api.moonshot.cn/v1".to_string());
+        let req = build_catalog_policy_test_request("mystery-model", ReasoningEchoPolicy::None);
+        let oai = driver.build_request(&req).expect("build_request");
+        let assistant_msg = oai
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message");
+        assert_eq!(
+            assistant_msg.reasoning_content.as_deref(),
+            Some(""),
+            "default policy must fall back to substring via is_moonshot() host check"
+        );
+        assert_eq!(oai.temperature, Some(0.6));
+        assert_eq!(oai.thinking, Some(serde_json::json!({"type": "disabled"})));
     }
 
     /// Verify that deepseek-reasoner assistant messages always get a non-null

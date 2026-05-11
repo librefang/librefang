@@ -899,6 +899,7 @@ pub async fn add_custom_model(
             .get("supports_thinking")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         aliases: vec![],
     };
 
