@@ -296,6 +296,7 @@ export const runtimeKeys = {
   status: () => [...runtimeKeys.all, "status"] as const,
   queueStatus: () => [...runtimeKeys.all, "queue", "status"] as const,
   healthDetail: () => [...runtimeKeys.all, "health", "detail"] as const,
+  healthLiveness: () => [...runtimeKeys.all, "health", "liveness"] as const,
   security: () => [...runtimeKeys.all, "security"] as const,
   backups: () => [...runtimeKeys.all, "backups"] as const,
   tasks: () => [...runtimeKeys.all, "tasks"] as const,

@@ -614,11 +614,7 @@ fn resolve_dispatch_session_id(
     }
     Some(match sender_context {
         Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
-            let scope = match &ctx.chat_id {
-                Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
-                _ => ctx.channel.clone(),
-            };
-            SessionId::for_channel(agent_id, &scope)
+            SessionId::for_sender_scope(agent_id, &ctx.channel, ctx.chat_id.as_deref())
         }
         _ => {
             let mode = session_mode_override.unwrap_or(manifest_session_mode);

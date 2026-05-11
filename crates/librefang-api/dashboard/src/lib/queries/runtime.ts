@@ -2,6 +2,7 @@ import { queryOptions, useQuery } from "@tanstack/react-query";
 import {
   getStatus,
   getQueueStatus,
+  getHealth,
   getHealthDetail,
   getSecurityStatus,
   listAuditRecent,
@@ -51,6 +52,24 @@ export const healthDetailQueryOptions = () =>
 
 export function useHealthDetail() {
   return useQuery(healthDetailQueryOptions());
+}
+
+/**
+ * Minimal-liveness query for `<OfflineBanner />`. Anchored on `/api/health`
+ * (always-public) rather than `/api/health/detail` (auth-required, operational
+ * telemetry) — see api.ts:getHealth for the rationale (#4868 review fix).
+ */
+export const healthLivenessQueryOptions = () =>
+  queryOptions({
+    queryKey: runtimeKeys.healthLiveness(),
+    queryFn: getHealth,
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false, // #3393
+  });
+
+export function useHealthLiveness() {
+  return useQuery(healthLivenessQueryOptions());
 }
 
 export const securityStatusQueryOptions = () =>

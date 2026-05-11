@@ -36,7 +36,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use librefang_types::agent::{AgentId, AgentManifest, RunningSessionSnapshot, SessionId};
+use librefang_types::agent::{
+    AgentId, AgentManifest, ResetScope, RunningSessionSnapshot, SessionId,
+};
 use librefang_types::error::LibreFangResult;
 
 use crate::approval::ApprovalManager;
@@ -200,9 +202,23 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn suspend_agent(&self, agent_id: AgentId) -> KernelResult<()>;
     fn resume_agent(&self, agent_id: AgentId) -> KernelResult<()>;
     async fn compact_agent_session(&self, agent_id: AgentId) -> KernelResult<String>;
-    fn reset_session(&self, agent_id: AgentId) -> KernelResult<()>;
-    fn reboot_session(&self, agent_id: AgentId) -> KernelResult<()>;
-    fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()>;
+    /// Compact a specific session id; channel `/compact` calls this with the
+    /// per-channel session so it doesn't accidentally summarise the agent's
+    /// registry-pointer session (#4868).
+    async fn compact_agent_session_with_id(
+        &self,
+        agent_id: AgentId,
+        session_id: Option<SessionId>,
+    ) -> KernelResult<String>;
+    /// Reset an agent's session(s). See [`ResetScope`] for the agent-wide vs.
+    /// per-session split (#4868). Async because it acquires the same
+    /// per-agent / per-session message lock that `send_message_full` holds,
+    /// to serialize against in-flight turns.
+    async fn reset_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<()>;
+    /// Hard-reboot an agent's session(s) — no summary saved. See
+    /// [`ResetScope`] for the agent-wide vs. per-session split (#4868).
+    async fn reboot_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<()>;
+    async fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()>;
     fn list_agent_sessions(&self, agent_id: AgentId) -> KernelResult<Vec<serde_json::Value>>;
     fn create_agent_session(
         &self,
@@ -763,14 +779,21 @@ impl KernelApi for LibreFangKernel {
     async fn compact_agent_session(&self, agent_id: AgentId) -> KernelResult<String> {
         Self::compact_agent_session(self, agent_id).await
     }
-    fn reset_session(&self, agent_id: AgentId) -> KernelResult<()> {
-        Self::reset_session(self, agent_id)
+    async fn compact_agent_session_with_id(
+        &self,
+        agent_id: AgentId,
+        session_id: Option<SessionId>,
+    ) -> KernelResult<String> {
+        Self::compact_agent_session_with_id(self, agent_id, session_id).await
     }
-    fn reboot_session(&self, agent_id: AgentId) -> KernelResult<()> {
-        Self::reboot_session(self, agent_id)
+    async fn reset_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<()> {
+        Self::reset_session(self, agent_id, scope).await
     }
-    fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()> {
-        Self::clear_agent_history(self, agent_id)
+    async fn reboot_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<()> {
+        Self::reboot_session(self, agent_id, scope).await
+    }
+    async fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()> {
+        Self::clear_agent_history(self, agent_id).await
     }
     fn list_agent_sessions(&self, agent_id: AgentId) -> KernelResult<Vec<serde_json::Value>> {
         Self::list_agent_sessions(self, agent_id)
