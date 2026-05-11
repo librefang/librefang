@@ -177,6 +177,7 @@ use crate::types;
         routes::get_provider,
         routes::set_provider_key,
         routes::delete_provider_key,
+        routes::enable_provider,
         routes::test_provider,
         routes::set_provider_url,
         routes::set_default_provider,
