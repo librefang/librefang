@@ -27,6 +27,7 @@ import {
   updateAgentTools,
   getAgentTemplateToml,
   setAgentMcpServers,
+  setAgentSkills,
 } from "../http/client";
 import type { PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
 import { clearChatSessionCacheForAgent } from "../chatSessionCache";
@@ -531,6 +532,24 @@ export function useSetAgentMcpServers() {
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
+    },
+  });
+}
+
+/** PUT /api/agents/{id}/skills — replace the agent's skill allowlist. */
+export function useSetAgentSkills() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      skills,
+    }: {
+      agentId: string;
+      skills: string[];
+    }) => setAgentSkills(agentId, skills),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.skills(variables.agentId) });
     },
   });
 }

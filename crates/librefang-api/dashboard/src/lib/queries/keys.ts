@@ -45,6 +45,8 @@ export const agentKeys = {
     [...agentKeys.all, "tools", agentId] as const,
   mcpServers: (agentId: string) =>
     [...agentKeys.all, "mcpServers", agentId] as const,
+  skills: (agentId: string) =>
+    [...agentKeys.all, "skills", agentId] as const,
 };
 
 export const toolKeys = {

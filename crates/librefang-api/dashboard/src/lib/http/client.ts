@@ -129,6 +129,8 @@ export {
   getAgentTemplateToml,
   // agent-level mcp
   getAgentMcpServers,
+  // agent-level skills
+  getAgentSkills,
   // overview
   loadDashboardSnapshot,
   getVersionInfo,
@@ -236,6 +238,8 @@ export {
   sendHandMessage,
   // agent-level mcp
   setAgentMcpServers,
+  // agent-level skills
+  setAgentSkills,
   // mcp
   addMcpServer,
   updateMcpServer,
@@ -386,4 +390,6 @@ export type {
   EffectiveChannelToolPolicy,
   // agent-level mcp
   AgentMcpServersResponse,
+  // agent-level skills
+  AgentSkillsResponse,
 } from "../../api";

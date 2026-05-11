@@ -57,6 +57,7 @@ import {
   useAgentTemplates,
   useAgentTools,
   useAgentMcpServers,
+  useAgentSkills,
   useTools,
 } from "../lib/queries/agents";
 import {
@@ -72,6 +73,7 @@ import {
   useSuspendAgent,
   useUpdateAgentTools,
   useSetAgentMcpServers,
+  useSetAgentSkills,
 } from "../lib/mutations/agents";
 
 /**
@@ -506,6 +508,10 @@ export function AgentsPage() {
     enabled: !!detailAgent && agentTab === "mcp",
   });
   const setAgentMcpServersMutation = useSetAgentMcpServers();
+  const agentSkillsQuery = useAgentSkills(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "skills",
+  });
+  const setAgentSkillsMutation = useSetAgentSkills();
   // Per-agent session list — Conversation tab uses this directly. The
   // global /api/sessions used previously was paginated to 50, so the
   // agent's latest session was often not in the page.
@@ -1172,41 +1178,49 @@ export function AgentsPage() {
     );
   };
 
-  // ---------- Skills tab — 2-col card grid per design canvas
+  // ---------- Skills tab — inline per-agent assignment via API
   const renderSkillsTab = (agent: AgentDetail) => {
-    const view = agent as AgentView;
-    const skills: string[] = Array.isArray(view.skills)
-      ? view.skills
-      : Array.isArray(view.capabilities?.skills)
-        ? view.capabilities!.skills!
-        : [];
-    // skills_mode: 'none' (skills_disabled), 'all' (no allowlist — uses
-    // every skill in the registry, the default), or 'allowlist' (manifest
-    // pinned a list). Each needs a different empty-state copy; the
-    // previous code collapsed them all to "0 installed".
-    const skillsMode = (agent as AgentDetail).skills_mode;
-    const usesAllSkills = skillsMode === "all" && skills.length === 0;
-    const skillsDisabled = skillsMode === "none";
+    const skillsData = agentSkillsQuery.data;
+    const assigned: string[] = skillsData?.assigned ?? [];
+    const available: string[] = skillsData?.available ?? [];
+    const mode: string = skillsData?.mode ?? (agent as AgentDetail).skills_mode ?? "all";
+    const usesAll = mode === "all";
+    const isDisabled = mode === "none";
+    const isLoading = agentSkillsQuery.isLoading;
+
+    const handleToggleSkill = (skillName: string) => {
+      if (!agent.id) return;
+      const isAssigned = assigned.includes(skillName);
+      const next = isAssigned
+        ? assigned.filter((s) => s !== skillName)
+        : [...assigned, skillName];
+      setAgentSkillsMutation.mutate({ agentId: agent.id, skills: next });
+    };
+
+    const handleCustomize = () => {
+      if (!agent.id) return;
+      setAgentSkillsMutation.mutate({ agentId: agent.id, skills: [...available] });
+    };
+
+    const handleUseAll = () => {
+      if (!agent.id) return;
+      setAgentSkillsMutation.mutate({ agentId: agent.id, skills: [] });
+    };
+
     return (
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
           <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
             {t("agents.detail.installed_skills", { defaultValue: "Installed skills" })}
             {" · "}
-            {usesAllSkills
-              ? t("agents.detail.skills_all", { defaultValue: "all" })
-              : skills.length}
+            {isDisabled
+              ? t("agents.detail.skills_none", { defaultValue: "disabled" })
+              : usesAll
+                ? t("agents.detail.skills_all", { defaultValue: "all" })
+                : assigned.length}
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            leftIcon={<Plus className="h-3.5 w-3.5" />}
-            onClick={() => navigate({ to: "/skills" })}
-          >
-            {t("agents.detail.install_skill", { defaultValue: "Install" })}
-          </Button>
         </div>
-        {skillsDisabled ? (
+        {isDisabled ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
             <X className="w-4 h-4 text-text-dim shrink-0 mt-0.5" />
             <div className="min-w-0 flex-1">
@@ -1220,45 +1234,112 @@ export function AgentsPage() {
               </div>
             </div>
           </div>
-        ) : usesAllSkills ? (
-          <div
-            onClick={() => navigate({ to: "/skills" })}
-            className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3 cursor-pointer hover:border-brand/40 transition-colors"
-          >
-            <Sparkles className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
-            <div className="min-w-0 flex-1">
-              <div className="font-mono text-[12.5px] font-medium text-text-main">
-                {t("agents.detail.skills_all_title", { defaultValue: "Using all available skills" })}
-              </div>
-              <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
-                {t("agents.detail.skills_all_desc", {
-                  defaultValue: "manifest doesn't pin an allowlist — every skill in the registry is available",
-                })}
-              </div>
-            </div>
+        ) : isLoading ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
+            <Loader2 className="w-4 h-4 animate-spin text-text-dim" />
           </div>
-        ) : skills.length === 0 ? (
-          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
-            {t("agents.detail.no_skills", { defaultValue: "No skills installed for this agent." })}
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            {skills.map((s) => (
-              <div
-                key={s}
-                onClick={() => navigate({ to: "/skills" })}
-                className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 cursor-pointer hover:border-brand/40 transition-colors flex items-start justify-between gap-2"
-              >
+        ) : usesAll ? (
+          <>
+            {available.length > 0 ? (
+              <>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {available.map((s) => (
+                    <div
+                      key={s}
+                      className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 flex items-start justify-between gap-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
+                        <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                          {t("agents.detail.skill_included", { defaultValue: "included" })}
+                        </div>
+                      </div>
+                      <Sparkles className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+                    </div>
+                  ))}
+                </div>
+                <button
+                  onClick={handleCustomize}
+                  className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+                >
+                  {t("agents.detail.skills_customize", { defaultValue: "Customize — switch to allowlist" })}
+                </button>
+              </>
+            ) : (
+              <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
+                <Sparkles className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
                 <div className="min-w-0 flex-1">
-                  <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
-                  <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
-                    {t("agents.detail.skill_meta", { defaultValue: "installed" })}
+                  <div className="font-mono text-[12.5px] font-medium text-text-main">
+                    {t("agents.detail.skills_all_title", { defaultValue: "Using all available skills" })}
+                  </div>
+                  <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                    {t("agents.detail.skills_all_desc", {
+                      defaultValue: "no skills registered in the system yet",
+                    })}
                   </div>
                 </div>
-                <Sparkles className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
               </div>
-            ))}
-          </div>
+            )}
+          </>
+        ) : (
+          <>
+            {assigned.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {assigned.map((s) => (
+                  <div
+                    key={s}
+                    className="px-3 py-2.5 rounded-md border border-brand/30 bg-main/40 flex items-start justify-between gap-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
+                      <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                        {t("agents.detail.skill_assigned", { defaultValue: "assigned" })}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => handleToggleSkill(s)}
+                      className="text-text-dim hover:text-red-400 transition-colors shrink-0 mt-0.5"
+                      title={t("agents.detail.skill_remove", { defaultValue: "Remove from allowlist" })}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {available.filter((s) => !assigned.includes(s)).length > 0 && (
+              <>
+                <div className="text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim mt-1">
+                  {t("agents.detail.skills_available", { defaultValue: "Available" })}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {available
+                    .filter((s) => !assigned.includes(s))
+                    .map((s) => (
+                      <div
+                        key={s}
+                        onClick={() => handleToggleSkill(s)}
+                        className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 cursor-pointer hover:border-brand/40 transition-colors flex items-start justify-between gap-2"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
+                          <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                            {t("agents.detail.skill_click_assign", { defaultValue: "click to assign" })}
+                          </div>
+                        </div>
+                        <Sparkles className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+                      </div>
+                    ))}
+                </div>
+              </>
+            )}
+            <button
+              onClick={handleUseAll}
+              className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+            >
+              {t("agents.detail.skills_reset_to_all", { defaultValue: "Reset to use all skills" })}
+            </button>
+          </>
         )}
       </div>
     );
@@ -1270,7 +1351,7 @@ export function AgentsPage() {
     const assigned: string[] = mcpData?.assigned ?? (agent as AgentView).mcp_servers ?? [];
     const available: string[] = mcpData?.available ?? [];
     const mode: string = mcpData?.mode ?? (agent as AgentView).mcp_servers_mode ?? "all";
-    const usesAll = mode === "all" && assigned.length === 0;
+    const usesAll = mode === "all";
     const isLoading = agentMcpServersQuery.isLoading;
 
     const handleToggleServer = (serverName: string) => {
@@ -1297,36 +1378,55 @@ export function AgentsPage() {
               ? t("agents.detail.mcp_all", { defaultValue: "all" })
               : assigned.length}
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            leftIcon={<Plus className="h-3.5 w-3.5" />}
-            onClick={() => navigate({ to: "/mcp-servers" })}
-          >
-            {t("agents.detail.manage_mcp", { defaultValue: "Manage" })}
-          </Button>
         </div>
         {isLoading ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
             <Loader2 className="w-4 h-4 animate-spin text-text-dim" />
           </div>
         ) : usesAll ? (
-          <div
-            onClick={() => navigate({ to: "/mcp-servers" })}
-            className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3 cursor-pointer hover:border-brand/40 transition-colors"
-          >
-            <Plug className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
-            <div className="min-w-0 flex-1">
-              <div className="font-mono text-[12.5px] font-medium text-text-main">
-                {t("agents.detail.mcp_all_title", { defaultValue: "Using all connected MCP servers" })}
+          available.length > 0 ? (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {available.map((s) => (
+                  <div
+                    key={s}
+                    className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 flex items-start justify-between gap-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
+                      <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                        {t("agents.detail.mcp_included", { defaultValue: "included" })}
+                      </div>
+                    </div>
+                    <Plug className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+                  </div>
+                ))}
               </div>
-              <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
-                {t("agents.detail.mcp_all_desc", {
-                  defaultValue: "manifest doesn't pin an allowlist — every connected MCP server is available",
-                })}
+              <button
+                onClick={() => {
+                  if (!agent.id) return;
+                  setAgentMcpServersMutation.mutate({ agentId: agent.id, servers: [...available] });
+                }}
+                className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+              >
+                {t("agents.detail.mcp_customize", { defaultValue: "Customize — switch to allowlist" })}
+              </button>
+            </>
+          ) : (
+            <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
+              <Plug className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
+              <div className="min-w-0 flex-1">
+                <div className="font-mono text-[12.5px] font-medium text-text-main">
+                  {t("agents.detail.mcp_all_title", { defaultValue: "Using all connected MCP servers" })}
+                </div>
+                <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                  {t("agents.detail.mcp_all_desc", {
+                    defaultValue: "no MCP servers connected yet",
+                  })}
+                </div>
               </div>
             </div>
-          </div>
+          )
         ) : assigned.length === 0 && available.length === 0 ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
             {t("agents.detail.no_mcp", { defaultValue: "No MCP servers connected." })}

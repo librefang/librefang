@@ -1429,6 +1429,23 @@ export async function setAgentMcpServers(agentId: string, servers: string[]): Pr
   return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/mcp_servers`, { mcp_servers: servers });
 }
 
+/** GET /api/agents/{id}/skills — agent skill assignment info. */
+export interface AgentSkillsResponse {
+  assigned: string[];
+  available: string[];
+  mode: "all" | "allowlist" | "none";
+  disabled: boolean;
+}
+
+export async function getAgentSkills(agentId: string): Promise<AgentSkillsResponse> {
+  return get<AgentSkillsResponse>(`/api/agents/${encodeURIComponent(agentId)}/skills`);
+}
+
+/** PUT /api/agents/{id}/skills — update the agent's skill allowlist. */
+export async function setAgentSkills(agentId: string, skills: string[]): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/skills`, { skills });
+}
+
 export interface AgentToolsResponse {
   capabilities_tools?: string[] | null;
   tool_allowlist?: string[] | null;
