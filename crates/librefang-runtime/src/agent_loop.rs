@@ -3292,8 +3292,7 @@ async fn finalize_successful_end_turn(
 /// operators can grep `"streaming"` vs `"non-streaming"` in production.
 async fn maybe_fold_stale_tool_results(
     messages: Vec<Message>,
-    fold_after_turns: u32,
-    fold_min_batch_size: u32,
+    fold_cfg: crate::history_fold::FoldConfig,
     model: &str,
     aux_client: Option<&crate::aux_client::AuxClient>,
     driver: Arc<dyn LlmDriver>,
@@ -3305,13 +3304,14 @@ async fn maybe_fold_stale_tool_results(
     // `fold_after_turns * 2` messages — before any tool-result can be
     // classified stale.  Skipping the call avoids even the index walk
     // inside `collect_stale_indices` on every short-session iteration.
-    if fold_after_turns == 0 || messages.len() <= (fold_after_turns as usize).saturating_mul(2) {
+    if fold_cfg.fold_after_turns == 0
+        || messages.len() <= (fold_cfg.fold_after_turns as usize).saturating_mul(2)
+    {
         return messages;
     }
     let (folded, fold_result) = crate::history_fold::fold_stale_tool_results(
         messages,
-        fold_after_turns,
-        fold_min_batch_size,
+        fold_cfg,
         model,
         aux_client,
         driver,
@@ -3802,8 +3802,10 @@ pub async fn run_agent_loop(
             .unwrap_or_default();
         messages = maybe_fold_stale_tool_results(
             messages,
-            tr_fold_after_turns,
-            tr_fold_min_batch_size,
+            crate::history_fold::FoldConfig {
+                fold_after_turns: tr_fold_after_turns,
+                min_batch_size: tr_fold_min_batch_size,
+            },
             &manifest.model.model,
             opts.aux_client.as_deref(),
             driver.clone(),
@@ -5294,8 +5296,10 @@ pub async fn run_agent_loop_streaming(
             .unwrap_or_default();
         messages = maybe_fold_stale_tool_results(
             messages,
-            tr_fold_after_turns,
-            tr_fold_min_batch_size,
+            crate::history_fold::FoldConfig {
+                fold_after_turns: tr_fold_after_turns,
+                min_batch_size: tr_fold_min_batch_size,
+            },
             &manifest.model.model,
             opts.aux_client.as_deref(),
             driver.clone(),

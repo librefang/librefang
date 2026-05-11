@@ -78,29 +78,48 @@ pub struct FoldResult {
     pub groups_used_fallback: usize,
 }
 
+/// Tuning knobs for a single [`fold_stale_tool_results`] pass.
+///
+/// Bundled so the function signature stays under clippy's
+/// `too_many_arguments` cap as new dispatch fields (e.g. catalog-driven
+/// `reasoning_echo_policy`, #4842) accrue.  Sourced from the kernel's
+/// runtime config — see `KernelConfig.history_fold` in
+/// `librefang-types`.
+#[derive(Debug, Clone, Copy)]
+pub struct FoldConfig {
+    /// Fold tool results older than this many assistant turns.
+    pub fold_after_turns: u32,
+    /// Only run a fold pass when at least this many newly-stale (i.e.
+    /// not already-folded) tool-result messages have accumulated.
+    /// Amortises the aux-LLM cost on long sessions where each new turn
+    /// would otherwise drag exactly one new message across the staleness
+    /// boundary and trigger another fold call. Set to `1` to disable the
+    /// batch threshold (fold every turn); `0` is treated as `1`.
+    pub min_batch_size: u32,
+}
+
 /// Fold stale tool-result messages in `messages`.
 ///
-/// `fold_after_turns` — fold tool results older than this many assistant turns.
-/// `min_batch_size` — only run a fold pass when at least this many newly-stale
-/// (i.e. not already-folded) tool-result messages have accumulated. Amortises
-/// the aux-LLM cost on long sessions where each new turn would otherwise drag
-/// exactly one new message across the staleness boundary and trigger another
-/// fold call. Set to `1` to disable the batch threshold (fold every turn);
-/// `0` is treated as `1`.
+/// `cfg` carries the fold-tuning knobs (see [`FoldConfig`]).
 /// `model` — model slug forwarded to the summariser.
 /// `aux_client` — optional aux-LLM client; when `None`, fallback text is used.
 /// `driver` — primary driver (used when aux chain resolves to primary).
+/// `reasoning_echo_policy` — catalog-driven dispatch hint for the
+/// OpenAI-compatible driver (#4842).
 ///
 /// Returns the (possibly modified) message list and a [`FoldResult`] summary.
 pub async fn fold_stale_tool_results(
     mut messages: Vec<Message>,
-    fold_after_turns: u32,
-    min_batch_size: u32,
+    cfg: FoldConfig,
     model: &str,
     aux_client: Option<&AuxClient>,
     driver: Arc<dyn LlmDriver>,
     reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> (Vec<Message>, FoldResult) {
+    let FoldConfig {
+        fold_after_turns,
+        min_batch_size,
+    } = cfg;
     if fold_after_turns == 0 {
         return (messages, FoldResult::default());
     }
@@ -521,8 +540,10 @@ mod tests {
 
         let (out, result) = fold_stale_tool_results(
             messages,
-            8,
-            1,
+            FoldConfig {
+                fold_after_turns: 8,
+                min_batch_size: 1,
+            },
             "test-model",
             None,
             driver,
@@ -560,8 +581,10 @@ mod tests {
 
         let (out, result) = fold_stale_tool_results(
             messages,
-            8,
-            1,
+            FoldConfig {
+                fold_after_turns: 8,
+                min_batch_size: 1,
+            },
             "test-model",
             None,
             driver,
@@ -582,8 +605,10 @@ mod tests {
 
         let (out, result) = fold_stale_tool_results(
             messages,
-            8,
-            1,
+            FoldConfig {
+                fold_after_turns: 8,
+                min_batch_size: 1,
+            },
             "test-model",
             None,
             driver,
@@ -653,8 +678,10 @@ mod tests {
         let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver("compact summary".to_string()));
         let (out, _result) = fold_stale_tool_results(
             msgs,
-            2,
-            1,
+            FoldConfig {
+                fold_after_turns: 2,
+                min_batch_size: 1,
+            },
             "test-model",
             None,
             driver,
@@ -701,8 +728,10 @@ mod tests {
         ));
         let (out, result) = fold_stale_tool_results(
             messages.clone(),
-            8,
-            4,
+            FoldConfig {
+                fold_after_turns: 8,
+                min_batch_size: 4,
+            },
             "test-model",
             None,
             driver,
@@ -776,8 +805,10 @@ mod tests {
         let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver("new summary".to_string()));
         let (out, result) = fold_stale_tool_results(
             msgs,
-            8,
-            1,
+            FoldConfig {
+                fold_after_turns: 8,
+                min_batch_size: 1,
+            },
             "test-model",
             None,
             driver,
