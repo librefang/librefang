@@ -10040,6 +10040,41 @@ mod tests {
                  missing {expected}"
             );
         }
+
+        // (5) Second-call no-op: now that session.messages carries fold
+        // stubs, calling the wrapper again on a fresh working clone must
+        // NOT rewrite session.messages a second time — the
+        // `is_already_folded` short-circuit fires inside
+        // `collect_stale_indices`, no aux-LLM call, no new rewrites, and
+        // `messages_generation` MUST stay where it is.  Without this
+        // invariant the persistence fix only saves one round-trip per
+        // session lifetime instead of all subsequent ones.
+        let gen_after_first = session.messages_generation;
+        let working_after_first = session.messages.clone();
+        let aux_driver_2: Arc<dyn LlmDriver> = Arc::new(FoldSummaryDriver);
+        let aux_client_2 =
+            crate::aux_client::AuxClient::with_primary_only(Arc::clone(&aux_driver_2));
+        let _ = maybe_fold_stale_tool_results(
+            working_after_first,
+            &mut session,
+            FoldConfig {
+                fold_after_turns: 2,
+                min_batch_size: 1,
+            },
+            "test-model",
+            Some(&aux_client_2),
+            aux_driver_2,
+            false,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+        assert_eq!(
+            session.messages_generation,
+            gen_after_first,
+            "second fold pass on already-folded session must NOT advance \
+             messages_generation; pre={gen_after_first} post={post}",
+            post = session.messages_generation,
+        );
     }
 
     #[tokio::test]

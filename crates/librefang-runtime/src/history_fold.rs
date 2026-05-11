@@ -85,6 +85,15 @@ const FOLD_PREVIEW_CHARS: usize = 500;
 /// Static-stub text used when the aux-LLM summarisation call fails outright.
 const FALLBACK_SUMMARY: &str = "[summarisation unavailable]";
 
+/// Hard cap on `max_tokens` requested from the summariser.  Several
+/// providers (Groq Llama-3.1, Cerebras, older Anthropic SKUs) reject
+/// `max_tokens` above 8192 with a 400; 1-2 sentence summaries × ~125
+/// blocks already saturates ~8k completion tokens, so the cap is
+/// generous in practice.  A catalog-driven per-model cap would be the
+/// long-term shape but bridges into the model catalog crate; static 8k
+/// is the simplest safe default until a fold pass actually exceeds it.
+const MAX_FOLD_OUTPUT_TOKENS: usize = 8_192;
+
 /// Result of a single fold pass.
 #[derive(Debug, Default)]
 pub struct FoldResult {
@@ -141,7 +150,8 @@ pub struct FoldConfig {
 /// Returns the (possibly modified) message list and a [`FoldResult`]
 /// summary.  Callers MUST also replay `result.rewrites` onto the durable
 /// `session.messages` and mark the session mutated — otherwise the fold
-/// is performed again from scratch on the next turn.
+/// is performed again from scratch on the next turn.  See
+/// [`apply_fold_rewrites`] for the recommended replay helper.
 pub async fn fold_stale_tool_results(
     mut messages: Vec<Message>,
     cfg: FoldConfig,
@@ -221,11 +231,13 @@ pub async fn fold_stale_tool_results(
                 "history_fold: summarised tool-result(s) in 1 batched call"
             );
             // Surface model-returned ids that do not match any stale
-            // tool_use_id.  Common failure modes: trailing whitespace,
-            // double-quoting (`"\"tid_3\""`), Unicode-normalised dash
-            // variants.  Without this warn the affected blocks silently
-            // fall back to `FALLBACK_SUMMARY` and operators have no way
-            // to spot the drift.
+            // tool_use_id AND stale ids that the model silently omitted.
+            // Common failure modes: trailing whitespace, double-quoting
+            // (`"\"tid_3\""`), Unicode-normalised dash variants, model
+            // under-delivery (returns summaries for K of N stale blocks).
+            // Without these warns the affected blocks silently fall back
+            // to `FALLBACK_SUMMARY` and operators have no way to spot
+            // the drift.
             let stale_id_set: std::collections::BTreeSet<&str> = stale_blocks
                 .iter()
                 .map(|b| b.tool_use_id.as_str())
@@ -239,6 +251,17 @@ pub async fn fold_stale_tool_results(
                 warn!(
                     unmatched_ids = ?unmatched,
                     "history_fold: model returned ids that did not match any stale tool_use_id — those blocks fall back to the static stub"
+                );
+            }
+            let missing: Vec<&str> = stale_id_set
+                .iter()
+                .copied()
+                .filter(|id| !map.contains_key(*id))
+                .collect();
+            if !missing.is_empty() {
+                warn!(
+                    missing_ids = ?missing,
+                    "history_fold: model omitted summaries for some stale tool_use_ids — those blocks fall back to the static stub"
                 );
             }
             (map, None)
@@ -306,9 +329,10 @@ pub async fn fold_stale_tool_results(
 /// caller is responsible for invoking `session.mark_messages_mutated()`
 /// in that case.
 ///
-/// This is the companion to the `rewrites` field added in #4866 to fix
-/// axis 2 (fold was previously applied only to a working clone, leaving
-/// `session.messages` to be re-folded from scratch every turn).
+/// This is the companion to [`fold_stale_tool_results`] and the
+/// [`FoldResult::rewrites`] field added in #4866 to fix axis 2 (fold was
+/// previously applied only to a working clone, leaving `session.messages`
+/// to be re-folded from scratch every turn).
 pub fn apply_fold_rewrites(messages: &mut [Message], rewrites: &BTreeMap<String, String>) -> bool {
     if rewrites.is_empty() {
         return false;
@@ -501,11 +525,8 @@ async fn summarise_batch(
     // Headroom for N short summaries plus the JSON wrapping.  256 was the
     // pre-#4866 per-group cap; with N blocks per call we need linear
     // headroom — 64 tokens per block is generous for 1-2 sentence outputs.
-    // Cap at 8192 because several providers (Groq Llama-3.1, Cerebras,
-    // older Anthropic SKUs) reject `max_tokens` above that with a 400 —
-    // and 1-2 sentences × ~125 blocks already saturates ~8k completion
-    // tokens, beyond which the per-block summary stops fitting anyway.
-    const MAX_FOLD_OUTPUT_TOKENS: usize = 8_192;
+    // Capped at MAX_FOLD_OUTPUT_TOKENS (see module-level const for the
+    // rationale).
     let max_tokens = std::cmp::max(256_usize, 64usize.saturating_mul(blocks.len()))
         .min(MAX_FOLD_OUTPUT_TOKENS) as u32;
 
@@ -577,6 +598,13 @@ fn parse_labeled_summaries(text: &str) -> Result<BTreeMap<String, String>, Strin
         serde_json::Value::Object(_) => vec![value],
         _ => return Err("expected JSON array or object".into()),
     };
+    // Distinguish "model returned an empty array" from "model returned
+    // entries but none had the {id,summary} shape" — the two failure
+    // modes need different operator interventions and squashing them
+    // into one error string costs debugging time.
+    if entries.is_empty() {
+        return Err("JSON array was empty — model returned no summaries".into());
+    }
     let mut out: BTreeMap<String, String> = BTreeMap::new();
     for entry in entries {
         if let (Some(id), Some(summary)) = (
@@ -587,7 +615,7 @@ fn parse_labeled_summaries(text: &str) -> Result<BTreeMap<String, String>, Strin
         }
     }
     if out.is_empty() {
-        return Err("JSON parsed but contained no {id,summary} entries".into());
+        return Err("JSON entries did not contain any {id,summary} pairs".into());
     }
     Ok(out)
 }
@@ -1278,6 +1306,56 @@ mod tests {
         assert!(
             all_stale_carry_raw_prose,
             "parse failure must apply the raw response as bulk summary, not the static stub"
+        );
+    }
+
+    /// JSON parse succeeds but every returned `id` is bogus (no overlap
+    /// with stale `tool_use_id`s).  The Ok-path runs, the per-block
+    /// apply loop finds no matching summary, every block falls back to
+    /// the static stub.  `groups_used_fallback` stays 0 (the aux-LLM
+    /// call itself succeeded — the operator-visible drift is surfaced
+    /// via the unmatched-ids warn, not this counter).
+    #[tokio::test]
+    async fn parse_succeeds_but_all_ids_bogus_falls_back_per_block() {
+        let messages = build_history(10); // tid_0..tid_9
+        let bogus = r#"[{"id":"not_a_real_id","summary":"won't match anything"}]"#;
+        let driver: Arc<dyn LlmDriver> = Arc::new(OkDriver(bogus.to_string()));
+
+        let (out, result) = fold_stale_tool_results(
+            messages,
+            FoldConfig {
+                fold_after_turns: 2,
+                min_batch_size: 1,
+            },
+            "test-model",
+            None,
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        // Ok-path → aux-call-failure counter stays 0 even though every
+        // block ended up on the static stub.
+        assert_eq!(result.groups_used_fallback, 0);
+        // But every folded block should carry the static FALLBACK_SUMMARY
+        // marker, not arbitrary text.
+        let stale_count = out
+            .iter()
+            .filter(|m| match &m.content {
+                MessageContent::Blocks(blocks) => blocks.iter().any(|b| match b {
+                    ContentBlock::ToolResult { content, .. } => {
+                        content.starts_with(FOLD_PREFIX)
+                            && content.contains("summarisation unavailable")
+                    }
+                    _ => false,
+                }),
+                _ => false,
+            })
+            .count();
+        assert!(
+            stale_count >= 8,
+            "every stale block must carry the static fallback stub when no \
+             returned id matches; saw {stale_count}"
         );
     }
 
