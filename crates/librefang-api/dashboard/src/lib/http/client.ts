@@ -133,6 +133,7 @@ export {
   // runtime
   getStatus,
   getQueueStatus,
+  getHealth,
   getHealthDetail,
   getSecurityStatus,
   listBackups,

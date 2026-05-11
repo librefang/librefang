@@ -696,14 +696,18 @@ pub const PUBLIC_ROUTES_ALWAYS: &[PublicRoute] = &[
     PublicRoute::exact_any("/api/pairing/complete"),
     // Minimal liveness probes
     PublicRoute::exact_any("/api/health"),
-    // Detailed liveness probe consumed by `<OfflineBanner />`, which
-    // mounts before the auth check completes and polls every 30s
-    // regardless of whether the user has logged in. Its payload is
-    // daemon liveness + build/uptime metadata — same security profile
-    // as `/api/health` / `/api/version` — so unauthenticated polling
-    // produced an endless 401 storm in server logs with zero security
-    // upside. Always-public.
-    PublicRoute::exact_any("/api/health/detail"),
+    // NOTE: `/api/health/detail` is intentionally NOT public here. Its
+    // payload includes `panic_count`, `restart_count`, `agent_count`,
+    // embedding / extraction model ids, `config_warnings` from
+    // `KernelConfig::validate()`, budget percentages, and LLM latency —
+    // i.e. operational telemetry that should not be reachable from a
+    // cold probe. The dashboard's `<OfflineBanner />` previously polled
+    // this endpoint pre-auth and #4893 worked around the 401 spam by
+    // exposing the detail payload publicly; the correct fix is for the
+    // banner to poll the genuinely minimal `/api/health` instead, which
+    // is what it does now. The middleware-internal comment block below
+    // (covering the dashboard-read group) has long explained this
+    // contract; this PR restores it (#4868 review).
     PublicRoute::exact_any("/api/version"),
     PublicRoute::exact_any("/api/versions"),
     // GitHub Copilot OAuth — prefix, any method
