@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 38;
+const SCHEMA_VERSION: u32 = 39;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -103,6 +103,11 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // missing, every approval-audit INSERT fails, and the user never
     // sees the approval card.
     run_step!(38, migrate_v38);
+    // v39 (#4898): per-session model override. Adds `model_override TEXT`
+    // to `sessions` so the dashboard chat picker can pin a model to one
+    // session without touching the agent manifest. NULL means "use the
+    // agent default" (backwards-compatible with all existing rows).
+    run_step!(39, migrate_v39);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1415,6 +1420,32 @@ fn migrate_v38(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (38, datetime('now'), 'Backfill approval_audit.second_factor_used for upgraded DBs (#4874)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 39: Per-session model override (#4898).
+///
+/// Adds a nullable `model_override` TEXT column to `sessions`. When set,
+/// the kernel's `execute_llm_agent` uses this value instead of the agent
+/// manifest's `model.model` / `model.provider` fields for LLM dispatch on
+/// that session. `NULL` preserves the existing behaviour (agent default).
+///
+/// The column stores `"<provider>/<model>"` when a provider is specified,
+/// or just `"<model>"` for provider-agnostic overrides. The API layer
+/// (`PATCH /api/sessions/{id}/model`) sets and clears it; `NULL` body
+/// clears the override and restores the agent default.
+fn migrate_v39(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "sessions", "model_override") {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN model_override TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (39, datetime('now'), 'Add model_override column to sessions for per-session model pin (#4898)')",
         [],
     )?;
     Ok(())

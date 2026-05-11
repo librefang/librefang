@@ -578,6 +578,8 @@ impl LibreFangKernel {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: Some("ephemeral /btw".to_string()),
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -1889,6 +1891,8 @@ impl LibreFangKernel {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         });

@@ -80,6 +80,13 @@ pub struct Session {
     pub context_window_tokens: u64,
     /// Optional human-readable session label.
     pub label: Option<String>,
+    /// Per-session model override (issue #4898).
+    ///
+    /// When `Some`, `execute_llm_agent` applies this model instead of the
+    /// agent manifest's `model.model` / `model.provider`. The value uses
+    /// the same `"<provider>/<model>"` or `"<model>"` format as the cron
+    /// `AgentTurn.model_override` field. `None` means "use the agent default".
+    pub model_override: Option<String>,
     /// Monotonically incremented on every mutation to `messages`.
     /// Used to skip redundant repair passes when the history hasn't changed.
     pub messages_generation: u64,
@@ -250,7 +257,7 @@ impl SessionStore {
     pub fn get_session(&self, session_id: SessionId) -> LibreFangResult<Option<Session>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
-            .prepare("SELECT agent_id, messages, context_window_tokens, label FROM sessions WHERE id = ?1")
+            .prepare("SELECT agent_id, messages, context_window_tokens, label, model_override FROM sessions WHERE id = ?1")
             .map_err(LibreFangError::memory)?;
 
         let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
@@ -258,11 +265,12 @@ impl SessionStore {
             let messages_blob: Vec<u8> = row.get(1)?;
             let tokens: i64 = row.get(2)?;
             let label: Option<String> = row.get(3).unwrap_or(None);
-            Ok((agent_str, messages_blob, tokens, label))
+            let model_override: Option<String> = row.get(4).unwrap_or(None);
+            Ok((agent_str, messages_blob, tokens, label, model_override))
         });
 
         match result {
-            Ok((agent_str, messages_blob, tokens, label)) => {
+            Ok((agent_str, messages_blob, tokens, label, model_override)) => {
                 let agent_id = uuid::Uuid::parse_str(&agent_str)
                     .map(AgentId)
                     .map_err(LibreFangError::memory)?;
@@ -274,6 +282,7 @@ impl SessionStore {
                     messages,
                     context_window_tokens: tokens as u64,
                     label,
+                    model_override,
                     messages_generation: 0,
                     last_repaired_generation: None,
                 }))
@@ -290,7 +299,7 @@ impl SessionStore {
     ) -> LibreFangResult<Option<(Session, String)>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
-            .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at FROM sessions WHERE id = ?1")
+            .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at, model_override FROM sessions WHERE id = ?1")
             .map_err(LibreFangError::memory)?;
 
         let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
@@ -299,11 +308,19 @@ impl SessionStore {
             let tokens: i64 = row.get(2)?;
             let label: Option<String> = row.get(3).unwrap_or(None);
             let created_at: String = row.get(4)?;
-            Ok((agent_str, messages_blob, tokens, label, created_at))
+            let model_override: Option<String> = row.get(5).unwrap_or(None);
+            Ok((
+                agent_str,
+                messages_blob,
+                tokens,
+                label,
+                created_at,
+                model_override,
+            ))
         });
 
         match result {
-            Ok((agent_str, messages_blob, tokens, label, created_at)) => {
+            Ok((agent_str, messages_blob, tokens, label, created_at, model_override)) => {
                 let agent_id = uuid::Uuid::parse_str(&agent_str)
                     .map(AgentId)
                     .map_err(LibreFangError::memory)?;
@@ -316,6 +333,7 @@ impl SessionStore {
                         messages,
                         context_window_tokens: tokens as u64,
                         label,
+                        model_override,
                         messages_generation: 0,
                         last_repaired_generation: None,
                     },
@@ -957,11 +975,35 @@ impl SessionStore {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,
         };
         self.save_session(&session)?;
         Ok(session)
+    }
+
+    /// Set (or clear) the per-session model override (#4898).
+    ///
+    /// `model_override = Some("provider/model")` pins the session to a
+    /// specific model for subsequent LLM calls. `None` clears the override
+    /// and restores the agent's manifest default.
+    pub fn set_session_model_override(
+        &self,
+        session_id: SessionId,
+        model_override: Option<&str>,
+    ) -> LibreFangResult<()> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        conn.execute(
+            "UPDATE sessions SET model_override = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![
+                model_override,
+                Utc::now().to_rfc3339(),
+                session_id.0.to_string()
+            ],
+        )
+        .map_err(LibreFangError::memory)?;
+        Ok(())
     }
 
     /// Set the label on an existing session.
@@ -988,7 +1030,7 @@ impl SessionStore {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, messages, context_window_tokens, label FROM sessions \
+                "SELECT id, messages, context_window_tokens, label, model_override FROM sessions \
                  WHERE agent_id = ?1 AND label = ?2 LIMIT 1",
             )
             .map_err(LibreFangError::memory)?;
@@ -998,11 +1040,12 @@ impl SessionStore {
             let messages_blob: Vec<u8> = row.get(1)?;
             let tokens: i64 = row.get(2)?;
             let lbl: Option<String> = row.get(3).unwrap_or(None);
-            Ok((id_str, messages_blob, tokens, lbl))
+            let model_override: Option<String> = row.get(4).unwrap_or(None);
+            Ok((id_str, messages_blob, tokens, lbl, model_override))
         });
 
         match result {
-            Ok((id_str, messages_blob, tokens, lbl)) => {
+            Ok((id_str, messages_blob, tokens, lbl, model_override)) => {
                 let session_id = uuid::Uuid::parse_str(&id_str)
                     .map(SessionId)
                     .map_err(LibreFangError::memory)?;
@@ -1014,6 +1057,7 @@ impl SessionStore {
                     messages,
                     context_window_tokens: tokens as u64,
                     label: lbl,
+                    model_override,
                     messages_generation: 0,
                     last_repaired_generation: None,
                 }))
@@ -1088,6 +1132,7 @@ impl SessionStore {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: label.map(|s| s.to_string()),
+            model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -2389,6 +2434,7 @@ mod tests {
             messages: vec![Message::user("second incarnation phrase")],
             context_window_tokens: 0,
             label: None,
+            model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,
         };
