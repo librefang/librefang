@@ -903,16 +903,28 @@ impl WorkflowEngine {
     }
 
     /// Register a new workflow definition and persist it to disk.
+    ///
+    /// Persistence is atomic: serialise → write `<id>.workflow.json.tmp` →
+    /// rename to `<id>.workflow.json`. A crash mid-write leaves the `.tmp`
+    /// side-file (ignored by `load_from_dir_sync`'s extension filter) but
+    /// never a half-written `<id>.workflow.json` that would later refuse to
+    /// parse and stall startup.
     pub async fn register(&self, workflow: Workflow) -> WorkflowId {
         let id = workflow.id;
         if let Some(ref dir) = self.workflows_dir {
             let path = dir.join(format!("{id}.workflow.json"));
+            let tmp_path = dir.join(format!("{id}.workflow.json.tmp"));
             match serde_json::to_string_pretty(&workflow) {
                 Ok(json) => {
                     if let Err(e) = tokio::fs::create_dir_all(dir).await {
                         warn!(workflow_id = %id, error = %e, "Failed to create workflows dir");
-                    } else if let Err(e) = tokio::fs::write(&path, &json).await {
-                        warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition");
+                    } else if let Err(e) = tokio::fs::write(&tmp_path, &json).await {
+                        warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition (tmp write)");
+                    } else if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
+                        warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition (atomic rename)");
+                        // Best-effort cleanup so the next register attempt isn't
+                        // blocked by a stale tmp file.
+                        let _ = tokio::fs::remove_file(&tmp_path).await;
                     } else {
                         debug!(workflow_id = %id, path = %path.display(), "Persisted workflow definition");
                     }
@@ -3654,6 +3666,60 @@ mod tests {
         let retrieved = engine.get_workflow(id).await;
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().name, "test-pipeline");
+    }
+
+    // Multi-thread flavor because `load_from_dir_sync` uses
+    // `blocking_write` on the workflows RwLock, which panics on the default
+    // current-thread runtime ("Cannot block the current thread from within
+    // a runtime").
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_writes_atomically_and_cleans_tmp() {
+        // Atomic-write invariant: after a successful register, the persisted
+        // file exists at <id>.workflow.json and the staging path
+        // <id>.workflow.json.tmp must NOT exist — otherwise the loader on
+        // the next boot would happily skip the .tmp file (extension filter)
+        // and the rename clearly didn't fire.
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = WorkflowEngine::new_with_persistence(tmp.path());
+        let wf = test_workflow();
+        let id = engine.register(wf.clone()).await;
+
+        let final_path = tmp
+            .path()
+            .join("workflows")
+            .join(format!("{id}.workflow.json"));
+        let tmp_path = tmp
+            .path()
+            .join("workflows")
+            .join(format!("{id}.workflow.json.tmp"));
+        assert!(
+            final_path.exists(),
+            "final file must exist after register: {}",
+            final_path.display()
+        );
+        assert!(
+            !tmp_path.exists(),
+            "tmp staging file must be cleaned after successful rename: {}",
+            tmp_path.display()
+        );
+
+        // The file must round-trip: load_from_dir_sync picks it up and the
+        // engine recognises the registered workflow by id. Drive
+        // `load_from_dir_sync` via `block_in_place` because it acquires
+        // `blocking_write` internally.
+        let engine2 = WorkflowEngine::new_with_persistence(tmp.path());
+        let loaded = tokio::task::block_in_place(|| {
+            engine2.load_from_dir_sync(&tmp.path().join("workflows"))
+        });
+        assert_eq!(loaded, 1, "expected exactly one workflow loaded back");
+        assert!(engine2.get_workflow(id).await.is_some());
+
+        // remove_workflow deletes the file too.
+        assert!(engine.remove_workflow(id).await);
+        assert!(
+            !final_path.exists(),
+            "persisted file must be gone after remove_workflow"
+        );
     }
 
     #[tokio::test]

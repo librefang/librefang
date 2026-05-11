@@ -426,17 +426,20 @@ impl LibreFangKernel {
                             };
 
                             if let Some(ref wid_str) = workflow_id {
-                                // Workflow dispatch path: resolve workflow by UUID then name,
-                                // create a run, and execute it in a separate task so it does
-                                // not block other trigger dispatches from the same event.
+                                // Workflow dispatch path: resolve workflow by UUID, then by
+                                // name (case-insensitive — matches WorkflowRunner::run_workflow
+                                // and start_workflow_async so `daily report` and `Daily Report`
+                                // resolve to the same workflow whether the entry point is a
+                                // tool call or a trigger).
                                 let wid_str = wid_str.clone();
+                                let wid_lower = wid_str.to_lowercase();
                                 let resolved_id = if let Ok(uuid) = wid_str.parse::<uuid::Uuid>() {
                                     Some(crate::workflow::WorkflowId(uuid))
                                 } else {
                                     let workflows = kernel.workflows.engine.list_workflows().await;
                                     workflows
                                         .iter()
-                                        .find(|w| w.name == wid_str)
+                                        .find(|w| w.name.to_lowercase() == wid_lower)
                                         .map(|w| w.id)
                                 };
                                 match resolved_id {
@@ -444,38 +447,50 @@ impl LibreFangKernel {
                                         info!(
                                             trigger_id = %trigger_id,
                                             workflow_id = %wid_str,
-                                            "Trigger fired workflow"
+                                            "Trigger fired workflow (async)"
                                         );
-                                        match tokio::time::timeout(
-                                            fire_timeout,
-                                            kernel.run_workflow(wf_id, msg),
-                                        )
-                                        .await
-                                        {
-                                            Ok(Ok((run_id, _output))) => {
-                                                info!(
-                                                    trigger_id = %trigger_id,
-                                                    run_id = %run_id,
-                                                    workflow_id = %wid_str,
-                                                    "Trigger workflow run completed"
-                                                );
+                                        // Spawn the run so the Lane::Trigger permit drops as
+                                        // soon as this iteration yields. A slow workflow must
+                                        // not pin Lane::Trigger kernel-wide (default lane cap
+                                        // is 8 per CLAUDE.md), starving agent-path triggers.
+                                        // Mirrors the fire-and-forget shape of
+                                        // WorkflowRunner::start_workflow_async (#4910).
+                                        let kernel_for_spawn = std::sync::Arc::clone(&kernel);
+                                        let wid_for_spawn = wid_str.clone();
+                                        let trigger_id_for_spawn = trigger_id;
+                                        let timeout_for_spawn = fire_timeout;
+                                        tokio::spawn(async move {
+                                            match tokio::time::timeout(
+                                                timeout_for_spawn,
+                                                kernel_for_spawn.run_workflow(wf_id, msg),
+                                            )
+                                            .await
+                                            {
+                                                Ok(Ok((run_id, _output))) => {
+                                                    info!(
+                                                        trigger_id = %trigger_id_for_spawn,
+                                                        run_id = %run_id,
+                                                        workflow_id = %wid_for_spawn,
+                                                        "Trigger workflow run completed"
+                                                    );
+                                                }
+                                                Ok(Err(e)) => {
+                                                    warn!(
+                                                        trigger_id = %trigger_id_for_spawn,
+                                                        workflow_id = %wid_for_spawn,
+                                                        "Trigger workflow run failed: {e}"
+                                                    );
+                                                }
+                                                Err(_) => {
+                                                    warn!(
+                                                        trigger_id = %trigger_id_for_spawn,
+                                                        workflow_id = %wid_for_spawn,
+                                                        timeout_secs = timeout_for_spawn.as_secs(),
+                                                        "Trigger workflow run timed out"
+                                                    );
+                                                }
                                             }
-                                            Ok(Err(e)) => {
-                                                warn!(
-                                                    trigger_id = %trigger_id,
-                                                    workflow_id = %wid_str,
-                                                    "Trigger workflow run failed: {e}"
-                                                );
-                                            }
-                                            Err(_) => {
-                                                warn!(
-                                                    trigger_id = %trigger_id,
-                                                    workflow_id = %wid_str,
-                                                    timeout_secs = fire_timeout.as_secs(),
-                                                    "Trigger workflow run timed out; releasing lane permit"
-                                                );
-                                            }
-                                        }
+                                        });
                                     }
                                     None => {
                                         warn!(
