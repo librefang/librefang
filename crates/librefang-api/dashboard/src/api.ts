@@ -58,6 +58,12 @@ export interface ProviderItem {
   is_custom?: boolean;
   error_message?: string;
   last_tested?: string;
+  /** True when the user explicitly suppressed this provider via
+   *  `DELETE /api/providers/{id}/key`. Pairs with the
+   *  `POST /api/providers/{id}/enable` endpoint that revives it.
+   *  Lets the dashboard distinguish "user-hidden" from "never configured"
+   *  for the otherwise indistinguishable `auth_status: "missing"`. */
+  suppressed?: boolean;
 }
 
 export interface MediaProvider {
@@ -129,6 +135,9 @@ export interface ChannelItem {
   name: string;
   display_name?: string;
   configured?: boolean;
+  /** Number of `[[channels.<name>]]` instances currently configured (#4837).
+   *  `0` means no instances; `1` matches the legacy single-instance shape. */
+  instance_count?: number;
   has_token?: boolean;
   category?: string;
   description?: string;
@@ -146,6 +155,30 @@ export interface ChannelItem {
    *  the `channel` column. Surfaced as the `kind · N msgs/24h`
    *  meta-line on the Channels page card. */
   msgs_24h?: number;
+}
+
+/** One configured `[[channels.<name>]]` instance. (#4837) */
+export interface ChannelInstance {
+  /** Array index — stable within a session, may shift after a delete.
+   *  Always re-fetch the list after a mutation. */
+  index: number;
+  /** Field schema with per-instance `value` and `has_value` populated. */
+  fields: ChannelField[];
+  /** Raw per-instance config map keyed by field. */
+  config: Record<string, unknown>;
+  /** True iff every required secret env var (the env var the instance's
+   *  field points at) is present and non-empty. */
+  has_token: boolean;
+  /** Compare-and-swap token. Send back unchanged on PUT/DELETE so the
+   *  server can reject the write if a concurrent edit shifted indices
+   *  or modified this instance after the list was read (#4865). */
+  signature: string;
+}
+
+export interface ChannelInstancesResponse {
+  channel: string;
+  items: ChannelInstance[];
+  total: number;
 }
 
 export interface SkillItem {
@@ -1579,6 +1612,10 @@ export async function deleteProviderKey(providerId: string): Promise<ApiActionRe
   return del<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/key`);
 }
 
+export async function enableProvider(providerId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/enable`, {});
+}
+
 export async function setProviderUrl(providerId: string, baseUrl: string, proxyUrl?: string): Promise<ApiActionResponse> {
   const body: Record<string, string> = { base_url: baseUrl };
   if (proxyUrl !== undefined) body.proxy_url = proxyUrl;
@@ -1686,6 +1723,53 @@ export async function configureChannel(channelName: string, config: Record<strin
 
 export async function reloadChannels(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/channels/reload", {});
+}
+
+// Per-instance channel management (#4837).
+//
+// The legacy `configureChannel` overwrites the single `[channels.<name>]`
+// section. The four functions below let the dashboard manage individual
+// `[[channels.<name>]]` array entries — supporting multiple Telegram bots,
+// Slack workspaces, etc. on the same channel type.
+
+export async function listChannelInstances(channelName: string): Promise<ChannelInstancesResponse> {
+  return get<ChannelInstancesResponse>(
+    `/api/channels/${encodeURIComponent(channelName)}/instances`,
+  );
+}
+
+export async function createChannelInstance(
+  channelName: string,
+  fields: Record<string, unknown>,
+): Promise<{ index: number; activated: boolean; started_channels: string[] }> {
+  return post<{ index: number; activated: boolean; started_channels: string[] }>(
+    `/api/channels/${encodeURIComponent(channelName)}/instances`,
+    { fields },
+  );
+}
+
+export async function updateChannelInstance(
+  channelName: string,
+  index: number,
+  fields: Record<string, unknown>,
+  signature: string,
+  clearSecrets?: string[],
+): Promise<{ index: number; activated: boolean; started_channels: string[] }> {
+  const body: Record<string, unknown> = { fields, signature };
+  if (clearSecrets && clearSecrets.length > 0) body.clear_secrets = clearSecrets;
+  return put<{ index: number; activated: boolean; started_channels: string[] }>(
+    `/api/channels/${encodeURIComponent(channelName)}/instances/${index}`,
+    body,
+  );
+}
+
+export async function deleteChannelInstance(
+  channelName: string,
+  index: number,
+  signature: string,
+): Promise<void> {
+  const qs = `?signature=${encodeURIComponent(signature)}`;
+  await del<void>(`/api/channels/${encodeURIComponent(channelName)}/instances/${index}${qs}`);
 }
 
 export interface QrStartResponse {
@@ -2335,6 +2419,19 @@ export async function getHealthDetail(): Promise<HealthDetailResponse> {
   return get<HealthDetailResponse>("/api/health/detail");
 }
 
+/**
+ * Minimal liveness probe for the `<OfflineBanner />`. `/api/health` is
+ * always-public (load-balancer / probe contract) while `/api/health/detail`
+ * requires auth because its payload leaks operational telemetry. The
+ * banner only needs "is the daemon reachable" — anchor on the minimal
+ * probe so it never trips the auth gate pre-login and never receives
+ * sensitive data (#4868 review fix; #4893 attempted the inverse and
+ * silently broke the auth contract on the detail endpoint).
+ */
+export async function getHealth(): Promise<{ status?: string }> {
+  return get<{ status?: string }>("/api/health");
+}
+
 export interface MemoryConfigResponse {
   embedding_provider?: string;
   embedding_model?: string;
@@ -2821,10 +2918,23 @@ export async function getUsageDaily(): Promise<UsageDailyResponse> {
   return get<UsageDailyResponse>("/api/usage/daily");
 }
 
+// Mirrors the kernel-side `BudgetStatus` (crates/librefang-kernel-metering)
+// which the API layer returns directly from `GET /api/budget`. The field
+// names are deliberately *not* the `BudgetConfig` names — they include the
+// current `*_spend` and `*_pct` rollups computed against the live
+// `usage_events` table. Issue #4797 (the dashboard read these as
+// `max_hourly_usd` etc.) was a typed-shape regression that always
+// rendered "-" for the operator's configured caps.
 export interface BudgetStatus {
-  max_hourly_usd?: number;
-  max_daily_usd?: number;
-  max_monthly_usd?: number;
+  hourly_spend?: number;
+  hourly_limit?: number;
+  hourly_pct?: number;
+  daily_spend?: number;
+  daily_limit?: number;
+  daily_pct?: number;
+  monthly_spend?: number;
+  monthly_limit?: number;
+  monthly_pct?: number;
   alert_threshold?: number;
   default_max_llm_tokens_per_hour?: number;
   [key: string]: unknown;

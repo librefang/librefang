@@ -850,6 +850,30 @@ pub trait PromptStore: Send + Sync {
 // 12. WorkflowRunner — declarative workflow execution
 // ============================================================================
 
+/// Summary of a registered workflow definition, used by `workflow_list`.
+#[derive(Debug, Clone)]
+pub struct WorkflowSummary {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub step_count: usize,
+}
+
+/// Summary of a workflow run instance, used by `workflow_status`.
+#[derive(Debug, Clone)]
+pub struct WorkflowRunSummary {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub state: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub output: Option<String>,
+    pub error: Option<String>,
+    pub step_count: usize,
+    pub last_step_name: Option<String>,
+}
+
 #[async_trait]
 pub trait WorkflowRunner: Send + Sync {
     /// Run a workflow by ID or name. The `workflow_id` can be a UUID string or a
@@ -862,6 +886,18 @@ pub trait WorkflowRunner: Send + Sync {
     ) -> Result<(String, String), KernelOpError> {
         let _ = (workflow_id, input);
         Err(KernelOpError::unavailable("Workflow engine"))
+    }
+
+    /// List all registered workflow definitions, sorted by name for determinism.
+    async fn list_workflows(&self) -> Vec<WorkflowSummary> {
+        Vec::new()
+    }
+
+    /// Get the status of a workflow run by its UUID string.
+    /// Returns `None` if the run ID is not found (including UUID parse failure).
+    async fn get_workflow_run(&self, run_id: &str) -> Option<WorkflowRunSummary> {
+        let _ = run_id;
+        None
     }
 }
 
@@ -1263,7 +1299,34 @@ pub trait AcpTerminalBridge: Send + Sync {
 }
 
 // ============================================================================
-// KernelHandle — supertrait alias of all 18 role traits.
+// CatalogQuery (#4842)
+// ============================================================================
+//
+// Read-side projection of model-catalog metadata that drivers need at
+// request-build time. Currently surfaces `reasoning_echo_policy_for(model)`
+// so the OpenAI-compat driver can dispatch the right wire shape for
+// `reasoning_content` per model by catalog lookup, replacing the substring
+// match that lived in the driver. Default impl returns `None`, letting
+// existing mocks and the legacy substring fallback continue to work for
+// catalog misses.
+// ============================================================================
+
+pub trait CatalogQuery: Send + Sync {
+    /// How the OpenAI-compatible driver must handle `reasoning_content`
+    /// on historical assistant turns for the given model. Default impl
+    /// returns [`librefang_types::model_catalog::ReasoningEchoPolicy::None`],
+    /// which causes the driver to fall back to substring-based detection
+    /// — see librefang/librefang#4842 for the migration plan.
+    fn reasoning_echo_policy_for(
+        &self,
+        _model: &str,
+    ) -> librefang_types::model_catalog::ReasoningEchoPolicy {
+        librefang_types::model_catalog::ReasoningEchoPolicy::None
+    }
+}
+
+// ============================================================================
+// KernelHandle — supertrait alias of all 19 role traits.
 //
 // Existing call sites take `Arc<dyn KernelHandle>`; that keeps working because
 // any type that impls every role trait automatically gets `KernelHandle` via
@@ -1291,6 +1354,7 @@ pub trait KernelHandle:
     + SessionWriter
     + AcpFsBridge
     + AcpTerminalBridge
+    + CatalogQuery
     + Send
     + Sync
 {
@@ -1316,6 +1380,7 @@ impl<T> KernelHandle for T where
         + SessionWriter
         + AcpFsBridge
         + AcpTerminalBridge
+        + CatalogQuery
         + Send
         + Sync
         + ?Sized
@@ -1329,9 +1394,10 @@ pub mod prelude {
     pub use super::{
         A2ARegistry, AcpFsBridge, AcpFsClient, AcpTerminalBridge, AcpTerminalClient,
         AcpTerminalRunResult, AgentControl, AgentInfo, ApiAuth, ApiAuthSnapshot,
-        ApiUserConfigSnapshot, ApprovalGate, ChannelSender, CronControl, DashboardRawConfig,
-        EventBus, GoalControl, HandsControl, KernelHandle, KnowledgeGraph, MemoryAccess,
-        PromptStore, SessionWriter, TaskQueue, ToolPolicy, WikiAccess, WorkflowRunner,
+        ApiUserConfigSnapshot, ApprovalGate, CatalogQuery, ChannelSender, CronControl,
+        DashboardRawConfig, EventBus, GoalControl, HandsControl, KernelHandle, KnowledgeGraph,
+        MemoryAccess, PromptStore, SessionWriter, TaskQueue, ToolPolicy, WikiAccess,
+        WorkflowRunSummary, WorkflowRunner, WorkflowSummary,
     };
 }
 
@@ -1489,6 +1555,7 @@ mod tests {
     impl GoalControl for StubKernel {}
     impl ToolPolicy for StubKernel {}
     impl WikiAccess for StubKernel {}
+    impl CatalogQuery for StubKernel {}
     impl ApiAuth for StubKernel {
         fn auth_snapshot(&self) -> ApiAuthSnapshot {
             ApiAuthSnapshot::default()
@@ -1537,5 +1604,29 @@ mod tests {
         let _tp: Arc<dyn ToolPolicy> = Arc::new(StubKernel);
         let _auth: Arc<dyn ApiAuth> = Arc::new(StubKernel);
         let _sw: Arc<dyn SessionWriter> = Arc::new(StubKernel);
+        let _cq: Arc<dyn CatalogQuery> = Arc::new(StubKernel);
+    }
+
+    #[test]
+    fn catalog_query_default_returns_none() {
+        // Mocks / stubs that don't override `reasoning_echo_policy_for`
+        // must return `None`, so drivers fall back to substring detection.
+        // Without this guarantee the registry-driven dispatch could
+        // accidentally activate against test fixtures that have no
+        // catalog wired.
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let stub = StubKernel;
+        assert_eq!(
+            stub.reasoning_echo_policy_for("deepseek-v4-flash"),
+            ReasoningEchoPolicy::None
+        );
+        assert_eq!(
+            stub.reasoning_echo_policy_for("kimi-k2.6"),
+            ReasoningEchoPolicy::None
+        );
+        assert_eq!(
+            stub.reasoning_echo_policy_for("anything-else"),
+            ReasoningEchoPolicy::None
+        );
     }
 }

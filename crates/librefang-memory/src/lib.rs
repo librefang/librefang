@@ -51,6 +51,7 @@ pub mod semantic;
 pub mod session;
 pub mod structured;
 pub mod usage;
+pub mod workflow_store;
 
 mod backend;
 pub mod backends;
@@ -83,6 +84,7 @@ pub use backends::SurrealTaskBackend;
 #[cfg(feature = "surreal-backend")]
 pub use backends::SurrealUsageStore;
 pub use substrate::MemorySubstrate;
+pub use workflow_store::{WorkflowRunRow, WorkflowStore};
 
 // Re-export types for convenience
 pub use librefang_types::memory::{

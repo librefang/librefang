@@ -697,6 +697,18 @@ pub const PUBLIC_ROUTES_ALWAYS: &[PublicRoute] = &[
     PublicRoute::exact_any("/api/pairing/complete"),
     // Minimal liveness probes
     PublicRoute::exact_any("/api/health"),
+    // NOTE: `/api/health/detail` is intentionally NOT public here. Its
+    // payload includes `panic_count`, `restart_count`, `agent_count`,
+    // embedding / extraction model ids, `config_warnings` from
+    // `KernelConfig::validate()`, budget percentages, and LLM latency —
+    // i.e. operational telemetry that should not be reachable from a
+    // cold probe. The dashboard's `<OfflineBanner />` previously polled
+    // this endpoint pre-auth and #4893 worked around the 401 spam by
+    // exposing the detail payload publicly; the correct fix is for the
+    // banner to poll the genuinely minimal `/api/health` instead, which
+    // is what it does now. The middleware-internal comment block below
+    // (covering the dashboard-read group) has long explained this
+    // contract; this PR restores it (#4868 review).
     PublicRoute::exact_any("/api/version"),
     PublicRoute::exact_any("/api/versions"),
     // GitHub Copilot OAuth — prefix, any method
@@ -2718,5 +2730,27 @@ mod tests {
                 "{path} must be auth-gated (returns action_summary)"
             );
         }
+    }
+
+    /// Regression for #4860: the inline login page must redirect to `/`
+    /// (the SPA shell) when it was itself served at `/`, `/dashboard`, or
+    /// `/dashboard/`. The router only registers `/` and
+    /// `/dashboard/{*path}`, so redirecting back to `/dashboard` or
+    /// `/dashboard/` after a successful sign-in lands on a 404.
+    #[test]
+    fn login_page_redirects_dashboard_root_to_spa_shell() {
+        let html = super::LOGIN_PAGE_HTML;
+        // Pin the full collapse condition so neither the bare `/dashboard`
+        // case nor the trailing-slash case can be silently dropped — a
+        // substring like `path === '/dashboard'` would also match
+        // `path === '/dashboard/'` and let one half regress unnoticed.
+        assert!(
+            html.contains("path === '/dashboard' || path === '/dashboard/'"),
+            "login page must collapse both /dashboard and /dashboard/ to the SPA shell at /"
+        );
+        assert!(
+            !html.contains("target = '/dashboard/';"),
+            "login page must not redirect to /dashboard/ — that path 404s (#4860)"
+        );
     }
 }

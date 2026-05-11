@@ -18,6 +18,7 @@ import {
   useTestProvider,
   useSetProviderKey,
   useDeleteProviderKey,
+  useEnableProvider,
   useSetProviderUrl,
   useSetDefaultProvider,
   useCreateRegistryContent,
@@ -36,6 +37,7 @@ vi.mock("../lib/mutations/providers", () => ({
   useTestProvider: vi.fn(),
   useSetProviderKey: vi.fn(),
   useDeleteProviderKey: vi.fn(),
+  useEnableProvider: vi.fn(),
   useSetProviderUrl: vi.fn(),
   useSetDefaultProvider: vi.fn(),
   useCreateRegistryContent: vi.fn(),
@@ -69,6 +71,9 @@ const useTestProviderMock = useTestProvider as unknown as ReturnType<
   typeof vi.fn
 >;
 const useSetProviderKeyMock = useSetProviderKey as unknown as ReturnType<
+  typeof vi.fn
+>;
+const useEnableProviderMock = useEnableProvider as unknown as ReturnType<
   typeof vi.fn
 >;
 const useDeleteProviderKeyMock = useDeleteProviderKey as unknown as ReturnType<
@@ -163,6 +168,9 @@ describe("ProvidersPage", () => {
       stubMutation(vi.fn().mockResolvedValue(undefined)),
     );
     useDeleteProviderKeyMock.mockReturnValue(
+      stubMutation(vi.fn().mockResolvedValue(undefined)),
+    );
+    useEnableProviderMock.mockReturnValue(
       stubMutation(vi.fn().mockResolvedValue(undefined)),
     );
     useSetProviderUrlMock.mockReturnValue(

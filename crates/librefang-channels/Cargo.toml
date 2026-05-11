@@ -71,8 +71,8 @@ all-channels = [
 channel-telegram = []
 channel-discord = []
 channel-slack = []
-channel-matrix = []
-channel-email = ["dep:lettre", "dep:imap", "dep:rustls-connector", "dep:mailparse"]
+channel-matrix = ["dep:pulldown-cmark"]
+channel-email = ["dep:lettre", "dep:imap", "dep:rustls-connector", "dep:mailparse", "dep:rustls-pemfile"]
 channel-webhook = []
 channel-whatsapp = []
 channel-signal = []
@@ -147,6 +147,10 @@ regex-lite = { workspace = true }
 smallvec = { workspace = true }
 webpki-roots = { workspace = true }
 rustls-native-certs = { workspace = true }
+urlencoding = { workspace = true }
+
+# Markdown → HTML for Matrix's `formatted_body`. Gated on channel-matrix.
+pulldown-cmark = { workspace = true, optional = true }
 
 # Channel-specific optional dependencies
 rsa = { workspace = true, optional = true }
@@ -159,6 +163,7 @@ rumqttc = { workspace = true, optional = true }
 lettre = { workspace = true, optional = true }
 imap = { workspace = true, optional = true }
 rustls-connector = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
 mailparse = { workspace = true, optional = true }
 
 [dev-dependencies]

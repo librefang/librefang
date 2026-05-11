@@ -12,6 +12,7 @@
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use librefang_memory::{WorkflowRunRow, WorkflowStore};
 use librefang_types::agent::AgentId;
 use librefang_types::subagent::SubagentContext;
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,32 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+/// Error type returned by [`WorkflowEngine::cancel_run`].
+#[derive(Debug, Clone)]
+pub enum CancelRunError {
+    /// No run with that id exists in the engine.
+    NotFound(WorkflowRunId),
+    /// The run is already in a terminal state and cannot be cancelled.
+    AlreadyTerminal {
+        run_id: WorkflowRunId,
+        /// One of `"completed"`, `"failed"`, or `"cancelled"`.
+        state: &'static str,
+    },
+}
+
+impl std::fmt::Display for CancelRunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CancelRunError::NotFound(id) => write!(f, "Workflow run not found: {id}"),
+            CancelRunError::AlreadyTerminal { run_id, state } => {
+                write!(f, "Cannot cancel workflow run {run_id}: already {state}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CancelRunError {}
 
 /// Unique identifier for a workflow definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -84,6 +111,12 @@ pub struct Workflow {
     /// Optional canvas layout data (nodes, edges, positions) for the visual editor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<serde_json::Value>,
+    /// Maximum wall-clock time for the entire workflow run, in seconds.
+    /// `None` means fall back to the kernel-level default
+    /// (`KernelConfig::workflow_default_total_timeout_secs`). When that is
+    /// also `None` the workflow runs unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_timeout_secs: Option<u64>,
 }
 
 /// A single step in a workflow.
@@ -161,7 +194,22 @@ pub enum ErrorMode {
     /// Skip this step on error and continue.
     Skip,
     /// Retry the step up to N times before failing.
-    Retry { max_retries: u32 },
+    ///
+    /// `backoff_ms`: base delay in milliseconds before attempt 2 (doubled each
+    /// attempt, capped at 60 000 ms). `None` preserves the historical
+    /// immediate-retry behaviour.
+    ///
+    /// `jitter_pct`: if set, the backoff is perturbed by ±`jitter_pct`%
+    /// (clamped to 0–100) using a uniform random draw. `None` means no
+    /// jitter. Both fields default to `None` so old persisted workflows
+    /// (`{"retry": {"max_retries": 3}}`) deserialize cleanly.
+    Retry {
+        max_retries: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backoff_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        jitter_pct: Option<u8>,
+    },
 }
 
 /// The current state of a workflow run.
@@ -192,6 +240,8 @@ pub enum WorkflowRunState {
     },
     Completed,
     Failed,
+    /// The run was explicitly cancelled via [`WorkflowEngine::cancel_run`].
+    Cancelled,
 }
 
 impl WorkflowRunState {
@@ -346,12 +396,25 @@ pub struct WorkflowEngine {
     /// Active and completed workflow runs.
     runs: Arc<DashMap<WorkflowRunId, WorkflowRun>>,
     /// Optional path to persist completed/failed runs (`~/.librefang/workflow_runs.json`).
+    /// Retained for backward compatibility and JSON-to-SQLite migration.
     persist_path: Option<PathBuf>,
     /// Serializes `persist_runs` writes so concurrent callers within a
     /// single process don't `O_TRUNC` the same `.tmp.{pid}` path and
     /// produce a torn file before rename.  `Arc` so the engine stays
     /// `Clone` (mutexes are shared, not duplicated).
     persist_lock: Arc<std::sync::Mutex<()>>,
+    /// SQLite-backed workflow store. When `Some`, all persistence goes
+    /// through SQLite instead of the JSON file. The JSON path is still
+    /// kept for the one-time migration (`migrate_from_json`).
+    store: Option<WorkflowStore>,
+    /// Kernel-level default total timeout for workflow runs (seconds).
+    /// Individual workflows can override this via `Workflow::total_timeout_secs`.
+    /// `None` means unbounded.
+    pub(crate) default_total_timeout_secs: Option<u64>,
+    /// Per-run cancellation notifiers. `cancel_run` calls `notify_waiters()`
+    /// on the entry for `run_id` so that retry sleeps can wake up immediately
+    /// instead of blocking for the full backoff duration.
+    cancel_notify: Arc<DashMap<WorkflowRunId, Arc<tokio::sync::Notify>>>,
 }
 
 /// Evaluate a conditional expression against the previous step output.
@@ -456,6 +519,114 @@ fn split_outside_quotes(s: &str, delimiter: &str) -> Option<Vec<String>> {
     }
 }
 
+/// Compute the backoff duration for a workflow step retry.
+///
+/// Resolution order (first match wins):
+///
+/// 1. **Explicit retry hint embedded in the error string.** Driver-side
+///    `LlmError::RateLimited` / `LlmError::Overloaded` Display formats
+///    embed `retry after Nms`, and provider 429 messages frequently
+///    inline `Retry-After: N` from the upstream HTTP header. Both are
+///    parsed by [`librefang_llm_driver::llm_errors::extract_retry_delay`]
+///    (the canonical, single-source-of-truth parser already used by the
+///    driver retry layer — keeps kernel and driver semantics in lockstep
+///    instead of maintaining a second regex here). Returns ms; we honour
+///    it directly so a server asking for 120 s isn't retried at 65 s and
+///    429ed again. Capped at 5 minutes; a value over the cap is WARN'd
+///    so operators can spot a hostile or misconfigured provider.
+/// 2. **Burst / rate-limit substring (case-insensitive).** Anthropic
+///    emits `"rate limit"`, OpenAI emits `"rate_limit"` /
+///    `"Rate limit"`, Gemini emits `"RATE_LIMIT_EXCEEDED"`. The
+///    case-sensitive check that shipped with the first version of
+///    this classifier silently fell through on every variant except
+///    Anthropic's. Lowercasing once at entry covers all of them and
+///    pins the 65 s sliding-window backoff (60 s window + 5 s
+///    safety margin).
+/// 3. **Everything else** uses exponential backoff `2^attempt`
+///    capped at 60 s — the historical default for transient network
+///    errors.
+fn classify_backoff(err: &str, attempt: u32) -> std::time::Duration {
+    /// 60-second sliding window + 5-second safety margin.
+    const BURST_WINDOW_BACKOFF: std::time::Duration = std::time::Duration::from_secs(65);
+    /// Upper bound on a server-supplied retry hint so a hostile or
+    /// misconfigured provider can't park a workflow indefinitely.
+    const RETRY_AFTER_CAP: std::time::Duration = std::time::Duration::from_secs(300);
+
+    if let Some(ms) = librefang_llm_driver::llm_errors::extract_retry_delay(err) {
+        let asked = std::time::Duration::from_millis(ms);
+        if asked > RETRY_AFTER_CAP {
+            warn!(
+                asked_ms = ms,
+                cap_ms = RETRY_AFTER_CAP.as_millis() as u64,
+                "Provider retry hint exceeds workflow cap; clamping"
+            );
+            return RETRY_AFTER_CAP;
+        }
+        return asked;
+    }
+
+    let lowered = err.to_ascii_lowercase();
+    let needs_window_clear = lowered.contains("burst")
+        || lowered.contains("rate limit")
+        || lowered.contains("rate_limit");
+    if needs_window_clear {
+        return BURST_WINDOW_BACKOFF;
+    }
+
+    std::time::Duration::from_secs(2u64.saturating_pow(attempt).min(60))
+}
+
+/// Compute the sleep duration between retry attempts.
+///
+/// Resolution order:
+/// 1. If `backoff_ms` is `Some(b)`, the base delay is `b * 2^attempt`
+///    (exponential doubling), capped at 60 000 ms.
+///    Optional `jitter_pct` (0–100) perturbs the base by ±j% using a
+///    uniform random draw so simultaneous retries of multiple steps do not
+///    all pile up at the same instant.
+/// 2. If `backoff_ms` is `None`, fall through to `classify_backoff` which
+///    handles rate-limit hints and the historical exponential default.
+fn compute_retry_backoff(
+    err: &str,
+    attempt: u32,
+    backoff_ms: Option<u64>,
+    jitter_pct: Option<u8>,
+) -> std::time::Duration {
+    const MAX_BACKOFF_MS: u64 = 60_000;
+
+    if let Some(base_ms) = backoff_ms {
+        // Exponential: base * 2^attempt, capped.
+        let raw_ms = base_ms
+            .saturating_mul(2u64.saturating_pow(attempt))
+            .min(MAX_BACKOFF_MS);
+
+        let final_ms = if let Some(pct) = jitter_pct {
+            // Apply ±pct% jitter. Clamp pct to [0, 100].
+            let pct_clamped = pct.min(100) as u64;
+            let delta = raw_ms.saturating_mul(pct_clamped) / 100;
+            if delta == 0 {
+                raw_ms
+            } else {
+                // Draw a uniform value in [0, 2*delta] and subtract delta to get
+                // a value in [-delta, +delta] relative to raw_ms.
+                let range = delta.saturating_mul(2).saturating_add(1);
+                let jitter = rand::random::<u64>() % range;
+                raw_ms
+                    .saturating_add(jitter)
+                    .saturating_sub(delta)
+                    .min(MAX_BACKOFF_MS)
+            }
+        } else {
+            raw_ms
+        };
+
+        std::time::Duration::from_millis(final_ms)
+    } else {
+        // No configured backoff — use the existing classifier.
+        classify_backoff(err, attempt)
+    }
+}
+
 impl WorkflowEngine {
     /// Create a new workflow engine (no persistence).
     pub fn new() -> Self {
@@ -464,10 +635,13 @@ impl WorkflowEngine {
             runs: Arc::new(DashMap::new()),
             persist_path: None,
             persist_lock: Arc::new(std::sync::Mutex::new(())),
+            store: None,
+            default_total_timeout_secs: None,
+            cancel_notify: Arc::new(DashMap::new()),
         }
     }
 
-    /// Create a new workflow engine with run persistence.
+    /// Create a new workflow engine with run persistence (JSON file).
     ///
     /// Completed and failed runs are persisted to `<home_dir>/data/workflow_runs.json`.
     pub fn new_with_persistence(home_dir: &Path) -> Self {
@@ -476,16 +650,73 @@ impl WorkflowEngine {
             runs: Arc::new(DashMap::new()),
             persist_path: Some(home_dir.join("data").join("workflow_runs.json")),
             persist_lock: Arc::new(std::sync::Mutex::new(())),
+            store: None,
+            default_total_timeout_secs: None,
+            cancel_notify: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Create a new workflow engine backed by SQLite.
+    ///
+    /// All state transitions are persisted immediately to the database.
+    /// The `home_dir` is retained so `migrate_from_json` can find the
+    /// legacy `workflow_runs.json` file for one-time import.
+    pub fn new_with_store(store: WorkflowStore, home_dir: &Path) -> Self {
+        Self {
+            workflows: Arc::new(RwLock::new(HashMap::new())),
+            runs: Arc::new(DashMap::new()),
+            persist_path: Some(home_dir.join("data").join("workflow_runs.json")),
+            persist_lock: Arc::new(std::sync::Mutex::new(())),
+            store: Some(store),
+            default_total_timeout_secs: None,
+            cancel_notify: Arc::new(DashMap::new()),
         }
     }
 
     // -- Run Persistence ------------------------------------------------------
 
-    /// Load persisted runs from disk into memory.
+    /// Load persisted runs into memory.
     ///
-    /// Returns the number of runs loaded. If the file does not exist,
-    /// returns `Ok(0)` without error.
+    /// When a SQLite store is configured, loads from the database.
+    /// Otherwise falls back to the legacy JSON file. Returns the number
+    /// of runs loaded. If no data source exists, returns `Ok(0)`.
     pub fn load_runs(&self) -> Result<usize, String> {
+        if let Some(ref store) = self.store {
+            return self.load_runs_from_sqlite(store);
+        }
+        self.load_runs_from_json()
+    }
+
+    /// Load runs from the SQLite store into the in-memory DashMap.
+    fn load_runs_from_sqlite(&self, store: &WorkflowStore) -> Result<usize, String> {
+        let rows = store
+            .load_all_runs()
+            .map_err(|e| format!("workflow SQLite load failed: {e}"))?;
+        let total = rows.len();
+        let mut loaded: usize = 0;
+        let mut skipped: usize = 0;
+        for row in rows {
+            match row_to_workflow_run(&row) {
+                Ok(run) => {
+                    self.runs.insert(run.id, run);
+                    loaded += 1;
+                }
+                Err(e) => {
+                    skipped += 1;
+                    warn!(
+                        run_id = %row.id,
+                        error = %e,
+                        "Skipping unreadable workflow run from SQLite"
+                    );
+                }
+            }
+        }
+        debug!(loaded, skipped, total, "Loaded workflow runs from SQLite");
+        Ok(loaded)
+    }
+
+    /// Load runs from the legacy JSON file into the in-memory DashMap.
+    fn load_runs_from_json(&self) -> Result<usize, String> {
         let path = match &self.persist_path {
             Some(p) => p,
             None => return Ok(0),
@@ -535,8 +766,50 @@ impl WorkflowEngine {
         Ok(count)
     }
 
-    /// Persist completed/failed runs to disk via atomic write.
+    /// Persist runs to the backing store.
+    ///
+    /// When a SQLite store is configured, iterates all runs in the
+    /// DashMap and upserts each one. A WAL checkpoint is issued after
+    /// writing terminal-state runs to ensure durability.
+    ///
+    /// Without a SQLite store, falls back to the legacy JSON atomic
+    /// write.
     fn persist_runs(&self) {
+        if let Some(ref store) = self.store {
+            self.persist_runs_to_sqlite(store);
+            return;
+        }
+        self.persist_runs_to_json();
+    }
+
+    /// Persist all runs to SQLite via upsert.
+    fn persist_runs_to_sqlite(&self, store: &WorkflowStore) {
+        let mut wrote_terminal = false;
+        for entry in self.runs.iter() {
+            let run = entry.value();
+            let row = workflow_run_to_row(run);
+            if let Err(e) = store.upsert_run(&row) {
+                warn!(run_id = %run.id, error = %e, "Failed to persist workflow run to SQLite");
+            }
+            if matches!(
+                run.state,
+                WorkflowRunState::Completed
+                    | WorkflowRunState::Failed
+                    | WorkflowRunState::Paused { .. }
+            ) {
+                wrote_terminal = true;
+            }
+        }
+        if wrote_terminal {
+            if let Err(e) = store.wal_checkpoint() {
+                warn!("WAL checkpoint after workflow persist failed: {e}");
+            }
+        }
+        debug!("Persisted workflow runs to SQLite");
+    }
+
+    /// Persist completed/failed/paused runs to JSON via atomic write (legacy path).
+    fn persist_runs_to_json(&self) {
         let _guard = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
         let path = match &self.persist_path {
             Some(p) => p,
@@ -806,9 +1079,27 @@ impl WorkflowEngine {
             paused_current_input: None,
         };
 
-        self.runs.insert(run_id, run);
+        // Persist the freshly-created Pending row before it goes into
+        // the DashMap. The batch `persist_runs` family deliberately
+        // skips Pending — without an explicit per-row upsert here, a
+        // newly created run that crashes before being dispatched
+        // disappears entirely on restart. The store happens to be cheap
+        // enough (one indexed insert) that doing it inline is fine; if
+        // it ever becomes hot, the right move is to debounce the
+        // upsert, not drop it.
+        if self.store.is_some() {
+            self.upsert_run_to_store(&run);
+        }
 
-        // Evict oldest completed/failed runs when we exceed the cap
+        self.runs.insert(run_id, run);
+        // Seat a fresh Notify so retry sleeps can be woken on cancellation.
+        self.cancel_notify
+            .insert(run_id, Arc::new(tokio::sync::Notify::new()));
+
+        // Evict oldest terminal runs (Completed / Failed / Cancelled) when
+        // we exceed the cap. Cancelled must be included here, otherwise a
+        // burst of user-initiated cancels would pin those records in the
+        // DashMap forever and push out evictable Completed/Failed runs.
         if self.runs.len() > Self::MAX_RETAINED_RUNS {
             let mut evictable: Vec<(WorkflowRunId, DateTime<Utc>)> = self
                 .runs
@@ -816,7 +1107,9 @@ impl WorkflowEngine {
                 .filter(|r| {
                     matches!(
                         r.state,
-                        WorkflowRunState::Completed | WorkflowRunState::Failed
+                        WorkflowRunState::Completed
+                            | WorkflowRunState::Failed
+                            | WorkflowRunState::Cancelled
                     )
                 })
                 .map(|r| (*r.key(), r.started_at))
@@ -880,6 +1173,14 @@ impl WorkflowEngine {
             run.error = Some("Interrupted by daemon restart".to_string());
             run.completed_at = Some(now);
             run.clear_pause_state();
+            // Persist the recovered Failed state immediately. Without
+            // this, the run lives in the DashMap as Failed but the
+            // SQLite row is whatever was on disk before recovery — so a
+            // second crash before the next batch persist would resurface
+            // the same run as a stale Running again.
+            if self.store.is_some() {
+                self.upsert_run_to_store(run);
+            }
             recovered += 1;
         }
         recovered
@@ -963,6 +1264,7 @@ impl WorkflowEngine {
                         "running" => matches!(r.state, WorkflowRunState::Running),
                         "completed" => matches!(r.state, WorkflowRunState::Completed),
                         "failed" => matches!(r.state, WorkflowRunState::Failed),
+                        "cancelled" => matches!(r.state, WorkflowRunState::Cancelled),
                         _ => true,
                     })
                     .unwrap_or(true)
@@ -1028,6 +1330,8 @@ impl WorkflowEngine {
         agent_id: AgentId,
         prompt: String,
         send_message: &F,
+        run_id: WorkflowRunId,
+        cancel_notify: &Arc<DashMap<WorkflowRunId, Arc<tokio::sync::Notify>>>,
     ) -> Result<Option<(String, u64, u64)>, String>
     where
         F: Fn(AgentId, String) -> Fut,
@@ -1064,7 +1368,11 @@ impl WorkflowEngine {
                     }
                 }
             }
-            ErrorMode::Retry { max_retries } => {
+            ErrorMode::Retry {
+                max_retries,
+                backoff_ms,
+                jitter_pct,
+            } => {
                 let mut last_err = String::new();
                 for attempt in 0..=*max_retries {
                     match tokio::time::timeout(timeout_dur, send_message(agent_id, prompt.clone()))
@@ -1074,21 +1382,61 @@ impl WorkflowEngine {
                         Ok(Err(e)) => {
                             last_err = e.to_string();
                             if attempt < *max_retries {
-                                warn!(
-                                    "Step '{}' attempt {} failed: {e}, retrying",
-                                    step.name,
-                                    attempt + 1
+                                let sleep_dur = compute_retry_backoff(
+                                    &last_err,
+                                    attempt,
+                                    *backoff_ms,
+                                    *jitter_pct,
                                 );
+                                warn!(
+                                    "Step '{}' attempt {} failed: {e}, retrying in {:?}",
+                                    step.name,
+                                    attempt + 1,
+                                    sleep_dur
+                                );
+                                let notify = cancel_notify.get(&run_id).map(|n| Arc::clone(&*n));
+                                tokio::select! {
+                                    _ = tokio::time::sleep(sleep_dur) => {}
+                                    _ = async {
+                                        match notify {
+                                            Some(n) => n.notified().await,
+                                            None => std::future::pending::<()>().await,
+                                        }
+                                    } => {
+                                        // Cancellation observed during retry sleep.
+                                        return Err("workflow run cancelled".into());
+                                    }
+                                }
                             }
                         }
                         Err(_) => {
                             last_err = format!("timed out after {}s", step.timeout_secs);
                             if attempt < *max_retries {
-                                warn!(
-                                    "Step '{}' attempt {} timed out, retrying",
-                                    step.name,
-                                    attempt + 1
+                                let sleep_dur = compute_retry_backoff(
+                                    &last_err,
+                                    attempt,
+                                    *backoff_ms,
+                                    *jitter_pct,
                                 );
+                                warn!(
+                                    "Step '{}' attempt {} timed out, retrying in {:?}",
+                                    step.name,
+                                    attempt + 1,
+                                    sleep_dur
+                                );
+                                let notify = cancel_notify.get(&run_id).map(|n| Arc::clone(&*n));
+                                tokio::select! {
+                                    _ = tokio::time::sleep(sleep_dur) => {}
+                                    _ = async {
+                                        match notify {
+                                            Some(n) => n.notified().await,
+                                            None => std::future::pending::<()>().await,
+                                        }
+                                    } => {
+                                        // Cancellation observed during retry sleep.
+                                        return Err("workflow run cancelled".into());
+                                    }
+                                }
                             }
                         }
                     }
@@ -1227,7 +1575,9 @@ impl WorkflowEngine {
                 run.pause_request.as_ref().map(|r| r.resume_token)
             }
             WorkflowRunState::Paused { resume_token, .. } => return Ok(*resume_token),
-            WorkflowRunState::Completed | WorkflowRunState::Failed => {
+            WorkflowRunState::Completed
+            | WorkflowRunState::Failed
+            | WorkflowRunState::Cancelled => {
                 return Err(format!(
                     "Cannot pause workflow run {run_id}: state is terminal"
                 ))
@@ -1242,6 +1592,88 @@ impl WorkflowEngine {
             resume_token: token,
         });
         Ok(token)
+    }
+
+    /// Cancel a workflow run.
+    ///
+    /// Transitions `Pending`, `Running`, or `Paused` runs to
+    /// [`WorkflowRunState::Cancelled`] atomically under the DashMap shard
+    /// guard and persists the change immediately so a crash after this call
+    /// does not revert the run to a non-terminal state on restart.
+    ///
+    /// Returns `Err(`[`CancelRunError`]`)` if the run is not found or is
+    /// already in a terminal state (`Completed`, `Failed`, or `Cancelled`).
+    ///
+    /// After the state transition the per-run [`tokio::sync::Notify`] is
+    /// signalled so any retry sleep currently waiting on the notifier wakes
+    /// up immediately rather than sleeping for the full backoff duration.
+    ///
+    /// The executor also observes cancellation at every step boundary: it
+    /// peeks the run state at the top of each iteration and exits early if
+    /// it finds `Cancelled`.
+    pub async fn cancel_run(&self, run_id: WorkflowRunId) -> Result<(), CancelRunError> {
+        let already_paused = {
+            let mut run = self
+                .runs
+                .get_mut(&run_id)
+                .ok_or(CancelRunError::NotFound(run_id))?;
+            match &run.state {
+                WorkflowRunState::Pending
+                | WorkflowRunState::Running
+                | WorkflowRunState::Paused { .. } => {
+                    let was_paused = run.state.is_paused();
+                    run.state = WorkflowRunState::Cancelled;
+                    run.completed_at = Some(Utc::now());
+                    // Clear any pending pause request so the executor cannot
+                    // re-pause a cancelled run.
+                    run.pause_request = None;
+                    was_paused
+                }
+                WorkflowRunState::Completed => {
+                    return Err(CancelRunError::AlreadyTerminal {
+                        run_id,
+                        state: "completed",
+                    })
+                }
+                WorkflowRunState::Failed => {
+                    return Err(CancelRunError::AlreadyTerminal {
+                        run_id,
+                        state: "failed",
+                    })
+                }
+                WorkflowRunState::Cancelled => {
+                    return Err(CancelRunError::AlreadyTerminal {
+                        run_id,
+                        state: "cancelled",
+                    })
+                }
+            }
+            // shard guard dropped here
+        };
+
+        // Wake any retry sleep that is parked on this run's notifier.
+        if let Some(n) = self.cancel_notify.get(&run_id) {
+            n.notify_waiters();
+        }
+
+        // Clear pause snapshot outside the shard guard (clear_pause_state
+        // takes a separate get_mut).
+        if already_paused {
+            if let Some(mut run) = self.runs.get_mut(&run_id) {
+                run.clear_pause_state();
+            }
+        }
+
+        // Persist immediately so a restart does not revert to Running/Pending.
+        if let Some(run) = self.runs.get(&run_id) {
+            self.upsert_run_to_store(&run);
+        }
+        if let Err(e) = self.persist_runs_async().await {
+            warn!(run_id = %run_id, error = %e, "Failed to persist cancelled run state");
+        }
+
+        info!(run_id = %run_id, "Workflow run cancelled");
+        Ok(())
     }
 
     /// Resume a paused workflow run from where it stopped.
@@ -1386,15 +1818,50 @@ impl WorkflowEngine {
             "Starting workflow execution"
         );
 
+        // Resolve total-timeout: workflow field wins over kernel default.
+        let total_timeout = workflow
+            .total_timeout_secs
+            .or(self.default_total_timeout_secs);
+
         // Check if any step has non-empty depends_on — if so, use DAG execution
         let has_dag_deps = workflow.steps.iter().any(|s| !s.depends_on.is_empty());
-        let result = if has_dag_deps {
-            self.execute_run_dag(run_id, &workflow, &input, &agent_resolver, &send_message)
+
+        let inner_fut = async {
+            if has_dag_deps {
+                self.execute_run_dag(run_id, &workflow, &input, &agent_resolver, &send_message)
+                    .await
+            } else {
+                self.execute_run_sequential(
+                    run_id,
+                    &workflow,
+                    &input,
+                    &agent_resolver,
+                    &send_message,
+                )
                 .await
-        } else {
-            self.execute_run_sequential(run_id, &workflow, &input, &agent_resolver, &send_message)
-                .await
+            }
         };
+
+        let result = if let Some(secs) = total_timeout {
+            match tokio::time::timeout(std::time::Duration::from_secs(secs), inner_fut).await {
+                Ok(r) => r,
+                Err(_elapsed) => {
+                    let msg = format!("workflow exceeded total_timeout of {secs}s");
+                    // Only overwrite state if not already Cancelled.
+                    if let Some(mut run) = self.runs.get_mut(&run_id) {
+                        if !matches!(run.state, WorkflowRunState::Cancelled) {
+                            run.state = WorkflowRunState::Failed;
+                            run.error = Some(msg.clone());
+                            run.completed_at = Some(Utc::now());
+                        }
+                    }
+                    Err(msg)
+                }
+            }
+        } else {
+            inner_fut.await
+        };
+
         self.cleanup_terminal_pause_state(run_id).await;
         // Surface persist panics instead of swallowing them (#3753).
         if let Err(persist_err) = self.persist_runs_async().await {
@@ -1417,9 +1884,15 @@ impl WorkflowEngine {
         if let Some(mut run) = self.runs.get_mut(&run_id) {
             if matches!(
                 run.state,
-                WorkflowRunState::Completed | WorkflowRunState::Failed
+                WorkflowRunState::Completed
+                    | WorkflowRunState::Failed
+                    | WorkflowRunState::Cancelled
             ) {
                 run.clear_pause_state();
+                // Drop the per-run notifier — the run is terminal and no
+                // retry sleep will ever need to be woken again.
+                drop(run);
+                self.cancel_notify.remove(&run_id);
             }
         }
     }
@@ -1504,6 +1977,16 @@ impl WorkflowEngine {
                 None
             };
             if let Some(pause) = pending_pause {
+                // Persist the Paused state immediately. Without this, a
+                // SIGKILL between here and the end-of-execute_run batch
+                // persist would lose the resume_token — the contract
+                // handed to the operator on a pause-for-approval flow.
+                // Mirrors the create_run / recover_stale_running_runs
+                // wiring; remaining per-step Failed/Completed
+                // transitions are tracked separately (see PR body).
+                if let Some(run) = self.runs.get(&run_id) {
+                    self.upsert_run_to_store(&run);
+                }
                 info!(
                     run_id = %run_id,
                     resume_step = i,
@@ -1511,6 +1994,20 @@ impl WorkflowEngine {
                     "Workflow run paused at step boundary"
                 );
                 return Ok(current_input);
+            }
+
+            // Cancellation gate — checked after the pause gate so a
+            // concurrent cancel_run() is always observable at every step
+            // boundary. `cancel_run` already set state=Cancelled; we just
+            // need to exit the loop cleanly without overwriting that state.
+            if self
+                .runs
+                .get(&run_id)
+                .map(|r| matches!(r.state, WorkflowRunState::Cancelled))
+                .unwrap_or(false)
+            {
+                info!(run_id = %run_id, step = i, "Workflow run cancelled at step boundary");
+                return Err("workflow run cancelled".into());
             }
 
             let step = &workflow.steps[i];
@@ -1546,9 +2043,15 @@ impl WorkflowEngine {
 
                     let prompt_sent = prompt.clone();
                     let start = std::time::Instant::now();
-                    let result =
-                        Self::execute_step_with_error_mode(step, agent_id, prompt, &send_message)
-                            .await;
+                    let result = Self::execute_step_with_error_mode(
+                        step,
+                        agent_id,
+                        prompt,
+                        &send_message,
+                        run_id,
+                        &self.cancel_notify,
+                    )
+                    .await;
                     let duration_ms = start.elapsed().as_millis() as u64;
 
                     match result {
@@ -1581,9 +2084,11 @@ impl WorkflowEngine {
                         }
                         Err(e) => {
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
-                                r.state = WorkflowRunState::Failed;
-                                r.error = Some(e.clone());
-                                r.completed_at = Some(Utc::now());
+                                if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                    r.state = WorkflowRunState::Failed;
+                                    r.error = Some(e.clone());
+                                    r.completed_at = Some(Utc::now());
+                                }
                             }
                             return Err(e);
                         }
@@ -1677,9 +2182,11 @@ impl WorkflowEngine {
                                     format!("FanOut step '{}' failed: {}", step_name, e);
                                 warn!(%error_msg);
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
-                                    r.state = WorkflowRunState::Failed;
-                                    r.error = Some(error_msg.clone());
-                                    r.completed_at = Some(Utc::now());
+                                    if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                        r.state = WorkflowRunState::Failed;
+                                        r.error = Some(error_msg.clone());
+                                        r.completed_at = Some(Utc::now());
+                                    }
                                 }
                                 return Err(error_msg);
                             }
@@ -1690,9 +2197,11 @@ impl WorkflowEngine {
                                 );
                                 warn!(%error_msg);
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
-                                    r.state = WorkflowRunState::Failed;
-                                    r.error = Some(error_msg.clone());
-                                    r.completed_at = Some(Utc::now());
+                                    if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                        r.state = WorkflowRunState::Failed;
+                                        r.error = Some(error_msg.clone());
+                                        r.completed_at = Some(Utc::now());
+                                    }
                                 }
                                 return Err(error_msg);
                             }
@@ -1785,9 +2294,15 @@ impl WorkflowEngine {
 
                     let prompt_sent = prompt.clone();
                     let start = std::time::Instant::now();
-                    let result =
-                        Self::execute_step_with_error_mode(step, agent_id, prompt, &send_message)
-                            .await;
+                    let result = Self::execute_step_with_error_mode(
+                        step,
+                        agent_id,
+                        prompt,
+                        &send_message,
+                        run_id,
+                        &self.cancel_notify,
+                    )
+                    .await;
                     let duration_ms = start.elapsed().as_millis() as u64;
 
                     match result {
@@ -1814,9 +2329,11 @@ impl WorkflowEngine {
                         Ok(None) => {}
                         Err(e) => {
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
-                                r.state = WorkflowRunState::Failed;
-                                r.error = Some(e.clone());
-                                r.completed_at = Some(Utc::now());
+                                if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                    r.state = WorkflowRunState::Failed;
+                                    r.error = Some(e.clone());
+                                    r.completed_at = Some(Utc::now());
+                                }
                             }
                             return Err(e);
                         }
@@ -1860,6 +2377,8 @@ impl WorkflowEngine {
                             agent_id,
                             prompt,
                             &send_message,
+                            run_id,
+                            &self.cancel_notify,
                         )
                         .await;
                         let duration_ms = start.elapsed().as_millis() as u64;
@@ -1903,9 +2422,11 @@ impl WorkflowEngine {
                             Ok(None) => break,
                             Err(e) => {
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
-                                    r.state = WorkflowRunState::Failed;
-                                    r.error = Some(e.clone());
-                                    r.completed_at = Some(Utc::now());
+                                    if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                        r.state = WorkflowRunState::Failed;
+                                        r.error = Some(e.clone());
+                                        r.completed_at = Some(Utc::now());
+                                    }
                                 }
                                 return Err(e);
                             }
@@ -2049,8 +2570,15 @@ impl WorkflowEngine {
                 let prompt = Self::expand_variables(&step.prompt_template, input, &variables);
                 let prompt_sent = prompt.clone();
                 let start = std::time::Instant::now();
-                let result =
-                    Self::execute_step_with_error_mode(step, agent_id, prompt, send_message).await;
+                let result = Self::execute_step_with_error_mode(
+                    step,
+                    agent_id,
+                    prompt,
+                    send_message,
+                    run_id,
+                    &self.cancel_notify,
+                )
+                .await;
                 let duration_ms = start.elapsed().as_millis() as u64;
 
                 match result {
@@ -2330,6 +2858,119 @@ impl WorkflowEngine {
 
         Ok(preview)
     }
+
+    // -- SQLite per-transition persistence ------------------------------------
+
+    /// Persist a single run to SQLite immediately after a state transition.
+    ///
+    /// This is the key durability improvement: each state change is
+    /// durable on its own rather than waiting for the full batch
+    /// `persist_runs`. A WAL checkpoint follows terminal-state writes.
+    pub fn upsert_run_to_store(&self, run: &WorkflowRun) {
+        if let Some(ref store) = self.store {
+            let row = workflow_run_to_row(run);
+            if let Err(e) = store.upsert_run(&row) {
+                // The caller (`create_run` / `recover_stale_running_runs` / state
+                // transitions) has already updated the in-memory DashMap, so the
+                // run looks persisted from outside, but a crash before the next
+                // batch persist would lose this state. Bumping a counter here
+                // gives ops a Prometheus signal beyond log inspection — log
+                // sampling under load tends to drop exactly the failures we
+                // care about. The caller signature is intentionally not
+                // changed to `Result<(), _>` because that would ripple
+                // through every state-transition site for marginal gain
+                // over a counter + warn.
+                metrics::counter!(
+                    "librefang_kernel_workflow_upsert_failed_total",
+                    "phase" => "upsert_run",
+                )
+                .increment(1);
+                warn!(run_id = %run.id, error = %e, "Immediate SQLite upsert failed");
+            }
+            if matches!(
+                run.state,
+                WorkflowRunState::Completed
+                    | WorkflowRunState::Failed
+                    | WorkflowRunState::Paused { .. }
+            ) {
+                if let Err(e) = store.wal_checkpoint() {
+                    metrics::counter!(
+                        "librefang_kernel_workflow_upsert_failed_total",
+                        "phase" => "wal_checkpoint",
+                    )
+                    .increment(1);
+                    warn!("WAL checkpoint after terminal upsert failed: {e}");
+                }
+            }
+        }
+    }
+
+    /// One-time migration from JSON to SQLite.
+    ///
+    /// If the legacy `workflow_runs.json` exists and has content, and
+    /// the SQLite table has zero rows, import all runs from JSON into
+    /// SQLite, then rename the JSON file to `.bak`. Idempotent: if
+    /// SQLite already has rows, or the JSON file is missing/empty, this
+    /// is a no-op.
+    pub fn migrate_from_json(&self) -> Result<usize, String> {
+        let store = match &self.store {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+        let path = match &self.persist_path {
+            Some(p) => p,
+            None => return Ok(0),
+        };
+        if !path.exists() {
+            return Ok(0);
+        }
+
+        // Only import when SQLite is empty — prevents double-import.
+        let existing = store
+            .count_runs()
+            .map_err(|e| format!("count_runs during migration: {e}"))?;
+        if existing > 0 {
+            debug!(
+                existing,
+                "SQLite workflow_runs already populated, skipping JSON migration"
+            );
+            return Ok(0);
+        }
+
+        let data = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+        if data.trim().is_empty() || data.trim() == "[]" {
+            return Ok(0);
+        }
+
+        let json_runs: Vec<WorkflowRun> = serde_json::from_str(&data)
+            .map_err(|e| format!("Failed to parse {}: {e}", path.display()))?;
+        if json_runs.is_empty() {
+            return Ok(0);
+        }
+
+        let rows: Vec<WorkflowRunRow> = json_runs.iter().map(workflow_run_to_row).collect();
+        let imported = store
+            .bulk_upsert_runs(&rows)
+            .map_err(|e| format!("bulk_upsert_runs during migration: {e}"))?;
+
+        // Rename the old file so we never re-import.
+        let bak = path.with_extension("json.bak");
+        if let Err(e) = std::fs::rename(path, &bak) {
+            warn!(
+                "Imported {imported} workflow runs but could not rename {} to {}: {e}",
+                path.display(),
+                bak.display()
+            );
+        } else {
+            info!(
+                "Migrated {imported} workflow run(s) from {} to SQLite (renamed to {})",
+                path.display(),
+                bak.display()
+            );
+        }
+        Ok(imported)
+    }
 }
 
 impl Default for WorkflowEngine {
@@ -2366,6 +3007,7 @@ impl From<WorkflowFile> for Workflow {
             steps: f.steps,
             created_at: f.created_at.unwrap_or_else(Utc::now),
             layout: None,
+            total_timeout_secs: None,
         }
     }
 }
@@ -2750,6 +3392,7 @@ impl WorkflowTemplateRegistry {
             steps,
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         })
     }
 }
@@ -2758,6 +3401,161 @@ impl Default for WorkflowTemplateRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// WorkflowRun <-> WorkflowRunRow conversion
+// ---------------------------------------------------------------------------
+
+/// Convert a `WorkflowRun` to a flat `WorkflowRunRow` for SQLite storage.
+fn workflow_run_to_row(run: &WorkflowRun) -> WorkflowRunRow {
+    let (state_str, resume_token, pause_reason, paused_at) = match &run.state {
+        WorkflowRunState::Pending => ("pending".to_string(), None, None, None),
+        WorkflowRunState::Running => ("running".to_string(), None, None, None),
+        WorkflowRunState::Paused {
+            resume_token,
+            reason,
+            paused_at,
+        } => (
+            "paused".to_string(),
+            Some(resume_token.to_string()),
+            Some(reason.clone()),
+            Some(paused_at.to_rfc3339()),
+        ),
+        WorkflowRunState::Completed => ("completed".to_string(), None, None, None),
+        WorkflowRunState::Failed => ("failed".to_string(), None, None, None),
+        WorkflowRunState::Cancelled => ("cancelled".to_string(), None, None, None),
+    };
+
+    let step_results_json =
+        serde_json::to_string(&run.step_results).unwrap_or_else(|_| "[]".to_string());
+
+    let paused_variables_json = if run.paused_variables.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&run.paused_variables).unwrap_or_else(|_| "{}".to_string()))
+    };
+
+    WorkflowRunRow {
+        id: run.id.to_string(),
+        workflow_id: run.workflow_id.to_string(),
+        workflow_name: run.workflow_name.clone(),
+        state: state_str,
+        input: run.input.clone(),
+        output: run.output.clone(),
+        error: run.error.clone(),
+        resume_token,
+        pause_reason,
+        paused_at,
+        paused_step_index: run.paused_step_index.map(|i| i as i64),
+        paused_variables: paused_variables_json,
+        paused_current_input: run.paused_current_input.clone(),
+        step_results: step_results_json,
+        started_at: run.started_at.to_rfc3339(),
+        completed_at: run.completed_at.map(|dt| dt.to_rfc3339()),
+        created_at: run.started_at.to_rfc3339(),
+    }
+}
+
+/// Convert a flat `WorkflowRunRow` back into a `WorkflowRun`.
+fn row_to_workflow_run(row: &WorkflowRunRow) -> Result<WorkflowRun, String> {
+    let id = WorkflowRunId(
+        Uuid::parse_str(&row.id).map_err(|e| format!("invalid run id '{}': {e}", row.id))?,
+    );
+    let workflow_id = WorkflowId(
+        Uuid::parse_str(&row.workflow_id)
+            .map_err(|e| format!("invalid workflow_id '{}': {e}", row.workflow_id))?,
+    );
+
+    let state = match row.state.as_str() {
+        "pending" => WorkflowRunState::Pending,
+        "running" => WorkflowRunState::Running,
+        "paused" => {
+            let resume_token = row
+                .resume_token
+                .as_deref()
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .unwrap_or_else(Uuid::new_v4);
+            let reason = row
+                .pause_reason
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            let paused_at = row
+                .paused_at
+                .as_deref()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(Utc::now);
+            WorkflowRunState::Paused {
+                resume_token,
+                reason,
+                paused_at,
+            }
+        }
+        "completed" => WorkflowRunState::Completed,
+        "failed" => WorkflowRunState::Failed,
+        other => return Err(format!("unknown workflow run state: {other}")),
+    };
+
+    let started_at = DateTime::parse_from_rfc3339(&row.started_at)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| format!("invalid started_at '{}': {e}", row.started_at))?;
+
+    let completed_at = row
+        .completed_at
+        .as_deref()
+        .map(|s| {
+            DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|e| format!("invalid completed_at '{s}': {e}"))
+        })
+        .transpose()?;
+
+    let step_results: Vec<StepResult> = serde_json::from_str(&row.step_results).unwrap_or_else(|e| {
+        // Corrupted JSON should never happen given workflow_run_to_row
+        // serializes from a typed Vec<StepResult>, but if it does, log
+        // the run_id rather than silently zero out the history. The
+        // alternative (returning Err) would block boot recovery on a
+        // single bad row, which is worse than visible truncation.
+        warn!(
+            run_id = %row.id,
+            error = %e,
+            "row_to_workflow_run: step_results JSON failed to parse; reloading run with empty history"
+        );
+        Vec::new()
+    });
+
+    let paused_variables: BTreeMap<String, String> = row
+        .paused_variables
+        .as_deref()
+        .map(|s| {
+            serde_json::from_str(s).unwrap_or_else(|e| {
+                warn!(
+                    run_id = %row.id,
+                    error = %e,
+                    "row_to_workflow_run: paused_variables JSON failed to parse; reloading run with empty variables"
+                );
+                BTreeMap::new()
+            })
+        })
+        .unwrap_or_default();
+
+    Ok(WorkflowRun {
+        id,
+        workflow_id,
+        workflow_name: row.workflow_name.clone(),
+        input: row.input.clone(),
+        state,
+        step_results,
+        output: row.output.clone(),
+        error: row.error.clone(),
+        started_at,
+        completed_at,
+        pause_request: None,
+        paused_step_index: row.paused_step_index.map(|i| i as usize),
+        paused_variables,
+        paused_current_input: row.paused_current_input.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -2799,6 +3597,7 @@ mod tests {
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         }
     }
 
@@ -2923,6 +3722,7 @@ mod tests {
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -2980,6 +3780,7 @@ mod tests {
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -3022,6 +3823,7 @@ mod tests {
             }],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "draft".to_string()).await.unwrap();
@@ -3071,6 +3873,7 @@ mod tests {
             }],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -3123,6 +3926,7 @@ mod tests {
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -3165,13 +3969,18 @@ mod tests {
                 prompt_template: "{{input}}".to_string(),
                 mode: StepMode::Sequential,
                 timeout_secs: 10,
-                error_mode: ErrorMode::Retry { max_retries: 2 },
+                error_mode: ErrorMode::Retry {
+                    max_retries: 2,
+                    backoff_ms: None,
+                    jitter_pct: None,
+                },
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
             }],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -3247,6 +4056,7 @@ mod tests {
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "start".to_string()).await.unwrap();
@@ -3323,6 +4133,7 @@ mod tests {
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -3362,9 +4173,14 @@ mod tests {
         let skip_json = serde_json::to_string(&ErrorMode::Skip).unwrap();
         assert_eq!(skip_json, "\"skip\"");
 
-        let retry_json = serde_json::to_string(&ErrorMode::Retry { max_retries: 3 }).unwrap();
+        let retry_json = serde_json::to_string(&ErrorMode::Retry {
+            max_retries: 3,
+            backoff_ms: None,
+            jitter_pct: None,
+        })
+        .unwrap();
         let retry: ErrorMode = serde_json::from_str(&retry_json).unwrap();
-        assert!(matches!(retry, ErrorMode::Retry { max_retries: 3 }));
+        assert!(matches!(retry, ErrorMode::Retry { max_retries: 3, .. }));
     }
 
     #[tokio::test]
@@ -3820,6 +4636,7 @@ prompt_template = "do {{x}}"
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -3953,6 +4770,7 @@ prompt_template = "do {{x}}"
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -4226,6 +5044,7 @@ prompt_template = "do {{x}}"
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
 
         let template = WorkflowEngine::workflow_to_template(&workflow);
@@ -4276,6 +5095,7 @@ prompt_template = "do {{x}}"
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -4857,6 +5677,68 @@ prompt_template = "do {{x}}"
         assert_eq!(run.paused_step_index, Some(0));
     }
 
+    /// A Pending run created on engine #1 must survive a crash that
+    /// happens before any state transition or `persist_runs` call.
+    /// This exercises the create_run -> upsert_run_to_store wiring; the
+    /// batch `persist_runs_to_sqlite` only fires at end-of-execute_run /
+    /// end-of-resume / drain_on_shutdown, so without per-row upsert at
+    /// create time, a crash in the dispatch window loses the run.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pending_run_survives_crash_before_first_persist() {
+        use r2d2::Pool;
+        use r2d2_sqlite::SqliteConnectionManager;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("workflows.db");
+
+        let make_store = || {
+            let pool = Pool::builder()
+                .max_size(2)
+                .build(SqliteConnectionManager::file(&db_path))
+                .unwrap();
+            librefang_memory::migration::run_migrations(&pool.get().unwrap())
+                .expect("migrations must apply");
+            librefang_memory::WorkflowStore::new(pool)
+        };
+
+        let original_run_id: WorkflowRunId;
+
+        // Phase 1: create a Pending run, then drop the engine WITHOUT
+        // calling execute_run / persist_runs. The crash window we care
+        // about is between insert into the DashMap and first dispatch
+        // — historically a daemon kill here lost the run.
+        {
+            let store = make_store();
+            let engine = WorkflowEngine::new_with_store(store, tmp.path());
+            let wf_id = engine.register(test_workflow()).await;
+            original_run_id = engine
+                .create_run(wf_id, "data".to_string())
+                .await
+                .expect("create_run must succeed");
+            // Confirm the run is Pending in memory.
+            let run = engine.get_run(original_run_id).await.unwrap();
+            assert!(matches!(run.state, WorkflowRunState::Pending));
+            // Engine drops here. No `persist_runs_async`. No execute.
+        }
+
+        // Phase 2: re-open the SAME database file with a fresh store
+        // and engine, load runs, assert the Pending row came back.
+        let store = make_store();
+        let engine = WorkflowEngine::new_with_store(store, tmp.path());
+        let count =
+            tokio::task::block_in_place(|| engine.load_runs()).expect("load_runs must succeed");
+        assert_eq!(count, 1, "expected exactly one persisted run");
+        let run = engine
+            .get_run(original_run_id)
+            .await
+            .expect("Pending run must be reloadable");
+        assert!(
+            matches!(run.state, WorkflowRunState::Pending),
+            "expected Pending after reload, got {:?}",
+            run.state
+        );
+    }
+
     #[tokio::test]
     async fn pause_request_on_dag_workflow_returns_explicit_error() {
         let engine = Arc::new(WorkflowEngine::new());
@@ -4893,6 +5775,7 @@ prompt_template = "do {{x}}"
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -5093,5 +5976,580 @@ prompt_template = "do {{x}}"
                 "every run should carry a pause_request"
             );
         }
+    }
+
+    #[test]
+    fn classify_backoff_burst_always_65s() {
+        assert_eq!(
+            classify_backoff("Token burst limit would be exceeded", 0),
+            std::time::Duration::from_secs(65)
+        );
+        assert_eq!(
+            classify_backoff("Token burst limit would be exceeded", 5),
+            std::time::Duration::from_secs(65)
+        );
+    }
+
+    #[test]
+    fn classify_backoff_rate_limit_always_65s() {
+        assert_eq!(
+            classify_backoff("Tool call rate limit exceeded: 10 per minute", 0),
+            std::time::Duration::from_secs(65)
+        );
+    }
+
+    /// Provider error strings come in every casing under the sun
+    /// (Anthropic: "rate limit", OpenAI: "Rate limit"/"rate_limit",
+    /// Gemini: "RATE_LIMIT_EXCEEDED"). Without case-insensitive matching
+    /// the burst window kicks in only for Anthropic and everything else
+    /// falls through to exponential — exactly the bug v1 of this
+    /// classifier shipped with.
+    #[test]
+    fn classify_backoff_rate_limit_is_case_insensitive() {
+        for variant in [
+            "Rate Limit Exceeded",
+            "RATE LIMIT EXCEEDED",
+            "rate_limit_exceeded",
+            "RATE_LIMIT_EXCEEDED",
+            "OpenAI: Rate limit reached for gpt-4",
+            "Gemini error: RATE_LIMIT_EXCEEDED for project foo",
+            "Token Burst Limit Reached",
+        ] {
+            assert_eq!(
+                classify_backoff(variant, 0),
+                std::time::Duration::from_secs(65),
+                "expected 65s burst-window backoff for variant: {variant}"
+            );
+        }
+    }
+
+    /// `Retry-After` from the upstream provider beats the constant 65s.
+    /// A server explicitly asking for 120s must NOT be retried at 65s
+    /// and 429ed again — that's exactly the loop the original v1
+    /// classifier failed to break. Driver 429 messages frequently inline
+    /// the upstream HTTP `Retry-After` header value.
+    #[test]
+    fn classify_backoff_honours_retry_after_seconds() {
+        assert_eq!(
+            classify_backoff("HTTP 429 from provider — Retry-After: 120 (rate limit)", 0),
+            std::time::Duration::from_secs(120)
+        );
+    }
+
+    /// `LlmError::RateLimited` and `LlmError::Overloaded` Display as
+    /// `"... retry after Nms ..."`. The kernel sees this string verbatim
+    /// (the runtime stringifies the driver error before bubbling). Pin
+    /// the contract against the *real* driver Display output — using a
+    /// synthetic `retry_after_ms=N` form here would silently let the two
+    /// parsers drift, which is exactly the gap that motivated this test.
+    #[test]
+    fn classify_backoff_honours_llm_error_display_strings() {
+        use librefang_llm_driver::LlmError;
+
+        let rate_limited = LlmError::RateLimited {
+            retry_after_ms: 8000,
+            message: Some("hit your limit · resets 10am".to_string()),
+        };
+        assert_eq!(
+            classify_backoff(&rate_limited.to_string(), 0),
+            std::time::Duration::from_millis(8000),
+            "RateLimited Display: {}",
+            rate_limited
+        );
+
+        let overloaded = LlmError::Overloaded {
+            retry_after_ms: 12_000,
+        };
+        assert_eq!(
+            classify_backoff(&overloaded.to_string(), 0),
+            std::time::Duration::from_millis(12_000),
+            "Overloaded Display: {}",
+            overloaded
+        );
+    }
+
+    /// A hostile or buggy provider returning Retry-After: 86400 (one
+    /// day) must not park a workflow indefinitely. Cap at 5 minutes
+    /// and let the next attempt re-classify.
+    #[test]
+    fn classify_backoff_caps_retry_after_at_five_minutes() {
+        assert_eq!(
+            classify_backoff("Retry-After: 86400", 0),
+            std::time::Duration::from_secs(300)
+        );
+    }
+
+    /// Plain rate-limit text without an embedded retry hint still
+    /// routes through the burst branch — pin against a regression
+    /// where `extract_retry_delay` over-matches a `rate_limit` /
+    /// `rate-limit` substring as if it were a `retry-after` prefix.
+    #[test]
+    fn classify_backoff_no_retry_after_falls_back_to_burst_branch() {
+        assert_eq!(
+            classify_backoff("Plain rate_limit error, no header info", 0),
+            std::time::Duration::from_secs(65)
+        );
+    }
+
+    #[test]
+    fn classify_backoff_generic_exponential_capped() {
+        assert_eq!(
+            classify_backoff("Resource quota exceeded: something", 0),
+            std::time::Duration::from_secs(1)
+        );
+        assert_eq!(
+            classify_backoff("Resource quota exceeded: something", 1),
+            std::time::Duration::from_secs(2)
+        );
+        assert_eq!(
+            classify_backoff("Resource quota exceeded: something", 3),
+            std::time::Duration::from_secs(8)
+        );
+        // attempt 10: 2^10 = 1024, capped at 60
+        assert_eq!(
+            classify_backoff("some other error", 10),
+            std::time::Duration::from_secs(60)
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // R1 Tests: behavioral executor tests (cancel, timeout, backoff math)
+    // -------------------------------------------------------------------------
+
+    /// Test 1: cancel mid-step stops execution and leaves state = Cancelled.
+    ///
+    /// - 3 sequential steps
+    /// - Step 1 returns immediately
+    /// - Step 2 waits on a Notify (simulating a long-running agent call)
+    /// - Step 3 would return immediately
+    /// - After step 1 completes (confirmed via a separate Notify), we cancel
+    ///   the run. Then we unblock step 2 to return.
+    /// - Asserts: executor returns Err("cancelled"), state is Cancelled,
+    ///   step_results.len() < 3 (step 3 never fired)
+    ///
+    /// Uses an atomic call counter to tell apart step 1 (call 0) from
+    /// step 2 (call 1) regardless of how the prompt template expands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_mid_step_stops_execution_and_state_is_cancelled() {
+        use std::sync::{
+            atomic::{AtomicU32, Ordering},
+            Arc,
+        };
+        use tokio::sync::Notify;
+
+        let engine = Arc::new(WorkflowEngine::new());
+        // step2_gate: blocks inside the step-2 send_message until notified.
+        let step2_gate = Arc::new(Notify::new());
+        // step1_done_signal: fires as soon as step 1 returns, before step 2
+        // is even called. Lets the test-driver know it's safe to cancel.
+        let step1_done_signal = Arc::new(Notify::new());
+        let call_count = Arc::new(AtomicU32::new(0));
+
+        let wf = Workflow {
+            id: WorkflowId::new(),
+            name: "cancel-mid-test".to_string(),
+            description: "".to_string(),
+            steps: vec![
+                WorkflowStep {
+                    name: "step1".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "a".to_string(),
+                    },
+                    prompt_template: "s1".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 10,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    depends_on: vec![],
+                },
+                WorkflowStep {
+                    name: "step2".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "a".to_string(),
+                    },
+                    prompt_template: "s2".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 10,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    depends_on: vec![],
+                },
+                WorkflowStep {
+                    name: "step3".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "a".to_string(),
+                    },
+                    prompt_template: "s3".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 10,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    depends_on: vec![],
+                },
+            ],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+        };
+
+        let wf_id = engine.register(wf).await;
+        let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
+
+        let gate = step2_gate.clone();
+        let s1_done = step1_done_signal.clone();
+        let counter = call_count.clone();
+        let engine_exec = engine.clone();
+
+        // Spawn execute_run so cancel can race it.
+        let handle = tokio::spawn(async move {
+            engine_exec
+                .execute_run(run_id, mock_resolver, move |_id: AgentId, _msg: String| {
+                    let gate = gate.clone();
+                    let s1_done = s1_done.clone();
+                    let counter = counter.clone();
+                    async move {
+                        let call = counter.fetch_add(1, Ordering::SeqCst);
+                        if call == 0 {
+                            // step 1: return immediately, signal the driver.
+                            s1_done.notify_one();
+                            Ok(("step1_done".to_string(), 1u64, 1u64))
+                        } else {
+                            // step 2 (or 3): block until the gate opens.
+                            gate.notified().await;
+                            Ok(("step_done".to_string(), 1u64, 1u64))
+                        }
+                    }
+                })
+                .await
+        });
+
+        // Wait until step 1 has signalled completion.
+        step1_done_signal.notified().await;
+        // Give the executor a brief moment to record the step result and
+        // reach the step-2 send_message call before we cancel.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // Cancel while executor is parked inside step-2's send_message.
+        engine
+            .cancel_run(run_id)
+            .await
+            .expect("cancel must succeed");
+
+        // Unblock step 2's send_message so the executor can observe the
+        // cancellation at the next step boundary.
+        step2_gate.notify_waiters();
+
+        // Await the spawned task.
+        let result = handle.await.expect("task must not panic");
+        assert!(
+            result.is_err(),
+            "execute_run must return Err after cancel, got Ok"
+        );
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("cancel"),
+            "error must mention 'cancel', got: {err_msg}"
+        );
+
+        // State must be Cancelled.
+        let run = engine.get_run(run_id).await.unwrap();
+        assert!(
+            matches!(run.state, WorkflowRunState::Cancelled),
+            "state must be Cancelled, got {:?}",
+            run.state
+        );
+        // Step 3 must never have fired.
+        assert!(
+            run.step_results.len() < 3,
+            "step 3 must not have executed, got {} step_results",
+            run.step_results.len()
+        );
+    }
+
+    /// Test 2: total_timeout fires and transitions the run to Failed.
+    ///
+    /// Uses `tokio::time::pause()` + `advance()` so the test completes
+    /// instantly without sleeping real time.
+    #[tokio::test(flavor = "current_thread")]
+    async fn total_timeout_fires_and_sets_state_to_failed() {
+        tokio::time::pause();
+
+        let engine = WorkflowEngine::new();
+        let wf = Workflow {
+            id: WorkflowId::new(),
+            name: "timeout-test".to_string(),
+            description: "".to_string(),
+            steps: vec![WorkflowStep {
+                name: "slow-step".to_string(),
+                agent: StepAgent::ByName {
+                    name: "a".to_string(),
+                },
+                prompt_template: "{{input}}".to_string(),
+                mode: StepMode::Sequential,
+                timeout_secs: 300, // per-step timeout: longer than workflow timeout
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+            }],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: Some(1), // 1 second total timeout
+        };
+
+        let wf_id = engine.register(wf).await;
+        let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
+
+        // execute_run will tokio::time::timeout(1s, inner_fut). The sender
+        // sleeps for 3s. We advance time by 2s to fire the timeout.
+        let exec_fut =
+            engine.execute_run(run_id, mock_resolver, |_id: AgentId, _msg: String| async {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                Ok(("done".to_string(), 0u64, 0u64))
+            });
+
+        // Drive execute_run and advance time concurrently. With time paused
+        // the sleep inside the sender won't advance unless we explicitly
+        // advance. We need to poll the future a bit first to get it parked
+        // in the sleep, then advance.
+        let result = tokio::select! {
+            r = exec_fut => r,
+            _ = async {
+                // Let the executor get parked in the sleep first.
+                tokio::task::yield_now().await;
+                tokio::time::advance(std::time::Duration::from_secs(2)).await;
+                std::future::pending::<()>().await
+            } => unreachable!(),
+        };
+
+        assert!(
+            result.is_err(),
+            "execute_run must return Err on timeout, got Ok"
+        );
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("workflow exceeded total_timeout"),
+            "error must mention timeout, got: {err_msg}"
+        );
+
+        let run = engine.get_run(run_id).await.unwrap();
+        assert!(
+            matches!(run.state, WorkflowRunState::Failed),
+            "state must be Failed after timeout, got {:?}",
+            run.state
+        );
+        let error_field = run.error.as_deref().unwrap_or("");
+        assert!(
+            error_field.contains("workflow exceeded total_timeout"),
+            "run.error must contain timeout message, got: {error_field}"
+        );
+    }
+
+    /// Test 3: compute_retry_backoff math — pure unit test.
+    #[test]
+    fn compute_retry_backoff_math() {
+        use std::time::Duration;
+
+        // Fixed base, no jitter: exponential doubling.
+        assert_eq!(
+            compute_retry_backoff("err", 0, Some(100), None),
+            Duration::from_millis(100),
+            "attempt 0: base_ms * 2^0"
+        );
+        assert_eq!(
+            compute_retry_backoff("err", 1, Some(100), None),
+            Duration::from_millis(200),
+            "attempt 1: base_ms * 2^1"
+        );
+        assert_eq!(
+            compute_retry_backoff("err", 2, Some(100), None),
+            Duration::from_millis(400),
+            "attempt 2: base_ms * 2^2"
+        );
+        // Very high attempt — must cap at MAX_BACKOFF_MS = 60_000 ms.
+        assert_eq!(
+            compute_retry_backoff("err", 20, Some(100), None),
+            Duration::from_millis(60_000),
+            "attempt 20: must be capped at 60_000 ms"
+        );
+
+        // With jitter_pct = 25 at attempt 1 (raw = 200ms):
+        // delta = 200 * 25 / 100 = 50ms, range = 201
+        // result in [200 - 50, 200 + 50] = [150ms, 250ms]
+        let mut values = std::collections::HashSet::new();
+        for _ in 0..20 {
+            let d = compute_retry_backoff("err", 1, Some(100), Some(25));
+            let ms = d.as_millis();
+            assert!(
+                (150..=250).contains(&ms),
+                "jitter result {ms}ms must be in [150, 250]"
+            );
+            values.insert(ms);
+        }
+        assert!(
+            values.len() >= 2,
+            "jitter must produce variation over 20 calls, got unique values: {values:?}"
+        );
+
+        // No backoff_ms → falls through to classify_backoff.
+        assert_eq!(
+            compute_retry_backoff("err", 0, None, None),
+            classify_backoff("err", 0),
+            "None backoff_ms must delegate to classify_backoff"
+        );
+    }
+
+    /// Test 4: cancel_run returns NotFound for an unknown run id.
+    #[tokio::test]
+    async fn cancel_run_returns_not_found_for_unknown_id() {
+        let engine = WorkflowEngine::new();
+        let unknown = WorkflowRunId(uuid::Uuid::new_v4());
+        let result = engine.cancel_run(unknown).await;
+        assert!(
+            matches!(result, Err(CancelRunError::NotFound(_))),
+            "expected NotFound, got: {:?}",
+            result
+        );
+    }
+
+    /// Test 5: cancel_during_retry_sleep_aborts_promptly.
+    ///
+    /// Step fails every time; backoff is 30s. We cancel during the sleep
+    /// and verify the executor returns well before the sleep would have
+    /// expired.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancel_during_retry_sleep_aborts_promptly() {
+        use std::sync::Arc;
+        tokio::time::pause();
+
+        let engine = Arc::new(WorkflowEngine::new());
+        let wf = Workflow {
+            id: WorkflowId::new(),
+            name: "retry-cancel-test".to_string(),
+            description: "".to_string(),
+            steps: vec![WorkflowStep {
+                name: "always-fail".to_string(),
+                agent: StepAgent::ByName {
+                    name: "a".to_string(),
+                },
+                prompt_template: "{{input}}".to_string(),
+                mode: StepMode::Sequential,
+                timeout_secs: 5,
+                error_mode: ErrorMode::Retry {
+                    max_retries: 5,
+                    backoff_ms: Some(30_000), // 30 second backoff
+                    jitter_pct: None,
+                },
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+            }],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+        };
+
+        let wf_id = engine.register(wf).await;
+        let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
+
+        let engine_exec = engine.clone();
+        // Spawn execute_run. The step always fails, so it enters the retry
+        // sleep (30s) after the first attempt.
+        let handle = tokio::spawn(async move {
+            engine_exec
+                .execute_run(run_id, mock_resolver, |_id: AgentId, _msg: String| async {
+                    Err("forced failure".to_string())
+                })
+                .await
+        });
+
+        // Advance time by 100ms — enough for the first attempt to fail and
+        // the executor to enter the retry sleep, but nowhere near the 30s backoff.
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+
+        // Cancel the run — this notifies the retry sleep's select branch.
+        engine
+            .cancel_run(run_id)
+            .await
+            .expect("cancel must succeed");
+
+        // The handle should resolve promptly (well under 500ms of real time).
+        // We use a real-time timeout here to guard against the test hanging.
+        tokio::time::resume();
+        let result = tokio::time::timeout(std::time::Duration::from_millis(500), handle)
+            .await
+            .expect("execute_run must return promptly after cancel, not wait 30s")
+            .expect("task must not panic");
+
+        assert!(
+            result.is_err(),
+            "execute_run must return Err after cancel, got Ok"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("cancel"),
+            "error must mention cancel, got: {err}"
+        );
+
+        let run = engine.get_run(run_id).await.unwrap();
+        assert!(
+            matches!(run.state, WorkflowRunState::Cancelled),
+            "state must be Cancelled, got {:?}",
+            run.state
+        );
+    }
+
+    /// Regression: Cancelled runs must be evictable when the total exceeds
+    /// the retention cap (`MAX_RETAINED_RUNS`). Without this, a burst of
+    /// cancels would pin those records in the DashMap forever and push out
+    /// evictable Completed/Failed runs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_runs_are_evictable_when_over_cap() {
+        let engine = WorkflowEngine::new();
+        let wf = Workflow {
+            id: WorkflowId::new(),
+            name: "evict-test".to_string(),
+            description: "".to_string(),
+            steps: vec![WorkflowStep {
+                name: "s".to_string(),
+                agent: StepAgent::ByName {
+                    name: "a".to_string(),
+                },
+                prompt_template: "x".to_string(),
+                mode: StepMode::Sequential,
+                timeout_secs: 1,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+            }],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+        };
+        let wf_id = engine.register(wf).await;
+
+        // Create + immediately cancel well past the retention cap (200).
+        // Without Cancelled in the eviction filter, this loop grows the
+        // `runs` map unboundedly.
+        for _ in 0..250usize {
+            let run_id = engine
+                .create_run(wf_id, "x".to_string())
+                .await
+                .expect("create_run");
+            engine.cancel_run(run_id).await.expect("cancel_run");
+        }
+
+        let all_runs = engine.list_runs(None).await;
+        assert!(
+            all_runs.len() <= 200,
+            "cancelled runs over the cap must be evictable, retained {} (cap 200)",
+            all_runs.len()
+        );
     }
 }

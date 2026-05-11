@@ -1056,6 +1056,17 @@ pub enum AuxTask {
     /// can disable one without disabling the other; budget tooling sees
     /// distinct line items.
     SkillWorkshopReview,
+    /// Session-end summary (#4869): on `reset_session` / `/new`, the
+    /// kernel asks the auxiliary LLM to produce a real summary of the
+    /// session that's about to be deleted (`kv_store` keyed by the
+    /// session id, plus a markdown file in the agent's workspace). The
+    /// pre-#4869 implementation built the summary from the last 10
+    /// `Text`-only user messages, which collapsed to "thanks / sure"
+    /// pleasantries on any non-trivial conversation. Routing through
+    /// `[llm.auxiliary]` keeps the cost on the cheap tier; when no aux
+    /// chain resolves, the kernel falls back to the historical trivial
+    /// summary and logs a WARN so operators see the degraded path.
+    SessionSummary,
 }
 
 impl AuxTask {
@@ -1070,6 +1081,7 @@ impl AuxTask {
             AuxTask::Fold => "fold",
             AuxTask::SkillReview => "skill_review",
             AuxTask::SkillWorkshopReview => "skill_workshop_review",
+            AuxTask::SessionSummary => "session_summary",
         }
     }
 }
@@ -3232,6 +3244,13 @@ pub struct KernelConfig {
     /// Default: `60` minutes.
     #[serde(default = "default_workflow_stale_timeout_minutes")]
     pub workflow_stale_timeout_minutes: u64,
+    /// Default wall-clock timeout (seconds) for an entire workflow run.
+    ///
+    /// Individual workflows can override this via `Workflow::total_timeout_secs`.
+    /// When both are `None` the workflow runs unbounded (no total timeout).
+    /// Default: `None` (unbounded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_default_total_timeout_secs: Option<u64>,
 }
 
 /// Input sanitization mode for channel messages.
@@ -4175,8 +4194,27 @@ pub struct BudgetConfig {
     pub default_max_llm_tokens_per_hour: u64,
     /// Per-provider spending caps, keyed by provider id (e.g. `"moonshot"`,
     /// `"openai"`, `"litellm"`). Missing providers are unlimited.
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub providers: std::collections::HashMap<String, ProviderBudget>,
+    ///
+    /// `BTreeMap` so the serialised form is deterministic — `[budget].providers`
+    /// round-trips byte-identically across reloads, so `field_changed` in
+    /// `config_reload::build_reload_plan` (which compares JSON forms) does not
+    /// emit a spurious `HotAction::UpdateBudget` from HashMap iteration-order
+    /// drift when the operator hasn't actually touched the caps.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub providers: std::collections::BTreeMap<String, ProviderBudget>,
+    /// Global default burst ratio for all agents (`0.0` = unset, use
+    /// compiled default `0.2`). Overridden per-agent via
+    /// `ResourceQuota.burst_ratio`.
+    ///
+    /// Validated at parse time: NaN, infinity, and values outside
+    /// `[0.0, 1.0]` are rejected with a serde error rather than
+    /// silently sanitised at the rate-limiter use site. The
+    /// compiled-default fallback for an out-of-range agent override
+    /// still lives in `ResourceQuota::effective_burst_ratio` (defence
+    /// in depth), but operator-provided config that's nonsensical
+    /// should fail loud at boot, not paper over a typo.
+    #[serde(default, deserialize_with = "deserialize_default_burst_ratio")]
+    pub default_burst_ratio: f32,
 }
 
 impl Default for BudgetConfig {
@@ -4187,13 +4225,37 @@ impl Default for BudgetConfig {
             max_monthly_usd: 0.0,
             alert_threshold: 0.8,
             default_max_llm_tokens_per_hour: 0,
-            providers: std::collections::HashMap::new(),
+            providers: std::collections::BTreeMap::new(),
+            default_burst_ratio: 0.0,
         }
     }
 }
 
 fn default_max_cron_jobs() -> usize {
     500
+}
+
+/// Validate `BudgetConfig::default_burst_ratio` at parse time.
+///
+/// Rejects NaN, ±infinity, and values outside `[0.0, 1.0]`. `0.0` is
+/// the explicit "unset, use compiled default" sentinel and is allowed.
+fn deserialize_default_burst_ratio<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let v = f32::deserialize(deserializer)?;
+    if !v.is_finite() {
+        return Err(D::Error::custom(format!(
+            "default_burst_ratio must be finite (got {v}); use 0.0 to leave unset"
+        )));
+    }
+    if !(0.0..=1.0).contains(&v) {
+        return Err(D::Error::custom(format!(
+            "default_burst_ratio must be in [0.0, 1.0] (got {v}); 0.0 = unset, 1.0 = full hourly budget per minute"
+        )));
+    }
+    Ok(v)
 }
 
 /// Compaction strategy for Persistent cron sessions (#3693).
@@ -5143,6 +5205,7 @@ impl Default for KernelConfig {
             parallel_tools: ParallelToolsConfig::default(),
             tool_results: ToolResultsConfig::default(),
             workflow_stale_timeout_minutes: default_workflow_stale_timeout_minutes(),
+            workflow_default_total_timeout_secs: None,
         }
     }
 }
@@ -5822,10 +5885,35 @@ pub struct ChannelsConfig {
     /// When `None`, defaults to `std::env::temp_dir()/librefang_uploads`.
     #[serde(default)]
     pub file_download_dir: Option<String>,
+
+    // --- Global file-upload settings ---
+    /// Maximum file size in bytes for channel file uploads (bot → server),
+    /// applied uniformly by the Matrix and Telegram adapters before sending
+    /// outbound media (default: 50 MB).
+    ///
+    /// Distinct from `file_download_max_bytes` (inbound: server → agent →
+    /// disk). An operator who wants a larger inbound budget but a smaller
+    /// outbound budget — or vice versa — must set both independently. The
+    /// 50 MiB default matches both the Matrix homeserver convention and
+    /// Telegram's bot API ceiling, so omitting the field leaves behaviour
+    /// unchanged from the pre-#4882 hardcoded constants.
+    #[serde(default = "default_file_upload_max_bytes")]
+    pub file_upload_max_bytes: u64,
 }
 
 /// Default max file download size: 50 MB.
 fn default_file_download_max_bytes() -> u64 {
+    50 * 1024 * 1024
+}
+
+/// Default max file upload size: 50 MB.
+///
+/// Same numeric value as the download default but a separate function so
+/// the two can drift if the protocol ceilings ever diverge (Matrix's
+/// theoretical event-size limit is much higher than Telegram's bot API
+/// 50 MiB, but the conservative shared default protects operators from
+/// surprises on the smaller-cap side).
+fn default_file_upload_max_bytes() -> u64 {
     50 * 1024 * 1024
 }
 
@@ -5885,6 +5973,7 @@ impl Default for ChannelsConfig {
             wecom: OneOrMany::default(),
             file_download_max_bytes: default_file_download_max_bytes(),
             file_download_dir: None,
+            file_upload_max_bytes: default_file_upload_max_bytes(),
         }
     }
 }
@@ -6298,6 +6387,18 @@ pub struct EmailConfig {
     pub username: String,
     /// Env var name holding the password.
     pub password_env: String,
+    /// IMAP-specific username (falls back to `username` if not set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imap_username: Option<String>,
+    /// Env var for IMAP-specific password (falls back to `password_env` if not set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imap_password_env: Option<String>,
+    /// SMTP-specific username (falls back to `username` if not set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smtp_username: Option<String>,
+    /// Env var for SMTP-specific password (falls back to `password_env` if not set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smtp_password_env: Option<String>,
     /// Poll interval in seconds.
     pub poll_interval_secs: u64,
     /// IMAP folders to monitor.
@@ -6314,6 +6415,23 @@ pub struct EmailConfig {
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// Path to a PEM file containing one or more CA certificates to trust
+    /// **in addition to** the system root store for the IMAP TLS connection
+    /// (#4877). Use this for self-hosted IMAP behind a private CA — strictly
+    /// preferred over [`Self::tls_accept_invalid_certs`] because hostname /
+    /// expiry / signature validation remain ON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_root_ca_path: Option<String>,
+    /// When `true`, the IMAP TLS connection accepts ANY server certificate —
+    /// hostname, expiry, signature, and chain are all ignored. **This makes
+    /// the connection vulnerable to MITM and exposes the entire mailbox.**
+    /// Provided as a last-resort dev escape hatch (e.g., expired self-signed
+    /// cert that cannot be renewed). Defaults to `false`. A WARN is logged
+    /// on every IMAP connect attempt while this is enabled, so the risk
+    /// stays visible in operator logs rather than being noticed once at
+    /// startup and then forgotten (#4877).
+    #[serde(default)]
+    pub tls_accept_invalid_certs: bool,
 }
 
 impl Default for EmailConfig {
@@ -6325,12 +6443,18 @@ impl Default for EmailConfig {
             smtp_port: 587,
             username: String::new(),
             password_env: "EMAIL_PASSWORD".to_string(),
+            imap_username: None,
+            imap_password_env: None,
+            smtp_username: None,
+            smtp_password_env: None,
             poll_interval_secs: 30,
             folders: vec!["INBOX".to_string()],
             allowed_senders: vec![],
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
+            tls_root_ca_path: None,
+            tls_accept_invalid_certs: false,
         }
     }
 }
@@ -8749,5 +8873,59 @@ rule_sets = ["browser_handles", "pii_baseline"]
             cfg.otlp_export_disabled(true),
             "empty endpoint is the explicit opt-out path even when stack is up"
         );
+    }
+
+    // ----- BudgetConfig::default_burst_ratio parse-time validation -----
+
+    #[test]
+    fn default_burst_ratio_accepts_zero_and_unit_range() {
+        for v in [0.0_f32, 0.01, 0.2, 0.5, 1.0] {
+            let toml_str = format!("default_burst_ratio = {v}");
+            let cfg: BudgetConfig = toml::from_str(&toml_str)
+                .unwrap_or_else(|e| panic!("expected accept for {v}: {e}"));
+            assert!((cfg.default_burst_ratio - v).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn default_burst_ratio_rejects_negative_at_parse_time() {
+        let err = toml::from_str::<BudgetConfig>("default_burst_ratio = -0.5")
+            .expect_err("negative ratio must be rejected at parse time");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("default_burst_ratio") && msg.contains("[0.0, 1.0]"),
+            "error must explain the constraint, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn default_burst_ratio_rejects_above_one_at_parse_time() {
+        let err = toml::from_str::<BudgetConfig>("default_burst_ratio = 2.5")
+            .expect_err("ratio > 1.0 must be rejected at parse time");
+        assert!(err.to_string().contains("default_burst_ratio"));
+    }
+
+    #[test]
+    fn default_burst_ratio_rejects_nan_at_parse_time() {
+        let err = toml::from_str::<BudgetConfig>("default_burst_ratio = nan")
+            .expect_err("NaN must be rejected at parse time");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("default_burst_ratio") && msg.contains("finite"),
+            "error must explain the constraint, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn default_burst_ratio_rejects_infinity_at_parse_time() {
+        let err = toml::from_str::<BudgetConfig>("default_burst_ratio = inf")
+            .expect_err("infinity must be rejected at parse time");
+        assert!(err.to_string().contains("finite"));
+    }
+
+    #[test]
+    fn default_burst_ratio_defaults_to_zero_when_missing() {
+        let cfg: BudgetConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.default_burst_ratio, 0.0);
     }
 }

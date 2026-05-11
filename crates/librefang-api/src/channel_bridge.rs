@@ -332,7 +332,7 @@ use librefang_kernel::config::load_config as kernel_load_config;
 use librefang_kernel::llm_driver::StreamEvent;
 use librefang_kernel::DeliveryTracker;
 use librefang_kernel::KernelApi;
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentId, ResetScope, SessionId};
 use std::sync::Arc;
 #[cfg(feature = "channel-telegram")]
 use std::time::Duration;
@@ -1659,14 +1659,16 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     async fn reset_session(&self, agent_id: AgentId) -> Result<String, String> {
         self.kernel
-            .reset_session(agent_id)
+            .reset_session(agent_id, ResetScope::Agent)
+            .await
             .map_err(|e| format!("{e}"))?;
         Ok("Session reset. Chat history cleared.".to_string())
     }
 
     async fn reboot_session(&self, agent_id: AgentId) -> Result<String, String> {
         self.kernel
-            .reboot_session(agent_id)
+            .reboot_session(agent_id, ResetScope::Agent)
+            .await
             .map_err(|e| format!("{e}"))?;
         Ok("Session rebooted. Context cleared.".to_string())
     }
@@ -1674,6 +1676,51 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     async fn compact_session(&self, agent_id: AgentId) -> Result<String, String> {
         self.kernel
             .compact_agent_session(agent_id)
+            .await
+            .map_err(|e| format!("{e}"))
+    }
+
+    async fn reset_channel_session(
+        &self,
+        agent_id: AgentId,
+        channel: &str,
+        chat_id: Option<&str>,
+    ) -> Result<String, String> {
+        let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
+        self.kernel
+            .reset_session(agent_id, ResetScope::Session(sid))
+            .await
+            .map_err(|e| format!("{e}"))?;
+        Ok(format!(
+            "Session reset for this {channel} chat. Other surfaces untouched."
+        ))
+    }
+
+    async fn reboot_channel_session(
+        &self,
+        agent_id: AgentId,
+        channel: &str,
+        chat_id: Option<&str>,
+    ) -> Result<String, String> {
+        let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
+        self.kernel
+            .reboot_session(agent_id, ResetScope::Session(sid))
+            .await
+            .map_err(|e| format!("{e}"))?;
+        Ok(format!(
+            "Session rebooted for this {channel} chat. Other surfaces untouched."
+        ))
+    }
+
+    async fn compact_channel_session(
+        &self,
+        agent_id: AgentId,
+        channel: &str,
+        chat_id: Option<&str>,
+    ) -> Result<String, String> {
+        let sid = SessionId::for_sender_scope(agent_id, channel, chat_id);
+        self.kernel
+            .compact_agent_session_with_id(agent_id, Some(sid))
             .await
             .map_err(|e| format!("{e}"))
     }
@@ -2238,6 +2285,65 @@ fn read_token(env_var: &str, adapter_name: &str) -> Option<String> {
     }
 }
 
+#[cfg(feature = "channel-email")]
+#[derive(Debug)]
+pub(crate) struct EmailCredentials {
+    pub imap_username: String,
+    pub imap_password: String,
+    pub smtp_username: String,
+    pub smtp_password: String,
+}
+
+/// Resolve the four split-credential fields against an `EmailConfig`,
+/// returning `None` if either side's password env var fails to resolve.
+///
+/// Fallback order for each per-protocol field (`imap_username`,
+/// `smtp_username`, `imap_password_env`, `smtp_password_env`):
+///
+///   1. The protocol-specific override (`em_config.imap_username`, etc.)
+///   2. The shared default (`em_config.username` / `em_config.password_env`)
+///
+/// `read_env` is injected so tests can drive the env-lookup path
+/// without mutating shared process state. Production calls pass
+/// [`read_token`].
+#[cfg(feature = "channel-email")]
+pub(crate) fn resolve_email_credentials<F>(
+    em_config: &librefang_types::config::EmailConfig,
+    read_env: F,
+) -> Option<EmailCredentials>
+where
+    F: Fn(&str, &str) -> Option<String>,
+{
+    let imap_username = em_config
+        .imap_username
+        .as_deref()
+        .unwrap_or(&em_config.username)
+        .to_string();
+    let imap_password_env = em_config
+        .imap_password_env
+        .as_deref()
+        .unwrap_or(&em_config.password_env);
+    let imap_password = read_env(imap_password_env, "Email IMAP")?;
+
+    let smtp_username = em_config
+        .smtp_username
+        .as_deref()
+        .unwrap_or(&em_config.username)
+        .to_string();
+    let smtp_password_env = em_config
+        .smtp_password_env
+        .as_deref()
+        .unwrap_or(&em_config.password_env);
+    let smtp_password = read_env(smtp_password_env, "Email SMTP")?;
+
+    Some(EmailCredentials {
+        imap_username,
+        imap_password,
+        smtp_username,
+        smtp_password,
+    })
+}
+
 /// Start the channel bridge for all configured channels based on kernel config.
 ///
 /// Returns `Some(BridgeManager)` if any channels were configured and started,
@@ -2259,6 +2365,158 @@ pub async fn start_channel_bridge(
 /// Start channels from an explicit `ChannelsConfig` (used by hot-reload).
 ///
 /// Returns `(Option<BridgeManager>, Vec<started_channel_names>, webhook_router)`.
+/// Re-dispatch a single journaled message after crash-recovery or after a
+/// rate-limit / overload window has elapsed.
+///
+/// Routes through `handle.send_message`, then delivers any response back to
+/// the originating channel adapter, and updates the journal status with
+/// [`MessageJournal::record_outcome`] (which itself routes the entry to
+/// `Completed` / `Deferred` / `Failed`). Re-dispatch failures that hit a
+/// fresh rate-limit get re-deferred — they do NOT count against the retry
+/// budget. Hard failures DO count (3-strike cap).
+async fn redispatch_journal_entry(
+    entry: &librefang_channels::message_journal::JournalEntry,
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    kernel: &Arc<dyn KernelApi>,
+    journal: Option<&librefang_channels::message_journal::MessageJournal>,
+) {
+    use librefang_channels::message_journal::JournalStatus;
+
+    let age_secs = (chrono::Utc::now() - entry.received_at).num_seconds();
+    let was_in_flight = entry.status == JournalStatus::Processing;
+    let is_deferred_retry = entry.status == JournalStatus::Deferred;
+    info!(
+        id = %entry.message_id,
+        channel = %entry.channel,
+        sender = %entry.sender_name,
+        age_secs,
+        was_in_flight,
+        is_deferred_retry,
+        "Re-dispatching journaled message"
+    );
+
+    // Resolve target agent: prefer the journaled name, fall back to the
+    // first registered agent (preserves the pre-existing crash-recovery
+    // contract — better to deliver to the wrong agent than to lose the
+    // message entirely).
+    let agent_id = if let Some(ref name) = entry.agent_name {
+        handle.find_agent_by_name(name).await.ok().flatten()
+    } else {
+        None
+    };
+    let agent_id = match agent_id {
+        Some(id) => id,
+        None => match kernel.agent_registry().list().first().map(|e| e.id) {
+            Some(id) => id,
+            None => {
+                warn!(id = %entry.message_id, "No agents available for re-dispatch");
+                return;
+            }
+        },
+    };
+
+    // Atomically claim the entry by flipping it to Processing before the
+    // slow LLM call. Without CAS, a second ticker tick that fires while
+    // send_message is still in flight would observe the original Deferred
+    // status and dispatch the same entry concurrently — double LLM bill,
+    // double user-facing reply. Two concurrent recovery snapshots (the
+    // boot-time `recoverable_entries` sweep and the periodic
+    // `due_deferred_entries` ticker) hit the same race, so the claim has
+    // to be CAS, not unconditional `update_status`.
+    if let Some(j) = journal {
+        if !j.claim(&entry.message_id).await {
+            info!(
+                id = %entry.message_id,
+                "Skip re-dispatch: claim already won by another snapshot"
+            );
+            return;
+        }
+    }
+
+    // Prefix tells the agent why this message is arriving late so it can
+    // adjust its response (e.g., not re-do work it already completed).
+    let prefix = if is_deferred_retry {
+        format!(
+            "[RETRY: this message hit a provider rate-limit / overload {age_secs}s ago and the \
+             quota window has now elapsed. Process it now if still relevant.]\n\n"
+        )
+    } else if was_in_flight {
+        format!(
+            "[RECOVERY: this message was being processed {age_secs}s ago when the \
+             system restarted. It may have been partially handled — check your \
+             session context before re-doing work. If you already responded, \
+             reply with NO_REPLY.]\n\n"
+        )
+    } else {
+        format!(
+            "[RECOVERY: this message was received {age_secs}s ago but processing \
+             never started. Please process it now.]\n\n"
+        )
+    };
+    let msg = format!("{prefix}{}", entry.content);
+
+    match handle.send_message(agent_id, &msg).await {
+        Ok(response) => {
+            info!(id = %entry.message_id, "Re-dispatched journaled message");
+            if !response.is_empty() {
+                const DELIVERY_DELAYS: &[u64] = &[5, 10, 15];
+                let mut delivered = false;
+                for delay in DELIVERY_DELAYS {
+                    if let Some(adapter) = kernel.channel_adapters_ref().get(&entry.channel) {
+                        let user = librefang_channels::types::ChannelUser {
+                            platform_id: entry.sender_id.clone(),
+                            display_name: entry.sender_name.clone(),
+                            librefang_user: None,
+                        };
+                        let content =
+                            librefang_channels::types::ChannelContent::Text(response.clone());
+                        match adapter.send(&user, content).await {
+                            Ok(()) => {
+                                delivered = true;
+                                break;
+                            }
+                            Err(e) => {
+                                warn!(
+                                    id = %entry.message_id,
+                                    error = %e,
+                                    "Re-dispatch delivery failed, retrying in {delay}s"
+                                );
+                            }
+                        }
+                    } else {
+                        warn!(
+                            id = %entry.message_id,
+                            channel = %entry.channel,
+                            "Adapter not ready, retrying in {delay}s"
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(*delay)).await;
+                }
+                if !delivered {
+                    warn!(
+                        id = %entry.message_id,
+                        "Could not deliver re-dispatched response after retries"
+                    );
+                }
+            }
+            if let Some(j) = journal {
+                j.record_outcome(&entry.message_id, true, None).await;
+            }
+        }
+        Err(e) => {
+            let err_str = e.to_string();
+            warn!(id = %entry.message_id, error = %err_str, "Re-dispatch failed");
+            if let Some(j) = journal {
+                // Routes to Deferred again if the failure carries a fresh
+                // rate-limit marker — otherwise to Failed (counts against
+                // the 3-strike retry cap).
+                j.record_outcome(&entry.message_id, false, Some(err_str))
+                    .await;
+            }
+        }
+    }
+}
+
 pub async fn start_channel_bridge_with_config(
     kernel: Arc<dyn KernelApi>,
     config: &librefang_types::config::ChannelsConfig,
@@ -2366,7 +2624,10 @@ pub async fn start_channel_bridge_with_config(
                     tg_config.max_backoff_secs,
                     tg_config.long_poll_timeout_secs,
                 )
-                .with_clear_done_reaction(tg_config.overrides.clear_done_reaction),
+                .with_clear_done_reaction(tg_config.overrides.clear_done_reaction)
+                .with_max_upload_bytes(
+                    usize::try_from(config.file_upload_max_bytes).unwrap_or(usize::MAX),
+                ),
             );
             adapters.push((
                 adapter,
@@ -2497,7 +2758,10 @@ pub async fn start_channel_bridge_with_config(
                     mx_config.auto_accept_invites,
                 )
                 .with_account_id(mx_config.account_id.clone())
-                .with_backoff(mx_config.initial_backoff_secs, mx_config.max_backoff_secs),
+                .with_backoff(mx_config.initial_backoff_secs, mx_config.max_backoff_secs)
+                .with_max_upload_bytes(
+                    usize::try_from(config.file_upload_max_bytes).unwrap_or(usize::MAX),
+                ),
             );
             adapters.push((
                 adapter,
@@ -2510,27 +2774,39 @@ pub async fn start_channel_bridge_with_config(
     // Email
     #[cfg(feature = "channel-email")]
     for em_config in config.email.iter() {
-        if let Some(password) = read_token(&em_config.password_env, "Email") {
-            let adapter = Arc::new(
-                EmailAdapter::new(
-                    em_config.imap_host.clone(),
-                    em_config.imap_port,
-                    em_config.smtp_host.clone(),
-                    em_config.smtp_port,
-                    em_config.username.clone(),
-                    password,
-                    em_config.poll_interval_secs,
-                    em_config.folders.clone(),
-                    em_config.allowed_senders.clone(),
-                )
-                .with_account_id(em_config.account_id.clone()),
-            );
-            adapters.push((
-                adapter,
-                em_config.default_agent.clone(),
-                em_config.account_id.clone(),
-            ));
-        }
+        let Some(creds) = resolve_email_credentials(em_config, |env_var, adapter_name| {
+            read_token(env_var, adapter_name)
+        }) else {
+            continue;
+        };
+        let adapter = Arc::new(
+            EmailAdapter::new(
+                em_config.imap_host.clone(),
+                em_config.imap_port,
+                em_config.smtp_host.clone(),
+                em_config.smtp_port,
+                creds.imap_username,
+                creds.imap_password,
+                creds.smtp_username,
+                creds.smtp_password,
+                em_config.poll_interval_secs,
+                em_config.folders.clone(),
+                em_config.allowed_senders.clone(),
+            )
+            .with_account_id(em_config.account_id.clone())
+            .with_tls_root_ca_path(
+                em_config
+                    .tls_root_ca_path
+                    .as_ref()
+                    .map(std::path::PathBuf::from),
+            )
+            .with_tls_accept_invalid_certs(em_config.tls_accept_invalid_certs),
+        );
+        adapters.push((
+            adapter,
+            em_config.default_agent.clone(),
+            em_config.account_id.clone(),
+        ));
     }
 
     // Teams
@@ -3481,139 +3757,80 @@ pub async fn start_channel_bridge_with_config(
         warn!("Could not open message journal — crash recovery disabled");
     }
 
-    // Recover messages that were in-flight during last shutdown/crash
-    let pending = manager.recover_pending().await;
-    if !pending.is_empty() {
+    // Recover messages that were in-flight during last shutdown/crash AND
+    // any deferred entries whose retry deadline has already passed
+    // (rate-limit window reset while the daemon was down).
+    let initial_recoverable = match manager.journal() {
+        Some(j) => j.recoverable_entries().await,
+        None => Vec::new(),
+    };
+    if !initial_recoverable.is_empty() {
+        info!(
+            count = initial_recoverable.len(),
+            "Recovering messages from journal (in-flight + due-deferred)"
+        );
         let handle = bridge_handle.clone();
         let kernel_for_recovery = kernel.clone();
         let recovery_journal = manager.journal().cloned();
-        tokio::spawn(async move {
-            // Wait for adapters to initialize before sending responses.
-            // Retry with increasing delays: 5s, 10s, 15s.
-            const RECOVERY_DELAYS: &[u64] = &[5, 10, 15];
+        let mut shutdown_recv = manager.shutdown_signal();
+        let recovery_task = tokio::spawn(async move {
+            tokio::select! {
+                _ = async {
+                    // Wait for adapters to boot before re-dispatch.
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    for entry in &initial_recoverable {
+                        redispatch_journal_entry(
+                            entry,
+                            &handle,
+                            &kernel_for_recovery,
+                            recovery_journal.as_ref(),
+                        )
+                        .await;
+                    }
+                } => {}
+                _ = shutdown_recv.changed() => {}
+            }
+        });
+        manager.track_task(recovery_task);
+    }
 
-            // First delay: let adapters boot
-            tokio::time::sleep(std::time::Duration::from_secs(RECOVERY_DELAYS[0])).await;
-
-            for entry in &pending {
-                let age_secs = (chrono::Utc::now() - entry.received_at).num_seconds();
-                let was_in_flight =
-                    entry.status == librefang_channels::message_journal::JournalStatus::Processing;
-                info!(
-                    id = %entry.message_id,
-                    channel = %entry.channel,
-                    sender = %entry.sender_name,
-                    age_secs,
-                    was_in_flight,
-                    "Re-dispatching recovered message"
-                );
-                let agent_id = if let Some(ref name) = entry.agent_name {
-                    handle.find_agent_by_name(name).await.ok().flatten()
-                } else {
-                    None
-                };
-                let agent_id = match agent_id {
-                    Some(id) => id,
-                    None => match kernel_for_recovery
-                        .agent_registry()
-                        .list()
-                        .first()
-                        .map(|e| e.id)
-                    {
-                        Some(id) => id,
-                        None => {
-                            warn!(id = %entry.message_id, "No agents available for recovery");
+    // Periodic ticker: every 60s, re-dispatch any Deferred entries whose
+    // retry deadline has passed since the last sweep. This is what makes
+    // the journal recover from rate-limit windows that elapse WHILE the
+    // daemon is running. Tied to the BridgeManager's lifecycle via
+    // `track_task` so a hot-reload cancels the old ticker before
+    // spawning a new one — otherwise N reloads = N tickers reading the
+    // same JSONL through N independent in-memory views, leading to
+    // double-dispatch on the same `message_id`.
+    if let Some(j) = manager.journal().cloned() {
+        let handle = bridge_handle.clone();
+        let kernel_for_retry = kernel.clone();
+        let mut shutdown_recv = manager.shutdown_signal();
+        let retry_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            // Skip the first immediate tick — initial-recovery already
+            // covers anything due at boot.
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let due = j.due_deferred_entries().await;
+                        if due.is_empty() {
                             continue;
                         }
-                    },
-                };
-                // Differentiate prefix: if the task was already in-flight, the
-                // agent may have partially processed it. Tell it so.
-                let prefix = if was_in_flight {
-                    format!(
-                        "[RECOVERY: this message was being processed {age_secs}s ago when the \
-                         system restarted. It may have been partially handled — check your \
-                         session context before re-doing work. If you already responded, \
-                         reply with NO_REPLY.]\n\n"
-                    )
-                } else {
-                    format!(
-                        "[RECOVERY: this message was received {age_secs}s ago but processing \
-                         never started. Please process it now.]\n\n"
-                    )
-                };
-                let msg = format!("{prefix}{}", entry.content);
-                match handle.send_message(agent_id, &msg).await {
-                    Ok(response) => {
-                        info!(id = %entry.message_id, "Recovered message processed");
-                        if !response.is_empty() {
-                            // Retry delivery with backoff if adapter isn't ready yet
-                            let mut delivered = false;
-                            for delay in RECOVERY_DELAYS {
-                                if let Some(adapter) = kernel_for_recovery
-                                    .channel_adapters_ref()
-                                    .get(&entry.channel)
-                                {
-                                    let user = librefang_channels::types::ChannelUser {
-                                        platform_id: entry.sender_id.clone(),
-                                        display_name: entry.sender_name.clone(),
-                                        librefang_user: None,
-                                    };
-                                    let content = librefang_channels::types::ChannelContent::Text(
-                                        response.clone(),
-                                    );
-                                    match adapter.send(&user, content).await {
-                                        Ok(()) => {
-                                            delivered = true;
-                                            break;
-                                        }
-                                        Err(e) => {
-                                            warn!(
-                                                id = %entry.message_id,
-                                                error = %e,
-                                                "Recovery delivery failed, retrying in {delay}s"
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    warn!(
-                                        id = %entry.message_id,
-                                        channel = %entry.channel,
-                                        "Adapter not ready, retrying in {delay}s"
-                                    );
-                                }
-                                tokio::time::sleep(std::time::Duration::from_secs(*delay)).await;
-                            }
-                            if !delivered {
-                                warn!(
-                                    id = %entry.message_id,
-                                    "Could not deliver recovery response after retries"
-                                );
-                            }
-                        }
-                        if let Some(ref j) = recovery_journal {
-                            j.update_status(
-                                &entry.message_id,
-                                librefang_channels::message_journal::JournalStatus::Completed,
-                                None,
-                            )
-                            .await;
+                        info!(
+                            count = due.len(),
+                            "Retry ticker re-dispatching deferred entries (quota window elapsed)"
+                        );
+                        for entry in &due {
+                            redispatch_journal_entry(entry, &handle, &kernel_for_retry, Some(&j)).await;
                         }
                     }
-                    Err(e) => {
-                        warn!(id = %entry.message_id, error = %e, "Recovery re-dispatch failed");
-                        if let Some(ref j) = recovery_journal {
-                            j.update_status(
-                                &entry.message_id,
-                                librefang_channels::message_journal::JournalStatus::Failed,
-                                Some(e.to_string()),
-                            )
-                            .await;
-                        }
-                    }
+                    _ = shutdown_recv.changed() => break,
                 }
             }
         });
+        manager.track_task(retry_task);
     }
 
     let mut started_names = Vec::new();
@@ -3671,6 +3888,13 @@ pub async fn start_channel_bridge_with_config(
     if started_names.is_empty() {
         (None, Vec::new(), webhook_router)
     } else {
+        // Forward `ApprovalRequested` kernel events to channel adapters so
+        // human approvers see a prompt in their configured chat instead of
+        // having to poll the dashboard (#4875). Started after the adapter
+        // registration loop so the listener captures the live `self.adapters`
+        // set; lifetime is tied to BridgeManager::shutdown_tx, so hot-reload
+        // cancels it together with the rest of the bridge tasks.
+        manager.start_approval_listener().await;
         (Some(manager), started_names, webhook_router)
     }
 }
@@ -4462,5 +4686,198 @@ mod tests {
         assert_eq!(bus.dropped_count(), 5);
         bus.record_consumer_lag(3, "test-context");
         assert_eq!(bus.dropped_count(), 8);
+    }
+
+    // -- resolve_email_credentials: split-creds fallback semantics ----------
+    //
+    // Pins the four fallback paths in EmailConfig:
+    //   imap_username      -> falls back to em_config.username
+    //   imap_password_env  -> falls back to em_config.password_env
+    //   smtp_username      -> falls back to em_config.username
+    //   smtp_password_env  -> falls back to em_config.password_env
+    //
+    // Production wires `read_token` (which reads `std::env::var`); these
+    // tests inject a closure-based env lookup so they don't mutate
+    // shared process state and are race-free under cargo test's
+    // multi-threaded harness.
+
+    #[cfg(feature = "channel-email")]
+    use super::resolve_email_credentials;
+    #[cfg(feature = "channel-email")]
+    use librefang_types::config::EmailConfig;
+
+    #[cfg(feature = "channel-email")]
+    fn email_base() -> EmailConfig {
+        EmailConfig {
+            imap_host: "imap.example.com".to_string(),
+            imap_port: 993,
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_port: 587,
+            username: "shared@example.com".to_string(),
+            password_env: "SHARED_PASSWORD".to_string(),
+            ..EmailConfig::default()
+        }
+    }
+
+    /// Both passwords resolve from the shared `password_env` when no
+    /// per-protocol overrides are set; usernames inherit `username`.
+    #[cfg(feature = "channel-email")]
+    #[test]
+    fn shared_credentials_resolve_to_same_password_for_both_sides() {
+        let cfg = email_base();
+        let creds = resolve_email_credentials(&cfg, |env, _| {
+            (env == "SHARED_PASSWORD").then(|| "shared-secret".to_string())
+        })
+        .expect("must resolve when shared password env is set");
+        assert_eq!(creds.imap_username, "shared@example.com");
+        assert_eq!(creds.smtp_username, "shared@example.com");
+        assert_eq!(creds.imap_password, "shared-secret");
+        assert_eq!(creds.smtp_password, "shared-secret");
+    }
+
+    /// `imap_username = Some(...)` overrides the shared username on the
+    /// IMAP side only; SMTP still falls back to `username`.
+    #[cfg(feature = "channel-email")]
+    #[test]
+    fn imap_username_override_does_not_leak_into_smtp_side() {
+        let mut cfg = email_base();
+        cfg.imap_username = Some("imap-user@example.com".to_string());
+        let creds =
+            resolve_email_credentials(&cfg, |_, _| Some("p".to_string())).expect("must resolve");
+        assert_eq!(creds.imap_username, "imap-user@example.com");
+        assert_eq!(creds.smtp_username, "shared@example.com");
+    }
+
+    /// `smtp_username = Some(...)` overrides on SMTP side only.
+    #[cfg(feature = "channel-email")]
+    #[test]
+    fn smtp_username_override_does_not_leak_into_imap_side() {
+        let mut cfg = email_base();
+        cfg.smtp_username = Some("smtp-user@example.com".to_string());
+        let creds =
+            resolve_email_credentials(&cfg, |_, _| Some("p".to_string())).expect("must resolve");
+        assert_eq!(creds.smtp_username, "smtp-user@example.com");
+        assert_eq!(creds.imap_username, "shared@example.com");
+    }
+
+    /// Per-protocol password env overrides resolve through DIFFERENT
+    /// secrets — pin against a regression where both sides accidentally
+    /// share the same fallback variable.
+    #[cfg(feature = "channel-email")]
+    #[test]
+    fn per_protocol_password_envs_resolve_independently() {
+        let mut cfg = email_base();
+        cfg.imap_password_env = Some("IMAP_SECRET".to_string());
+        cfg.smtp_password_env = Some("SMTP_SECRET".to_string());
+        let creds = resolve_email_credentials(&cfg, |env, _| match env {
+            "IMAP_SECRET" => Some("imap-pw".to_string()),
+            "SMTP_SECRET" => Some("smtp-pw".to_string()),
+            _ => None,
+        })
+        .expect("must resolve");
+        assert_eq!(creds.imap_password, "imap-pw");
+        assert_eq!(creds.smtp_password, "smtp-pw");
+    }
+
+    /// IMAP-specific override resolves; SMTP falls back to `password_env`.
+    #[cfg(feature = "channel-email")]
+    #[test]
+    fn imap_password_override_smtp_falls_back_to_shared() {
+        let mut cfg = email_base();
+        cfg.imap_password_env = Some("IMAP_SECRET".to_string());
+        let creds = resolve_email_credentials(&cfg, |env, _| match env {
+            "IMAP_SECRET" => Some("imap-pw".to_string()),
+            "SHARED_PASSWORD" => Some("shared-pw".to_string()),
+            _ => None,
+        })
+        .expect("must resolve");
+        assert_eq!(creds.imap_password, "imap-pw");
+        assert_eq!(creds.smtp_password, "shared-pw");
+    }
+
+    /// If the IMAP password resolution yields `None` (env var missing
+    /// or empty), the entire adapter is skipped — `None` is returned
+    /// short-circuit BEFORE the SMTP side is consulted.
+    #[cfg(feature = "channel-email")]
+    #[test]
+    fn missing_imap_password_short_circuits_to_none() {
+        use std::cell::Cell;
+        let cfg = email_base();
+        let lookups = Cell::new(0_u32);
+        let result = resolve_email_credentials(&cfg, |env, _| {
+            lookups.set(lookups.get() + 1);
+            // Both sides default to "SHARED_PASSWORD"; returning None
+            // here forces the IMAP `?` to short-circuit.
+            let _ = env;
+            None
+        });
+        assert!(result.is_none(), "missing password must yield None");
+        assert_eq!(
+            lookups.get(),
+            1,
+            "SMTP-side lookup must NOT run after IMAP fails — short-circuit via the `?` operator on the first read_env call"
+        );
+    }
+
+    /// `SessionId::for_sender_scope` is the SINGLE source of truth for the
+    /// channel-scope formula and is called by both ends of the round-trip
+    /// (the channel-bridge reset helpers and the four kernel inbound
+    /// resolvers — `kernel/messaging.rs::send_message_full`,
+    /// `kernel/agent_execution.rs`, `kernel/mod.rs::resolve_dispatch_session_id`).
+    /// This test pins its output: empty `chat_id` collapses to channel-only
+    /// (matching `build_sender_context`'s empty-platform-id case), and the
+    /// `format!("{ch}:{cid}")` joiner matches what the inline formulas
+    /// produced before extraction. If these inputs ever produce different
+    /// sids than the legacy formula did, channel `/new` will delete a
+    /// different sid than the one the next inbound message resolves to,
+    /// silently regressing #4868.
+    #[test]
+    fn for_sender_scope_matches_legacy_inline_formula() {
+        use librefang_types::agent::SessionId;
+        let agent = AgentId(uuid::Uuid::new_v4());
+
+        // Channel + chat — the most common case (Telegram, Slack, Discord).
+        let with_chat = SessionId::for_sender_scope(agent, "telegram", Some("chat-1"));
+        let legacy_with_chat = SessionId::for_channel(agent, "telegram:chat-1");
+        assert_eq!(
+            with_chat, legacy_with_chat,
+            "channel + chat sid must match the legacy inline scope formula (#4868)"
+        );
+
+        // Channel without chat (DM-style adapter that doesn't disambiguate).
+        let dm = SessionId::for_sender_scope(agent, "webhook", None);
+        let legacy_dm = SessionId::for_channel(agent, "webhook");
+        assert_eq!(dm, legacy_dm, "channel-only sid must match (#4868)");
+
+        // Empty chat_id is treated identically to None — same path the
+        // resolver hits when ctx.chat_id is Some("").
+        let empty = SessionId::for_sender_scope(agent, "discord", Some(""));
+        let legacy_empty = SessionId::for_channel(agent, "discord");
+        assert_eq!(
+            empty, legacy_empty,
+            "empty chat_id collapses to channel-only (#4868)"
+        );
+    }
+
+    /// Smoke test for the silent-skip-on-empty case my comment flagged:
+    /// when `password_env = ""` (operator wiped it intending the
+    /// per-protocol fields to take over) and only one side is
+    /// configured, the OTHER side hits the empty fallback and the
+    /// adapter is skipped. Surfaces clearly via `None`.
+    #[cfg(feature = "channel-email")]
+    #[test]
+    fn empty_shared_password_env_with_single_side_override_skips_adapter() {
+        let mut cfg = email_base();
+        cfg.password_env = String::new();
+        cfg.imap_password_env = Some("IMAP_SECRET".to_string());
+        // SMTP side has neither override nor a usable shared env.
+        let result = resolve_email_credentials(&cfg, |env, _| match env {
+            "IMAP_SECRET" => Some("imap-pw".to_string()),
+            _ => None, // empty `password_env` looks up "" and gets None
+        });
+        assert!(
+            result.is_none(),
+            "operator must set BOTH per-protocol envs when wiping the shared one"
+        );
     }
 }

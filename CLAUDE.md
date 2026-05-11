@@ -244,10 +244,17 @@ The daemon command is `start` (not `daemon`).
   cap. See `docs/architecture/trigger-dispatch-concurrency.md`.
 - **Skill workshop** (#3328) passively captures teaching signals from
   successful turns into draft skills under
-  `~/.librefang/skills/pending/<agent>/<uuid>.toml`. **Default-on with
-  the conservative knob set**: `enabled=true`, `auto_capture=true`,
-  `review_mode="heuristic"` (no LLM call), `approval_policy="pending"`
-  (every candidate waits for human approve / reject), `max_pending=20`.
+  `~/.librefang/skills/pending/<agent>/<uuid>.toml`. **Default-OFF —
+  opt-in per agent** by setting `[skill_workshop] enabled = true` in
+  the agent's manifest (`agent.toml`, or the matching `[agents.<name>]`
+  section of a `HAND.toml`). Once enabled, the conservative knob set
+  applies by default: `auto_capture = true`,
+  `review_mode = "heuristic"` (no LLM call),
+  `approval_policy = "pending"` (every candidate waits for human
+  approve / reject), `max_pending = 20`. Source of truth is
+  `SkillWorkshopConfig::default()` in
+  `crates/librefang-types/src/agent.rs` — `enabled: false` per the
+  original #3328 acceptance criteria.
   Three signals — `ExplicitInstruction` ("from now on always …"),
   `UserCorrection` ("no, do it like …"), `RepeatedToolPattern` (same
   tool sequence ≥ 3 turns). Approval routes through
@@ -450,6 +457,23 @@ issue threads.
   refactors with the requested change. If you find a real problem
   out-of-scope, open a separate issue or follow-up PR; mention it in the
   current PR's "Out-of-scope follow-ups" section.
+- **Fix what you found — don't punt it to a "follow-up".** Anything you
+  noticed while reading or writing the code in this PR is in-scope by
+  definition: review nits, mismatched HTTP status codes, missing log
+  fields, redundant lookups, stale comments, type-shape inconsistencies,
+  small clippy noise. Treat the phrases "follow-up", "long-term
+  improvement", "next PR", "future cleanup", "out-of-scope follow-up
+  issue", "leave for later" as red flags in your own review or summary
+  output — they almost always mean "I saw the problem and decided to
+  defer the work". The bar to defer: would fixing it require touching a
+  *different* crate or domain than the one you're already in? If no, fix
+  it in this PR. If yes, surface the question to the human reviewer with
+  the concrete trade-off and ask before deferring; don't decide
+  unilaterally. The same rule applies when you re-evaluate a deferred
+  item and decide it's a "non-issue" — you must back that decision with
+  the file/line evidence that contradicts the original concern, in the
+  same response. "I looked again and it's fine" without evidence is
+  another form of punting.
 - **PR body must enumerate** the substantive changes, the verification
   performed (integration test names, `cargo check --workspace --lib`
   output, scoped `cargo test -p <crate>` runs), and any deferred work.

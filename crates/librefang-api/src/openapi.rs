@@ -177,6 +177,7 @@ use crate::types;
         routes::get_provider,
         routes::set_provider_key,
         routes::delete_provider_key,
+        routes::enable_provider,
         routes::test_provider,
         routes::set_provider_url,
         routes::set_default_provider,
@@ -191,6 +192,13 @@ use crate::types;
         routes::remove_channel,
         routes::test_channel,
         routes::reload_channels,
+        // Per-instance management (#4837): the dashboard manages multiple
+        // `[[channels.<name>]]` entries via these endpoints; the legacy
+        // `/configure` ones above stay registered for backwards compat.
+        routes::list_channel_instances,
+        routes::create_channel_instance,
+        routes::update_channel_instance_handler,
+        routes::delete_channel_instance,
         routes::whatsapp_qr_start,
         routes::whatsapp_qr_status,
         routes::wechat_qr_start,

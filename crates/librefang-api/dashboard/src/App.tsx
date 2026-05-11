@@ -855,6 +855,32 @@ export function App() {
       });
     });
 
+    // Endpoints that require auth: defer until after `verifyStoredAuth()`
+    // resolves, so we don't 401-spam the daemon log while the auth probe
+    // is still in flight. `/api/version{,s}` and `/api/health/detail` are
+    // public and can fire eagerly.
+    const fetchAuthedBootstrap = () => {
+      getStatus()
+        .then((s) => {
+          if (cancelled) return;
+          setTerminalEnabled(s.terminal_enabled !== false);
+        })
+        .catch(() => {
+          // If status fetch fails, assume terminal is available (fail-open).
+          // The WebSocket connection itself will enforce actual policy.
+          if (!cancelled) setTerminalEnabled(true);
+        });
+
+      getDashboardUsername()
+        .then((u) => {
+          if (cancelled) return;
+          setUsername(u);
+        })
+        .catch(() => {
+          /* unauth or no-auth mode — fine, avatar shows the icon. */
+        });
+    };
+
     const checkAuth = async () => {
       const mode = await checkDashboardAuthMode();
       if (cancelled) {
@@ -865,6 +891,7 @@ export function App() {
       if (mode === "none") {
         setAuthNeeded(false);
         setAuthChecked(true);
+        fetchAuthedBootstrap();
         return;
       }
 
@@ -875,6 +902,9 @@ export function App() {
 
       setAuthNeeded(!authenticated);
       setAuthChecked(true);
+      if (authenticated) {
+        fetchAuthedBootstrap();
+      }
     };
 
     void checkAuth();
@@ -882,19 +912,6 @@ export function App() {
       setAppVersion(v.version ?? "");
       setHostname(v.hostname ?? "");
     }).catch(() => { /* Version info is non-essential; silently ignore failure. */ });
-
-    getStatus().then((s) => {
-      setTerminalEnabled(s.terminal_enabled !== false);
-    }).catch(() => {
-      // If status fetch fails, assume terminal is available (fail-open).
-      // The WebSocket connection itself will enforce actual policy.
-      setTerminalEnabled(true);
-    });
-
-    getDashboardUsername().then((u) => {
-      if (cancelled) return;
-      setUsername(u);
-    }).catch(() => { /* unauth or no-auth mode — fine, avatar shows the icon. */ });
 
     return () => {
       cancelled = true;
@@ -1012,9 +1029,24 @@ export function App() {
   // `useApprovalCount` (5s refetchInterval) the moment they render.
   // Those endpoints sit behind the auth gate, so polling them before the
   // user logs in (or after a token expiry) produces an endless 401 storm
-  // in server logs.  Render only the AuthDialog here, then fall through
-  // to the full layout once authentication is established.
-  if (!isNoAuthRoute && authChecked && authNeeded) {
+  // in server logs.
+  //
+  // Three pre-shell states:
+  //  - `!authChecked`         → auth probe still in flight; render
+  //                             nothing so polling queries don't mount
+  //                             during the brief check window.
+  //  - `authChecked && authNeeded` → login dialog.
+  //  - `authChecked && !authNeeded` → fall through to the full layout.
+  if (!isNoAuthRoute && !authChecked) {
+    return (
+      <div
+        className="flex h-screen items-center justify-center bg-main"
+        aria-busy="true"
+        aria-label={t("auth.checking", { defaultValue: "Checking authentication…" })}
+      />
+    );
+  }
+  if (!isNoAuthRoute && authNeeded) {
     return (
       <div className="flex h-screen items-center justify-center bg-main text-slate-900 dark:text-slate-100">
         <AuthDialog

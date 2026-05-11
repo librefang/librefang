@@ -158,4 +158,14 @@ pub const OPERATIONAL_MIGRATIONS: &[Migration] = &[
         name: "approvals_deferred_payload_v1",
         sql: include_str!("sql/026_approvals_deferred_payload.surql"),
     },
+    Migration {
+        version: 27,
+        name: "workflow_runs_v1",
+        sql: include_str!("sql/027_workflow_runs.surql"),
+    },
+    Migration {
+        version: 28,
+        name: "approval_audit_second_factor_used_v1",
+        sql: include_str!("sql/028_approval_audit_second_factor_used.surql"),
+    },
 ];

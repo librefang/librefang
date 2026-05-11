@@ -188,9 +188,61 @@ pub struct ModelCatalogEntry {
     /// Whether the model supports extended thinking / reasoning.
     #[serde(default)]
     pub supports_thinking: bool,
+    /// How the OpenAI-compatible driver must handle the `reasoning_content`
+    /// field on historical assistant turns. Sourced from the registry per
+    /// model so the driver doesn't have to encode this in substring matches.
+    /// See [`ReasoningEchoPolicy`] for the four cases.
+    #[serde(default)]
+    pub reasoning_echo_policy: ReasoningEchoPolicy,
     /// Aliases for this model (e.g. ["sonnet", "claude-sonnet"]).
     #[serde(default)]
     pub aliases: Vec<String>,
+}
+
+/// How the OpenAI-compatible driver must handle the `reasoning_content`
+/// field on historical assistant turns for a given model.
+///
+/// The OpenAI-compat ecosystem has at least three incompatible conventions
+/// here. Encoding the choice as catalog metadata lets the driver resolve
+/// the correct behaviour by lookup instead of substring-matching the model
+/// name. The variants:
+///
+/// * [`Self::None`] — the field is omitted on history (default; most
+///   providers reject the unknown field).
+/// * [`Self::Strip`] — historical `reasoning_content` MUST be stripped from
+///   request payloads. DeepSeek-R1 / `deepseek-reasoner` is the canonical
+///   case: the API rejects requests carrying `reasoning_content` from a
+///   previous assistant turn. The variant *also* implies "force a non-null
+///   `content` field on assistant turns whose `text_parts` would otherwise
+///   be empty" — DeepSeek R1's other multi-turn quirk has always
+///   co-occurred with the strip rule, so the two share one knob. A future
+///   provider that needs only one of the two behaviours will require a
+///   new variant (`#[non_exhaustive]` is set for that reason).
+/// * [`Self::Echo`] — the original thinking text MUST be echoed back on
+///   assistant turns containing `tool_calls`, otherwise the API returns
+///   400. DeepSeek V4 Flash (thinking-mode-on) requires this — see
+///   librefang/librefang#4842.
+/// * [`Self::EmptyString`] — the field must be present (empty string) on
+///   `tool_calls` turns, with thinking disabled wire-side. Moonshot / Kimi
+///   K2 family.
+///
+/// Drivers that don't speak the OpenAI-compatible chat-completions wire
+/// format (Anthropic, Gemini, etc.) ignore this entirely.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ReasoningEchoPolicy {
+    /// No `reasoning_content` field on historical assistant turns (default).
+    #[default]
+    None,
+    /// Strip historical `reasoning_content` (DeepSeek R1 / reasoner).
+    Strip,
+    /// Echo the original thinking text on `tool_calls` turns
+    /// (DeepSeek V4 Flash with thinking mode on).
+    Echo,
+    /// Send empty-string `reasoning_content` on `tool_calls` turns plus
+    /// disable thinking wire-side (Moonshot / Kimi K2 family).
+    EmptyString,
 }
 
 impl ModelCatalogEntry {
@@ -244,6 +296,7 @@ impl Default for ModelCatalogEntry {
             supports_vision: false,
             supports_streaming: false,
             supports_thinking: false,
+            reasoning_echo_policy: ReasoningEchoPolicy::default(),
             aliases: Vec::new(),
         }
     }
@@ -1008,5 +1061,95 @@ aliases = []
             resolved_default,
             "https://dashscope.aliyuncs.com/compatible-mode/v1"
         );
+    }
+
+    // ----- ReasoningEchoPolicy serde tests (#4842) -----
+
+    #[test]
+    fn test_reasoning_echo_policy_serializes_snake_case() {
+        // Verify wire-compatibility with the registry schema (#4842 registry PR)
+        // which lists options as `["none", "strip", "echo", "empty_string"]`.
+        assert_eq!(
+            serde_json::to_string(&ReasoningEchoPolicy::None).unwrap(),
+            r#""none""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ReasoningEchoPolicy::Strip).unwrap(),
+            r#""strip""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ReasoningEchoPolicy::Echo).unwrap(),
+            r#""echo""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ReasoningEchoPolicy::EmptyString).unwrap(),
+            r#""empty_string""#
+        );
+    }
+
+    #[test]
+    fn test_reasoning_echo_policy_deserializes_snake_case() {
+        assert_eq!(
+            serde_json::from_str::<ReasoningEchoPolicy>(r#""none""#).unwrap(),
+            ReasoningEchoPolicy::None
+        );
+        assert_eq!(
+            serde_json::from_str::<ReasoningEchoPolicy>(r#""strip""#).unwrap(),
+            ReasoningEchoPolicy::Strip
+        );
+        assert_eq!(
+            serde_json::from_str::<ReasoningEchoPolicy>(r#""echo""#).unwrap(),
+            ReasoningEchoPolicy::Echo
+        );
+        assert_eq!(
+            serde_json::from_str::<ReasoningEchoPolicy>(r#""empty_string""#).unwrap(),
+            ReasoningEchoPolicy::EmptyString
+        );
+    }
+
+    #[test]
+    fn test_reasoning_echo_policy_default_is_none() {
+        assert_eq!(
+            ReasoningEchoPolicy::default(),
+            ReasoningEchoPolicy::None,
+            "default policy must be None so unmarked catalog entries don't \
+             accidentally enable provider-specific behaviour"
+        );
+    }
+
+    #[test]
+    fn test_model_catalog_entry_parses_reasoning_echo_policy_from_toml() {
+        // Mirrors what the registry consumer reads from
+        // `providers/deepseek.toml` after the registry PR lands.
+        let toml_str = r#"
+            id = "deepseek-v4-flash"
+            display_name = "DeepSeek V4 Flash"
+            tier = "smart"
+            context_window = 1000000
+            max_output_tokens = 384000
+            input_cost_per_m = 0.14
+            output_cost_per_m = 0.28
+            supports_thinking = true
+            reasoning_echo_policy = "echo"
+        "#;
+        let entry: ModelCatalogEntry = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(entry.reasoning_echo_policy, ReasoningEchoPolicy::Echo);
+    }
+
+    #[test]
+    fn test_model_catalog_entry_defaults_reasoning_echo_policy_when_absent() {
+        // Backwards compat: catalogs from older registry releases do not
+        // carry the field. They must keep parsing and default to None.
+        let toml_str = r#"
+            id = "deepseek-chat"
+            display_name = "DeepSeek V3"
+            tier = "smart"
+            context_window = 64000
+            max_output_tokens = 8192
+            input_cost_per_m = 0.32
+            output_cost_per_m = 0.89
+        "#;
+        let entry: ModelCatalogEntry = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(entry.reasoning_echo_policy, ReasoningEchoPolicy::None);
     }
 }

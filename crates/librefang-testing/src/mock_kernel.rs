@@ -59,6 +59,7 @@ pub fn test_catalog_baseline() -> CatalogSeed {
         supports_vision: true,
         supports_streaming: true,
         supports_thinking: false,
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         aliases: Vec::new(),
     }];
     (providers, models)

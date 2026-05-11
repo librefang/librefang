@@ -18,6 +18,18 @@
   --color-border-subtle: var(--border-color);
   --color-text-dim: var(--text-muted);
 
+  /* Override Tailwind v4's `lg` breakpoint from 1024px → 1000px (refs #4873).
+     iPad Pro 13" portrait is 1024px CSS-wide — exactly on the default `lg`
+     boundary. iOS Safari can report the visual viewport a fraction below
+     1024 (scrollbar / subpixel rounding), which collapses the layout into
+     mobile mode mid-render and traps the agent-panel close button under
+     the bottom-tab nav. Lowering to 1000 puts iPad portrait safely inside
+     the desktop layout while still keeping every phone (incl. landscape
+     iPhone 15 Pro Max at 932px) on the mobile layout. The JS-side checks
+     in PushDrawer.useIsMobile and AgentsPage's auto-select effect are
+     pinned to the same threshold. */
+  --breakpoint-lg: 1000px;
+
   /* Custom breakpoints for wide displays.
      Tailwind v4 defaults stop at 2xl (1536px), which leaves 2K / 4K monitors
      stuck at the same density as a 1536px laptop. These let card grids go

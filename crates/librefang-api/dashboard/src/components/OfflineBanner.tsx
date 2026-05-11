@@ -3,19 +3,26 @@ import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import { WifiOff, RefreshCw } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useHealthDetail } from "../lib/queries/runtime";
+import { useHealthLiveness } from "../lib/queries/runtime";
 import { runtimeKeys } from "../lib/queries/keys";
 
 /**
- * Surfaces a "daemon unreachable" banner when the dedicated `/api/health/detail`
- * polling query fails. Anchoring on a single connectivity probe avoids the
- * earlier behavior where any 5xx from any unrelated endpoint flickered the
- * banner — daemon status now drives daemon-status UI, nothing else.
+ * Surfaces a "daemon unreachable" banner when the `/api/health` polling
+ * query fails. Uses the minimal liveness probe rather than
+ * `/api/health/detail` so the pre-auth poll never hits the auth gate (and
+ * never receives operational telemetry it doesn't need) — see api.ts
+ * `getHealth` for the contract (#4868 review fix; #4893 attempted to fix
+ * the same 401 spam by making `/detail` public, which silently broke the
+ * detail endpoint's auth contract).
+ *
+ * Anchoring on a single connectivity probe avoids the earlier behavior
+ * where any 5xx from any unrelated endpoint flickered the banner —
+ * daemon status now drives daemon-status UI, nothing else.
  */
 export function OfflineBanner() {
   const { t } = useTranslation();
   const qc = useQueryClient();
-  const { isError, isFetching, refetch } = useHealthDetail();
+  const { isError, isFetching, refetch } = useHealthLiveness();
   const [retrying, setRetrying] = useState(false);
 
   const offline = isError;

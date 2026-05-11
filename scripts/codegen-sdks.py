@@ -8,6 +8,8 @@ Usage:
 """
 import json
 import re
+import shutil
+import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -989,6 +991,33 @@ def main():
             if old.exists():
                 old.unlink()
                 print(f"  removed {old.relative_to(ROOT)}")
+
+        # rustfmt the generated Rust SDK so its output is byte-identical to
+        # what `cargo fmt` / `rustfmt --check` expects. Without this the
+        # codegen output trips the pre-commit hook on every regen.
+        # Soft-fail on either missing-rustfmt or rustfmt-rejection so a
+        # syntactically-broken emitter regression surfaces as a WARN with
+        # the half-emitted file on disk for inspection, rather than a
+        # Python traceback. The pre-commit `cargo fmt --check` hook is
+        # the hard gate either way.
+        rust_out = ROOT / "sdk/rust/src/lib.rs"
+        if shutil.which("rustfmt"):
+            result = subprocess.run(
+                ["rustfmt", "--edition", "2021", str(rust_out)],
+            )
+            if result.returncode == 0:
+                print(f"  rustfmt {rust_out.relative_to(ROOT)}")
+            else:
+                print(
+                    f"  WARN: rustfmt exited {result.returncode}; "
+                    "sdk/rust/src/lib.rs left as emitted",
+                    file=sys.stderr,
+                )
+        else:
+            print(
+                "  WARN: rustfmt not on PATH; sdk/rust/src/lib.rs left unformatted",
+                file=sys.stderr,
+            )
 
 
 if __name__ == "__main__":

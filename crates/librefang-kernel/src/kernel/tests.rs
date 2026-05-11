@@ -7401,7 +7401,14 @@ mod try_summarize_trim_tests {
             .map(|i| Message::user(format!("turn {i}")))
             .collect();
 
-        let out = super::try_summarize_trim(&messages, 4, driver, "").await;
+        let out = super::try_summarize_trim(
+            &messages,
+            4,
+            driver,
+            "",
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
 
         assert!(out.is_none(), "empty model name must short-circuit to None");
         assert_eq!(
@@ -7426,7 +7433,14 @@ mod try_summarize_trim_tests {
         // keep_recent = 5 > 3 messages → raw_tail_start = 0 (saturating_sub),
         // adjust_split_for_tool_pair leaves it at 0, so we hit the
         // "tail_start == 0" short-circuit branch.
-        let out = super::try_summarize_trim(&messages, 5, driver, "test-model").await;
+        let out = super::try_summarize_trim(
+            &messages,
+            5,
+            driver,
+            "test-model",
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
 
         assert!(
             out.is_none(),
@@ -7454,9 +7468,15 @@ mod try_summarize_trim_tests {
             .collect();
         let keep_recent = 3usize;
 
-        let out = super::try_summarize_trim(&messages, keep_recent, driver, "test-model")
-            .await
-            .expect("a working driver with non-empty content must yield Some(_)");
+        let out = super::try_summarize_trim(
+            &messages,
+            keep_recent,
+            driver,
+            "test-model",
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await
+        .expect("a working driver with non-empty content must yield Some(_)");
 
         assert!(
             calls.load(Ordering::SeqCst) >= 1,
@@ -7503,7 +7523,14 @@ mod try_summarize_trim_tests {
             .map(|i| Message::user(format!("turn {i}")))
             .collect();
 
-        let out = super::try_summarize_trim(&messages, 3, driver, "test-model").await;
+        let out = super::try_summarize_trim(
+            &messages,
+            3,
+            driver,
+            "test-model",
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
 
         assert!(
             out.is_none(),
@@ -7560,9 +7587,15 @@ mod try_summarize_trim_tests {
         // ToolUse @6 and ToolResult @7). adjust_split_for_tool_pair must
         // shift the split forward so the pair stays together; the ToolResult
         // therefore must NOT appear in the kept tail.
-        let out = super::try_summarize_trim(&messages, 3, driver, "test-model")
-            .await
-            .expect("working driver must yield Some(_)");
+        let out = super::try_summarize_trim(
+            &messages,
+            3,
+            driver,
+            "test-model",
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await
+        .expect("working driver must yield Some(_)");
 
         // out[0] is the summary message; out[1..] is the kept tail.
         let tail = &out[1..];

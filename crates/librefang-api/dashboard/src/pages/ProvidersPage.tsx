@@ -7,7 +7,7 @@ import type { ApiActionResponse, ProviderItem } from "../api";
 import { isProviderAvailable } from "../lib/status";
 import { useProviders, useProviderStatus } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
-import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useSetProviderUrl, useSetDefaultProvider, useCreateRegistryContent } from "../lib/mutations/providers";
+import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useEnableProvider, useSetProviderUrl, useSetDefaultProvider, useCreateRegistryContent } from "../lib/mutations/providers";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -24,7 +24,7 @@ import {
   Server, Zap, Clock, Key, Globe, CheckCircle2, XCircle, Loader2, AlertCircle, Search,
   SortAsc, SortDesc, CheckSquare, Square, ChevronRight, X, Grid3X3, List, Filter,
   Activity, Cpu, Cloud, Bot, Globe2, Sparkles, Plus, Star, Pencil, Trash2,
-  Check, ChevronLeft
+  Check, ChevronLeft, RotateCcw
 } from "lucide-react";
 
 function getErrorMessage(e: unknown): string | null {
@@ -1107,6 +1107,7 @@ export function ProvidersPage() {
   const testMutation = useTestProvider();
   const setKeyMutation = useSetProviderKey();
   const deleteKeyMutation = useDeleteProviderKey();
+  const enableProviderMutation = useEnableProvider();
   const setUrlMutation = useSetProviderUrl();
   const defaultProviderMutation = useSetDefaultProvider();
   const createRegistryContentMutation = useCreateRegistryContent();
@@ -1174,6 +1175,23 @@ export function ProvidersPage() {
     setPickerOpen(false);
     config.open(p);
   };
+  // CLI-shape providers (`claude-code`, `codex-cli`, `gemini-cli`,
+  // `qwen-code`) have no key or URL to set, so `set_provider_key` /
+  // `set_provider_url` — which un-suppress as a side effect — never run
+  // for them. The Re-enable button on suppressed picker entries calls
+  // `POST /api/providers/{id}/enable` directly so the provider returns
+  // to the configured grid in one click. For non-CLI suppressed
+  // providers this is also the preferred path when the user is happy
+  // with the prior URL/key and only wants to revert the suppress.
+  const handleReenable = useCallback(async (p: ProviderItem) => {
+    try {
+      await enableProviderMutation.mutateAsync(p.id);
+      setPickerOpen(false);
+      addToast(t("providers.reenabled", { defaultValue: "Provider re-enabled" }), "success");
+    } catch (e) {
+      addToast(getErrorMessage(e) || t("common.error"), "error");
+    }
+  }, [enableProviderMutation, addToast, t]);
 
   const handleSearch = (value: string) => { dispatch({ type: "SEARCH", value }); setSelectedIds(new Set()); };
   const handleFilterChange = (filter: FilterStatus) => { dispatch({ type: "FILTER", status: filter }); setSelectedIds(new Set()); };
@@ -1604,27 +1622,54 @@ export function ProvidersPage() {
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {pickerProviders.map((p) => (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => handlePick(p)}
-                  className="flex items-center gap-3 px-3 py-2.5 rounded-lg border border-border-subtle bg-main/40 hover:border-brand/40 hover:bg-main/60 transition-colors text-left"
-                >
-                  <div className="w-9 h-9 rounded-lg bg-brand/10 border border-brand/20 grid place-items-center text-brand shrink-0">
-                    {getProviderIcon(p.id)}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="font-mono text-[13px] font-medium text-text-main truncate">
-                      {p.display_name || p.id}
+              {pickerProviders.map((p) => {
+                // Suppressed entries collapsed into the picker by
+                // `DELETE /api/providers/{id}/key` get a one-click
+                // Re-enable instead of opening the configure drawer —
+                // CLI providers have no key/URL to set, and even for
+                // local HTTP providers the prior URL is usually still
+                // what the user wants. Non-suppressed entries keep the
+                // existing "open configure drawer" flow.
+                const suppressed = p.suppressed === true;
+                const onClick = suppressed
+                  ? () => handleReenable(p)
+                  : () => handlePick(p);
+                const reenabling =
+                  suppressed
+                  && enableProviderMutation.isPending
+                  && enableProviderMutation.variables === p.id;
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={onClick}
+                    disabled={reenabling}
+                    className="flex items-center gap-3 px-3 py-2.5 rounded-lg border border-border-subtle bg-main/40 hover:border-brand/40 hover:bg-main/60 transition-colors text-left disabled:opacity-60"
+                  >
+                    <div className={`w-9 h-9 rounded-lg grid place-items-center shrink-0 ${suppressed ? "bg-warning/10 border border-warning/20 text-warning" : "bg-brand/10 border border-brand/20 text-brand"}`}>
+                      {getProviderIcon(p.id)}
                     </div>
-                    <div className="font-mono text-[10.5px] text-text-dim/80 truncate">
-                      {p.id}
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-[13px] font-medium text-text-main truncate">
+                        {p.display_name || p.id}
+                      </div>
+                      <div className="font-mono text-[10.5px] text-text-dim/80 truncate">
+                        {p.id}
+                      </div>
                     </div>
-                  </div>
-                  <ChevronRight className="w-4 h-4 text-text-dim shrink-0" />
-                </button>
-              ))}
+                    {suppressed ? (
+                      <span className="flex items-center gap-1 text-[10px] font-bold uppercase text-warning shrink-0">
+                        {reenabling
+                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          : <RotateCcw className="w-3.5 h-3.5" />}
+                        {t("providers.reenable", { defaultValue: "Re-enable" })}
+                      </span>
+                    ) : (
+                      <ChevronRight className="w-4 h-4 text-text-dim shrink-0" />
+                    )}
+                  </button>
+                );
+              })}
             </div>
           )}
           <div className="border-t border-border-subtle pt-3 mt-1">

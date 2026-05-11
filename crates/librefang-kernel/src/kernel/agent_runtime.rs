@@ -377,7 +377,8 @@ impl LibreFangKernel {
                 .await
                 .map_err(KernelError::LibreFang)?
         } else {
-            compact_session(driver, &model, &session, &config)
+            let echo_policy = self.lookup_reasoning_echo_policy(&model);
+            compact_session(driver, &model, &session, &config, echo_policy)
                 .await
                 .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e)))?
         };

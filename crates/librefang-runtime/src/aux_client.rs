@@ -187,7 +187,8 @@ impl AuxClient {
             | AuxTask::Search
             | AuxTask::Fold
             | AuxTask::SkillReview
-            | AuxTask::SkillWorkshopReview => vec![
+            | AuxTask::SkillWorkshopReview
+            | AuxTask::SessionSummary => vec![
                 "openrouter:anthropic/claude-3-5-haiku".to_string(),
                 "anthropic:haiku".to_string(),
                 "openai:gpt-4o-mini".to_string(),
@@ -387,6 +388,7 @@ mod tests {
             agent_id: None,
             session_id: None,
             step_id: None,
+            reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         };
         resolution.driver.complete(req).await.unwrap();
         assert_eq!(primary_calls.1.load(Ordering::SeqCst), 1);
@@ -463,6 +465,7 @@ mod tests {
             AuxTask::Fold,
             AuxTask::SkillReview,
             AuxTask::SkillWorkshopReview,
+            AuxTask::SessionSummary,
         ] {
             let res = aux.resolve(task);
             assert!(

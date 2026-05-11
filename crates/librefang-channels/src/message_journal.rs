@@ -29,6 +29,33 @@ pub enum JournalStatus {
     Completed,
     /// Processing failed after retries.
     Failed,
+    /// Dispatch hit a transient block (rate-limit / overload). The entry is
+    /// kept on disk with a `next_retry_after` deadline; a periodic ticker
+    /// re-dispatches it once the deadline passes. Distinct from `Failed`
+    /// because waiting for a quota window to reset is not a real failure
+    /// and must NOT count against the retry budget.
+    Deferred,
+}
+
+/// Marker appended to LLM rate-limit / overload exhaustion messages so the
+/// channel bridge can route the journal entry to `JournalStatus::Deferred`
+/// instead of `Failed`. Format: `<message> [rate_limit_defer_ms]=<ms>`.
+///
+/// Emitted by `librefang_runtime::agent_loop` after exhausting in-loop
+/// retries; parsed by [`parse_defer_marker`].
+pub const RATE_LIMIT_DEFER_MARKER: &str = "[rate_limit_defer_ms]";
+
+/// Extract the deferral hint (in milliseconds) from a kernel-emitted error
+/// string, if present. Returns `None` when the marker is absent — the entry
+/// should be treated as a hard failure.
+pub fn parse_defer_marker(err: &str) -> Option<u64> {
+    let idx = err.find(RATE_LIMIT_DEFER_MARKER)?;
+    let tail = &err[idx + RATE_LIMIT_DEFER_MARKER.len()..];
+    let tail = tail.strip_prefix('=')?.trim_start();
+    let end = tail
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(tail.len());
+    tail[..end].parse::<u64>().ok()
 }
 
 /// A single journal entry.
@@ -68,6 +95,10 @@ pub struct JournalEntry {
     /// Extra metadata (platform-specific).
     #[serde(default)]
     pub metadata: HashMap<String, serde_json::Value>,
+    /// Earliest time at which a Deferred entry should be re-dispatched.
+    /// `None` for non-deferred entries.
+    #[serde(default)]
+    pub next_retry_after: Option<DateTime<Utc>>,
 }
 
 /// Thread-safe message journal backed by a JSONL file.
@@ -103,13 +134,12 @@ impl MessageJournal {
                             JournalStatus::Completed => {
                                 pending.remove(&entry.message_id);
                             }
-                            JournalStatus::Failed => {
-                                // Keep failed entries if under retry limit
-                                if entry.attempts < 3 {
-                                    pending.insert(entry.message_id.clone(), entry);
-                                } else {
-                                    pending.remove(&entry.message_id);
-                                }
+                            // Failed entries: drop once they exhaust the
+                            // 3-strike retry budget. Deferred entries skip
+                            // this gate — they are waiting on an external
+                            // quota reset, not failing.
+                            JournalStatus::Failed if entry.attempts >= 3 => {
+                                pending.remove(&entry.message_id);
                             }
                             _ => {
                                 pending.insert(entry.message_id.clone(), entry);
@@ -171,6 +201,159 @@ impl MessageJournal {
         inner.pending.insert(entry.message_id.clone(), entry);
     }
 
+    /// Record a terminal dispatch outcome.
+    ///
+    /// Routes the entry to one of three statuses based on the kernel result:
+    /// * `success = true` → `Completed` (entry purged on next compaction).
+    /// * `success = false` and the error string carries the
+    ///   [`RATE_LIMIT_DEFER_MARKER`] suffix → `Deferred` with the parsed
+    ///   retry-after window (the periodic ticker re-dispatches it once due).
+    /// * Any other failure → `Failed` (counts against the 3-strike retry budget).
+    pub async fn record_outcome(&self, message_id: &str, success: bool, err_str: Option<String>) {
+        if success {
+            self.update_status(message_id, JournalStatus::Completed, None)
+                .await;
+            return;
+        }
+        if let Some(ref s) = err_str {
+            if let Some(ms) = parse_defer_marker(s) {
+                self.defer(
+                    message_id,
+                    chrono::Duration::milliseconds(ms as i64),
+                    Some(s.clone()),
+                )
+                .await;
+                return;
+            }
+        }
+        self.update_status(message_id, JournalStatus::Failed, err_str)
+            .await;
+    }
+
+    /// Mark an entry as `Deferred` and schedule a retry.
+    ///
+    /// Use this when a dispatch failure is recoverable on its own
+    /// (provider rate-limit / overload). The retry budget is NOT bumped —
+    /// waiting for a quota window to reset is not a real failure. The
+    /// entry stays on disk and is picked up by [`due_deferred_entries`]
+    /// once `now >= next_retry_after`.
+    ///
+    /// Existing failed `attempts` count is preserved so that a Deferred
+    /// entry that previously failed for non-rate-limit reasons still
+    /// honors the 3-strike cap when it fails again post-retry.
+    pub async fn defer(
+        &self,
+        message_id: &str,
+        retry_after: chrono::Duration,
+        last_error: Option<String>,
+    ) {
+        let mut inner = self.inner.lock().await;
+        let path = inner.path.clone();
+
+        let (line, updated) = {
+            let entry = match inner.pending.get(message_id) {
+                Some(e) => e,
+                None => return,
+            };
+            let mut updated = entry.clone();
+            updated.status = JournalStatus::Deferred;
+            updated.updated_at = Utc::now();
+            updated.next_retry_after = Some(Utc::now() + retry_after);
+            updated.last_error = last_error;
+            let line = match serde_json::to_string(&updated) {
+                Ok(l) => l,
+                Err(e) => {
+                    error!(error = %e, id = message_id, "Failed to serialize defer update");
+                    return;
+                }
+            };
+            (line, updated)
+        };
+
+        let write_result =
+            tokio::task::spawn_blocking(move || Self::write_line_to_path(&path, &line)).await;
+        match write_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!(error = %e, id = message_id, "Failed to write defer entry");
+                return;
+            }
+            Err(e) => {
+                error!(error = %e, id = message_id, "spawn_blocking panicked deferring journal");
+                return;
+            }
+        }
+
+        if let Some(entry) = inner.pending.get_mut(message_id) {
+            *entry = updated;
+        }
+    }
+
+    /// Return Deferred entries whose `next_retry_after` deadline has passed.
+    ///
+    /// Skips entries older than [`Self::MAX_RECOVERY_AGE`] — the same stale
+    /// window applied by [`pending_entries`].
+    pub async fn due_deferred_entries(&self) -> Vec<JournalEntry> {
+        let now = Utc::now();
+        let mut inner = self.inner.lock().await;
+        let stale_ids: Vec<String> = inner
+            .pending
+            .values()
+            .filter(|e| now - e.received_at > Self::MAX_RECOVERY_AGE)
+            .map(|e| e.message_id.clone())
+            .collect();
+        for id in &stale_ids {
+            debug!(
+                id,
+                "Discarding stale journal entry (older than MAX_RECOVERY_AGE)"
+            );
+            inner.pending.remove(id);
+        }
+        inner
+            .pending
+            .values()
+            .filter(|e| {
+                matches!(e.status, JournalStatus::Deferred)
+                    && e.next_retry_after.map(|d| d <= now).unwrap_or(false)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Union of [`pending_entries`] (crash-recovery) and
+    /// [`due_deferred_entries`] (rate-limit retries that are due now).
+    ///
+    /// Single-pass: takes the inner lock once, runs the stale-entry sweep
+    /// once, and walks the map once. The two-call composition is correct
+    /// but acquires the lock and copies entries twice, with no upside.
+    pub async fn recoverable_entries(&self) -> Vec<JournalEntry> {
+        let now = Utc::now();
+        let mut inner = self.inner.lock().await;
+        let stale_ids: Vec<String> = inner
+            .pending
+            .values()
+            .filter(|e| now - e.received_at > Self::MAX_RECOVERY_AGE)
+            .map(|e| e.message_id.clone())
+            .collect();
+        for id in &stale_ids {
+            debug!(
+                id,
+                "Discarding stale journal entry (older than MAX_RECOVERY_AGE)"
+            );
+            inner.pending.remove(id);
+        }
+        inner
+            .pending
+            .values()
+            .filter(|e| match e.status {
+                JournalStatus::Pending | JournalStatus::Processing => true,
+                JournalStatus::Deferred => e.next_retry_after.map(|d| d <= now).unwrap_or(false),
+                JournalStatus::Completed | JournalStatus::Failed => false,
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Update the status of an existing entry.
     ///
     /// Disk-then-memory ordering: serialize the *desired* new state, write
@@ -200,6 +383,12 @@ impl MessageJournal {
             let mut updated = entry.clone();
             updated.status = status;
             updated.updated_at = Utc::now();
+            // Any non-Deferred transition clears the retry deadline so a
+            // re-dispatched entry that lands back in Processing is not also
+            // returned by `due_deferred_entries` on the next tick.
+            if status != JournalStatus::Deferred {
+                updated.next_retry_after = None;
+            }
             if status == JournalStatus::Failed {
                 updated.attempts += 1;
                 updated.last_error = error;
@@ -241,15 +430,101 @@ impl MessageJournal {
         }
     }
 
-    /// Maximum age of a message to be eligible for recovery (1 hour).
-    const MAX_RECOVERY_AGE: chrono::TimeDelta = match chrono::TimeDelta::try_hours(1) {
+    /// Atomically claim an entry for re-dispatch by transitioning its status
+    /// from `Pending` or `Deferred` to `Processing`. Returns `true` if the
+    /// claim was won; `false` if another caller already moved the entry
+    /// past `Pending`/`Deferred` (or the entry is gone).
+    ///
+    /// Race this guards against: two concurrent snapshots — the boot-time
+    /// initial-recovery sweep (`recoverable_entries`) and the periodic
+    /// retry ticker (`due_deferred_entries`) — can each see the same
+    /// `Deferred` entry whose `next_retry_after` has elapsed if the
+    /// initial-recovery dispatch is still in flight when the first ticker
+    /// tick fires. Without CAS, both call sites then dispatch the same
+    /// `message_id`, costing a double LLM bill and producing two
+    /// user-visible replies. With CAS, the second caller observes
+    /// `Processing` and skips the dispatch.
+    ///
+    /// Disk-then-memory ordering matches `update_status`: the proposed
+    /// entry is serialized and written *under* the inner lock; in-memory
+    /// state advances only after the disk write succeeds. A failed disk
+    /// write returns `false` so the caller does not act on a state the
+    /// journal cannot persist.
+    pub async fn claim(&self, message_id: &str) -> bool {
+        let mut inner = self.inner.lock().await;
+        let path = inner.path.clone();
+
+        let (line, updated) = {
+            let entry = match inner.pending.get(message_id) {
+                Some(e) => e,
+                None => return false,
+            };
+            // Reject the claim if another caller already advanced this
+            // entry. `Completed` / `Failed` are normally already removed
+            // from `pending` (so the `None` branch above catches them),
+            // but match exhaustively in case a future code path keeps
+            // them around.
+            match entry.status {
+                JournalStatus::Pending | JournalStatus::Deferred => {}
+                JournalStatus::Processing | JournalStatus::Completed | JournalStatus::Failed => {
+                    return false
+                }
+            }
+            let mut updated = entry.clone();
+            updated.status = JournalStatus::Processing;
+            updated.updated_at = Utc::now();
+            // Keep `next_retry_after` so that a later defer() that
+            // observes the still-set deadline can use it as the
+            // round-trip start without a clock query.
+            let line = match serde_json::to_string(&updated) {
+                Ok(l) => l,
+                Err(e) => {
+                    error!(error = %e, id = message_id, "Failed to serialize claim update");
+                    return false;
+                }
+            };
+            (line, updated)
+        };
+
+        let write_result =
+            tokio::task::spawn_blocking(move || Self::write_line_to_path(&path, &line)).await;
+        match write_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!(error = %e, id = message_id, "Failed to write claim update");
+                return false;
+            }
+            Err(e) => {
+                error!(error = %e, id = message_id, "spawn_blocking panicked claiming journal");
+                return false;
+            }
+        }
+
+        if let Some(entry) = inner.pending.get_mut(message_id) {
+            *entry = updated;
+        }
+        true
+    }
+
+    /// Maximum age of a message to be eligible for recovery.
+    ///
+    /// Sized to cover the longest realistic provider quota window: Claude.ai
+    /// rate-limits cycle on a 5-hour window, so a Deferred entry that hits
+    /// the start of a window must survive until the window resets without
+    /// being silently swept. 6 hours leaves margin for clock skew and
+    /// short overlap periods. Pre-PR this was 1 hour, which silently
+    /// dropped messages waiting on a 5h Claude.ai window — pre-#4754
+    /// behaviour was an immediate "rate limited" reply, so the 1h sweep
+    /// represented a UX regression for long windows. Bumping the window
+    /// keeps the deferred-retry contract honest end-to-end.
+    const MAX_RECOVERY_AGE: chrono::TimeDelta = match chrono::TimeDelta::try_hours(6) {
         Some(d) => d,
         None => unreachable!(),
     };
 
     /// Get all entries that need (re-)processing.
     /// Returns entries with status Pending or Processing (from a previous crash).
-    /// Skips entries older than 1 hour — they are too stale to recover.
+    /// Skips entries older than `MAX_RECOVERY_AGE` — they are too stale to recover.
     pub async fn pending_entries(&self) -> Vec<JournalEntry> {
         let now = Utc::now();
         let mut inner = self.inner.lock().await;
@@ -261,7 +536,10 @@ impl MessageJournal {
             .map(|e| e.message_id.clone())
             .collect();
         for id in &stale_ids {
-            debug!(id, "Discarding stale journal entry (>1h old)");
+            debug!(
+                id,
+                "Discarding stale journal entry (older than MAX_RECOVERY_AGE)"
+            );
             inner.pending.remove(id);
         }
         inner
@@ -436,6 +714,7 @@ mod tests {
             is_group: false,
             thread_id: None,
             metadata: HashMap::new(),
+            next_retry_after: None,
         }
     }
 
@@ -581,6 +860,167 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_defer_marker_extracts_ms_or_none() {
+        assert_eq!(
+            parse_defer_marker("Rate limited after 3 retries [rate_limit_defer_ms]=300000"),
+            Some(300_000)
+        );
+        assert_eq!(
+            parse_defer_marker("Model overloaded [rate_limit_defer_ms]= 60000 trailing"),
+            Some(60_000)
+        );
+        // Absent marker → None (treated as hard failure by bridge)
+        assert_eq!(parse_defer_marker("Some other error"), None);
+        // Present marker but missing value → None (do not trigger defer)
+        assert_eq!(
+            parse_defer_marker("Bad [rate_limit_defer_ms]= not a number"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn defer_sets_next_retry_after_and_keeps_entry_pending() {
+        let dir = TempDir::new().unwrap();
+        let journal = MessageJournal::open(dir.path()).unwrap();
+
+        journal.record(test_entry("msg-1")).await;
+        journal
+            .defer(
+                "msg-1",
+                chrono::Duration::seconds(120),
+                Some("rate limited".into()),
+            )
+            .await;
+
+        // pending_entries() must NOT include Deferred (only Pending+Processing).
+        let pending = journal.pending_entries().await;
+        assert!(pending.is_empty(), "Deferred should not appear in pending");
+
+        // due_deferred_entries() with future deadline → empty.
+        let due = journal.due_deferred_entries().await;
+        assert!(due.is_empty(), "deadline not yet reached");
+
+        // Recoverable view returns nothing yet either.
+        let rec = journal.recoverable_entries().await;
+        assert!(rec.is_empty());
+    }
+
+    #[tokio::test]
+    async fn defer_with_past_deadline_appears_in_due_and_recoverable() {
+        let dir = TempDir::new().unwrap();
+        let journal = MessageJournal::open(dir.path()).unwrap();
+
+        journal.record(test_entry("msg-1")).await;
+        // Deferral with negative duration → deadline already in the past,
+        // entry must show up in due_deferred immediately.
+        journal
+            .defer("msg-1", chrono::Duration::seconds(-1), None)
+            .await;
+
+        let due = journal.due_deferred_entries().await;
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].message_id, "msg-1");
+        assert_eq!(due[0].status, JournalStatus::Deferred);
+
+        let rec = journal.recoverable_entries().await;
+        assert_eq!(rec.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn defer_does_not_consume_retry_budget() {
+        let dir = TempDir::new().unwrap();
+        let journal = MessageJournal::open(dir.path()).unwrap();
+
+        journal.record(test_entry("msg-1")).await;
+        // Defer five times — attempts must remain 0; deferring is not failure.
+        for _ in 0..5 {
+            journal
+                .defer("msg-1", chrono::Duration::seconds(60), None)
+                .await;
+        }
+
+        let due = journal
+            .pending_entries()
+            .await
+            .into_iter()
+            .chain(journal.due_deferred_entries().await)
+            .collect::<Vec<_>>();
+        // The deadline is 60s in the future so it shouldn't be due yet.
+        // Reach into pending map directly via reopen+inspect-only path.
+        let _ = due;
+        let inner = journal.inner.lock().await;
+        let entry = inner.pending.get("msg-1").expect("entry retained");
+        assert_eq!(entry.attempts, 0, "defer must not bump attempts");
+        assert_eq!(entry.status, JournalStatus::Deferred);
+        assert!(entry.next_retry_after.is_some());
+    }
+
+    #[tokio::test]
+    async fn deferred_entry_persists_across_reopen() {
+        let dir = TempDir::new().unwrap();
+        {
+            let journal = MessageJournal::open(dir.path()).unwrap();
+            journal.record(test_entry("msg-1")).await;
+            journal
+                .defer("msg-1", chrono::Duration::seconds(-1), None)
+                .await;
+        }
+        // Re-open: Deferred entry must survive (waiting on quota reset across
+        // a daemon restart is the entire point of the feature).
+        let journal2 = MessageJournal::open(dir.path()).unwrap();
+        let due = journal2.due_deferred_entries().await;
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].message_id, "msg-1");
+    }
+
+    #[tokio::test]
+    async fn processing_claim_guard_removes_entry_from_due_deferred() {
+        // Regression: redispatch_journal_entry flips the entry to Processing
+        // before the slow LLM call to prevent a second ticker tick from
+        // re-claiming the same entry mid-flight (double-dispatch race).
+        // Once Processing, due_deferred_entries() must NOT return it.
+        let dir = TempDir::new().unwrap();
+        let journal = MessageJournal::open(dir.path()).unwrap();
+        journal.record(test_entry("msg-1")).await;
+        journal
+            .defer("msg-1", chrono::Duration::seconds(-1), None)
+            .await;
+        // Sanity: deferred entry IS due before claim.
+        assert_eq!(journal.due_deferred_entries().await.len(), 1);
+        // Claim guard.
+        journal
+            .update_status("msg-1", JournalStatus::Processing, None)
+            .await;
+        // After claim, it must no longer appear in the due-deferred view —
+        // a concurrent ticker tick would have skipped it.
+        assert!(journal.due_deferred_entries().await.is_empty());
+        // It should appear in pending instead (Processing status).
+        let pending = journal.pending_entries().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].status, JournalStatus::Processing);
+        // Claim guard must also have cleared the deadline.
+        assert!(pending[0].next_retry_after.is_none());
+    }
+
+    #[tokio::test]
+    async fn deferred_clears_retry_deadline_on_completion() {
+        let dir = TempDir::new().unwrap();
+        let journal = MessageJournal::open(dir.path()).unwrap();
+        journal.record(test_entry("msg-1")).await;
+        journal
+            .defer("msg-1", chrono::Duration::seconds(-1), None)
+            .await;
+        // After successful retry the entry is Completed and removed from
+        // pending; reopen confirms it's not coming back as due-deferred.
+        journal
+            .update_status("msg-1", JournalStatus::Completed, None)
+            .await;
+        let journal2 = MessageJournal::open(dir.path()).unwrap();
+        assert!(journal2.due_deferred_entries().await.is_empty());
+        assert!(journal2.pending_entries().await.is_empty());
+    }
+
     #[tokio::test]
     async fn test_processing_entries_recovered_on_reopen() {
         let dir = TempDir::new().unwrap();
@@ -602,5 +1042,69 @@ mod tests {
             assert_eq!(pending[0].message_id, "msg-1");
             assert_eq!(pending[0].status, JournalStatus::Processing);
         }
+    }
+
+    #[tokio::test]
+    async fn claim_rejects_already_claimed_entry() {
+        // Sequential proof of CAS semantics: the second claim observes
+        // Processing and bails. Concurrent variant below.
+        let dir = TempDir::new().unwrap();
+        let journal = MessageJournal::open(dir.path()).unwrap();
+        let mut e = test_entry("msg-1");
+        e.status = JournalStatus::Deferred;
+        e.next_retry_after = Some(Utc::now() - chrono::Duration::seconds(5));
+        journal.record(e).await;
+
+        assert!(journal.claim("msg-1").await, "first claim must win");
+        assert!(
+            !journal.claim("msg-1").await,
+            "second claim against the same entry must lose"
+        );
+
+        // Entry is now Processing in-memory; status reflects the won claim.
+        let pending = journal.pending_entries().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].status, JournalStatus::Processing);
+    }
+
+    #[tokio::test]
+    async fn claim_returns_false_for_unknown_message() {
+        let dir = TempDir::new().unwrap();
+        let journal = MessageJournal::open(dir.path()).unwrap();
+        assert!(
+            !journal.claim("does-not-exist").await,
+            "claiming a missing message must return false, not panic"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_claims_resolve_to_exactly_one_winner() {
+        // Multi-thread runtime + spawned tasks pin true contention. The
+        // single-threaded sequential variant above proves CAS semantics
+        // in isolation; this one proves the inner mutex serializes the
+        // claim race correctly under load.
+        let dir = TempDir::new().unwrap();
+        let journal = Arc::new(MessageJournal::open(dir.path()).unwrap());
+        let mut e = test_entry("msg-1");
+        e.status = JournalStatus::Deferred;
+        e.next_retry_after = Some(Utc::now() - chrono::Duration::seconds(5));
+        journal.record(e).await;
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let j = Arc::clone(&journal);
+            handles.push(tokio::spawn(async move { j.claim("msg-1").await }));
+        }
+
+        let mut wins = 0usize;
+        for h in handles {
+            if h.await.unwrap() {
+                wins += 1;
+            }
+        }
+        assert_eq!(
+            wins, 1,
+            "exactly one of 8 concurrent claims must win; the rest must observe Processing"
+        );
     }
 }

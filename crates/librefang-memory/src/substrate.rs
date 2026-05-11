@@ -12,6 +12,7 @@ use crate::semantic::SemanticStore;
 use crate::session::{Session, SessionStore};
 use crate::structured::StructuredStore;
 use crate::usage::UsageStore;
+use crate::workflow_store::WorkflowStore;
 
 use async_trait::async_trait;
 use librefang_types::agent::{AgentEntry, AgentId, SessionId};
@@ -40,6 +41,7 @@ pub struct MemorySubstrate {
     consolidation: ConsolidationEngine,
     usage: UsageStore,
     roster: RosterStore,
+    workflow_store: WorkflowStore,
     chunk_config: ChunkConfig,
 }
 
@@ -131,6 +133,7 @@ impl MemorySubstrate {
             sessions,
             usage: UsageStore::new(pool.clone()),
             roster: RosterStore::new(pool.clone()),
+            workflow_store: WorkflowStore::new(pool.clone()),
             consolidation: ConsolidationEngine::new(pool, decay_rate),
             chunk_config,
         })
@@ -166,6 +169,7 @@ impl MemorySubstrate {
             sessions: SessionStore::new(pool.clone()),
             usage: UsageStore::new(pool.clone()),
             roster: RosterStore::new(pool.clone()),
+            workflow_store: WorkflowStore::new(pool.clone()),
             consolidation: ConsolidationEngine::new(pool, decay_rate),
             chunk_config,
         })
@@ -184,6 +188,22 @@ impl MemorySubstrate {
     /// Get a reference to the group roster store.
     pub fn roster(&self) -> &RosterStore {
         &self.roster
+    }
+
+    /// Get a reference to the workflow run store.
+    pub fn workflow_store(&self) -> &WorkflowStore {
+        &self.workflow_store
+    }
+
+    /// Force a WAL checkpoint on the shared connection pool.
+    ///
+    /// Flushes any pending WAL frames to the main database file. Called
+    /// during kernel shutdown to ensure all workflow state transitions
+    /// (and other pending writes) are durable on disk.
+    pub fn wal_checkpoint(&self) {
+        if let Err(e) = self.workflow_store.wal_checkpoint() {
+            tracing::warn!("WAL checkpoint failed: {e}");
+        }
     }
 
     /// Attach an external vector store backend to the semantic store.

@@ -608,6 +608,26 @@ pub trait ChannelAdapter: Send + Sync {
         Ok(())
     }
 
+    /// Extra HTTP headers required to fetch a media URL that originated
+    /// from this channel. Default: empty (anonymous GET).
+    ///
+    /// Most channels expose media via signed CDN URLs that don't need
+    /// auth (Telegram `getFile`, Discord attachments, Slack files via
+    /// pre-signed `files.remote` URLs). Matrix is the exception:
+    /// MSC3916 requires `Authorization: Bearer <access_token>` on
+    /// `/_matrix/client/v1/media/download`. Returning a non-empty list
+    /// from this method tells the bridge to attach the headers when
+    /// streaming the URL into `<temp>/librefang_uploads/`.
+    ///
+    /// Implementations must only emit auth for URLs that point at
+    /// **their own** trusted endpoint — a credential leak to a
+    /// model-controlled hostname would let a forged inbound message
+    /// exfiltrate the access token. Match on the homeserver / API host
+    /// before returning.
+    fn fetch_headers_for(&self, _url: &str) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     /// Send a lifecycle reaction to a message (optional — default no-op).
     async fn send_reaction(
         &self,
@@ -726,6 +746,17 @@ pub trait ChannelAdapter: Send + Sync {
             self.send(user, ChannelContent::Text(full_text)).await?;
         }
         Ok(())
+    }
+
+    /// Recipients for non-conversational broadcasts originating outside an
+    /// active chat — currently just approval notifications (#4875). Default
+    /// returns an empty list, which is correct for adapters that don't know
+    /// a stable operator inbox (group-only integrations, public broadcast
+    /// platforms) and means those adapters silently skip the notification.
+    /// Adapters with a configured `allowed_users` / admin list should
+    /// override this to return those users so the bridge can deliver.
+    fn notification_recipients(&self) -> Vec<ChannelUser> {
+        Vec::new()
     }
 }
 

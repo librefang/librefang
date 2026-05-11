@@ -284,11 +284,8 @@ impl LibreFangKernel {
         } else {
             match sender_context {
                 Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
-                    let scope = match &ctx.chat_id {
-                        Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
-                        _ => ctx.channel.clone(),
-                    };
-                    let derived = SessionId::for_channel(agent_id, &scope);
+                    let derived =
+                        SessionId::for_sender_scope(agent_id, &ctx.channel, ctx.chat_id.as_deref());
                     // #3692: surface when the channel branch silently
                     // overrides a non-default manifest `session_mode`.
                     // The `execute_llm_agent` path is reached by
@@ -681,8 +678,11 @@ impl LibreFangKernel {
             // Resolve aliases (e.g. "sonnet" -> "claude-sonnet-4-20250514") before scoring
             router.resolve_aliases(&self.llm.model_catalog.load());
             // Build a probe request to score complexity
+            let probe_model =
+                strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
+            let echo_policy = self.lookup_reasoning_echo_policy(&probe_model);
             let probe = CompletionRequest {
-                model: strip_provider_prefix(&manifest.model.model, &manifest.model.provider),
+                model: probe_model,
                 messages: std::sync::Arc::new(vec![librefang_types::message::Message::user(
                     message,
                 )]),
@@ -699,6 +699,7 @@ impl LibreFangKernel {
                 agent_id: None,
                 session_id: None,
                 step_id: None,
+                reasoning_echo_policy: echo_policy,
             };
             let (complexity, routed_model) = router.select_model(&probe);
             // Check if the routed model's provider has a valid API key.

@@ -405,6 +405,45 @@ admin_role = "admin"
         assert_eq!(em.smtp_port, 587);
         assert_eq!(em.password_env, "EMAIL_PASSWORD");
         assert_eq!(em.folders, vec!["INBOX".to_string()]);
+        // #4877: TLS knobs default safe.
+        assert_eq!(em.tls_root_ca_path, None);
+        assert!(!em.tls_accept_invalid_certs);
+    }
+
+    /// #4877: TLS knobs round-trip through TOML and only the set fields land
+    /// in the serialised output (skip_serializing_if on the optional path).
+    #[test]
+    fn test_email_config_tls_overrides_serde_roundtrip() {
+        let em = EmailConfig {
+            imap_host: "imap.internal.example.com".to_string(),
+            tls_root_ca_path: Some("/etc/librefang/internal-ca.pem".to_string()),
+            tls_accept_invalid_certs: true,
+            ..EmailConfig::default()
+        };
+        let toml_str = toml::to_string(&em).expect("serialize");
+        assert!(
+            toml_str.contains("tls_root_ca_path = \"/etc/librefang/internal-ca.pem\""),
+            "set path must appear: {toml_str}"
+        );
+        assert!(
+            toml_str.contains("tls_accept_invalid_certs = true"),
+            "set flag must appear: {toml_str}"
+        );
+
+        // When the path is None, nothing is emitted for that field.
+        let em_unset = EmailConfig::default();
+        let toml_unset = toml::to_string(&em_unset).expect("serialize default");
+        assert!(
+            !toml_unset.contains("tls_root_ca_path"),
+            "unset Option must not serialise: {toml_unset}"
+        );
+
+        let parsed: EmailConfig = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(
+            parsed.tls_root_ca_path.as_deref(),
+            Some("/etc/librefang/internal-ca.pem")
+        );
+        assert!(parsed.tls_accept_invalid_certs);
     }
 
     #[test]

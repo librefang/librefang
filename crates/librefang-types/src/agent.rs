@@ -266,6 +266,29 @@ impl SessionId {
         ))
     }
 
+    /// Derive the per-channel `SessionId` for a `(channel, chat_id)` pair
+    /// using the canonical scope construction shared by the kernel's inbound
+    /// resolver and the channel-bridge `/new` / `/reboot` / `/compact`
+    /// commands. Empty `chat_id` collapses to channel-only — matching what
+    /// `build_sender_context` does when `sender.platform_id` is empty.
+    ///
+    /// This is the single source of truth for the scope formula. The
+    /// inbound message resolver (`kernel/messaging.rs::send_message_full`,
+    /// the dispatch resolver in `kernel/mod.rs::resolve_dispatch_session_id`,
+    /// and the agent-execution path in `kernel/agent_execution.rs`) plus
+    /// the channel-bridge reset helper in `librefang-api::channel_bridge`
+    /// all call this so they cannot drift. Without this helper, the
+    /// scope-derivation literal lived inline in 4 places — any one of
+    /// them silently disagreeing would re-introduce #4868 (channel `/new`
+    /// deleting the wrong sid).
+    pub fn for_sender_scope(agent_id: AgentId, channel: &str, chat_id: Option<&str>) -> Self {
+        let scope = match chat_id {
+            Some(cid) if !cid.is_empty() => format!("{channel}:{cid}"),
+            _ => channel.to_string(),
+        };
+        Self::for_channel(agent_id, &scope)
+    }
+
     /// Derive a per-fire cron session id keyed by `(agent, run_key)`.
     ///
     /// Used when a cron job is configured with `session_mode = "new"` and
@@ -342,6 +365,21 @@ impl std::fmt::Display for SessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
+}
+
+/// Scope passed to `reset_session` / `reboot_session` so callers can choose
+/// between agent-wide nuke and single-session reset (#4868).
+///
+/// Channel `/new` / `/reboot` use `Session(for_channel(agent, channel:chat))`
+/// so resetting in one chat does not wipe transcripts on every other surface
+/// the same agent serves. Dashboard / explicit "reset agent" surfaces use
+/// `Agent` to preserve the historical full-wipe semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResetScope {
+    /// Reset every session belonging to this agent (default + per-channel).
+    Agent,
+    /// Reset exactly one session id; sibling sessions are untouched.
+    Session(SessionId),
 }
 
 /// Snapshot of a single in-flight (agent, session) loop, returned by
@@ -509,6 +547,10 @@ pub struct ResourceQuota {
     pub max_cost_per_day_usd: f64,
     /// Maximum cost in USD per month (0.0 = unlimited).
     pub max_cost_per_month_usd: f64,
+    /// Per-agent burst ratio override. `None` = inherit global
+    /// `default_burst_ratio` (or compiled default 0.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst_ratio: Option<f32>,
 }
 
 impl Default for ResourceQuota {
@@ -522,6 +564,7 @@ impl Default for ResourceQuota {
             max_cost_per_hour_usd: 0.0,    // unlimited by default
             max_cost_per_day_usd: 0.0,     // unlimited
             max_cost_per_month_usd: 0.0,   // unlimited
+            burst_ratio: None,
         }
     }
 }
@@ -536,6 +579,20 @@ impl ResourceQuota {
     /// returned value is `0`.
     pub fn effective_token_limit(&self) -> u64 {
         self.max_llm_tokens_per_hour.unwrap_or(0)
+    }
+
+    /// Resolved burst ratio: agent override > global default > 0.2.
+    /// Clamped to [0.01, 1.0]. NaN/Inf fall back to 0.2.
+    pub fn effective_burst_ratio(&self, global_default: f32) -> f32 {
+        let raw = self.burst_ratio.unwrap_or(if global_default > 0.0 {
+            global_default
+        } else {
+            0.2
+        });
+        if !raw.is_finite() {
+            return 0.2;
+        }
+        raw.clamp(0.01, 1.0)
     }
 }
 
@@ -983,6 +1040,17 @@ pub struct AgentManifest {
     /// per agent via `[skill_workshop]` in `agent.toml`.
     #[serde(default)]
     pub skill_workshop: SkillWorkshopConfig,
+    /// Per-agent override for the kernel-global `[proactive_memory]`
+    /// policy (#4870). Each field of
+    /// [`crate::memory::ProactiveMemoryOverrides`] is an `Option<bool>`
+    /// that, when set, supersedes the matching field in
+    /// `KernelConfig.proactive_memory` for this agent only. Default is
+    /// all-`None` (inherit global). Boot caveat: the global
+    /// `proactive_memory.enabled = false` still short-circuits store
+    /// construction, so this knob is primarily a per-agent opt-out
+    /// vector — see the struct doc for details.
+    #[serde(default)]
+    pub proactive_memory: crate::memory::ProactiveMemoryOverrides,
 }
 
 /// Access mode for a named workspace.
@@ -1089,6 +1157,7 @@ impl Default for AgentManifest {
             cache_context: false,
             tool_exec_backend: None,
             skill_workshop: SkillWorkshopConfig::default(),
+            proactive_memory: crate::memory::ProactiveMemoryOverrides::default(),
         }
     }
 }
@@ -1688,6 +1757,54 @@ mod tests {
     }
 
     // ----- ToolProfile tests -----
+
+    #[test]
+    fn effective_burst_ratio_defaults_to_one_fifth() {
+        let q = ResourceQuota::default();
+        assert!((q.effective_burst_ratio(0.0) - 0.2).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn effective_burst_ratio_uses_global_default() {
+        let q = ResourceQuota::default();
+        assert!((q.effective_burst_ratio(0.5) - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn effective_burst_ratio_agent_overrides_global() {
+        let q = ResourceQuota {
+            burst_ratio: Some(0.3),
+            ..Default::default()
+        };
+        assert!((q.effective_burst_ratio(0.8) - 0.3).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn effective_burst_ratio_clamps_below_minimum() {
+        let q = ResourceQuota {
+            burst_ratio: Some(0.0),
+            ..Default::default()
+        };
+        assert!((q.effective_burst_ratio(0.0) - 0.01).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn effective_burst_ratio_clamps_above_one() {
+        let q = ResourceQuota {
+            burst_ratio: Some(2.5),
+            ..Default::default()
+        };
+        assert!((q.effective_burst_ratio(0.0) - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn effective_burst_ratio_nan_falls_back_to_default() {
+        let q = ResourceQuota {
+            burst_ratio: Some(f32::NAN),
+            ..Default::default()
+        };
+        assert!((q.effective_burst_ratio(0.0) - 0.2).abs() < f32::EPSILON);
+    }
 
     #[test]
     fn test_tool_profile_minimal() {

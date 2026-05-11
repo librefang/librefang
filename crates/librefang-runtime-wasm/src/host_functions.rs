@@ -1386,6 +1386,7 @@ mod tests {
     impl librefang_kernel_handle::WorkflowRunner for RecordingKernel {}
     impl librefang_kernel_handle::GoalControl for RecordingKernel {}
     impl librefang_kernel_handle::ToolPolicy for RecordingKernel {}
+    impl librefang_kernel_handle::CatalogQuery for RecordingKernel {}
     // ACP-specific role traits (#3313). Test stubs use the trait-default
     // no-op impls; ACP routing is exercised in `librefang-acp` /
     // `librefang-runtime` tests, not here.

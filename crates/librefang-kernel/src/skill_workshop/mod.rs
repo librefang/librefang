@@ -475,7 +475,8 @@ async fn run_llm_review(
         session_id: Some(session_id_str.as_str()),
         candidate_id: Some(candidate_id),
     };
-    llm_review::review_candidate(resolution.driver, &model, hit, attribution).await
+    let echo_policy = kernel.lookup_reasoning_echo_policy(&model);
+    llm_review::review_candidate(resolution.driver, &model, hit, attribution, echo_policy).await
 }
 
 /// Per-turn snapshot of the conversation needed by the heuristic

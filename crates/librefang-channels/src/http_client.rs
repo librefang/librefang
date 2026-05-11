@@ -32,6 +32,40 @@ pub fn new_client() -> reqwest::Client {
         .expect("HTTP client with bundled CA roots should always build")
 }
 
+/// Process-wide HTTP client used by [`fetch_url_bytes`] for safe
+/// outbound media fetches.
+///
+/// Configured with a `redirect::Policy::custom` that re-runs
+/// [`validate_url_for_fetch`] on every redirect target, refusing the
+/// hop if the new URL points at a private/loopback/metadata host or a
+/// non-`http(s)` scheme. Without this, reqwest's default
+/// follow-up-to-10-redirects behaviour would let a `302 Location:
+/// http://169.254.169.254/...` smuggle past the entry-time guard.
+///
+/// `OnceLock`-backed so the redirect policy and bundled TLS roots are
+/// initialised once per process; multiple concurrent media fetches
+/// share the connection pool.
+pub(crate) fn safe_fetch_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        client_builder()
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 5 {
+                    return attempt.error("too many redirects (cap: 5)");
+                }
+                let url_str = attempt.url().as_str().to_string();
+                if let Err(reason) = validate_url_for_fetch(&url_str) {
+                    return attempt.error(format!(
+                        "SSRF guard refused redirect to '{url_str}': {reason}"
+                    ));
+                }
+                attempt.follow()
+            }))
+            .build()
+            .expect("safe fetch client builds with bundled roots")
+    })
+}
+
 // ---------------------------------------------------------------------------
 // SSRF guard
 // ---------------------------------------------------------------------------
@@ -190,6 +224,170 @@ fn is_private_hostname(host: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Bounded fetch
+// ---------------------------------------------------------------------------
+
+/// Errors returned by [`fetch_url_bytes`].
+///
+/// Three variants by design — callers usually need to distinguish:
+///
+/// * a pre-network rejection (SSRF guard, scheme),
+/// * a size-cap hit (so the caller can phrase its own "too large"
+///   message and surface the real or the limit byte count), and
+/// * any other failure (transport, non-2xx status, mid-stream read).
+///
+/// Used by channel modules behind `channel-*` feature flags; the `#[allow]`
+/// keeps it available without forcing a `cfg(any(...))` here.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum FetchError {
+    /// `validate_url_for_fetch` refused the URL before any I/O.
+    Rejected(String),
+    /// Body would exceed `max_bytes`. `actual` carries the
+    /// `Content-Length` value when the pre-check tripped, and is
+    /// `None` when the mid-stream accumulator tripped (no honest
+    /// total available). `limit` is the cap that was passed in.
+    TooLarge { actual: Option<u64>, limit: usize },
+    /// Anything else: transport error, non-2xx status, mid-stream
+    /// read failure, ...
+    Failed(String),
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(s) => write!(f, "{s}"),
+            Self::TooLarge {
+                actual: Some(len),
+                limit,
+            } => write!(f, "Content-Length {len} exceeds cap of {limit} bytes"),
+            Self::TooLarge {
+                actual: None,
+                limit,
+            } => write!(f, "response exceeds cap of {limit} bytes mid-stream"),
+            Self::Failed(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl std::error::Error for FetchError {}
+
+/// Fetch the body of an `http(s)` URL with both the SSRF guard and a
+/// hard in-memory size cap, returning the body and the optional
+/// `Content-Type` header.
+///
+/// Two layers of defense:
+///
+/// 1. `validate_url_for_fetch` is applied to the input URL before any
+///    network I/O, rejecting non-`http(s)` schemes and any host that
+///    resolves syntactically into a private/loopback/metadata range.
+/// 2. The streamed body is rejected if either the advertised
+///    `Content-Length` exceeds `max_bytes`, or the accumulated bytes
+///    grow past `max_bytes` mid-stream. The streaming guard is the
+///    load-bearing one — `Content-Length` can be missing, wrong, or a
+///    chunked-transfer "lie".
+///
+/// Use this in any code path where the URL can come from an untrusted
+/// source (LLM output, channel-supplied attachment, MCP server response).
+/// Callers MUST pass an explicit `max_bytes` ceiling — there is no
+/// default; security utilities should make the cap a deliberate decision
+/// of the caller.
+///
+/// The returned `Option<String>` is the response's `Content-Type`
+/// header (raw, including any `; charset=...` / `; boundary=...`
+/// parameters). Callers that need to dispatch on media type should
+/// strip parameters and validate the prefix themselves — see the image
+/// download path in `bridge.rs` for an example.
+///
+/// **DNS rebinding is out of scope** — same as `validate_url_for_fetch`.
+/// Mitigate at the network layer or with a resolving SSRF proxy if the
+/// threat model requires it.
+///
+/// Used by channel modules behind `channel-*` feature flags; the `#[allow]`
+/// keeps it available without forcing a `cfg(any(...))` here.
+#[allow(dead_code)]
+pub async fn fetch_url_bytes(
+    url: &str,
+    max_bytes: usize,
+    extra_headers: &[(String, String)],
+) -> Result<(Vec<u8>, Option<String>), FetchError> {
+    validate_url_for_fetch(url).map_err(FetchError::Rejected)?;
+    fetch_url_bytes_unchecked(safe_fetch_client(), url, max_bytes, extra_headers).await
+}
+
+/// Send the GET and apply the size cap. Skips the SSRF guard.
+///
+/// `extra_headers` is attached to the outgoing request — caller is
+/// responsible for deciding whether the URL belongs to a trusted host
+/// (auth tokens MUST NOT be sent to a model-controlled hostname); see
+/// `ChannelAdapter::fetch_headers_for` for the gating contract that
+/// guards Matrix's MSC3916 Bearer-token path.
+///
+/// **Do NOT call this directly from production code.** The only legitimate
+/// callers are unit tests pointing at a `wiremock` server (which binds
+/// `127.0.0.1`, refused by `validate_url_for_fetch`). Production paths
+/// MUST go through [`fetch_url_bytes`].
+#[allow(dead_code)]
+pub(crate) async fn fetch_url_bytes_unchecked(
+    client: &reqwest::Client,
+    url: &str,
+    max_bytes: usize,
+    extra_headers: &[(String, String)],
+) -> Result<(Vec<u8>, Option<String>), FetchError> {
+    let mut req = client.get(url);
+    for (name, value) in extra_headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| FetchError::Failed(format!("fetch failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(FetchError::Failed(format!(
+            "fetch returned status {}",
+            resp.status()
+        )));
+    }
+
+    if let Some(len) = resp.content_length() {
+        if len > max_bytes as u64 {
+            return Err(FetchError::TooLarge {
+                actual: Some(len),
+                limit: max_bytes,
+            });
+        }
+    }
+
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let cap = max_bytes;
+    let prealloc = resp
+        .content_length()
+        .map(|c| (c as usize).min(cap))
+        .unwrap_or(0);
+    let mut body = Vec::with_capacity(prealloc);
+    let mut resp = resp;
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| FetchError::Failed(format!("read chunk: {e}")))?
+    {
+        if body.len().saturating_add(chunk.len()) > cap {
+            return Err(FetchError::TooLarge {
+                actual: None,
+                limit: cap,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, content_type))
+}
+
+// ---------------------------------------------------------------------------
 // Constant-time HMAC compare
 // ---------------------------------------------------------------------------
 
@@ -334,6 +532,255 @@ mod tests {
     fn userinfo_does_not_fool_host_check() {
         assert!(validate_url_for_fetch("http://attacker.com@127.0.0.1/").is_err());
         assert!(validate_url_for_fetch("http://attacker.com@example.com/").is_ok());
+    }
+
+    // -------- fetch_url_bytes ---------------------------------------------
+
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn fetch_url_bytes_rejects_blocked_url_before_dialing() {
+        // No mock server stood up — if the SSRF guard didn't fire we'd see a
+        // connection error, not the scheme/host rejection.
+        let err = fetch_url_bytes("http://127.0.0.1/", 1024, &[])
+            .await
+            .unwrap_err();
+        match &err {
+            FetchError::Rejected(msg) => assert!(
+                msg.contains("private/reserved"),
+                "expected SSRF guard message, got: {msg}"
+            ),
+            other => panic!("expected Rejected, got: {other:?}"),
+        }
+
+        let err = fetch_url_bytes("file:///etc/passwd", 1024, &[])
+            .await
+            .unwrap_err();
+        match &err {
+            FetchError::Rejected(msg) => {
+                assert!(msg.contains("scheme"), "expected scheme reject, got: {msg}")
+            }
+            other => panic!("expected Rejected, got: {other:?}"),
+        }
+    }
+
+    /// Regression for the redirect-bypass attack: a public URL that
+    /// `validate_url_for_fetch` accepts at entry returns 302 to a
+    /// private/loopback host. Without the `Policy::custom` revalidator
+    /// reqwest's default 10-redirect follower would happily fetch the
+    /// IMDS / loopback target. With it, the redirect is refused.
+    #[tokio::test]
+    async fn fetch_url_bytes_refuses_redirect_to_private_host() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        // Hand-rolled HTTP/1.1 server that 302s to http://127.0.0.1:1/
+        // — a private IPv4 the entry-time guard would have refused had
+        // it been the original URL. The listener binds on 127.0.0.1:0
+        // (the test fixture is the redirect ORIGIN, not the redirect
+        // TARGET — the target is what must be refused).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let resp = b"HTTP/1.1 302 Found\r\n\
+                    Location: http://127.0.0.1:1/loot\r\n\
+                    Content-Length: 0\r\n\
+                    \r\n";
+                let _ = sock.write_all(resp).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        // The original URL is a literal IPv4 that `validate_url_for_fetch`
+        // would refuse — so we can't use it as the entry-point. Instead
+        // we have to bypass the entry-time guard by calling the
+        // unchecked-on-entry path with a private origin, but we still
+        // want the redirect-policy revalidator to fire. Use the safe
+        // client directly with a pre-validated URL skip.
+        //
+        // For the entry-point check: the test fixture itself binds
+        // 127.0.0.1:0, so the entry-time guard would also refuse. To
+        // exercise ONLY the redirect policy, drive the safe_fetch_client
+        // directly with the bound listener URL.
+        let client = safe_fetch_client();
+        let url = format!("http://{addr}/start");
+        let resp = client.get(&url).send().await;
+        let _ = handle.await;
+        match resp {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("SSRF") || msg.contains("redirect"),
+                    "redirect rejection should mention SSRF or redirect, got: {msg}"
+                );
+            }
+            Ok(r) => panic!(
+                "expected redirect to be refused, got status {} (redirected to a private host!)",
+                r.status()
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_url_bytes_returns_body_within_cap() {
+        let server = MockServer::start().await;
+        let body = b"hello world".to_vec();
+        Mock::given(method("GET"))
+            .and(path("/file"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/plain; charset=utf-8")
+                    .set_body_bytes(body.clone()),
+            )
+            .mount(&server)
+            .await;
+
+        let client = new_client();
+        let url = format!("{}/file", server.uri());
+        let (got, content_type) = fetch_url_bytes_unchecked(&client, &url, 1024, &[])
+            .await
+            .unwrap();
+        assert_eq!(got, body);
+        // The Content-Type header is surfaced verbatim — caller is
+        // responsible for stripping `;` parameters and validating the
+        // prefix. Asserting raw form pins that contract.
+        assert_eq!(content_type.as_deref(), Some("text/plain; charset=utf-8"));
+    }
+
+    #[tokio::test]
+    async fn fetch_url_bytes_rejects_content_length_over_cap() {
+        let server = MockServer::start().await;
+        let body = vec![0u8; 4096];
+        Mock::given(method("GET"))
+            .and(path("/big"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .mount(&server)
+            .await;
+
+        let client = new_client();
+        let url = format!("{}/big", server.uri());
+        let err = fetch_url_bytes_unchecked(&client, &url, 1024, &[])
+            .await
+            .unwrap_err();
+        match err {
+            FetchError::TooLarge {
+                actual: Some(len),
+                limit,
+            } => {
+                assert_eq!(len, 4096);
+                assert_eq!(limit, 1024);
+            }
+            other => panic!("expected TooLarge {{ actual: Some(..), .. }}, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_url_bytes_rejects_streamed_body_over_cap() {
+        // Stand up a hand-rolled chunked-transfer server: no Content-Length
+        // is emitted, so the pre-check is bypassed and the streaming
+        // accumulator must catch the overrun. (wiremock is not used here
+        // because hyper rejects responses whose advertised Content-Length
+        // disagrees with the body bytes — there is no clean way through
+        // wiremock to produce a "lying" length response.)
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                // Drain the request — anything until \r\n\r\n.
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let header = b"HTTP/1.1 200 OK\r\n\
+                    Content-Type: application/octet-stream\r\n\
+                    Transfer-Encoding: chunked\r\n\
+                    \r\n";
+                let _ = sock.write_all(header).await;
+                // First chunk: 600 bytes of 'x'.
+                let _ = sock.write_all(b"258\r\n").await; // 0x258 = 600
+                let _ = sock.write_all(&vec![b'x'; 600]).await;
+                let _ = sock.write_all(b"\r\n").await;
+                // Second chunk: another 600 bytes (total 1200).
+                let _ = sock.write_all(b"258\r\n").await;
+                let _ = sock.write_all(&vec![b'x'; 600]).await;
+                let _ = sock.write_all(b"\r\n").await;
+                // End-of-chunks.
+                let _ = sock.write_all(b"0\r\n\r\n").await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let client = new_client();
+        let url = format!("http://{addr}/");
+        // Cap = 800: pre-check has nothing to check (no Content-Length),
+        // streaming accumulator sees the real 1200 bytes and rejects.
+        let err = fetch_url_bytes_unchecked(&client, &url, 800, &[])
+            .await
+            .unwrap_err();
+        match err {
+            FetchError::TooLarge {
+                actual: None,
+                limit,
+            } => assert_eq!(limit, 800),
+            other => panic!("expected TooLarge {{ actual: None, .. }}, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_url_bytes_returns_status_error_on_4xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/missing"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = new_client();
+        let url = format!("{}/missing", server.uri());
+        let err = fetch_url_bytes_unchecked(&client, &url, 1024, &[])
+            .await
+            .unwrap_err();
+        match &err {
+            FetchError::Failed(msg) => {
+                assert!(msg.contains("404"), "expected 404 in error, got: {msg}")
+            }
+            other => panic!("expected Failed, got: {other:?}"),
+        }
+    }
+
+    /// Regression for the Tier-4 dedup: confirm that `extra_headers`
+    /// attached at the public `fetch_url_bytes_*` boundary actually
+    /// reach the wire. Without this, the dedup would silently drop
+    /// Matrix's MSC3916 `Authorization: Bearer …` and inbound media
+    /// downloads would 401 on `enable_authenticated_media` homeservers.
+    #[tokio::test]
+    async fn fetch_url_bytes_unchecked_attaches_extra_headers() {
+        use wiremock::matchers::header;
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/secret"))
+            .and(header("Authorization", "Bearer t0p-s3cret"))
+            .and(header("X-Extra", "yes"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok".to_vec()))
+            .mount(&server)
+            .await;
+
+        let client = new_client();
+        let url = format!("{}/secret", server.uri());
+        let headers = vec![
+            ("Authorization".to_string(), "Bearer t0p-s3cret".to_string()),
+            ("X-Extra".to_string(), "yes".to_string()),
+        ];
+        let (got, _) = fetch_url_bytes_unchecked(&client, &url, 1024, &headers)
+            .await
+            .expect("auth'd request must succeed");
+        assert_eq!(got, b"ok");
     }
 
     // -------- ct_eq --------------------------------------------------------

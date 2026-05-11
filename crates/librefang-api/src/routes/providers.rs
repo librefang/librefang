@@ -43,6 +43,10 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/providers/{name}/key",
             axum::routing::post(set_provider_key).delete(delete_provider_key),
         )
+        .route(
+            "/providers/{name}/enable",
+            axum::routing::post(enable_provider),
+        )
         .route("/providers/{name}/test", axum::routing::post(test_provider))
         .route(
             "/providers/{name}/url",
@@ -507,9 +511,23 @@ fn attach_probe_result(
     )
 )]
 pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let provider_list: Vec<librefang_types::model_catalog::ProviderInfo> = {
+    // Snapshot both the provider list and the matching suppression flags
+    // from the same catalog load — racing a `delete_provider_key` /
+    // `enable_provider` mid-iteration would otherwise let the JSON show a
+    // provider with `auth_status: "missing"` AND `suppressed: false` (or
+    // vice versa), giving the dashboard inconsistent state to render.
+    let (provider_list, suppressed_ids): (
+        Vec<librefang_types::model_catalog::ProviderInfo>,
+        std::collections::HashSet<String>,
+    ) = {
         let catalog = state.kernel.model_catalog_ref().load();
-        catalog.list_providers().to_vec()
+        let providers = catalog.list_providers().to_vec();
+        let suppressed: std::collections::HashSet<String> = providers
+            .iter()
+            .filter(|p| catalog.is_suppressed(&p.id))
+            .map(|p| p.id.clone())
+            .collect();
+        (providers, suppressed)
     };
 
     // Collect local providers that need probing
@@ -574,6 +592,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             "proxy_url": p.proxy_url,
             "media_capabilities": p.media_capabilities,
             "is_custom": p.is_custom,
+            "suppressed": suppressed_ids.contains(&p.id),
         });
 
         // Attach region map so the dashboard can show available regions
@@ -640,9 +659,20 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
 
 /// Returns providers list for the dashboard snapshot endpoint.
 pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json::Value> {
-    let provider_list: Vec<librefang_types::model_catalog::ProviderInfo> = {
+    // Same single-load suppression snapshot as `list_providers` — see the
+    // comment there for the rationale.
+    let (provider_list, suppressed_ids): (
+        Vec<librefang_types::model_catalog::ProviderInfo>,
+        std::collections::HashSet<String>,
+    ) = {
         let catalog = state.kernel.model_catalog_ref().load();
-        catalog.list_providers().to_vec()
+        let providers = catalog.list_providers().to_vec();
+        let suppressed: std::collections::HashSet<String> = providers
+            .iter()
+            .filter(|p| catalog.is_suppressed(&p.id))
+            .map(|p| p.id.clone())
+            .collect();
+        (providers, suppressed)
     };
 
     let local_providers: Vec<(usize, String, String, Option<String>)> = provider_list
@@ -699,6 +729,7 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
             "proxy_url": p.proxy_url,
             "media_capabilities": p.media_capabilities,
             "is_custom": p.is_custom,
+            "suppressed": suppressed_ids.contains(&p.id),
         });
         if let Some(probe) = probe_map.remove(&i) {
             attach_probe_result(&mut entry, &probe, &p.id, &*state.kernel);
@@ -899,6 +930,7 @@ pub async fn add_custom_model(
             .get("supports_thinking")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
         aliases: vec![],
     };
 
@@ -1233,8 +1265,19 @@ pub async fn delete_provider_key(
             .into_json_tuple();
     }
 
-    // Remove from process environment
-    std::env::remove_var(&env_var);
+    // Remove from process environment. `std::env::remove_var` became unsafe
+    // in Rust 1.82 for the same reason `set_var` did — concurrent reads
+    // from other threads race the mutation. Delegate to a blocking thread
+    // so the tokio worker stays unblocked, mirroring the `set_provider_key`
+    // path above.
+    {
+        let env_var_clone = env_var.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            // SAFETY: single mutation on a dedicated blocking thread.
+            unsafe { std::env::remove_var(&env_var_clone) };
+        })
+        .await;
+    }
 
     // Suppress fallback/CLI detection for this provider and refresh auth
     {
@@ -1252,6 +1295,66 @@ pub async fn delete_provider_key(
     }
 
     (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
+}
+
+/// POST /api/providers/{name}/enable — Re-enable a previously suppressed
+/// provider.
+///
+/// Pairs with DELETE /api/providers/{name}/key, which writes the provider
+/// id into `suppressed_providers.json` so `detect_auth` stops promoting
+/// the row back to `Configured` / `NotRequired` / `AutoDetected` via
+/// CLI binary probes, local HTTP probes, or alias env vars. For
+/// CLI-shape providers (`claude-code`, `codex-cli`, `gemini-cli`,
+/// `qwen-code`) the existing `set_provider_key` / `set_provider_url`
+/// un-suppress side-effects don't apply — there's no key or URL to
+/// set — so without this endpoint a user who clicked "remove key" on a
+/// CLI provider had no UI to revert. This endpoint is the explicit
+/// re-enable signal and works uniformly for every provider shape.
+///
+/// Idempotent: calling on a non-suppressed provider is a no-op aside
+/// from the `detect_auth` refresh.
+#[utoipa::path(
+    post,
+    path = "/api/providers/{name}/enable",
+    tag = "models",
+    params(("name" = String, Path, description = "Provider name")),
+    responses(
+        (status = 200, description = "Provider re-enabled", body = crate::types::JsonObject),
+    ),
+)]
+pub async fn enable_provider(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let suppressed_path = state
+        .kernel
+        .home_dir()
+        .join("data")
+        .join("suppressed_providers.json");
+    let name_for_closure = name.clone();
+    state.kernel.model_catalog_update(&mut move |catalog| {
+        // Skip the disk write when nothing is suppressed — `save_suppressed`
+        // unlinks the file when the set is empty, so an unconditional save
+        // would touch the FS on every idempotent call.
+        if catalog.is_suppressed(&name_for_closure) {
+            catalog.unsuppress_provider(&name_for_closure);
+            catalog.save_suppressed(&suppressed_path);
+        }
+        catalog.detect_auth();
+    });
+
+    // Kick off a background probe so any key still present in the
+    // environment is re-validated and reflected as `ValidatedKey`
+    // without waiting for the user's next dashboard refresh.
+    state.kernel.clone().spawn_key_validation();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "enabled",
+            "provider": name,
+        })),
+    )
 }
 
 /// POST /api/providers/{name}/test — Test a provider's connectivity.
@@ -1586,16 +1689,34 @@ pub async fn set_provider_url(
         }
     }
 
-    // Update catalog in memory
+    // Update catalog in memory. Reconfiguring the URL is an explicit signal
+    // that the user wants this provider active, so undo any suppression set
+    // by a prior `delete_provider_key` (#4803) and refresh auth status —
+    // otherwise a suppressed local provider stays Missing even after the
+    // user re-points it at a reachable host.
     {
         let name_for_closure = name.clone();
         let base_url_for_closure = base_url.clone();
         let proxy_url_for_closure = proxy_url.clone();
+        let suppressed_path = state
+            .kernel
+            .home_dir()
+            .join("data")
+            .join("suppressed_providers.json");
         state.kernel.model_catalog_update(&mut move |catalog| {
             catalog.set_provider_url(&name_for_closure, &base_url_for_closure);
             if let Some(ref pu) = proxy_url_for_closure {
                 catalog.set_provider_proxy_url(&name_for_closure, pu);
             }
+            // Skip the unsuppress + disk write when nothing is suppressed —
+            // otherwise every URL edit (including those on already-active
+            // providers) issues a no-op `remove_file` on
+            // `suppressed_providers.json`.
+            if catalog.is_suppressed(&name_for_closure) {
+                catalog.unsuppress_provider(&name_for_closure);
+                catalog.save_suppressed(&suppressed_path);
+            }
+            catalog.detect_auth();
         });
     }
 

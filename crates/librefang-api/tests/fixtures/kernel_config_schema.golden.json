@@ -2699,12 +2699,26 @@
           "description": "IMAP server host.",
           "type": "string"
         },
+        "imap_password_env": {
+          "description": "Env var for IMAP-specific password (falls back to `password_env` if not set).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "imap_port": {
           "default": 993,
           "description": "IMAP port (993 for TLS).",
           "format": "uint16",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "imap_username": {
+          "description": "IMAP-specific username (falls back to `username` if not set).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "overrides": {
           "allOf": [
@@ -2760,12 +2774,26 @@
           "description": "SMTP server host.",
           "type": "string"
         },
+        "smtp_password_env": {
+          "description": "Env var for SMTP-specific password (falls back to `password_env` if not set).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "smtp_port": {
           "default": 587,
           "description": "SMTP port (587 for STARTTLS).",
           "format": "uint16",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "smtp_username": {
+          "description": "SMTP-specific username (falls back to `username` if not set).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "username": {
           "default": "",
@@ -6258,12 +6286,26 @@
               "description": "IMAP server host.",
               "type": "string"
             },
+            "imap_password_env": {
+              "description": "Env var for IMAP-specific password (falls back to `password_env` if not set).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "imap_port": {
               "default": 993,
               "description": "IMAP port (993 for TLS).",
               "format": "uint16",
               "minimum": 0.0,
               "type": "integer"
+            },
+            "imap_username": {
+              "description": "IMAP-specific username (falls back to `username` if not set).",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "overrides": {
               "allOf": [
@@ -6319,12 +6361,26 @@
               "description": "SMTP server host.",
               "type": "string"
             },
+            "smtp_password_env": {
+              "description": "Env var for SMTP-specific password (falls back to `password_env` if not set).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "smtp_port": {
               "default": 587,
               "description": "SMTP port (587 for STARTTLS).",
               "format": "uint16",
               "minimum": 0.0,
               "type": "integer"
+            },
+            "smtp_username": {
+              "description": "SMTP-specific username (falls back to `username` if not set).",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "username": {
               "default": "",

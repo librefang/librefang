@@ -165,18 +165,67 @@ pub trait ChannelBridgeHandle: Send + Sync {
         Err("Not implemented".to_string())
     }
 
-    /// Reset an agent's session (clear messages, fresh session ID).
+    /// Reset every session for an agent (default + per-channel + cron).
+    /// Used by surfaces that mean "wipe this agent" — dashboard / explicit
+    /// admin reset. Channel `/new` should call [`Self::reset_channel_session`]
+    /// instead so other surfaces are not collateral damage (#4868).
     async fn reset_session(&self, _agent_id: AgentId) -> Result<String, String> {
         Err("Not implemented".to_string())
     }
 
-    /// Hard-reboot an agent's session — full context clear without saving summary.
+    /// Hard-reboot every session for an agent — full context clear without
+    /// saving summaries. Channel `/reboot` should call
+    /// [`Self::reboot_channel_session`] instead (#4868).
     async fn reboot_session(&self, _agent_id: AgentId) -> Result<String, String> {
         Err("Not implemented".to_string())
     }
 
-    /// Trigger LLM-based session compaction for an agent.
+    /// Trigger LLM-based session compaction for an agent's registry-pointer
+    /// session. Channel `/compact` should call
+    /// [`Self::compact_channel_session`] instead so it operates on the
+    /// per-channel session the user is actually chatting in (#4868).
     async fn compact_session(&self, _agent_id: AgentId) -> Result<String, String> {
+        Err("Not implemented".to_string())
+    }
+
+    /// Reset only the session derived from `(channel, chat_id)` — the
+    /// per-channel session that channel `/new` actually means to clear
+    /// (#4868). Sibling sessions (other channels, dashboard) stay intact.
+    ///
+    /// `chat_id` follows the inbound-message convention: `None` for an
+    /// adapter that doesn't disambiguate by chat (the channel name itself
+    /// becomes the scope), `Some(<sender.platform_id>)` otherwise — the same
+    /// pair the channel resolver uses to derive
+    /// [`librefang_types::agent::SessionId::for_channel`] for inbound traffic.
+    async fn reset_channel_session(
+        &self,
+        _agent_id: AgentId,
+        _channel: &str,
+        _chat_id: Option<&str>,
+    ) -> Result<String, String> {
+        Err("Not implemented".to_string())
+    }
+
+    /// Hard-reboot only the per-channel session derived from
+    /// `(channel, chat_id)` — no summary saved (#4868).
+    async fn reboot_channel_session(
+        &self,
+        _agent_id: AgentId,
+        _channel: &str,
+        _chat_id: Option<&str>,
+    ) -> Result<String, String> {
+        Err("Not implemented".to_string())
+    }
+
+    /// Compact only the per-channel session derived from
+    /// `(channel, chat_id)` — operates on the session the channel user is
+    /// chatting in, not the agent's registry-pointer session (#4868).
+    async fn compact_channel_session(
+        &self,
+        _agent_id: AgentId,
+        _channel: &str,
+        _chat_id: Option<&str>,
+    ) -> Result<String, String> {
         Err("Not implemented".to_string())
     }
 
@@ -1151,6 +1200,18 @@ impl BridgeManager {
             });
         }
 
+        // 24h retention only fires when something accesses a bucket;
+        // groups that go quiet without ever being addressed need an
+        // active ticker to free memory. The evictor is owned by the
+        // process-wide buffer (see `crate::group_history::install_global`),
+        // not by any one BridgeManager — binding its lifetime to a single
+        // bridge would orphan the buffer's TTL on hot-reload (the second
+        // BridgeManager would skip the spawn, leaving the singleton
+        // accumulating entries with no ticker).
+        crate::group_history::install_global(|| {
+            Arc::new(crate::group_history::GroupHistoryBuffer::with_default_retention())
+        });
+
         // Prefer shared webhook routes over adapter-managed HTTP servers.
         // If the adapter provides webhook routes, collect them for mounting
         // on the main API server and use the returned stream for dispatch.
@@ -1270,7 +1331,8 @@ impl BridgeManager {
                                     let image_blocks = if let ChannelContent::Image {
                                         ref url, ref caption, ref mime_type
                                     } = message.content {
-                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), &upload_dir).await {
+                                        let extra_headers = adapter_clone.fetch_headers_for(url);
+                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), &upload_dir, &extra_headers).await {
                                             blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::ImageFile { .. })) => Some(blocks),
                                             _ => None,
                                         }
@@ -1336,13 +1398,17 @@ impl BridgeManager {
     }
 
     /// Start listening for `ApprovalRequested` kernel events and forward them
-    /// to all running channel adapters as interactive approval messages.
+    /// to every running channel adapter as a text notification (#4875).
     ///
-    /// Each adapter receives a text notification about the pending approval.
-    /// Adapters that support inline keyboards (e.g. Telegram) can later be
-    /// extended to send interactive buttons; for now we send a text prompt
-    /// with the approval ID so users can `/approve <id>` or `/reject <id>`.
-    pub async fn start_approval_listener(&mut self, adapters: Vec<Arc<dyn ChannelAdapter>>) {
+    /// Per-adapter recipients come from
+    /// [`ChannelAdapter::notification_recipients`]. Adapters that return an
+    /// empty list (the default) silently skip the broadcast — that is the
+    /// correct behaviour for group-only / public-broadcast adapters that
+    /// have no stable operator inbox. The current payload is plain text
+    /// with the truncated approval ID and `/approve <id>` / `/reject <id>`
+    /// instructions; inline-keyboard support per adapter is a follow-on
+    /// (re-opens the delivery side of #2029).
+    pub async fn start_approval_listener(&mut self) {
         let maybe_rx = self.handle.subscribe_events().await;
         let Some(mut rx) = maybe_rx else {
             debug!("Event subscription not available — approval listener not started");
@@ -1351,47 +1417,73 @@ impl BridgeManager {
 
         let mut shutdown = self.shutdown_rx.clone();
         let handle = self.handle.clone();
+        let adapters = self.adapters.clone();
 
         let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
+                    // Bias toward shutdown so a stop() call wins deterministically
+                    // over an in-flight ApprovalRequested poll. Without this the
+                    // unbiased select can pick the broadcast arm on the same poll
+                    // that shutdown_tx fires, then call adapter.send() on an
+                    // adapter that stop() has already drained — benign (warn! +
+                    // continue) but spurious in shutdown logs.
+                    biased;
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            info!("Shutting down approval event listener");
+                            break;
+                        }
+                    }
                     result = rx.recv() => {
                         match result {
                             Ok(event) => {
                                 if let librefang_types::event::EventPayload::ApprovalRequested(approval) = &event.payload {
+                                    let short_id = &approval.request_id[..8.min(approval.request_id.len())];
                                     let msg = format!(
                                         "Approval required for agent {}\n\
                                          Tool: {}\n\
                                          Risk: {}\n\
                                          {}\n\n\
-                                         Reply /approve {} or /reject {}",
+                                         Reply /approve {short_id} or /reject {short_id}",
                                         approval.agent_id,
                                         approval.tool_name,
                                         approval.risk_level,
                                         approval.description,
-                                        &approval.request_id[..8.min(approval.request_id.len())],
-                                        &approval.request_id[..8.min(approval.request_id.len())],
                                     );
 
-                                    // Send to all adapters (best-effort). Each adapter
-                                    // gets the notification so the user sees it on
-                                    // whichever channel they are active on.
                                     for adapter in &adapters {
-                                        // We don't have a specific user to send to, so
-                                        // this is a broadcast-style notification. Adapters
-                                        // that don't support broadcast will simply skip.
-                                        // For now, log the notification — concrete delivery
-                                        // requires per-adapter user tracking which is a
-                                        // follow-up feature.
-                                        info!(
-                                            adapter = adapter.name(),
-                                            request_id = %approval.request_id,
-                                            "Approval notification ready for channel adapter"
-                                        );
+                                        let recipients = adapter.notification_recipients();
+                                        if recipients.is_empty() {
+                                            debug!(
+                                                adapter = adapter.name(),
+                                                request_id = %approval.request_id,
+                                                "Adapter has no notification recipients — skipping approval broadcast"
+                                            );
+                                            continue;
+                                        }
+                                        for user in &recipients {
+                                            if let Err(e) = adapter
+                                                .send(user, ChannelContent::Text(msg.clone()))
+                                                .await
+                                            {
+                                                warn!(
+                                                    adapter = adapter.name(),
+                                                    request_id = %approval.request_id,
+                                                    recipient = %user.platform_id,
+                                                    error = %e,
+                                                    "Failed to deliver approval notification"
+                                                );
+                                            } else {
+                                                info!(
+                                                    adapter = adapter.name(),
+                                                    request_id = %approval.request_id,
+                                                    recipient = %user.platform_id,
+                                                    "Delivered approval notification"
+                                                );
+                                            }
+                                        }
                                     }
-
-                                    let _ = &msg; // Suppress unused variable warning
-                                    let _ = &handle;
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -1407,12 +1499,6 @@ impl BridgeManager {
                                 info!("Event bus closed — stopping approval listener");
                                 break;
                             }
-                        }
-                    }
-                    _ = shutdown.changed() => {
-                        if *shutdown.borrow() {
-                            info!("Shutting down approval event listener");
-                            break;
                         }
                     }
                 }
@@ -1469,6 +1555,22 @@ impl BridgeManager {
             router = router.nest(&format!("/{name}"), routes);
         }
         router
+    }
+
+    /// Register a background task with the bridge so its lifetime is
+    /// tied to the bridge's. `stop()` awaits every tracked handle.
+    /// External spawners (e.g. the journal retry ticker in
+    /// `librefang-api`) MUST register here or they leak across
+    /// hot-reloads — old and new instances would race on the same
+    /// journal entries and double-dispatch.
+    pub fn track_task(&mut self, handle: tokio::task::JoinHandle<()>) {
+        self.tasks.push(handle);
+    }
+
+    /// Subscriber to the bridge's shutdown signal. Background tasks
+    /// can `select!` on this to exit cleanly when `stop()` fires.
+    pub fn shutdown_signal(&self) -> watch::Receiver<bool> {
+        self.shutdown_rx.clone()
     }
 
     pub async fn stop(&mut self) {
@@ -2162,12 +2264,38 @@ fn default_output_format_for_channel(channel_type: &str) -> OutputFormat {
     formatter::default_output_format_for_channel(channel_type)
 }
 
+/// Extract the tool name from a `\n\n🔧 toolname\n\n` progress marker
+/// emitted by `librefang_api::channel_bridge` in response to a kernel
+/// `StreamEvent::ToolUseStart` event. Returns `None` for plain text
+/// deltas, the trailing-`⚠️`-error marker, the context-warning marker,
+/// or anything that doesn't exactly match the prefix+suffix wrapping —
+/// the api channel bridge sends each marker as its own dedicated
+/// `tx.send(line)` so an exact-match strip is the right shape (we
+/// would NOT want to grab a `🔧` that appeared inside model prose).
+fn extract_tool_marker_name(delta: &str) -> Option<String> {
+    let prefix = "\n\n🔧 ";
+    let suffix = "\n\n";
+    let inner = delta.strip_prefix(prefix)?.strip_suffix(suffix)?;
+    let trimmed = inner.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// Send a lifecycle reaction (best-effort, non-blocking for supported adapters).
 ///
-/// Errors are logged at debug level — reactions are non-critical UX polish, but
-/// repeated failures can hint at adapter / permission issues worth investigating.
-/// For Telegram, the underlying HTTP call is already fire-and-forget (spawned internally),
-/// so this await returns almost immediately.
+/// Errors are logged at WARN — reactions are best-effort UX polish, but a
+/// silent failure mode masks real problems. The original `debug!` here hid
+/// per-room rate-limit drops on Matrix (`M_LIMIT_EXCEEDED`) where the
+/// trailing `✅ Done` reaction was being silently swallowed at default
+/// verbosity, and made the lifecycle-reaction feature look broken even
+/// when it was working. WARN is the right level: a single failure tells
+/// an operator "your homeserver is rate-limiting the bot", which is
+/// exactly the actionable diagnosis we want surfaced.
+/// For Telegram, the underlying HTTP call is already fire-and-forget
+/// (spawned internally), so this await returns almost immediately.
 async fn send_lifecycle_reaction(
     adapter: &dyn ChannelAdapter,
     user: &ChannelUser,
@@ -2180,12 +2308,12 @@ async fn send_lifecycle_reaction(
         remove_previous: true,
     };
     if let Err(e) = adapter.send_reaction(user, message_id, &reaction).await {
-        debug!(
+        warn!(
             adapter = adapter.name(),
             message_id = message_id,
             phase = ?phase,
             error = %e,
-            "Lifecycle reaction send failed (best-effort, ignored)",
+            "Lifecycle reaction send failed (best-effort, not retried)",
         );
     }
 }
@@ -2553,9 +2681,44 @@ async fn dispatch_message(
     // --- DM/Group policy check ---
     if let Some(ref ov) = overrides {
         if message.is_group {
+            // capture the group_jid before the gating call so
+            // both branches (record-on-skip, drain-on-pass) can use the
+            // same key without re-deriving it. The bridge keys group
+            // messages by `sender.platform_id` (= chat JID for groups).
+            let group_id = message.sender.platform_id.clone();
+
             if !should_process_group_message(ct_str, ov, message) {
+                // Record the skipped message into the per-group buffer so
+                // the next addressed turn on this group can recover its
+                // text. Only plain-text content reaches `dispatch_message`
+                // (media goes through `dispatch_with_blocks` which doesn't
+                // gate); recording empty text would just bloat the
+                // buffer, so we skip when nothing useful is extractable.
+                if let Some(buffer) = crate::group_history::global() {
+                    if let Some(text) = text_content(message) {
+                        if !text.is_empty() {
+                            let entry = crate::group_history::HistoryEntry {
+                                sender_display_name: message.sender.display_name.clone(),
+                                text: text.to_string(),
+                                captured_at: std::time::Instant::now(),
+                            };
+                            buffer
+                                .record(&crate::group_history::group_key(ct_str, &group_id), entry)
+                                .await;
+                        }
+                    }
+                }
                 return;
             }
+            // Gating pass: the drain is deferred to the dispatch site
+            // (just before the journal record) so per-channel rate-limit,
+            // per-user rate-limit, reply-intent precheck, command-policy,
+            // thread-ownership, RBAC, and auto-reply early-returns can
+            // each take their turn first. Draining here would empty the
+            // buffer even when one of those gates suppresses the message,
+            // erasing the very context the next addressed turn was meant
+            // to recover. See `dispatch_message` near the journal-record
+            // call for the actual drain.
             // Reply-intent precheck: lightweight LLM classification for group
             // messages when group_policy is "all" and precheck is enabled.
             // Skipped for mentions and commands (already filtered above).
@@ -2728,9 +2891,15 @@ async fn dispatch_message(
     } = message.content
     {
         let upload_dir = handle.effective_channels_download_dir();
-        let blocks =
-            download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), &upload_dir)
-                .await;
+        let extra_headers = adapter.fetch_headers_for(url);
+        let blocks = download_image_to_blocks(
+            url,
+            caption.as_deref(),
+            mime_type.as_deref(),
+            &upload_dir,
+            &extra_headers,
+        )
+        .await;
         if blocks.iter().any(|b| {
             matches!(
                 b,
@@ -2767,7 +2936,9 @@ async fn dispatch_message(
         let max_bytes = handle
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
-        let blocks = download_file_to_blocks(url, filename, max_bytes, &download_dir).await;
+        let extra_headers = adapter.fetch_headers_for(url);
+        let blocks =
+            download_file_to_blocks(url, filename, max_bytes, &download_dir, &extra_headers).await;
         if has_file_saved_block(&blocks) {
             dispatch_with_blocks(
                 blocks,
@@ -2801,7 +2972,9 @@ async fn dispatch_message(
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
         let filename = filename_from_url(url).unwrap_or_else(|| "voice.ogg".to_string());
-        let mut blocks = download_file_to_blocks(url, &filename, max_bytes, &download_dir).await;
+        let extra_headers = adapter.fetch_headers_for(url);
+        let mut blocks =
+            download_file_to_blocks(url, &filename, max_bytes, &download_dir, &extra_headers).await;
         if has_file_saved_block(&blocks) {
             // Prepend a context block carrying duration + caption so the
             // model knows this is voice (not an arbitrary file) and any
@@ -2854,7 +3027,9 @@ async fn dispatch_message(
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
         let filename = filename_from_url(url).unwrap_or_else(|| "audio.mp3".to_string());
-        let mut blocks = download_file_to_blocks(url, &filename, max_bytes, &download_dir).await;
+        let extra_headers = adapter.fetch_headers_for(url);
+        let mut blocks =
+            download_file_to_blocks(url, &filename, max_bytes, &download_dir, &extra_headers).await;
         if has_file_saved_block(&blocks) {
             let mut header = format!("[Audio ({duration_seconds}s)");
             match (title.as_deref(), performer.as_deref()) {
@@ -2915,8 +3090,15 @@ async fn dispatch_message(
             .clone()
             .or_else(|| filename_from_url(url))
             .unwrap_or_else(|| "video.mp4".to_string());
-        let mut blocks =
-            download_file_to_blocks(url, &resolved_filename, max_bytes, &download_dir).await;
+        let extra_headers = adapter.fetch_headers_for(url);
+        let mut blocks = download_file_to_blocks(
+            url,
+            &resolved_filename,
+            max_bytes,
+            &download_dir,
+            &extra_headers,
+        )
+        .await;
         if has_file_saved_block(&blocks) {
             let context = match caption {
                 Some(c) if !c.is_empty() => {
@@ -3466,6 +3648,30 @@ async fn dispatch_message(
         return;
     }
 
+    // --- Group-history drain (gating pass survived all early-return gates) ---
+    //
+    // Done here, after rate-limit / reply-intent / command-policy /
+    // thread-ownership / RBAC / auto-reply have all let the message
+    // through — earlier in the gating block we'd erase the buffer even
+    // when one of these suppressed the dispatch, costing the very
+    // context the next addressed turn was meant to recover. The drained
+    // count is log-only in v1; the kernel-side prompt enrichment that
+    // consumes `drained` is the follow-up PR.
+    if message.is_group {
+        if let Some(buffer) = crate::group_history::global() {
+            let key = crate::group_history::group_key(ct_str, &message.sender.platform_id);
+            if let Some(drained) = buffer.drain(&key).await {
+                info!(
+                    event = "group_history_drained",
+                    channel = ct_str,
+                    group = %message.sender.platform_id,
+                    entries = drained.len(),
+                    "drained prior group entries on gating pass",
+                );
+            }
+        }
+    }
+
     // --- Message journal: record before dispatch for crash recovery ---
     if let Some(j) = journal {
         let entry = crate::message_journal::JournalEntry {
@@ -3483,6 +3689,7 @@ async fn dispatch_message(
             is_group: message.is_group,
             thread_id: thread_id.map(|s| s.to_string()),
             metadata: std::collections::HashMap::new(),
+            next_retry_after: None,
         };
         j.record(entry).await;
     }
@@ -3536,42 +3743,54 @@ async fn dispatch_message(
 
                 // Tee: forward deltas to the adapter while buffering a copy.
                 // If send_streaming fails, the buffer lets us fall back to send().
+                //
+                // Drain runs as a sibling future via `tokio::join!` (not a
+                // detached `tokio::spawn`) so it shares the dispatch task's
+                // borrow of `adapter`. That lets us call
+                // `send_lifecycle_reaction(adapter, ...)` from inside the
+                // drain when we observe the api/channel_bridge's
+                // `\n\n🔧 toolname\n\n` text marker — a turn that runs a
+                // tool now flips the trigger-message reaction to ⚙️ for the
+                // duration of the call, instead of staying stuck on ✍️.
                 let (adapter_tx, adapter_rx) = mpsc::channel::<String>(64);
-                let mut buffered_text = String::new();
-                let buffer_handle = tokio::spawn({
-                    let prefix_chunk = prefix_chunk.clone();
+                let prefix_chunk_owned = prefix_chunk.clone();
+                let drain_fut = async {
                     let mut buffered = String::new();
-                    async move {
-                        // Inject the prefix as the first delta so it becomes
-                        // part of the streamed message. Mirror it into the
-                        // buffer so the stream-fail fallback path's
-                        // idempotency check (`apply_agent_prefix`) sees an
-                        // already-prefixed buffer and skips re-prefixing.
-                        if let Some(ref p) = prefix_chunk {
-                            buffered.push_str(p);
-                            if adapter_tx.send(p.clone()).await.is_err() {
-                                return buffered;
-                            }
+                    // Inject the prefix as the first delta so it becomes
+                    // part of the streamed message. Mirror it into the
+                    // buffer so the stream-fail fallback path's
+                    // idempotency check (`apply_agent_prefix`) sees an
+                    // already-prefixed buffer and skips re-prefixing.
+                    if let Some(ref p) = prefix_chunk_owned {
+                        buffered.push_str(p);
+                        if adapter_tx.send(p.clone()).await.is_err() {
+                            return buffered;
                         }
-                        while let Some(delta) = delta_rx.recv().await {
-                            buffered.push_str(&delta);
-                            // Best-effort forward — if adapter dropped rx, stop.
-                            if adapter_tx.send(delta).await.is_err() {
-                                break;
-                            }
-                        }
-                        buffered
                     }
-                });
+                    while let Some(delta) = delta_rx.recv().await {
+                        buffered.push_str(&delta);
+                        if let Some(name) = extract_tool_marker_name(&delta) {
+                            send_lifecycle_reaction(
+                                adapter,
+                                &message.sender,
+                                msg_id,
+                                &AgentPhase::tool_use(&name),
+                            )
+                            .await;
+                        }
+                        // Best-effort forward — if adapter dropped rx, stop.
+                        if adapter_tx.send(delta).await.is_err() {
+                            break;
+                        }
+                    }
+                    drop(adapter_tx);
+                    buffered
+                };
 
-                let stream_result = adapter
-                    .send_streaming(&message.sender, adapter_rx, thread_id)
-                    .await;
-
-                // Collect the buffered text (always succeeds unless the task panicked).
-                if let Ok(text) = buffer_handle.await {
-                    buffered_text = text;
-                }
+                let (stream_result, buffered_text) = tokio::join!(
+                    adapter.send_streaming(&message.sender, adapter_rx, thread_id),
+                    drain_fut
+                );
 
                 // Status is sent after the text channel fully drains, so
                 // awaiting here will not block longer than the stream itself.
@@ -3600,14 +3819,9 @@ async fn dispatch_message(
                             )
                             .await;
                         if let Some(j) = journal {
-                            let jstatus = if kernel_ok {
-                                crate::message_journal::JournalStatus::Completed
-                            } else {
-                                crate::message_journal::JournalStatus::Failed
-                            };
-                            j.update_status(
+                            j.record_outcome(
                                 &message.platform_message_id,
-                                jstatus,
+                                kernel_ok,
                                 kernel_err_str.clone(),
                             )
                             .await;
@@ -3675,12 +3889,7 @@ async fn dispatch_message(
                                 )
                                 .await;
                             if let Some(j) = journal {
-                                let jstatus = if kernel_ok {
-                                    crate::message_journal::JournalStatus::Completed
-                                } else {
-                                    crate::message_journal::JournalStatus::Failed
-                                };
-                                j.update_status(&message.platform_message_id, jstatus, err_str)
+                                j.record_outcome(&message.platform_message_id, kernel_ok, err_str)
                                     .await;
                             }
                             return;
@@ -3706,12 +3915,8 @@ async fn dispatch_message(
                             )
                             .await;
                         if let Some(j) = journal {
-                            j.update_status(
-                                &message.platform_message_id,
-                                crate::message_journal::JournalStatus::Failed,
-                                Some(err_str),
-                            )
-                            .await;
+                            j.record_outcome(&message.platform_message_id, false, Some(err_str))
+                                .await;
                         }
                         return;
                     }
@@ -3788,12 +3993,7 @@ async fn dispatch_message(
             )
             .await;
         if let Some(j) = journal {
-            let jstatus = if success {
-                crate::message_journal::JournalStatus::Completed
-            } else {
-                crate::message_journal::JournalStatus::Failed
-            };
-            j.update_status(&message.platform_message_id, jstatus, err_str)
+            j.record_outcome(&message.platform_message_id, success, err_str)
                 .await;
         }
         return;
@@ -3822,12 +4022,8 @@ async fn dispatch_message(
                 )
                 .await;
             if let Some(j) = journal {
-                j.update_status(
-                    &message.platform_message_id,
-                    crate::message_journal::JournalStatus::Completed,
-                    None,
-                )
-                .await;
+                j.record_outcome(&message.platform_message_id, true, None)
+                    .await;
             }
         }
         Err(e) => {
@@ -3856,12 +4052,8 @@ async fn dispatch_message(
             )
             .await;
             if let Some(j) = journal {
-                j.update_status(
-                    &message.platform_message_id,
-                    crate::message_journal::JournalStatus::Failed,
-                    Some(e.to_string()),
-                )
-                .await;
+                j.record_outcome(&message.platform_message_id, false, Some(e.to_string()))
+                    .await;
             }
         }
     }
@@ -3994,6 +4186,7 @@ async fn download_file_to_blocks(
     filename: &str,
     max_bytes: u64,
     download_dir: &std::path::Path,
+    extra_headers: &[(String, String)],
 ) -> Vec<ContentBlock> {
     // Validate URL scheme
     if let Err(reason) = validate_url_scheme(url) {
@@ -4005,12 +4198,11 @@ async fn download_file_to_blocks(
     }
 
     let client = crate::http_client::new_client();
-    let resp = match client
-        .get(url)
-        .timeout(std::time::Duration::from_secs(60))
-        .send()
-        .await
-    {
+    let mut req = client.get(url).timeout(std::time::Duration::from_secs(60));
+    for (name, value) in extra_headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+    let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             warn!("Failed to download file from channel: {e}");
@@ -4020,6 +4212,26 @@ async fn download_file_to_blocks(
             }];
         }
     };
+
+    // Fail closed on non-2xx. Without this the body of a 4xx/5xx (e.g.
+    // Synapse's `M_NOT_FOUND` JSON, ~45 bytes) streams straight into
+    // `<uuid>.<ext>` and the agent then sees a "PDF" that's actually an
+    // error envelope.
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let preview: String = body.chars().take(200).collect();
+        warn!(
+            status = %status,
+            body_preview = %preview,
+            url = %url,
+            "File download returned non-success status"
+        );
+        return vec![ContentBlock::Text {
+            text: format!("[File download failed: HTTP {status} ({filename})]"),
+            provider_metadata: None,
+        }];
+    }
 
     // Fast-reject via Content-Length header when available.
     if let Some(cl) = resp.content_length() {
@@ -4210,100 +4422,75 @@ async fn download_image_to_blocks(
     caption: Option<&str>,
     mime_type_hint: Option<&str>,
     upload_dir: &std::path::Path,
+    extra_headers: &[(String, String)],
 ) -> Vec<ContentBlock> {
     use base64::Engine;
 
     // 5 MB limit to prevent memory abuse from oversized images
     const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
-    // SSRF guard (#3442): reject not just non-http/https schemes but also
-    // any URL that points at a loopback, private, link-local, or cloud
-    // metadata target.  A forged inbound message could otherwise smuggle
-    // `http://169.254.169.254/...` into the LLM context as an "image".
-    if let Err(reason) = crate::http_client::validate_url_for_fetch(url) {
-        warn!("Rejecting image download: {reason}");
-        return vec![ContentBlock::Text {
-            text: format!("[Image download rejected: {reason}]"),
-            provider_metadata: None,
-        }];
-    }
-
-    let client = crate::http_client::new_client();
-    let resp = match client.get(url).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("Failed to download image from channel: {e}");
-            return vec![ContentBlock::Text {
-                text: format!("[Image download failed: {e}]"),
-                provider_metadata: None,
-            }];
-        }
-    };
-
-    // Detect media type from Content-Type header — but only trust it if it's
-    // actually an image/* type. Many APIs (Telegram, S3 pre-signed URLs) return
-    // `application/octet-stream` for all files, which breaks vision.
-    let header_type = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .map(|ct| ct.split(';').next().unwrap_or(ct).trim().to_string())
-        .filter(|ct| ct.starts_with("image/"));
-
-    // Early rejection if Content-Length header exceeds limit
-    if let Some(len) = resp.content_length() {
-        if len as usize > MAX_IMAGE_BYTES {
-            warn!("Image Content-Length ({len} bytes) exceeds limit, rejecting before download");
-            let desc = match caption {
-                Some(c) => format!(
-                    "[Image too large for vision ({} KB)]\nCaption: {c}",
-                    len / 1024
-                ),
-                None => format!("[Image too large for vision ({} KB)]", len / 1024),
-            };
-            return vec![ContentBlock::Text {
-                text: desc,
-                provider_metadata: None,
-            }];
-        }
-    }
-
-    // Stream body with size accumulator to enforce limit even without Content-Length
-    let mut stream = resp.bytes_stream();
-    let mut buf = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = match chunk {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("Failed to read image bytes: {e}");
+    // SSRF guard (#3442) + size cap (5 MiB, in-memory) + Content-Type
+    // capture, all behind one helper. The helper rejects non-http(s)
+    // schemes and any host literally in a private/loopback/metadata
+    // range BEFORE opening a socket — so a forged
+    // `http://169.254.169.254/...` never produces an "image" block in
+    // the agent's LLM context. The size cap enforces both a
+    // Content-Length pre-check and a streaming-accumulator mid-fetch
+    // bound, so a chunked-transfer "lying" length cannot bypass it.
+    //
+    // `extra_headers` is threaded through to attach auth (MSC3916
+    // Bearer for Matrix's authenticated media path); the adapter has
+    // already gated the URL host before producing the headers — see
+    // `ChannelAdapter::fetch_headers_for` for the credential-leak
+    // contract.
+    let (buf, response_content_type) =
+        match crate::http_client::fetch_url_bytes(url, MAX_IMAGE_BYTES, extra_headers).await {
+            Ok(t) => t,
+            Err(crate::http_client::FetchError::Rejected(reason)) => {
+                warn!("Rejecting image download: {reason}");
                 return vec![ContentBlock::Text {
-                    text: format!("[Image read failed: {e}]"),
+                    text: format!("[Image download rejected: {reason}]"),
+                    provider_metadata: None,
+                }];
+            }
+            Err(crate::http_client::FetchError::TooLarge { actual, limit }) => {
+                let reported_kb = actual
+                    .map(|a| a / 1024)
+                    .unwrap_or_else(|| (limit as u64) / 1024);
+                match actual {
+                    Some(len) => warn!(
+                    "Image Content-Length ({len} bytes) exceeds limit, rejecting before download"
+                ),
+                    None => warn!("Image stream exceeded {limit} byte limit, aborting download"),
+                }
+                let desc = match caption {
+                    Some(c) => {
+                        format!("[Image too large for vision ({reported_kb} KB)]\nCaption: {c}")
+                    }
+                    None => format!("[Image too large for vision ({reported_kb} KB)]"),
+                };
+                return vec![ContentBlock::Text {
+                    text: desc,
+                    provider_metadata: None,
+                }];
+            }
+            Err(crate::http_client::FetchError::Failed(reason)) => {
+                warn!("Image download failed: {reason}");
+                return vec![ContentBlock::Text {
+                    text: format!("[Image download failed: {reason}]"),
                     provider_metadata: None,
                 }];
             }
         };
-        buf.extend_from_slice(&chunk);
-        if buf.len() > MAX_IMAGE_BYTES {
-            warn!(
-                "Image stream exceeded {} byte limit, aborting download",
-                MAX_IMAGE_BYTES
-            );
-            let desc = match caption {
-                Some(c) => format!(
-                    "[Image too large for vision ({} KB)]\nCaption: {c}",
-                    MAX_IMAGE_BYTES / 1024
-                ),
-                None => format!(
-                    "[Image too large for vision ({} KB)]",
-                    MAX_IMAGE_BYTES / 1024
-                ),
-            };
-            return vec![ContentBlock::Text {
-                text: desc,
-                provider_metadata: None,
-            }];
-        }
-    }
+
+    // Detect media type from Content-Type header — but only trust it if it's
+    // actually an image/* type. Many APIs (Telegram, S3 pre-signed URLs) return
+    // `application/octet-stream` for all files, which breaks vision.
+    let header_type = response_content_type
+        .as_deref()
+        .map(|ct| ct.split(';').next().unwrap_or(ct).trim().to_string())
+        .filter(|ct| ct.starts_with("image/"));
+
     let bytes = bytes::Bytes::from(buf);
 
     // Four-tier media type detection:
@@ -4534,6 +4721,7 @@ async fn dispatch_with_blocks(
             is_group: message.is_group,
             thread_id: thread_id.map(|s| s.to_string()),
             metadata: std::collections::HashMap::new(),
+            next_retry_after: None,
         };
         j.record(entry).await;
     }
@@ -4563,12 +4751,8 @@ async fn dispatch_with_blocks(
                 send_response(adapter, &message.sender, response, thread_id, output_format).await;
             }
             if let Some(j) = journal {
-                j.update_status(
-                    &message.platform_message_id,
-                    crate::message_journal::JournalStatus::Completed,
-                    None,
-                )
-                .await;
+                j.record_outcome(&message.platform_message_id, true, None)
+                    .await;
             }
             handle
                 .record_delivery(
@@ -4606,12 +4790,8 @@ async fn dispatch_with_blocks(
             )
             .await;
             if let Some(j) = journal {
-                j.update_status(
-                    &message.platform_message_id,
-                    crate::message_journal::JournalStatus::Failed,
-                    Some(e.to_string()),
-                )
-                .await;
+                j.record_outcome(&message.platform_message_id, false, Some(e.to_string()))
+                    .await;
             }
         }
     }
@@ -4706,17 +4886,29 @@ async fn handle_command(
             }
         }
         "new" => {
-            // Need to resolve the user's current agent
+            // Resolve the user's current agent and the channel-derived sid
+            // so /new only resets THIS chat (#4868). The (channel, chat_id)
+            // pair must match `build_sender_context` exactly so the sid we
+            // delete here equals the sid the next inbound message will
+            // resolve via `SessionId::for_channel`.
             let agent_id = router.resolve(
                 channel_type,
                 &sender.platform_id,
                 sender.librefang_user.as_deref(),
             );
             match agent_id {
-                Some(aid) => handle
-                    .reset_session(aid)
-                    .await
-                    .unwrap_or_else(|e| format!("Error: {e}")),
+                Some(aid) => {
+                    let ch = channel_type_str(channel_type);
+                    let chat = if sender.platform_id.is_empty() {
+                        None
+                    } else {
+                        Some(sender.platform_id.as_str())
+                    };
+                    handle
+                        .reset_channel_session(aid, ch, chat)
+                        .await
+                        .unwrap_or_else(|e| format!("Error: {e}"))
+                }
                 None => "No agent selected. Use /agent <name> first.".to_string(),
             }
         }
@@ -4727,10 +4919,18 @@ async fn handle_command(
                 sender.librefang_user.as_deref(),
             );
             match agent_id {
-                Some(aid) => handle
-                    .reboot_session(aid)
-                    .await
-                    .unwrap_or_else(|e| format!("Error: {e}")),
+                Some(aid) => {
+                    let ch = channel_type_str(channel_type);
+                    let chat = if sender.platform_id.is_empty() {
+                        None
+                    } else {
+                        Some(sender.platform_id.as_str())
+                    };
+                    handle
+                        .reboot_channel_session(aid, ch, chat)
+                        .await
+                        .unwrap_or_else(|e| format!("Error: {e}"))
+                }
                 None => "No agent selected. Use /agent <name> first.".to_string(),
             }
         }
@@ -4741,10 +4941,18 @@ async fn handle_command(
                 sender.librefang_user.as_deref(),
             );
             match agent_id {
-                Some(aid) => handle
-                    .compact_session(aid)
-                    .await
-                    .unwrap_or_else(|e| format!("Error: {e}")),
+                Some(aid) => {
+                    let ch = channel_type_str(channel_type);
+                    let chat = if sender.platform_id.is_empty() {
+                        None
+                    } else {
+                        Some(sender.platform_id.as_str())
+                    };
+                    handle
+                        .compact_channel_session(aid, ch, chat)
+                        .await
+                        .unwrap_or_else(|e| format!("Error: {e}"))
+                }
                 None => "No agent selected. Use /agent <name> first.".to_string(),
             }
         }
@@ -7016,9 +7224,14 @@ mod tests {
         #[tokio::test]
         async fn test_file_download_rejects_bad_scheme() {
             let dir = std::env::temp_dir().join("librefang_test_download");
-            let blocks =
-                download_file_to_blocks("ftp://evil.com/malware.exe", "malware.exe", 1024, &dir)
-                    .await;
+            let blocks = download_file_to_blocks(
+                "ftp://evil.com/malware.exe",
+                "malware.exe",
+                1024,
+                &dir,
+                &[],
+            )
+            .await;
             assert_eq!(blocks.len(), 1);
             match &blocks[0] {
                 ContentBlock::Text { text, .. } => {
@@ -7029,6 +7242,73 @@ mod tests {
                 }
                 other => panic!("Expected Text block, got: {other:?}"),
             }
+        }
+    }
+
+    mod tool_marker_extraction {
+        use super::super::extract_tool_marker_name;
+
+        #[test]
+        fn extracts_simple_tool_name() {
+            assert_eq!(
+                extract_tool_marker_name("\n\n🔧 system_time\n\n"),
+                Some("system_time".to_string())
+            );
+        }
+
+        #[test]
+        fn extracts_pretty_tool_name_with_spaces() {
+            // `prettify_tool_name` upstream may render `web_fetch` as
+            // `Web Fetch` — the marker passes through whatever upstream
+            // emits. Trim whitespace but preserve the inner text.
+            assert_eq!(
+                extract_tool_marker_name("\n\n🔧 Web Fetch\n\n"),
+                Some("Web Fetch".to_string())
+            );
+        }
+
+        #[test]
+        fn rejects_plain_text_delta() {
+            assert_eq!(extract_tool_marker_name("Hello world"), None);
+            assert_eq!(extract_tool_marker_name(""), None);
+        }
+
+        #[test]
+        fn rejects_error_marker() {
+            // `\n\n⚠️ tool failed\n\n` is a different signal — it MUST
+            // not be misread as a ToolUse start (would fire ⚙️ on a
+            // tool that just errored).
+            assert_eq!(
+                extract_tool_marker_name("\n\n⚠️ system_time failed\n\n"),
+                None
+            );
+        }
+
+        #[test]
+        fn rejects_marker_inside_prose() {
+            // We rely on the api channel bridge sending each marker as
+            // its own `tx.send(line)` — a `🔧` literal that appears
+            // inside model-authored prose must NOT be treated as a
+            // marker, since we'd extract the wrong "tool name" and
+            // fire a phantom reaction.
+            assert_eq!(
+                extract_tool_marker_name("Sure, I'll use 🔧 to fix it."),
+                None
+            );
+        }
+
+        #[test]
+        fn rejects_marker_missing_suffix() {
+            // The api bridge always emits `\n\n…\n\n`. If the suffix
+            // is missing the delta is malformed; fail closed rather
+            // than guess.
+            assert_eq!(extract_tool_marker_name("\n\n🔧 system_time"), None);
+        }
+
+        #[test]
+        fn rejects_empty_tool_name() {
+            assert_eq!(extract_tool_marker_name("\n\n🔧 \n\n"), None);
+            assert_eq!(extract_tool_marker_name("\n\n🔧    \n\n"), None);
         }
     }
 }

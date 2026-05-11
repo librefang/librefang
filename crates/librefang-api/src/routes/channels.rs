@@ -9,6 +9,20 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/channels/{name}/configure",
             axum::routing::post(configure_channel).delete(remove_channel),
         )
+        // Per-instance endpoints (#4837) — let the dashboard manage multiple
+        // `[[channels.<name>]]` entries (e.g. two Telegram bots, three Slack
+        // workspaces) instead of treating every channel type as a single
+        // instance. The legacy `/configure` endpoints remain for backwards
+        // compatibility and continue to drive the single-instance flow.
+        .route(
+            "/channels/{name}/instances",
+            axum::routing::get(list_channel_instances).post(create_channel_instance),
+        )
+        .route(
+            "/channels/{name}/instances/{index}",
+            axum::routing::put(update_channel_instance_handler)
+                .delete(delete_channel_instance),
+        )
         .route("/channels/{name}/test", axum::routing::post(test_channel))
         .route("/channels/reload", axum::routing::post(reload_channels))
         .route(
@@ -34,11 +48,12 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
 }
 
 use super::skills::{
-    remove_channel_config, remove_secret_env, upsert_channel_config, validate_env_var,
-    write_secret_env,
+    append_channel_instance, remove_channel_config, remove_channel_instance, remove_secret_env,
+    update_channel_instance, upsert_channel_config, validate_env_var, write_secret_env,
+    CHANNEL_AOT_CONFLICT_PREFIX,
 };
 use super::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -1156,6 +1171,129 @@ fn channel_config_values(
     }
 }
 
+/// Returns the number of configured instances for a channel type.
+///
+/// Mirrors `is_channel_configured` but returns the underlying
+/// `OneOrMany.len()` so the dashboard can render
+/// "Telegram · 2 bots" subtitles and the list endpoint can populate
+/// `instance_count`.
+fn channel_instance_count(config: &librefang_types::config::ChannelsConfig, name: &str) -> usize {
+    match name {
+        "telegram" => config.telegram.len(),
+        "discord" => config.discord.len(),
+        "slack" => config.slack.len(),
+        "whatsapp" => config.whatsapp.len(),
+        "signal" => config.signal.len(),
+        "matrix" => config.matrix.len(),
+        "email" => config.email.len(),
+        "line" => config.line.len(),
+        "viber" => config.viber.len(),
+        "messenger" => config.messenger.len(),
+        "threema" => config.threema.len(),
+        "keybase" => config.keybase.len(),
+        "reddit" => config.reddit.len(),
+        "mastodon" => config.mastodon.len(),
+        "bluesky" => config.bluesky.len(),
+        "linkedin" => config.linkedin.len(),
+        "nostr" => config.nostr.len(),
+        "teams" => config.teams.len(),
+        "mattermost" => config.mattermost.len(),
+        "google_chat" => config.google_chat.len(),
+        "webex" => config.webex.len(),
+        "feishu" => config.feishu.len(),
+        "dingtalk" => config.dingtalk.len(),
+        "pumble" => config.pumble.len(),
+        "flock" => config.flock.len(),
+        "twist" => config.twist.len(),
+        "zulip" => config.zulip.len(),
+        "irc" => config.irc.len(),
+        "xmpp" => config.xmpp.len(),
+        "gitter" => config.gitter.len(),
+        "discourse" => config.discourse.len(),
+        "revolt" => config.revolt.len(),
+        "guilded" => config.guilded.len(),
+        "nextcloud" => config.nextcloud.len(),
+        "rocketchat" => config.rocketchat.len(),
+        "twitch" => config.twitch.len(),
+        "ntfy" => config.ntfy.len(),
+        "gotify" => config.gotify.len(),
+        "webhook" => config.webhook.len(),
+        "voice" => config.voice.len(),
+        "mumble" => config.mumble.len(),
+        "wechat" => config.wechat.len(),
+        "wecom" => config.wecom.len(),
+        "qq" => config.qq.len(),
+        _ => 0,
+    }
+}
+
+/// Serialize each configured instance of `name` to a JSON value.
+///
+/// Returns an empty vector when the channel is unknown or has no instances.
+/// Each element is the per-instance config (same shape as the legacy
+/// `channel_config_values` returns for the first instance), so it can be
+/// fed straight into `build_field_json` to render the per-instance form.
+fn channel_instances_serialized(
+    config: &librefang_types::config::ChannelsConfig,
+    name: &str,
+) -> Vec<serde_json::Value> {
+    fn ser<T: serde::Serialize>(
+        items: &librefang_types::config::OneOrMany<T>,
+    ) -> Vec<serde_json::Value> {
+        items
+            .iter()
+            .filter_map(|c| serde_json::to_value(c).ok())
+            .collect()
+    }
+    match name {
+        "telegram" => ser(&config.telegram),
+        "discord" => ser(&config.discord),
+        "slack" => ser(&config.slack),
+        "whatsapp" => ser(&config.whatsapp),
+        "signal" => ser(&config.signal),
+        "matrix" => ser(&config.matrix),
+        "email" => ser(&config.email),
+        "line" => ser(&config.line),
+        "viber" => ser(&config.viber),
+        "messenger" => ser(&config.messenger),
+        "threema" => ser(&config.threema),
+        "keybase" => ser(&config.keybase),
+        "reddit" => ser(&config.reddit),
+        "mastodon" => ser(&config.mastodon),
+        "bluesky" => ser(&config.bluesky),
+        "linkedin" => ser(&config.linkedin),
+        "nostr" => ser(&config.nostr),
+        "teams" => ser(&config.teams),
+        "mattermost" => ser(&config.mattermost),
+        "google_chat" => ser(&config.google_chat),
+        "webex" => ser(&config.webex),
+        "feishu" => ser(&config.feishu),
+        "dingtalk" => ser(&config.dingtalk),
+        "pumble" => ser(&config.pumble),
+        "flock" => ser(&config.flock),
+        "twist" => ser(&config.twist),
+        "zulip" => ser(&config.zulip),
+        "irc" => ser(&config.irc),
+        "xmpp" => ser(&config.xmpp),
+        "gitter" => ser(&config.gitter),
+        "discourse" => ser(&config.discourse),
+        "revolt" => ser(&config.revolt),
+        "guilded" => ser(&config.guilded),
+        "nextcloud" => ser(&config.nextcloud),
+        "rocketchat" => ser(&config.rocketchat),
+        "twitch" => ser(&config.twitch),
+        "ntfy" => ser(&config.ntfy),
+        "gotify" => ser(&config.gotify),
+        "webhook" => ser(&config.webhook),
+        "voice" => ser(&config.voice),
+        "mumble" => ser(&config.mumble),
+        "wechat" => ser(&config.wechat),
+        "wecom" => ser(&config.wecom),
+        "qq" => ser(&config.qq),
+        _ => Vec::new(),
+    }
+}
+
 /// GET /api/channels — List all 40 channel adapters with status and field metadata.
 ///
 /// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
@@ -1192,6 +1330,7 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
         if configured {
             configured_count += 1;
         }
+        let instance_count = channel_instance_count(&live_channels, meta.name);
 
         // Check if all required secret env vars are set
         let has_token = meta
@@ -1223,6 +1362,7 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "quick_setup": meta.quick_setup,
             "setup_type": meta.setup_type,
             "configured": configured,
+            "instance_count": instance_count,
             "has_token": has_token,
             "fields": fields,
             "setup_steps": meta.setup_steps,
@@ -1255,6 +1395,7 @@ pub(crate) async fn channels_snapshot(state: &Arc<AppState>) -> Vec<serde_json::
 
     for meta in CHANNEL_REGISTRY {
         let configured = is_channel_configured(&live_channels, meta.name);
+        let instance_count = channel_instance_count(&live_channels, meta.name);
         let has_token = meta
             .fields
             .iter()
@@ -1282,6 +1423,7 @@ pub(crate) async fn channels_snapshot(state: &Arc<AppState>) -> Vec<serde_json::
             "quick_setup": meta.quick_setup,
             "setup_type": meta.setup_type,
             "configured": configured,
+            "instance_count": instance_count,
             "has_token": has_token,
             "fields": fields,
             "setup_steps": meta.setup_steps,
@@ -1323,6 +1465,7 @@ pub async fn get_channel(
 
     let live_channels = state.channels_config.read().await;
     let configured = is_channel_configured(&live_channels, meta.name);
+    let instance_count = channel_instance_count(&live_channels, meta.name);
 
     let has_token = meta
         .fields
@@ -1353,6 +1496,7 @@ pub async fn get_channel(
         "quick_setup": meta.quick_setup,
         "setup_type": meta.setup_type,
         "configured": configured,
+        "instance_count": instance_count,
         "has_token": has_token,
         "fields": fields,
         "setup_steps": meta.setup_steps,
@@ -1376,7 +1520,8 @@ pub async fn get_channel(
     responses(
         (status = 200, description = "Channel configured successfully", body = crate::types::JsonObject),
         (status = 400, description = "Bad request", body = crate::types::JsonObject),
-        (status = 404, description = "Unknown channel", body = crate::types::JsonObject)
+        (status = 404, description = "Unknown channel", body = crate::types::JsonObject),
+        (status = 409, description = "Channel is in multi-instance form; use the per-instance API", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/{name}/configure — Save channel secrets + config fields.
@@ -1454,6 +1599,12 @@ pub async fn configure_channel(
     {
         let _config_guard = state.config_write_lock.lock().await;
         if let Err(e) = upsert_channel_config(&config_path, &name, &config_fields) {
+            let msg = e.to_string();
+            if let Some(rest) = msg.strip_prefix(CHANNEL_AOT_CONFLICT_PREFIX) {
+                return ApiErrorResponse::bad_request(rest.to_string())
+                    .with_status(StatusCode::CONFLICT)
+                    .into_json_tuple();
+            }
             return ApiErrorResponse::internal(format!("Failed to write config: {e}"))
                 .into_json_tuple();
         }
@@ -1502,6 +1653,7 @@ pub async fn configure_channel(
     responses(
         (status = 200, description = "Channel removed successfully", body = crate::types::JsonObject),
         (status = 404, description = "Unknown channel", body = crate::types::JsonObject),
+        (status = 409, description = "Channel is in multi-instance form; use the per-instance API", body = crate::types::JsonObject),
         (status = 500, description = "Internal server error", body = crate::types::JsonObject)
     )
 )]
@@ -1537,6 +1689,12 @@ pub async fn remove_channel(
     {
         let _config_guard = state.config_write_lock.lock().await;
         if let Err(e) = remove_channel_config(&config_path, &name) {
+            let msg = e.to_string();
+            if let Some(rest) = msg.strip_prefix(CHANNEL_AOT_CONFLICT_PREFIX) {
+                return ApiErrorResponse::bad_request(rest.to_string())
+                    .with_status(StatusCode::CONFLICT)
+                    .into_json_tuple();
+            }
             return ApiErrorResponse::internal(format!("Failed to remove config: {e}"))
                 .into_json_tuple();
         }
@@ -1551,6 +1709,799 @@ pub async fn remove_channel(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Per-instance endpoints (#4837)
+//
+// The legacy `/configure` endpoints treat every channel name as a single
+// `[channels.<name>]` entry. The kernel has supported `[[channels.<name>]]`
+// (multiple instances) since #240, but the dashboard had no UI to add a
+// second Telegram bot or Slack workspace. The four handlers below let the
+// dashboard list / create / update / delete individual instances. The
+// instance ID is the array index — stable within a session, may shift after
+// a deletion (the dashboard re-fetches via the standard query invalidation
+// pattern in `mutations/channels.ts`).
+// ---------------------------------------------------------------------------
+
+/// Render the per-instance fields for the dashboard form.
+///
+/// Each instance gets the channel's full field schema (same shape as
+/// `build_field_json` returns for the legacy single-instance flow), with
+/// `value` populated from the per-instance config so the form pre-fills
+/// when editing. Secret fields never have their value exposed — only
+/// `has_value` (env-var presence check on the *named* env var the instance
+/// points at) flips so the UI can show "secret already set" vs "needs setup".
+fn build_instance_fields_json(
+    meta: &ChannelMeta,
+    instance: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    let mut fields: Vec<serde_json::Value> = meta
+        .fields
+        .iter()
+        .map(|f| build_field_json(f, Some(instance)))
+        .collect();
+
+    // For per-instance secret fields, override `has_value` to check the env
+    // var that THIS instance's `<key>` points at (e.g. `TELEGRAM_BOT_TOKEN_2`)
+    // instead of the field schema's default env var. Without this, every
+    // instance would report the same `has_value` derived from the default
+    // env var, defeating the purpose of multiple instances.
+    let obj = match instance.as_object() {
+        Some(o) => o,
+        None => return fields,
+    };
+    for field_def in meta.fields {
+        if field_def.field_type != FieldType::Secret {
+            continue;
+        }
+        let pointed_env_name = obj
+            .get(field_def.key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if pointed_env_name.is_empty() {
+            continue;
+        }
+        let has_value = std::env::var(pointed_env_name)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        for field_json in fields.iter_mut() {
+            if field_json.get("key").and_then(|v| v.as_str()) == Some(field_def.key) {
+                field_json["has_value"] = serde_json::Value::Bool(has_value);
+                // Surface the env-var name the instance is pointing at so
+                // the UI can show "TELEGRAM_BOT_TOKEN_2" next to the secret
+                // field — otherwise the user can't tell instances apart.
+                field_json["env_var"] = serde_json::Value::String(pointed_env_name.to_string());
+            }
+        }
+    }
+    fields
+}
+
+/// Resolve secret env var name overrides for a write to instance
+/// `target_index` of `channel`.
+///
+/// Two cases:
+///
+///   - `target_index == existing_instances.len()` → caller is appending a new
+///     instance. `existing_instances.get(target_index)` returns `None`, so we
+///     fall through to the suffix-search branch and pick the lowest unused
+///     `<env>_<N>` name (or the bare default name when free).
+///   - `target_index < existing_instances.len()` → caller is updating an
+///     existing instance. We preserve whatever env-var name that instance is
+///     already pointing at, so re-typing the secret writes to the SAME
+///     env var (rotation in place) rather than allocating a fresh suffix
+///     that may collide with siblings or leak a stale env var.
+///
+/// The previous implementation always synthesised `<env>_<index+1>` and
+/// blindly wrote there. After deleting a middle instance, indices shift, so
+/// "add a new instance" would land on a suffix already in use by a survivor
+/// — silently overwriting the live token (#4865).
+fn resolve_secret_env_overrides(
+    meta: &ChannelMeta,
+    existing_instances: &[serde_json::Value],
+    target_index: usize,
+) -> HashMap<String, String> {
+    let mut overrides = HashMap::new();
+    for field_def in meta.fields {
+        let Some(default_env) = field_def.env_var else {
+            continue;
+        };
+
+        // Update path: preserve the env-var name the existing instance is
+        // already pointing at.
+        if let Some(existing_name) = existing_instances
+            .get(target_index)
+            .and_then(|i| i.as_object())
+            .and_then(|o| o.get(field_def.key))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            overrides.insert(field_def.key.to_string(), existing_name.to_string());
+            continue;
+        }
+
+        // Create path (or update on an instance that has no env-var ref yet):
+        // pick the lowest-unused `<env>_<N>` name across siblings.
+        let used: std::collections::HashSet<String> = existing_instances
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != target_index)
+            .filter_map(|(_, inst)| {
+                inst.as_object()
+                    .and_then(|o| o.get(field_def.key))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        let chosen = if !used.contains(default_env) {
+            default_env.to_string()
+        } else {
+            (2..)
+                .map(|n| format!("{default_env}_{n}"))
+                .find(|name| !used.contains(name))
+                .expect("counter is unbounded")
+        };
+        overrides.insert(field_def.key.to_string(), chosen);
+    }
+    overrides
+}
+
+/// Canonical JSON serialisation with object keys sorted lexicographically and
+/// no whitespace, so the same logical config always produces byte-identical
+/// output. Used as the input to `instance_signature` for an opaque-content
+/// fingerprint (CAS token) of each channel instance.
+///
+/// **Invariant for signature stability:** both the GET-side hash (computed
+/// over `channel_instances_serialized(...)` of in-memory `ChannelsConfig`)
+/// and the recomputed PUT/DELETE-side hash (computed over
+/// `channel_instances_serialized(...)` of `read_disk_channels(...)`) must
+/// flow through the SAME serialiser. Concretely: never mix a hash computed
+/// over a `toml_edit::Table` with one computed over `serde_json::Value`
+/// — `OneOrMany`'s deserialiser coerces TOML integers to JSON strings in
+/// some fields (see `librefang-types/src/config/serde_helpers.rs`), and
+/// the two views diverge. All sites that build the hash today route
+/// through `serde_json::to_value(&TelegramConfig)` (and friends) so this
+/// holds; the test `instance_signature_stable_across_key_order` pins it.
+fn canonical_json(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<(&String, &serde_json::Value)> = map.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            let parts: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap_or_default(),
+                        canonical_json(v)
+                    )
+                })
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
+        serde_json::Value::Array(arr) => {
+            let parts: Vec<String> = arr.iter().map(canonical_json).collect();
+            format!("[{}]", parts.join(","))
+        }
+        _ => serde_json::to_string(v).unwrap_or_default(),
+    }
+}
+
+/// SHA-256 of `canonical_json(instance)`, hex-encoded. The dashboard receives
+/// this as `signature` on every list response and echoes it back on PUT/DELETE
+/// so the server can detect when an intervening write moved or modified the
+/// instance the client thought it was operating on (compare-and-swap).
+fn instance_signature(instance: &serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+    let canonical = canonical_json(instance);
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Re-deserialise `[channels]` from disk under the write lock, so handlers
+/// validate against the authoritative on-disk state rather than the stale
+/// in-memory `state.channels_config` snapshot (which only catches up after
+/// the post-write hot-reload). Without this, two concurrent PUT/DELETE
+/// requests can both pass an in-memory range check, then race to write a
+/// shifted disk view — the second write lands on the wrong instance.
+///
+/// **Dual-parser note:** the WRITE path (`update_channel_instance`,
+/// `remove_channel_instance` in skills.rs) parses with
+/// `toml_edit::DocumentMut` to preserve comments/key-order; this READ
+/// path parses with `toml::from_str` → `try_into::<ChannelsConfig>` so it
+/// can use the canonical struct definitions. Both grammars are TOML and
+/// agree on the channel-section shape; the downstream signature CAS only
+/// compares the read-side serialisation against itself (GET + recompute
+/// both go through this fn → `channel_instances_serialized`), so even an
+/// edge-case parser disagreement on a non-channel section can't cause a
+/// false 409.
+fn read_disk_channels(
+    config_path: &std::path::Path,
+) -> Result<librefang_types::config::ChannelsConfig, Box<dyn std::error::Error + Send + Sync>> {
+    if !config_path.exists() {
+        return Ok(librefang_types::config::ChannelsConfig::default());
+    }
+    let content = std::fs::read_to_string(config_path)?;
+    if content.trim().is_empty() {
+        return Ok(librefang_types::config::ChannelsConfig::default());
+    }
+    let root: toml::Value = toml::from_str(&content)?;
+    let Some(channels_val) = root.get("channels") else {
+        return Ok(librefang_types::config::ChannelsConfig::default());
+    };
+    let channels: librefang_types::config::ChannelsConfig = channels_val.clone().try_into()?;
+    Ok(channels)
+}
+
+/// Pure pre-write validation: run the user-submitted `fields` through the
+/// channel schema, resolve each secret field's effective env-var name from
+/// `secret_env_overrides`, and accumulate (a) the TOML config payload and
+/// (b) the side-effecting secret writes that need to land in `secrets.env`.
+///
+/// No I/O happens here — secrets are NOT written until `apply_secret_writes`
+/// is called, which lets handlers defer the writes until they are inside the
+/// `config_write_lock` critical section and have verified the CAS signature.
+struct PreparedWrite {
+    config_fields: HashMap<String, (String, FieldType)>,
+    /// `(env_var_name, value)` pairs to write to `secrets.env`. Distinct from
+    /// `config_fields` because the same env-var name could be referenced by
+    /// multiple fields (defensive — the schema does not currently allow it).
+    secret_writes: Vec<(String, String)>,
+}
+
+fn prepare_fields_write(
+    meta: &ChannelMeta,
+    fields: &serde_json::Map<String, serde_json::Value>,
+    secret_env_overrides: &HashMap<String, String>,
+) -> Result<PreparedWrite, (StatusCode, Json<serde_json::Value>)> {
+    let mut config_fields: HashMap<String, (String, FieldType)> = HashMap::new();
+    let mut secret_writes: Vec<(String, String)> = Vec::new();
+
+    for field_def in meta.fields {
+        let value = fields
+            .get(field_def.key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if value.is_empty() {
+            continue;
+        }
+
+        if let Some(default_env_var) = field_def.env_var {
+            let env_var_name = secret_env_overrides
+                .get(field_def.key)
+                .cloned()
+                .unwrap_or_else(|| default_env_var.to_string());
+
+            if let Err(msg) = validate_env_var(&env_var_name, value) {
+                return Err(ApiErrorResponse::bad_request(msg).into_json_tuple());
+            }
+
+            secret_writes.push((env_var_name.clone(), value.to_string()));
+            config_fields.insert(field_def.key.to_string(), (env_var_name, FieldType::Text));
+        } else {
+            config_fields.insert(
+                field_def.key.to_string(),
+                (value.to_string(), field_def.field_type),
+            );
+        }
+    }
+
+    Ok(PreparedWrite {
+        config_fields,
+        secret_writes,
+    })
+}
+
+/// Apply the deferred secret writes from `prepare_fields_write` under the
+/// `config_write_lock` critical section. Each pair is written to
+/// `secrets.env` and pushed into the running process's environment via a
+/// dedicated blocking thread (`std::env::set_var` is not thread-safe in the
+/// async runtime).
+async fn apply_secret_writes(
+    secrets_path: &std::path::Path,
+    secret_writes: &[(String, String)],
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    for (env_var, value) in secret_writes {
+        if let Err(e) = write_secret_env(secrets_path, env_var, value) {
+            return Err(
+                ApiErrorResponse::internal(format!("Failed to write secret: {e}"))
+                    .into_json_tuple(),
+            );
+        }
+        let env_var_owned = env_var.clone();
+        let value_owned = value.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            // SAFETY: single mutation on a dedicated blocking thread.
+            unsafe { std::env::set_var(&env_var_owned, &value_owned) };
+        })
+        .await;
+    }
+    Ok(())
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/channels/{name}/instances",
+    tag = "channels",
+    params(
+        ("name" = String, Path, description = "Channel adapter name (e.g. telegram, discord)")
+    ),
+    responses(
+        (status = 200, description = "List configured instances", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown channel", body = crate::types::JsonObject)
+    )
+)]
+/// GET /api/channels/{name}/instances — List every configured instance.
+pub async fn list_channel_instances(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let meta = match find_channel_meta(&name) {
+        Some(m) => m,
+        None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
+    };
+
+    let live_channels = state.channels_config.read().await;
+    let instances = channel_instances_serialized(&live_channels, meta.name);
+
+    let items: Vec<serde_json::Value> = instances
+        .iter()
+        .enumerate()
+        .map(|(idx, inst)| {
+            let fields = build_instance_fields_json(meta, inst);
+            // `has_token` for THIS instance: every required secret field's
+            // pointed-at env var must be set.
+            let has_token = meta
+                .fields
+                .iter()
+                .filter(|f| f.required && f.field_type == FieldType::Secret)
+                .all(|f| {
+                    let pointed = inst
+                        .as_object()
+                        .and_then(|o| o.get(f.key))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if pointed.is_empty() {
+                        return false;
+                    }
+                    std::env::var(pointed)
+                        .map(|v| !v.is_empty())
+                        .unwrap_or(false)
+                });
+            // CAS token. The dashboard echoes this back on PUT/DELETE so the
+            // server can reject writes that target an instance that has been
+            // moved or modified since the client read it (#4865).
+            let signature = instance_signature(inst);
+            serde_json::json!({
+                "index": idx,
+                "fields": fields,
+                "config": inst,
+                "has_token": has_token,
+                "signature": signature,
+            })
+        })
+        .collect();
+
+    let total = items.len();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "channel": meta.name,
+            "items": items,
+            "total": total,
+        })),
+    )
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/channels/{name}/instances",
+    tag = "channels",
+    params(
+        ("name" = String, Path, description = "Channel adapter name")
+    ),
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 201, description = "Instance created", body = crate::types::JsonObject),
+        (status = 400, description = "Bad request", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown channel", body = crate::types::JsonObject),
+        (status = 500, description = "Internal server error", body = crate::types::JsonObject)
+    )
+)]
+/// POST /api/channels/{name}/instances — Append a new `[[channels.<name>]]`.
+///
+/// The whole "compute target index → resolve env-var name overrides → write
+/// secrets → append config" sequence runs inside the `config_write_lock`
+/// critical section, against a freshly re-read on-disk view of `[channels]`,
+/// so two concurrent creates can't pick the same suffix or land at the same
+/// index (#4865).
+pub async fn create_channel_instance(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let meta = match find_channel_meta(&name) {
+        Some(m) => m,
+        None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
+    };
+
+    let fields = match body.get("fields").and_then(|v| v.as_object()) {
+        Some(f) => f,
+        None => return ApiErrorResponse::bad_request("Missing 'fields' object").into_json_tuple(),
+    };
+
+    let home = librefang_home();
+    let secrets_path = home.join("secrets.env");
+    let config_path = home.join("config.toml");
+
+    let written_index = {
+        let _config_guard = state.config_write_lock.lock().await;
+
+        // Re-read `[channels]` from disk under the lock, so override resolution
+        // sees the authoritative state (the in-memory snapshot only catches
+        // up after the post-write hot-reload).
+        let disk_channels = match read_disk_channels(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return ApiErrorResponse::internal(format!("Failed to read config: {e}"))
+                    .into_json_tuple();
+            }
+        };
+        let existing_instances = channel_instances_serialized(&disk_channels, meta.name);
+        let next_index = existing_instances.len();
+        let overrides = resolve_secret_env_overrides(meta, &existing_instances, next_index);
+
+        let prepared = match prepare_fields_write(meta, fields, &overrides) {
+            Ok(p) => p,
+            Err(resp) => return resp,
+        };
+
+        if let Err(resp) = apply_secret_writes(&secrets_path, &prepared.secret_writes).await {
+            return resp;
+        }
+
+        match append_channel_instance(&config_path, &name, &prepared.config_fields) {
+            Ok(idx) => idx,
+            Err(e) => {
+                return ApiErrorResponse::internal(format!("Failed to append instance: {e}"))
+                    .into_json_tuple();
+            }
+        }
+    };
+
+    let (activated, started) = match crate::channel_bridge::reload_channels_from_disk(&state).await
+    {
+        Ok(s) => (s.iter().any(|x| x.eq_ignore_ascii_case(&name)), s),
+        Err(e) => {
+            tracing::warn!(error = %e, "Channel hot-reload failed after instance create");
+            (false, Vec::new())
+        }
+    };
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "status": "created",
+            "channel": name,
+            "index": written_index,
+            "activated": activated,
+            "started_channels": started,
+        })),
+    )
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/channels/{name}/instances/{index}",
+    tag = "channels",
+    params(
+        ("name" = String, Path, description = "Channel adapter name"),
+        ("index" = usize, Path, description = "Instance array index (0-based)")
+    ),
+    request_body(
+        content = crate::types::JsonObject,
+        description = "REQUIRED body fields: `fields` (object of channel-schema fields) and `signature` (hex CAS token from the matching `GET /instances` item, used to detect concurrent edits — mismatch yields 409). OPTIONAL: `clear_secrets` (array of secret-field keys to actively drop)."
+    ),
+    responses(
+        (status = 200, description = "Instance updated", body = crate::types::JsonObject),
+        (status = 400, description = "Bad request (missing fields or signature)", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown channel or instance index out of range", body = crate::types::JsonObject),
+        (status = 409, description = "Signature mismatch — instance was modified or moved by another writer", body = crate::types::JsonObject),
+        (status = 500, description = "Internal server error", body = crate::types::JsonObject)
+    )
+)]
+/// PUT /api/channels/{name}/instances/{index} — Replace one instance's fields.
+///
+/// Body shape:
+/// ```json
+/// {
+///   "fields": { "bot_token_env": "...", "default_agent": "assistant" },
+///   "signature": "<hex from GET response>",
+///   "clear_secrets": ["bot_token_env"]   // optional
+/// }
+/// ```
+///
+/// `signature` is REQUIRED and acts as a compare-and-swap token: the server
+/// re-reads disk under the write lock, computes the signature of the
+/// instance currently at `index`, and rejects with 409 Conflict if it
+/// doesn't match. This eliminates the silent-wrong-write bug where a
+/// concurrent delete on a sibling row shifted indices between the client's
+/// list-fetch and its PUT (#4865).
+///
+/// `clear_secrets` lets the caller actively drop a secret reference instead
+/// of preserving it. Listed keys have their `<key>_env` field removed from
+/// the rebuilt instance and, when no sibling instance references the same
+/// env-var name, the env-var line is also removed from `secrets.env`.
+pub async fn update_channel_instance_handler(
+    State(state): State<Arc<AppState>>,
+    Path((name, index)): Path<(String, usize)>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let meta = match find_channel_meta(&name) {
+        Some(m) => m,
+        None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
+    };
+
+    let fields = match body.get("fields").and_then(|v| v.as_object()) {
+        Some(f) => f,
+        None => return ApiErrorResponse::bad_request("Missing 'fields' object").into_json_tuple(),
+    };
+
+    // Required CAS token. Reject before touching disk so a missing field is
+    // a clean 400 rather than an opaque race surface.
+    let client_signature = match body.get("signature").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return ApiErrorResponse::bad_request(
+                "Missing 'signature' (compare-and-swap token from list response)",
+            )
+            .into_json_tuple();
+        }
+    };
+
+    let clear_secrets: Vec<String> = body
+        .get("clear_secrets")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let home = librefang_home();
+    let secrets_path = home.join("secrets.env");
+    let config_path = home.join("config.toml");
+
+    {
+        let _config_guard = state.config_write_lock.lock().await;
+
+        // Re-read disk so range/CAS check + override resolution see the
+        // authoritative state.
+        let disk_channels = match read_disk_channels(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return ApiErrorResponse::internal(format!("Failed to read config: {e}"))
+                    .into_json_tuple();
+            }
+        };
+        let existing_instances = channel_instances_serialized(&disk_channels, meta.name);
+        if index >= existing_instances.len() {
+            return ApiErrorResponse::not_found(format!(
+                "Instance {index} out of range (have {} instance(s))",
+                existing_instances.len()
+            ))
+            .into_json_tuple();
+        }
+
+        let on_disk_signature = instance_signature(&existing_instances[index]);
+        if on_disk_signature != client_signature {
+            return ApiErrorResponse::bad_request(
+                "Instance has been modified or moved since the list was read; refresh and retry",
+            )
+            .with_status(StatusCode::CONFLICT)
+            .into_json_tuple();
+        }
+
+        let overrides = resolve_secret_env_overrides(meta, &existing_instances, index);
+        let mut prepared = match prepare_fields_write(meta, fields, &overrides) {
+            Ok(p) => p,
+            Err(resp) => return resp,
+        };
+
+        // Preserve the existing instance's secret-field env-var-name when the
+        // user didn't retype the secret AND didn't list it under
+        // `clear_secrets`. Without this, editing any non-secret field while
+        // leaving a secret blank would silently drop the env-var ref, breaking
+        // authentication.
+        if let Some(obj) = existing_instances[index].as_object() {
+            for field_def in meta.fields {
+                if field_def.field_type != FieldType::Secret {
+                    continue;
+                }
+                if prepared.config_fields.contains_key(field_def.key) {
+                    continue;
+                }
+                if clear_secrets.iter().any(|k| k == field_def.key) {
+                    continue;
+                }
+                let existing_env_name = obj
+                    .get(field_def.key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if existing_env_name.is_empty() {
+                    continue;
+                }
+                prepared.config_fields.insert(
+                    field_def.key.to_string(),
+                    (existing_env_name.to_string(), FieldType::Text),
+                );
+            }
+        }
+
+        // For each cleared secret: drop the env-var line from secrets.env if
+        // no sibling instance still references the same env-var name. This
+        // avoids leaving stale tokens on disk after the user has removed an
+        // instance's auth, while preventing collateral damage to siblings
+        // that happen to share the env-var name.
+        if !clear_secrets.is_empty() {
+            if let Some(obj) = existing_instances[index].as_object() {
+                let sibling_env_refs: std::collections::HashSet<String> = existing_instances
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != index)
+                    .filter_map(|(_, inst)| inst.as_object())
+                    .flat_map(|o| o.values())
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+                for key in &clear_secrets {
+                    let Some(env_name) = obj.get(key).and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    if env_name.is_empty() || sibling_env_refs.contains(env_name) {
+                        continue;
+                    }
+                    if let Err(e) = remove_secret_env(&secrets_path, env_name) {
+                        tracing::warn!(error = %e, env_var = %env_name, "Failed to remove cleared secret env var");
+                    }
+                    let env_owned = env_name.to_string();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        // SAFETY: single mutation on a dedicated blocking thread.
+                        unsafe { std::env::remove_var(&env_owned) };
+                    })
+                    .await;
+                }
+            }
+        }
+
+        if let Err(resp) = apply_secret_writes(&secrets_path, &prepared.secret_writes).await {
+            return resp;
+        }
+
+        if let Err(e) = update_channel_instance(&config_path, &name, index, &prepared.config_fields)
+        {
+            return ApiErrorResponse::internal(format!("Failed to update instance: {e}"))
+                .into_json_tuple();
+        }
+    }
+
+    let (activated, started) = match crate::channel_bridge::reload_channels_from_disk(&state).await
+    {
+        Ok(s) => (s.iter().any(|x| x.eq_ignore_ascii_case(&name)), s),
+        Err(e) => {
+            tracing::warn!(error = %e, "Channel hot-reload failed after instance update");
+            (false, Vec::new())
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "updated",
+            "channel": name,
+            "index": index,
+            "activated": activated,
+            "started_channels": started,
+        })),
+    )
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/channels/{name}/instances/{index}",
+    tag = "channels",
+    params(
+        ("name" = String, Path, description = "Channel adapter name"),
+        ("index" = usize, Path, description = "Instance array index (0-based)"),
+        ("signature" = String, Query, description = "REQUIRED hex CAS token from the matching `GET /instances` item; mismatch yields 409 (#4865)")
+    ),
+    responses(
+        (status = 204, description = "Instance removed"),
+        (status = 400, description = "Missing `signature` query parameter", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown channel or instance index out of range", body = crate::types::JsonObject),
+        (status = 409, description = "Signature mismatch — instance was modified or moved by another writer", body = crate::types::JsonObject),
+        (status = 500, description = "Internal server error", body = crate::types::JsonObject)
+    )
+)]
+/// DELETE /api/channels/{name}/instances/{index}?signature=<hex>
+///
+/// `signature` is REQUIRED (query string) and acts as a compare-and-swap
+/// token: the server re-reads disk under the write lock and rejects with
+/// 409 Conflict if the instance currently at `index` doesn't match the
+/// signature the client read from the GET response (#4865).
+///
+/// Note: this does NOT clear the secret env var the instance pointed at —
+/// the env var may be shared with another instance, and we don't want to
+/// silently break a running bot. To explicitly clear secrets while editing,
+/// use PUT with `clear_secrets`.
+pub async fn delete_channel_instance(
+    State(state): State<Arc<AppState>>,
+    Path((name, index)): Path<(String, usize)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let meta = match find_channel_meta(&name) {
+        Some(m) => m,
+        None => return ApiErrorResponse::not_found("Unknown channel").into_json_tuple(),
+    };
+
+    let client_signature = match query.get("signature") {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => {
+            return ApiErrorResponse::bad_request(
+                "Missing 'signature' query parameter (compare-and-swap token from list response)",
+            )
+            .into_json_tuple();
+        }
+    };
+
+    let home = librefang_home();
+    let config_path = home.join("config.toml");
+
+    {
+        let _config_guard = state.config_write_lock.lock().await;
+
+        let disk_channels = match read_disk_channels(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return ApiErrorResponse::internal(format!("Failed to read config: {e}"))
+                    .into_json_tuple();
+            }
+        };
+        let existing_instances = channel_instances_serialized(&disk_channels, meta.name);
+        if index >= existing_instances.len() {
+            return ApiErrorResponse::not_found(format!(
+                "Instance {index} out of range (have {} instance(s))",
+                existing_instances.len()
+            ))
+            .into_json_tuple();
+        }
+
+        let on_disk_signature = instance_signature(&existing_instances[index]);
+        if on_disk_signature != client_signature {
+            return ApiErrorResponse::bad_request(
+                "Instance has been modified or moved since the list was read; refresh and retry",
+            )
+            .with_status(StatusCode::CONFLICT)
+            .into_json_tuple();
+        }
+
+        if let Err(e) = remove_channel_instance(&config_path, &name, index) {
+            return ApiErrorResponse::internal(format!("Failed to remove instance: {e}"))
+                .into_json_tuple();
+        }
+    }
+
+    if let Err(e) = crate::channel_bridge::reload_channels_from_disk(&state).await {
+        tracing::warn!(error = %e, "Channel hot-reload failed after instance delete");
+    }
+
+    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
+}
+
 #[utoipa::path(
     post,
     path = "/api/channels/{name}/test",
@@ -2267,5 +3218,133 @@ mod test_channel_status_tests {
             StatusCode::OK,
             "downstream send failure must NOT be reported as 200"
         );
+    }
+}
+
+#[cfg(test)]
+mod instance_helper_tests {
+    //! Unit coverage for the per-instance write helpers added in #4865:
+    //! `resolve_secret_env_overrides` and `instance_signature`. Both
+    //! eliminate silent-data-loss footguns the original PR shipped with
+    //! and have no business reaching production untested.
+    use super::*;
+
+    fn telegram_meta() -> &'static ChannelMeta {
+        find_channel_meta("telegram").expect("telegram is in the registry")
+    }
+
+    fn inst_with_env(env_name: &str) -> serde_json::Value {
+        serde_json::json!({ "bot_token_env": env_name })
+    }
+
+    /// First-instance create on an empty channel returns the bare default
+    /// env-var name (no suffix), matching the legacy single-instance flow.
+    #[test]
+    fn resolve_overrides_picks_default_for_first_instance() {
+        let meta = telegram_meta();
+        let overrides = resolve_secret_env_overrides(meta, &[], 0);
+        assert_eq!(
+            overrides.get("bot_token_env").map(|s| s.as_str()),
+            Some("TELEGRAM_BOT_TOKEN"),
+            "first instance must use the bare default env-var name: {overrides:?}"
+        );
+    }
+
+    /// After deleting the middle of three instances, the survivors point at
+    /// `_BOT_TOKEN` and `_BOT_TOKEN_3`. Adding a new instance must NOT pick
+    /// `_BOT_TOKEN_3` (which would silently overwrite the surviving instance
+    /// at idx 1) — it must pick `_BOT_TOKEN_2`, the lowest unused suffix.
+    #[test]
+    fn resolve_overrides_picks_lowest_unused_suffix_after_middle_delete() {
+        let meta = telegram_meta();
+        let existing = vec![
+            inst_with_env("TELEGRAM_BOT_TOKEN"),
+            inst_with_env("TELEGRAM_BOT_TOKEN_3"),
+        ];
+        let overrides = resolve_secret_env_overrides(meta, &existing, existing.len());
+        assert_eq!(
+            overrides.get("bot_token_env").map(|s| s.as_str()),
+            Some("TELEGRAM_BOT_TOKEN_2"),
+            "must reuse the freed `_2` slot, not append `_3` and clobber the survivor: {overrides:?}"
+        );
+    }
+
+    /// Update on an existing instance preserves the env-var name that
+    /// instance is already pointing at — no fresh suffix allocated, no
+    /// drift onto a sibling's env var. This is what makes "rotate the
+    /// bot token in place" actually rotate in place.
+    #[test]
+    fn resolve_overrides_preserves_existing_env_name_on_update() {
+        let meta = telegram_meta();
+        let existing = vec![
+            inst_with_env("TELEGRAM_BOT_TOKEN"),
+            inst_with_env("MY_CUSTOM_TG_TOKEN"),
+        ];
+        let overrides = resolve_secret_env_overrides(meta, &existing, 1);
+        assert_eq!(
+            overrides.get("bot_token_env").map(|s| s.as_str()),
+            Some("MY_CUSTOM_TG_TOKEN"),
+            "update path must preserve the instance's existing env-var name: {overrides:?}"
+        );
+    }
+
+    /// Sibling-set excludes the target index. An update should not skip
+    /// `_BOT_TOKEN_2` just because the row being updated currently points
+    /// at it (we'd never reach the suffix branch for a non-empty existing
+    /// ref anyway, but a future caller passing target_index for an empty
+    /// row should still be allowed to pick its own slot).
+    #[test]
+    fn resolve_overrides_excludes_target_index_from_sibling_set() {
+        let meta = telegram_meta();
+        let existing = vec![
+            inst_with_env("TELEGRAM_BOT_TOKEN"),
+            inst_with_env(""), // empty — falls through to suffix search
+            inst_with_env("TELEGRAM_BOT_TOKEN_3"),
+        ];
+        let overrides = resolve_secret_env_overrides(meta, &existing, 1);
+        // Slot 1 is empty, so we go to suffix search. Used by siblings: KEY,
+        // KEY_3. Lowest unused: KEY_2.
+        assert_eq!(
+            overrides.get("bot_token_env").map(|s| s.as_str()),
+            Some("TELEGRAM_BOT_TOKEN_2")
+        );
+    }
+
+    /// Signature is stable across object-key insertion order, so two
+    /// processes seeing identical content always emit the same hex string.
+    #[test]
+    fn instance_signature_stable_across_key_order() {
+        let a = serde_json::json!({ "x": 1, "y": "two", "z": [3, 4] });
+        let b = serde_json::json!({ "z": [3, 4], "y": "two", "x": 1 });
+        assert_eq!(
+            instance_signature(&a),
+            instance_signature(&b),
+            "signature must be canonical across key order"
+        );
+    }
+
+    /// Any content change flips the signature so the CAS check fires.
+    #[test]
+    fn instance_signature_detects_mutation() {
+        let a = serde_json::json!({ "bot_token_env": "TG_TOKEN", "default_agent": "alice" });
+        let b = serde_json::json!({ "bot_token_env": "TG_TOKEN", "default_agent": "bob" });
+        assert_ne!(
+            instance_signature(&a),
+            instance_signature(&b),
+            "signature must change when any field changes"
+        );
+    }
+
+    /// Output is hex (so the dashboard can put it in a JSON string and
+    /// query string without escaping concerns).
+    #[test]
+    fn instance_signature_is_lowercase_hex() {
+        let sig = instance_signature(&serde_json::json!({ "x": 1 }));
+        assert!(
+            sig.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+            "signature must be lowercase hex: {sig}"
+        );
+        assert_eq!(sig.len(), 64, "sha-256 hex length: {sig}");
     }
 }

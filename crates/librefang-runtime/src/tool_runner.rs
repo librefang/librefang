@@ -1141,8 +1141,10 @@ pub async fn execute_tool_raw(
         // Goal tracking tool
         "goal_update" => tool_goal_update(input, *kernel),
 
-        // Workflow execution tool
+        // Workflow tools
         "workflow_run" => tool_workflow_run(input, *kernel).await,
+        "workflow_list" => tool_workflow_list(*kernel).await,
+        "workflow_status" => tool_workflow_status(input, *kernel).await,
 
         // Browser automation tools
         "browser_navigate" => {
@@ -2584,7 +2586,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["goal_id"]
             }),
         },
-        // --- Workflow execution tool ---
+        // --- Workflow tools ---
         ToolDefinition {
             name: "workflow_run".to_string(),
             description: "Run a registered workflow pipeline end-to-end. Workflows are multi-step agent pipelines (e.g., bug-triage, code-review, test-generation). Accepts a workflow UUID or name.".to_string(),
@@ -2595,6 +2597,26 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "input": { "type": "object", "description": "Optional input parameters to pass to the workflow's first step (JSON object)" }
                 },
                 "required": ["workflow_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "workflow_list".to_string(),
+            description: "List all registered workflow definitions. Returns an array of {id, name, description, step_count} objects sorted by name. Use this to discover available workflows before calling workflow_run.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        ToolDefinition {
+            name: "workflow_status".to_string(),
+            description: "Get the current status of a workflow run. Returns run state (pending/running/paused/completed/failed), timing, output, error, and step details. Use the run_id returned by workflow_run.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "run_id": { "type": "string", "description": "The workflow run UUID returned by workflow_run" }
+                },
+                "required": ["run_id"]
             }),
         },
         // --- System time tool ---
@@ -3406,44 +3428,48 @@ async fn tool_shell_exec(
     // session interrupt fires while the command is running.  Using `output()`
     // instead would block until the process *completes*, meaning cancel() would
     // never be observed mid-execution — the whole point of this feature.
-    let mut child = match cmd.spawn() {
+    let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return Err(format!("Failed to execute command: {e}")),
     };
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
-    // Poll for completion, interrupt, or timeout.  We use a short sleep so we
-    // don't burn CPU in a tight loop; 50 ms is imperceptible to users but still
-    // gives responsive cancellation.
+    // Drive `wait_with_output()` directly: it owns the stdout/stderr pipes and
+    // drains them concurrently with reaping the child. The previous
+    // `try_wait`-with-50 ms-sleep poll loop did NOT drain pipes — so any child
+    // that wrote more than the OS pipe buffer (often 8–16 KB on container
+    // kernels) would deadlock on `write()`, never reach `try_wait → Some`, and
+    // the loop would burn the full timeout. Confirmed reproducer:
+    // `yes hello | head -c 30000` deadlocks at the 8 KB pipe boundary on this
+    // box.
+    //
+    // Cancel-cascade preserved by select-ing the wait future against a 100 ms
+    // periodic interrupt poll. If interrupt fires (or the deadline lapses),
+    // dropping the wait future cancels the underlying child handle —
+    // `kill_on_drop(true)` set above ensures the OS process is reaped.
+    let interrupt_clone = interrupt.clone();
+    let mut interrupt_tick = tokio::time::interval(std::time::Duration::from_millis(100));
+    interrupt_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let wait_fut = child.wait_with_output();
+    tokio::pin!(wait_fut);
+
     let output = loop {
-        // Has the process already finished?
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                // Process exited; collect its output.
-                match child.wait_with_output().await {
-                    Ok(o) => break Ok(o),
-                    Err(e) => break Err(format!("Failed to collect output: {e}")),
+        tokio::select! {
+            biased;
+            // Process exited (with pipes drained — that's the bug fix). Take the result.
+            res = &mut wait_fut => break res.map_err(|e| format!("Failed to collect output: {e}")),
+            // Periodic interrupt + deadline check. We drop wait_fut on either,
+            // which kills the child via kill_on_drop.
+            _ = interrupt_tick.tick() => {
+                if interrupt_clone.as_ref().is_some_and(|i| i.is_cancelled()) {
+                    return Err("[interrupted]".to_string());
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(format!("Command timed out after {timeout_secs}s"));
                 }
             }
-            Ok(None) => {} // still running
-            Err(e) => break Err(format!("Failed to wait on child: {e}")),
         }
-
-        // Did the session get cancelled while the command was running?
-        if interrupt.as_ref().is_some_and(|i| i.is_cancelled()) {
-            // Best-effort kill; ignore errors (process may have already exited).
-            let _ = child.kill().await;
-            return Err("[interrupted]".to_string());
-        }
-
-        // Timed out?
-        if tokio::time::Instant::now() >= deadline {
-            let _ = child.kill().await;
-            return Err(format!("Command timed out after {timeout_secs}s"));
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
 
     match output {
@@ -4237,6 +4263,68 @@ async fn tool_workflow_run(
         "output": output,
     })
     .to_string())
+}
+
+// ---------------------------------------------------------------------------
+// workflow_list — enumerate registered workflow definitions
+// ---------------------------------------------------------------------------
+
+async fn tool_workflow_list(kernel: Option<&Arc<dyn KernelHandle>>) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let mut summaries = kh.list_workflows().await;
+    // Sort by name for deterministic LLM prompt output (#3298).
+    summaries.sort_by(|a, b| a.name.cmp(&b.name));
+    let json_array: Vec<serde_json::Value> = summaries
+        .into_iter()
+        .map(|w| {
+            serde_json::json!({
+                "id": w.id,
+                "name": w.name,
+                "description": w.description,
+                "step_count": w.step_count,
+            })
+        })
+        .collect();
+    serde_json::to_string(&json_array)
+        .map_err(|e| format!("Failed to serialize workflow list: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// workflow_status — get the status of a workflow run
+// ---------------------------------------------------------------------------
+
+async fn tool_workflow_status(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let run_id = input["run_id"]
+        .as_str()
+        .ok_or("Missing 'run_id' parameter")?;
+
+    // Validate UUID format before calling kernel — returns a clear error
+    // rather than silently returning not-found for a malformed id.
+    uuid::Uuid::parse_str(run_id)
+        .map_err(|_| format!("Invalid run_id — must be a UUID: {run_id}"))?;
+
+    let kh = require_kernel(kernel)?;
+    let summary = kh
+        .get_workflow_run(run_id)
+        .await
+        .ok_or_else(|| format!("workflow run not found: {run_id}"))?;
+
+    serde_json::to_string(&serde_json::json!({
+        "run_id": summary.run_id,
+        "workflow_id": summary.workflow_id,
+        "workflow_name": summary.workflow_name,
+        "state": summary.state,
+        "started_at": summary.started_at,
+        "completed_at": summary.completed_at,
+        "output": summary.output,
+        "error": summary.error,
+        "step_count": summary.step_count,
+        "last_step_name": summary.last_step_name,
+    }))
+    .map_err(|e| format!("Failed to serialize workflow status: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -7443,6 +7531,7 @@ mod tests {
     impl WorkflowRunner for ApprovalKernel {}
     impl GoalControl for ApprovalKernel {}
     impl ToolPolicy for ApprovalKernel {}
+    impl librefang_kernel_handle::CatalogQuery for ApprovalKernel {}
     impl ApiAuth for ApprovalKernel {
         fn auth_snapshot(&self) -> ApiAuthSnapshot {
             ApiAuthSnapshot::default()
@@ -7671,6 +7760,7 @@ mod tests {
     impl WorkflowRunner for ForceHumanCapturingKernel {}
     impl GoalControl for ForceHumanCapturingKernel {}
     impl ToolPolicy for ForceHumanCapturingKernel {}
+    impl librefang_kernel_handle::CatalogQuery for ForceHumanCapturingKernel {}
     impl ApiAuth for ForceHumanCapturingKernel {
         fn auth_snapshot(&self) -> ApiAuthSnapshot {
             ApiAuthSnapshot::default()
@@ -8261,6 +8351,7 @@ mod tests {
     impl PromptStore for NamedWsKernel {}
     impl WorkflowRunner for NamedWsKernel {}
     impl GoalControl for NamedWsKernel {}
+    impl librefang_kernel_handle::CatalogQuery for NamedWsKernel {}
     impl ApiAuth for NamedWsKernel {
         fn auth_snapshot(&self) -> ApiAuthSnapshot {
             ApiAuthSnapshot::default()
@@ -9314,6 +9405,87 @@ mod tests {
             librefang_types::tool::ToolExecutionStatus::WaitingApproval
         );
         assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
+    }
+
+    /// Regression: shell_exec must NOT deadlock when a child writes more
+    /// stdout than the OS pipe buffer can hold. Container kernels often have
+    /// 8 KB pipe buffers; the previous implementation polled `try_wait()`
+    /// without draining stdout/stderr, so any child that exceeded the buffer
+    /// blocked on `write()` forever and only timed out at `timeout_secs`.
+    /// This test produces ~30 KB of stdout — well past 8 KB but well under
+    /// the 100 KB result cap — and asserts that it returns quickly with all
+    /// bytes preserved. Without the fix this test hangs the full
+    /// `timeout_secs` (set short here so a regression fails CI fast).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_shell_exec_drains_pipe_above_buffer_size() {
+        let approval_requests = Arc::new(AtomicUsize::new(0));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::clone(&approval_requests),
+            user_gate_override: None,
+        });
+        let policy = librefang_types::config::ExecPolicy {
+            mode: librefang_types::config::ExecSecurityMode::Full,
+            timeout_secs: 5, // Short timeout — regression hangs at this value.
+            ..Default::default()
+        };
+        let workspace = tempfile::tempdir().expect("tempdir");
+
+        let started = std::time::Instant::now();
+        let result = execute_tool(
+            "test-id",
+            "shell_exec",
+            // ~30 KB of stdout — 4× the typical 8 KB container pipe buffer.
+            &serde_json::json!({"command": "yes hello | head -c 30000"}),
+            Some(&kernel),
+            None,
+            Some("agent-1"),
+            None,
+            None,
+            None,
+            None, // allowed_skills
+            None,
+            None,
+            Some(workspace.path()),
+            None, // media_engine
+            None, // media_drivers
+            Some(&policy),
+            None,
+            None,
+            None,
+            None,
+            None, // sender_id
+            None, // channel
+            None, // checkpoint_manager
+            None, // interrupt
+            None, // session_id
+            None, // dangerous_command_checker
+            None, // available_tools
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            !result.is_error,
+            "shell_exec must not error on >pipe-buffer output, got: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("timed out"),
+            "shell_exec must not time out on drainable output, got: {}",
+            result.content
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "shell_exec finished in {elapsed:?}; expected sub-second on drainable output. Pipe drain regression?"
+        );
+        // 30000 'hello' chars (5 bytes + newline = 6 each), so output count
+        // is in the same order — assert > buffer size, < truncation cap.
+        let len = result.content.len();
+        assert!(
+            len > 8_000 && len < 100_000,
+            "expected output between 8 KB and 100 KB, got {len} bytes"
+        );
     }
 
     // ---- RBAC M3 — per-user tool policy gate (#3054) ----
@@ -10961,6 +11133,7 @@ mod tests {
     impl WorkflowRunner for SpawnCheckKernel {}
     impl GoalControl for SpawnCheckKernel {}
     impl ToolPolicy for SpawnCheckKernel {}
+    impl librefang_kernel_handle::CatalogQuery for SpawnCheckKernel {}
     impl ApiAuth for SpawnCheckKernel {
         fn auth_snapshot(&self) -> ApiAuthSnapshot {
             ApiAuthSnapshot::default()

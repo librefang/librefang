@@ -69,7 +69,7 @@ impl AgentRouter {
         self.default_agent = Some(agent_id);
     }
 
-    /// Set a per-channel-type default agent (e.g., "Telegram" -> agent_id).
+    /// Set a per-channel-type default agent (e.g., "telegram" -> agent_id).
     pub fn set_channel_default(&self, channel_key: String, agent_id: AgentId) {
         self.channel_defaults.insert(channel_key, agent_id);
     }
@@ -156,7 +156,7 @@ impl AgentRouter {
         platform_user_id: &str,
         user_key: Option<&str>,
     ) -> Option<AgentId> {
-        let channel_key = format!("{channel_type:?}");
+        let channel_key = channel_type_to_str(channel_type).to_string();
 
         // 0. Check bindings (most specific first)
         let ctx = BindingContext {
@@ -211,7 +211,7 @@ impl AgentRouter {
             return Some(agent_id);
         }
         // Fall back to standard resolution
-        let channel_key = format!("{channel_type:?}");
+        let channel_key = channel_type_to_str(channel_type).to_string();
         if let Some(agent) = self
             .direct_routes
             .get(&(channel_key.clone(), platform_user_id.to_string()))
@@ -227,7 +227,7 @@ impl AgentRouter {
             return Some(*agent);
         }
         // Account-specific channel default takes priority over the generic channel default.
-        // Keys are stored as "Telegram:account_id" when account_id is known.
+        // Keys are stored as "telegram:account_id" when account_id is known.
         if let Some(account_id) = ctx.account_id.as_deref() {
             let account_key = format!("{}:{}", channel_key, account_id);
             if let Some(agent) = self.channel_defaults.get(&account_key) {
@@ -414,7 +414,7 @@ mod tests {
 
         router.set_default(default_agent);
         router.set_user_default("alice".to_string(), user_agent);
-        router.set_direct_route("Telegram".to_string(), "tg_123".to_string(), direct_agent);
+        router.set_direct_route("telegram".to_string(), "tg_123".to_string(), direct_agent);
 
         // Direct route wins
         let resolved = router.resolve(&ChannelType::Telegram, "tg_123", Some("alice"));
@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn test_channel_default_name_and_id_can_be_updated_independently() {
         let router = AgentRouter::new();
-        let channel = "Telegram".to_string();
+        let channel = "telegram".to_string();
         let old_id = AgentId(Uuid::new_v4());
         let new_id = AgentId(Uuid::new_v4());
 
@@ -618,8 +618,8 @@ mod tests {
         let discord_default = AgentId::new();
 
         router.set_default(system_default);
-        router.set_channel_default("Telegram".to_string(), telegram_default);
-        router.set_channel_default("Discord".to_string(), discord_default);
+        router.set_channel_default("telegram".to_string(), telegram_default);
+        router.set_channel_default("discord".to_string(), discord_default);
 
         // Telegram should use Telegram-specific default
         let resolved = router.resolve(&ChannelType::Telegram, "user1", None);
@@ -644,12 +644,12 @@ mod tests {
 
         // Register two Telegram bots, each with their own account-qualified key.
         router.set_channel_default_with_name(
-            "Telegram:samapoedu-bot".to_string(),
+            "telegram:samapoedu-bot".to_string(),
             samapoedu_agent,
             "nika".to_string(),
         );
         router.set_channel_default_with_name(
-            "Telegram:admin-bot".to_string(),
+            "telegram:admin-bot".to_string(),
             admin_agent,
             "nick-assistant".to_string(),
         );
@@ -682,6 +682,16 @@ mod tests {
             Some(samapoedu_agent),
             "samapoedu-bot should route to nika"
         );
+    }
+
+    #[test]
+    fn channel_default_resolves_with_lowercase_key() {
+        let router = AgentRouter::new();
+        let telegram_default = AgentId::new();
+        router.set_channel_default("telegram".to_string(), telegram_default);
+
+        let resolved = router.resolve(&ChannelType::Telegram, "user1", None);
+        assert_eq!(resolved, Some(telegram_default));
     }
 
     #[test]

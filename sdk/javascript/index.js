@@ -559,6 +559,22 @@ class ChannelsResource {
     return this._c._request("DELETE", `/api/channels/${name}/configure`);
   }
 
+  async listChannelInstances(name) {
+    return this._c._request("GET", `/api/channels/${name}/instances`);
+  }
+
+  async createChannelInstance(name, data) {
+    return this._c._request("POST", `/api/channels/${name}/instances`, data, undefined);
+  }
+
+  async updateChannelInstanceHandler(name, index, data) {
+    return this._c._request("PUT", `/api/channels/${name}/instances/${index}`, data, undefined);
+  }
+
+  async deleteChannelInstance(name, index, query) {
+    return this._c._request("DELETE", `/api/channels/${name}/instances/${index}`, undefined, query);
+  }
+
   async testChannel(name, data) {
     return this._c._request("POST", `/api/channels/${name}/test`, data, undefined);
   }
@@ -791,6 +807,10 @@ class ModelsResource {
 
   async setDefaultProvider(name, data) {
     return this._c._request("POST", `/api/providers/${name}/default`, data, undefined);
+  }
+
+  async enableProvider(name) {
+    return this._c._request("POST", `/api/providers/${name}/enable`);
   }
 
   async setProviderKey(name, data) {

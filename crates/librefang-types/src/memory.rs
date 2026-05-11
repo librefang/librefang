@@ -239,6 +239,94 @@ impl Default for ProactiveMemoryConfig {
     }
 }
 
+/// Per-agent override for the kernel-global [`ProactiveMemoryConfig`] (#4870).
+///
+/// `[proactive_memory]` in `config.toml` sets a single, kernel-wide policy.
+/// On hosts that mix one chatty user-facing agent with cron-driven
+/// sub-agents (data collectors, ETL, brief composers), enabling
+/// `auto_memorize` globally costs an extraction LLM call per sub-agent
+/// turn for content that has no recall value. This struct lets an
+/// agent's manifest disable proactive memory (in whole, or just one of
+/// `auto_memorize` / `auto_retrieve`) without forcing the global policy
+/// to follow.
+///
+/// Each field is `Option<bool>`: `None` inherits the global setting,
+/// `Some(b)` overrides it. Resolution lives in
+/// [`ProactiveMemoryOverrides::resolve_auto_retrieve`] and
+/// [`ProactiveMemoryOverrides::resolve_auto_memorize`] so call sites in
+/// the runtime can gate without reproducing the merge logic.
+///
+/// Boot caveat: the global [`ProactiveMemoryConfig::enabled = false`]
+/// short-circuits store construction in
+/// `librefang_kernel::kernel::boot`; per-agent `enabled = Some(true)`
+/// cannot resurrect a non-existent store. For the same reason, per-field
+/// overrides like `auto_memorize = Some(true)` or `auto_retrieve = Some(true)`
+/// against a globally-off config are dead letters — the gate they would
+/// flip never receives a store to act on. The intended (and currently
+/// supported) shape is **per-agent opt-out** when the global is on.
+///
+/// Example in `agent.toml`:
+/// ```toml
+/// # full opt-out for this agent
+/// [proactive_memory]
+/// enabled = false
+///
+/// # or: keep retrieve, skip memorize (tool-output extraction is noise)
+/// [proactive_memory]
+/// auto_memorize = false
+/// ```
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ProactiveMemoryOverrides {
+    /// Override the master switch. `Some(false)` disables both retrieve
+    /// and memorize for this agent regardless of the global config.
+    /// `Some(true)` is documented but not load-bearing — see the boot
+    /// caveat above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Override `auto_memorize`. `Some(false)` skips the after-turn
+    /// extraction call for this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_memorize: Option<bool>,
+    /// Override `auto_retrieve`. `Some(false)` skips the before-turn
+    /// retrieval (no memory items injected into the prompt).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_retrieve: Option<bool>,
+}
+
+impl ProactiveMemoryOverrides {
+    /// Resolve the effective `auto_retrieve` for this agent given the
+    /// kernel-global `[proactive_memory]` defaults.
+    pub fn resolve_auto_retrieve(&self, global: &ProactiveMemoryConfig) -> bool {
+        if matches!(self.enabled, Some(false)) {
+            return false;
+        }
+        if let Some(v) = self.auto_retrieve {
+            return v;
+        }
+        global.enabled && global.auto_retrieve
+    }
+
+    /// Resolve the effective `auto_memorize` for this agent given the
+    /// kernel-global `[proactive_memory]` defaults.
+    pub fn resolve_auto_memorize(&self, global: &ProactiveMemoryConfig) -> bool {
+        if matches!(self.enabled, Some(false)) {
+            return false;
+        }
+        if let Some(v) = self.auto_memorize {
+            return v;
+        }
+        global.enabled && global.auto_memorize
+    }
+
+    /// True when *no* field is set — equivalent to `Default::default()`.
+    /// Used by call sites that want to skip the resolve dance entirely
+    /// for the common "no override" case.
+    pub fn is_empty(&self) -> bool {
+        self.enabled.is_none() && self.auto_memorize.is_none() && self.auto_retrieve.is_none()
+    }
+}
+
 /// A relationship triple extracted from conversation (subject, relation, object).
 ///
 /// Example: ("Alice", "works_at", "Acme Corp")
@@ -1345,6 +1433,86 @@ mod tests {
         assert!(config.auto_memorize);
         assert!(config.auto_retrieve);
         assert_eq!(config.max_retrieve, 10);
+    }
+
+    #[test]
+    fn test_proactive_memory_overrides_default_inherits_global() {
+        // No fields set → resolution returns the global truth verbatim.
+        let global = ProactiveMemoryConfig::default();
+        let overrides = ProactiveMemoryOverrides::default();
+        assert!(overrides.is_empty());
+        assert!(overrides.resolve_auto_retrieve(&global));
+        assert!(overrides.resolve_auto_memorize(&global));
+
+        let disabled_global = ProactiveMemoryConfig {
+            auto_memorize: false,
+            ..ProactiveMemoryConfig::default()
+        };
+        assert!(!overrides.resolve_auto_memorize(&disabled_global));
+    }
+
+    #[test]
+    fn test_proactive_memory_overrides_per_field_disable() {
+        // The issue's main use case: cron sub-agents disable memorize
+        // while the global remains on for the user-facing agent.
+        let global = ProactiveMemoryConfig::default();
+        let overrides = ProactiveMemoryOverrides {
+            auto_memorize: Some(false),
+            ..Default::default()
+        };
+        assert!(!overrides.resolve_auto_memorize(&global));
+        assert!(
+            overrides.resolve_auto_retrieve(&global),
+            "retrieve untouched when only auto_memorize override is set"
+        );
+    }
+
+    #[test]
+    fn test_proactive_memory_overrides_master_switch_disables_both() {
+        let global = ProactiveMemoryConfig::default();
+        let overrides = ProactiveMemoryOverrides {
+            enabled: Some(false),
+            auto_memorize: Some(true), // Set but should be ignored.
+            auto_retrieve: Some(true),
+        };
+        assert!(
+            !overrides.resolve_auto_memorize(&global),
+            "enabled=false wins over per-field auto_memorize=true"
+        );
+        assert!(
+            !overrides.resolve_auto_retrieve(&global),
+            "enabled=false wins over per-field auto_retrieve=true"
+        );
+    }
+
+    #[test]
+    fn test_proactive_memory_overrides_global_disabled_inherits_off() {
+        // Global says off → no override fields set → per-agent stays off.
+        let global = ProactiveMemoryConfig {
+            enabled: false,
+            ..ProactiveMemoryConfig::default()
+        };
+        let overrides = ProactiveMemoryOverrides::default();
+        assert!(!overrides.resolve_auto_memorize(&global));
+        assert!(!overrides.resolve_auto_retrieve(&global));
+    }
+
+    #[test]
+    fn test_proactive_memory_overrides_serde_roundtrip() {
+        let overrides = ProactiveMemoryOverrides {
+            enabled: None,
+            auto_memorize: Some(false),
+            auto_retrieve: None,
+        };
+        let toml = toml::to_string(&overrides).expect("serialize");
+        // Only the set field is emitted (skip_serializing_if on None).
+        assert!(toml.contains("auto_memorize"));
+        assert!(!toml.contains("auto_retrieve"));
+        assert!(!toml.contains("enabled"));
+        let parsed: ProactiveMemoryOverrides = toml::from_str(&toml).expect("deserialize");
+        assert_eq!(parsed.auto_memorize, Some(false));
+        assert_eq!(parsed.auto_retrieve, None);
+        assert_eq!(parsed.enabled, None);
     }
 
     #[test]

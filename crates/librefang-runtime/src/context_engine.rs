@@ -642,9 +642,17 @@ impl ContextEngine for DefaultContextEngine {
         let mut compaction_config = self.compaction_config.clone();
         compaction_config.context_window_tokens = context_window_tokens;
 
-        compactor::compact_session(driver, model, &session, &compaction_config)
-            .await
-            .map_err(LibreFangError::Internal)
+        compactor::compact_session(
+            driver,
+            model,
+            &session,
+            &compaction_config,
+            // The trait-level default ContextEngine doesn't carry a
+            // catalog reference; rely on the driver's substring fallback.
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await
+        .map_err(LibreFangError::Internal)
     }
 
     async fn after_turn(&self, _agent_id: AgentId, _messages: &[Message]) -> LibreFangResult<()> {

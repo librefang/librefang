@@ -1291,6 +1291,9 @@ impl LibreFangKernel {
             tracing::info!(drained, "Paused in-flight workflow runs for shutdown");
         }
 
+        // Flush the WAL so all workflow (and other) writes are durable.
+        self.memory.substrate.wal_checkpoint();
+
         // Update agent states to Suspended in persistent storage (not delete).
         // Track failures so we can emit a single critical summary if any
         // agent could not be persisted — without this, a partial-shutdown

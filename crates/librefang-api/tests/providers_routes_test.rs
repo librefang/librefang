@@ -8,7 +8,6 @@
 //!
 //! Out of scope (not exercised here, by design):
 //!   - `POST /api/providers/{name}/key`             — mutates global `std::env`
-//!   - `DELETE /api/providers/{name}/key`           — mutates global `std::env`
 //!   - `POST /api/providers/github-copilot/oauth/*` — outbound device-flow HTTP
 //!   - `GET  /api/providers/ollama/detect`          — outbound HTTP probe
 //!   - `POST /api/catalog/update`                   — outbound network sync
@@ -18,6 +17,13 @@
 //! These would either flake on CI (real network) or contaminate other test
 //! binaries running in parallel via `std::env::set_var`. Per CLAUDE.md
 //! "no global env mutation, no fs writes outside tempfile."
+//!
+//! `DELETE /api/providers/{name}/key` IS exercised — only for providers
+//! whose env var name (`CLAUDE_CODE_API_KEY`, `OLLAMA_API_KEY`) is not
+//! referenced by any other test in this workspace, so the
+//! `std::env::remove_var` call inside the handler is a no-op on shared
+//! state. The assertion is on the catalog's `auth_status` flip, which is
+//! the regression surface for #4803.
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -701,4 +707,408 @@ async fn copilot_oauth_poll_unknown_id_returns_404() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["status"].as_str().unwrap(), "not_found");
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/providers/{name}/key — regression coverage for #4803.
+//
+// Pre-fix, pressing "remove key" on a CLI or local-HTTP provider suppressed
+// it in `suppressed_providers.json` but `detect_auth` ignored suppression
+// for those branches and re-promoted the provider to Configured /
+// NotRequired on the same call, so the provider never left the configured
+// grid. These tests boot a seeded catalog, hit the route, and assert the
+// catalog flips `auth_status` to Missing — the state the dashboard filter
+// (`isProviderAvailable`) treats as unconfigured.
+// ---------------------------------------------------------------------------
+
+use librefang_types::model_catalog::{
+    AuthStatus, Modality, ModelCatalogEntry, ModelTier, ProviderInfo, ReasoningEchoPolicy,
+};
+
+/// Boot a harness seeded with a single named provider in the given
+/// initial `auth_status`. Lets each test stage the "configured" state
+/// the pre-fix bug failed to leave.
+///
+/// Intentionally single-provider. Multi-provider scenarios (e.g.
+/// "suppressing A does not affect B") should build a custom seed via
+/// `MockKernelBuilder::with_catalog_seed` rather than extending this
+/// helper — keeping it 1-to-1 with the test intent makes the asserts
+/// easy to read.
+fn boot_with_provider(provider: ProviderInfo) -> Harness {
+    let id = provider.id.clone();
+    let model = ModelCatalogEntry {
+        id: format!("{id}-test-model"),
+        display_name: format!("{id} test model"),
+        provider: id,
+        tier: ModelTier::Custom,
+        modality: Modality::default(),
+        context_window: 8_192,
+        max_output_tokens: 2_048,
+        input_cost_per_m: 0.0,
+        output_cost_per_m: 0.0,
+        image_input_cost_per_m: None,
+        image_output_cost_per_m: None,
+        supports_tools: false,
+        supports_vision: false,
+        supports_streaming: false,
+        supports_thinking: false,
+        aliases: Vec::new(),
+        reasoning_echo_policy: ReasoningEchoPolicy::default(),
+    };
+    let test = TestAppState::with_builder(
+        MockKernelBuilder::new()
+            .with_config(|cfg| {
+                cfg.default_model = librefang_types::config::DefaultModelConfig {
+                    provider: "openai".to_string(),
+                    model: "gpt-4o-mini".to_string(),
+                    api_key_env: "OPENAI_API_KEY".to_string(),
+                    base_url: None,
+                    message_timeout_secs: 300,
+                    extra_params: std::collections::HashMap::new(),
+                    cli_profile_dirs: Vec::new(),
+                };
+            })
+            .with_catalog_seed((vec![provider], vec![model])),
+    );
+
+    let state = test.state.clone();
+    let app = Router::new()
+        .nest("/api", routes::providers::router())
+        .with_state(state.clone());
+
+    Harness {
+        app,
+        _state: state,
+        _test: test,
+    }
+}
+
+fn find_provider<'a>(body: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+    body["providers"]
+        .as_array()
+        .expect("providers array")
+        .iter()
+        .find(|p| p["id"].as_str() == Some(id))
+        .unwrap_or_else(|| panic!("provider '{id}' missing from /api/providers"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_provider_key_flips_cli_provider_to_missing() {
+    // claude-code is a CLI provider (`is_cli_provider("claude-code") = true`,
+    // `key_required = false`, `api_key_env = ""`). Pre-fix `detect_auth`
+    // re-set its status from the cli_provider_available probe, leaving the
+    // provider in the configured grid no matter what the dashboard did.
+    let h = boot_with_provider(ProviderInfo {
+        id: "claude-code".to_string(),
+        display_name: "Claude Code".to_string(),
+        api_key_env: String::new(),
+        base_url: String::new(),
+        key_required: false,
+        auth_status: AuthStatus::Configured,
+        model_count: 1,
+        ..ProviderInfo::default()
+    });
+
+    let (status, _) =
+        json_request(&h, Method::DELETE, "/api/providers/claude-code/key", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (_, body) = json_request(&h, Method::GET, "/api/providers", None).await;
+    let claude = find_provider(&body, "claude-code");
+    assert_eq!(
+        claude["auth_status"].as_str(),
+        Some("missing"),
+        "suppressed CLI provider must report `missing` so the dashboard moves it out of the configured grid; got {claude}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_provider_key_flips_local_provider_to_missing() {
+    // ollama is a local HTTP provider (`is_local_provider("ollama") = true`,
+    // `key_required = false`). Pre-fix `detect_auth` re-promoted it from
+    // Missing to NotRequired on the same call that suppressed it.
+    let h = boot_with_provider(ProviderInfo {
+        id: "ollama".to_string(),
+        display_name: "Ollama".to_string(),
+        api_key_env: "OLLAMA_API_KEY".to_string(),
+        base_url: "http://127.0.0.1:11434".to_string(),
+        key_required: false,
+        auth_status: AuthStatus::NotRequired,
+        model_count: 1,
+        ..ProviderInfo::default()
+    });
+
+    let (status, _) = json_request(&h, Method::DELETE, "/api/providers/ollama/key", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (_, body) = json_request(&h, Method::GET, "/api/providers", None).await;
+    let ollama = find_provider(&body, "ollama");
+    assert_eq!(
+        ollama["auth_status"].as_str(),
+        Some("missing"),
+        "suppressed local provider must report `missing`; got {ollama}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_provider_url_unsuppresses_after_delete() {
+    // The re-enable counterpart of the above: after suppressing a local
+    // provider, pointing it at a new URL must un-suppress so it appears
+    // in the configured grid again. Without `set_provider_url` clearing
+    // the suppression flag (#4803), the local provider would stay
+    // Missing forever after the user removed and re-configured it.
+    //
+    // We assert against the on-disk `suppressed_providers.json` rather
+    // than `/api/providers` because the list endpoint additionally
+    // overrides `auth_status` to "missing" when a fresh probe finds the
+    // local port closed — that branch fires here (nothing is listening
+    // in the test process), masking the un-suppression we want to
+    // verify. The file is the persistence layer that survives restarts,
+    // so it is the right surface for this regression.
+    let h = boot_with_provider(ProviderInfo {
+        id: "ollama".to_string(),
+        display_name: "Ollama".to_string(),
+        api_key_env: "OLLAMA_API_KEY".to_string(),
+        base_url: "http://127.0.0.1:11434".to_string(),
+        key_required: false,
+        auth_status: AuthStatus::NotRequired,
+        model_count: 1,
+        ..ProviderInfo::default()
+    });
+
+    let suppressed_path = h
+        ._state
+        .kernel
+        .home_dir()
+        .join("data")
+        .join("suppressed_providers.json");
+
+    // Suppress via DELETE first to set up the regression scenario.
+    let (status, _) = json_request(&h, Method::DELETE, "/api/providers/ollama/key", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let suppressed_after_delete: Vec<String> =
+        serde_json::from_str(&std::fs::read_to_string(&suppressed_path).unwrap()).unwrap();
+    assert!(
+        suppressed_after_delete.iter().any(|s| s == "ollama"),
+        "DELETE should add ollama to suppressed_providers.json; got {suppressed_after_delete:?}",
+    );
+
+    // PUT a new URL — this must un-suppress (#4803). The probe inside
+    // the handler fires against the new URL; in this test environment
+    // nothing is listening so the probe fails, but that does not block
+    // the suppression flip.
+    let (status, _) = json_request(
+        &h,
+        Method::PUT,
+        "/api/providers/ollama/url",
+        Some(serde_json::json!({ "base_url": "http://127.0.0.1:11999" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // `save_suppressed` removes the file when the set is empty.
+    let still_suppressed: Option<Vec<String>> = std::fs::read_to_string(&suppressed_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let any_suppressed_after_put = still_suppressed
+        .as_ref()
+        .map(|v| v.iter().any(|s| s == "ollama"))
+        .unwrap_or(false);
+    assert!(
+        !any_suppressed_after_put,
+        "PUT /api/providers/ollama/url must drop ollama from the suppressed list; on-disk content: {still_suppressed:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/providers/{name}/enable — explicit re-enable for suppressed
+// providers, the CLI-shape counterpart to `set_provider_url` un-suppression
+// (#4803 follow-up). CLI providers (`claude-code`, `codex-cli`, …) have no
+// key or URL to set, so they can only leave the suppressed bucket via this
+// endpoint. The tests assert on the on-disk suppression file rather than
+// `/api/providers` for the same reason `set_provider_url_unsuppresses_after_delete`
+// does: the list endpoint's local-probe override would mask the flip for
+// the ollama row, and the on-disk file is the persistence layer that
+// survives restart anyway.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn enable_provider_unsuppresses_cli_provider() {
+    // claude-code can only escape suppression via this endpoint: no key to
+    // POST, no URL to PUT. Pre-fix the user had to hand-edit
+    // suppressed_providers.json.
+    let h = boot_with_provider(ProviderInfo {
+        id: "claude-code".to_string(),
+        display_name: "Claude Code".to_string(),
+        api_key_env: String::new(),
+        base_url: String::new(),
+        key_required: false,
+        auth_status: AuthStatus::Configured,
+        model_count: 1,
+        ..ProviderInfo::default()
+    });
+
+    let suppressed_path = h
+        ._state
+        .kernel
+        .home_dir()
+        .join("data")
+        .join("suppressed_providers.json");
+
+    // Suppress first — same setup as `delete_provider_key_flips_cli_provider_to_missing`.
+    let (status, _) =
+        json_request(&h, Method::DELETE, "/api/providers/claude-code/key", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let suppressed_after_delete: Vec<String> =
+        serde_json::from_str(&std::fs::read_to_string(&suppressed_path).unwrap()).unwrap();
+    assert!(
+        suppressed_after_delete.iter().any(|s| s == "claude-code"),
+        "DELETE should add claude-code to suppressed_providers.json; got {suppressed_after_delete:?}",
+    );
+
+    // Re-enable via the new endpoint.
+    let (status, body) =
+        json_request(&h, Method::POST, "/api/providers/claude-code/enable", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"].as_str(), Some("enabled"));
+    assert_eq!(body["provider"].as_str(), Some("claude-code"));
+
+    let still_suppressed: Option<Vec<String>> = std::fs::read_to_string(&suppressed_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let any_suppressed_after_enable = still_suppressed
+        .as_ref()
+        .map(|v| v.iter().any(|s| s == "claude-code"))
+        .unwrap_or(false);
+    assert!(
+        !any_suppressed_after_enable,
+        "POST /api/providers/claude-code/enable must drop claude-code from the suppressed list; on-disk content: {still_suppressed:?}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn enable_provider_unsuppresses_local_provider() {
+    // ollama already has the `set_provider_url` un-suppress path; this
+    // covers the "user wants to re-enable without changing the URL"
+    // shortcut, which is the natural one-click re-enable from a
+    // dashboard list of suppressed providers.
+    let h = boot_with_provider(ProviderInfo {
+        id: "ollama".to_string(),
+        display_name: "Ollama".to_string(),
+        api_key_env: "OLLAMA_API_KEY".to_string(),
+        base_url: "http://127.0.0.1:11434".to_string(),
+        key_required: false,
+        auth_status: AuthStatus::NotRequired,
+        model_count: 1,
+        ..ProviderInfo::default()
+    });
+
+    let suppressed_path = h
+        ._state
+        .kernel
+        .home_dir()
+        .join("data")
+        .join("suppressed_providers.json");
+
+    let (status, _) = json_request(&h, Method::DELETE, "/api/providers/ollama/key", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _) = json_request(&h, Method::POST, "/api/providers/ollama/enable", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let still_suppressed: Option<Vec<String>> = std::fs::read_to_string(&suppressed_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let any_suppressed_after_enable = still_suppressed
+        .as_ref()
+        .map(|v| v.iter().any(|s| s == "ollama"))
+        .unwrap_or(false);
+    assert!(
+        !any_suppressed_after_enable,
+        "POST /api/providers/ollama/enable must drop ollama from the suppressed list; on-disk content: {still_suppressed:?}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn enable_provider_is_idempotent_on_already_enabled_row() {
+    // Calling enable on a provider that was never suppressed must not
+    // touch the suppressed_providers.json file (the handler skips the
+    // disk write when nothing is suppressed) and must return 200. This
+    // guards the "dashboard double-clicks Re-enable" UX from spuriously
+    // recreating the file every call.
+    let h = boot_with_provider(ProviderInfo {
+        id: "claude-code".to_string(),
+        display_name: "Claude Code".to_string(),
+        api_key_env: String::new(),
+        base_url: String::new(),
+        key_required: false,
+        auth_status: AuthStatus::Configured,
+        model_count: 1,
+        ..ProviderInfo::default()
+    });
+
+    let suppressed_path = h
+        ._state
+        .kernel
+        .home_dir()
+        .join("data")
+        .join("suppressed_providers.json");
+
+    let (status, _) =
+        json_request(&h, Method::POST, "/api/providers/claude-code/enable", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !suppressed_path.exists(),
+        "idempotent enable on a never-suppressed provider must not create suppressed_providers.json",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn list_providers_exposes_suppression_state() {
+    // Dashboard discriminates "user-suppressed CLI provider" from
+    // "missing because never configured" by reading `suppressed: bool`
+    // on each provider entry. Pre-fix this flag was not exposed and the
+    // dashboard could only guess from `auth_status: "missing"`.
+    let h = boot_with_provider(ProviderInfo {
+        id: "claude-code".to_string(),
+        display_name: "Claude Code".to_string(),
+        api_key_env: String::new(),
+        base_url: String::new(),
+        key_required: false,
+        auth_status: AuthStatus::Configured,
+        model_count: 1,
+        ..ProviderInfo::default()
+    });
+
+    let (_, body_before) = json_request(&h, Method::GET, "/api/providers", None).await;
+    let claude_before = find_provider(&body_before, "claude-code");
+    assert_eq!(
+        claude_before["suppressed"].as_bool(),
+        Some(false),
+        "pristine catalog must report `suppressed: false`; got {claude_before}",
+    );
+
+    let (status, _) =
+        json_request(&h, Method::DELETE, "/api/providers/claude-code/key", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (_, body_after) = json_request(&h, Method::GET, "/api/providers", None).await;
+    let claude_after = find_provider(&body_after, "claude-code");
+    assert_eq!(
+        claude_after["suppressed"].as_bool(),
+        Some(true),
+        "after DELETE /key, suppressed must flip to true; got {claude_after}",
+    );
+
+    let (status, _) =
+        json_request(&h, Method::POST, "/api/providers/claude-code/enable", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, body_final) = json_request(&h, Method::GET, "/api/providers", None).await;
+    let claude_final = find_provider(&body_final, "claude-code");
+    assert_eq!(
+        claude_final["suppressed"].as_bool(),
+        Some(false),
+        "after POST /enable, suppressed must flip back to false; got {claude_final}",
+    );
 }

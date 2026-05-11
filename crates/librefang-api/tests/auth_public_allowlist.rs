@@ -193,6 +193,11 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/logo.png", Expect::AlwaysPublic),
     re("/.well-known/agent.json", Expect::AlwaysPublic),
     re("/api/health", Expect::AlwaysPublic),
+    // `/api/health/detail` is the polling target for `<OfflineBanner />`,
+    // which mounts before the auth check completes. It carries the same
+    // payload class as `/api/health` (liveness + build/uptime metadata),
+    // so it lives next to its sibling in `PUBLIC_ROUTES_ALWAYS`.
+    re("/api/health/detail", Expect::AlwaysPublic),
     re("/api/version", Expect::AlwaysPublic),
     re("/api/versions", Expect::AlwaysPublic),
     re("/api/auth/callback", Expect::AlwaysPublic),
@@ -255,7 +260,6 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/api/status", Expect::DashboardRead),
     re("/api/workflows", Expect::DashboardRead),
     // Auth-required endpoints (must 401 without Bearer token)
-    re("/api/health/detail", Expect::Authed),
     // Security regression: /api/mcp/servers/{name} and /auth/status must NOT be
     // publicly reachable — the server config (including env vars) and OAuth token
     // state are sensitive. Only /auth/callback is public (via is_mcp_oauth_callback).

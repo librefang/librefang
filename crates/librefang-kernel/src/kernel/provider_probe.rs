@@ -70,10 +70,19 @@ pub async fn probe_and_update_local_provider(
                 Some(result.discovered_model_info.clone())
             };
         kernel.model_catalog_update(|catalog| {
-            catalog.set_provider_auth_status(
-                provider_id,
-                librefang_types::model_catalog::AuthStatus::NotRequired,
-            );
+            // Honour suppression — periodic probes are already filtered upstream
+            // via `local_provider_probe_targets`, but user-triggered tests
+            // (POST /api/providers/{name}/test) reach this path on suppressed
+            // providers too; silently flipping auth_status to NotRequired would
+            // un-do `delete_provider_key`. `merge_discovered_models` stays
+            // outside the gate so a Test click still refreshes the model list
+            // the user might want to inspect before re-enabling.
+            if !catalog.is_suppressed(provider_id) {
+                catalog.set_provider_auth_status(
+                    provider_id,
+                    librefang_types::model_catalog::AuthStatus::NotRequired,
+                );
+            }
             if let Some(ref info) = merged_info {
                 catalog.merge_discovered_models(provider_id, info);
             }
@@ -97,11 +106,18 @@ pub async fn probe_and_update_local_provider(
         // Using Missing would cause detect_auth() to reset the status back
         // to NotRequired on the next unrelated auth check, making offline
         // providers reappear in the model switcher.
+        //
+        // Same suppression gate as the reachable branch above — a
+        // user-triggered Test on a suppressed provider must not silently
+        // promote `Missing` to `LocalOffline`, which would re-add the
+        // provider to the dashboard's "configured but offline" bucket.
         kernel.model_catalog_update(|catalog| {
-            catalog.set_provider_auth_status(
-                provider_id,
-                librefang_types::model_catalog::AuthStatus::LocalOffline,
-            );
+            if !catalog.is_suppressed(provider_id) {
+                catalog.set_provider_auth_status(
+                    provider_id,
+                    librefang_types::model_catalog::AuthStatus::LocalOffline,
+                );
+            }
         });
     }
     result
@@ -119,17 +135,14 @@ pub(super) async fn probe_all_local_providers_once(
     kernel: &Arc<LibreFangKernel>,
     relevant_providers: &std::collections::HashSet<String>,
 ) {
+    // Pull the filter through `ModelCatalog::local_provider_probe_targets` so
+    // suppressed providers (set by `delete_provider_key`) are excluded — without
+    // that, the next tick would overwrite `Missing` with `NotRequired` /
+    // `LocalOffline` via `set_provider_auth_status` (#4803) and the provider
+    // would reappear in the configured grid.
     let local_providers: Vec<(String, String)> = {
         let catalog = kernel.llm.model_catalog.load();
-        catalog
-            .list_providers()
-            .iter()
-            .filter(|p| {
-                librefang_runtime::provider_health::is_local_provider(&p.id)
-                    && !p.base_url.is_empty()
-            })
-            .map(|p| (p.id.clone(), p.base_url.clone()))
-            .collect()
+        catalog.local_provider_probe_targets()
     };
     let tasks = local_providers.into_iter().map(|(provider_id, base_url)| {
         let kernel = Arc::clone(kernel);

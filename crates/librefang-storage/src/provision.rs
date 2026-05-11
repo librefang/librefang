@@ -13,6 +13,7 @@
 //! password (`app_pass_env`) is similarly read from the environment.
 
 use crate::error::{StorageError, StorageResult};
+#[cfg(feature = "surreal-backend")]
 use tracing::info;
 
 /// Outcome of a successful UAR namespace provisioning run.
@@ -130,6 +131,7 @@ pub async fn provision_uar_namespace(
 }
 
 /// Read a non-empty value from an environment variable.
+#[cfg(feature = "surreal-backend")]
 fn read_env_secret(env_var: &str) -> StorageResult<String> {
     let value = std::env::var(env_var).map_err(|_| StorageError::MissingCredential {
         name: env_var.to_owned(),
@@ -147,6 +149,7 @@ fn read_env_secret(env_var: &str) -> StorageResult<String> {
 /// SurrealDB wraps identifiers in backticks; a real backtick inside the name
 /// would need to be doubled. Reject names containing backticks outright since
 /// they are not valid in any common namespace/user naming policy.
+#[cfg(feature = "surreal-backend")]
 fn escape_surql_ident(s: &str) -> String {
     // Replace any backtick with nothing; callers should validate names before
     // calling this function. In practice, namespace and user names coming from
@@ -155,6 +158,7 @@ fn escape_surql_ident(s: &str) -> String {
 }
 
 /// Escape a SurrealQL single-quoted string value (used for passwords).
+#[cfg(feature = "surreal-backend")]
 fn escape_surql_string(s: &str) -> String {
     // Escape single quotes by doubling them (standard SQL convention).
     s.replace('\'', "''")

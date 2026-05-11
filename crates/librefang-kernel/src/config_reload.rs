@@ -78,6 +78,13 @@ pub enum HotAction {
     /// Per-agent caps are NOT touched — see
     /// `docs/architecture/trigger-dispatch-concurrency.md` for why.
     UpdateQueueConcurrency,
+    /// `[budget]` changed — push the new global cost / token caps into the
+    /// metering subsystem's `budget_config` swap so the next LLM call gates
+    /// against the operator's edit (#4797). Without this action, edits to
+    /// `[budget]` in `config.toml` only take effect on the next boot — the
+    /// in-memory `BudgetConfig` is constructed once from `KernelConfig.budget`
+    /// at boot time and never re-read.
+    UpdateBudget,
 }
 
 // ---------------------------------------------------------------------------
@@ -389,6 +396,15 @@ pub fn build_reload_plan_with_caps(
         plan.hot_actions.push(HotAction::UpdateQueueConcurrency);
     }
 
+    // #4797 — `[budget]` is held in `MeteringSubsystem.budget_config` (an
+    // ArcSwap snapshot built at boot from `KernelConfig.budget`), separate
+    // from `self.config`. A bare config swap leaves the metering snapshot
+    // pointed at the boot-time budget, so edits to `max_hourly_usd` etc.
+    // silently no-op until restart. Push `UpdateBudget` to RCU the snapshot.
+    if field_changed(&old.budget, &new.budget) {
+        plan.hot_actions.push(HotAction::UpdateBudget);
+    }
+
     if field_changed(&old.sanitize, &new.sanitize) {
         plan.noop_changes.push(
             "sanitize config changed (effective on next message via config swap)".to_string(),
@@ -663,6 +679,30 @@ mod tests {
         let plan = build_reload_plan(&a, &b);
         assert!(!plan.restart_required);
         assert!(plan.hot_actions.contains(&HotAction::UpdateCronConfig));
+    }
+
+    /// Regression for #4797: changes to `[budget]` must produce an
+    /// `UpdateBudget` hot action so the metering subsystem swaps in the
+    /// new caps. Without this, edits to `max_hourly_usd` etc. in
+    /// `config.toml` are written into `self.config` but the live
+    /// `MeteringSubsystem.budget_config` ArcSwap stays pointed at the
+    /// boot-time budget — the operator's edit silently no-ops until
+    /// daemon restart.
+    #[test]
+    fn test_budget_hot_reload_emits_update_action() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.budget.max_hourly_usd = 12.34;
+        let plan = build_reload_plan(&a, &b);
+        assert!(
+            !plan.restart_required,
+            "budget edits must be hot-reloadable"
+        );
+        assert!(
+            plan.hot_actions.contains(&HotAction::UpdateBudget),
+            "expected UpdateBudget in {:?}",
+            plan.hot_actions,
+        );
     }
 
     /// Regression for #3628: changes to `[queue.concurrency]` must produce

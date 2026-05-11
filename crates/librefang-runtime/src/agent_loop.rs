@@ -130,14 +130,30 @@ const MAX_CONCURRENT_LLM_CALLS: usize = 5;
 static LLM_CONCURRENCY: std::sync::LazyLock<tokio::sync::Semaphore> =
     std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_LLM_CALLS));
 
-/// Default ceiling for message history before auto-trimming. With tool
-/// calls each user turn can consume 4–6 messages, so 40 gives roughly
-/// 7–10 real conversation turns instead of the previous 3–5. Override
-/// per-agent via `AgentManifest.max_history_messages` or globally via
-/// `KernelConfig.max_history_messages`; resolved at loop entry by
-/// `resolve_max_history`. Values below `MIN_HISTORY_MESSAGES` are
-/// clamped up at runtime.
-pub const DEFAULT_MAX_HISTORY_MESSAGES: usize = 40;
+/// Default ceiling for message history before auto-trimming.
+///
+/// The earlier value of 40 assumed "tool calls consume 4–6 messages per
+/// user turn → 7–10 conversation turns", which held for chat-style
+/// agents but underestimated coordinator hands. In production logs we
+/// observed `creator:creator-hand` (polling `video_status` every 15-20s)
+/// trimming every turn at total_messages=41 with `hit_ratio=0.0` — the
+/// trim was invalidating the prompt-cache prefix on every turn because
+/// the cap was too tight for the actual workflow length. Survey of the
+/// librefang-registry hands shows `max_iterations` of 50–80 is the
+/// norm; at ~8 messages per real turn that fills the bucket in 5
+/// turns, far less than the 7–10 the comment claimed.
+///
+/// 60 gives ~7–10 real turns for those heavier workflows and leaves
+/// the prompt-cache prefix stable across normal back-and-forth.
+/// Long-workflow hands (researcher / creator / devops / predictor)
+/// still set explicit per-hand `max_history_messages` overrides in the
+/// registry to push their headroom higher.
+///
+/// Override per-agent via `AgentManifest.max_history_messages` or
+/// globally via `KernelConfig.max_history_messages`; resolved at loop
+/// entry by `resolve_max_history`. Values below `MIN_HISTORY_MESSAGES`
+/// are clamped up at runtime.
+pub const DEFAULT_MAX_HISTORY_MESSAGES: usize = 60;
 
 /// Floor for the message-history cap. Values below this are clamped up
 /// with a warning log: `safe_trim_messages` re-validates the trimmed
@@ -2840,6 +2856,7 @@ async fn generate_search_queries(
     manifest: &AgentManifest,
     session_messages: &[Message],
     user_message: &str,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Option<Vec<String>> {
     // Build a compact conversation summary from the last few messages
     let recent: Vec<&Message> = session_messages
@@ -2885,6 +2902,7 @@ async fn generate_search_queries(
         agent_id: None,
         session_id: None,
         step_id: None,
+        reasoning_echo_policy,
     };
 
     let response =
@@ -2937,6 +2955,7 @@ async fn web_search_augment(
     web_ctx: Option<&WebToolsContext>,
     driver: &dyn LlmDriver,
     session_messages: &[Message],
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Option<String> {
     if !should_augment_web_search(manifest) {
         return None;
@@ -2945,12 +2964,19 @@ async fn web_search_augment(
 
     // Try LLM-based query generation.
     // Some(vec![...]) = generated queries, Some(vec![]) = no search needed, None = generation failed
-    let queries =
-        match generate_search_queries(driver, manifest, session_messages, user_message).await {
-            Some(q) if q.is_empty() => return None, // LLM says no search needed
-            Some(q) => q,
-            None => vec![user_message.to_string()], // Generation failed, fall back to raw message
-        };
+    let queries = match generate_search_queries(
+        driver,
+        manifest,
+        session_messages,
+        user_message,
+        reasoning_echo_policy,
+    )
+    .await
+    {
+        Some(q) if q.is_empty() => return None, // LLM says no search needed
+        Some(q) => q,
+        None => vec![user_message.to_string()], // Generation failed, fall back to raw message
+    };
 
     // Search with each query and collect results
     let mut all_results = String::new();
@@ -3276,36 +3302,71 @@ async fn finalize_successful_end_turn(
 /// helper prevents the two paths from drifting (e.g. one branch picking
 /// up a new `min_batch_size` knob and the other lagging).
 ///
-/// Returns the (possibly modified) message list — same semantics as
-/// [`crate::history_fold::fold_stale_tool_results`] but with the fast-path
-/// and call-site logging baked in.  `streaming` flips the log target so
-/// operators can grep `"streaming"` vs `"non-streaming"` in production.
+/// Returns the (possibly modified) working-copy message list — same
+/// semantics as [`crate::history_fold::fold_stale_tool_results`] but with
+/// the fast-path, call-site logging, and durable-session replay baked in.
+/// The durable replay (issue #4866 axis 2) walks `session.messages` and
+/// rewrites every matching `ToolResult.content` by `tool_use_id`, then
+/// calls `session.mark_messages_mutated()`.  Without that step the fold
+/// runs from scratch every turn — see `history_fold.rs` module doc.
+/// `streaming` flips the log target so operators can grep `"streaming"`
+/// vs `"non-streaming"` in production.
+///
+/// **Ordering note** — when soft-compression later in this same loop
+/// iteration fires `session.set_messages(messages.clone())`, it writes
+/// the (already-folded) working copy back over `session.messages`, so
+/// the explicit replay above is redundant on that path.  The replay is
+/// load-bearing only on the no-compression path; keeping it on both
+/// paths keeps session-mutation semantics uniform and removes a foot-gun
+/// for future refactors that move the fold call out from under the
+/// compression step.
+// Eight args because every parameter is genuinely distinct (working
+// messages, durable session, knobs, model, aux+primary driver chain,
+// streaming flag, reasoning policy) and bundling them into a context
+// struct would just be a positional alias.  FoldConfig already pulls the
+// two knobs out; further bundling would obscure the call sites.
+#[allow(clippy::too_many_arguments)]
 async fn maybe_fold_stale_tool_results(
     messages: Vec<Message>,
-    fold_after_turns: u32,
-    fold_min_batch_size: u32,
+    session: &mut Session,
+    fold_cfg: crate::history_fold::FoldConfig,
     model: &str,
     aux_client: Option<&crate::aux_client::AuxClient>,
     driver: Arc<dyn LlmDriver>,
     streaming: bool,
+    reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
 ) -> Vec<Message> {
     // Fast-path: a fold pass needs at least `fold_after_turns` *recent*
     // assistant turns plus one stale turn — i.e. more than
     // `fold_after_turns * 2` messages — before any tool-result can be
     // classified stale.  Skipping the call avoids even the index walk
     // inside `collect_stale_indices` on every short-session iteration.
-    if fold_after_turns == 0 || messages.len() <= (fold_after_turns as usize).saturating_mul(2) {
+    if fold_cfg.fold_after_turns == 0
+        || messages.len() <= (fold_cfg.fold_after_turns as usize).saturating_mul(2)
+    {
         return messages;
     }
     let (folded, fold_result) = crate::history_fold::fold_stale_tool_results(
         messages,
-        fold_after_turns,
-        fold_min_batch_size,
+        fold_cfg,
         model,
         aux_client,
         driver,
+        reasoning_echo_policy,
     )
     .await;
+    // Replay the fold onto `session.messages` so the rewrite is persisted
+    // on the next `save_session_async` and subsequent turns short-circuit
+    // via `is_already_folded` instead of re-summarising from scratch.
+    // Matching by `tool_use_id` lets the working copy and durable list
+    // drift in length/ordering without breaking the projection.
+    if !fold_result.rewrites.is_empty() {
+        let durable_changed =
+            crate::history_fold::apply_fold_rewrites(&mut session.messages, &fold_result.rewrites);
+        if durable_changed {
+            session.mark_messages_mutated();
+        }
+    }
     if fold_result.groups_folded > 0 {
         let label = if streaming {
             "streaming"
@@ -3316,10 +3377,63 @@ async fn maybe_fold_stale_tool_results(
             groups = fold_result.groups_folded,
             replaced = fold_result.messages_replaced,
             groups_used_fallback = fold_result.groups_used_fallback,
+            durable_rewrites = fold_result.rewrites.len(),
             "history_fold: fold pass complete ({label})"
         );
     }
     folded
+}
+
+/// Gate the proactive-memory store for the *retrieve* side based on the
+/// per-agent override in `manifest.proactive_memory` (#4870).
+///
+/// Returns `Some(store)` when both the kernel-global config and the
+/// per-agent override allow `auto_retrieve`, else `None`. The store's
+/// internal gate also reads the global config, so the only case the
+/// outer gate covers that the inner doesn't is **per-agent opt-out**
+/// (the issue's primary use case: cron sub-agents that should skip
+/// retrieval entirely).
+fn gated_proactive_memory_for_retrieve<'a>(
+    manifest: &AgentManifest,
+    pm: Option<&'a Arc<librefang_memory::ProactiveMemoryStore>>,
+) -> Option<&'a Arc<librefang_memory::ProactiveMemoryStore>> {
+    let store = pm?;
+    if manifest.proactive_memory.is_empty() {
+        return Some(store);
+    }
+    let global = store.config();
+    if manifest.proactive_memory.resolve_auto_retrieve(&global) {
+        Some(store)
+    } else {
+        tracing::debug!(
+            agent = %manifest.name,
+            "Per-agent override disables auto_retrieve; skipping proactive memory retrieval"
+        );
+        None
+    }
+}
+
+/// Gate the proactive-memory store for the *memorize* side based on the
+/// per-agent override in `manifest.proactive_memory` (#4870). See
+/// [`gated_proactive_memory_for_retrieve`] for the rationale.
+fn gated_proactive_memory_for_memorize<'a>(
+    manifest: &AgentManifest,
+    pm: Option<&'a Arc<librefang_memory::ProactiveMemoryStore>>,
+) -> Option<&'a Arc<librefang_memory::ProactiveMemoryStore>> {
+    let store = pm?;
+    if manifest.proactive_memory.is_empty() {
+        return Some(store);
+    }
+    let global = store.config();
+    if manifest.proactive_memory.resolve_auto_memorize(&global) {
+        Some(store)
+    } else {
+        tracing::debug!(
+            agent = %manifest.name,
+            "Per-agent override disables auto_memorize; skipping proactive memory extraction"
+        );
+        None
+    }
 }
 
 /// Run the agent execution loop for a single user message.
@@ -3430,7 +3544,7 @@ pub async fn run_agent_loop(
         user_message,
         memory,
         embedding_driver,
-        proactive_memory: proactive_memory.as_ref(),
+        proactive_memory: gated_proactive_memory_for_retrieve(manifest, proactive_memory.as_ref()),
         context_engine,
         sender_user_id: sender_user_id.as_deref(),
         sender_channel: sender_channel.as_deref(),
@@ -3570,12 +3684,17 @@ pub async fn run_agent_loop(
 
     // Web search augmentation: generate search queries via LLM, search the web,
     // and inject results into context for models without tool/function calling.
+    let web_search_echo_policy = kernel
+        .as_ref()
+        .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
+        .unwrap_or_default();
     if let Some(search_results) = web_search_augment(
         manifest,
         user_message,
         web_ctx,
         driver.as_ref(),
         &session.messages,
+        web_search_echo_policy,
     )
     .await
     {
@@ -3779,14 +3898,22 @@ pub async fn run_agent_loop(
         // before context assembly so the LLM never sees raw bulk payloads
         // from old turns.  Runs fold first, then the compressor, mirroring
         // the ordering rationale in `history_fold`'s module-level doc.
+        let fold_echo_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
+            .unwrap_or_default();
         messages = maybe_fold_stale_tool_results(
             messages,
-            tr_fold_after_turns,
-            tr_fold_min_batch_size,
+            session,
+            crate::history_fold::FoldConfig {
+                fold_after_turns: tr_fold_after_turns,
+                min_batch_size: tr_fold_min_batch_size,
+            },
             &manifest.model.model,
             opts.aux_client.as_deref(),
             driver.clone(),
             false,
+            fold_echo_policy,
         )
         .await;
 
@@ -3891,6 +4018,15 @@ pub async fn run_agent_loop(
                 }
             });
 
+        // Catalog-driven reasoning_echo_policy lookup (#4842). Falls back
+        // to `None` when no kernel handle is wired or the model isn't in
+        // the catalog; the OpenAI driver then resolves the policy via its
+        // own substring fallback for backwards compatibility.
+        let reasoning_echo_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_echo_policy_for(&api_model))
+            .unwrap_or_default();
+
         // Wrap messages once per turn — call_with_retry's `request.clone()`
         // becomes a refcount bump instead of a deep clone of the history (#3766).
         let request = CompletionRequest {
@@ -3915,6 +4051,7 @@ pub async fn run_agent_loop(
             agent_id: Some(agent_id_str.clone()),
             session_id: Some(session.id.to_string()),
             step_id: Some(iteration.to_string()),
+            reasoning_echo_policy,
         };
 
         // Notify phase: Thinking
@@ -4138,7 +4275,10 @@ pub async fn run_agent_loop(
                         embedding_driver,
                         context_engine,
                         on_phase,
-                        proactive_memory: proactive_memory.as_ref(),
+                        proactive_memory: gated_proactive_memory_for_memorize(
+                            manifest,
+                            proactive_memory.as_ref(),
+                        ),
                         hooks,
                         agent_id_str: agent_id_str.as_str(),
                         user_message,
@@ -4553,6 +4693,14 @@ fn record_retry_failure(
     }
 }
 
+/// Conservative defer window when a provider exhausts in-loop retries
+/// without giving us a structured `retry_after_ms` hint. 5 minutes is short
+/// enough that quota-clearing windows (claude.ai 5h hard caps, OpenAI 1m
+/// per-token windows) usually open well before this re-fires, and long
+/// enough that a tight ticker doesn't burn a fresh quota the moment it
+/// resets.
+const DEFAULT_DEFER_MS: u64 = 5 * 60 * 1000;
+
 async fn handle_retryable_llm_error(
     attempt: u32,
     retry_after_ms: u64,
@@ -4564,7 +4712,16 @@ async fn handle_retryable_llm_error(
 ) -> Result<String, LibreFangError> {
     if attempt == MAX_RETRIES {
         record_retry_failure(provider, cooldown, false);
-        return Err(LibreFangError::llm_driver_msg(exhausted_message));
+        // Append the defer marker so the channel bridge can route this
+        // entry to `JournalStatus::Deferred` (re-dispatched on a ticker
+        // once the quota window resets) instead of `Failed` (one-shot).
+        // Floor the hint at DEFAULT_DEFER_MS — providers that returned no
+        // structured retry-after still need a usable delay.
+        let defer_ms = retry_after_ms.max(DEFAULT_DEFER_MS);
+        return Err(LibreFangError::llm_driver_msg(format!(
+            "{exhausted_message} {marker}={defer_ms}",
+            marker = librefang_channels::message_journal::RATE_LIMIT_DEFER_MARKER,
+        )));
     }
 
     let delay = std::cmp::max(retry_after_ms, BASE_RETRY_DELAY_MS * 2u64.pow(attempt));
@@ -4905,7 +5062,7 @@ pub async fn run_agent_loop_streaming(
         user_message,
         memory,
         embedding_driver,
-        proactive_memory: proactive_memory.as_ref(),
+        proactive_memory: gated_proactive_memory_for_retrieve(manifest, proactive_memory.as_ref()),
         context_engine,
         sender_user_id: sender_user_id.as_deref(),
         sender_channel: sender_channel.as_deref(),
@@ -5045,12 +5202,17 @@ pub async fn run_agent_loop_streaming(
 
     // Web search augmentation: generate search queries via LLM, search the web,
     // and inject results into context for models without tool/function calling.
+    let web_search_echo_policy = kernel
+        .as_ref()
+        .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
+        .unwrap_or_default();
     if let Some(search_results) = web_search_augment(
         manifest,
         user_message,
         web_ctx,
         driver.as_ref(),
         &session.messages,
+        web_search_echo_policy,
     )
     .await
     {
@@ -5234,14 +5396,22 @@ pub async fn run_agent_loop_streaming(
         // History fold (#3347 3/N): rewrite stale tool-result blocks in place
         // before context assembly — streaming path mirrors non-streaming via
         // `maybe_fold_stale_tool_results` (#4 review-followup DRY).
+        let fold_echo_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
+            .unwrap_or_default();
         messages = maybe_fold_stale_tool_results(
             messages,
-            tr_fold_after_turns,
-            tr_fold_min_batch_size,
+            session,
+            crate::history_fold::FoldConfig {
+                fold_after_turns: tr_fold_after_turns,
+                min_batch_size: tr_fold_min_batch_size,
+            },
             &manifest.model.model,
             opts.aux_client.as_deref(),
             driver.clone(),
             true,
+            fold_echo_policy,
         )
         .await;
 
@@ -5355,6 +5525,13 @@ pub async fn run_agent_loop_streaming(
                 }
             });
 
+        // Catalog-driven reasoning_echo_policy lookup (#4842), same as the
+        // non-streaming path above.
+        let reasoning_echo_policy = kernel
+            .as_ref()
+            .map(|k| k.reasoning_echo_policy_for(&api_model))
+            .unwrap_or_default();
+
         // Same Arc-wrap as the non-streaming hot path (#3766).
         let request = CompletionRequest {
             model: api_model,
@@ -5377,6 +5554,7 @@ pub async fn run_agent_loop_streaming(
             agent_id: Some(agent_id_str.clone()),
             session_id: Some(session.id.to_string()),
             step_id: Some(iteration.to_string()),
+            reasoning_echo_policy,
         };
 
         // Notify phase: on first iteration emit Streaming; on subsequent
@@ -5639,7 +5817,10 @@ pub async fn run_agent_loop_streaming(
                         embedding_driver,
                         context_engine,
                         on_phase,
-                        proactive_memory: proactive_memory.as_ref(),
+                        proactive_memory: gated_proactive_memory_for_memorize(
+                            manifest,
+                            proactive_memory.as_ref(),
+                        ),
                         hooks,
                         agent_id_str: agent_id_str.as_str(),
                         user_message,
@@ -6035,10 +6216,16 @@ pub async fn run_agent_loop_streaming(
 
 /// Detect when the LLM claims to have performed an action in text without
 /// actually calling any tools — a common hallucination pattern.
+///
+/// Covers three claim families: English present-perfect (`i've|i have` +
+/// verb), Italian present-perfect (`ho` + past participle), and impersonal
+/// completion claims in either language (`successfully X`, `è stato/stata`,
+/// `messaggio inviato`). Bare "fatto" is intentionally absent — too noisy
+/// as a substring (matches "non ho fatto in tempo").
 fn looks_like_hallucinated_action(text: &str) -> bool {
     let lower = text.to_lowercase();
-    // Action verbs that imply tool usage
     let action_phrases = [
+        // English present-perfect — dev/file flavor.
         "i've created",
         "i've written",
         "i've updated",
@@ -6059,14 +6246,113 @@ fn looks_like_hallucinated_action(text: &str) -> bool {
         "i have deleted",
         "i have added",
         "i have removed",
+        // English present-perfect — transactional/domain flavor.
+        "i've sent",
+        "i've scheduled",
+        "i've booked",
+        "i've ordered",
+        "i've registered",
+        "i've recorded",
+        "i've transferred",
+        "i've logged",
+        "i've notified",
+        "i've cancelled",
+        "i've canceled",
+        "i've reserved",
+        "i've submitted",
+        "i've forwarded",
+        "i've attached",
+        "i've published",
+        "i've uploaded",
+        "i have sent",
+        "i have scheduled",
+        "i have booked",
+        "i have ordered",
+        "i have registered",
+        "i have recorded",
+        "i have transferred",
+        "i have logged",
+        "i have notified",
+        "i have submitted",
+        "i have attached",
+        // English impersonal completion claims.
         "file has been",
         "changes have been",
         "code has been",
+        "message has been sent",
+        "transaction has been",
+        "appointment has been",
+        "booking has been",
+        "order has been placed",
         "successfully created",
         "successfully updated",
         "successfully saved",
         "successfully written",
         "successfully modified",
+        "successfully sent",
+        "successfully scheduled",
+        "successfully booked",
+        "successfully registered",
+        // Italian present-perfect — ho + past participle.
+        "ho creato",
+        "ho scritto",
+        "ho aggiornato",
+        "ho salvato",
+        "ho modificato",
+        "ho cancellato",
+        "ho aggiunto",
+        "ho rimosso",
+        "ho eliminato",
+        "ho inviato",
+        "ho mandato",
+        "ho spedito",
+        "ho registrato",
+        "ho allegato",
+        "ho prenotato",
+        "ho ordinato",
+        "ho schedulato",
+        "ho programmato",
+        "ho bonificato",
+        "ho trasferito",
+        "ho recapitato",
+        "ho notificato",
+        "ho pubblicato",
+        "ho caricato",
+        "ho fissato",
+        "ho impostato",
+        // Italian impersonal completion claims.
+        "è stato inviato",
+        "è stato registrato",
+        "è stato salvato",
+        "è stato creato",
+        "è stato aggiornato",
+        "è stato cancellato",
+        "è stato programmato",
+        "è stato schedulato",
+        "è stato prenotato",
+        "è stato bonificato",
+        "è stata inviata",
+        "è stata creata",
+        "è stata aggiornata",
+        "è stata salvata",
+        "è stata cancellata",
+        "è stata registrata",
+        "è stata programmata",
+        "è stata schedulata",
+        "è stata prenotata",
+        "è stata recapitata",
+        // Italian outcome adjectives — narrow forms that imply a completed
+        // operation. Avoid bare "fatto" — too noisy as a substring.
+        "messaggio inviato",
+        "messaggio recapitato",
+        "spesa registrata",
+        "transazione registrata",
+        "operazione completata",
+        "operazione riuscita",
+        "ordine effettuato",
+        "prenotazione effettuata",
+        "bonifico effettuato",
+        "trasferimento effettuato",
     ];
     action_phrases.iter().any(|phrase| lower.contains(phrase))
 }
@@ -7077,6 +7363,110 @@ mod tests {
     }
 
     #[test]
+    fn hallucinated_action_detects_english_dev_claims() {
+        // Regression: original EN dev/file claims must keep firing.
+        assert!(looks_like_hallucinated_action(
+            "I've created the file in src/utils.rs"
+        ));
+        assert!(looks_like_hallucinated_action(
+            "I have updated the configuration."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "The file has been written successfully."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "Successfully modified the schema."
+        ));
+    }
+
+    #[test]
+    fn hallucinated_action_detects_english_transactional_claims() {
+        // Domain-action claims that previously slipped through (channel send,
+        // YNAB record, calendar booking, etc.).
+        assert!(looks_like_hallucinated_action(
+            "I've sent the message to your contact."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "I've scheduled the appointment for tomorrow."
+        ));
+        assert!(looks_like_hallucinated_action("I've booked the flight."));
+        assert!(looks_like_hallucinated_action(
+            "I've registered the transaction in YNAB."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "I've transferred €100 to your savings account."
+        ));
+        assert!(looks_like_hallucinated_action("Order has been placed."));
+        assert!(looks_like_hallucinated_action(
+            "Message has been sent successfully."
+        ));
+    }
+
+    #[test]
+    fn hallucinated_action_detects_italian_present_perfect_claims() {
+        // Italian "ho + past participle" — the form Ambrogio falls into when
+        // it lies about completing a domain operation.
+        assert!(looks_like_hallucinated_action(
+            "Ho registrato la spesa di 12 euro al supermercato."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "Ho inviato il messaggio a Jessica come richiesto."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "Ho allegato il PDF alla mail."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "Ho prenotato il ristorante per le 20:00."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "Ho schedulato il bonifico per domani."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "Ho bonificato 500 euro sul conto risparmio."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "Ho aggiornato la nota sul calendario."
+        ));
+    }
+
+    #[test]
+    fn hallucinated_action_detects_italian_impersonal_claims() {
+        assert!(looks_like_hallucinated_action(
+            "Il messaggio è stato inviato al destinatario."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "La transazione è stata registrata correttamente."
+        ));
+        assert!(looks_like_hallucinated_action(
+            "L'appuntamento è stato programmato."
+        ));
+        assert!(looks_like_hallucinated_action("Messaggio inviato."));
+        assert!(looks_like_hallucinated_action("Operazione completata."));
+        assert!(looks_like_hallucinated_action(
+            "Bonifico effettuato con successo."
+        ));
+    }
+
+    #[test]
+    fn hallucinated_action_does_not_fire_on_neutral_text() {
+        // Plain replies must never trigger a corrective retry — a false
+        // positive burns one in-loop iteration.
+        assert!(!looks_like_hallucinated_action(""));
+        assert!(!looks_like_hallucinated_action("Hello, how can I help?"));
+        assert!(!looks_like_hallucinated_action(
+            "Vuoi che registri questa spesa? Confermami pure."
+        ));
+        assert!(!looks_like_hallucinated_action(
+            "Posso inviare il messaggio se mi confermi il numero."
+        ));
+        // Bare "fatto" intentionally NOT in the trigger list — too noisy
+        // ("non ho fatto in tempo a chiamarti" should not retry).
+        assert!(!looks_like_hallucinated_action(
+            "Non ho fatto in tempo a chiamarti."
+        ));
+    }
+
+    #[test]
     fn test_retry_constants() {
         assert_eq!(MAX_RETRIES, 3);
         assert_eq!(BASE_RETRY_DELAY_MS, 1000);
@@ -7492,7 +7882,7 @@ mod tests {
 
     #[test]
     fn test_max_history_messages() {
-        assert_eq!(DEFAULT_MAX_HISTORY_MESSAGES, 40);
+        assert_eq!(DEFAULT_MAX_HISTORY_MESSAGES, 60);
     }
 
     #[test]
@@ -8205,11 +8595,17 @@ mod tests {
         // turn's user message, which is what the old code used.
         let old_messages_before = session_messages.len();
 
-        // Push the current turn's user message. At this point
-        // len = 26 + 14 + 1 = 41, which is > DEFAULT_MAX_HISTORY_MESSAGES=40 and
-        // will trigger safe_trim_messages.
+        // Push the current turn's user message. At this point len = 26
+        // + 14 + 1 = 41. The cap is pinned to the literal 40 (the
+        // original #2067 reproduction shape) rather than
+        // `DEFAULT_MAX_HISTORY_MESSAGES` because this is a regression
+        // test for a specific historical bug — the safe-trim index
+        // arithmetic is what's being pinned, not whatever the current
+        // default happens to be. Recap if the default ever moves up
+        // past 40: this test stays at cap=40 by intention.
+        const ISSUE_2067_CAP: usize = 40;
         session_messages.push(Message::user("current turn"));
-        assert!(session_messages.len() > DEFAULT_MAX_HISTORY_MESSAGES);
+        assert!(session_messages.len() > ISSUE_2067_CAP);
 
         let mut llm_messages = session_messages.clone();
         safe_trim_messages(
@@ -8217,7 +8613,7 @@ mod tests {
             &mut session_messages,
             "test-agent",
             "current turn",
-            DEFAULT_MAX_HISTORY_MESSAGES,
+            ISSUE_2067_CAP,
         );
 
         // The forward scan in find_safe_trim_point skipped past the tool-pair
@@ -8292,15 +8688,16 @@ mod tests {
 
         let prior_len = session.messages.len();
         session.messages.push(Message::user("current turn"));
+        // Cap pinned to 40 (literal) rather than DEFAULT_MAX_HISTORY_MESSAGES.
+        // The construction above produces 41 messages — chosen to be just over
+        // the historical default of 40, which is the shape that triggers the
+        // post-trim invariant this test pins. If the kernel default later
+        // moved above 41, the trim wouldn't fire and the invariant under
+        // test would be vacuous.
+        const TRIM_CAP: usize = 40;
         let PreparedMessages {
             new_messages_start, ..
-        } = prepare_llm_messages(
-            &manifest,
-            &mut session,
-            "current turn",
-            None,
-            DEFAULT_MAX_HISTORY_MESSAGES,
-        );
+        } = prepare_llm_messages(&manifest, &mut session, "current turn", None, TRIM_CAP);
 
         assert!(prior_len > new_messages_start);
         let tail = &session.messages[new_messages_start..];
@@ -8363,6 +8760,15 @@ mod tests {
 
         session.messages.push(Message::user("current turn"));
 
+        // Cap pinned to 40 (literal) — same rationale as the sibling
+        // `..._keeps_full_turn_after_trim` test: the 41-message
+        // construction above is sized to trigger trim only when the cap
+        // is at the historical default of 40. The invariants being
+        // pinned (canonical-context / memory-context injection
+        // stripped, new_messages_start points at the tail) are about
+        // the trim path, so we keep this test under trim by fixing the
+        // cap rather than scaling the construction.
+        const TRIM_CAP: usize = 40;
         let PreparedMessages {
             messages,
             new_messages_start,
@@ -8372,10 +8778,10 @@ mod tests {
             &mut session,
             "current turn",
             Some("memory context".to_string()),
-            DEFAULT_MAX_HISTORY_MESSAGES,
+            TRIM_CAP,
         );
 
-        assert!(messages.len() <= DEFAULT_MAX_HISTORY_MESSAGES);
+        assert!(messages.len() <= TRIM_CAP);
         assert!(messages.iter().all(|msg| {
             let text = msg.content.text_content();
             text != "canonical context"
@@ -9481,6 +9887,196 @@ mod tests {
         );
     }
 
+    /// Axis-2 wiring regression for #4866: `maybe_fold_stale_tool_results`
+    /// must replay the fold rewrites onto `session.messages` (not just the
+    /// working clone) AND advance `messages_generation` via
+    /// `mark_messages_mutated()` so `save_session_async` persists the
+    /// rewrite.  A future refactor in this wrapper could silently drop
+    /// either of those steps; the unit tests inside `history_fold` cover
+    /// the function in isolation and would not catch that.
+    #[tokio::test]
+    async fn maybe_fold_stale_tool_results_persists_rewrites_to_session_messages() {
+        use crate::history_fold::FoldConfig;
+        use librefang_types::tool::ToolExecutionStatus;
+
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+        };
+        // 10 turns of (assistant, tool_result) — under fold_after=2 every
+        // tool_result older than the last two assistant turns is stale.
+        session
+            .messages
+            .push(librefang_types::message::Message::user("start"));
+        for i in 0..10 {
+            session
+                .messages
+                .push(librefang_types::message::Message::assistant(format!(
+                    "asst {i}"
+                )));
+            session.messages.push(librefang_types::message::Message {
+                role: librefang_types::message::Role::User,
+                content: librefang_types::message::MessageContent::Blocks(vec![
+                    librefang_types::message::ContentBlock::ToolResult {
+                        tool_use_id: format!("tid_{i}"),
+                        tool_name: "shell".to_string(),
+                        content: format!("output {i}"),
+                        is_error: false,
+                        status: ToolExecutionStatus::Completed,
+                        approval_request_id: None,
+                    },
+                ]),
+                pinned: false,
+                timestamp: None,
+            });
+        }
+        let pre_generation = session.messages_generation;
+        let working = session.messages.clone();
+
+        // Aux driver returns plain prose — fold falls back to bulk
+        // summary across every block.  The persistence wiring is what
+        // we are testing, NOT the JSON path; using the prose driver
+        // makes the assertion shape independent of JSON formatting.
+        let aux_driver: Arc<dyn LlmDriver> = Arc::new(FoldSummaryDriver);
+        let aux_client = crate::aux_client::AuxClient::with_primary_only(Arc::clone(&aux_driver));
+
+        let folded = maybe_fold_stale_tool_results(
+            working,
+            &mut session,
+            FoldConfig {
+                fold_after_turns: 2,
+                min_batch_size: 1,
+            },
+            "test-model",
+            Some(&aux_client),
+            aux_driver,
+            false,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        // (1) The working clone must carry the stubs (sanity).
+        let working_stubs = folded
+            .iter()
+            .filter(|m| match &m.content {
+                librefang_types::message::MessageContent::Blocks(blocks) => {
+                    blocks.iter().any(|b| {
+                        matches!(
+                            b,
+                            librefang_types::message::ContentBlock::ToolResult { content, .. }
+                                if content.starts_with("[history-fold]")
+                        )
+                    })
+                }
+                _ => false,
+            })
+            .count();
+        assert!(working_stubs >= 8, "expected working copy to be folded");
+
+        // (2) `session.messages` must ALSO carry the stubs — without
+        // this, every subsequent turn refolds from scratch (the bug).
+        let durable_stubs = session
+            .messages
+            .iter()
+            .filter(|m| match &m.content {
+                librefang_types::message::MessageContent::Blocks(blocks) => {
+                    blocks.iter().any(|b| {
+                        matches!(
+                            b,
+                            librefang_types::message::ContentBlock::ToolResult { content, .. }
+                                if content.starts_with("[history-fold]")
+                        )
+                    })
+                }
+                _ => false,
+            })
+            .count();
+        assert!(
+            durable_stubs >= 8,
+            "fold must replay rewrites onto session.messages — without this the \
+             durable record stays raw and every subsequent turn refolds from scratch \
+             (issue #4866 axis 2). durable_stubs={durable_stubs}"
+        );
+
+        // (3) `messages_generation` must have advanced — without this
+        // `save_session_async` would NOT detect the mutation and the
+        // rewrite would be lost across save / reload.
+        assert!(
+            session.messages_generation > pre_generation,
+            "mark_messages_mutated must fire when fold rewrites are replayed; \
+             pre={pre_generation} post={post}",
+            post = session.messages_generation,
+        );
+
+        // (4) Every original `tool_use_id` must still be present in
+        // `session.messages` — pairing invariant.
+        let durable_ids: std::collections::BTreeSet<String> = session
+            .messages
+            .iter()
+            .flat_map(|m| match &m.content {
+                librefang_types::message::MessageContent::Blocks(blocks) => blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        librefang_types::message::ContentBlock::ToolResult {
+                            tool_use_id, ..
+                        } => Some(tool_use_id.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+        for i in 0..10 {
+            let expected = format!("tid_{i}");
+            assert!(
+                durable_ids.contains(&expected),
+                "fold must preserve every original tool_use_id in session.messages, \
+                 missing {expected}"
+            );
+        }
+
+        // (5) Second-call no-op: now that session.messages carries fold
+        // stubs, calling the wrapper again on a fresh working clone must
+        // NOT rewrite session.messages a second time — the
+        // `is_already_folded` short-circuit fires inside
+        // `collect_stale_indices`, no aux-LLM call, no new rewrites, and
+        // `messages_generation` MUST stay where it is.  Without this
+        // invariant the persistence fix only saves one round-trip per
+        // session lifetime instead of all subsequent ones.
+        let gen_after_first = session.messages_generation;
+        let working_after_first = session.messages.clone();
+        let aux_driver_2: Arc<dyn LlmDriver> = Arc::new(FoldSummaryDriver);
+        let aux_client_2 =
+            crate::aux_client::AuxClient::with_primary_only(Arc::clone(&aux_driver_2));
+        let _ = maybe_fold_stale_tool_results(
+            working_after_first,
+            &mut session,
+            FoldConfig {
+                fold_after_turns: 2,
+                min_batch_size: 1,
+            },
+            "test-model",
+            Some(&aux_client_2),
+            aux_driver_2,
+            false,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+        assert_eq!(
+            session.messages_generation,
+            gen_after_first,
+            "second fold pass on already-folded session must NOT advance \
+             messages_generation; pre={gen_after_first} post={post}",
+            post = session.messages_generation,
+        );
+    }
+
     #[tokio::test]
     async fn test_streaming_max_continuations_return_preserves_reply_directives() {
         let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
@@ -9859,7 +10455,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_history_messages_constant() {
-        assert_eq!(DEFAULT_MAX_HISTORY_MESSAGES, 40);
+        assert_eq!(DEFAULT_MAX_HISTORY_MESSAGES, 60);
     }
 
     #[tokio::test]

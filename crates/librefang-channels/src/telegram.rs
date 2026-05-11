@@ -5,6 +5,7 @@
 
 use crate::bridge::SENDER_USER_ID_KEY;
 use crate::formatter;
+use crate::http_client::{fetch_url_bytes_unchecked, safe_fetch_client};
 use crate::message_truncator::{split_to_utf16_chunks, TELEGRAM_MESSAGE_LIMIT};
 use crate::types::{
     truncate_utf8, ChannelAdapter, ChannelContent, ChannelMessage, ChannelRoleQuery, ChannelType,
@@ -93,31 +94,6 @@ fn url_filename(url_str: &str, fallback: &str) -> String {
                 .filter(|s| !s.is_empty())
         })
         .unwrap_or_else(|| fallback.to_string())
-}
-
-/// Fetch bytes from an internal-network URL for re-upload via multipart.
-/// Returns the body plus the `Content-Type` header (falling back to
-/// `application/octet-stream` when the origin doesn't announce one).
-async fn fetch_url_bytes(
-    client: &reqwest::Client,
-    url_str: &str,
-) -> Result<(Vec<u8>, String), Box<dyn std::error::Error + Send + Sync>> {
-    let resp = client.get(url_str).send().await?;
-    if !resp.status().is_success() {
-        return Err(format!(
-            "Failed to fetch {url_str} for multipart fallback: HTTP {}",
-            resp.status()
-        )
-        .into());
-    }
-    let mime = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
-    let bytes = resp.bytes().await?.to_vec();
-    Ok((bytes, mime))
 }
 
 /// A Telegram bot command definition for the command menu.
@@ -268,7 +244,19 @@ pub struct TelegramAdapter {
     /// Bot commands registered in the Telegram command menu.
     commands: Vec<BotCommand>,
     poll_contexts: Arc<DashMap<String, PollContext>>,
+    /// Outbound media upload size cap (bytes) for the private-URL
+    /// multipart-fallback path. Defaults to
+    /// `DEFAULT_TELEGRAM_UPLOAD_BYTES` (50 MiB — Telegram bot API
+    /// ceiling) — operators override via
+    /// `[channels].file_upload_max_bytes` in `config.toml`, plumbed in
+    /// by the bridge through `with_max_upload_bytes`.
+    max_upload_bytes: usize,
 }
+
+/// Default outbound media upload cap for Telegram (50 MiB, the bot
+/// API ceiling). Per-instance override via
+/// `TelegramAdapter::with_max_upload_bytes`.
+const DEFAULT_TELEGRAM_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 
 struct PollContext {
     question: String,
@@ -322,6 +310,7 @@ impl TelegramAdapter {
             clear_done_reaction: false,
             commands: Vec::new(),
             poll_contexts: Arc::new(DashMap::new()),
+            max_upload_bytes: DEFAULT_TELEGRAM_UPLOAD_BYTES,
         }
     }
 
@@ -361,6 +350,15 @@ impl TelegramAdapter {
     /// Set thread-based agent routing. Returns self for builder chaining.
     pub fn with_thread_routes(mut self, thread_routes: HashMap<String, String>) -> Self {
         self.thread_routes = thread_routes;
+        self
+    }
+
+    /// Override the outbound media upload size cap. Returns self for
+    /// builder chaining. Bridge plumbs the operator's
+    /// `[channels].file_upload_max_bytes` here so a single config knob
+    /// applies to every Telegram bot instance.
+    pub fn with_max_upload_bytes(mut self, max_upload_bytes: usize) -> Self {
+        self.max_upload_bytes = max_upload_bytes;
         self
     }
 
@@ -568,7 +566,14 @@ impl TelegramAdapter {
                 url = document_url,
                 "Private URL detected on sendDocument, falling back to multipart upload"
             );
-            let (bytes, mime) = fetch_url_bytes(&self.client, document_url).await?;
+            let (bytes, ct) = fetch_url_bytes_unchecked(
+                safe_fetch_client(),
+                document_url,
+                self.max_upload_bytes,
+                &[],
+            )
+            .await?;
+            let mime = ct.unwrap_or_else(|| "application/octet-stream".to_string());
             return self
                 .api_send_media_upload(
                     "sendDocument",
@@ -712,7 +717,14 @@ impl TelegramAdapter {
                 url = voice_url,
                 "Private URL detected on sendVoice, falling back to multipart upload"
             );
-            let (bytes, mime) = fetch_url_bytes(&self.client, voice_url).await?;
+            let (bytes, ct) = fetch_url_bytes_unchecked(
+                safe_fetch_client(),
+                voice_url,
+                self.max_upload_bytes,
+                &[],
+            )
+            .await?;
+            let mime = ct.unwrap_or_else(|| "audio/ogg".to_string());
             let filename = url_filename(voice_url, "voice.ogg");
             let mut extra: Vec<(&str, String)> = Vec::new();
             if let Some(cap) = caption {
@@ -759,7 +771,14 @@ impl TelegramAdapter {
                 url = audio_url,
                 "Private URL detected on sendAudio, falling back to multipart upload"
             );
-            let (bytes, mime) = fetch_url_bytes(&self.client, audio_url).await?;
+            let (bytes, ct) = fetch_url_bytes_unchecked(
+                safe_fetch_client(),
+                audio_url,
+                self.max_upload_bytes,
+                &[],
+            )
+            .await?;
+            let mime = ct.unwrap_or_else(|| "audio/mpeg".to_string());
             let filename = url_filename(audio_url, "audio.mp3");
             let mut extra: Vec<(&str, String)> = Vec::new();
             if let Some(cap) = caption {
@@ -2325,6 +2344,26 @@ impl ChannelAdapter for TelegramAdapter {
             }
         }
         Ok(())
+    }
+
+    /// Telegram approval-notification recipients are the configured
+    /// `allowed_users` (#4875). Only numeric entries are kept — Telegram
+    /// `sendMessage` requires a numeric `chat_id`, and a private chat's
+    /// `chat_id` equals the user's numeric `user_id`. Bare `@username`
+    /// entries are dropped here because there is no API call that resolves
+    /// a username to a `chat_id` without a prior message from that user.
+    /// An empty `allowed_users` list means "no operator inbox configured",
+    /// so we return an empty Vec rather than broadcasting to strangers.
+    fn notification_recipients(&self) -> Vec<ChannelUser> {
+        self.allowed_users
+            .iter()
+            .filter(|u| u.parse::<i64>().is_ok())
+            .map(|u| ChannelUser {
+                platform_id: u.clone(),
+                display_name: String::new(),
+                librefang_user: None,
+            })
+            .collect()
     }
 }
 

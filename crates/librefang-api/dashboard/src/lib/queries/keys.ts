@@ -72,6 +72,12 @@ export const providerKeys = {
 export const channelKeys = {
   all: ["channels"] as const,
   lists: () => [...channelKeys.all, "list"] as const,
+  // Per-instance keys (#4837). Hierarchical so
+  // `invalidateQueries({ queryKey: channelKeys.all })` from any
+  // instance mutation also clears the channel list/snapshot
+  // (`instance_count` changes on every CRUD).
+  instances: (name: string) =>
+    [...channelKeys.all, "instances", name] as const,
 };
 
 export const commsKeys = {
@@ -290,6 +296,7 @@ export const runtimeKeys = {
   status: () => [...runtimeKeys.all, "status"] as const,
   queueStatus: () => [...runtimeKeys.all, "queue", "status"] as const,
   healthDetail: () => [...runtimeKeys.all, "health", "detail"] as const,
+  healthLiveness: () => [...runtimeKeys.all, "health", "liveness"] as const,
   security: () => [...runtimeKeys.all, "security"] as const,
   backups: () => [...runtimeKeys.all, "backups"] as const,
   tasks: () => [...runtimeKeys.all, "tasks"] as const,
