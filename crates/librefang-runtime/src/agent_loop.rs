@@ -1002,7 +1002,7 @@ async fn execute_single_tool_call_inner(
                 warn!(tool = %tool_call.name, "Circuit breaker triggered");
             }
             repair_session_before_save(ctx.session, ctx.agent_id_str, "circuit_breaker");
-            if !ctx.opts.is_fork && !ctx.opts.incognito {
+            if ctx.opts.persists_session() {
                 if let Err(e) = ctx.memory.save_session_async(ctx.session).await {
                     warn!("Failed to save session on circuit break: {e}");
                 }
@@ -1925,6 +1925,17 @@ pub struct LoopOptions {
     ///
     /// Kernel populates this from `KernelConfig.runtime.tool_results`.
     pub tool_results_config: Option<librefang_types::config::ToolResultsConfig>,
+}
+
+impl LoopOptions {
+    /// Whether the session messages and proactive memory writes from this
+    /// turn should be persisted. Forks are ephemeral by contract;
+    /// incognito turns leave no trace by design — both must be `false`
+    /// for persistence to fire.
+    #[inline]
+    pub fn persists_session(&self) -> bool {
+        !self.is_fork && !self.incognito
+    }
 }
 
 /// Result of an agent loop execution.
@@ -3051,6 +3062,44 @@ fn build_silent_agent_loop_result(
     }
 }
 
+/// Push the synthetic `[no reply needed]` assistant marker, persist
+/// the session via `opts.persists_session()`, and build the silent
+/// `AgentLoopResult`. Shared tail for every silent-completion path
+/// (NO_REPLY sentinel, progress-text leak, system-prompt
+/// regurgitation — streaming and non-streaming).
+#[allow(clippy::too_many_arguments)]
+async fn silent_drop(
+    session: &mut Session,
+    memory: &MemorySubstrate,
+    opts: &LoopOptions,
+    total_usage: TokenUsage,
+    iteration: u32,
+    parsed_directives: crate::reply_directives::DirectiveSet,
+    decision_traces: Vec<DecisionTrace>,
+    memories_used: Vec<String>,
+    experiment_context: Option<ExperimentContext>,
+    new_messages_start: usize,
+) -> LibreFangResult<AgentLoopResult> {
+    session
+        .messages
+        .push(Message::assistant("[no reply needed]".to_string()));
+    if opts.persists_session() {
+        memory
+            .save_session_async(session)
+            .await
+            .map_err(LibreFangError::memory)?;
+    }
+    Ok(build_silent_agent_loop_result(
+        total_usage,
+        iteration + 1,
+        parsed_directives,
+        decision_traces,
+        memories_used,
+        experiment_context,
+        new_messages_start,
+    ))
+}
+
 enum EndTurnRetry {
     EmptyResponse { is_silent_failure: bool },
     HallucinatedAction,
@@ -3160,7 +3209,7 @@ async fn finalize_successful_end_turn(
     // derivative calls like auto-dream consolidation or incognito chats.
     // The LLM already ran and we have its response in memory; we just
     // don't write messages back to disk.
-    if !ctx.opts.is_fork && !ctx.opts.incognito {
+    if ctx.opts.persists_session() {
         ctx.memory
             .save_session_async(ctx.session)
             .await
@@ -3168,25 +3217,42 @@ async fn finalize_successful_end_turn(
     }
 
     // Post-turn memory writes and context-engine updates are skipped for
-    // fork and incognito turns. Three reasons for fork (unchanged): (1)
-    // ephemeral conversation must not leak into long-term memory; (2)
-    // context_engine state shouldn't advance; (3) auto_memorize recursion
-    // guard. For incognito: memory reads remain full-access (the agent
-    // already recalled memories before this point), but writes are
-    // silently dropped so the private conversation leaves no trace.
-    if !ctx.opts.is_fork && !ctx.opts.incognito {
-        let interaction_text = format!(
-            "User asked: {}\nI responded: {}",
-            ctx.user_message, end_turn.final_response
-        );
-        remember_interaction_best_effort(
-            ctx.memory,
-            ctx.embedding_driver,
-            ctx.session.agent_id,
-            &interaction_text,
-            ctx.streaming,
-        )
-        .await;
+    // fork and incognito turns. Reasons for fork: (1) ephemeral
+    // conversation must not leak into long-term memory; (2) context_engine
+    // state shouldn't advance; (3) auto_memorize recursion guard. For
+    // incognito: memory reads remain full-access (the agent already
+    // recalled memories before this point), but writes are silently
+    // dropped so the private conversation leaves no trace.
+    if ctx.opts.persists_session() {
+        // Skip storing the interaction when the agent produced no
+        // meaningful response (silent turn, empty string, sentinel
+        // placeholder). Without this gate the memory bank slowly fills
+        // with `[recall:turn] user: "..." | agent: ""` rows — the model
+        // then retrieves them as past interactions and learns an
+        // "empty reply" pattern, which leaks back as visible text on
+        // the next turn (`<empty>`, `<response>`, etc.).
+        let response_meaningful = !end_turn.final_response.trim().is_empty()
+            && !crate::silent_response::is_silent_response(&end_turn.final_response);
+        if response_meaningful {
+            // The `[recall:turn]` / `[/recall]` markers anchor the
+            // block as a memory record so the model does not confuse
+            // retrieved bullets with a live user/assistant turn. Do
+            // NOT reshape this back into a `User asked: / I responded:`
+            // wording — the conversational form caused the model to
+            // recite past memory bullets as if they were the live turn.
+            let interaction_text = format!(
+                "[recall:turn]\nuser: {}\n---\nagent: {}\n[/recall]",
+                ctx.user_message, end_turn.final_response,
+            );
+            remember_interaction_best_effort(
+                ctx.memory,
+                ctx.embedding_driver,
+                ctx.session.agent_id,
+                &interaction_text,
+                ctx.streaming,
+            )
+            .await;
+        }
 
         if let Some(engine) = ctx.context_engine {
             if let Err(e) = engine.after_turn(ctx.session.agent_id, ctx.messages).await {
@@ -4140,24 +4206,19 @@ pub async fn run_agent_loop(
                         "Agent chose silent completion"
                     );
                     debug!(agent = %manifest.name, "Agent chose NO_REPLY/silent — silent completion");
-                    session
-                        .messages
-                        .push(Message::assistant("[no reply needed]".to_string()));
-                    if !opts.is_fork && !opts.incognito {
-                        memory
-                            .save_session_async(session)
-                            .await
-                            .map_err(LibreFangError::memory)?;
-                    }
-                    return Ok(build_silent_agent_loop_result(
+                    return silent_drop(
+                        session,
+                        memory,
+                        opts,
                         total_usage,
-                        iteration + 1,
+                        iteration,
                         parsed_directives,
                         decision_traces,
                         memories_used.clone(),
                         experiment_context.clone(),
                         new_messages_start,
-                    ));
+                    )
+                    .await;
                 }
 
                 // Progress-text-leak guard: model emitted a short ellipsis-
@@ -4175,24 +4236,42 @@ pub async fn run_agent_loop(
                         text_excerpt = %text.chars().take(80).collect::<String>(),
                         "Progress-text leak detected (ellipsis-terminated short reply without tool_use) — dropping as silent"
                     );
-                    session
-                        .messages
-                        .push(Message::assistant("[no reply needed]".to_string()));
-                    if !opts.is_fork && !opts.incognito {
-                        memory
-                            .save_session_async(session)
-                            .await
-                            .map_err(LibreFangError::memory)?;
-                    }
-                    return Ok(build_silent_agent_loop_result(
+                    return silent_drop(
+                        session,
+                        memory,
+                        opts,
                         total_usage,
-                        iteration + 1,
+                        iteration,
                         parsed_directives,
                         decision_traces,
                         memories_used.clone(),
                         experiment_context.clone(),
                         new_messages_start,
-                    ));
+                    )
+                    .await;
+                }
+
+                if crate::silent_response::is_prompt_leak(&text) {
+                    warn!(
+                        event = "system_prompt_regurgitated",
+                        agent = %manifest.name,
+                        text_len = text.len(),
+                        text_excerpt = %text.chars().take(120).collect::<String>(),
+                        "System-prompt regurgitation detected — dropping as silent"
+                    );
+                    return silent_drop(
+                        session,
+                        memory,
+                        opts,
+                        total_usage,
+                        iteration,
+                        parsed_directives,
+                        decision_traces,
+                        memories_used.clone(),
+                        experiment_context.clone(),
+                        new_messages_start,
+                    )
+                    .await;
                 }
 
                 match classify_end_turn_retry(EndTurnRetryContext {
@@ -4480,7 +4559,7 @@ pub async fn run_agent_loop(
                 // Interim save after tool execution to prevent data loss on crash.
                 // Skipped for fork and incognito turns — both are ephemeral and
                 // must not pollute the canonical session even on mid-turn crashes.
-                if !opts.is_fork && !opts.incognito {
+                if opts.persists_session() {
                     if let Err(e) = memory.save_session_async(session).await {
                         warn!("Failed to interim-save session: {e}");
                     }
@@ -4538,7 +4617,7 @@ pub async fn run_agent_loop(
                         crate::reply_directives::parse_directives(&text);
                     let text = cleaned_text;
                     session.push_message(Message::assistant(&text));
-                    if !opts.is_fork && !opts.incognito {
+                    if opts.persists_session() {
                         if let Err(e) = memory.save_session_async(session).await {
                             warn!("Failed to save session on max continuations: {e}");
                         }
@@ -4612,7 +4691,7 @@ pub async fn run_agent_loop(
                     "LLM response blocked by provider safety / content filter"
                 );
                 session.push_message(Message::assistant(&partial));
-                if !opts.is_fork && !opts.incognito {
+                if opts.persists_session() {
                     if let Err(e) = memory.save_session_async(session).await {
                         warn!("Failed to save session on content filter: {e}");
                     }
@@ -4626,7 +4705,7 @@ pub async fn run_agent_loop(
     // Fork and incognito turns skip — both are ephemeral and must not
     // pollute canonical session history even when the loop bailed out.
     repair_session_before_save(session, agent_id_str.as_str(), "max_iterations");
-    if !opts.is_fork && !opts.incognito {
+    if opts.persists_session() {
         if let Err(e) = memory.save_session_async(session).await {
             warn!("Failed to save session on max iterations: {e}");
         }
@@ -5607,7 +5686,7 @@ pub async fn run_agent_loop_streaming(
                     );
                     session.push_message(Message::assistant(note));
                     repair_session_before_save(session, agent_id_str.as_str(), "streaming_timeout");
-                    if !opts.is_fork && !opts.incognito {
+                    if opts.persists_session() {
                         if let Err(save_err) = memory.save_session_async(session).await {
                             warn!(
                                 "Failed to persist timeout note to session: {save_err}. \
@@ -5686,24 +5765,19 @@ pub async fn run_agent_loop_streaming(
                         "Agent chose silent completion"
                     );
                     debug!(agent = %manifest.name, "Agent chose NO_REPLY/silent (streaming) — silent completion");
-                    session
-                        .messages
-                        .push(Message::assistant("[no reply needed]".to_string()));
-                    if !opts.is_fork && !opts.incognito {
-                        memory
-                            .save_session_async(session)
-                            .await
-                            .map_err(LibreFangError::memory)?;
-                    }
-                    return Ok(build_silent_agent_loop_result(
+                    return silent_drop(
+                        session,
+                        memory,
+                        opts,
                         total_usage,
-                        iteration + 1,
+                        iteration,
                         parsed_directives_s,
                         decision_traces,
                         memories_used.clone(),
                         experiment_context.clone(),
                         new_messages_start,
-                    ));
+                    )
+                    .await;
                 }
 
                 // Progress-text-leak guard (streaming path) — see non-stream
@@ -5718,24 +5792,43 @@ pub async fn run_agent_loop_streaming(
                         text_excerpt = %text.chars().take(80).collect::<String>(),
                         "Progress-text leak detected (streaming, ellipsis-terminated short reply without tool_use) — dropping as silent"
                     );
-                    session
-                        .messages
-                        .push(Message::assistant("[no reply needed]".to_string()));
-                    if !opts.is_fork && !opts.incognito {
-                        memory
-                            .save_session_async(session)
-                            .await
-                            .map_err(LibreFangError::memory)?;
-                    }
-                    return Ok(build_silent_agent_loop_result(
+                    return silent_drop(
+                        session,
+                        memory,
+                        opts,
                         total_usage,
-                        iteration + 1,
+                        iteration,
                         parsed_directives_s,
                         decision_traces,
                         memories_used.clone(),
                         experiment_context.clone(),
                         new_messages_start,
-                    ));
+                    )
+                    .await;
+                }
+
+                if crate::silent_response::is_prompt_leak(&text) {
+                    warn!(
+                        event = "system_prompt_regurgitated",
+                        agent = %manifest.name,
+                        source = "agent_loop.streaming",
+                        text_len = text.len(),
+                        text_excerpt = %text.chars().take(120).collect::<String>(),
+                        "System-prompt regurgitation detected (streaming) — dropping as silent"
+                    );
+                    return silent_drop(
+                        session,
+                        memory,
+                        opts,
+                        total_usage,
+                        iteration,
+                        parsed_directives_s,
+                        decision_traces,
+                        memories_used.clone(),
+                        experiment_context.clone(),
+                        new_messages_start,
+                    )
+                    .await;
                 }
 
                 match classify_end_turn_retry(EndTurnRetryContext {
@@ -6056,7 +6149,7 @@ pub async fn run_agent_loop_streaming(
                     iteration_outcomes.accumulate(staged.commit(session, &mut messages));
                 }
 
-                if !opts.is_fork && !opts.incognito {
+                if opts.persists_session() {
                     if let Err(e) = memory.save_session_async(session).await {
                         warn!("Failed to interim-save session: {e}");
                     }
@@ -6108,7 +6201,7 @@ pub async fn run_agent_loop_streaming(
                         crate::reply_directives::parse_directives(&text);
                     let text = cleaned_text;
                     session.push_message(Message::assistant(&text));
-                    if !opts.is_fork && !opts.incognito {
+                    if opts.persists_session() {
                         if let Err(e) = memory.save_session_async(session).await {
                             warn!("Failed to save session on max continuations: {e}");
                         }
@@ -6180,7 +6273,7 @@ pub async fn run_agent_loop_streaming(
                     "LLM response blocked by provider safety / content filter (streaming)"
                 );
                 session.push_message(Message::assistant(&partial));
-                if !opts.is_fork && !opts.incognito {
+                if opts.persists_session() {
                     if let Err(e) = memory.save_session_async(session).await {
                         warn!("Failed to save session on content filter: {e}");
                     }
@@ -6192,7 +6285,7 @@ pub async fn run_agent_loop_streaming(
     }
 
     repair_session_before_save(session, agent_id_str.as_str(), "streaming_max_iterations");
-    if !opts.is_fork && !opts.incognito {
+    if opts.persists_session() {
         if let Err(e) = memory.save_session_async(session).await {
             warn!("Failed to save session on max iterations: {e}");
         }
@@ -7048,6 +7141,7 @@ fn try_parse_bare_json_tool_call(
 mod tests {
     use super::*;
     use crate::llm_driver::{CompletionResponse, LlmError};
+    use crate::silent_response::is_prompt_leak;
     use async_trait::async_trait;
     use librefang_memory::session::SessionStore;
     use librefang_types::tool::ToolCall;
@@ -7464,6 +7558,52 @@ mod tests {
         assert!(!looks_like_hallucinated_action(
             "Non ho fatto in tempo a chiamarti."
         ));
+    }
+
+    #[test]
+    fn template_wrapped_response_is_dropped() {
+        // Whole-message <answer>/<response>/<reply> wrap is a model
+        // artifact when it gets confused about output format — never a
+        // legitimate reply shape.
+        assert!(is_prompt_leak(
+            "<answer>\nUser asked: foo\nI responded: bar\n</answer>"
+        ));
+        assert!(is_prompt_leak("<response>some content</response>"));
+        assert!(is_prompt_leak("<reply>x</reply>"));
+        // Whitespace tolerance.
+        assert!(is_prompt_leak("  <answer>x</answer>  "));
+    }
+
+    #[test]
+    fn multiple_prompt_keyword_headers_are_dropped() {
+        // System prompts emit `## ` headers from a fixed keyword set
+        // (`silent_response::PROMPT_LEAK_HEADER_KEYWORDS`). Real replies
+        // virtually never stack two such section names back-to-back, so
+        // the threshold is two keyword-matching H2 headers (one is left
+        // deliverable for the genuine "## Tasks: …" reply pattern).
+        let dump = "## Sender\nMessage from: X\n## Today\nWednesday\n## Calendar\nNo events.\n## Tasks\npending\n";
+        assert!(is_prompt_leak(dump));
+        // Threshold pin: exactly two keyword-matching headers must trip.
+        assert!(is_prompt_leak("## Sender\nx\n## Calendar\ny"));
+    }
+
+    #[test]
+    fn plain_reply_with_at_most_two_h2_headers_is_delivered() {
+        // Short replies with one or two genuine subheadings must stay
+        // deliverable.
+        assert!(!is_prompt_leak(""));
+        assert!(!is_prompt_leak("Subito, Signore."));
+        assert!(!is_prompt_leak("Ho registrato la spesa."));
+        assert!(!is_prompt_leak("## Update\nFatto."));
+        assert!(!is_prompt_leak("## Update\nFatto.\n## Next\nProseguo."));
+    }
+
+    #[test]
+    fn unwrapped_angle_bracket_tag_is_delivered() {
+        // A `<answer>` mention without a matching close tag is real
+        // content (the model is explaining or quoting), not a wrap.
+        assert!(!is_prompt_leak("<answer> is a literal tag I'm explaining"));
+        assert!(!is_prompt_leak("Use the <answer> element here"));
     }
 
     #[test]
@@ -12835,6 +12975,71 @@ mod tests {
             "in-memory session must still contain user msg + assistant reply (only the \
              SQLite write is suppressed) — got {} msgs",
             session.messages.len(),
+        );
+    }
+
+    // -------- silent_drop persistence gate --------
+
+    async fn run_silent_drop(opts: LoopOptions) -> Option<librefang_memory::session::Session> {
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let mut session = fresh_session();
+        let session_id = session.id;
+        silent_drop(
+            &mut session,
+            &memory,
+            &opts,
+            TokenUsage::default(),
+            0,
+            crate::reply_directives::DirectiveSet::default(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            0,
+        )
+        .await
+        .expect("silent_drop must succeed");
+        // Marker must always land in the in-memory session regardless of
+        // persistence.
+        let Some(librefang_types::message::MessageContent::Text(t)) =
+            session.messages.last().map(|m| &m.content)
+        else {
+            panic!("silent_drop must append the [no reply needed] marker");
+        };
+        assert_eq!(t.as_str(), "[no reply needed]");
+        memory.get_session(session_id).unwrap()
+    }
+
+    #[tokio::test]
+    async fn silent_drop_persists_on_normal_turn() {
+        assert!(
+            run_silent_drop(LoopOptions::default()).await.is_some(),
+            "normal turn must persist to SQLite"
+        );
+    }
+
+    #[tokio::test]
+    async fn silent_drop_skips_persistence_on_fork() {
+        assert!(
+            run_silent_drop(LoopOptions {
+                is_fork: true,
+                ..Default::default()
+            })
+            .await
+            .is_none(),
+            "fork turns must NOT persist (ephemeral by contract)"
+        );
+    }
+
+    #[tokio::test]
+    async fn silent_drop_skips_persistence_on_incognito() {
+        assert!(
+            run_silent_drop(LoopOptions {
+                incognito: true,
+                ..Default::default()
+            })
+            .await
+            .is_none(),
+            "incognito turns must NOT persist (no-trace invariant)"
         );
     }
 }
