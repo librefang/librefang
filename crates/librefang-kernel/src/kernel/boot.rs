@@ -1211,6 +1211,9 @@ impl LibreFangKernel {
             );
         }
 
+        // Extract before config is moved into ArcSwap.
+        let wf_default_total_timeout = config.workflow_default_total_timeout_secs;
+
         let kernel = Self {
             home_dir_boot: config.home_dir.clone(),
             data_dir_boot: config.data_dir.clone(),
@@ -1223,10 +1226,14 @@ impl LibreFangKernel {
                 wiki_vault.clone(),
             ),
             workflows: crate::kernel::subsystems::WorkflowSubsystem::new(
-                WorkflowEngine::new_with_store(
-                    librefang_memory::WorkflowStore::new(memory.pool()),
-                    &workflow_home_dir,
-                ),
+                {
+                    let mut wf_engine = WorkflowEngine::new_with_store(
+                        librefang_memory::WorkflowStore::new(memory.pool()),
+                        &workflow_home_dir,
+                    );
+                    wf_engine.default_total_timeout_secs = wf_default_total_timeout;
+                    wf_engine
+                },
                 trigger_engine,
                 background,
                 cron_scheduler,

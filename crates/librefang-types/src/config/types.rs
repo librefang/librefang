@@ -3153,6 +3153,13 @@ pub struct KernelConfig {
     /// Default: `60` minutes.
     #[serde(default = "default_workflow_stale_timeout_minutes")]
     pub workflow_stale_timeout_minutes: u64,
+    /// Default wall-clock timeout (seconds) for an entire workflow run.
+    ///
+    /// Individual workflows can override this via `Workflow::total_timeout_secs`.
+    /// When both are `None` the workflow runs unbounded (no total timeout).
+    /// Default: `None` (unbounded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_default_total_timeout_secs: Option<u64>,
 }
 
 /// Input sanitization mode for channel messages.
@@ -5105,6 +5112,7 @@ impl Default for KernelConfig {
             parallel_tools: ParallelToolsConfig::default(),
             tool_results: ToolResultsConfig::default(),
             workflow_stale_timeout_minutes: default_workflow_stale_timeout_minutes(),
+            workflow_default_total_timeout_secs: None,
         }
     }
 }

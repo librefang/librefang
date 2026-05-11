@@ -85,6 +85,12 @@ pub struct Workflow {
     /// Optional canvas layout data (nodes, edges, positions) for the visual editor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<serde_json::Value>,
+    /// Maximum wall-clock time for the entire workflow run, in seconds.
+    /// `None` means fall back to the kernel-level default
+    /// (`KernelConfig::workflow_default_total_timeout_secs`). When that is
+    /// also `None` the workflow runs unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_timeout_secs: Option<u64>,
 }
 
 /// A single step in a workflow.
@@ -162,7 +168,22 @@ pub enum ErrorMode {
     /// Skip this step on error and continue.
     Skip,
     /// Retry the step up to N times before failing.
-    Retry { max_retries: u32 },
+    ///
+    /// `backoff_ms`: base delay in milliseconds before attempt 2 (doubled each
+    /// attempt, capped at 60 000 ms). `None` preserves the historical
+    /// immediate-retry behaviour.
+    ///
+    /// `jitter_pct`: if set, the backoff is perturbed by ±`jitter_pct`%
+    /// (clamped to 0–100) using a uniform random draw. `None` means no
+    /// jitter. Both fields default to `None` so old persisted workflows
+    /// (`{"retry": {"max_retries": 3}}`) deserialize cleanly.
+    Retry {
+        max_retries: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backoff_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        jitter_pct: Option<u8>,
+    },
 }
 
 /// The current state of a workflow run.
@@ -193,6 +214,8 @@ pub enum WorkflowRunState {
     },
     Completed,
     Failed,
+    /// The run was explicitly cancelled via [`WorkflowEngine::cancel_run`].
+    Cancelled,
 }
 
 impl WorkflowRunState {
@@ -358,6 +381,10 @@ pub struct WorkflowEngine {
     /// through SQLite instead of the JSON file. The JSON path is still
     /// kept for the one-time migration (`migrate_from_json`).
     store: Option<WorkflowStore>,
+    /// Kernel-level default total timeout for workflow runs (seconds).
+    /// Individual workflows can override this via `Workflow::total_timeout_secs`.
+    /// `None` means unbounded.
+    pub default_total_timeout_secs: Option<u64>,
 }
 
 /// Evaluate a conditional expression against the previous step output.
@@ -519,6 +546,57 @@ fn classify_backoff(err: &str, attempt: u32) -> std::time::Duration {
     std::time::Duration::from_secs(2u64.saturating_pow(attempt).min(60))
 }
 
+/// Compute the sleep duration between retry attempts.
+///
+/// Resolution order:
+/// 1. If `backoff_ms` is `Some(b)`, the base delay is `b * 2^attempt`
+///    (exponential doubling), capped at 60 000 ms.
+///    Optional `jitter_pct` (0–100) perturbs the base by ±j% using a
+///    uniform random draw so simultaneous retries of multiple steps do not
+///    all pile up at the same instant.
+/// 2. If `backoff_ms` is `None`, fall through to `classify_backoff` which
+///    handles rate-limit hints and the historical exponential default.
+fn compute_retry_backoff(
+    err: &str,
+    attempt: u32,
+    backoff_ms: Option<u64>,
+    jitter_pct: Option<u8>,
+) -> std::time::Duration {
+    const MAX_BACKOFF_MS: u64 = 60_000;
+
+    if let Some(base_ms) = backoff_ms {
+        // Exponential: base * 2^attempt, capped.
+        let raw_ms = base_ms
+            .saturating_mul(2u64.saturating_pow(attempt))
+            .min(MAX_BACKOFF_MS);
+
+        let final_ms = if let Some(pct) = jitter_pct {
+            // Apply ±pct% jitter. Clamp pct to [0, 100].
+            let pct_clamped = pct.min(100) as u64;
+            let delta = raw_ms.saturating_mul(pct_clamped) / 100;
+            if delta == 0 {
+                raw_ms
+            } else {
+                // Draw a uniform value in [0, 2*delta] and subtract delta to get
+                // a value in [-delta, +delta] relative to raw_ms.
+                let range = delta.saturating_mul(2).saturating_add(1);
+                let jitter = rand::random::<u64>() % range;
+                raw_ms
+                    .saturating_add(jitter)
+                    .saturating_sub(delta)
+                    .min(MAX_BACKOFF_MS)
+            }
+        } else {
+            raw_ms
+        };
+
+        std::time::Duration::from_millis(final_ms)
+    } else {
+        // No configured backoff — use the existing classifier.
+        classify_backoff(err, attempt)
+    }
+}
+
 impl WorkflowEngine {
     /// Create a new workflow engine (no persistence).
     pub fn new() -> Self {
@@ -528,6 +606,7 @@ impl WorkflowEngine {
             persist_path: None,
             persist_lock: Arc::new(std::sync::Mutex::new(())),
             store: None,
+            default_total_timeout_secs: None,
         }
     }
 
@@ -541,6 +620,7 @@ impl WorkflowEngine {
             persist_path: Some(home_dir.join("data").join("workflow_runs.json")),
             persist_lock: Arc::new(std::sync::Mutex::new(())),
             store: None,
+            default_total_timeout_secs: None,
         }
     }
 
@@ -556,6 +636,7 @@ impl WorkflowEngine {
             persist_path: Some(home_dir.join("data").join("workflow_runs.json")),
             persist_lock: Arc::new(std::sync::Mutex::new(())),
             store: Some(store),
+            default_total_timeout_secs: None,
         }
     }
 
@@ -1142,6 +1223,7 @@ impl WorkflowEngine {
                         "running" => matches!(r.state, WorkflowRunState::Running),
                         "completed" => matches!(r.state, WorkflowRunState::Completed),
                         "failed" => matches!(r.state, WorkflowRunState::Failed),
+                        "cancelled" => matches!(r.state, WorkflowRunState::Cancelled),
                         _ => true,
                     })
                     .unwrap_or(true)
@@ -1243,7 +1325,11 @@ impl WorkflowEngine {
                     }
                 }
             }
-            ErrorMode::Retry { max_retries } => {
+            ErrorMode::Retry {
+                max_retries,
+                backoff_ms,
+                jitter_pct,
+            } => {
                 let mut last_err = String::new();
                 for attempt in 0..=*max_retries {
                     match tokio::time::timeout(timeout_dur, send_message(agent_id, prompt.clone()))
@@ -1253,27 +1339,37 @@ impl WorkflowEngine {
                         Ok(Err(e)) => {
                             last_err = e.to_string();
                             if attempt < *max_retries {
-                                let backoff = classify_backoff(&last_err, attempt);
+                                let sleep_dur = compute_retry_backoff(
+                                    &last_err,
+                                    attempt,
+                                    *backoff_ms,
+                                    *jitter_pct,
+                                );
                                 warn!(
                                     "Step '{}' attempt {} failed: {e}, retrying in {:?}",
                                     step.name,
                                     attempt + 1,
-                                    backoff
+                                    sleep_dur
                                 );
-                                tokio::time::sleep(backoff).await;
+                                tokio::time::sleep(sleep_dur).await;
                             }
                         }
                         Err(_) => {
                             last_err = format!("timed out after {}s", step.timeout_secs);
                             if attempt < *max_retries {
-                                let backoff = classify_backoff(&last_err, attempt);
+                                let sleep_dur = compute_retry_backoff(
+                                    &last_err,
+                                    attempt,
+                                    *backoff_ms,
+                                    *jitter_pct,
+                                );
                                 warn!(
                                     "Step '{}' attempt {} timed out, retrying in {:?}",
                                     step.name,
                                     attempt + 1,
-                                    backoff
+                                    sleep_dur
                                 );
-                                tokio::time::sleep(backoff).await;
+                                tokio::time::sleep(sleep_dur).await;
                             }
                         }
                     }
@@ -1412,7 +1508,9 @@ impl WorkflowEngine {
                 run.pause_request.as_ref().map(|r| r.resume_token)
             }
             WorkflowRunState::Paused { resume_token, .. } => return Ok(*resume_token),
-            WorkflowRunState::Completed | WorkflowRunState::Failed => {
+            WorkflowRunState::Completed
+            | WorkflowRunState::Failed
+            | WorkflowRunState::Cancelled => {
                 return Err(format!(
                     "Cannot pause workflow run {run_id}: state is terminal"
                 ))
@@ -1427,6 +1525,76 @@ impl WorkflowEngine {
             resume_token: token,
         });
         Ok(token)
+    }
+
+    /// Cancel a workflow run.
+    ///
+    /// Transitions `Pending`, `Running`, or `Paused` runs to
+    /// [`WorkflowRunState::Cancelled`] atomically under the DashMap shard
+    /// guard and persists the change immediately so a crash after this call
+    /// does not revert the run to a non-terminal state on restart.
+    ///
+    /// Returns `Err` if the run is not found or is already in a terminal
+    /// state (`Completed`, `Failed`, or `Cancelled`).
+    ///
+    /// The executor observes cancellation at every step boundary: it peeks
+    /// the run state at the top of each iteration and exits early if it
+    /// finds `Cancelled`.
+    pub async fn cancel_run(&self, run_id: WorkflowRunId) -> Result<(), String> {
+        let already_paused = {
+            let mut run = self
+                .runs
+                .get_mut(&run_id)
+                .ok_or_else(|| format!("Workflow run not found: {run_id}"))?;
+            match &run.state {
+                WorkflowRunState::Pending
+                | WorkflowRunState::Running
+                | WorkflowRunState::Paused { .. } => {
+                    let was_paused = run.state.is_paused();
+                    run.state = WorkflowRunState::Cancelled;
+                    run.completed_at = Some(Utc::now());
+                    // Clear any pending pause request so the executor cannot
+                    // re-pause a cancelled run.
+                    run.pause_request = None;
+                    was_paused
+                }
+                WorkflowRunState::Completed => {
+                    return Err(format!(
+                        "Cannot cancel workflow run {run_id}: already completed"
+                    ))
+                }
+                WorkflowRunState::Failed => {
+                    return Err(format!(
+                        "Cannot cancel workflow run {run_id}: already failed"
+                    ))
+                }
+                WorkflowRunState::Cancelled => {
+                    return Err(format!(
+                        "Cannot cancel workflow run {run_id}: already cancelled"
+                    ))
+                }
+            }
+            // shard guard dropped here
+        };
+
+        // Clear pause snapshot outside the shard guard (clear_pause_state
+        // takes a separate get_mut).
+        if already_paused {
+            if let Some(mut run) = self.runs.get_mut(&run_id) {
+                run.clear_pause_state();
+            }
+        }
+
+        // Persist immediately so a restart does not revert to Running/Pending.
+        if let Some(run) = self.runs.get(&run_id) {
+            self.upsert_run_to_store(&run);
+        }
+        if let Err(e) = self.persist_runs_async().await {
+            warn!(run_id = %run_id, error = %e, "Failed to persist cancelled run state");
+        }
+
+        info!(run_id = %run_id, "Workflow run cancelled");
+        Ok(())
     }
 
     /// Resume a paused workflow run from where it stopped.
@@ -1571,15 +1739,50 @@ impl WorkflowEngine {
             "Starting workflow execution"
         );
 
+        // Resolve total-timeout: workflow field wins over kernel default.
+        let total_timeout = workflow
+            .total_timeout_secs
+            .or(self.default_total_timeout_secs);
+
         // Check if any step has non-empty depends_on — if so, use DAG execution
         let has_dag_deps = workflow.steps.iter().any(|s| !s.depends_on.is_empty());
-        let result = if has_dag_deps {
-            self.execute_run_dag(run_id, &workflow, &input, &agent_resolver, &send_message)
+
+        let inner_fut = async {
+            if has_dag_deps {
+                self.execute_run_dag(run_id, &workflow, &input, &agent_resolver, &send_message)
+                    .await
+            } else {
+                self.execute_run_sequential(
+                    run_id,
+                    &workflow,
+                    &input,
+                    &agent_resolver,
+                    &send_message,
+                )
                 .await
-        } else {
-            self.execute_run_sequential(run_id, &workflow, &input, &agent_resolver, &send_message)
-                .await
+            }
         };
+
+        let result = if let Some(secs) = total_timeout {
+            match tokio::time::timeout(std::time::Duration::from_secs(secs), inner_fut).await {
+                Ok(r) => r,
+                Err(_elapsed) => {
+                    let msg = format!("workflow exceeded total_timeout of {secs}s");
+                    // Only overwrite state if not already Cancelled.
+                    if let Some(mut run) = self.runs.get_mut(&run_id) {
+                        if !matches!(run.state, WorkflowRunState::Cancelled) {
+                            run.state = WorkflowRunState::Failed;
+                            run.error = Some(msg.clone());
+                            run.completed_at = Some(Utc::now());
+                        }
+                    }
+                    Err(msg)
+                }
+            }
+        } else {
+            inner_fut.await
+        };
+
         self.cleanup_terminal_pause_state(run_id).await;
         // Surface persist panics instead of swallowing them (#3753).
         if let Err(persist_err) = self.persist_runs_async().await {
@@ -1602,7 +1805,9 @@ impl WorkflowEngine {
         if let Some(mut run) = self.runs.get_mut(&run_id) {
             if matches!(
                 run.state,
-                WorkflowRunState::Completed | WorkflowRunState::Failed
+                WorkflowRunState::Completed
+                    | WorkflowRunState::Failed
+                    | WorkflowRunState::Cancelled
             ) {
                 run.clear_pause_state();
             }
@@ -1708,6 +1913,20 @@ impl WorkflowEngine {
                 return Ok(current_input);
             }
 
+            // Cancellation gate — checked after the pause gate so a
+            // concurrent cancel_run() is always observable at every step
+            // boundary. `cancel_run` already set state=Cancelled; we just
+            // need to exit the loop cleanly without overwriting that state.
+            if self
+                .runs
+                .get(&run_id)
+                .map(|r| matches!(r.state, WorkflowRunState::Cancelled))
+                .unwrap_or(false)
+            {
+                info!(run_id = %run_id, step = i, "Workflow run cancelled at step boundary");
+                return Err("workflow run cancelled".into());
+            }
+
             let step = &workflow.steps[i];
 
             debug!(
@@ -1776,9 +1995,11 @@ impl WorkflowEngine {
                         }
                         Err(e) => {
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
-                                r.state = WorkflowRunState::Failed;
-                                r.error = Some(e.clone());
-                                r.completed_at = Some(Utc::now());
+                                if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                    r.state = WorkflowRunState::Failed;
+                                    r.error = Some(e.clone());
+                                    r.completed_at = Some(Utc::now());
+                                }
                             }
                             return Err(e);
                         }
@@ -1872,9 +2093,11 @@ impl WorkflowEngine {
                                     format!("FanOut step '{}' failed: {}", step_name, e);
                                 warn!(%error_msg);
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
-                                    r.state = WorkflowRunState::Failed;
-                                    r.error = Some(error_msg.clone());
-                                    r.completed_at = Some(Utc::now());
+                                    if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                        r.state = WorkflowRunState::Failed;
+                                        r.error = Some(error_msg.clone());
+                                        r.completed_at = Some(Utc::now());
+                                    }
                                 }
                                 return Err(error_msg);
                             }
@@ -1885,9 +2108,11 @@ impl WorkflowEngine {
                                 );
                                 warn!(%error_msg);
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
-                                    r.state = WorkflowRunState::Failed;
-                                    r.error = Some(error_msg.clone());
-                                    r.completed_at = Some(Utc::now());
+                                    if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                        r.state = WorkflowRunState::Failed;
+                                        r.error = Some(error_msg.clone());
+                                        r.completed_at = Some(Utc::now());
+                                    }
                                 }
                                 return Err(error_msg);
                             }
@@ -2009,9 +2234,11 @@ impl WorkflowEngine {
                         Ok(None) => {}
                         Err(e) => {
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
-                                r.state = WorkflowRunState::Failed;
-                                r.error = Some(e.clone());
-                                r.completed_at = Some(Utc::now());
+                                if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                    r.state = WorkflowRunState::Failed;
+                                    r.error = Some(e.clone());
+                                    r.completed_at = Some(Utc::now());
+                                }
                             }
                             return Err(e);
                         }
@@ -2098,9 +2325,11 @@ impl WorkflowEngine {
                             Ok(None) => break,
                             Err(e) => {
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
-                                    r.state = WorkflowRunState::Failed;
-                                    r.error = Some(e.clone());
-                                    r.completed_at = Some(Utc::now());
+                                    if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                        r.state = WorkflowRunState::Failed;
+                                        r.error = Some(e.clone());
+                                        r.completed_at = Some(Utc::now());
+                                    }
                                 }
                                 return Err(e);
                             }
@@ -2674,6 +2903,7 @@ impl From<WorkflowFile> for Workflow {
             steps: f.steps,
             created_at: f.created_at.unwrap_or_else(Utc::now),
             layout: None,
+            total_timeout_secs: None,
         }
     }
 }
@@ -3058,6 +3288,7 @@ impl WorkflowTemplateRegistry {
             steps,
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         })
     }
 }
@@ -3089,6 +3320,7 @@ fn workflow_run_to_row(run: &WorkflowRun) -> WorkflowRunRow {
         ),
         WorkflowRunState::Completed => ("completed".to_string(), None, None, None),
         WorkflowRunState::Failed => ("failed".to_string(), None, None, None),
+        WorkflowRunState::Cancelled => ("cancelled".to_string(), None, None, None),
     };
 
     let step_results_json =
@@ -3261,6 +3493,7 @@ mod tests {
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         }
     }
 
@@ -3385,6 +3618,7 @@ mod tests {
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -3442,6 +3676,7 @@ mod tests {
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -3484,6 +3719,7 @@ mod tests {
             }],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "draft".to_string()).await.unwrap();
@@ -3533,6 +3769,7 @@ mod tests {
             }],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -3585,6 +3822,7 @@ mod tests {
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -3627,13 +3865,18 @@ mod tests {
                 prompt_template: "{{input}}".to_string(),
                 mode: StepMode::Sequential,
                 timeout_secs: 10,
-                error_mode: ErrorMode::Retry { max_retries: 2 },
+                error_mode: ErrorMode::Retry {
+                    max_retries: 2,
+                    backoff_ms: None,
+                    jitter_pct: None,
+                },
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
             }],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -3709,6 +3952,7 @@ mod tests {
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "start".to_string()).await.unwrap();
@@ -3785,6 +4029,7 @@ mod tests {
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -3824,9 +4069,14 @@ mod tests {
         let skip_json = serde_json::to_string(&ErrorMode::Skip).unwrap();
         assert_eq!(skip_json, "\"skip\"");
 
-        let retry_json = serde_json::to_string(&ErrorMode::Retry { max_retries: 3 }).unwrap();
+        let retry_json = serde_json::to_string(&ErrorMode::Retry {
+            max_retries: 3,
+            backoff_ms: None,
+            jitter_pct: None,
+        })
+        .unwrap();
         let retry: ErrorMode = serde_json::from_str(&retry_json).unwrap();
-        assert!(matches!(retry, ErrorMode::Retry { max_retries: 3 }));
+        assert!(matches!(retry, ErrorMode::Retry { max_retries: 3, .. }));
     }
 
     #[tokio::test]
@@ -4282,6 +4532,7 @@ prompt_template = "do {{x}}"
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -4415,6 +4666,7 @@ prompt_template = "do {{x}}"
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -4688,6 +4940,7 @@ prompt_template = "do {{x}}"
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
 
         let template = WorkflowEngine::workflow_to_template(&workflow);
@@ -4738,6 +4991,7 @@ prompt_template = "do {{x}}"
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -5417,6 +5671,7 @@ prompt_template = "do {{x}}"
             ],
             created_at: Utc::now(),
             layout: None,
+            total_timeout_secs: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();

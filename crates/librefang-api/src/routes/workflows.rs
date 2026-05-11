@@ -58,6 +58,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/workflows/runs/{run_id}",
             axum::routing::get(get_workflow_run),
         )
+        .route(
+            "/workflows/runs/{run_id}/cancel",
+            axum::routing::post(cancel_workflow_run),
+        )
         // Workflow templates (distinct from the agent templates in system.rs)
         .route(
             "/workflow-templates",
@@ -141,6 +145,7 @@ fn workflow_to_json(w: &Workflow) -> serde_json::Value {
         }).collect::<Vec<_>>(),
         "created_at": w.created_at.to_rfc3339(),
         "layout": w.layout,
+        "total_timeout_secs": w.total_timeout_secs,
     })
 }
 
@@ -272,6 +277,10 @@ fn parse_error_mode(val: &serde_json::Value, step: &serde_json::Value) -> ErrorM
                     .as_u64()
                     .and_then(|v| u32::try_from(v).ok())
                     .unwrap_or(3),
+                backoff_ms: step["backoff_ms"].as_u64(),
+                jitter_pct: step["jitter_pct"]
+                    .as_u64()
+                    .and_then(|v| u8::try_from(v).ok()),
             },
             _ => ErrorMode::Fail,
         };
@@ -285,6 +294,10 @@ fn parse_error_mode(val: &serde_json::Value, step: &serde_json::Value) -> ErrorM
                     .as_u64()
                     .and_then(|v| u32::try_from(v).ok())
                     .unwrap_or(3),
+                backoff_ms: inner["backoff_ms"].as_u64(),
+                jitter_pct: inner["jitter_pct"]
+                    .as_u64()
+                    .and_then(|v| u8::try_from(v).ok()),
             };
         }
         if obj.contains_key("skip") {
@@ -375,6 +388,7 @@ pub async fn create_workflow(
     }
 
     let layout = req.get("layout").cloned();
+    let total_timeout_secs = req["total_timeout_secs"].as_u64();
 
     let workflow = Workflow {
         id: WorkflowId::new(),
@@ -383,6 +397,7 @@ pub async fn create_workflow(
         steps,
         created_at: chrono::Utc::now(),
         layout,
+        total_timeout_secs,
     };
 
     let id = state.kernel.register_workflow(workflow).await;
@@ -428,7 +443,7 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
         entry.total += 1;
         match &r.state {
             WorkflowRunState::Completed => entry.completed += 1,
-            WorkflowRunState::Failed => entry.failed += 1,
+            WorkflowRunState::Failed | WorkflowRunState::Cancelled => entry.failed += 1,
             _ => {}
         }
         match entry.latest {
@@ -445,6 +460,7 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
             WorkflowRunState::Paused { .. } => "paused",
             WorkflowRunState::Completed => "completed",
             WorkflowRunState::Failed => "failed",
+            WorkflowRunState::Cancelled => "cancelled",
         }
     };
 
@@ -647,6 +663,14 @@ pub async fn update_workflow(
         existing.layout.clone()
     };
 
+    // If the request contains "total_timeout_secs" (even null), use the new
+    // value. If the key is absent, preserve the existing setting.
+    let total_timeout_secs = if req.get("total_timeout_secs").is_some() {
+        req["total_timeout_secs"].as_u64()
+    } else {
+        existing.total_timeout_secs
+    };
+
     let updated = Workflow {
         id: workflow_id,
         name,
@@ -654,6 +678,7 @@ pub async fn update_workflow(
         steps,
         created_at: existing.created_at,
         layout,
+        total_timeout_secs,
     };
 
     if !state
@@ -880,6 +905,65 @@ pub async fn get_workflow_run(
             })),
         ),
         None => ApiErrorResponse::not_found(format!("Run '{run_id}' not found")).into_json_tuple(),
+    }
+}
+
+/// POST /api/workflows/runs/:run_id/cancel — Cancel a workflow run.
+///
+/// Transitions `Pending`, `Running`, or `Paused` runs to `Cancelled`.
+/// Returns 200 with `{"run_id": ..., "state": "cancelled"}` on success,
+/// 404 if the run does not exist, or 409 if the run is already terminal.
+#[utoipa::path(
+    post,
+    path = "/api/workflows/runs/{run_id}/cancel",
+    tag = "workflows",
+    params(("run_id" = String, Path, description = "Workflow run ID")),
+    responses(
+        (status = 200, description = "Run cancelled", body = crate::types::JsonObject),
+        (status = 404, description = "Run not found"),
+        (status = 409, description = "Run already in terminal state")
+    )
+)]
+pub async fn cancel_workflow_run(
+    State(state): State<Arc<AppState>>,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    let run_id = WorkflowRunId(match run_id.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return ApiErrorResponse::bad_request("Invalid run ID").into_json_tuple();
+        }
+    });
+
+    // 404 fast-path: check existence before attempting cancel.
+    if state
+        .kernel
+        .workflow_engine()
+        .get_run(run_id)
+        .await
+        .is_none()
+    {
+        return ApiErrorResponse::not_found(format!("Run '{run_id}' not found")).into_json_tuple();
+    }
+
+    match state.kernel.workflow_engine().cancel_run(run_id).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "run_id": run_id.to_string(),
+                "state": "cancelled",
+            })),
+        ),
+        Err(e) => {
+            // cancel_run returns Err only for terminal-state conflicts.
+            (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "conflict",
+                    "message": e,
+                })),
+            )
+        }
     }
 }
 
@@ -2586,7 +2670,7 @@ mod tests {
         let step = json!({"max_retries": 7});
         let mode = parse_error_mode(&json!("retry"), &step);
         match mode {
-            ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 7),
+            ErrorMode::Retry { max_retries, .. } => assert_eq!(max_retries, 7),
             other => panic!("expected Retry, got {other:?}"),
         }
     }
@@ -2595,7 +2679,7 @@ mod tests {
     fn error_mode_flat_retry_missing_max_retries() {
         let mode = parse_error_mode(&json!("retry"), &json!({}));
         match mode {
-            ErrorMode::Retry { max_retries } => {
+            ErrorMode::Retry { max_retries, .. } => {
                 assert_eq!(max_retries, 3, "should default to 3");
             }
             other => panic!("expected Retry, got {other:?}"),
@@ -2607,7 +2691,7 @@ mod tests {
         let step = json!({"max_retries": u64::MAX});
         let mode = parse_error_mode(&json!("retry"), &step);
         match mode {
-            ErrorMode::Retry { max_retries } => {
+            ErrorMode::Retry { max_retries, .. } => {
                 assert_eq!(max_retries, 3, "should fall back to 3 on u32 overflow");
             }
             other => panic!("expected Retry, got {other:?}"),
@@ -2625,7 +2709,7 @@ mod tests {
         let val = json!({"retry": {"max_retries": 2}});
         let mode = parse_error_mode(&val, &json!({}));
         match mode {
-            ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 2),
+            ErrorMode::Retry { max_retries, .. } => assert_eq!(max_retries, 2),
             other => panic!("expected Retry, got {other:?}"),
         }
     }
@@ -2635,7 +2719,7 @@ mod tests {
         let val = json!({"retry": {}});
         let mode = parse_error_mode(&val, &json!({}));
         match mode {
-            ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 3),
+            ErrorMode::Retry { max_retries, .. } => assert_eq!(max_retries, 3),
             other => panic!("expected Retry, got {other:?}"),
         }
     }
@@ -2645,7 +2729,7 @@ mod tests {
         let val = json!({"retry": {"max_retries": u64::MAX}});
         let mode = parse_error_mode(&val, &json!({}));
         match mode {
-            ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 3),
+            ErrorMode::Retry { max_retries, .. } => assert_eq!(max_retries, 3),
             other => panic!("expected Retry, got {other:?}"),
         }
     }
