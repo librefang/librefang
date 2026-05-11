@@ -312,6 +312,13 @@ impl LlmMemoryExtractor {
     /// catalog-driven metadata at request-build time (currently the
     /// `reasoning_echo_policy` for #4842). Idempotent — overwrites any
     /// previously installed handle.
+    ///
+    /// **History**: this method existed as a no-op before #4842 (kept for
+    /// backwards compatibility with kernel init which still calls it on
+    /// every extractor it constructs — the previous fork-based extraction
+    /// pathway it once supported was removed because it bypassed JSON
+    /// mode; see `extract_memories_with_agent_id` for details). #4842
+    /// repurposed the slot to actually store the handle.
     pub fn install_kernel_handle(
         &self,
         handle: std::sync::Weak<dyn crate::kernel_handle::KernelHandle>,
