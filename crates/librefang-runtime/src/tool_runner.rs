@@ -128,9 +128,12 @@ fn classify_shell_exec_ro_safety(command: &str, ro_prefix: &str) -> RoSafety {
     // --- 3. Known pure-read verbs -----------------------------------------------
     // These commands cannot write files when invoked normally.
     // `sed` and `awk` have write-enabling flags handled below.
+    // NOTE: `xargs` is intentionally NOT in this list — `xargs rm <path>`
+    // would bypass the gate entirely. Falls through to the conservative
+    // "unrecognised verb → deny" branch.
     const READ_VERBS: &[&str] = &[
         "cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "find", "wc",
-        "diff", "cmp", "file", "stat", "du", "ls", "zcat", "zless", "xargs",
+        "diff", "cmp", "file", "stat", "du", "ls", "zcat", "zless",
     ];
     if READ_VERBS.contains(&verb_base) {
         return RoSafety::Allow;
