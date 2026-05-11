@@ -1598,7 +1598,8 @@ enum MemoryCommands {
     },
     /// Set a KV value.
     #[command(
-        long_about = "Store a key-value pair in an agent's memory.\n\nExamples:\n  librefang memory set coder my-key \"hello world\""
+        alias = "store",
+        long_about = "Store a key-value pair in an agent's memory.\n\nExamples:\n  librefang memory set coder my-key \"hello world\"\n  librefang memory store coder my-key \"hello world\"  # alias for set"
     )]
     Set {
         /// Agent name or ID.

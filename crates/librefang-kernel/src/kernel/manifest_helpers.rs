@@ -967,4 +967,26 @@ system_prompt = "p"
             "standalone agent.toml must not parse as a HandDefinition"
         );
     }
+
+    // Regression guard for #4923: `memory_store` writes keys with peer-scoping
+    // (`peer:{id}:{key}`) when `sender_id` is set, so the prompt-building read
+    // of `user_name` must use the same scoping — otherwise the stored value is
+    // never found and the agent asks for the user's name on every session.
+    #[test]
+    fn peer_scoped_key_matches_write_and_read_paths() {
+        // No peer: key is stored and read unscoped.
+        assert_eq!(peer_scoped_key("user_name", None), "user_name");
+
+        // With peer (e.g. WebUI client IP): both sides must produce the same
+        // scoped key.
+        let write_key = peer_scoped_key("user_name", Some("203.0.113.7"));
+        let read_key = peer_scoped_key("user_name", Some("203.0.113.7"));
+        assert_eq!(write_key, read_key);
+        assert_eq!(write_key, "peer:203.0.113.7:user_name");
+
+        // Empty peer_id must be treated as no peer (same as None) on the read
+        // side, so we filter empty strings before calling peer_scoped_key.
+        let empty_peer: Option<&str> = Some("").filter(|s| !s.is_empty());
+        assert_eq!(peer_scoped_key("user_name", empty_peer), "user_name");
+    }
 }

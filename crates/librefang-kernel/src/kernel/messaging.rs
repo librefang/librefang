@@ -1982,10 +1982,17 @@ impl LibreFangKernel {
             let mcp_tool_count = self.mcp.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
             let stable_prefix_mode = cfg.stable_prefix_mode;
+            // Mirror the peer-scoping applied by `memory_store` on write: use
+            // the sender's user_id as the peer namespace so we read the same key
+            // the agent wrote.  Falls back to the unscoped key for system turns.
+            let peer_id = sender_context
+                .map(|s| s.user_id.as_str())
+                .filter(|s| !s.is_empty());
+            let user_name_key = peer_scoped_key("user_name", peer_id);
             let user_name = self
                 .memory
                 .substrate
-                .structured_get(shared_id, "user_name")
+                .structured_get(shared_id, &user_name_key)
                 .ok()
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
