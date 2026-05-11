@@ -261,12 +261,13 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <DrawerPanel isOpen={true} onClose={onClose} title={t("memory.config_title", { defaultValue: "Memory Configuration" })} size="lg">
-      <p className="text-xs text-text-dim -mt-2 mb-4">{t("memory.config_desc", { defaultValue: "Changes are written to config.toml. Restart required for full effect." })}</p>
+      <div className="p-4 sm:p-6">
+      <p className="text-xs text-text-dim mb-4">{t("memory.config_desc", { defaultValue: "Changes are written to config.toml. Restart required for full effect." })}</p>
 
       {configQuery.isLoading || !form ? (
         <div className="p-6 text-center"><Loader2 className="w-5 h-5 animate-spin mx-auto" /></div>
       ) : (
-        <div className="space-y-4 max-h-[60vh] overflow-y-auto">
+        <div className="space-y-4">
           {/* Embedding */}
           <div>
             <h4 className="text-xs font-bold mb-3">{t("memory.embedding_section", { defaultValue: "Embedding" })}</h4>
@@ -369,6 +370,7 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
           {updateConfig.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : t("common.save")}
         </Button>
         <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
+      </div>
       </div>
     </DrawerPanel>
   );
