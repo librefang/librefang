@@ -163,30 +163,115 @@ impl LibreFangKernel {
         }
     }
 
-    /// Reset an agent's session — auto-saves a summary to memory, then clears messages
-    /// and creates a fresh session ID.
-    pub fn reset_session(&self, agent_id: AgentId) -> KernelResult<()> {
+    /// Reset an agent's session(s) — auto-saves a summary to memory, then
+    /// clears messages and prepares a fresh session.
+    ///
+    /// `scope` chooses between agent-wide and per-session semantics (#4868):
+    ///
+    /// - [`ResetScope::Agent`] — historical behaviour. Saves a summary for
+    ///   every session (default + per-channel + cron-spawned), deletes all
+    ///   rows, creates one fresh registry-pointer session, resets quota.
+    ///   Used by the dashboard / explicit `POST /api/agents/{id}/session/reset`.
+    /// - [`ResetScope::Session(sid)`] — scoped delete. Saves the summary for
+    ///   that one session, deletes only that row + its FTS index + its JSONL
+    ///   mirror, eagerly recreates an empty session at the same deterministic
+    ///   sid (so the channel resolver lands on it on the next inbound
+    ///   message), and leaves all other sessions untouched. Quota is **not**
+    ///   reset (per-channel resets must not give one user a way to clear an
+    ///   agent-wide token-quota state). Used by channel `/new`.
+    pub async fn reset_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<()> {
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
+        match scope {
+            ResetScope::Session(sid) => self.reset_one_session(agent_id, sid, &entry, true).await,
+            ResetScope::Agent => self.reset_all_sessions(agent_id, &entry, true).await,
+        }
+    }
+
+    /// Hard-reboot an agent's session(s) — clears conversation history WITHOUT
+    /// saving a summary to memory. Keeps agent config, system prompt, and
+    /// tools intact. More aggressive than `reset_session` (which auto-saves a
+    /// summary) but less destructive than `clear_agent_history` (which wipes
+    /// the canonical session as well).
+    ///
+    /// `scope` follows the same agent-wide vs. per-session split as
+    /// [`Self::reset_session`] (#4868).
+    pub async fn reboot_session(&self, agent_id: AgentId, scope: ResetScope) -> KernelResult<()> {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+
+        match scope {
+            ResetScope::Session(sid) => self.reset_one_session(agent_id, sid, &entry, false).await,
+            ResetScope::Agent => self.reset_all_sessions(agent_id, &entry, false).await,
+        }
+    }
+
+    /// Implementation of [`ResetScope::Agent`] — wipe every session for this
+    /// agent. `save_summary` distinguishes reset (true) vs. reboot (false).
+    ///
+    /// Lock discipline (#4868 review): `send_message_full` and the streaming
+    /// path acquire EITHER `agent_msg_locks[agent_id]` OR
+    /// `session_msg_locks[sid]` depending on whether the caller supplied a
+    /// `session_id_override` (multi-tab WS / scoped HTTP — #2959). Holding
+    /// just the agent lock would leave a revive-after-delete window for
+    /// any concurrent override-using turn: it could finish its work and
+    /// UPSERT a deleted session row back into existence. So we acquire the
+    /// agent lock, snapshot the live sids under it, then take every
+    /// per-session lock (sorted to keep a deterministic order across
+    /// callers). All guards are held through the delete + recreate.
+    async fn reset_all_sessions(
+        &self,
+        agent_id: AgentId,
+        entry: &AgentEntry,
+        save_summary: bool,
+    ) -> KernelResult<()> {
+        let agent_lock = self
+            .agents
+            .agent_msg_locks
+            .entry(agent_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _agent_guard = agent_lock.lock_owned().await;
+
         // Auto-save session summaries for ALL sessions (default + per-channel)
         // before clearing, so no channel's conversation history is silently lost.
         // Also emit session:end for each active session before deletion.
-        if let Ok(session_ids) = self.memory.substrate.get_agent_session_ids(agent_id) {
-            for sid in session_ids {
-                if let Ok(Some(old_session)) = self.memory.substrate.get_session(sid) {
-                    // Fire session:end before removing the old session.
-                    self.governance.external_hooks.fire(
-                        crate::hooks::ExternalHookEvent::SessionEnd,
-                        serde_json::json!({
-                            "agent_id": agent_id.to_string(),
-                            "session_id": old_session.id.0.to_string(),
-                        }),
-                    );
-                    if old_session.messages.len() >= 2 {
-                        self.save_session_summary(agent_id, &entry, &old_session);
-                    }
+        let mut pre_delete_sids = self
+            .memory
+            .substrate
+            .get_agent_session_ids(agent_id)
+            .unwrap_or_default();
+        // Sort so two concurrent agent-wide resets on different agents that
+        // somehow shared a sid (impossible today — sids hash in agent_id —
+        // but cheap insurance) can never form a deadlock cycle on the
+        // session locks.
+        pre_delete_sids.sort_by_key(|s| s.0);
+        let mut _session_guards: Vec<tokio::sync::OwnedMutexGuard<()>> =
+            Vec::with_capacity(pre_delete_sids.len());
+        for sid in &pre_delete_sids {
+            let lock = self
+                .agents
+                .session_msg_locks
+                .entry(*sid)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            _session_guards.push(lock.lock_owned().await);
+        }
+        for sid in &pre_delete_sids {
+            if let Ok(Some(old_session)) = self.memory.substrate.get_session(*sid) {
+                // Fire session:end before removing the old session.
+                self.governance.external_hooks.fire(
+                    crate::hooks::ExternalHookEvent::SessionEnd,
+                    serde_json::json!({
+                        "agent_id": agent_id.to_string(),
+                        "session_id": old_session.id.0.to_string(),
+                    }),
+                );
+                if save_summary && old_session.messages.len() >= 2 {
+                    self.save_session_summary(agent_id, entry, &old_session);
                 }
             }
         }
@@ -200,6 +285,12 @@ impl LibreFangKernel {
             .substrate
             .delete_agent_sessions(agent_id)
             .map_err(KernelError::LibreFang)?;
+
+        // JSONL mirrors live outside the SQLite transaction (#4868 follow-up).
+        // Best-effort cleanup so deleted sessions don't accumulate as orphan
+        // transcripts on disk. SQLite is the source of truth for the API
+        // surface; a file-system failure here is logged but not fatal.
+        Self::purge_jsonl_files(entry, &pre_delete_sids);
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
@@ -236,98 +327,244 @@ impl LibreFangKernel {
             }),
         );
 
-        info!(agent_id = %agent_id, "Session reset (summary saved to memory)");
+        info!(
+            agent_id = %agent_id,
+            save_summary,
+            op = if save_summary { "reset" } else { "reboot" },
+            "Agent-wide session wipe complete"
+        );
         Ok(())
     }
 
-    /// Hard-reboot an agent's session — clears conversation history WITHOUT saving
-    /// a summary to memory.  Keeps agent config, system prompt, and tools intact.
-    /// More aggressive than `reset_session` (which auto-saves a summary) but less
-    /// destructive than `clear_agent_history` (which wipes ALL sessions).
-    pub fn reboot_session(&self, agent_id: AgentId) -> KernelResult<()> {
-        let _entry = self.agents.registry.get(agent_id).ok_or_else(|| {
-            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
-        })?;
+    /// Implementation of [`ResetScope::Session`] — wipe exactly one session
+    /// (sibling sessions untouched). `save_summary` distinguishes reset
+    /// (true) vs. reboot (false).
+    ///
+    /// The recreated session reuses the same deterministic sid because
+    /// channel session ids are derived via [`SessionId::for_sender_scope`]
+    /// — the next inbound message on that channel will resolve back to the
+    /// same id and we want it to land on a fresh empty session, not a 404.
+    ///
+    /// Lock discipline (#4868 review, lock-race fix): `send_message_full`
+    /// acquires EITHER `agent_msg_locks[agent_id]` OR `session_msg_locks[sid]`
+    /// — never both, branching on `session_id_override`. Without acquiring
+    /// both here, an in-flight turn on either path could finish after the
+    /// delete and UPSERT the row back via `save_session`. We take agent
+    /// then session; no deadlock cycle is possible because
+    /// `send_message_full` only ever holds one of the two, so the second
+    /// lock here is never blocked by a caller already holding the first.
+    ///
+    /// JSONL asymmetry: the recreated empty session is persisted to SQL
+    /// but its `<workspace>/sessions/{sid}.jsonl` mirror is intentionally
+    /// NOT created at reset time — the next inbound turn's
+    /// `write_jsonl_mirror` does it under truncate-create semantics. So
+    /// in the brief gap between reset and the next turn, the directory
+    /// shows the row in SQL with no file; this is the same shape lazy
+    /// session creation produces and is harmless.
+    async fn reset_one_session(
+        &self,
+        agent_id: AgentId,
+        sid: SessionId,
+        entry: &AgentEntry,
+        save_summary: bool,
+    ) -> KernelResult<()> {
+        let agent_lock = self
+            .agents
+            .agent_msg_locks
+            .entry(agent_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _agent_guard = agent_lock.lock().await;
+        let session_lock = self
+            .agents
+            .session_msg_locks
+            .entry(sid)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _session_guard = session_lock.lock().await;
 
-        // Emit session:end for each active session before deletion.
-        if let Ok(session_ids) = self.memory.substrate.get_agent_session_ids(agent_id) {
-            for sid in session_ids {
-                self.governance.external_hooks.fire(
-                    crate::hooks::ExternalHookEvent::SessionEnd,
-                    serde_json::json!({
-                        "agent_id": agent_id.to_string(),
-                        "session_id": sid.0.to_string(),
-                    }),
-                );
+        // Validate ownership: prevent cross-agent reset (callers compute the
+        // sid from a (channel, chat) pair which is trusted but the typed
+        // `SessionId` argument itself isn't — better to fail loudly than to
+        // delete another agent's session because of a wiring bug.
+        let old_session = self
+            .memory
+            .substrate
+            .get_session(sid)
+            .map_err(KernelError::LibreFang)?;
+        if let Some(ref s) = old_session {
+            if s.agent_id != agent_id {
+                return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                    format!("session {sid} does not belong to agent {agent_id}"),
+                )));
             }
         }
 
-        // Delete ALL sessions for this agent (default + per-channel).
-        // Propagate so a failed reboot is visible instead of silently
-        // leaving the old history in place (#3470).
-        self.memory
-            .substrate
-            .delete_agent_sessions(agent_id)
-            .map_err(KernelError::LibreFang)?;
+        // Fire SessionEnd + save summary only when the session actually
+        // existed (no point summarising a never-touched per-channel sid).
+        if let Some(ref s) = old_session {
+            self.governance.external_hooks.fire(
+                crate::hooks::ExternalHookEvent::SessionEnd,
+                serde_json::json!({
+                    "agent_id": agent_id.to_string(),
+                    "session_id": s.id.0.to_string(),
+                }),
+            );
+            if save_summary && s.messages.len() >= 2 {
+                self.save_session_summary(agent_id, entry, s);
+            }
 
-        // Create a fresh session
-        let new_session = self
-            .memory
-            .substrate
-            .create_session(agent_id)
-            .map_err(KernelError::LibreFang)?;
+            // Delete the SQL row + FTS index transactionally. Skip when the
+            // session never existed — `delete_session` would just no-op.
+            self.memory
+                .substrate
+                .delete_session(sid)
+                .map_err(KernelError::LibreFang)?;
 
-        // Update registry with new session ID
-        self.agents
-            .registry
-            .update_session_id(agent_id, new_session.id)
-            .map_err(KernelError::LibreFang)?;
+            // Best-effort JSONL cleanup (see `reset_all_sessions` for rationale).
+            Self::purge_jsonl_files(entry, std::slice::from_ref(&sid));
+        }
 
-        // Reset quota tracking
-        self.agents.scheduler.reset_usage(agent_id);
+        // Eagerly recreate an empty session at the SAME deterministic sid.
+        // Without this, the next channel inbound would lazily materialise an
+        // empty session inside the agent loop — but external SessionStart /
+        // SessionReset hooks would never fire for that lazy creation, so
+        // hook subscribers would see an asymmetric "End without Start".
+        let mut new_session = librefang_memory::session::Session {
+            id: sid,
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+        };
+        self.inject_reset_prompt(&mut new_session, agent_id);
+        // `inject_reset_prompt` only persists when it actually pushed messages
+        // — explicitly save the empty case so the row exists for the next
+        // inbound message instead of round-tripping back through lazy
+        // creation.
+        if new_session.messages.is_empty() {
+            self.memory
+                .substrate
+                .save_session(&new_session)
+                .map_err(KernelError::LibreFang)?;
+        }
 
-        // Fire external session:reset hook (fire-and-forget).
+        // Update the registry pointer only when it was pointing at the
+        // session we just reset. For channel-derived sids (the common case)
+        // the pointer is a different sid and stays untouched — that's the
+        // whole point of per-session reset.
+        if entry.session_id == sid {
+            self.agents
+                .registry
+                .update_session_id(agent_id, sid)
+                .map_err(KernelError::LibreFang)?;
+        }
+
+        // Quota is intentionally NOT reset here. Token quota is agent-wide;
+        // letting any one channel reset it would give a per-channel user a
+        // way to clear an agent-wide quota-exceeded state by typing /new.
+        // The dashboard "Reset agent" path (ResetScope::Agent) keeps the
+        // quota-clearing semantic.
+
+        // Fire session:reset + session:start so external hooks see the
+        // standard "fresh session" lifecycle pair, mirroring the agent-wide
+        // path.
         self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionReset,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),
-                "session_id": new_session.id.0.to_string(),
+                "session_id": sid.0.to_string(),
             }),
         );
-
-        // Fire session:start for the newly created session to match the
-        // behaviour of other new-session flows.
         self.governance.external_hooks.fire(
             crate::hooks::ExternalHookEvent::SessionStart,
             serde_json::json!({
                 "agent_id": agent_id.to_string(),
-                "session_id": new_session.id.0.to_string(),
+                "session_id": sid.0.to_string(),
             }),
         );
 
-        info!(agent_id = %agent_id, "Session rebooted (no summary saved)");
+        info!(
+            agent_id = %agent_id,
+            session_id = %sid,
+            existed = old_session.is_some(),
+            save_summary,
+            op = if save_summary { "reset" } else { "reboot" },
+            "Per-session wipe complete (sibling sessions untouched)"
+        );
         Ok(())
+    }
+
+    /// Best-effort removal of `<workspace>/sessions/{sid}.jsonl` mirrors after
+    /// a session row is deleted from SQLite. Without this, `/new`, `/reboot`,
+    /// and `clear_agent_history` accumulate orphan transcripts indefinitely
+    /// (#4868 follow-up).
+    ///
+    /// Failures are logged but not propagated: the SQL row is gone, so the
+    /// API surface and FTS search no longer expose the deleted session. A
+    /// leftover JSONL is a hygiene issue, not a privacy regression — the
+    /// data was already on disk and removing the index is the user-visible
+    /// "delete" guarantee.
+    fn purge_jsonl_files(entry: &AgentEntry, sids: &[SessionId]) {
+        let Some(ref workspace) = entry.manifest.workspace else {
+            return;
+        };
+        let sessions_dir = workspace.join("sessions");
+        for sid in sids {
+            let path = sessions_dir.join(format!("{}.jsonl", sid.0));
+            if !path.exists() {
+                continue;
+            }
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!(
+                    session_id = %sid,
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to remove orphan session JSONL after delete; \
+                     manual cleanup required (DB row already gone)"
+                );
+            }
+        }
     }
 
     /// Clear ALL conversation history for an agent (sessions + canonical).
     ///
     /// Creates a fresh empty session afterward so the agent is still usable.
-    pub fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()> {
-        let _entry = self.agents.registry.get(agent_id).ok_or_else(|| {
+    ///
+    /// Acquires `agents.agent_msg_locks[agent_id]` so an in-flight inbound
+    /// turn cannot save its appended history back over the cleared session
+    /// rows (#4868 review).
+    pub async fn clear_agent_history(&self, agent_id: AgentId) -> KernelResult<()> {
+        let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
-        // Emit session:end for each active session before deletion.
-        if let Ok(session_ids) = self.memory.substrate.get_agent_session_ids(agent_id) {
-            for sid in session_ids {
-                self.governance.external_hooks.fire(
-                    crate::hooks::ExternalHookEvent::SessionEnd,
-                    serde_json::json!({
-                        "agent_id": agent_id.to_string(),
-                        "session_id": sid.0.to_string(),
-                    }),
-                );
-            }
+        let lock = self
+            .agents
+            .agent_msg_locks
+            .entry(agent_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock().await;
+
+        // Emit session:end for each active session before deletion. Capture
+        // the sids list once so we can both fire hooks here and purge JSONL
+        // mirrors after the SQL delete (#4868 follow-up).
+        let pre_delete_sids = self
+            .memory
+            .substrate
+            .get_agent_session_ids(agent_id)
+            .unwrap_or_default();
+        for sid in &pre_delete_sids {
+            self.governance.external_hooks.fire(
+                crate::hooks::ExternalHookEvent::SessionEnd,
+                serde_json::json!({
+                    "agent_id": agent_id.to_string(),
+                    "session_id": sid.0.to_string(),
+                }),
+            );
         }
 
         // Delete all regular sessions then the canonical (cross-channel)
@@ -342,6 +579,11 @@ impl LibreFangKernel {
             .substrate
             .delete_canonical_session(agent_id)
             .map_err(KernelError::LibreFang)?;
+
+        // Best-effort JSONL cleanup. Without this, every history-clear leaks
+        // an orphan transcript file the API surface no longer indexes
+        // (#4868 follow-up).
+        Self::purge_jsonl_files(&entry, &pre_delete_sids);
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self

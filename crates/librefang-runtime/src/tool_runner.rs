@@ -1141,8 +1141,10 @@ pub async fn execute_tool_raw(
         // Goal tracking tool
         "goal_update" => tool_goal_update(input, *kernel),
 
-        // Workflow execution tool
+        // Workflow tools
         "workflow_run" => tool_workflow_run(input, *kernel).await,
+        "workflow_list" => tool_workflow_list(*kernel).await,
+        "workflow_status" => tool_workflow_status(input, *kernel).await,
 
         // Browser automation tools
         "browser_navigate" => {
@@ -2584,7 +2586,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["goal_id"]
             }),
         },
-        // --- Workflow execution tool ---
+        // --- Workflow tools ---
         ToolDefinition {
             name: "workflow_run".to_string(),
             description: "Run a registered workflow pipeline end-to-end. Workflows are multi-step agent pipelines (e.g., bug-triage, code-review, test-generation). Accepts a workflow UUID or name.".to_string(),
@@ -2595,6 +2597,26 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "input": { "type": "object", "description": "Optional input parameters to pass to the workflow's first step (JSON object)" }
                 },
                 "required": ["workflow_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "workflow_list".to_string(),
+            description: "List all registered workflow definitions. Returns an array of {id, name, description, step_count} objects sorted by name. Use this to discover available workflows before calling workflow_run.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        ToolDefinition {
+            name: "workflow_status".to_string(),
+            description: "Get the current status of a workflow run. Returns run state (pending/running/paused/completed/failed), timing, output, error, and step details. Use the run_id returned by workflow_run.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "run_id": { "type": "string", "description": "The workflow run UUID returned by workflow_run" }
+                },
+                "required": ["run_id"]
             }),
         },
         // --- System time tool ---
@@ -4241,6 +4263,68 @@ async fn tool_workflow_run(
         "output": output,
     })
     .to_string())
+}
+
+// ---------------------------------------------------------------------------
+// workflow_list — enumerate registered workflow definitions
+// ---------------------------------------------------------------------------
+
+async fn tool_workflow_list(kernel: Option<&Arc<dyn KernelHandle>>) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let mut summaries = kh.list_workflows().await;
+    // Sort by name for deterministic LLM prompt output (#3298).
+    summaries.sort_by(|a, b| a.name.cmp(&b.name));
+    let json_array: Vec<serde_json::Value> = summaries
+        .into_iter()
+        .map(|w| {
+            serde_json::json!({
+                "id": w.id,
+                "name": w.name,
+                "description": w.description,
+                "step_count": w.step_count,
+            })
+        })
+        .collect();
+    serde_json::to_string(&json_array)
+        .map_err(|e| format!("Failed to serialize workflow list: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// workflow_status — get the status of a workflow run
+// ---------------------------------------------------------------------------
+
+async fn tool_workflow_status(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let run_id = input["run_id"]
+        .as_str()
+        .ok_or("Missing 'run_id' parameter")?;
+
+    // Validate UUID format before calling kernel — returns a clear error
+    // rather than silently returning not-found for a malformed id.
+    uuid::Uuid::parse_str(run_id)
+        .map_err(|_| format!("Invalid run_id — must be a UUID: {run_id}"))?;
+
+    let kh = require_kernel(kernel)?;
+    let summary = kh
+        .get_workflow_run(run_id)
+        .await
+        .ok_or_else(|| format!("workflow run not found: {run_id}"))?;
+
+    serde_json::to_string(&serde_json::json!({
+        "run_id": summary.run_id,
+        "workflow_id": summary.workflow_id,
+        "workflow_name": summary.workflow_name,
+        "state": summary.state,
+        "started_at": summary.started_at,
+        "completed_at": summary.completed_at,
+        "output": summary.output,
+        "error": summary.error,
+        "step_count": summary.step_count,
+        "last_step_name": summary.last_step_name,
+    }))
+    .map_err(|e| format!("Failed to serialize workflow status: {e}"))
 }
 
 // ---------------------------------------------------------------------------
