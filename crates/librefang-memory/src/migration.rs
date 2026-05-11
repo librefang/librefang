@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 37;
+const SCHEMA_VERSION: u32 = 38;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -95,6 +95,14 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // tmp+rename JSON file (`workflow_runs.json`) that lost Running/Pending
     // state on any shutdown and didn't survive power loss.
     run_step!(37, migrate_v37);
+    // v38 (#4874): backfill `approval_audit.second_factor_used` for DBs
+    // that crossed v17 *before* the TOTP-second-factor patch (#2131)
+    // mutated migrate_v17 in place. Those DBs already report
+    // user_version >= 17, so neither the v17 CREATE TABLE nor the
+    // in-place ALTER inside v17 ever runs again — the column stays
+    // missing, every approval-audit INSERT fails, and the user never
+    // sees the approval card.
+    run_step!(38, migrate_v38);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -696,11 +704,19 @@ fn migrate_v17(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE INDEX IF NOT EXISTS idx_approval_audit_decided ON approval_audit(decided_at);
         ",
     )?;
-    // Migration: add second_factor_used column (ignore error if already exists)
-    let _ = conn.execute(
-        "ALTER TABLE approval_audit ADD COLUMN second_factor_used INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
+    // `second_factor_used` was added to the CREATE TABLE above by #2131
+    // (TOTP second-factor for critical approvals). Fresh installs land
+    // here with the column already present from CREATE TABLE; the only
+    // case where the table existed without the column is a DB at
+    // user_version >= 17 from a pre-#2131 binary — that path is
+    // self-healed by `migrate_v38` (issue #4874), not here, because v17
+    // does not re-run for those DBs.
+    //
+    // The previous `let _ = conn.execute("ALTER TABLE ...")` was a
+    // dead-letter: it only ran on a fresh install (where the column
+    // already existed and the ALTER errored), and *never* ran on the
+    // upgrade path where it was actually needed. Removed.
+    //
     // Audit row (#3538): keep migrations table in sync with user_version.
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
@@ -1372,6 +1388,38 @@ fn migrate_v37(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// Version 38: Backfill `approval_audit.second_factor_used` for upgraded DBs (#4874).
+///
+/// PR #2131 added the `second_factor_used` column by editing
+/// `migrate_v17` in place — both the `CREATE TABLE` and an
+/// `ALTER TABLE ... ADD COLUMN`. That works for fresh installs
+/// (`user_version = 0` → v17 runs → column lands via CREATE TABLE),
+/// but for any DB already at `user_version >= 17` from an earlier
+/// binary, `migrate_v17` never re-runs, the ALTER never fires, and the
+/// column stays missing. Every subsequent `INSERT INTO approval_audit
+/// (..., second_factor_used) VALUES (...)` then fails with
+/// `table approval_audit has no column named second_factor_used`,
+/// the audit-write `warn!` fires, and on the affected installs the
+/// approval flow stalls — the user never sees the approval card on
+/// any surface (Web, Telegram, `/api/approvals`).
+///
+/// `column_exists` makes this idempotent: fresh installs (where v17
+/// already created the column) and re-runs both no-op cleanly.
+fn migrate_v38(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "approval_audit", "second_factor_used") {
+        conn.execute(
+            "ALTER TABLE approval_audit ADD COLUMN second_factor_used INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (38, datetime('now'), 'Backfill approval_audit.second_factor_used for upgraded DBs (#4874)')",
+        [],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
@@ -1491,6 +1539,105 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM migrations", [], |row| row.get(0))
             .unwrap();
         assert_eq!(before, after, "second backfill must be a no-op");
+    }
+
+    /// Regression for #4874: a DB that crossed `migrate_v17` on a binary
+    /// that pre-dated #2131 has `approval_audit` *without* the
+    /// `second_factor_used` column. When the user later upgrades to a
+    /// binary whose `migrate_v17` adds that column, v17 never re-runs
+    /// (user_version is already past it), so the column stays missing
+    /// and every approval-audit INSERT fails. `migrate_v38` must
+    /// backfill the column on this path.
+    #[test]
+    fn test_migrate_v38_backfills_second_factor_used_on_legacy_v17_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Bring the DB to a healthy modern schema first so that all of
+        // v1..v37's other tables / indexes are present (v19+ reference
+        // tables that v17 alone does not create).
+        run_migrations(&conn).unwrap();
+
+        // Now reproduce the historical bad state: an `approval_audit`
+        // table that is *missing* `second_factor_used`, with
+        // `user_version` rolled back to one below SCHEMA_VERSION so that
+        // v38 actually re-runs on the next `run_migrations` call. This
+        // is exactly what an in-place upgrade from a binary whose
+        // `migrate_v17` predated #2131 looks like.
+        conn.execute_batch(
+            "DROP TABLE approval_audit;
+            CREATE TABLE approval_audit (
+                id TEXT PRIMARY KEY,
+                request_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                action_summary TEXT NOT NULL DEFAULT '',
+                risk_level TEXT NOT NULL DEFAULT 'low',
+                decision TEXT NOT NULL,
+                decided_by TEXT,
+                decided_at TEXT NOT NULL,
+                requested_at TEXT NOT NULL,
+                feedback TEXT
+            );",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 37_i32).unwrap();
+        conn.execute("DELETE FROM migrations WHERE version = 38", [])
+            .unwrap();
+
+        // Sanity: the legacy column is missing before the upgrade runs.
+        assert!(
+            !column_exists(&conn, "approval_audit", "second_factor_used"),
+            "test setup must reproduce the legacy v17 schema (no second_factor_used)"
+        );
+
+        // Re-run migrations as a beta.10+ binary would on startup.
+        run_migrations(&conn).unwrap();
+
+        // The column must now exist…
+        assert!(
+            column_exists(&conn, "approval_audit", "second_factor_used"),
+            "migrate_v38 must add second_factor_used on the upgrade path"
+        );
+
+        // …and an INSERT matching the production statement must succeed.
+        // This is the statement that fails on the affected installs and
+        // produces the `Failed to write pending audit entry` warning.
+        conn.execute(
+            "INSERT OR IGNORE INTO approval_audit (
+                id, request_id, agent_id, tool_name, description,
+                action_summary, risk_level, decision, decided_by,
+                decided_at, requested_at, feedback, second_factor_used
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            rusqlite::params![
+                "audit-1",
+                "req-1",
+                "agent-1",
+                "shell_exec",
+                "echo hello",
+                "echo hello",
+                "low",
+                "pending",
+                Option::<String>::None,
+                "2026-05-11T00:00:00+00:00",
+                "2026-05-11T00:00:00+00:00",
+                Option::<String>::None,
+                false,
+            ],
+        )
+        .unwrap();
+    }
+
+    /// Re-running migrations on a healthy DB must be a no-op for v38 —
+    /// the `column_exists` guard must short-circuit the ALTER so a
+    /// second boot doesn't error with `duplicate column name`.
+    #[test]
+    fn test_migrate_v38_is_idempotent_on_healthy_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        assert!(column_exists(&conn, "approval_audit", "second_factor_used"));
+        // Second pass must succeed even though the column is already present.
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
     }
 
     #[test]
