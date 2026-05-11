@@ -3302,12 +3302,24 @@ async fn finalize_successful_end_turn(
 /// helper prevents the two paths from drifting (e.g. one branch picking
 /// up a new `min_batch_size` knob and the other lagging).
 ///
-/// Returns the (possibly modified) message list — same semantics as
-/// [`crate::history_fold::fold_stale_tool_results`] but with the fast-path
-/// and call-site logging baked in.  `streaming` flips the log target so
-/// operators can grep `"streaming"` vs `"non-streaming"` in production.
+/// Returns the (possibly modified) working-copy message list — same
+/// semantics as [`crate::history_fold::fold_stale_tool_results`] but with
+/// the fast-path, call-site logging, and durable-session replay baked in.
+/// The durable replay (issue #4866 axis 2) walks `session.messages` and
+/// rewrites every matching `ToolResult.content` by `tool_use_id`, then
+/// calls `session.mark_messages_mutated()`.  Without that step the fold
+/// runs from scratch every turn — see `history_fold.rs` module doc.
+/// `streaming` flips the log target so operators can grep `"streaming"`
+/// vs `"non-streaming"` in production.
+// Eight args because every parameter is genuinely distinct (working
+// messages, durable session, knobs, model, aux+primary driver chain,
+// streaming flag, reasoning policy) and bundling them into a context
+// struct would just be a positional alias.  FoldConfig already pulls the
+// two knobs out; further bundling would obscure the call sites.
+#[allow(clippy::too_many_arguments)]
 async fn maybe_fold_stale_tool_results(
     messages: Vec<Message>,
+    session: &mut Session,
     fold_cfg: crate::history_fold::FoldConfig,
     model: &str,
     aux_client: Option<&crate::aux_client::AuxClient>,
@@ -3334,6 +3346,18 @@ async fn maybe_fold_stale_tool_results(
         reasoning_echo_policy,
     )
     .await;
+    // Replay the fold onto `session.messages` so the rewrite is persisted
+    // on the next `save_session_async` and subsequent turns short-circuit
+    // via `is_already_folded` instead of re-summarising from scratch.
+    // Matching by `tool_use_id` lets the working copy and durable list
+    // drift in length/ordering without breaking the projection.
+    if !fold_result.rewrites.is_empty() {
+        let durable_changed =
+            crate::history_fold::apply_fold_rewrites(&mut session.messages, &fold_result.rewrites);
+        if durable_changed {
+            session.mark_messages_mutated();
+        }
+    }
     if fold_result.groups_folded > 0 {
         let label = if streaming {
             "streaming"
@@ -3344,6 +3368,7 @@ async fn maybe_fold_stale_tool_results(
             groups = fold_result.groups_folded,
             replaced = fold_result.messages_replaced,
             groups_used_fallback = fold_result.groups_used_fallback,
+            durable_rewrites = fold_result.rewrites.len(),
             "history_fold: fold pass complete ({label})"
         );
     }
@@ -3870,6 +3895,7 @@ pub async fn run_agent_loop(
             .unwrap_or_default();
         messages = maybe_fold_stale_tool_results(
             messages,
+            session,
             crate::history_fold::FoldConfig {
                 fold_after_turns: tr_fold_after_turns,
                 min_batch_size: tr_fold_min_batch_size,
@@ -5367,6 +5393,7 @@ pub async fn run_agent_loop_streaming(
             .unwrap_or_default();
         messages = maybe_fold_stale_tool_results(
             messages,
+            session,
             crate::history_fold::FoldConfig {
                 fold_after_turns: tr_fold_after_turns,
                 min_batch_size: tr_fold_min_batch_size,
