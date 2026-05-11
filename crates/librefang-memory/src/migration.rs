@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 38;
+const SCHEMA_VERSION: u32 = 39;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -103,6 +103,14 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // missing, every approval-audit INSERT fails, and the user never
     // sees the approval card.
     run_step!(38, migrate_v38);
+    // v39 (#4908): extend the `workflow_runs.state` CHECK constraint
+    // to allow `'cancelled'`. The original v37 CHECK only enumerated
+    // pending/running/paused/completed/failed, so when #4906 added the
+    // `WorkflowRunState::Cancelled` variant the matching SQLite write
+    // was silently rejected at the constraint layer — `upsert_run_to_
+    // store` got a WARN log per cancel and the row never landed on
+    // disk, defeating the whole "persist cancel immediately" promise.
+    run_step!(39, migrate_v39);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1415,6 +1423,63 @@ fn migrate_v38(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (38, datetime('now'), 'Backfill approval_audit.second_factor_used for upgraded DBs (#4874)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 39: Extend the `workflow_runs.state` CHECK constraint to
+/// admit `'cancelled'` (#4908).
+///
+/// PR #4906 introduced the `WorkflowRunState::Cancelled` variant and
+/// wired `cancel_run` to call `upsert_run_to_store` for immediate
+/// durability — but the v37 `CREATE TABLE` constraint enumerated only
+/// `pending/running/paused/completed/failed`.  Every cancel-time
+/// SQLite write therefore failed the CHECK, fell into the WARN-and-
+/// swallow branch of `upsert_run_to_store`, and the row never landed
+/// on disk.  Combined with the matching gaps in `persist_runs_to_json`
+/// and `row_to_workflow_run` this meant every user cancel was lost on
+/// restart on both backends.
+///
+/// SQLite can't ALTER a CHECK constraint in place, so the table-swap
+/// pattern is the only option: copy rows into a new table, drop the
+/// old one, rename, recreate indexes.  `PRAGMA foreign_keys = OFF` is
+/// not needed here — `workflow_runs` has no FKs.  The transaction in
+/// `run_step!` makes the swap atomic.
+fn migrate_v39(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE workflow_runs_new (
+            id                   TEXT PRIMARY KEY,
+            workflow_id          TEXT NOT NULL,
+            workflow_name        TEXT NOT NULL DEFAULT '',
+            state                TEXT NOT NULL CHECK (state IN ('pending','running','paused','completed','failed','cancelled')),
+            input                TEXT NOT NULL DEFAULT '',
+            output               TEXT,
+            error                TEXT,
+            resume_token         TEXT,
+            pause_reason         TEXT,
+            paused_at            TEXT,
+            paused_step_index    INTEGER,
+            paused_variables     TEXT,
+            paused_current_input TEXT,
+            step_results         TEXT NOT NULL DEFAULT '[]',
+            started_at           TEXT NOT NULL,
+            completed_at         TEXT,
+            created_at           TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO workflow_runs_new SELECT * FROM workflow_runs;
+        DROP TABLE workflow_runs;
+        ALTER TABLE workflow_runs_new RENAME TO workflow_runs;
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_state
+            ON workflow_runs(state);
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id
+            ON workflow_runs(workflow_id);
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_started_at
+            ON workflow_runs(started_at DESC);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (39, datetime('now'), 'Extend workflow_runs.state CHECK to allow cancelled (#4908)')",
         [],
     )?;
     Ok(())

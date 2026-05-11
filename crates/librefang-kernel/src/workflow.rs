@@ -818,7 +818,10 @@ impl WorkflowEngine {
         // Collect terminal/paused runs from the DashMap.
         // DashMap provides shared iteration via `iter()` without a global lock.
         // Persist:
-        //   - terminal runs (Completed / Failed) for history queries
+        //   - terminal runs (Completed / Failed / Cancelled) for history
+        //     queries — Cancelled was missing pre-#4908 follow-up, which
+        //     meant JSON-mode installs silently lost every user cancel
+        //     on restart.
         //   - paused runs (#3335) so a daemon restart preserves the
         //     snapshot needed to resume — without this, a paused run
         //     becomes unrecoverable on restart.
@@ -833,6 +836,7 @@ impl WorkflowEngine {
                     r.state,
                     WorkflowRunState::Completed
                         | WorkflowRunState::Failed
+                        | WorkflowRunState::Cancelled
                         | WorkflowRunState::Paused { .. }
                 )
             })
@@ -1608,9 +1612,18 @@ impl WorkflowEngine {
     /// signalled so any retry sleep currently waiting on the notifier wakes
     /// up immediately rather than sleeping for the full backoff duration.
     ///
-    /// The executor also observes cancellation at every step boundary: it
-    /// peeks the run state at the top of each iteration and exits early if
-    /// it finds `Cancelled`.
+    /// # Cancellation semantics
+    ///
+    /// Cancel is observed at **step boundaries**, not inside a step.  The
+    /// executor peeks the run state at the top of each iteration and exits
+    /// early if it finds `Cancelled`, but an in-flight `send_message`,
+    /// FanOut `join_all`, or any other step body continues to completion
+    /// (or its per-step `timeout_secs`) before the cancellation lands.
+    /// The retry-sleep `tokio::select!` is the one place inside a step
+    /// where cancel pre-empts an in-progress wait.  Callers who need
+    /// hard Ctrl-C-style preemption of an in-flight LLM call need to
+    /// thread a cancellation token through the runtime — out of scope
+    /// for this API.
     pub async fn cancel_run(&self, run_id: WorkflowRunId) -> Result<(), CancelRunError> {
         let already_paused = {
             let mut run = self
@@ -1819,9 +1832,16 @@ impl WorkflowEngine {
         );
 
         // Resolve total-timeout: workflow field wins over kernel default.
+        // A `Some(0)` slipping past the API validator would map to
+        // `Duration::ZERO`, firing the timeout before the inner future
+        // is polled once — every run instantly fails. Treat `Some(0)`
+        // as `None` here as a kernel-side safety net so a bad value
+        // in `config.toml` or an unvalidated client cannot brick every
+        // workflow on the daemon (#4908).
         let total_timeout = workflow
             .total_timeout_secs
-            .or(self.default_total_timeout_secs);
+            .or(self.default_total_timeout_secs)
+            .filter(|secs| *secs > 0);
 
         // Check if any step has non-empty depends_on — if so, use DAG execution
         let has_dag_deps = workflow.steps.iter().any(|s| !s.depends_on.is_empty());
@@ -2887,10 +2907,18 @@ impl WorkflowEngine {
                 .increment(1);
                 warn!(run_id = %run.id, error = %e, "Immediate SQLite upsert failed");
             }
+            // Force a WAL checkpoint after any *terminal* upsert so the
+            // row is durable across SIGKILL / OOM / power loss before the
+            // next batch flush. `Cancelled` was missing pre-#4908; under
+            // unclean recovery, the row stayed at its pre-cancel state
+            // (typically Running) and `recover_stale_running_runs` would
+            // then flip it to Failed instead of preserving the user-
+            // cancellation signal.
             if matches!(
                 run.state,
                 WorkflowRunState::Completed
                     | WorkflowRunState::Failed
+                    | WorkflowRunState::Cancelled
                     | WorkflowRunState::Paused { .. }
             ) {
                 if let Err(e) = store.wal_checkpoint() {
@@ -3494,6 +3522,13 @@ fn row_to_workflow_run(row: &WorkflowRunRow) -> Result<WorkflowRun, String> {
         }
         "completed" => WorkflowRunState::Completed,
         "failed" => WorkflowRunState::Failed,
+        // `"cancelled"` arm missed in the original #4906 implementation
+        // — `workflow_run_to_row` serialised this variant but the
+        // inverse parse rejected it, so a Cancelled row written via
+        // `upsert_run_to_store` came back as `Err("unknown workflow
+        // run state: cancelled")` and `load_runs_from_sqlite` silently
+        // skipped it with a warn.  Round-trip is now closed.  (#4908)
+        "cancelled" => WorkflowRunState::Cancelled,
         other => return Err(format!("unknown workflow run state: {other}")),
     };
 
@@ -5230,6 +5265,150 @@ prompt_template = "do {{x}}"
             assert!(engine.runs.contains_key(&completed_id));
             assert!(!engine.runs.contains_key(&running_id));
         }
+    }
+
+    /// Regression for #4908: `Cancelled` runs must survive a JSON
+    /// persist + load cycle.  Pre-fix the JSON filter at
+    /// `persist_runs_to_json` only matched `Completed | Failed |
+    /// Paused`, so a daemon restart on a JSON-mode install silently
+    /// lost every user cancel.  Now that the filter includes
+    /// `Cancelled`, the row survives.
+    #[test]
+    fn cancelled_run_survives_json_persist_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cancelled = make_terminal_run(WorkflowRunState::Cancelled);
+        let cancelled_id = cancelled.id;
+
+        {
+            let engine = WorkflowEngine::new_with_persistence(tmp.path());
+            engine.runs.insert(cancelled.id, cancelled);
+            engine.persist_runs();
+        }
+
+        {
+            let engine = WorkflowEngine::new_with_persistence(tmp.path());
+            let count = engine.load_runs().unwrap();
+            assert_eq!(count, 1, "cancelled run must round-trip through JSON");
+            let reloaded = engine
+                .runs
+                .get(&cancelled_id)
+                .expect("cancelled run missing after reload");
+            assert!(
+                matches!(reloaded.state, WorkflowRunState::Cancelled),
+                "state must remain Cancelled across persist+load, got {:?}",
+                reloaded.state
+            );
+        }
+    }
+
+    /// Regression for #4908: `Cancelled` runs must survive a SQLite
+    /// upsert + reload cycle.  The WAL-checkpoint match arm at
+    /// `upsert_run_to_store` previously omitted `Cancelled`, so on
+    /// unclean recovery the row could be left in WAL-only state and
+    /// `recover_stale_running_runs` would flip it to `Failed` instead
+    /// of preserving the user-cancellation signal.
+    ///
+    /// Runs on the multi-threaded runtime because `load_runs` is
+    /// invoked via `block_in_place` to bridge the sync SQLite call out
+    /// of the async test — matching the pattern used by the existing
+    /// SQLite persistence tests in this module.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_run_persists_to_sqlite_with_wal_checkpoint() {
+        use r2d2::Pool;
+        use r2d2_sqlite::SqliteConnectionManager;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("workflows.db");
+
+        let make_store = || {
+            let pool = Pool::builder()
+                .max_size(2)
+                .build(SqliteConnectionManager::file(&db_path))
+                .unwrap();
+            librefang_memory::migration::run_migrations(&pool.get().unwrap())
+                .expect("migrations must apply");
+            librefang_memory::WorkflowStore::new(pool)
+        };
+
+        let cancelled = make_terminal_run(WorkflowRunState::Cancelled);
+        let cancelled_id = cancelled.id;
+
+        {
+            let store = make_store();
+            let engine = WorkflowEngine::new_with_store(store, tmp.path());
+            engine.runs.insert(cancelled.id, cancelled.clone());
+            // upsert_run_to_store is the cancel_run code path that #4908
+            // missed for Cancelled — invoke it directly here.
+            engine.upsert_run_to_store(&cancelled);
+        }
+
+        let store = make_store();
+        let engine = WorkflowEngine::new_with_store(store, tmp.path());
+        let count =
+            tokio::task::block_in_place(|| engine.load_runs()).expect("load_runs must succeed");
+        assert_eq!(count, 1, "cancelled run must reload from SQLite");
+        let reloaded = engine
+            .get_run(cancelled_id)
+            .await
+            .expect("cancelled run must be reloadable");
+        assert!(
+            matches!(reloaded.state, WorkflowRunState::Cancelled),
+            "state must remain Cancelled after SQLite reload, got {:?}",
+            reloaded.state
+        );
+    }
+
+    /// Regression for #4908: a workflow registered with
+    /// `total_timeout_secs = Some(0)` must NOT brick its runs — the
+    /// kernel resolver in `execute_run` defensively maps `Some(0)` to
+    /// `None` so a value that slipped past the API validator (or
+    /// `KernelConfig` default with a typo) cannot fire `Duration::ZERO`
+    /// before the first step polls.
+    #[tokio::test(flavor = "current_thread")]
+    async fn total_timeout_secs_zero_is_treated_as_unset_in_resolver() {
+        let engine = std::sync::Arc::new(WorkflowEngine::new());
+        let wf = Workflow {
+            id: WorkflowId::new(),
+            name: "zero-timeout".to_string(),
+            description: "".to_string(),
+            steps: vec![WorkflowStep {
+                name: "noop".to_string(),
+                agent: StepAgent::ByName {
+                    name: "a".to_string(),
+                },
+                prompt_template: "{{input}}".to_string(),
+                mode: StepMode::Sequential,
+                timeout_secs: 30,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+            }],
+            created_at: Utc::now(),
+            layout: None,
+            // The pathological value the resolver must defuse:
+            total_timeout_secs: Some(0),
+        };
+        let wf_id = engine.register(wf).await;
+        let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
+
+        let result = engine
+            .execute_run(run_id, mock_resolver, |_id: AgentId, _msg: String| async {
+                Ok(("ok".to_string(), 0u64, 0u64))
+            })
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Some(0) must NOT trigger an instant timeout — got Err: {:?}",
+            result.err()
+        );
+        let run = engine.get_run(run_id).await.unwrap();
+        assert!(
+            matches!(run.state, WorkflowRunState::Completed),
+            "Some(0) must be treated as unset; expected Completed, got {:?}",
+            run.state
+        );
     }
 
     /// Regression for #3335: graceful shutdown must transition every

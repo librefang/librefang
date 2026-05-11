@@ -369,6 +369,89 @@ async fn workflow_total_timeout_secs_absent_when_not_set() {
     );
 }
 
+/// Regression for #4908: `POST /api/workflows` must reject
+/// `total_timeout_secs: 0` with HTTP 400.  Pre-fix the value was
+/// accepted and mapped to `Duration::ZERO` in the kernel resolver,
+/// firing the workflow timeout before the first step polled and
+/// bricking every run on the workflow with `"workflow exceeded
+/// total_timeout of 0s"`.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_workflow_rejects_total_timeout_secs_zero() {
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "zero-timeout",
+            "description": "should be rejected",
+            "total_timeout_secs": 0,
+            "steps": [{"name": "s1", "agent_id": agent_id, "prompt": "hi"}]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Some(0) must be rejected with 400, got {status}: {body:?}"
+    );
+}
+
+/// Regression for #4908: `PUT /api/workflows/{id}` must reject
+/// `total_timeout_secs: 0` for the same reason `create_workflow`
+/// does — an operator cannot brick an existing workflow with a
+/// trailing PUT either.
+#[tokio::test(flavor = "multi_thread")]
+async fn update_workflow_rejects_total_timeout_secs_zero() {
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    // Create a healthy workflow first.
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "healthy",
+            "description": "v1",
+            "total_timeout_secs": 60,
+            "steps": [{"name": "s1", "agent_id": agent_id, "prompt": "hi"}]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"].as_str().unwrap().to_string();
+
+    // Attempt to PUT with total_timeout_secs=0 — must be rejected.
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/workflows/{wf_id}"),
+        Some(serde_json::json!({
+            "name": "healthy",
+            "total_timeout_secs": 0,
+            "steps": [{"name": "s1", "agent_id": agent_id, "prompt": "hi"}]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Some(0) on PUT must be rejected with 400, got {status}: {body:?}"
+    );
+
+    // The existing healthy value must survive the rejected PUT.
+    let (status, body) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["total_timeout_secs"].as_u64(),
+        Some(60),
+        "rejected PUT must leave the workflow's prior value intact: {body:?}"
+    );
+}
+
 /// `PUT /api/workflows/{id}` preserves `total_timeout_secs` when the field
 /// is omitted from the update payload.
 #[tokio::test(flavor = "multi_thread")]

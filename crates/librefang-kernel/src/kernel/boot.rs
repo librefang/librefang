@@ -1211,8 +1211,25 @@ impl LibreFangKernel {
             );
         }
 
-        // Extract before config is moved into ArcSwap.
-        let wf_default_total_timeout = config.workflow_default_total_timeout_secs;
+        // Extract before config is moved into ArcSwap.  A `Some(0)` would
+        // map to `Duration::ZERO` in the workflow timeout resolver and
+        // brick every run on the daemon at once.  Treat it as `None`
+        // here with a warn so a typo in `config.toml` doesn't take the
+        // whole instance down silently.  The kernel-side resolver
+        // (`workflow::execute_run`) also applies the same defensive
+        // filter; this log is the actionable signal an operator needs.
+        // (#4908)
+        let wf_default_total_timeout = match config.workflow_default_total_timeout_secs {
+            Some(0) => {
+                warn!(
+                    "config.workflow_default_total_timeout_secs = 0 would brick every \
+                     workflow run; treating as unset (use a positive integer, or omit \
+                     the field for unbounded execution)"
+                );
+                None
+            }
+            other => other,
+        };
 
         let kernel = Self {
             home_dir_boot: config.home_dir.clone(),

@@ -389,6 +389,16 @@ pub async fn create_workflow(
 
     let layout = req.get("layout").cloned();
     let total_timeout_secs = req["total_timeout_secs"].as_u64();
+    // `Some(0)` would map to `Duration::ZERO` in the kernel resolver
+    // and fire the workflow timeout before the first step runs.  Reject
+    // explicitly with HTTP 400 — clients that want "unbounded" must
+    // omit the field (or set it to `null`).  (#4908)
+    if total_timeout_secs == Some(0) {
+        return ApiErrorResponse::bad_request(
+            "total_timeout_secs must be > 0 (omit the field for unbounded execution)",
+        )
+        .into_json_tuple();
+    }
 
     let workflow = Workflow {
         id: WorkflowId::new(),
@@ -678,6 +688,15 @@ pub async fn update_workflow(
     } else {
         existing.total_timeout_secs
     };
+    // Same validation as `create_workflow` — `Some(0)` would map to
+    // `Duration::ZERO` in the kernel resolver and brick every run
+    // against this workflow.  Reject with HTTP 400.  (#4908)
+    if total_timeout_secs == Some(0) {
+        return ApiErrorResponse::bad_request(
+            "total_timeout_secs must be > 0 (omit the field or set it to null for unbounded)",
+        )
+        .into_json_tuple();
+    }
 
     let updated = Workflow {
         id: workflow_id,
