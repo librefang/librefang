@@ -30,7 +30,10 @@ function useIsMobile() {
   const [isMobile, setIsMobile] = useState(false);
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return;
-    const mql = window.matchMedia("(max-width: 1023px)");
+    // Mirrors the `--breakpoint-lg: 1000px` override in index.css (#4873)
+    // so JS- and CSS-driven layout decisions never disagree at the iPad
+    // portrait boundary. If you change one, change the other.
+    const mql = window.matchMedia("(max-width: 999px)");
     setIsMobile(mql.matches);
     const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
     mql.addEventListener("change", handler);
@@ -126,10 +129,16 @@ export function PushDrawer() {
         )}
       </aside>
 
-      {/* Mobile overlay fallback. Backdrop closes on click. */}
+      {/* Mobile overlay fallback. Backdrop closes on click.
+          z-index: must sit above the slide-in sidebar (z-50 in App.tsx) so
+          the close button stays tappable when both end up in mobile mode at
+          the same time (#4873). Stay BELOW the OfflineBanner (z-[60]) — the
+          banner is a daemon-disconnect signal that must remain visible even
+          when a drawer is open — and below dropdown menus (z-[90]/z-[100]).
+          z-[55] threads the needle. */}
       {isOpen && content && (
         <div
-          className="fixed inset-0 z-50 lg:hidden bg-black/40 backdrop-blur-sm flex items-stretch justify-end"
+          className="fixed inset-0 z-[55] lg:hidden bg-black/40 backdrop-blur-sm flex items-stretch justify-end"
           onClick={triggerClose}
           role="dialog"
           aria-modal="true"

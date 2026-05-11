@@ -691,7 +691,8 @@ export function AgentsPage() {
   useEffect(() => {
     if (detailAgent) return;
     if (filteredAgents.length === 0) return;
-    if (typeof window.matchMedia === "function" && !window.matchMedia("(min-width: 1024px)").matches) return;
+    // 1000px matches the `--breakpoint-lg` override in index.css (#4873).
+    if (typeof window.matchMedia === "function" && !window.matchMedia("(min-width: 1000px)").matches) return;
     void selectAgent(filteredAgents[0]);
     // selectAgent is recreated each render; depending on filteredAgents+detailAgent is sufficient.
     // eslint-disable-next-line react-hooks/exhaustive-deps
