@@ -4884,7 +4884,7 @@ async fn handle_command(
             // uses (#4923) — otherwise the agent re-asks the user's name
             // for every `/btw` even after it was learned on a channel turn.
             let sctx = crate::types::SenderContext {
-                channel: channel_type.to_string(),
+                channel: channel_type_str(channel_type).to_string(),
                 user_id: sender.platform_id.clone(),
                 display_name: sender.display_name.clone(),
                 ..Default::default()
