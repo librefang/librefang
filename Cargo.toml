@@ -63,7 +63,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 
 # OpenTelemetry
-opentelemetry = "0.31"
+opentelemetry = "0.32"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 # `default-features = false` is critical: opentelemetry-otlp's default feature
 # set enables `http-proto` + `reqwest-blocking-client`, which forces
@@ -121,7 +121,7 @@ bytes = "1"
 futures = "0.3"
 
 # MCP SDK
-rmcp = { version = "1.5", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
+rmcp = { version = "1.6", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 
 # ACP (Agent Client Protocol) SDK — official Zed-maintained crates for IDE integration (#3313)
 # `unstable` enables session/{resume,close,fork,list-additional-directories}, message-id, session-usage,

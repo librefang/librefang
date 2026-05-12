@@ -65,7 +65,7 @@ colored = { workspace = true }
 libc = "0.2"
 fluent = "0.17"
 unic-langid = "0.9"
-open = "5.3.4"
+open = "5.3.5"
 toml_edit = "0.25.8"
 rustls = "0.23"
 opentelemetry = { workspace = true, optional = true }
