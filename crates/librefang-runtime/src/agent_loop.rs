@@ -4983,8 +4983,28 @@ async fn stream_with_retry(
     )?;
 
     let mut last_error = None;
+    // Sticky flag: once a cascade-leak fires in any attempt, all subsequent
+    // retry attempts must be short-circuited to a silent drop. Without this,
+    // a RateLimited or Overloaded retry would start a fresh accumulator and
+    // give the leaking model a "do over" — defeating the guard entirely.
+    let mut leak_fired_sticky = false;
 
     for attempt in 0..=MAX_RETRIES {
+        // If a previous attempt already triggered the leak guard, do not
+        // invoke the driver again — return immediately with cascade_leak_aborted.
+        if leak_fired_sticky {
+            use crate::llm_driver::CompletionResponse;
+            return Ok(StreamWithRetryResult {
+                response: CompletionResponse {
+                    content: vec![],
+                    stop_reason: StopReason::EndTurn,
+                    tool_calls: vec![],
+                    usage: TokenUsage::default(),
+                },
+                cascade_leak_aborted: true,
+            });
+        }
+
         // Same rationale as call_with_retry: acquire inside the loop so
         // the permit is not held during backoff sleeps between retries.
         let _permit = LLM_CONCURRENCY
@@ -5053,6 +5073,10 @@ async fn stream_with_retry(
         // proxy_tx is dropped when driver returns (moved into driver.stream).
         // forward_task drains the proxy channel and finishes.
         let cascade_leak_aborted = forward_task.await.unwrap_or(false);
+        // Propagate to the sticky flag so any retry iteration short-circuits.
+        if cascade_leak_aborted {
+            leak_fired_sticky = true;
+        }
 
         match driver_result {
             Ok(response) => {
@@ -10664,6 +10688,86 @@ mod tests {
         .expect("Streaming loop should complete without error");
         assert!(result.silent, "got response: {:?}", result.response);
         assert!(result.response.is_empty(), "got: {:?}", result.response);
+    }
+
+    /// M-2: Regression lock for the streaming short-circuit in
+    /// `run_agent_loop_streaming`. When the incremental cascade-leak guard fires
+    /// mid-stream, the caller must treat the entire turn as a silent drop even
+    /// if the driver's final `ContentComplete` carries `stop_reason = ToolUse`.
+    ///
+    /// This test drives `run_agent_loop_streaming` end-to-end (not just the
+    /// forwarding task) and asserts:
+    /// - `result.silent == true` (the turn was silently dropped)
+    /// - `result.response.is_empty()` (no text reached the caller)
+    /// - No tool was invoked (the ToolUse stop_reason must not trigger
+    ///   tool execution when cascade_leak_aborted is set).
+    #[tokio::test]
+    async fn cascade_leak_guard_aborts_tool_use_stop_reason_in_streaming_path() {
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id: librefang_types::agent::AgentId::new(),
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+        };
+        // A driver that emits two structural markers (triggering the cascade-leak
+        // guard) and then signals ToolUse as the stop reason. Without the
+        // cascade_leak_aborted short-circuit in run_agent_loop_streaming the loop
+        // would proceed to tool execution — which this test must prevent.
+        let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
+            text: "User asked: hi\nI responded: Buongiorno!",
+            stop_reason: StopReason::ToolUse,
+        });
+        let manifest = test_manifest();
+        let (tx, _rx) = mpsc::channel(64);
+
+        let result = run_agent_loop_streaming(
+            &manifest,
+            "\u{1F934}",
+            &mut session,
+            &memory,
+            driver,
+            &[], // no tools registered — ensures any tool execution would panic/err
+            None,
+            tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // checkpoint_manager
+            None, // process_registry
+            None,
+            None,
+            None,
+            None,
+            &LoopOptions::default(),
+        )
+        .await
+        .expect("Streaming loop should complete without error");
+
+        assert!(
+            result.silent,
+            "cascade-leak + ToolUse stop_reason must yield a silent result; got: {:?}",
+            result.response
+        );
+        assert!(
+            result.response.is_empty(),
+            "no text must reach the caller when cascade leak fires; got: {:?}",
+            result.response
+        );
     }
 
     #[tokio::test]

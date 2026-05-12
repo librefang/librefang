@@ -24,6 +24,27 @@ use tokio::sync::mpsc;
 /// `is_cascade_leak` on each delta, and forwards events to `outer_tx`
 /// exactly as the production code does. Returns `true` when the leak guard
 /// fired (i.e. `cascade_leak_aborted`).
+///
+/// # IMPORTANT — simplified facsimile (M-3)
+///
+/// This is a **test-only reimplementation** of the production `forward_task`
+/// closure inside `stream_with_retry`. It intentionally omits:
+///
+/// - The **128 KB rolling-window cap** (`ACCUMULATED_CAP = 128 * 1024`) and
+///   the 512-byte overlap tail that the production code keeps after truncation.
+/// - The **UTF-8 boundary walk** (`accumulated.is_char_boundary`) used before
+///   draining the prefix.
+///
+/// These omissions mean the tests below do **NOT** cover:
+/// - Streams longer than 128 KB (the cap/overlap logic).
+/// - Multi-byte characters that span the cap boundary.
+///
+/// If the production forwarding logic changes (e.g. cap size, overlap, or
+/// the `drain` strategy), update this facsimile to match and add a test that
+/// exercises the rolling-window path. The facsimile is kept here rather than
+/// re-exporting the production closure because `forward_task` is an anonymous
+/// closure captured inside a `tokio::spawn` — making it `pub(crate)` would
+/// require significant restructuring for marginal test coverage gain.
 async fn run_forward_task(
     mut proxy_rx: mpsc::Receiver<StreamEvent>,
     outer_tx: mpsc::Sender<StreamEvent>,
