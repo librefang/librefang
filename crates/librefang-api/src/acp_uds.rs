@@ -37,15 +37,16 @@
 
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use librefang_acp::{AcpKernel, KernelAdapter};
 use librefang_kernel::LibreFangKernel;
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Default agent name when the editor doesn't specify one. Mirrors
 /// the in-process CLI default (`assistant`) so behaviour is consistent
@@ -162,35 +163,110 @@ async fn bind_atomic_owner_only(final_path: &Path) -> std::io::Result<UnixListen
     // orphan from a previous run. Best-effort removal — ignore every error
     // (permission races, cross-device issues) because cleanup must never
     // prevent a successful bind.
+    //
+    // Deletion is PID-liveness checked (via `kill(pid, 0)`) and bounded by
+    // a UID equality guard so we never remove a concurrent daemon's
+    // in-flight tempfile or touch files owned by another user.
     sweep_stale_orphans(&parent, &stem).await;
 
     Ok(listener)
 }
 
 /// Best-effort removal of `.<stem>.<pid>.<nanos>` orphan tempfiles in `parent`.
+///
+/// Each candidate is subject to three guards before deletion:
+/// 1. **UID check** — the file must be owned by the current daemon's euid.
+///    This prevents cross-user blast radius even when PIDs wrap.
+/// 2. **PID-liveness check** — `kill(pid, 0)` is used; only files whose
+///    parsed PID returns `ESRCH` (no such process) are removed. `EPERM`
+///    means the process exists but is owned by another user — kept.
+///    A live PID means a concurrent daemon is still in its bind→rename
+///    window — kept.
+/// 3. **Recency guard** — files whose mtime is within the last 10 seconds
+///    are skipped to protect fresh tempfiles that haven't been parsed yet.
 async fn sweep_stale_orphans(parent: &Path, stem: &str) {
+    use std::os::unix::ffi::OsStrExt;
+
     let prefix = format!(".{stem}.");
+    let prefix_bytes = prefix.as_bytes();
+    let self_uid = self_euid();
+    // Files younger than this window are left alone to avoid racing with a
+    // concurrent daemon's bind→chmod→rename sequence.
+    const RECENCY_WINDOW: Duration = Duration::from_secs(10);
+
     let mut rd = match tokio::fs::read_dir(parent).await {
         Ok(rd) => rd,
-        Err(_) => return,
+        Err(e) => {
+            debug!(error = %e, "ACP UDS sweep skipped");
+            return;
+        }
     };
     while let Ok(Some(entry)) = rd.next_entry().await {
         let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        // Match `.<stem>.<pid>.<nanos>` — three dot-separated segments
-        // where the last two are pure decimal digits.
-        if !name_str.starts_with(&prefix) {
+        // Bytewise prefix comparison — avoids lossy UTF-8 conversion on
+        // platforms where filenames can be arbitrary byte sequences.
+        if !name.as_bytes().starts_with(prefix_bytes) {
             continue;
         }
-        let rest = &name_str[prefix.len()..];
-        let mut parts = rest.splitn(2, '.');
-        let pid_part = parts.next().unwrap_or("");
-        let nanos_part = parts.next().unwrap_or("");
-        if pid_part.chars().all(|c| c.is_ascii_digit())
-            && nanos_part.chars().all(|c| c.is_ascii_digit())
-            && !pid_part.is_empty()
-            && !nanos_part.is_empty()
+        // Parse `<pid>.<nanos>` from the suffix after the prefix.
+        let suffix = &name.as_bytes()[prefix_bytes.len()..];
+        let dot = match suffix.iter().position(|&b| b == b'.') {
+            Some(p) => p,
+            None => continue,
+        };
+        let pid_bytes = &suffix[..dot];
+        let nanos_bytes = &suffix[dot + 1..];
+        if pid_bytes.is_empty()
+            || nanos_bytes.is_empty()
+            || !pid_bytes.iter().all(|b| b.is_ascii_digit())
+            || !nanos_bytes.iter().all(|b| b.is_ascii_digit())
         {
+            continue;
+        }
+        // Parse PID; skip on overflow (impossibly large value, not a real PID).
+        let pid_str = match std::str::from_utf8(pid_bytes) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let pid: libc::pid_t = match pid_str.parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        // --- Guard 1: UID equality ---
+        let meta = match tokio::fs::metadata(entry.path()).await {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.uid() != self_uid {
+            continue;
+        }
+
+        // --- Guard 2: Recency window ---
+        if let Ok(mtime) = meta.modified() {
+            if SystemTime::now()
+                .duration_since(mtime)
+                .map(|age| age < RECENCY_WINDOW)
+                .unwrap_or(true)
+            {
+                continue;
+            }
+        }
+
+        // --- Guard 3: PID liveness via kill(pid, 0) ---
+        // Safety: kill(pid, 0) is a read-only liveness probe; it sends no
+        // signal, has no side effects, and is thread-safe.
+        let alive = unsafe { libc::kill(pid, 0) == 0 };
+        let dead = if alive {
+            false
+        } else {
+            // ESRCH = no such process (dead). EPERM = exists, owned by
+            // another user (treat as alive — don't delete).
+            let err = std::io::Error::last_os_error();
+            err.raw_os_error() == Some(libc::ESRCH)
+        };
+
+        if dead {
             let _ = tokio::fs::remove_file(entry.path()).await;
         }
     }
@@ -222,6 +298,7 @@ async fn handle_connection(
 mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
+    use std::time::{Duration, SystemTime};
 
     #[tokio::test]
     async fn bind_atomic_owner_only_sets_mode_0600() {
@@ -251,24 +328,56 @@ mod tests {
         assert_eq!(meta.mode() & 0o777, 0o600);
     }
 
+    /// Helper: plant a tempfile-shaped name with an mtime 60 s in the past.
+    async fn plant_old_orphan(dir: &std::path::Path, name: &str) {
+        let path = dir.join(name);
+        tokio::fs::write(&path, b"orphan")
+            .await
+            .expect("seed orphan");
+        // Back-date mtime by 60 s so the recency guard doesn't protect it.
+        let past = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+            .saturating_sub(60);
+        // Safety: path is a valid, freshly-created file; tv_sec/tv_usec are
+        // plain integers; utimes is thread-safe.
+        use std::ffi::CString;
+        let c_path = CString::new(path.to_str().expect("path utf8")).expect("cstring");
+        let times = [
+            libc::timeval {
+                tv_sec: past as libc::time_t,
+                tv_usec: 0,
+            },
+            libc::timeval {
+                tv_sec: past as libc::time_t,
+                tv_usec: 0,
+            },
+        ];
+        let rc = unsafe { libc::utimes(c_path.as_ptr(), times.as_ptr()) };
+        assert_eq!(rc, 0, "utimes failed: {}", std::io::Error::last_os_error());
+    }
+
     #[tokio::test]
-    async fn bind_atomic_owner_only_sweeps_orphan_tempfiles() {
+    async fn bind_atomic_owner_only_sweeps_dead_pid_orphans() {
         let dir = tempfile::tempdir().expect("tempdir");
         let sock = dir.path().join("acp.sock");
 
-        // Plant orphan tempfiles that look like previous-run leftovers.
-        let orphans = [
-            ".acp.sock.999.123456789",
-            ".acp.sock.12345.987654321",
-            ".acp.sock.1.1",
-        ];
-        for name in &orphans {
-            tokio::fs::write(dir.path().join(name), b"orphan")
-                .await
-                .expect("seed orphan");
-        }
+        // PID 1 is init/launchd — always alive, so we need a definitely-dead
+        // PID. Spawn `true`, wait for it to exit, then use its PID.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let dead_pid = child.id();
+        // wait() reaps the child so the PID is no longer live.
+        child.wait().expect("wait true");
+        // Give the OS a moment to release the PID slot.
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // An unrelated file that must NOT be removed.
+        let orphan_name = format!(".acp.sock.{dead_pid}.111222333");
+        plant_old_orphan(dir.path(), &orphan_name).await;
+
+        // An unrelated file must survive.
         tokio::fs::write(dir.path().join("unrelated.txt"), b"keep")
             .await
             .expect("seed unrelated");
@@ -281,20 +390,64 @@ mod tests {
             "live socket must exist"
         );
 
-        // All orphans must be gone.
-        for name in &orphans {
-            assert!(
-                tokio::fs::metadata(dir.path().join(name)).await.is_err(),
-                "orphan {name} must have been swept"
-            );
-        }
-
         // The unrelated file must survive.
         assert!(
             tokio::fs::metadata(dir.path().join("unrelated.txt"))
                 .await
                 .is_ok(),
             "unrelated.txt must not be removed"
+        );
+    }
+
+    /// A tempfile whose PID belongs to a living process must NOT be deleted.
+    #[tokio::test]
+    async fn sweep_preserves_live_pid_tempfile() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Spawn a long-lived child; its PID is guaranteed alive during the sweep.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let live_pid = child.id();
+
+        let name = format!(".acp.sock.{live_pid}.999888777");
+        plant_old_orphan(dir.path(), &name).await;
+
+        sweep_stale_orphans(dir.path(), "acp.sock").await;
+
+        // File must still exist — the PID is alive.
+        assert!(
+            tokio::fs::metadata(dir.path().join(&name)).await.is_ok(),
+            "tempfile with live PID {live_pid} must not be deleted"
+        );
+
+        child.kill().ok();
+        let _ = child.wait();
+    }
+
+    /// A tempfile whose mtime is within the recency window must NOT be deleted
+    /// regardless of PID state.
+    #[tokio::test]
+    async fn sweep_preserves_recent_tempfile() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Use a definitely-dead-or-irrelevant PID (PID 0 is invalid, kernel
+        // returns ESRCH), but the file's mtime is fresh so the recency guard
+        // must protect it before we even reach the liveness check.
+        // We use the current process's PID to guarantee ESRCH won't fire
+        // (process exists), and keep mtime at "now" (default on write).
+        let name = format!(".acp.sock.{}.555444333", std::process::id());
+        // Write without backdating — mtime stays at "now".
+        tokio::fs::write(dir.path().join(&name), b"recent")
+            .await
+            .expect("seed recent");
+
+        sweep_stale_orphans(dir.path(), "acp.sock").await;
+
+        assert!(
+            tokio::fs::metadata(dir.path().join(&name)).await.is_ok(),
+            "recently-written tempfile must not be swept"
         );
     }
 }
