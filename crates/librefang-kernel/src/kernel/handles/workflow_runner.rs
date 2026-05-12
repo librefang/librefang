@@ -173,11 +173,20 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
                         .map_err(|e| format!("{e}"))
                 }
             };
-            let _ = kernel_arc
+            // Don't swallow the result — without a log the agent that
+            // called workflow_start has no way to learn the run failed
+            // except by polling get_workflow_run for the Failed state.
+            if let Err(e) = kernel_arc
                 .workflows
                 .engine
                 .execute_run(run_id, resolver, send_message)
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    run_id = %run_id,
+                    "Async workflow execution failed: {e}"
+                );
+            }
         });
 
         Ok(run_id.0.to_string())
