@@ -5,6 +5,137 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.5.12] - 2026-05-12
+
+_95 PRs from 5 contributors since v2026.5.8-beta.10._
+
+### Highlights
+
+- **Workflow Engine** — agents can now start, cancel, and monitor multi-step workflows natively via new tools (`workflow_start`, `workflow_cancel`, `workflow_list`, `workflow_status`), with run history persisted to SQLite, configurable retry backoff, timeouts, and event triggers that fire workflows directly
+- **Multi-Instance Dashboard Management** — manage multiple LibreFang instances from a single dashboard UI
+- **Redesigned Memory Page** — the Memory dashboard is rebuilt around a per-agent rail with tabs, and Auto-Dream settings move there from Settings; proactive memory extraction now supports provider-qualified model IDs and per-agent overrides
+- **Messaging & Channel Improvements** — full P1 parity for reactions, threads, streaming, redaction, edits, and media; channel messages now mirror into inbound-routing sessions; cron/autonomous fires are labeled with `[Scheduled trigger]` in history
+- **Security & Fetch Hardening** — new SSRF-safe `fetch_url_bytes` helper with redirect re-validation, `web_fetch_to_file` for downloading URLs directly to disk, streaming abort on prompt-leak detection, and at-rest token hashing for workflow credentials
+
+### Added
+
+- Defer rate-limit failures + claim verifier (#4754) (@f-liva)
+- Buffer text-only group messages skipped at gating (#4755) (@f-liva)
+- Configurable burst ratio with NaN guard and tests (#4830) (@DaBlitzStein)
+- P1 parity (reactions, threads, streaming, redaction, edit) + media (#4831) (@neo-wanderer)
+- Persist workflow runs to SQLite (#4838) (@DaBlitzStein)
+- Render per-parameter form fields for workflow runs (#4839) (@DaBlitzStein)
+- Separate IMAP and SMTP credentials in EmailConfig (#4841) (@DaBlitzStein)
+- Add bounded SSRF-safe fetch_url_bytes helper (#4846) (@houko)
+- Catalog-driven ReasoningEchoPolicy with substring fallback (#4842) (#4863) (@houko)
+- Multi-instance management from the dashboard (#4837) (#4865) (@houko)
+- Tls_root_ca_path + tls_accept_invalid_certs for self-hosted IMAP (#4877) (#4889) (@houko)
+- [proactive_memory] extraction_model honours provider-qualified ids (#4871, #4870) (#4892) (@houko)
+- Add workflow_list and workflow_status native tools (#4902) (@houko)
+- Add run cancel, total timeout, retry backoff (#4844) (#4906) (@houko)
+- Allow event triggers to fire workflows directly (#4844) (#4909) (@houko)
+- Add workflow_start and workflow_cancel native tools (#4844) (#4910) (@houko)
+- At-rest token hashing, typed errors, pause/resume HTTP endpoints, async POST /run (#4911) (@houko)
+- Accept .oga audio extension in media_transcribe tool (#4919) (@f-liva)
+- Make token burst ratio configurable per agent (#4921) (@DaBlitzStein)
+- Add mcp_disabled field to AgentManifest (#4930) (@houko)
+- Mirror channel_send into inbound-routing session (#4932) (@houko)
+- Web_fetch_to_file — download URLs straight to disk (#4964) (@houko)
+
+### Fixed
+
+- Cache response_url per user to enable per-message replies (#4751) (@f-liva)
+- Mark cron/autonomous fires with [Scheduled trigger] prefix (#4752) (@f-liva)
+- Resilience pass — heartbeat, dedup, crash-safety, sweep race (#4759) (@f-liva)
+- Allow same-eTLD+1 metadata endpoints at discovery (#4665, follow-up to #4779) (#4789) (@neo-wanderer)
+- Channel=current uses main HEAD, not the tag's frozen commit (#4813) (@houko)
+- Switch ollama provider to native Ollama API (#4810) (#4814) (@houko)
+- Release --channel current works without `gh repo set-default` (#4816) (@houko)
+- Channel=current dispatches against main, takes tag via input (#4817) (@houko)
+- Unbreak main clippy on parse_github_owner_repo (#4819) (@houko)
+- Use chrono for config-backup timestamp; drop deprecated libc::time_t (#4820) (@houko)
+- Xcconfig shim for iOS signing; use apple-actions for cert (#4821) (@houko)
+- Unit-fast lane should not error on binary-only crates (#4822) (@houko)
+- Unblock iOS exportArchive + idempotent crates.io publish (#4827) (@houko)
+- Pre-dispatch provider budget gate on all 3 dispatch paths (#4828) (@DaBlitzStein)
+- Classify workflow retry backoff by error type (#4829) (@DaBlitzStein)
+- Pin scheme on Rule 2 eTLD+1 acceptance (supersedes #4789) (#4848) (@houko)
+- Persist workflow runs to SQLite (supersedes #4838) (#4849) (@houko)
+- Case-insensitive retry classifier + honour Retry-After (supersedes #4829) (#4850) (@houko)
+- Snapshot sock at sendOrEdit entry (supersedes #4759) (#4851) (@houko)
+- Pre-dispatch provider budget gate + integration tests (supersedes #4828) (#4852) (@houko)
+- Parse-time validation for default_burst_ratio + dup doc fix (supersedes #4830) (#4853) (@houko)
+- Seed workflow param defaults + clarify {{var}} contract (supersedes #4839) (#4854) (@houko)
+- Test fallback resolver for split email creds + regen schema golden (supersedes #4841) (#4855) (@houko)
+- Round-trip reasoning_content for deepseek-v4-flash tool_calls (#4842) (#4856) (@houko)
+- Drain pipes during wait to avoid >pipe-buffer deadlock (#4857) (@neo-wanderer)
+- Re-validate redirect targets in fetch_url_bytes (security) (#4858) (@houko)
+- Persist Paused state immediately at pause-transition site (#4859) (@houko)
+- Channel-default key mismatch — resolver used Debug format (#4861) (@neo-wanderer)
+- Redirect dashboard login to / instead of /dashboard (#4860) (#4862) (@houko)
+- Persist PUT /api/budget to config.toml + hot-reload + dashboard read (#4797) (#4864) (@houko)
+- Actionable error when stdio MCP runtime is missing (#4836) (#4867) (@houko)
+- Keep iPad portrait on the desktop layout (#4873) (#4880) (@houko)
+- Deliver ApprovalRequested events to channel adapters (#4875) (#4881) (@houko)
+- Typed 429 retry + idempotent txn_id + edit size cap (#4831 follow-up) (#4882) (@houko)
+- Backfill approval_audit.second_factor_used on upgrade (#4874) (#4883) (@houko)
+- Real session summaries via aux LLM + per-agent proactive_memory override (#4869, #4870) (#4885) (@houko)
+- Honour suppression for CLI/local providers + un-suppress on URL reconfigure (#4803) (#4886) (@houko)
+- Raise DEFAULT_MAX_HISTORY_MESSAGES from 40 to 60 (#4891) (@houko)
+- Stop the dashboard 401 spam on initial mount (#4893) (@houko)
+- Make embedding & extraction model fields suggest options instead of being raw text inputs (#4894) (@houko)
+- Switch embedding/extraction model fields to real <select> dropdowns (#4897) (@houko)
+- Recognise known embedding models when provider is Auto-detect (#4900) (@houko)
+- Batch history_fold LLM call + persist rewrites to session (#4866) (#4901) (@houko)
+- Scope `/new` to the calling channel + purge JSONL on delete (#4868) (#4905) (@houko)
+- Eradicate cascade scaffolding leak in agent replies (#4907) (@f-liva)
+- Persist workflow definitions to disk on register/remove (#4920) (@DaBlitzStein)
+- Unblock main coverage — /api/health/detail auth + workflow timeout overlay (#4928) (@houko)
+- Abort streaming on incremental prompt-leak detection (#4931) (@houko)
+- Sweep stale ACP UDS orphan tempfiles on bind (#4933) (@houko)
+- Detect audio MIME via magic bytes / filename (#4934) (@houko)
+- Allow shell_exec read commands against RO workspaces (#4935) (@houko)
+- Memory store alias + peer-scoped /btw read fix + kv-write logs (#4936) (@houko)
+- Per-session model override (#4898) (#4937) (@houko)
+- Close gaps from #4907-#4910/#4920 audit (#4938) (@houko)
+- Unblock Security audit — Next.js patch + tanstack/history GHSA (#4944) (@houko)
+- Align status fields, fix OFP-disabled empty-state (#4945) (@houko)
+- Add missing model_override in Session literal (#4955) (@houko)
+- Exclude cache-read hits from burst limit; sort agent-detail skills (#4957) (@houko)
+
+### Changed
+
+- Move Auto-Dream runtime panel from Settings to Memory page (#4890) (@houko)
+- Fold Auto-Dream into per-agent memory card (#4896) (@houko)
+- Redesign /dashboard/memory around an agent rail + tabs (#4904) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Documentation
+
+- Clarify manifest allowlist vs MCP server registry split (#4845) (@houko)
+- Correct skill_workshop default to OFF in agent guide (#4872) (@neo-wanderer)
+- Require fixing review nits in-PR instead of punting to follow-ups (#4879) (@houko)
+
+### Maintenance
+
+- Clarify, clean up, and loosen the AI agent rules (#4815) (@houko)
+- Regenerate SDKs + rustfmt Rust output (#4887) (#4888) (@houko)
+- End-to-end inbound POST → cache → send round-trip (#4929) (@houko)
+- Bump the cargo-minor-patch group with 14 updates (#4946) (@app/dependabot)
+- Bump opentelemetry from 0.31.0 to 0.32.0 (#4947) (@app/dependabot)
+- Bump r2d2_sqlite from 0.33.0 to 0.34.0 (#4950) (@app/dependabot)
+- Bump pulldown-cmark from 0.10.3 to 0.13.3 (#4951) (@app/dependabot)
+- Bump sysinfo from 0.38.4 to 0.39.1 (#4952) (@app/dependabot)
+
+### Reverted
+
+- Pin opentelemetry to 0.31 (#4947 broke main) (#4953) (@houko)
+
+</details>
+
+
 ## [2026.5.8] - 2026-05-08
 
 _68 PRs from 5 contributors since v2026.5.6-beta.9._
