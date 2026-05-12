@@ -24,9 +24,12 @@ use tracing::{debug, info, warn};
 /// to prevent leaking API keys from other providers. We keep the full env
 /// intact (so Node.js, NVM, SSL, proxies, etc. all work) and only remove
 /// secrets that belong to other LLM providers.
+///
+/// Note: ANTHROPIC_API_KEY is intentionally absent — the Claude Code CLI
+/// is Anthropic's own tool and requires its own key to authenticate API
+/// calls (OAuth alone is insufficient in -p/--print mode).
 const SENSITIVE_ENV_EXACT: &[&str] = &[
     "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     "GROQ_API_KEY",
@@ -1721,7 +1724,6 @@ mod tests {
     fn test_sensitive_env_list_coverage() {
         // Ensure all major provider keys are in the strip list
         assert!(SENSITIVE_ENV_EXACT.contains(&"OPENAI_API_KEY"));
-        assert!(SENSITIVE_ENV_EXACT.contains(&"ANTHROPIC_API_KEY"));
         assert!(SENSITIVE_ENV_EXACT.contains(&"GEMINI_API_KEY"));
         assert!(SENSITIVE_ENV_EXACT.contains(&"GROQ_API_KEY"));
         assert!(SENSITIVE_ENV_EXACT.contains(&"DEEPSEEK_API_KEY"));
