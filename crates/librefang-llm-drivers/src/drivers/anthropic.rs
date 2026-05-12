@@ -743,16 +743,21 @@ impl LlmDriver for AnthropicDriver {
 
                     match event_type.as_str() {
                         "message_start" => {
+                            // Anthropic delivers all three usage buckets in
+                            // one message_start event. Read them locally,
+                            // then normalize: see #4958 / the non-streaming
+                            // builder at convert_response — input_tokens
+                            // on the workspace-side TokenUsage is the TOTAL
+                            // prompt including cache, but Anthropic's API
+                            // reports it as new-input-only.
                             let u = &json["message"]["usage"];
-                            if let Some(it) = u["input_tokens"].as_u64() {
-                                usage.input_tokens = it;
-                            }
-                            if let Some(ct) = u["cache_creation_input_tokens"].as_u64() {
-                                usage.cache_creation_input_tokens = ct;
-                            }
-                            if let Some(cr) = u["cache_read_input_tokens"].as_u64() {
-                                usage.cache_read_input_tokens = cr;
-                            }
+                            let new_input = u["input_tokens"].as_u64().unwrap_or(0);
+                            let cache_creation =
+                                u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                            let cache_read = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                            usage.input_tokens = new_input + cache_read + cache_creation;
+                            usage.cache_creation_input_tokens = cache_creation;
+                            usage.cache_read_input_tokens = cache_read;
                         }
                         "content_block_start" => {
                             let block = &json["content_block"];
@@ -1301,7 +1306,16 @@ fn convert_response(api: ApiResponse) -> CompletionResponse {
         stop_reason,
         tool_calls,
         usage: TokenUsage {
-            input_tokens: api.usage.input_tokens,
+            // Normalize to the workspace convention used by
+            // `librefang-kernel-metering` and `TokenUsage::burst_tokens`:
+            // `input_tokens` = TOTAL prompt tokens including the cached
+            // portion. Anthropic's API reports `input_tokens` as the NEW
+            // input only with cache_read / cache_creation as separate
+            // buckets, so add them in here at the boundary. Tracking
+            // issue: #4958.
+            input_tokens: api.usage.input_tokens
+                + api.usage.cache_read_input_tokens
+                + api.usage.cache_creation_input_tokens,
             output_tokens: api.usage.output_tokens,
             cache_creation_input_tokens: api.usage.cache_creation_input_tokens,
             cache_read_input_tokens: api.usage.cache_read_input_tokens,
