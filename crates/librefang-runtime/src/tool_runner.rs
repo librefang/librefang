@@ -175,8 +175,18 @@ fn shell_split_chain(command: &str) -> Result<Vec<String>, String> {
                     continue;
                 }
                 // `$(` — command substitution: opaque subshell.
-                if ch == '$' && i + 1 < len && chars[i + 1] == '(' {
-                    return Err("$(...) command substitution".to_string());
+                // `$'...'` — ANSI-C quoting: shell decodes escape sequences like
+                // `$'\x3b'` → `;` at parse time, before we see the string.  We
+                // cannot safely tokenize through that, so fail-closed (B3).
+                if ch == '$' && i + 1 < len {
+                    if chars[i + 1] == '(' {
+                        return Err("$(...) command substitution".to_string());
+                    }
+                    if chars[i + 1] == '\'' {
+                        return Err(
+                            "ANSI-C quoting ($'...') contains shell-decoded escapes".to_string()
+                        );
+                    }
                 }
                 // `&&` operator.
                 if ch == '&' && i + 1 < len && chars[i + 1] == '&' {
@@ -243,20 +253,16 @@ fn shell_split_chain(command: &str) -> Result<Vec<String>, String> {
 /// agents — it is not designed to stop a determined attacker who controls the
 /// workspace filesystem.
 fn classify_shell_exec_ro_safety(command: &str, ro_prefix: &str) -> RoSafety {
-    // --- 0. Subshell / command-substitution guard (fast path) -----------------
-    // `$( ... )` and backticks embed sub-commands that the verb classifier
-    // never reaches (sh evaluates them before exec). The quote-aware splitter
-    // below will also catch these, but we check here first to avoid the
-    // allocation cost of the splitter on the common case.
-    if command.contains("$(") || command.contains('`') {
-        return RoSafety::Block(format!(
-            "shell_exec blocked: command-substitution (`$(...)` or backtick) \
-             is not analyzable — RO path '{}' may be targeted by an embedded sub-command",
-            ro_prefix
-        ));
-    }
-
-    // --- 0b. Quote-aware shell-chain split ------------------------------------
+    // --- 0. Quote-aware shell-chain split ------------------------------------
+    // The tokenizer (`shell_split_chain`) already fails-closed on:
+    //   - backtick subshells
+    //   - `$(...)` command substitution
+    //   - `$'...'` ANSI-C quoting (B3 — decodes shell escapes before we see them)
+    // The old raw `contains("$(")` fast-path was removed (M1): it blocked
+    // legitimate reads like `grep '$(foo)' /vaults-ro/x/log` where `$(` is
+    // inside a single-quoted argument.  The tokenizer handles the real unsafe
+    // cases correctly and without false positives.
+    //
     // Split on unquoted `&&`, `||`, `|`, `;` so that operators inside string
     // literals are not mistaken for chain operators (BLOCKER-2).
     match shell_split_chain(command) {
@@ -298,58 +304,93 @@ fn classify_shell_exec_ro_safety(command: &str, ro_prefix: &str) -> RoSafety {
 /// `;` / `|`. Subshells / command-substitution are rejected before reaching
 /// here, so this function can assume `command` is a single simple command.
 fn classify_shell_exec_ro_safety_segment(command: &str, ro_prefix: &str) -> RoSafety {
-    // --- 1. Redirect detection -------------------------------------------------
-    // Check the raw command string for output-redirect operators that target the
-    // RO path. We scan for every known output-redirect operator; longer operators
-    // must precede shorter ones so `>>` matches before `>`, `&&` isn't hit as
-    // `&`, etc.
+    // --- 1. Redirect detection (quote-aware) ------------------------------------
+    // Walk the command character-by-character tracking quote state so that
+    // redirect operators that appear inside single- or double-quoted strings
+    // are NOT treated as real redirects (H1).
     //
-    // Operators covered (BLOCKER-1):
+    // Example false-positive that the old raw `.find()` approach triggered:
+    //   `grep '>' /vaults-ro/x/log`
+    // The `>` is inside single quotes and is part of the grep pattern, not a
+    // redirect — but the old scan found it and blocked the legitimate read.
+    //
+    // Operators covered (longer before shorter to avoid prefix shadowing):
     //   &>>  2>>  >>   >|   >&   &>   2>   1>   >    (output redirects)
-    //   <<<  <<                                        (heredoc / herestring — can
-    //                                                  redirect stdin to a file
-    //                                                  opened for write via `cat <<EOF >file`)
-    //   >(   (bash process substitution — writes via FD)
+    //   <<<  <<                                        (heredoc / herestring)
+    //   >(                                             (bash process substitution)
     //
-    // For heredoc / herestring the *following token* is the delimiter, not a
-    // path. However, the redirect operator that PRECEDES the heredoc (e.g.
-    // `> /vaults-ro/x/out`) is caught by the `>` scan below. The `<<` / `<<<`
-    // entries ensure we also block `cat <<EOF >/vaults-ro/x/out` if by some
-    // ordering the `>` appears first in the string.
-    //
-    // `>(` is a bash process substitution that opens a pipe to a command; when
-    // used as `cmd > >(tee /vaults-ro/x/out)` the RO path appears after `>(`.
-    // We treat any `>(` occurrence as a write-direction operator.
-    for op in &[
-        "&>>", "2>>", ">>", ">|", ">&", "&>", "2>", "1>", ">", "<<<", "<<", ">(",
-    ] {
-        let mut search_from = 0usize;
-        while let Some(rel) = command[search_from..].find(op) {
-            let op_start = search_from + rel;
-
-            // For heredoc operators (`<<`, `<<<`) the token after the operator
-            // is the delimiter word, not a path. We still do the scan so that
-            // a command like `cat /ro/path <<EOF` triggers no false-positive on
-            // the delimiter; we only care about whether the *destination* after a
-            // real output-redirect contains the RO prefix.  For `<<`/`<<<` we
-            // skip the destination check (there is none) and just mark the
-            // command as safe from the heredoc operator itself — the actual
-            // output redirect that pairs with a heredoc would be caught by the
-            // `>` entry.  However, if the RO prefix literally appears after a
-            // `<<`/`<<<` token (unusual but possible in `<<<` herestring form),
-            // block conservatively.
-            let after_op = command[op_start + op.len()..].trim_start();
-            let dest_token = after_op.split_whitespace().next().unwrap_or("");
-
-            if is_ro_path(dest_token, ro_prefix) {
-                return RoSafety::Block(format!(
-                    "shell_exec blocked: shell redirect '{}' targets read-only workspace path '{}'",
-                    op, ro_prefix
-                ));
+    // For heredoc / herestring the *following token* is the delimiter word, not
+    // a path — we only block if the RO prefix appears after the operator token.
+    {
+        // Build a parallel byte-offset → in-Normal-state index so we can check
+        // quote state at each candidate operator position.  We track quote state
+        // over the raw bytes (ASCII operators only, so char == byte here).
+        let ops: &[&str] = &[
+            "&>>", "2>>", ">>", ">|", ">&", "&>", "2>", "1>", ">", "<<<", "<<", ">(",
+        ];
+        // Compute quote state at every byte offset using a simple state machine.
+        // `true` = this position is in Normal (unquoted) state.
+        let bytes = command.as_bytes();
+        let n = bytes.len();
+        let mut normal_at: Vec<bool> = vec![false; n + 1];
+        {
+            let mut sq = false; // inside single-quote
+            let mut dq = false; // inside double-quote
+            let mut esc = false; // backslash-escape active
+            for (idx, &b) in bytes.iter().enumerate() {
+                normal_at[idx] = !sq && !dq && !esc;
+                if esc {
+                    esc = false;
+                } else if sq {
+                    if b == b'\'' {
+                        sq = false;
+                    }
+                } else if dq {
+                    if b == b'\\' {
+                        esc = true;
+                    } else if b == b'"' {
+                        dq = false;
+                    }
+                } else {
+                    // Normal state
+                    if b == b'\\' {
+                        esc = true;
+                    } else if b == b'\'' {
+                        sq = true;
+                    } else if b == b'"' {
+                        dq = true;
+                    }
+                }
             }
-            search_from = op_start + op.len();
+            normal_at[n] = !sq && !dq && !esc;
         }
-    }
+
+        for op in ops {
+            let op_len = op.len();
+            let mut search_from = 0usize;
+            while search_from + op_len <= n {
+                if let Some(rel) = command[search_from..].find(op) {
+                    let op_start = search_from + rel;
+                    // Only treat as a real redirect if the operator starts in
+                    // Normal (unquoted) state (H1).
+                    if normal_at[op_start] {
+                        let after_op = command[op_start + op_len..].trim_start();
+                        let dest_token = after_op.split_whitespace().next().unwrap_or("");
+                        if is_ro_path(dest_token, ro_prefix) {
+                            return RoSafety::Block(format!(
+                                "shell_exec blocked: shell redirect '{}' targets \
+                                 read-only workspace path '{}'",
+                                op, ro_prefix
+                            ));
+                        }
+                    }
+                    search_from = op_start + op_len;
+                } else {
+                    break;
+                }
+            }
+        } // for op in ops
+    } // quote-aware redirect scan block
 
     // --- 2. Split into tokens for verb + arg analysis --------------------------
     let tokens: Vec<&str> = command.split_whitespace().collect();
@@ -386,7 +427,11 @@ fn classify_shell_exec_ro_safety_segment(command: &str, ro_prefix: &str) -> RoSa
         // These primaries instruct find to mutate the filesystem or write to
         // a file, making `find` a write operation even if it looks like a read.
         const FIND_WRITE_PRIMARIES: &[&str] = &[
-            "-delete", "-exec", "-execdir", "-fprint", "-fprintf", "-fls", "-fprint0",
+            "-delete", "-exec", "-execdir",
+            // `-ok` / `-okdir` are interactive variants of `-exec` / `-execdir`.
+            // In non-interactive (AI agent) execution they silently run the
+            // command, so they must be treated as write-enabling primaries (B2).
+            "-ok", "-okdir", "-fprint", "-fprintf", "-fls", "-fprint0",
         ];
         let has_write_primary = tokens[1..].iter().any(|t| {
             // Match the primary exactly or when it's a prefix of a combined token
@@ -1407,9 +1452,15 @@ pub async fn execute_tool_raw(
                         }
                         // Path-boundary check: make sure it's not a shared-prefix
                         // false-positive (e.g. /data vs /data2).
+                        //
+                        // We must check ALL occurrences, not just the first one.
+                        // A command like `cat /vaults-roxxx/dummy; rm /vaults-ro/x/foo`
+                        // has its first match at `/vaults-roxxx` (boundary fails),
+                        // so using `.find()` alone would skip the second real match
+                        // and let the `rm` through (B1).
                         let at_boundary = {
                             let ps = prefix_str.as_ref();
-                            full_command.find(ps).is_some_and(|idx| {
+                            full_command.match_indices(ps).any(|(idx, _)| {
                                 let after = &full_command[idx + ps.len()..];
                                 after.is_empty()
                                     || after.starts_with('/')
@@ -10132,6 +10183,75 @@ mod tests {
             result,
             RoSafety::Allow,
             "cp -t /tmp with RO as source must be allowed; got {result:?}"
+        );
+    }
+
+    // ── Second-pass security regression tests (PR #4935 review) ─────────────
+
+    #[test]
+    fn at_boundary_handles_shared_prefix() {
+        // B1: `/vaults-roxxx` (longer shared prefix) appears first in the
+        // command; the real RO path `/vaults-ro/x` appears after a semicolon.
+        // The boundary check must scan ALL occurrences, not just the first.
+        // `classify_shell_exec_ro_safety` is called after the `at_boundary`
+        // gate passes, so we test the gate directly via a command that
+        // contains both the longer decoy prefix and the real one.
+        //
+        // The full command after the at_boundary gate is passed to the
+        // classifier; the classifier must then block the `rm` segment.
+        let result = classify_shell_exec_ro_safety(
+            "cat /vaults-roxxx/dummy; rm /vaults-ro/x/foo",
+            "/vaults-ro/x",
+        );
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "shared-prefix decoy must not prevent detection of real RO path; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn find_ok_and_okdir_blocked() {
+        // B2: `-ok` and `-okdir` are interactive variants of `-exec`/`-execdir`.
+        // In non-interactive (AI agent) execution they silently run the command.
+        let result_ok =
+            classify_shell_exec_ro_safety(r"find /vaults-ro/x -ok rm {} \;", "/vaults-ro/x");
+        assert!(
+            matches!(result_ok, RoSafety::Block(_)),
+            "find -ok must be blocked; got {result_ok:?}"
+        );
+        let result_okdir =
+            classify_shell_exec_ro_safety(r"find /vaults-ro/x -okdir rm {} \;", "/vaults-ro/x");
+        assert!(
+            matches!(result_okdir, RoSafety::Block(_)),
+            "find -okdir must be blocked; got {result_okdir:?}"
+        );
+    }
+
+    #[test]
+    fn ansi_c_quoting_blocked() {
+        // B3: `$'\x3b'` is ANSI-C quoting for `;`. The shell decodes this to
+        // a real semicolon before execution, splitting the command. Our
+        // tokenizer cannot safely decode these escapes, so it must fail-closed.
+        let result = classify_shell_exec_ro_safety(
+            r"cat /tmp/in $'\x3b' rm /vaults-ro/x/foo",
+            "/vaults-ro/x",
+        );
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "ANSI-C quoting ($'...') must cause a block; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn redirect_in_single_quotes_allowed() {
+        // H1: `grep '>' /vaults-ro/x/log` — the `>` is inside a single-quoted
+        // grep pattern, not a shell redirect operator. The quote-aware redirect
+        // scanner must not treat it as a write operation.
+        let result = classify_shell_exec_ro_safety("grep '>' /vaults-ro/x/log", "/vaults-ro/x");
+        assert_eq!(
+            result,
+            RoSafety::Allow,
+            "redirect operator inside single quotes must not block a read; got {result:?}"
         );
     }
 
