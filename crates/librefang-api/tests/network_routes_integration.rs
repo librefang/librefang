@@ -236,6 +236,16 @@ async fn network_status_disabled_when_secret_empty() {
     assert_eq!(body["node_id"], "");
     assert_eq!(body["listen_address"], "");
     assert!(body["identity_fingerprint"].is_null());
+
+    // #3873 follow-up: dashboard reads `online` / `listen_addr` /
+    // `peer_count` / `protocol_version`. Lock those names so a future
+    // rename or removal can't silently re-break the network page
+    // (NetworkPage.tsx referenced them while the daemon shipped only
+    // their legacy aliases — the badge stayed "offline" for months).
+    assert_eq!(body["online"], false);
+    assert_eq!(body["listen_addr"], "");
+    assert_eq!(body["peer_count"], 0);
+    assert_eq!(body["protocol_version"], "ofp/1");
 }
 
 // ---------------------------------------------------------------------------
