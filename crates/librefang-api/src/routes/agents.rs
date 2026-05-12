@@ -4413,6 +4413,31 @@ pub async fn patch_agent(
         }
     }
 
+    if let Some(schedule_val) = body.get("schedule") {
+        match serde_json::from_value::<librefang_types::agent::ScheduleMode>(schedule_val.clone()) {
+            Ok(schedule) => {
+                if let Err(e) = state
+                    .kernel
+                    .agent_registry()
+                    .update_schedule(agent_id, schedule)
+                {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(
+                            serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                        ),
+                    );
+                }
+            }
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("Invalid schedule format: {e}")})),
+                );
+            }
+        }
+    }
+
     // Persist updated entry to SQLite
     if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
         if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {

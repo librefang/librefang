@@ -461,6 +461,19 @@ impl AgentRegistry {
         Ok(())
     }
 
+    pub fn update_schedule(
+        &self,
+        id: AgentId,
+        schedule: librefang_types::agent::ScheduleMode,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.schedule = schedule;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Update an agent's fallback model chain.
     pub fn update_fallback_models(
         &self,
