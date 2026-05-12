@@ -63,7 +63,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 
 # OpenTelemetry
-opentelemetry = "0.32"
+# DO NOT upgrade to 0.32 until `tracing-opentelemetry` releases a version
+# that depends on opentelemetry 0.32 (current latest 0.32.1 still pins
+# opentelemetry = "0.31"). Mixing 0.32 here with tracing-opentelemetry
+# 0.32.1 leaves two copies of `opentelemetry::trace::Tracer` in the
+# tree and breaks `SdkTracer: Tracer` trait bounds in telemetry.rs.
+# dependabot bump #4947 violated this constraint and was reverted.
+opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 # `default-features = false` is critical: opentelemetry-otlp's default feature
 # set enables `http-proto` + `reqwest-blocking-client`, which forces
