@@ -235,6 +235,7 @@ use crate::types;
         routes::get_session,
         routes::delete_session,
         routes::set_session_label,
+        routes::patch_session_model,
         routes::find_session_by_label,
         routes::session_cleanup,
 
