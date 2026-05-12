@@ -146,8 +146,12 @@ impl AgentScheduler {
             tracker.input_tokens += usage.input_tokens;
             tracker.output_tokens += usage.output_tokens;
             tracker.llm_calls += 1;
-            // Record in the per-minute sliding window for burst detection
-            tracker.token_timestamps.push_back((Instant::now(), total));
+            // Sliding-window for burst detection — exclude cached prompt
+            // tokens (served from provider cache, no real throughput cost).
+            let burst_tokens = total.saturating_sub(usage.cache_read_input_tokens);
+            tracker
+                .token_timestamps
+                .push_back((Instant::now(), burst_tokens));
         }
     }
 
