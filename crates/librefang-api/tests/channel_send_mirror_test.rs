@@ -86,8 +86,12 @@ async fn boot_with_tool_invoke(tool_invoke: ToolInvokeConfig) -> Harness {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Route wiring: `POST /api/tools/channel_send/invoke` returns 200 with
-/// `is_error: true` when no channel adapter is configured.  Verifies:
+/// Route wiring: `POST /api/tools/channel_send/invoke` reaches the handler,
+/// passes the allowlist gate, and returns a well-formed `is_error: true`
+/// JSON body when no channel adapter is configured.  `invoke_tool` maps
+/// `result.is_error → StatusCode::BAD_REQUEST` so the wire-level status is
+/// 400 — what we care about here is that the body is a valid tool-result
+/// envelope (not a server panic / 5xx), proving:
 ///   - `channel_send` is registered as a builtin tool (existence check)
 ///   - the `tool_invoke` allowlist gate is applied correctly
 ///   - the handler returns a valid JSON body on adapter-not-found failure
@@ -105,29 +109,37 @@ async fn test_channel_send_invoke_route_wired_and_gated() {
         "message": "hello from integration test",
     });
 
-    let resp = h
-        .app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/tools/channel_send/invoke")
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
-        .await
-        .expect("oneshot");
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/api/tools/channel_send/invoke")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    // oneshot bypasses axum's connection layer, so ConnectInfo is not set.
+    // Inject a loopback address so the auth middleware's "fail closed for
+    // non-loopback when no api_key" branch treats this as a localhost caller.
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
 
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "channel_send route must be reachable"
-    );
+    let resp = h.app.clone().oneshot(req).await.expect("oneshot");
 
+    let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .expect("body bytes");
+    let body_str = String::from_utf8_lossy(&bytes).to_string();
+    // `invoke_tool` maps `result.is_error` → 400.  Anything else (200, 401,
+    // 403, 404, 5xx) means the route, allowlist gate, or handler is wrong.
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "channel_send route must reach the handler and return is_error:true \
+         as 400; got status {status}, body: {body_str}"
+    );
+
     let json: serde_json::Value = serde_json::from_slice(&bytes).expect("response is JSON");
 
     // No adapter configured → tool execution error, not a server panic/500.
@@ -146,22 +158,21 @@ async fn test_channel_send_invoke_forbidden_when_not_allowlisted() {
     })
     .await;
 
-    let resp = h
-        .app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/tools/channel_send/invoke")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({"channel":"telegram","recipient":"1","message":"x"})
-                        .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .expect("oneshot");
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/api/tools/channel_send/invoke")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({"channel":"telegram","recipient":"1","message":"x"}).to_string(),
+        ))
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let resp = h.app.clone().oneshot(req).await.expect("oneshot");
 
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
