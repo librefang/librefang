@@ -133,14 +133,14 @@ librefang session export <session-id> --format json
 ### 存储记忆
 
 ```bash
-# 存储简单记忆
-librefang memory store --key "user:preference:theme" --value "dark"
+# 存储简单键值（位置参数：agent key value）
+librefang memory store <agent> "user:preference:theme" "dark"
 
-# 存储结构化数据
-librefang memory store --key "project:details" --data '{"name": "LibreFang", "version": "1.0"}'
+# 示例：为 coder agent 存储版本信息
+librefang memory store coder "project:version" "1.0"
 
-# 存储带标签
-librefang memory store --key "note:1" --value "Important note" --tags "work,urgent"
+# 等价形式：使用 set 子命令
+librefang memory set coder "note:1" "Important note"
 ```
 
 ### 搜索记忆

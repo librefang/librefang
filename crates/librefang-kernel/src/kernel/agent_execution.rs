@@ -501,10 +501,20 @@ impl LibreFangKernel {
             let mcp_tool_count = self.mcp.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
             let stable_prefix_mode = cfg.stable_prefix_mode;
+            // Apply the same peer-scoping that `memory_store` uses on write so
+            // the key we read actually matches what the agent stored.  When
+            // sender_context carries a non-empty user_id (e.g. the WebUI client
+            // IP or a channel user identifier) the key is `peer:{id}:user_name`;
+            // for system / autonomous / cron turns (no sender) we fall back to
+            // the unscoped `"user_name"` key — same as the write side.
+            let peer_id = sender_context
+                .map(|s| s.user_id.as_str())
+                .filter(|s| !s.is_empty());
+            let user_name_key = peer_scoped_key("user_name", peer_id);
             let user_name = self
                 .memory
                 .substrate
-                .structured_get(shared_id, "user_name")
+                .structured_get(shared_id, &user_name_key)
                 .ok()
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));

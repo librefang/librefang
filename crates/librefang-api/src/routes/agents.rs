@@ -1771,7 +1771,7 @@ pub async fn send_message(
         let kernel = state.kernel.clone();
         let msg = effective_message.clone();
         match run_cancel_on_disconnect(async move {
-            kernel.send_message_ephemeral(agent_id, &msg).await
+            kernel.send_message_ephemeral(agent_id, &msg, None).await
         })
         .await
         {

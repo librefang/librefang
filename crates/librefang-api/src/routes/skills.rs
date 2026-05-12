@@ -3628,7 +3628,7 @@ pub async fn hand_send_message(
     let result = if is_ephemeral {
         state
             .kernel
-            .send_message_ephemeral(agent_id, &effective_message)
+            .send_message_ephemeral(agent_id, &effective_message, None)
             .await
     } else {
         let kernel_handle: Arc<dyn librefang_kernel::kernel_handle::KernelHandle> =

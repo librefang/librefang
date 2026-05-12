@@ -156,11 +156,13 @@ pub trait ChannelBridgeHandle: Send + Sync {
     }
 
     /// Send an ephemeral "side question" (`/btw`) — answered with the agent's system
-    /// prompt but without loading or saving session history.
+    /// prompt but without loading or saving session history. `sender` is forwarded
+    /// for peer-scoped memory lookups (#4923).
     async fn send_message_ephemeral(
         &self,
         _agent_id: AgentId,
         _message: &str,
+        _sender: Option<&SenderContext>,
     ) -> Result<String, String> {
         Err("Not implemented".to_string())
     }
@@ -5007,9 +5009,19 @@ async fn handle_command(
                 &sender.platform_id,
                 sender.librefang_user.as_deref(),
             );
+            // Build a minimal SenderContext so the kernel can apply the
+            // same peer-scoped memory lookup that the regular message path
+            // uses (#4923) — otherwise the agent re-asks the user's name
+            // for every `/btw` even after it was learned on a channel turn.
+            let sctx = crate::types::SenderContext {
+                channel: channel_type_str(channel_type).to_string(),
+                user_id: sender.platform_id.clone(),
+                display_name: sender.display_name.clone(),
+                ..Default::default()
+            };
             match agent_id {
                 Some(aid) => handle
-                    .send_message_ephemeral(aid, &question)
+                    .send_message_ephemeral(aid, &question, Some(&sctx))
                     .await
                     .unwrap_or_else(|e| format!("Error: {e}")),
                 None => "No agent selected. Use /agent <name> first.".to_string(),
