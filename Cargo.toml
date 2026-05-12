@@ -121,7 +121,7 @@ bytes = "1"
 futures = "0.3"
 
 # MCP SDK
-rmcp = { version = "1.5", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
+rmcp = { version = "1.6", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 
 # ACP (Agent Client Protocol) SDK — official Zed-maintained crates for IDE integration (#3313)
 # `unstable` enables session/{resume,close,fork,list-additional-directories}, message-id, session-usage,
