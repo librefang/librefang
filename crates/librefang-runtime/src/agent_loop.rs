@@ -4998,12 +4998,31 @@ async fn stream_with_retry(
         let outer_tx = tx.clone();
 
         // Spawn a forwarding task that accumulates text and checks for leaks.
+        // Cap the accumulator at 128 KB so a pathologically long stream cannot
+        // grow the leak-detection buffer unboundedly (the rolling suffix kept
+        // after the cap still covers any marker that could span a delta boundary).
+        const ACCUMULATED_CAP: usize = 128 * 1024;
         let forward_task = tokio::spawn(async move {
             let mut accumulated = String::new();
             let mut leak_fired = false;
             while let Some(event) = proxy_rx.recv().await {
                 match &event {
                     StreamEvent::TextDelta { text } if !leak_fired => {
+                        // Rolling-window: once we exceed the cap, discard the
+                        // oldest bytes and keep only the tail that is large
+                        // enough to overlap any multi-token marker.  The longest
+                        // marker in STRUCTURAL_TURN_FRAMES / ENVELOPE_* is
+                        // ~30 chars; 512 bytes of overlap is a comfortable
+                        // margin.
+                        if accumulated.len() + text.len() > ACCUMULATED_CAP {
+                            const OVERLAP: usize = 512;
+                            let keep_from = accumulated.len().saturating_sub(OVERLAP);
+                            // Walk to a valid UTF-8 boundary.
+                            let keep_from = (keep_from..=accumulated.len())
+                                .find(|&i| accumulated.is_char_boundary(i))
+                                .unwrap_or(accumulated.len());
+                            accumulated.drain(..keep_from);
+                        }
                         accumulated.push_str(text);
                         if crate::silent_response::is_cascade_leak(&accumulated) {
                             leak_fired = true;
@@ -5027,20 +5046,23 @@ async fn stream_with_retry(
             leak_fired
         });
 
-        match driver.stream(request.clone(), proxy_tx).await {
+        // Drive the LLM stream, then join the forwarding task exactly once.
+        // The join handle is consumed here; each match arm either returns or
+        // continues, so there is exactly one await site per control-flow path.
+        let driver_result = driver.stream(request.clone(), proxy_tx).await;
+        // proxy_tx is dropped when driver returns (moved into driver.stream).
+        // forward_task drains the proxy channel and finishes.
+        let cascade_leak_aborted = forward_task.await.unwrap_or(false);
+
+        match driver_result {
             Ok(response) => {
                 record_retry_success(provider, cooldown);
-                let cascade_leak_aborted = forward_task.await.unwrap_or(false);
                 return Ok(StreamWithRetryResult {
                     response,
                     cascade_leak_aborted,
                 });
             }
             Err(LlmError::RateLimited { retry_after_ms, .. }) => {
-                // proxy_tx is dropped (driver returned Err), forward_task
-                // will drain and finish. Await before the next retry
-                // iteration to avoid task accumulation.
-                let _ = forward_task.await;
                 last_error = Some(
                     handle_retryable_llm_error(
                         attempt,
@@ -5055,7 +5077,6 @@ async fn stream_with_retry(
                 );
             }
             Err(LlmError::Overloaded { retry_after_ms }) => {
-                let _ = forward_task.await;
                 last_error = Some(
                     handle_retryable_llm_error(
                         attempt,
@@ -5085,8 +5106,6 @@ async fn stream_with_retry(
                 // classification, log lines, error stringification through
                 // `LibreFangError::LlmDriver(e.to_string())`) only ever read
                 // `partial_text_len` and pay nothing for the body.
-                // forward_task has finished (proxy_tx was dropped by driver).
-                let _ = forward_task.await;
                 if let Some(body) = partial_text.as_deref() {
                     if !body.is_empty() {
                         let _ = tx
@@ -5111,7 +5130,6 @@ async fn stream_with_retry(
                         error = %err_str,
                         "LLM stream died with transient error, retrying"
                     );
-                    let _ = forward_task.await;
                     last_error = Some("Transient stream error".to_string());
                     tokio::time::sleep(Duration::from_millis(
                         BASE_RETRY_DELAY_MS * 2u64.pow(attempt),
@@ -5119,7 +5137,6 @@ async fn stream_with_retry(
                     .await;
                     continue;
                 }
-                let _ = forward_task.await;
                 let (is_billing, err) =
                     build_user_facing_llm_error(&e, "LLM stream error classified");
                 record_retry_failure(provider, cooldown, is_billing);
@@ -5799,14 +5816,17 @@ pub async fn run_agent_loop_streaming(
 
         // Incremental cascade-leak guard fired mid-stream: the forward task
         // already stopped emitting TextDelta. Treat the turn as a silent
-        // drop — do not deliver any response text to the user, do not
-        // persist the partial reply, and prune it from session history.
+        // drop unconditionally — regardless of stop_reason (including
+        // ToolUse). This prevents an attacker from leaking the system prompt
+        // and then forcing tool execution by emitting a tool_use block after
+        // the leak trigger.
         if stream_result.cascade_leak_aborted {
             warn!(
-                event = "system_prompt_regurgitated",
+                event = "silent_response_detected",
                 agent = %manifest.name,
+                reason = ?crate::silent_response::SilentReason::PromptRegurgitated,
                 source = "agent_loop.streaming.incremental",
-                "Incremental cascade-leak guard fired mid-stream — aborting, delivering generic replacement"
+                "Incremental cascade-leak guard fired mid-stream — aborting turn, delivering [no reply needed]"
             );
             session
                 .messages

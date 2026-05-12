@@ -72,7 +72,7 @@ const STRUCTURAL_TURN_FRAMES: &[&str] = &["User asked:", "I responded:", "[Past 
 ///
 /// Used both by the assembled-response guard (non-streaming and streaming
 /// EndTurn) and by the incremental streaming abort path.
-pub(crate) fn is_cascade_leak(text: &str) -> bool {
+pub fn is_cascade_leak(text: &str) -> bool {
     let mut structural_hits = 0u8;
 
     for m in STRUCTURAL_TURN_FRAMES
