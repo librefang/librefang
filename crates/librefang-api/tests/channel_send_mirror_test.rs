@@ -15,7 +15,6 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use librefang_api::{routes::AppState, server};
 use librefang_kernel::{KernelApi, LibreFangKernel};
-use librefang_kernel_handle::prelude::*;
 use librefang_types::agent::SessionId;
 use librefang_types::config::{DefaultModelConfig, KernelConfig, ToolInvokeConfig};
 use librefang_types::message::{Message, MessageContent, Role};
@@ -65,10 +64,16 @@ async fn boot_with_tool_invoke(tool_invoke: ToolInvokeConfig) -> Harness {
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
     let kernel = Arc::new(kernel);
-    kernel.set_self_handle();
+    // `set_self_handle` on the `KernelApi` trait takes `self: Arc<Self>` by
+    // value (post-#3565 cleanup) — clone first so we keep `kernel` for
+    // `build_router` below.
+    Arc::clone(&kernel).set_self_handle();
 
-    let (app, state) =
-        server::build_router(Arc::clone(&kernel), "127.0.0.1:0".parse().expect("addr")).await;
+    // `build_router` now takes `Arc<dyn KernelApi>` (post-#3565 cleanup).
+    // Coerce the concrete `Arc<LibreFangKernel>` to the trait object before
+    // calling.
+    let kernel_dyn: Arc<dyn KernelApi> = kernel.clone();
+    let (app, state) = server::build_router(kernel_dyn, "127.0.0.1:0".parse().expect("addr")).await;
 
     Harness {
         app,
