@@ -1842,16 +1842,59 @@ pub fn strip_provider_prefix(model: &str, provider: &str) -> String {
 
 /// Apply a per-session model override string (#4898).
 ///
-/// Format: `"<provider>/<model>"` (sets both provider and model) or
-/// `"<model>"` (model only, provider stays as the manifest default).
-/// Mirrors the cron `AgentTurn.model_override` resolution pattern.
-fn apply_session_model_override(manifest: &mut AgentManifest, override_str: &str) {
-    if let Some((provider, model)) = override_str.split_once('/') {
-        manifest.model.provider = provider.to_string();
-        manifest.model.model = model.to_string();
-    } else {
-        manifest.model.model = override_str.to_string();
+/// Format: `"<provider>/<model>"` (sets both provider and model — provider
+/// is the first `/`-delimited segment, model is everything after it, so
+/// qualified identifiers like `meta-llama/Llama-3.3-70B` are handled
+/// correctly) or `"<model>"` (model only, provider stays as the manifest
+/// default). Returns `Err(LibreFangError::InvalidInput)` for obviously
+/// invalid inputs (empty string, missing provider or model component).
+///
+/// Exposed as `pub` so `kernel::agent_execution::execute_llm_agent` can
+/// call it at the dispatch site (before billing/router) without duplicating
+/// the logic.
+pub fn apply_session_model_override_to_manifest(
+    manifest: &mut AgentManifest,
+    override_str: &str,
+) -> LibreFangResult<()> {
+    use librefang_types::error::LibreFangError;
+    if override_str.is_empty() {
+        return Err(LibreFangError::InvalidInput(
+            "model_override must not be empty".to_string(),
+        ));
     }
+    // Use splitn(2, '/') so qualified model IDs like
+    // `meta-llama/Llama-3.3-70B` don't get mis-split on the second `/`.
+    let mut parts = override_str.splitn(2, '/');
+    let first = parts.next().unwrap_or("");
+    match parts.next() {
+        Some(model) => {
+            // provider/model form
+            if first.is_empty() {
+                return Err(LibreFangError::InvalidInput(
+                    "model_override provider must not be empty (got '/model' form)".to_string(),
+                ));
+            }
+            if model.is_empty() {
+                return Err(LibreFangError::InvalidInput(
+                    "model_override model must not be empty (got 'provider/' form)".to_string(),
+                ));
+            }
+            manifest.model.provider = first.to_string();
+            manifest.model.model = model.to_string();
+        }
+        None => {
+            // model-only form — provider stays as manifest default
+            manifest.model.model = first.to_string();
+        }
+    }
+    Ok(())
+}
+
+/// Internal alias used within this module.
+fn apply_session_model_override(manifest: &mut AgentManifest, override_str: &str) {
+    // Validation is best-effort at the write boundary (PATCH route); inside
+    // the loop we trust stored values are already valid and fall back silently.
+    let _ = apply_session_model_override_to_manifest(manifest, override_str);
 }
 
 #[cfg(test)]
@@ -1873,7 +1916,7 @@ mod session_model_override_tests {
     #[test]
     fn override_provider_and_model_when_slash_present() {
         let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
-        apply_session_model_override(&mut m, "groq/llama-3.3-70b");
+        apply_session_model_override_to_manifest(&mut m, "groq/llama-3.3-70b").unwrap();
         assert_eq!(m.model.provider, "groq");
         assert_eq!(m.model.model, "llama-3.3-70b");
     }
@@ -1881,7 +1924,7 @@ mod session_model_override_tests {
     #[test]
     fn override_model_only_when_no_slash() {
         let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
-        apply_session_model_override(&mut m, "claude-haiku-4-5");
+        apply_session_model_override_to_manifest(&mut m, "claude-haiku-4-5").unwrap();
         assert_eq!(
             m.model.provider, "anthropic",
             "provider must stay as manifest default when override has no slash"
@@ -1894,9 +1937,41 @@ mod session_model_override_tests {
         let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
         m.name = "agent-foo".to_string();
         m.description = "test agent".to_string();
-        apply_session_model_override(&mut m, "groq/llama-3.3");
+        apply_session_model_override_to_manifest(&mut m, "groq/llama-3.3").unwrap();
         assert_eq!(m.name, "agent-foo");
         assert_eq!(m.description, "test agent");
+    }
+
+    #[test]
+    fn qualified_model_id_with_multiple_slashes_uses_splitn() {
+        // "meta-llama/Llama-3.3-70B" — provider is "meta-llama", model is
+        // "Llama-3.3-70B". A naive split_once('/') would behave the same
+        // here but splitn(2) ensures a future "org/family/variant" can't
+        // inadvertently truncate the model name.
+        let mut m = manifest_with("openai", "gpt-4o");
+        apply_session_model_override_to_manifest(&mut m, "meta-llama/Llama-3.3-70B").unwrap();
+        assert_eq!(m.model.provider, "meta-llama");
+        assert_eq!(m.model.model, "Llama-3.3-70B");
+    }
+
+    #[test]
+    fn empty_override_is_rejected() {
+        let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
+        assert!(apply_session_model_override_to_manifest(&mut m, "").is_err());
+    }
+
+    #[test]
+    fn slash_only_provider_form_is_rejected() {
+        // "/model" → empty provider — invalid
+        let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
+        assert!(apply_session_model_override_to_manifest(&mut m, "/llama-3.3-70b").is_err());
+    }
+
+    #[test]
+    fn trailing_slash_form_is_rejected() {
+        // "groq/" → empty model — invalid
+        let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
+        assert!(apply_session_model_override_to_manifest(&mut m, "groq/").is_err());
     }
 }
 

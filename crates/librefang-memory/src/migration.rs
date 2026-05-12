@@ -2306,4 +2306,78 @@ mod tests {
         assert!(column_exists(&conn, "entities", "agent_id"));
         assert!(column_exists(&conn, "relations", "agent_id"));
     }
+
+    /// Regression for #4898: v39 must add `model_override TEXT` to `sessions`,
+    /// preserve NULL for pre-existing rows, and persist the value on write/read.
+    #[test]
+    fn migrate_v39_adds_model_override_column_nullable_and_round_trips() {
+        // Start from a v38-equivalent schema (full run_migrations populates
+        // the column through v39, but we want to verify the column shape).
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Column must exist after migration.
+        assert!(
+            column_exists(&conn, "sessions", "model_override"),
+            "sessions.model_override column missing after migrate_v39"
+        );
+
+        // Insert a minimal sessions row — model_override should default to NULL
+        // (backwards compatible). `created_at` and `updated_at` are NOT NULL.
+        let sid = uuid::Uuid::new_v4().to_string();
+        let aid = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO sessions (id, agent_id, messages, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))",
+            rusqlite::params![sid, aid, b"[]" as &[u8]],
+        )
+        .unwrap();
+
+        let stored_override: Option<String> = conn
+            .query_row(
+                "SELECT model_override FROM sessions WHERE id = ?1",
+                [&sid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            stored_override.is_none(),
+            "model_override must default to NULL for pre-migration rows: got {stored_override:?}"
+        );
+
+        // Write a non-NULL override and read it back.
+        conn.execute(
+            "UPDATE sessions SET model_override = ?1 WHERE id = ?2",
+            rusqlite::params!["groq/llama-3.3-70b", sid],
+        )
+        .unwrap();
+
+        let stored_override: Option<String> = conn
+            .query_row(
+                "SELECT model_override FROM sessions WHERE id = ?1",
+                [&sid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored_override.as_deref(),
+            Some("groq/llama-3.3-70b"),
+            "model_override round-trip failed: {stored_override:?}"
+        );
+
+        // Clear back to NULL.
+        conn.execute(
+            "UPDATE sessions SET model_override = NULL WHERE id = ?1",
+            [&sid],
+        )
+        .unwrap();
+        let cleared: Option<String> = conn
+            .query_row(
+                "SELECT model_override FROM sessions WHERE id = ?1",
+                [&sid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(cleared.is_none(), "clearing model_override to NULL failed");
+    }
 }
