@@ -1271,6 +1271,96 @@ pub async fn execute_tool_raw(
                 }
             }
         },
+        "web_fetch_to_file" => {
+            // Taint scans on URL / headers / body mirror the `web_fetch`
+            // arm exactly — same TaintSink::net_fetch() sink, same outbound
+            // semantics. Writing to disk does not soften the outbound
+            // exfiltration risk because the URL itself still leaves the
+            // host (and the response is persisted, not just transient).
+            let Some(url) = input["url"].as_str() else {
+                return ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content: "Missing 'url' parameter".to_string(),
+                    is_error: true,
+                    ..Default::default()
+                };
+            };
+            if let Some(violation) = check_taint_net_fetch(url) {
+                return ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content: format!("Taint violation: {violation}"),
+                    is_error: true,
+                    ..Default::default()
+                };
+            }
+            if let Some(body_text) = input["body"].as_str() {
+                if let Some(violation) =
+                    check_taint_outbound_text(body_text, &TaintSink::net_fetch())
+                {
+                    return ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!("Taint violation: {violation}"),
+                        is_error: true,
+                        ..Default::default()
+                    };
+                }
+            }
+            if let Some(headers_map) = input.get("headers").and_then(|v| v.as_object()) {
+                for (name, value) in headers_map {
+                    if let Some(vs) = value.as_str() {
+                        if let Some(violation) =
+                            check_taint_outbound_header(name, vs, &TaintSink::net_fetch())
+                        {
+                            return ToolResult {
+                                tool_use_id: tool_use_id.to_string(),
+                                content: format!("Taint violation: {violation}"),
+                                is_error: true,
+                                ..Default::default()
+                            };
+                        }
+                    }
+                }
+            }
+
+            // dest_path pre-flight checks mirror the `file_write` arm:
+            // reject writes that land in a read-only named workspace, and
+            // reject absolute paths that escape every allowed prefix or
+            // contain `..` components.
+            if let (Some(k), Some(agent_id)) = (kernel, caller_agent_id) {
+                let raw = input["dest_path"].as_str().unwrap_or("");
+                if Path::new(raw).is_absolute() {
+                    let ro = k.readonly_workspace_prefixes(agent_id);
+                    if ro.iter().any(|prefix| Path::new(raw).starts_with(prefix)) {
+                        return ToolResult {
+                            tool_use_id: tool_use_id.to_string(),
+                            content: format!(
+                                "Write denied: '{}' is in a read-only named workspace",
+                                raw
+                            ),
+                            is_error: true,
+                            ..Default::default()
+                        };
+                    }
+                }
+            }
+            let writable = named_ws_prefixes_writable(*kernel, *caller_agent_id);
+            if let Some(violation) = check_absolute_path_inside_workspace(
+                input.get("dest_path").and_then(|v| v.as_str()),
+                *workspace_root,
+                &writable,
+            ) {
+                return ToolResult::error(tool_use_id.to_string(), violation);
+            }
+
+            let extra_refs: Vec<&Path> = writable.iter().map(|p| p.as_path()).collect();
+            crate::web_fetch_to_file::tool_web_fetch_to_file(
+                input,
+                *web_ctx,
+                *workspace_root,
+                &extra_refs,
+            )
+            .await
+        }
         "web_search" => match input["query"].as_str() {
             None => Err("Missing 'query' parameter".to_string()),
             Some(query) => {
@@ -2331,6 +2421,27 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "body": { "type": "string", "description": "Request body for POST/PUT/PATCH" }
                 },
                 "required": ["url"]
+            }),
+        },
+        ToolDefinition {
+            name: "web_fetch_to_file".to_string(),
+            description: "Fetch a URL and stream the response body straight into a workspace file. \
+Same SSRF protection, DNS pinning, and redirect re-validation as web_fetch, but the body \
+never enters the agent context — only a short summary (path, byte count, sha256, content-type) \
+is returned. Use this when downloading documents, papers, or other artifacts for later use \
+instead of web_fetch + file_write (which round-trips the entire body through the model)."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "The URL to fetch (http/https only)" },
+                    "dest_path": { "type": "string", "description": "Workspace-relative or absolute path to write to. Absolute paths must stay inside the agent workspace or a read-write named workspace." },
+                    "method": { "type": "string", "enum": ["GET","POST","PUT","PATCH","DELETE"], "description": "HTTP method (default: GET)" },
+                    "headers": { "type": "object", "description": "Custom HTTP headers as key-value pairs" },
+                    "body": { "type": "string", "description": "Request body for POST/PUT/PATCH" },
+                    "max_bytes": { "type": "integer", "description": "Optional per-call cap; clamped down to the configured max_file_bytes" }
+                },
+                "required": ["url", "dest_path"]
             }),
         },
         ToolDefinition {
