@@ -455,6 +455,60 @@ impl ClaudeCodeDriver {
         // and passing just the server prefix permits all of them.
         args.push("mcp__librefang".to_string());
     }
+
+    /// On stdin write failure (typically EPIPE because the CLI exited
+    /// during its own init) drain the CLI's stderr for up to 2 s and
+    /// fold the captured snippet into the surfaced error message.
+    /// Without this the caller sees only `Broken pipe` and has no clue
+    /// why the CLI quit — invalid auth profile, missing/unreadable cwd,
+    /// bad `--mcp-config`, etc. Kills the child as a side effect.
+    async fn diagnose_stdin_write_failure(
+        child: &mut tokio::process::Child,
+        write_err: &std::io::Error,
+    ) -> String {
+        use tokio::io::AsyncReadExt;
+        const STDERR_CAP: usize = 4096;
+        const STDERR_WAIT: std::time::Duration = std::time::Duration::from_millis(2000);
+
+        let stderr_pipe = child.stderr.take();
+        // Best-effort kill: the child is almost certainly already dead
+        // (that's why the pipe broke), but never leak a stuck process.
+        let _ = child.kill().await;
+
+        let stderr_snippet = if let Some(mut err) = stderr_pipe {
+            let mut buf: Vec<u8> = Vec::with_capacity(STDERR_CAP);
+            let _ = tokio::time::timeout(STDERR_WAIT, async {
+                let mut chunk = [0u8; 1024];
+                while buf.len() < STDERR_CAP {
+                    match err.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let take = (STDERR_CAP - buf.len()).min(n);
+                            buf.extend_from_slice(&chunk[..take]);
+                        }
+                    }
+                }
+            })
+            .await;
+            String::from_utf8_lossy(&buf).trim().to_string()
+        } else {
+            String::new()
+        };
+
+        if stderr_snippet.is_empty() {
+            format!(
+                "Failed to write prompt to Claude Code CLI stdin: {write_err}. \
+                 The CLI exited before reading stdin (no stderr captured). \
+                 Common causes: invalid auth profile (run `claude /status` to verify), \
+                 missing or unreadable workspace cwd, invalid `--mcp-config` path."
+            )
+        } else {
+            format!(
+                "Failed to write prompt to Claude Code CLI stdin: {write_err}. \
+                 The CLI exited before reading stdin. Captured stderr: {stderr_snippet}"
+            )
+        }
+    }
 }
 
 /// Prompt text plus optional temp directory containing decoded images.
@@ -672,11 +726,9 @@ impl LlmDriver for ClaudeCodeDriver {
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             if let Err(e) = stdin.write_all(prepared.text.as_bytes()).await {
+                let diag = Self::diagnose_stdin_write_failure(&mut child, &e).await;
                 prepared.cleanup();
-                let _ = child.kill().await;
-                return Err(LlmError::Http(format!(
-                    "Failed to write prompt to Claude Code CLI stdin: {e}"
-                )));
+                return Err(LlmError::Http(diag));
             }
             // Drop closes stdin; CLI proceeds with the full prompt.
             drop(stdin);
@@ -946,11 +998,9 @@ impl LlmDriver for ClaudeCodeDriver {
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             if let Err(e) = stdin.write_all(prepared.text.as_bytes()).await {
+                let diag = Self::diagnose_stdin_write_failure(&mut child, &e).await;
                 prepared.cleanup();
-                let _ = child.kill().await;
-                return Err(LlmError::Http(format!(
-                    "Failed to write prompt to Claude Code CLI stdin: {e}"
-                )));
+                return Err(LlmError::Http(diag));
             }
             drop(stdin);
         }
@@ -1364,6 +1414,66 @@ fn home_dir() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pin: when stdin write fails (child exits during init), the error
+    /// surface must include any stderr the CLI emitted before death.
+    /// Without this the operator gets a bare "Broken pipe" with no clue
+    /// whether to re-auth, fix the workspace, or rebuild the binary.
+    #[tokio::test]
+    async fn diagnose_stdin_write_failure_includes_child_stderr() {
+        // Spawn /bin/sh that prints a recognisable error to stderr and
+        // immediately exits without ever reading stdin → next stdin
+        // write will EPIPE just like a real claude-code init failure.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg("echo 'mock cli: auth profile invalid' >&2; exit 7");
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn mock cli");
+
+        // Give the child a moment to exit so its stdin pipe is closed.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let write_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Broken pipe");
+        let diag = ClaudeCodeDriver::diagnose_stdin_write_failure(&mut child, &write_err).await;
+
+        assert!(
+            diag.contains("Failed to write prompt to Claude Code CLI stdin"),
+            "diag must keep the original failure header, got: {diag}"
+        );
+        assert!(
+            diag.contains("mock cli: auth profile invalid"),
+            "diag must include captured stderr from the dying child, got: {diag}"
+        );
+    }
+
+    /// When the child produces no stderr at all, the diagnostic must
+    /// still be actionable — fall back to a hint pointing at the common
+    /// auth/cwd/MCP causes rather than just leaking the io::Error.
+    #[tokio::test]
+    async fn diagnose_stdin_write_failure_falls_back_to_hint_when_silent() {
+        let mut cmd = tokio::process::Command::new("sh");
+        // No stderr output, just immediate exit.
+        cmd.arg("-c").arg("exit 0");
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn silent child");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let write_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Broken pipe");
+        let diag = ClaudeCodeDriver::diagnose_stdin_write_failure(&mut child, &write_err).await;
+
+        assert!(
+            diag.contains("Common causes"),
+            "silent-child diag must surface the hint block, got: {diag}"
+        );
+        assert!(
+            diag.contains("claude /status"),
+            "hint must mention the auth check command, got: {diag}"
+        );
+    }
 
     #[test]
     fn test_build_prompt_simple() {
