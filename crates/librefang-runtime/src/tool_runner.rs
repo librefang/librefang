@@ -2427,9 +2427,9 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             name: "web_fetch_to_file".to_string(),
             description: "Fetch a URL and stream the response body straight into a workspace file. \
 Same SSRF protection, DNS pinning, and redirect re-validation as web_fetch, but the body \
-never enters the agent context — only a short summary (path, byte count, sha256, content-type) \
-is returned. Use this when downloading documents, papers, or other artifacts for later use \
-instead of web_fetch + file_write (which round-trips the entire body through the model)."
+never enters the agent context — only a short summary (path, byte count, sha256, content-type, \
+status) is returned. Use this when downloading documents, papers, or other artifacts for later \
+use instead of web_fetch + file_write (which round-trips the entire body through the model)."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",

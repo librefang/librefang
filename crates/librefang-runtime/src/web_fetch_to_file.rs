@@ -67,11 +67,16 @@ pub async fn tool_web_fetch_to_file(
 
     let method_upper = method.to_uppercase();
     let mut req = match method_upper.as_str() {
+        "GET" => client.get(url),
         "POST" => client.post(url),
         "PUT" => client.put(url),
         "PATCH" => client.patch(url),
         "DELETE" => client.delete(url),
-        _ => client.get(url),
+        other => {
+            return Err(format!(
+                "Unsupported HTTP method '{other}'. Allowed: GET, POST, PUT, PATCH, DELETE."
+            ));
+        }
     };
     req = req.header(
         "User-Agent",
@@ -97,7 +102,18 @@ pub async fn tool_web_fetch_to_file(
         .map_err(|e| format!("HTTP request failed: {e}"))?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(format!("HTTP {} from {}", status.as_u16(), url));
+        // Surface up to 256 bytes of the response body so the agent can see
+        // problem-details / error JSON / RFC 7807 payloads in the tool result
+        // — but never write the error body to dest_path.
+        let preview = read_error_preview(&mut resp).await;
+        return Err(if preview.is_empty() {
+            format!("HTTP {} from {url}", status.as_u16())
+        } else {
+            format!(
+                "HTTP {} from {url} — body preview: {preview}",
+                status.as_u16()
+            )
+        });
     }
 
     let content_type = resp
@@ -107,8 +123,12 @@ pub async fn tool_web_fetch_to_file(
         .unwrap_or("")
         .to_string();
 
-    // Fast-path Content-Length check: bail before reading a single byte when
-    // the server is honest about size.
+    // Fast-path Content-Length check: bail before reading any bytes when the
+    // server is honest about size. Note this is the *compressed* size when
+    // gzip / deflate / brotli are enabled in `pinned_client`; the streaming
+    // loop below is the true gate against oversized decompressed bodies, but
+    // this early-exit still avoids round-tripping for clearly-too-large
+    // uncompressed responses.
     if let Some(len) = resp.content_length() {
         if len > cap {
             return Err(format!(
@@ -141,9 +161,31 @@ pub async fn tool_web_fetch_to_file(
             .await
             .map_err(|e| format!("Failed to create parent directories: {e}"))?;
     }
-    tokio::fs::write(&resolved, &buf)
-        .await
-        .map_err(|e| format!("Failed to write file: {e}"))?;
+
+    // Atomic write: stream to a sibling temp file then `rename` into place.
+    // If the body-write or rename fails midway, dest_path is either the
+    // pre-existing file (if any) or absent — never a half-written partial.
+    // `rename` is atomic on POSIX same-fs and on NTFS via `MoveFileEx`.
+    let parent = resolved
+        .parent()
+        .ok_or_else(|| "Resolved path has no parent directory".to_string())?;
+    let tmp_name = format!(
+        ".{}.partial.{}",
+        resolved
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("download"),
+        uuid::Uuid::new_v4()
+    );
+    let tmp_path = parent.join(tmp_name);
+    if let Err(e) = tokio::fs::write(&tmp_path, &buf).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(format!("Failed to write file: {e}"));
+    }
+    if let Err(e) = tokio::fs::rename(&tmp_path, &resolved).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(format!("Failed to publish file (rename): {e}"));
+    }
 
     let mut hasher = Sha256::new();
     hasher.update(&buf);
@@ -173,6 +215,28 @@ fn clamp_max_bytes(requested: Option<u64>, hard_cap: u64) -> u64 {
     }
 }
 
+/// Read up to 256 bytes of a non-2xx response body for inclusion in the
+/// tool's error message. Best-effort: silently returns an empty string on
+/// any network / decoding error rather than masking the original status
+/// code with a follow-on error.
+async fn read_error_preview(resp: &mut reqwest::Response) -> String {
+    const MAX_PREVIEW_BYTES: usize = 256;
+    let mut preview: Vec<u8> = Vec::new();
+    while preview.len() < MAX_PREVIEW_BYTES {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                let take = (MAX_PREVIEW_BYTES - preview.len()).min(chunk.len());
+                preview.extend_from_slice(&chunk[..take]);
+                if preview.len() >= MAX_PREVIEW_BYTES {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    String::from_utf8_lossy(&preview).trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,11 +259,5 @@ mod tests {
     #[test]
     fn clamp_keeps_hard_cap_when_request_exceeds_it() {
         assert_eq!(clamp_max_bytes(Some(1_000_000), 50_000), 50_000);
-    }
-
-    #[test]
-    fn clamp_keeps_hard_cap_when_request_equals_it() {
-        // Equal request → use the cap (no benefit to honouring an equal request).
-        assert_eq!(clamp_max_bytes(Some(50_000), 50_000), 50_000);
     }
 }

@@ -7,7 +7,6 @@
 //   - allocates a tempdir for the agent workspace;
 //   - calls the tool and asserts on returned text + on-disk side effects.
 
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +17,8 @@ use librefang_runtime::web_search::{WebSearchEngine, WebToolsContext};
 use librefang_types::config::{WebConfig, WebFetchConfig};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -311,5 +312,180 @@ async fn missing_dest_path_returns_clear_error() {
     assert!(err.contains("'dest_path'"), "unexpected error: {err}");
 }
 
-// Anchor `Path` import in case we end up needing it for future cases.
-const _: fn(&Path) = |_| {};
+// ---------------------------------------------------------------------------
+// HTTP method whitelist
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rejects_unsupported_http_method() {
+    let ws = tempfile::tempdir().unwrap();
+    let ctx = build_web_ctx(50 * 1024 * 1024);
+    let err = tool_web_fetch_to_file(
+        &json!({
+            "url": "http://example.com/x",
+            "dest_path": "x.md",
+            "method": "HEAD",
+        }),
+        Some(&ctx),
+        Some(ws.path()),
+        &[],
+    )
+    .await
+    .expect_err("unsupported method should be rejected");
+    assert!(
+        err.contains("Unsupported HTTP method 'HEAD'"),
+        "unexpected error: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HTTP error body preview
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn http_error_includes_body_preview_in_message() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/problem"))
+        .respond_with(
+            ResponseTemplate::new(422)
+                .set_body_bytes(br#"{"type":"validation","detail":"missing arxiv id"}"#.to_vec()),
+        )
+        .mount(&server)
+        .await;
+
+    let ws = tempfile::tempdir().unwrap();
+    let ctx = build_web_ctx(50 * 1024 * 1024);
+
+    let err = tool_web_fetch_to_file(
+        &json!({
+            "url": format!("{}/problem", server.uri()),
+            "dest_path": "out.md",
+        }),
+        Some(&ctx),
+        Some(ws.path()),
+        &[],
+    )
+    .await
+    .expect_err("4xx should bubble up");
+    assert!(err.contains("HTTP 422"), "unexpected error: {err}");
+    assert!(
+        err.contains("missing arxiv id"),
+        "error should include body preview: {err}"
+    );
+    assert!(!ws.path().join("out.md").exists());
+}
+
+// ---------------------------------------------------------------------------
+// Streaming cap when Content-Length is absent
+// ---------------------------------------------------------------------------
+
+/// Minimal chunked-encoding TCP server used to exercise the streaming bound
+/// check — wiremock always emits `Content-Length`, so without this we can't
+/// cover the "server omitted Content-Length and pushed past the cap" branch.
+async fn spawn_chunked_server(total_bytes: usize, chunk_size: usize) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        if let Ok((mut stream, _)) = listener.accept().await {
+            // Drain the request line / headers; we don't actually parse.
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\n\
+                      Content-Type: application/octet-stream\r\n\
+                      Transfer-Encoding: chunked\r\n\
+                      \r\n",
+                )
+                .await;
+            let mut sent = 0;
+            while sent < total_bytes {
+                let this_chunk = chunk_size.min(total_bytes - sent);
+                let header = format!("{this_chunk:x}\r\n");
+                if stream.write_all(header.as_bytes()).await.is_err() {
+                    return;
+                }
+                if stream.write_all(&vec![b'x'; this_chunk]).await.is_err() {
+                    return;
+                }
+                if stream.write_all(b"\r\n").await.is_err() {
+                    return;
+                }
+                sent += this_chunk;
+            }
+            let _ = stream.write_all(b"0\r\n\r\n").await;
+            let _ = stream.shutdown().await;
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn streaming_cap_aborts_when_content_length_is_absent() {
+    // Server sends 2 KiB via chunked encoding (no Content-Length header);
+    // cap is 1 KiB so the streaming bound check is the only line of defense.
+    let base = spawn_chunked_server(2048, 256).await;
+    let ws = tempfile::tempdir().unwrap();
+    let ctx = build_web_ctx(1024);
+
+    let err = tool_web_fetch_to_file(
+        &json!({
+            "url": format!("{base}/big"),
+            "dest_path": "big.bin",
+        }),
+        Some(&ctx),
+        Some(ws.path()),
+        &[],
+    )
+    .await
+    .expect_err("streaming bound check should fire");
+    assert!(
+        err.contains("exceeded cap"),
+        "expected streaming-cap message, got: {err}"
+    );
+    assert!(!ws.path().join("big.bin").exists());
+}
+
+// ---------------------------------------------------------------------------
+// Read-write named workspace via additional_roots
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn writes_into_rw_named_workspace_via_additional_roots() {
+    let server = MockServer::start().await;
+    let body = b"named-workspace-data";
+    Mock::given(method("GET"))
+        .and(path("/x"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.to_vec()))
+        .mount(&server)
+        .await;
+
+    let primary = tempfile::tempdir().unwrap();
+    let named = tempfile::tempdir().unwrap();
+    let ctx = build_web_ctx(50 * 1024 * 1024);
+
+    // Canonicalise the named-workspace prefix the same way the kernel would
+    // before passing it to the tool — matches `KernelHandle::named_workspace_prefixes`.
+    let named_canon = named.path().canonicalize().unwrap();
+    let dest = named_canon.join("downloaded.bin");
+
+    let result = tool_web_fetch_to_file(
+        &json!({
+            "url": format!("{}/x", server.uri()),
+            "dest_path": dest.to_string_lossy(),
+        }),
+        Some(&ctx),
+        Some(primary.path()),
+        &[named_canon.as_path()],
+    )
+    .await
+    .expect("RW named workspace write should succeed");
+
+    let on_disk = std::fs::read(&dest).expect("file should land in named workspace");
+    assert_eq!(on_disk, body);
+    assert!(
+        result.contains(&format!("{} bytes", body.len())),
+        "result: {result}"
+    );
+}
