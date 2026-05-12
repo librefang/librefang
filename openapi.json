@@ -9771,6 +9771,7 @@
           "workflows"
         ],
         "summary": "POST /api/workflows/:id/run — Execute a workflow.",
+        "description": "By default (no query params) this is **asynchronous**: the run is spawned\nin the background and a 202 is returned immediately with `{\"run_id\":\"...\"}`.\nThe caller can poll `GET /api/workflows/runs/{run_id}` to track progress.\n\nWith `?wait=true` the request blocks until completion (original behavior,\nkept for backward compat). With `?wait=true&timeout_ms=N` the block is\ncapped at N milliseconds; if the run hasn't finished, 202 is returned\nand the run continues in the background.",
         "operationId": "run_workflow",
         "parameters": [
           {
@@ -9796,14 +9797,10 @@
         },
         "responses": {
           "200": {
-            "description": "Workflow run started",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
+            "description": "Workflow run completed (wait=true)"
+          },
+          "202": {
+            "description": "Workflow run started asynchronously"
           }
         }
       }
