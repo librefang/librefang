@@ -7613,8 +7613,85 @@ mod tests {
         }
     }
     impl WikiAccess for MirrorKernel {}
-    impl KnowledgeGraph for MirrorKernel {}
-    impl TaskQueue for MirrorKernel {}
+    #[async_trait::async_trait]
+    impl KnowledgeGraph for MirrorKernel {
+        async fn knowledge_add_entity(
+            &self,
+            _entity: &librefang_types::memory::Entity,
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        async fn knowledge_add_relation(
+            &self,
+            _relation: &librefang_types::memory::Relation,
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        async fn knowledge_query(
+            &self,
+            _pattern: librefang_types::memory::GraphPattern,
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError>
+        {
+            Ok(vec![])
+        }
+    }
+    #[async_trait::async_trait]
+    impl TaskQueue for MirrorKernel {
+        async fn task_post(
+            &self,
+            _title: &str,
+            _description: &str,
+            _assigned_to: Option<&str>,
+            _created_by: Option<&str>,
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        async fn task_claim(
+            &self,
+            _agent_id: &str,
+        ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+            Ok(None)
+        }
+        async fn task_complete(
+            &self,
+            _agent_id: &str,
+            _task_id: &str,
+            _result: &str,
+        ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        async fn task_list(
+            &self,
+            _status: Option<&str>,
+        ) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+            Ok(vec![])
+        }
+        async fn task_delete(
+            &self,
+            _task_id: &str,
+        ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+            Ok(false)
+        }
+        async fn task_retry(
+            &self,
+            _task_id: &str,
+        ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+            Ok(false)
+        }
+        async fn task_get(
+            &self,
+            _task_id: &str,
+        ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+            Ok(None)
+        }
+        async fn task_update_status(
+            &self,
+            _task_id: &str,
+            _new_status: &str,
+        ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+            Ok(false)
+        }
+    }
     impl ApprovalGate for MirrorKernel {}
     impl CronControl for MirrorKernel {}
     impl HandsControl for MirrorKernel {}
