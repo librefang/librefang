@@ -864,6 +864,16 @@ pub struct AgentManifest {
     pub mcp_servers: Vec<String>,
     /// Explicitly disable all MCP server tools for this agent. Mirrors
     /// `skills_disabled` — `mcp_servers = []` means "all", this means "none".
+    ///
+    /// **Scope**: this flag hides MCP tools and the MCP server summary from
+    /// *this agent's* LLM prompt only. MCP servers defined in `KernelConfig`
+    /// still start globally if any other agent uses them — no server process
+    /// is stopped or skipped.
+    ///
+    /// **Hot-reload**: takes effect on the next `available_tools()` call after
+    /// the per-agent tools cache is evicted. `reload_agent_from_disk` (the
+    /// file-watcher path) evicts it automatically, so toggling `mcp_disabled`
+    /// in `agent.toml` at runtime takes effect without an agent respawn.
     #[serde(default)]
     pub mcp_disabled: bool,
     /// Custom metadata.
