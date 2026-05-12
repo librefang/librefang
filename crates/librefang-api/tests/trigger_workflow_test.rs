@@ -373,6 +373,98 @@ async fn trigger_workflow_id_too_long_returns_400() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 6b: trigger workflow_id resolves by name case-insensitively, matching
+// WorkflowRunner::run_workflow / start_workflow_async and the cron path.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn trigger_workflow_id_resolves_name_case_insensitively() {
+    use librefang_kernel::triggers::TriggerPattern;
+    use librefang_kernel::workflow::WorkflowId;
+    use librefang_types::event::{Event, EventPayload, EventTarget};
+
+    let h = boot().await;
+    let agent_id = spawn_agent(&h.state);
+
+    // Register a workflow with a MIXED-case name via the HTTP API.
+    let mixed_name = format!("MixedDeploy-{}", uuid::Uuid::new_v4().simple());
+    let agent_ref = uuid::Uuid::new_v4().to_string();
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": mixed_name.clone(),
+            "description": "case-insensitive lookup probe",
+            "steps": [{"name": "s1", "agent_id": agent_ref, "prompt": "hello"}]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "create_workflow failed: {body:?}"
+    );
+    let wf_uuid: WorkflowId = WorkflowId(
+        body["workflow_id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .expect("workflow_id must be a UUID"),
+    );
+
+    // Register a trigger with the workflow_id set to the LOWERCASE form of
+    // the workflow name. UUID parsing must fail (so the trigger falls into
+    // the name-lookup branch) and the case-insensitive comparison must match.
+    let lowercase_form = mixed_name.to_lowercase();
+    let trigger_id = h
+        .state
+        .kernel
+        .register_trigger_with_target(
+            agent_id,
+            TriggerPattern::ContentMatch {
+                substring: "deploy".to_string(),
+            },
+            "input is: {{event}}".to_string(),
+            0,
+            None,
+            Some(0),
+            None,
+            Some(lowercase_form.clone()),
+        )
+        .expect("register_trigger_with_target must succeed");
+
+    let stored = h
+        .state
+        .kernel
+        .get_trigger(trigger_id)
+        .expect("trigger must exist");
+    assert_eq!(stored.workflow_id.as_deref(), Some(lowercase_form.as_str()));
+
+    let payload_bytes = serde_json::to_vec(&serde_json::json!({
+        "type": "custom",
+        "text": "deploy this thing",
+    }))
+    .unwrap();
+    let event = Event::new(
+        AgentId::new(),
+        EventTarget::Broadcast,
+        EventPayload::Custom(payload_bytes),
+    );
+    h.state.kernel.publish_typed_event(event).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let engine = h.state.kernel.workflow_engine();
+    let runs = engine.list_runs(None).await;
+    let wf_run = runs.iter().find(|r| r.workflow_id == wf_uuid);
+    assert!(
+        wf_run.is_some(),
+        "case-insensitive name lookup must resolve `{lowercase_form}` to workflow `{mixed_name}` (id {wf_uuid:?}); got runs: {runs:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Test 6: old-format trigger JSON (without workflow_id) deserialises cleanly
 // ---------------------------------------------------------------------------
 
