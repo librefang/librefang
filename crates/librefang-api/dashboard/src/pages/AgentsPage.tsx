@@ -225,6 +225,11 @@ export function AgentsPage() {
   const [availableToolNames, setAvailableToolNames] = useState<string[]>([]);
   const [stateFilter, setStateFilter] = useState<"all" | "running" | "suspended">("all");
   const [sortBy, setSortBy] = useState<"name" | "last_active" | "created_at">("name");
+  // Draft state for Save-button pattern on Skills / MCP / Channels tabs.
+  // null = not yet initialized from server data.
+  const [skillsDraft, setSkillsDraft] = useState<string[] | null>(null);
+  const [mcpDraft, setMcpDraft] = useState<string[] | null>(null);
+  const [channelsDraft, setChannelsDraft] = useState<string[] | null>(null);
   // Tab switcher inside the inline detail panel.  Mirrors the design's
   // five sections (Conversation / Memory / Skills / Schedule / Logs).
   const [agentTab, setAgentTab] = useState<
@@ -719,6 +724,13 @@ export function AgentsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filteredAgents, detailAgent]);
 
+  // Reset drafts when selected agent changes so stale edits don't leak.
+  useEffect(() => {
+    setSkillsDraft(null);
+    setMcpDraft(null);
+    setChannelsDraft(null);
+  }, [detailAgent?.id]);
+
   const renderAgentRow = (agent: AgentItem) => {
     const isSelected = detailAgent?.id === agent.id;
     // Row-embedded stats from /api/agents (single grouped SQL pass). The
@@ -1186,38 +1198,44 @@ export function AgentsPage() {
     );
   };
 
-  // ---------- Skills tab — inline per-agent assignment via API
+  // ---------- Skills tab — local draft + explicit Save button
   const renderSkillsTab = (agent: AgentDetail) => {
     const skillsData = agentSkillsQuery.data;
-    const assigned: string[] = skillsData?.assigned ?? [];
+    const serverAssigned: string[] = skillsData?.assigned ?? [];
     const available: string[] = skillsData?.available ?? [];
     const mode: string = skillsData?.mode ?? (agent as AgentDetail).skills_mode ?? "all";
     const usesAll = mode === "all";
     const isDisabled = mode === "none";
     const isLoading = agentSkillsQuery.isLoading;
 
+    // Initialize draft from server state on first load
+    const draft = skillsDraft ?? serverAssigned;
+    const isDirty = skillsDraft !== null &&
+      (draft.length !== serverAssigned.length || draft.some((s) => !serverAssigned.includes(s)));
+
     const handleToggleSkill = (skillName: string) => {
-      if (!agent.id) return;
-      const isAssigned = assigned.includes(skillName);
+      const isAssigned = draft.includes(skillName);
       const next = isAssigned
-        ? assigned.filter((s) => s !== skillName)
-        : [...assigned, skillName];
-      setAgentSkillsMutation.mutate({ agentId: agent.id, skills: next }, {
-        onSuccess: () => addToast(t("agents.detail.skills_saved", { defaultValue: "Skills saved to agent.toml" }), "success"),
-      });
+        ? draft.filter((s) => s !== skillName)
+        : [...draft, skillName];
+      setSkillsDraft(next);
     };
 
     const handleCustomize = () => {
-      if (!agent.id) return;
-      setAgentSkillsMutation.mutate({ agentId: agent.id, skills: [...available] }, {
-        onSuccess: () => addToast(t("agents.detail.skills_saved", { defaultValue: "Skills saved to agent.toml" }), "success"),
-      });
+      setSkillsDraft([...available]);
     };
 
     const handleUseAll = () => {
+      setSkillsDraft([]);
+    };
+
+    const handleSave = () => {
       if (!agent.id) return;
-      setAgentSkillsMutation.mutate({ agentId: agent.id, skills: [] }, {
-        onSuccess: () => addToast(t("agents.detail.skills_saved", { defaultValue: "Skills saved to agent.toml" }), "success"),
+      setAgentSkillsMutation.mutate({ agentId: agent.id, skills: draft }, {
+        onSuccess: () => {
+          addToast(t("agents.detail.skills_saved", { defaultValue: "Saved to agent.toml" }), "success");
+          setSkillsDraft(null);
+        },
       });
     };
 
@@ -1229,9 +1247,9 @@ export function AgentsPage() {
             {" · "}
             {isDisabled
               ? t("agents.detail.skills_none", { defaultValue: "disabled" })
-              : usesAll
+              : usesAll && !isDirty
                 ? t("agents.detail.skills_all", { defaultValue: "all" })
-                : assigned.length}
+                : draft.length}
           </div>
         </div>
         {isDisabled ? (
@@ -1252,7 +1270,7 @@ export function AgentsPage() {
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
             <Loader2 className="w-4 h-4 animate-spin text-text-dim" />
           </div>
-        ) : usesAll ? (
+        ) : usesAll && !isDirty ? (
           <>
             {available.length > 0 ? (
               <>
@@ -1297,9 +1315,9 @@ export function AgentsPage() {
           </>
         ) : (
           <>
-            {assigned.length > 0 && (
+            {draft.length > 0 && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                {assigned.map((s) => (
+                {draft.map((s) => (
                   <div
                     key={s}
                     className="px-3 py-2.5 rounded-md border border-brand/30 bg-main/40 flex items-start justify-between gap-2"
@@ -1321,14 +1339,14 @@ export function AgentsPage() {
                 ))}
               </div>
             )}
-            {available.filter((s) => !assigned.includes(s)).length > 0 && (
+            {available.filter((s) => !draft.includes(s)).length > 0 && (
               <>
                 <div className="text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim mt-1">
                   {t("agents.detail.skills_available", { defaultValue: "Available" })}
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   {available
-                    .filter((s) => !assigned.includes(s))
+                    .filter((s) => !draft.includes(s))
                     .map((s) => (
                       <div
                         key={s}
@@ -1355,34 +1373,60 @@ export function AgentsPage() {
             </button>
           </>
         )}
+        {isDirty && (
+          <div className="flex justify-end mt-2">
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleSave}
+              disabled={setAgentSkillsMutation.isPending}
+            >
+              {setAgentSkillsMutation.isPending
+                ? t("common.saving", { defaultValue: "Saving..." })
+                : t("common.save", { defaultValue: "Save" })}
+            </Button>
+          </div>
+        )}
       </div>
     );
   };
 
-  // ---------- MCP tab — connected MCP server cards per design canvas
+  // ---------- MCP tab — local draft + explicit Save button
   const renderMcpTab = (agent: AgentDetail) => {
     const mcpData = agentMcpServersQuery.data;
-    const assigned: string[] = mcpData?.assigned ?? (agent as AgentView).mcp_servers ?? [];
+    const serverAssigned: string[] = mcpData?.assigned ?? (agent as AgentView).mcp_servers ?? [];
     const available: string[] = mcpData?.available ?? [];
     const mode: string = mcpData?.mode ?? (agent as AgentView).mcp_servers_mode ?? "all";
     const usesAll = mode === "all";
     const isLoading = agentMcpServersQuery.isLoading;
 
+    const draft = mcpDraft ?? serverAssigned;
+    const isDirty = mcpDraft !== null &&
+      (draft.length !== serverAssigned.length || draft.some((s) => !serverAssigned.includes(s)));
+
     const handleToggleServer = (serverName: string) => {
-      if (!agent.id) return;
-      const isAssigned = assigned.includes(serverName);
+      const isAssigned = draft.includes(serverName);
       const next = isAssigned
-        ? assigned.filter((s) => s !== serverName)
-        : [...assigned, serverName];
-      setAgentMcpServersMutation.mutate({ agentId: agent.id, servers: next }, {
-        onSuccess: () => addToast(t("agents.detail.mcp_saved", { defaultValue: "MCP servers saved to agent.toml" }), "success"),
-      });
+        ? draft.filter((s) => s !== serverName)
+        : [...draft, serverName];
+      setMcpDraft(next);
+    };
+
+    const handleCustomize = () => {
+      setMcpDraft([...available]);
     };
 
     const handleUseAll = () => {
+      setMcpDraft([]);
+    };
+
+    const handleSave = () => {
       if (!agent.id) return;
-      setAgentMcpServersMutation.mutate({ agentId: agent.id, servers: [] }, {
-        onSuccess: () => addToast(t("agents.detail.mcp_saved", { defaultValue: "MCP servers saved to agent.toml" }), "success"),
+      setAgentMcpServersMutation.mutate({ agentId: agent.id, servers: draft }, {
+        onSuccess: () => {
+          addToast(t("agents.detail.mcp_saved", { defaultValue: "Saved to agent.toml" }), "success");
+          setMcpDraft(null);
+        },
       });
     };
 
@@ -1392,16 +1436,16 @@ export function AgentsPage() {
           <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
             {t("agents.detail.connected_mcp_servers", { defaultValue: "Connected MCP servers" })}
             {" · "}
-            {usesAll
+            {usesAll && !isDirty
               ? t("agents.detail.mcp_all", { defaultValue: "all" })
-              : assigned.length}
+              : draft.length}
           </div>
         </div>
         {isLoading ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
             <Loader2 className="w-4 h-4 animate-spin text-text-dim" />
           </div>
-        ) : usesAll ? (
+        ) : usesAll && !isDirty ? (
           available.length > 0 ? (
             <>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -1421,12 +1465,7 @@ export function AgentsPage() {
                 ))}
               </div>
               <button
-                onClick={() => {
-                  if (!agent.id) return;
-                  setAgentMcpServersMutation.mutate({ agentId: agent.id, servers: [...available] }, {
-                    onSuccess: () => addToast(t("agents.detail.mcp_saved", { defaultValue: "MCP servers saved to agent.toml" }), "success"),
-                  });
-                }}
+                onClick={handleCustomize}
                 className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
               >
                 {t("agents.detail.mcp_customize", { defaultValue: "Customize — switch to allowlist" })}
@@ -1447,15 +1486,15 @@ export function AgentsPage() {
               </div>
             </div>
           )
-        ) : assigned.length === 0 && available.length === 0 ? (
+        ) : draft.length === 0 && available.length === 0 ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
             {t("agents.detail.no_mcp", { defaultValue: "No MCP servers connected." })}
           </div>
         ) : (
           <>
-            {assigned.length > 0 && (
+            {draft.length > 0 && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                {assigned.map((s) => (
+                {draft.map((s) => (
                   <div
                     key={s}
                     className="px-3 py-2.5 rounded-md border border-brand/30 bg-main/40 flex items-start justify-between gap-2"
@@ -1477,14 +1516,14 @@ export function AgentsPage() {
                 ))}
               </div>
             )}
-            {available.filter((s) => !assigned.includes(s)).length > 0 && (
+            {available.filter((s) => !draft.includes(s)).length > 0 && (
               <>
                 <div className="text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim mt-1">
                   {t("agents.detail.mcp_available", { defaultValue: "Available" })}
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   {available
-                    .filter((s) => !assigned.includes(s))
+                    .filter((s) => !draft.includes(s))
                     .map((s) => (
                       <div
                         key={s}
@@ -1503,44 +1542,71 @@ export function AgentsPage() {
                 </div>
               </>
             )}
-            {!usesAll && (
-              <button
-                onClick={handleUseAll}
-                className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
-              >
-                {t("agents.detail.mcp_reset_to_all", { defaultValue: "Reset to use all servers" })}
-              </button>
-            )}
+            <button
+              onClick={handleUseAll}
+              className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+            >
+              {t("agents.detail.mcp_reset_to_all", { defaultValue: "Reset to use all servers" })}
+            </button>
           </>
+        )}
+        {isDirty && (
+          <div className="flex justify-end mt-2">
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleSave}
+              disabled={setAgentMcpServersMutation.isPending}
+            >
+              {setAgentMcpServersMutation.isPending
+                ? t("common.saving", { defaultValue: "Saving..." })
+                : t("common.save", { defaultValue: "Save" })}
+            </Button>
+          </div>
         )}
       </div>
     );
   };
 
-  // ---------- Channels tab — same pattern as MCP tab
+  // ---------- Channels tab — local draft + explicit Save button
   const renderChannelsTab = (agent: AgentDetail) => {
     const chData = agentChannelsQuery.data;
-    const assigned: string[] = chData?.assigned ?? [];
+    const serverAssigned: string[] = chData?.assigned ?? [];
     const available: string[] = chData?.available ?? [];
     const mode: string = chData?.mode ?? "all";
     const usesAll = mode === "all";
     const isLoading = agentChannelsQuery.isLoading;
 
+    const draft = channelsDraft ?? serverAssigned;
+    const isDirty = channelsDraft !== null &&
+      (draft.length !== serverAssigned.length || draft.some((c) => !serverAssigned.includes(c)));
+
+    // Capitalize channel type name for display (e.g. "email" -> "Email")
+    const channelLabel = (name: string) => name.charAt(0).toUpperCase() + name.slice(1);
+
     const handleToggleChannel = (channelName: string) => {
-      if (!agent.id) return;
-      const isAssigned = assigned.includes(channelName);
+      const isAssigned = draft.includes(channelName);
       const next = isAssigned
-        ? assigned.filter((c) => c !== channelName)
-        : [...assigned, channelName];
-      setAgentChannelsMutation.mutate({ agentId: agent.id, channels: next }, {
-        onSuccess: () => addToast(t("agents.detail.channels_saved", { defaultValue: "Channel assignment saved" }), "success"),
-      });
+        ? draft.filter((c) => c !== channelName)
+        : [...draft, channelName];
+      setChannelsDraft(next);
+    };
+
+    const handleCustomize = () => {
+      setChannelsDraft([...available]);
     };
 
     const handleUseAll = () => {
+      setChannelsDraft([]);
+    };
+
+    const handleSave = () => {
       if (!agent.id) return;
-      setAgentChannelsMutation.mutate({ agentId: agent.id, channels: [] }, {
-        onSuccess: () => addToast(t("agents.detail.channels_saved", { defaultValue: "Channel assignment saved" }), "success"),
+      setAgentChannelsMutation.mutate({ agentId: agent.id, channels: draft }, {
+        onSuccess: () => {
+          addToast(t("agents.detail.channels_saved", { defaultValue: "Saved to agent.toml" }), "success");
+          setChannelsDraft(null);
+        },
       });
     };
 
@@ -1550,16 +1616,16 @@ export function AgentsPage() {
           <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
             {t("agents.detail.connected_channels", { defaultValue: "Connected channels" })}
             {" · "}
-            {usesAll
+            {usesAll && !isDirty
               ? t("agents.detail.channels_all", { defaultValue: "all" })
-              : assigned.length}
+              : draft.length}
           </div>
         </div>
         {isLoading ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
             <Loader2 className="w-4 h-4 animate-spin text-text-dim" />
           </div>
-        ) : usesAll ? (
+        ) : usesAll && !isDirty ? (
           available.length > 0 ? (
             <>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -1569,9 +1635,10 @@ export function AgentsPage() {
                     className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 flex items-start justify-between gap-2"
                   >
                     <div className="min-w-0 flex-1">
-                      <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{c}</div>
+                      <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{channelLabel(c)}</div>
                       <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
                         {t("agents.detail.channel_included", { defaultValue: "included" })}
+                        {" · "}{c}
                       </div>
                     </div>
                     <Radio className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
@@ -1579,12 +1646,7 @@ export function AgentsPage() {
                 ))}
               </div>
               <button
-                onClick={() => {
-                  if (!agent.id) return;
-                  setAgentChannelsMutation.mutate({ agentId: agent.id, channels: [...available] }, {
-                    onSuccess: () => addToast(t("agents.detail.channels_saved", { defaultValue: "Channel assignment saved" }), "success"),
-                  });
-                }}
+                onClick={handleCustomize}
                 className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
               >
                 {t("agents.detail.channels_customize", { defaultValue: "Customize — switch to allowlist" })}
@@ -1605,23 +1667,24 @@ export function AgentsPage() {
               </div>
             </div>
           )
-        ) : assigned.length === 0 && available.length === 0 ? (
+        ) : draft.length === 0 && available.length === 0 ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
             {t("agents.detail.no_channels", { defaultValue: "No channels connected." })}
           </div>
         ) : (
           <>
-            {assigned.length > 0 && (
+            {draft.length > 0 && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                {assigned.map((c) => (
+                {draft.map((c) => (
                   <div
                     key={c}
                     className="px-3 py-2.5 rounded-md border border-brand/30 bg-main/40 flex items-start justify-between gap-2"
                   >
                     <div className="min-w-0 flex-1">
-                      <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{c}</div>
+                      <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{channelLabel(c)}</div>
                       <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
                         {t("agents.detail.channel_assigned", { defaultValue: "assigned" })}
+                        {" · "}{c}
                       </div>
                     </div>
                     <button
@@ -1635,14 +1698,14 @@ export function AgentsPage() {
                 ))}
               </div>
             )}
-            {available.filter((c) => !assigned.includes(c)).length > 0 && (
+            {available.filter((c) => !draft.includes(c)).length > 0 && (
               <>
                 <div className="text-[10px] uppercase font-semibold tracking-[0.08em] text-text-dim mt-1">
                   {t("agents.detail.channels_available", { defaultValue: "Available" })}
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   {available
-                    .filter((c) => !assigned.includes(c))
+                    .filter((c) => !draft.includes(c))
                     .map((c) => (
                       <div
                         key={c}
@@ -1650,9 +1713,10 @@ export function AgentsPage() {
                         className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 cursor-pointer hover:border-brand/40 transition-colors flex items-start justify-between gap-2"
                       >
                         <div className="min-w-0 flex-1">
-                          <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{c}</div>
+                          <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{channelLabel(c)}</div>
                           <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
                             {t("agents.detail.channel_click_assign", { defaultValue: "click to assign" })}
+                            {" · "}{c}
                           </div>
                         </div>
                         <Radio className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
@@ -1661,15 +1725,27 @@ export function AgentsPage() {
                 </div>
               </>
             )}
-            {!usesAll && (
-              <button
-                onClick={handleUseAll}
-                className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
-              >
-                {t("agents.detail.channels_reset_to_all", { defaultValue: "Reset to use all channels" })}
-              </button>
-            )}
+            <button
+              onClick={handleUseAll}
+              className="text-[11px] text-brand hover:underline font-medium self-start mt-1"
+            >
+              {t("agents.detail.channels_reset_to_all", { defaultValue: "Reset to use all channels" })}
+            </button>
           </>
+        )}
+        {isDirty && (
+          <div className="flex justify-end mt-2">
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleSave}
+              disabled={setAgentChannelsMutation.isPending}
+            >
+              {setAgentChannelsMutation.isPending
+                ? t("common.saving", { defaultValue: "Saving..." })
+                : t("common.save", { defaultValue: "Save" })}
+            </Button>
+          </div>
         )}
       </div>
     );
