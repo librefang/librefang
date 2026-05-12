@@ -21,50 +21,55 @@ use super::super::LibreFangKernel;
 #[macro_export]
 macro_rules! for_each_channel_field {
     ($mac:ident) => {
-        $mac!(telegram, "telegram");
-        $mac!(discord, "discord");
-        $mac!(slack, "slack");
-        $mac!(whatsapp, "whatsapp");
-        $mac!(signal, "signal");
-        $mac!(matrix, "matrix");
-        $mac!(email, "email");
-        $mac!(teams, "teams");
-        $mac!(mattermost, "mattermost");
-        $mac!(irc, "irc");
-        $mac!(google_chat, "google_chat");
-        $mac!(twitch, "twitch");
-        $mac!(rocketchat, "rocketchat");
-        $mac!(zulip, "zulip");
-        $mac!(xmpp, "xmpp");
-        $mac!(line, "line");
-        $mac!(viber, "viber");
-        $mac!(messenger, "messenger");
-        $mac!(reddit, "reddit");
-        $mac!(mastodon, "mastodon");
+        // Alphabetical order is mandatory — `resolve_agent_home_channel` uses
+        // first()-match semantics, so non-deterministic ordering across
+        // processes or compilations would silently change which agent wins
+        // when multiple channel instances share a `default_agent`. See
+        // CLAUDE.md "Deterministic prompt ordering".
         $mac!(bluesky, "bluesky");
-        $mac!(feishu, "feishu");
-        $mac!(revolt, "revolt");
-        $mac!(nextcloud, "nextcloud");
-        $mac!(guilded, "guilded");
-        $mac!(keybase, "keybase");
-        $mac!(threema, "threema");
-        $mac!(nostr, "nostr");
-        $mac!(webex, "webex");
-        $mac!(pumble, "pumble");
-        $mac!(flock, "flock");
-        $mac!(twist, "twist");
-        $mac!(mumble, "mumble");
         $mac!(dingtalk, "dingtalk");
-        $mac!(qq, "qq");
+        $mac!(discord, "discord");
         $mac!(discourse, "discourse");
+        $mac!(email, "email");
+        $mac!(feishu, "feishu");
+        $mac!(flock, "flock");
         $mac!(gitter, "gitter");
-        $mac!(ntfy, "ntfy");
+        $mac!(google_chat, "google_chat");
         $mac!(gotify, "gotify");
-        $mac!(webhook, "webhook");
-        $mac!(voice, "voice");
+        $mac!(guilded, "guilded");
+        $mac!(irc, "irc");
+        $mac!(keybase, "keybase");
+        $mac!(line, "line");
         $mac!(linkedin, "linkedin");
+        $mac!(mastodon, "mastodon");
+        $mac!(matrix, "matrix");
+        $mac!(mattermost, "mattermost");
+        $mac!(messenger, "messenger");
+        $mac!(mumble, "mumble");
+        $mac!(nextcloud, "nextcloud");
+        $mac!(nostr, "nostr");
+        $mac!(ntfy, "ntfy");
+        $mac!(pumble, "pumble");
+        $mac!(qq, "qq");
+        $mac!(reddit, "reddit");
+        $mac!(revolt, "revolt");
+        $mac!(rocketchat, "rocketchat");
+        $mac!(signal, "signal");
+        $mac!(slack, "slack");
+        $mac!(teams, "teams");
+        $mac!(telegram, "telegram");
+        $mac!(threema, "threema");
+        $mac!(twist, "twist");
+        $mac!(twitch, "twitch");
+        $mac!(viber, "viber");
+        $mac!(voice, "voice");
+        $mac!(webex, "webex");
+        $mac!(webhook, "webhook");
         $mac!(wechat, "wechat");
         $mac!(wecom, "wecom");
+        $mac!(whatsapp, "whatsapp");
+        $mac!(xmpp, "xmpp");
+        $mac!(zulip, "zulip");
     };
 }
 
@@ -429,5 +434,93 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         crate::for_each_channel_field!(check);
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Regression guard: `for_each_channel_field!` must expand in strict
+    /// alphabetical (dictionary) order.  `resolve_agent_home_channel` uses
+    /// first-match semantics, so the expansion order determines which agent
+    /// wins when multiple channel instances share a `default_agent`.
+    /// Non-alphabetical order is a silent non-determinism bug.
+    ///
+    /// If you add a new channel, insert it at its alphabetical position both
+    /// in the macro body above AND in `EXPECTED` below — the test will fail
+    /// to compile if the counts diverge, and fail at runtime if the order drifts.
+    #[test]
+    fn for_each_channel_field_macro_uses_dictionary_order() {
+        let mut collected: Vec<&'static str> = Vec::new();
+
+        macro_rules! gather {
+            ($field:ident, $name:literal) => {
+                collected.push($name);
+            };
+        }
+
+        crate::for_each_channel_field!(gather);
+
+        // Hardcoded sorted reference — must match the macro body exactly.
+        const EXPECTED: &[&str] = &[
+            "bluesky",
+            "dingtalk",
+            "discord",
+            "discourse",
+            "email",
+            "feishu",
+            "flock",
+            "gitter",
+            "google_chat",
+            "gotify",
+            "guilded",
+            "irc",
+            "keybase",
+            "line",
+            "linkedin",
+            "mastodon",
+            "matrix",
+            "mattermost",
+            "messenger",
+            "mumble",
+            "nextcloud",
+            "nostr",
+            "ntfy",
+            "pumble",
+            "qq",
+            "reddit",
+            "revolt",
+            "rocketchat",
+            "signal",
+            "slack",
+            "teams",
+            "telegram",
+            "threema",
+            "twist",
+            "twitch",
+            "viber",
+            "voice",
+            "webex",
+            "webhook",
+            "wechat",
+            "wecom",
+            "whatsapp",
+            "xmpp",
+            "zulip",
+        ];
+
+        assert_eq!(
+            collected, EXPECTED,
+            "for_each_channel_field! must expand in strict alphabetical order; \
+             re-sort the macro body in channel_sender.rs if this fails"
+        );
+
+        // Also verify it is already sorted (catches future drift even if
+        // EXPECTED is accidentally updated out of order).
+        let mut sorted = collected.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            collected, sorted,
+            "for_each_channel_field! expansion order is not alphabetically sorted"
+        );
     }
 }

@@ -4929,8 +4929,9 @@ fn parse_poll_options(raw: Option<&serde_json::Value>) -> Result<Vec<String>, St
 ///
 /// Decision summary (issue #4824):
 /// 1. Mirror unconditionally — even when caller == channel owner.
-/// 2. Role = `user` with `[mirror from {agent}]: {body}` text so the
-///    block is visible in prompt context without polluting the system role.
+/// 2. Role = `user` with a JSON envelope `{"mirror_from":"<agent>","body":"<text>"}` so
+///    the block is visible in prompt context without polluting the system role.
+///    JSON escaping prevents prompt-injection via crafted body content.
 /// 3. Mirror on partial-failure (platform delivery succeeded, ack lost).
 /// 4. Written directly to session storage; no adapter re-emit.
 async fn mirror_channel_send_to_session(
@@ -4962,9 +4963,30 @@ async fn mirror_channel_send_to_session(
     // `SessionId::for_sender_scope(owner, channel, Some(recipient))`
     let session_id = SessionId::for_sender_scope(owner, channel, Some(recipient));
 
+    // LOW: skip the mirror entirely when the caller is anonymous — an
+    // "unknown" sender carries no useful context and could mislead the agent.
+    let from = match caller_agent_id {
+        Some(id) => id,
+        None => {
+            tracing::debug!(
+                channel,
+                recipient,
+                "channel_send mirror: caller_agent_id is None, skipping mirror"
+            );
+            return;
+        }
+    };
+
     let sent_at = chrono::Utc::now();
-    let from = caller_agent_id.unwrap_or("unknown");
-    let mirror_text = format!("[mirror from {from}]: {body}");
+
+    // Stable data contract (#4824): JSON envelope prevents prompt-injection
+    // via crafted body text (e.g. `]: <injected>` or embedded newlines).
+    // Both fields are JSON-string-escaped by serde_json::to_string.
+    let mirror_text = format!(
+        "{{\"mirror_from\":{},\"body\":{}}}",
+        serde_json::to_string(from).unwrap_or_else(|_| "\"unknown\"".to_string()),
+        serde_json::to_string(body).unwrap_or_else(|_| "\"\"".to_string()),
+    );
 
     let msg = Message {
         role: Role::User,
@@ -7666,7 +7688,11 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    // `multi_thread` is required so that the `block_in_place` call inside
+    // `append_to_session` does not panic (block_in_place requires a
+    // multi-threaded runtime). This test exercises the mock-only path;
+    // the real block_in_place coverage lives in `channel_send_mirror_test.rs`.
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_channel_send_mirrors_to_channel_owner_session() {
         use librefang_types::agent::AgentId;
         use librefang_types::message::Role;
@@ -7707,12 +7733,15 @@ mod tests {
 
         let content = msgs[0].content.text_content();
         assert_eq!(
-            content, "[mirror from caller-agent-id]: Hello from cron agent",
-            "mirror text must follow [mirror from <agent>]: <body> format"
+            content, r#"{"mirror_from":"caller-agent-id","body":"Hello from cron agent"}"#,
+            "mirror text must be a JSON envelope with mirror_from and body fields"
         );
     }
 
-    #[tokio::test]
+    // `multi_thread` is required so that the `block_in_place` call inside
+    // `append_to_session` does not panic. This test exercises the mock-only
+    // path; the real block_in_place coverage lives in `channel_send_mirror_test.rs`.
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_channel_send_mirrors_when_caller_is_channel_owner() {
         // Decision 1: mirror unconditionally, even when caller == owner.
         use librefang_types::agent::AgentId;
@@ -7749,7 +7778,10 @@ mod tests {
         assert_eq!(msgs[0].role, Role::User);
     }
 
-    #[tokio::test]
+    // `multi_thread` is required so that the `block_in_place` call inside
+    // `append_to_session` does not panic. This test exercises the mock-only
+    // path; the real block_in_place coverage lives in `channel_send_mirror_test.rs`.
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_channel_send_succeeds_even_when_mirror_fails() {
         // Decision 3: mirror failure must not fail the tool call.
         let owner = librefang_types::agent::AgentId(
