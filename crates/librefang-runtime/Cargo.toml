@@ -62,7 +62,7 @@ pdf-extract = "0.10"
 # 0.45 is the last release that targets `rand 0.8`; later releases pull
 # `internal-russh-forked-ssh-key` which conflicts with the workspace's
 # `rand = "0.10"` direct dep on the rand_core trait surface.
-russh = { version = "0.45", optional = true }
+russh = { version = "0.60", optional = true }
 russh-keys = { version = "0.45", optional = true }
 
 [target.'cfg(unix)'.dependencies]
