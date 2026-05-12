@@ -8586,6 +8586,55 @@
         }
       }
     },
+    "/api/sessions/{id}/model": {
+      "patch": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "PATCH /api/sessions/:id/model — Set or clear a per-session model override (#4898).",
+        "description": "Body: `{\"model_override\": \"provider/model\"}` to pin, or `{\"model_override\": null}`\nto clear and restore the agent manifest default.\n\nThe `model_override` string is validated before persistence:\n- Empty strings are rejected (400).\n- `\"provider/\"` (trailing slash, empty model) is rejected (400).\n- `\"/model\"` (leading slash, empty provider) is rejected (400).\n- Qualified identifiers like `\"meta-llama/Llama-3.3-70B\"` are accepted.",
+        "operationId": "patch_session_model",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Model override updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid session ID or model override format"
+          },
+          "404": {
+            "description": "Session not found"
+          }
+        }
+      }
+    },
     "/api/shutdown": {
       "post": {
         "tags": [

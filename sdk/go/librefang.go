@@ -1106,6 +1106,10 @@ func (r *SessionsResource) SetSessionLabel(id string, data map[string]interface{
 	return r.client.request("PUT", fmt.Sprintf("/api/sessions/%s/label", id), data, nil)
 }
 
+func (r *SessionsResource) PatchSessionModel(id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PATCH", fmt.Sprintf("/api/sessions/%s/model", id), data, nil)
+}
+
 // ── Skills Resource
 
 type SkillsResource struct{ client *Client }
