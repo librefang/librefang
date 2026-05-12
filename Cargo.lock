@@ -6930,9 +6930,9 @@ checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.10.3"
+version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76979bea66e7875e7509c4ec5300112b316af87fa7a252ca91c448b32dfe3993"
+checksum = "7c3a14896dfa883796f1cb410461aef38810ea05f2b2c33c5aded3649095fdad"
 dependencies = [
  "bitflags 2.11.1",
  "memchr",
@@ -6942,9 +6942,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark-escape"
-version = "0.10.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd348ff538bc9caeda7ee8cad2d1d48236a1f443c1fa3913c6a02fe0043b1dd3"
+checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
 name = "pulley-interpreter"
@@ -7133,9 +7133,9 @@ dependencies = [
 
 [[package]]
 name = "r2d2_sqlite"
-version = "0.33.0"
+version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5576df16239e4e422c4835c8ed00be806d4491855c7847dba60b7aa8408b469b"
+checksum = "f9a289c0a3bf56505c470efa2366e76010f1d892e2492a2f96b223386d63b7e2"
 dependencies = [
  "r2d2",
  "rusqlite",
@@ -9057,9 +9057,9 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.38.4"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92ab6a2f8bfe508deb3c6406578252e491d299cbbf3bc0529ecc3313aee4a52f"
+checksum = "a4deba334e1190ba7cb498327affa11e5ece10d26a30ab2f27fcf09504b8d8b6"
 dependencies = [
  "libc",
  "memchr",

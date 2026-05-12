@@ -95,7 +95,7 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 # Database
 rusqlite = { version = "0.39.0", features = ["bundled", "serde_json"] }
 r2d2 = "0.8"
-r2d2_sqlite = "0.33"
+r2d2_sqlite = "0.34"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -150,7 +150,7 @@ urlencoding = "2"
 # expects CommonMark in `body` and rendered HTML in `formatted_body`; the
 # canonical Rust pull-parser. ~7 kLOC, MIT, no transitive deps that aren't
 # already in our tree.
-pulldown-cmark = { version = "0.10", default-features = false, features = ["html"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 # Public Suffix List — used by mcp_auth to decide whether a metadata-declared
 # token_endpoint shares a registrable domain with the operator-typed issuer
