@@ -64,7 +64,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 
 # OpenTelemetry
 opentelemetry = "0.31"
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 # `default-features = false` is critical: opentelemetry-otlp's default feature
 # set enables `http-proto` + `reqwest-blocking-client`, which forces
 # `opentelemetry-http` to pull `reqwest = "0.12"` alongside the workspace
