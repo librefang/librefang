@@ -3203,19 +3203,24 @@ export async function deleteGoal(goalId: string): Promise<ApiActionResponse> {
 // ── Network / Peers ──────────────────────────────────
 
 export interface NetworkStatusResponse {
-  // `online` mirrors whether the OFP PeerNode is actually running on the
-  // daemon. `enabled` is the legacy/config-mirror field (`network_enabled
-  // && !shared_secret.is_empty()`) — both ship for SDK back-compat; the
-  // dashboard reads `online`.
+  // `online` is strictly "the OFP PeerNode actually bound a listener"
+  // (peer_node_ref().is_some() on the daemon). `enabled` is the looser
+  // config-mirror (`network_enabled && !shared_secret.is_empty()`) — so
+  // `enabled === true && online === false` is the genuine "configured
+  // but listener bind failed" state, surfaced separately from
+  // "disabled". Both fields ship for SDK back-compat; the dashboard
+  // reads `online`.
   online?: boolean;
   enabled?: boolean;
   node_id?: string;
   protocol_version?: string;
   // Daemon emits both `listen_addr` (dashboard-aligned) and
-  // `listen_address` (legacy SDK consumers). Either may be undefined when
-  // OFP is disabled.
+  // `listen_address` (legacy SDK consumers). They carry the same value;
+  // both may be `""` when OFP is disabled.
   listen_addr?: string;
   listen_address?: string;
+  // `peer_count` equals `connected_peers`. Both ship for SDK
+  // back-compat; the dashboard reads `peer_count` when present.
   peer_count?: number;
   connected_peers?: number;
   total_peers?: number;
