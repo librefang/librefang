@@ -171,6 +171,7 @@ impl SetupWizard {
             skills: intent.skills.clone(),
             skills_disabled: false,
             mcp_servers: vec![],
+            mcp_disabled: false,
             metadata: HashMap::new(),
             tags: vec![],
             routing: None,

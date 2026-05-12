@@ -383,23 +383,10 @@ fn is_progress_text_leak(text: &str) -> bool {
     t.ends_with("...") || t.ends_with("…")
 }
 
-/// Channel-envelope prefixes the gateway prepends to inbound text.
-/// Single source of truth for both `sanitize_for_memory` (strip on persist)
-/// and `is_cascade_leak`'s structural-marker set (drop on output). A unit
-/// test pins the invariant so the two sides cannot drift.
-const ENVELOPE_LINE_PREFIXES: &[&str] = &[
-    "[Group message from ",
-    // Covers both "[In risposta a: ...]" and the no-space variant some
-    // JS template literals emit.
-    "[In risposta a:",
-    "[Replying to:",
-    "[Stranger from ",
-];
-
-/// Standalone envelope markers that occupy their own line. Matched as
-/// exact-line equality after trim so `"[User] follow-up question"` keeps
-/// the body.
-const ENVELOPE_STANDALONE_MARKERS: &[&str] = &["[Stranger]", "[Forwarded]", "[User]"];
+// Canonical envelope prefix/marker arrays live in `silent_response` so both
+// the drop-on-output guard (`is_cascade_leak`) and the strip-on-persist path
+// here share a single source of truth.
+use crate::silent_response::{ENVELOPE_LINE_PREFIXES, ENVELOPE_STANDALONE_MARKERS};
 
 /// Strip channel-envelope prefixes from a user-message or agent-response
 /// string before persisting it as long-term episodic memory.
@@ -454,56 +441,11 @@ fn sanitize_for_memory(text: &str) -> Option<String> {
     }
 }
 
-/// Detect a cascade scaffolding leak: an agent response that contains
-/// scaffolding markers in a configuration real replies almost never
-/// produce. Observed in a real WhatsApp group incident where an agent
-/// dumped `User asked: …\nI responded: …\n[Group message from …]` into
-/// chat in response to an emoji-only inbound.
-///
-/// Markers split into two classes:
-/// - **Structural** — turn frames (`User asked:`, `I responded:`,
-///   `[Past exchange]`) and channel-envelope prefixes shared via
-///   `ENVELOPE_LINE_PREFIXES`. Exotic; real replies almost never contain one.
-/// - **Thematic** — prompt section headers (`## Sender`, `## Today`,
-///   `## Calendar`, `## Tasks`, `## Response Style`). Common markdown;
-///   legitimate help replies routinely use them.
-///
-/// Trip condition: **2+ structural** OR **1 structural + 1 thematic**.
-/// `2+ thematic alone` is intentionally NOT a leak (pinned by the
-/// `thematic_headers_alone_are_legitimate` regression test).
+/// Thin delegate to the canonical cascade-leak detector in `silent_response`.
+/// See `crates/librefang-runtime/src/silent_response.rs` for full docs,
+/// marker lists, and trip-condition rationale.
 fn is_cascade_leak(text: &str) -> bool {
-    const STRUCTURAL_TURN_FRAMES: &[&str] = &["User asked:", "I responded:", "[Past exchange]"];
-    const THEMATIC_HEADERS: &[&str] = &[
-        "## Sender",
-        "## Today",
-        "## Calendar",
-        "## Tasks",
-        "## Response Style",
-    ];
-
-    let mut structural_hits = 0u8;
-
-    // Pass 1: structural markers (turn frames + envelope prefixes +
-    // envelope standalones). Early-exit at 2+ structural.
-    for m in STRUCTURAL_TURN_FRAMES
-        .iter()
-        .chain(ENVELOPE_LINE_PREFIXES.iter())
-        .chain(ENVELOPE_STANDALONE_MARKERS.iter())
-    {
-        if text.contains(m) {
-            structural_hits += 1;
-            if structural_hits >= 2 {
-                return true;
-            }
-        }
-    }
-
-    // Pass 2: thematic markers only matter when paired with a structural
-    // hit — skip the scan entirely when structural is zero.
-    if structural_hits == 0 {
-        return false;
-    }
-    THEMATIC_HEADERS.iter().any(|m| text.contains(m))
+    crate::silent_response::is_cascade_leak(text)
 }
 
 /// Returns true if this tool-error content is a "soft" error — one the LLM is
@@ -1838,6 +1780,134 @@ pub fn strip_provider_prefix(model: &str, provider: &str) -> String {
     }
 
     stripped
+}
+
+/// Apply a per-session model override string (#4898).
+///
+/// Format: `"<provider>/<model>"` (sets both provider and model — provider
+/// is the first `/`-delimited segment, model is everything after it, so
+/// qualified identifiers like `meta-llama/Llama-3.3-70B` are handled
+/// correctly) or `"<model>"` (model only, provider stays as the manifest
+/// default). Returns `Err(LibreFangError::InvalidInput)` for obviously
+/// invalid inputs (empty string, missing provider or model component).
+///
+/// Exposed as `pub` so `kernel::agent_execution::execute_llm_agent` can
+/// call it at the dispatch site (before billing/router) without duplicating
+/// the logic.
+pub fn apply_session_model_override_to_manifest(
+    manifest: &mut AgentManifest,
+    override_str: &str,
+) -> LibreFangResult<()> {
+    use librefang_types::error::LibreFangError;
+    if override_str.is_empty() {
+        return Err(LibreFangError::InvalidInput(
+            "model_override must not be empty".to_string(),
+        ));
+    }
+    // Use splitn(2, '/') so qualified model IDs like
+    // `meta-llama/Llama-3.3-70B` don't get mis-split on the second `/`.
+    let mut parts = override_str.splitn(2, '/');
+    let first = parts.next().unwrap_or("");
+    match parts.next() {
+        Some(model) => {
+            // provider/model form
+            if first.is_empty() {
+                return Err(LibreFangError::InvalidInput(
+                    "model_override provider must not be empty (got '/model' form)".to_string(),
+                ));
+            }
+            if model.is_empty() {
+                return Err(LibreFangError::InvalidInput(
+                    "model_override model must not be empty (got 'provider/' form)".to_string(),
+                ));
+            }
+            manifest.model.provider = first.to_string();
+            manifest.model.model = model.to_string();
+        }
+        None => {
+            // model-only form — provider stays as manifest default
+            manifest.model.model = first.to_string();
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod session_model_override_tests {
+    use super::*;
+    use librefang_types::agent::ModelConfig;
+
+    fn manifest_with(provider: &str, model: &str) -> AgentManifest {
+        AgentManifest {
+            model: ModelConfig {
+                provider: provider.to_string(),
+                model: model.to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn override_provider_and_model_when_slash_present() {
+        let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
+        apply_session_model_override_to_manifest(&mut m, "groq/llama-3.3-70b").unwrap();
+        assert_eq!(m.model.provider, "groq");
+        assert_eq!(m.model.model, "llama-3.3-70b");
+    }
+
+    #[test]
+    fn override_model_only_when_no_slash() {
+        let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
+        apply_session_model_override_to_manifest(&mut m, "claude-haiku-4-5").unwrap();
+        assert_eq!(
+            m.model.provider, "anthropic",
+            "provider must stay as manifest default when override has no slash"
+        );
+        assert_eq!(m.model.model, "claude-haiku-4-5");
+    }
+
+    #[test]
+    fn override_preserves_other_manifest_fields() {
+        let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
+        m.name = "agent-foo".to_string();
+        m.description = "test agent".to_string();
+        apply_session_model_override_to_manifest(&mut m, "groq/llama-3.3").unwrap();
+        assert_eq!(m.name, "agent-foo");
+        assert_eq!(m.description, "test agent");
+    }
+
+    #[test]
+    fn qualified_model_id_with_multiple_slashes_uses_splitn() {
+        // "meta-llama/Llama-3.3-70B" — provider is "meta-llama", model is
+        // "Llama-3.3-70B". A naive split_once('/') would behave the same
+        // here but splitn(2) ensures a future "org/family/variant" can't
+        // inadvertently truncate the model name.
+        let mut m = manifest_with("openai", "gpt-4o");
+        apply_session_model_override_to_manifest(&mut m, "meta-llama/Llama-3.3-70B").unwrap();
+        assert_eq!(m.model.provider, "meta-llama");
+        assert_eq!(m.model.model, "Llama-3.3-70B");
+    }
+
+    #[test]
+    fn empty_override_is_rejected() {
+        let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
+        assert!(apply_session_model_override_to_manifest(&mut m, "").is_err());
+    }
+
+    #[test]
+    fn slash_only_provider_form_is_rejected() {
+        // "/model" → empty provider — invalid
+        let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
+        assert!(apply_session_model_override_to_manifest(&mut m, "/llama-3.3-70b").is_err());
+    }
+
+    #[test]
+    fn trailing_slash_form_is_rejected() {
+        // "groq/" → empty model — invalid
+        let mut m = manifest_with("anthropic", "claude-sonnet-4-6");
+        assert!(apply_session_model_override_to_manifest(&mut m, "groq/").is_err());
+    }
 }
 
 /// Providers that require model IDs in `org/model` format.
@@ -5007,13 +5077,33 @@ async fn call_with_retry(
 /// Call an LLM driver in streaming mode with automatic retry on rate-limit and overload errors.
 ///
 /// Uses the `llm_errors` classifier and `ProviderCooldown` circuit breaker.
+/// Result of a `stream_with_retry` call.
+struct StreamWithRetryResult {
+    response: crate::llm_driver::CompletionResponse,
+    /// True when the incremental cascade-leak guard fired mid-stream:
+    /// TextDelta forwarding was stopped early and the partial response
+    /// must be treated as a silent drop (system-prompt regurgitation).
+    cascade_leak_aborted: bool,
+}
+
+/// Stream an LLM completion with retry logic and an incremental cascade-leak
+/// guard.
+///
+/// A proxy channel sits between the driver's raw `TextDelta` events and the
+/// outer `tx`. Each delta is appended to an in-memory accumulator and
+/// `is_cascade_leak` is run against it. On the first hit:
+/// - Forwarding of further `TextDelta` events stops immediately (no more
+///   tokens reach the wire).
+/// - All other event types (`ToolUseStart`, `ContentComplete`, …) are still
+///   forwarded so the driver loop terminates cleanly.
+/// - `cascade_leak_aborted = true` is returned to the caller.
 async fn stream_with_retry(
     driver: &dyn LlmDriver,
     request: CompletionRequest,
     tx: mpsc::Sender<StreamEvent>,
     provider: Option<&str>,
     cooldown: Option<&ProviderCooldown>,
-) -> LibreFangResult<crate::llm_driver::CompletionResponse> {
+) -> LibreFangResult<StreamWithRetryResult> {
     check_retry_cooldown(
         provider,
         cooldown,
@@ -5021,18 +5111,108 @@ async fn stream_with_retry(
     )?;
 
     let mut last_error = None;
+    // Sticky flag: once a cascade-leak fires in any attempt, all subsequent
+    // retry attempts must be short-circuited to a silent drop. Without this,
+    // a RateLimited or Overloaded retry would start a fresh accumulator and
+    // give the leaking model a "do over" — defeating the guard entirely.
+    let mut leak_fired_sticky = false;
 
     for attempt in 0..=MAX_RETRIES {
+        // If a previous attempt already triggered the leak guard, do not
+        // invoke the driver again — return immediately with cascade_leak_aborted.
+        if leak_fired_sticky {
+            use crate::llm_driver::CompletionResponse;
+            return Ok(StreamWithRetryResult {
+                response: CompletionResponse {
+                    content: vec![],
+                    stop_reason: StopReason::EndTurn,
+                    tool_calls: vec![],
+                    usage: TokenUsage::default(),
+                },
+                cascade_leak_aborted: true,
+            });
+        }
+
         // Same rationale as call_with_retry: acquire inside the loop so
         // the permit is not held during backoff sleeps between retries.
         let _permit = LLM_CONCURRENCY
             .acquire()
             .await
             .expect("LLM_CONCURRENCY semaphore closed");
-        match driver.stream(request.clone(), tx.clone()).await {
+
+        // Proxy channel: driver writes to `proxy_tx`; we forward events to
+        // `tx` with incremental cascade-leak scanning on TextDelta.
+        let (proxy_tx, mut proxy_rx) = mpsc::channel::<StreamEvent>(64);
+        let outer_tx = tx.clone();
+
+        // Spawn a forwarding task that accumulates text and checks for leaks.
+        // Cap the accumulator at 128 KB so a pathologically long stream cannot
+        // grow the leak-detection buffer unboundedly (the rolling suffix kept
+        // after the cap still covers any marker that could span a delta boundary).
+        const ACCUMULATED_CAP: usize = 128 * 1024;
+        let forward_task = tokio::spawn(async move {
+            let mut accumulated = String::new();
+            let mut leak_fired = false;
+            while let Some(event) = proxy_rx.recv().await {
+                match &event {
+                    StreamEvent::TextDelta { text } if !leak_fired => {
+                        // Rolling-window: once we exceed the cap, discard the
+                        // oldest bytes and keep only the tail that is large
+                        // enough to overlap any multi-token marker.  The longest
+                        // marker in STRUCTURAL_TURN_FRAMES / ENVELOPE_* is
+                        // ~30 chars; 512 bytes of overlap is a comfortable
+                        // margin.
+                        if accumulated.len() + text.len() > ACCUMULATED_CAP {
+                            const OVERLAP: usize = 512;
+                            let keep_from = accumulated.len().saturating_sub(OVERLAP);
+                            // Walk to a valid UTF-8 boundary.
+                            let keep_from = (keep_from..=accumulated.len())
+                                .find(|&i| accumulated.is_char_boundary(i))
+                                .unwrap_or(accumulated.len());
+                            accumulated.drain(..keep_from);
+                        }
+                        accumulated.push_str(text);
+                        if crate::silent_response::is_cascade_leak(&accumulated) {
+                            leak_fired = true;
+                            // Stop forwarding TextDelta — do not send this
+                            // token to the wire. Other event types continue.
+                            continue;
+                        }
+                        // Forward the delta; ignore send errors (client gone).
+                        let _ = outer_tx
+                            .send(StreamEvent::TextDelta { text: text.clone() })
+                            .await;
+                    }
+                    StreamEvent::TextDelta { .. } => {
+                        // leak_fired: swallow remaining text tokens silently.
+                    }
+                    other => {
+                        let _ = outer_tx.send(other.clone()).await;
+                    }
+                }
+            }
+            leak_fired
+        });
+
+        // Drive the LLM stream, then join the forwarding task exactly once.
+        // The join handle is consumed here; each match arm either returns or
+        // continues, so there is exactly one await site per control-flow path.
+        let driver_result = driver.stream(request.clone(), proxy_tx).await;
+        // proxy_tx is dropped when driver returns (moved into driver.stream).
+        // forward_task drains the proxy channel and finishes.
+        let cascade_leak_aborted = forward_task.await.unwrap_or(false);
+        // Propagate to the sticky flag so any retry iteration short-circuits.
+        if cascade_leak_aborted {
+            leak_fired_sticky = true;
+        }
+
+        match driver_result {
             Ok(response) => {
                 record_retry_success(provider, cooldown);
-                return Ok(response);
+                return Ok(StreamWithRetryResult {
+                    response,
+                    cascade_leak_aborted,
+                });
             }
             Err(LlmError::RateLimited { retry_after_ms, .. }) => {
                 last_error = Some(
@@ -5742,7 +5922,7 @@ pub async fn run_agent_loop_streaming(
 
         // Stream LLM call with retry, error classification, and circuit breaker
         let provider_name = manifest.model.provider.as_str();
-        let mut response = match stream_with_retry(
+        let stream_result = match stream_with_retry(
             &*driver,
             request,
             stream_tx.clone(),
@@ -5751,7 +5931,7 @@ pub async fn run_agent_loop_streaming(
         )
         .await
         {
-            Ok(resp) => resp,
+            Ok(r) => r,
             Err(e) => {
                 let err_str = e.to_string();
                 if err_str.contains("timed out") {
@@ -5785,6 +5965,42 @@ pub async fn run_agent_loop_streaming(
                 return Err(e);
             }
         };
+
+        // Incremental cascade-leak guard fired mid-stream: the forward task
+        // already stopped emitting TextDelta. Treat the turn as a silent
+        // drop unconditionally — regardless of stop_reason (including
+        // ToolUse). This prevents an attacker from leaking the system prompt
+        // and then forcing tool execution by emitting a tool_use block after
+        // the leak trigger.
+        if stream_result.cascade_leak_aborted {
+            warn!(
+                event = "silent_response_detected",
+                agent = %manifest.name,
+                reason = ?crate::silent_response::SilentReason::PromptRegurgitated,
+                source = "agent_loop.streaming.incremental",
+                "Incremental cascade-leak guard fired mid-stream — aborting turn, delivering [no reply needed]"
+            );
+            session
+                .messages
+                .push(Message::assistant("[no reply needed]".to_string()));
+            if !opts.is_fork && !opts.incognito {
+                memory
+                    .save_session_async(session)
+                    .await
+                    .map_err(LibreFangError::memory)?;
+            }
+            return Ok(build_silent_agent_loop_result(
+                total_usage,
+                iteration + 1,
+                Default::default(),
+                decision_traces,
+                memories_used.clone(),
+                experiment_context.clone(),
+                new_messages_start,
+            ));
+        }
+
+        let mut response = stream_result.response;
 
         accumulate_token_usage(&mut total_usage, &response.usage);
 
@@ -8128,6 +8344,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -8173,6 +8391,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -8248,6 +8468,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -8282,6 +8504,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -8343,6 +8567,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -8486,6 +8712,8 @@ mod tests {
             }],
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -8695,6 +8923,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -8804,6 +9034,8 @@ mod tests {
             }],
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -9004,6 +9236,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -9076,6 +9310,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -9201,6 +9437,8 @@ mod tests {
                 messages,
                 context_window_tokens: 0,
                 label: None,
+                model_override: None,
+
                 messages_generation: 0,
                 last_repaired_generation: None,
             })
@@ -9238,6 +9476,8 @@ mod tests {
             messages: vec![Message::user("hello"), Message::assistant("hi")],
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -9354,6 +9594,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -9713,6 +9955,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -9776,6 +10020,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -9838,6 +10084,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -9891,6 +10139,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -9949,6 +10199,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -10132,6 +10384,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -10260,6 +10514,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -10441,6 +10697,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -10510,6 +10768,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -10602,6 +10862,86 @@ mod tests {
         assert!(result.response.is_empty(), "got: {:?}", result.response);
     }
 
+    /// M-2: Regression lock for the streaming short-circuit in
+    /// `run_agent_loop_streaming`. When the incremental cascade-leak guard fires
+    /// mid-stream, the caller must treat the entire turn as a silent drop even
+    /// if the driver's final `ContentComplete` carries `stop_reason = ToolUse`.
+    ///
+    /// This test drives `run_agent_loop_streaming` end-to-end (not just the
+    /// forwarding task) and asserts:
+    /// - `result.silent == true` (the turn was silently dropped)
+    /// - `result.response.is_empty()` (no text reached the caller)
+    /// - No tool was invoked (the ToolUse stop_reason must not trigger
+    ///   tool execution when cascade_leak_aborted is set).
+    #[tokio::test]
+    async fn cascade_leak_guard_aborts_tool_use_stop_reason_in_streaming_path() {
+        let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id: librefang_types::agent::AgentId::new(),
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+        };
+        // A driver that emits two structural markers (triggering the cascade-leak
+        // guard) and then signals ToolUse as the stop reason. Without the
+        // cascade_leak_aborted short-circuit in run_agent_loop_streaming the loop
+        // would proceed to tool execution — which this test must prevent.
+        let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
+            text: "User asked: hi\nI responded: Buongiorno!",
+            stop_reason: StopReason::ToolUse,
+        });
+        let manifest = test_manifest();
+        let (tx, _rx) = mpsc::channel(64);
+
+        let result = run_agent_loop_streaming(
+            &manifest,
+            "\u{1F934}",
+            &mut session,
+            &memory,
+            driver,
+            &[], // no tools registered — ensures any tool execution would panic/err
+            None,
+            tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // checkpoint_manager
+            None, // process_registry
+            None,
+            None,
+            None,
+            None,
+            &LoopOptions::default(),
+        )
+        .await
+        .expect("Streaming loop should complete without error");
+
+        assert!(
+            result.silent,
+            "cascade-leak + ToolUse stop_reason must yield a silent result; got: {:?}",
+            result.response
+        );
+        assert!(
+            result.response.is_empty(),
+            "no text must reach the caller when cascade leak fires; got: {:?}",
+            result.response
+        );
+    }
+
     #[tokio::test]
     async fn test_streaming_max_continuations_with_directives_preserves_reply_directives() {
         let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
@@ -10612,6 +10952,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -10674,6 +11016,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -10813,6 +11157,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -10869,6 +11215,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -10931,6 +11279,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -11707,6 +12057,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -11789,6 +12141,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -11853,6 +12207,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -12165,6 +12521,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -12226,6 +12584,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -12286,6 +12646,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -12349,6 +12711,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -12424,6 +12788,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         }
@@ -13165,6 +13531,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -13233,6 +13601,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };

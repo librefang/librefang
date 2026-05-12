@@ -2815,6 +2815,15 @@ export async function setSessionLabel(
   });
 }
 
+export async function setSessionModelOverride(
+  sessionId: string,
+  modelOverride: string | null
+): Promise<ApiActionResponse> {
+  return patch<ApiActionResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/model`, {
+    model_override: modelOverride
+  });
+}
+
 export async function listMemories(params?: {
   agentId?: string;
   offset?: number;

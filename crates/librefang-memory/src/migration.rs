@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 38;
+const SCHEMA_VERSION: u32 = 39;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -103,6 +103,11 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // missing, every approval-audit INSERT fails, and the user never
     // sees the approval card.
     run_step!(38, migrate_v38);
+    // v39 (#4898): per-session model override. Adds `model_override TEXT`
+    // to `sessions` so the dashboard chat picker can pin a model to one
+    // session without touching the agent manifest. NULL means "use the
+    // agent default" (backwards-compatible with all existing rows).
+    run_step!(39, migrate_v39);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1420,6 +1425,32 @@ fn migrate_v38(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// Version 39: Per-session model override (#4898).
+///
+/// Adds a nullable `model_override` TEXT column to `sessions`. When set,
+/// the kernel's `execute_llm_agent` uses this value instead of the agent
+/// manifest's `model.model` / `model.provider` fields for LLM dispatch on
+/// that session. `NULL` preserves the existing behaviour (agent default).
+///
+/// The column stores `"<provider>/<model>"` when a provider is specified,
+/// or just `"<model>"` for provider-agnostic overrides. The API layer
+/// (`PATCH /api/sessions/{id}/model`) sets and clears it; `NULL` body
+/// clears the override and restores the agent default.
+fn migrate_v39(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "sessions", "model_override") {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN model_override TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (39, datetime('now'), 'Add model_override column to sessions for per-session model pin (#4898)')",
+        [],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
@@ -2274,5 +2305,79 @@ mod tests {
         assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
         assert!(column_exists(&conn, "entities", "agent_id"));
         assert!(column_exists(&conn, "relations", "agent_id"));
+    }
+
+    /// Regression for #4898: v39 must add `model_override TEXT` to `sessions`,
+    /// preserve NULL for pre-existing rows, and persist the value on write/read.
+    #[test]
+    fn migrate_v39_adds_model_override_column_nullable_and_round_trips() {
+        // Start from a v38-equivalent schema (full run_migrations populates
+        // the column through v39, but we want to verify the column shape).
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Column must exist after migration.
+        assert!(
+            column_exists(&conn, "sessions", "model_override"),
+            "sessions.model_override column missing after migrate_v39"
+        );
+
+        // Insert a minimal sessions row — model_override should default to NULL
+        // (backwards compatible). `created_at` and `updated_at` are NOT NULL.
+        let sid = uuid::Uuid::new_v4().to_string();
+        let aid = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO sessions (id, agent_id, messages, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))",
+            rusqlite::params![sid, aid, b"[]" as &[u8]],
+        )
+        .unwrap();
+
+        let stored_override: Option<String> = conn
+            .query_row(
+                "SELECT model_override FROM sessions WHERE id = ?1",
+                [&sid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            stored_override.is_none(),
+            "model_override must default to NULL for pre-migration rows: got {stored_override:?}"
+        );
+
+        // Write a non-NULL override and read it back.
+        conn.execute(
+            "UPDATE sessions SET model_override = ?1 WHERE id = ?2",
+            rusqlite::params!["groq/llama-3.3-70b", sid],
+        )
+        .unwrap();
+
+        let stored_override: Option<String> = conn
+            .query_row(
+                "SELECT model_override FROM sessions WHERE id = ?1",
+                [&sid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored_override.as_deref(),
+            Some("groq/llama-3.3-70b"),
+            "model_override round-trip failed: {stored_override:?}"
+        );
+
+        // Clear back to NULL.
+        conn.execute(
+            "UPDATE sessions SET model_override = NULL WHERE id = ?1",
+            [&sid],
+        )
+        .unwrap();
+        let cleared: Option<String> = conn
+            .query_row(
+                "SELECT model_override FROM sessions WHERE id = ?1",
+                [&sid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(cleared.is_none(), "clearing model_override to NULL failed");
     }
 }

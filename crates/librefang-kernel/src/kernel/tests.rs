@@ -1497,7 +1497,9 @@ async fn test_send_message_ephemeral_unknown_agent_returns_not_found() {
 
     // Use a random AgentId that doesn't exist
     let bogus_id = AgentId::new();
-    let result = kernel.send_message_ephemeral(bogus_id, "hello?").await;
+    let result = kernel
+        .send_message_ephemeral(bogus_id, "hello?", None)
+        .await;
     assert!(
         result.is_err(),
         "ephemeral message to unknown agent should error"
@@ -1536,7 +1538,7 @@ async fn test_send_message_ephemeral_does_not_modify_session() {
     // Send ephemeral message (will fail because no LLM provider, but that's OK —
     // the point is the session should remain untouched)
     let _ = kernel
-        .send_message_ephemeral(agent_id, "what is 2+2?")
+        .send_message_ephemeral(agent_id, "what is 2+2?", None)
         .await;
 
     // Check session is unchanged
@@ -4967,7 +4969,7 @@ async fn before_prompt_build_hook_fires_for_ephemeral_with_call_site_and_user_me
     // is resolved. Both Ok and Err are acceptable here; we only care that
     // the recorder captured the hook payload.
     let _ = kernel
-        .send_message_ephemeral(agent_id, "hello from the test")
+        .send_message_ephemeral(agent_id, "hello from the test", None)
         .await;
 
     let data = recorder
@@ -5014,7 +5016,7 @@ async fn before_prompt_build_hook_unregistered_event_does_not_fire_provider() {
         recorder.clone(),
     );
 
-    let _ = kernel.send_message_ephemeral(agent_id, "hello").await;
+    let _ = kernel.send_message_ephemeral(agent_id, "hello", None).await;
 
     assert!(
         recorder.last_data.lock().unwrap().is_none(),
@@ -5225,6 +5227,271 @@ fn available_tools_mcp_section_is_sorted_across_connect_orders() {
     );
 
     kernel.shutdown();
+}
+
+// ─── mcp_disabled (#4808) ─────────────────────────────────────────────────
+
+#[test]
+fn mcp_disabled_suppresses_all_mcp_tools() {
+    // Manifest with mcp_disabled = true + mcp_servers = ["foo"] must produce
+    // zero MCP tools even when MCP tools are registered in the kernel.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("librefang-mcp-disabled-test");
+    std::fs::create_dir_all(home.join("data")).unwrap();
+    let cfg = KernelConfig {
+        home_dir: home.clone(),
+        data_dir: home.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "no-mcp".to_string(),
+        description: "agent with mcp_disabled".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        mcp_disabled: true,
+        mcp_servers: vec!["foo".to_string()],
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    // Register some MCP tools in the kernel.
+    {
+        let mut tools = kernel.tools_ref().lock().unwrap();
+        tools.push(librefang_types::tool::ToolDefinition {
+            name: "mcp_foo_do_thing".to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        });
+    }
+    kernel
+        .mcp
+        .mcp_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let mcp_tools: Vec<_> = kernel
+        .available_tools(agent_id)
+        .iter()
+        .filter(|t| t.name.starts_with("mcp_"))
+        .map(|t| t.name.clone())
+        .collect();
+
+    assert!(
+        mcp_tools.is_empty(),
+        "mcp_disabled=true must produce zero MCP tools; got: {mcp_tools:?}"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn mcp_disabled_false_preserves_mcp_tools() {
+    // Regression lock: default manifest (mcp_disabled = false) still gets MCP tools.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("librefang-mcp-enabled-test");
+    std::fs::create_dir_all(home.join("data")).unwrap();
+    let cfg = KernelConfig {
+        home_dir: home.clone(),
+        data_dir: home.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "with-mcp".to_string(),
+        description: "agent with mcp enabled".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        mcp_disabled: false,
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    {
+        let mut tools = kernel.tools_ref().lock().unwrap();
+        tools.push(librefang_types::tool::ToolDefinition {
+            name: "mcp_bar_action".to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        });
+    }
+    kernel
+        .mcp
+        .mcp_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let mcp_tools: Vec<_> = kernel
+        .available_tools(agent_id)
+        .iter()
+        .filter(|t| t.name.starts_with("mcp_"))
+        .map(|t| t.name.clone())
+        .collect();
+
+    assert!(
+        !mcp_tools.is_empty(),
+        "mcp_disabled=false must not suppress MCP tools"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn mcp_disabled_hot_reload_takes_effect_without_respawn() {
+    // After toggling mcp_disabled from false → true in a live manifest,
+    // the next available_tools() call must return zero MCP tools — no
+    // agent respawn required. This locks in the "hot-reload, no respawn"
+    // contract documented on AgentManifest::mcp_disabled.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("librefang-mcp-hotreload-test");
+    std::fs::create_dir_all(home.join("data")).unwrap();
+    let cfg = KernelConfig {
+        home_dir: home.clone(),
+        data_dir: home.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
+
+    // Start with MCP enabled.
+    let manifest = AgentManifest {
+        name: "hot-reload-mcp".to_string(),
+        description: "agent for mcp_disabled hot-reload test".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        mcp_disabled: false,
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    // Register an MCP tool.
+    {
+        let mut tools = kernel.tools_ref().lock().unwrap();
+        tools.push(librefang_types::tool::ToolDefinition {
+            name: "mcp_svc_do_thing".to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        });
+    }
+    kernel
+        .mcp
+        .mcp_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    // Before toggle: MCP tools must be visible.
+    let before: Vec<_> = kernel
+        .available_tools(agent_id)
+        .iter()
+        .filter(|t| t.name.starts_with("mcp_"))
+        .map(|t| t.name.clone())
+        .collect();
+    assert!(
+        !before.is_empty(),
+        "mcp_disabled=false should expose MCP tools before hot-reload; got: {before:?}"
+    );
+
+    // Hot-reload: update the manifest in-place to set mcp_disabled = true,
+    // then evict the per-agent tools cache entry. This replicates what
+    // reload_agent_from_disk does (replace_manifest + tools.remove), which
+    // is the mechanism by which toggling mcp_disabled in agent.toml at
+    // runtime takes effect on the next available_tools() call.
+    {
+        let mut updated = kernel
+            .agents
+            .registry
+            .get(agent_id)
+            .expect("agent must exist")
+            .manifest
+            .clone();
+        updated.mcp_disabled = true;
+        kernel
+            .agents
+            .registry
+            .replace_manifest(agent_id, updated)
+            .expect("replace_manifest must succeed");
+        // Evict the cached tool list so available_tools() re-reads the
+        // manifest. reload_agent_from_disk does this at agent_state.rs:309.
+        kernel.prompt_metadata_cache.tools.remove(&agent_id);
+    }
+
+    // After toggle: next available_tools() call must return zero MCP tools.
+    let after: Vec<_> = kernel
+        .available_tools(agent_id)
+        .iter()
+        .filter(|t| t.name.starts_with("mcp_"))
+        .map(|t| t.name.clone())
+        .collect();
+    assert!(
+        after.is_empty(),
+        "mcp_disabled=true after hot-reload must suppress MCP tools; got: {after:?}"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn mcp_disabled_produces_empty_mcp_summary() {
+    // When mcp_disabled = true, the call sites gate build_mcp_summary behind
+    // `mcp_tool_count > 0 && !manifest.mcp_disabled`, so the summary is always
+    // String::new() (""). This test exercises that gate logic directly: with
+    // mcp_disabled = true, mcp_summary must be "" regardless of which MCP
+    // tools are registered or what insertion order they arrived in. Extends
+    // mcp_summary_is_byte_identical_across_input_orders to the disabled path.
+    let configured = vec![
+        "filesystem".to_string(),
+        "github".to_string(),
+        "weather".to_string(),
+    ];
+    let order_a = vec![
+        "mcp_filesystem_read_file".to_string(),
+        "mcp_github_create_issue".to_string(),
+        "mcp_weather_forecast".to_string(),
+    ];
+    let order_b = vec![
+        "mcp_weather_forecast".to_string(),
+        "mcp_filesystem_read_file".to_string(),
+        "mcp_github_create_issue".to_string(),
+    ];
+    let allowlist: Vec<String> = Vec::new();
+
+    // Helper that mirrors the call-site gate exactly:
+    //   `if mcp_tool_count > 0 && !mcp_disabled { build_mcp_summary(...) } else { "" }`
+    let gate = |tools: &[String], mcp_disabled: bool| -> String {
+        let mcp_tool_count = tools.len();
+        if mcp_tool_count > 0 && !mcp_disabled {
+            super::render_mcp_summary(tools, &configured, &allowlist)
+        } else {
+            String::new()
+        }
+    };
+
+    // With mcp_disabled = true, both orderings must produce "".
+    let disabled_a = gate(&order_a, true);
+    let disabled_b = gate(&order_b, true);
+    assert_eq!(
+        disabled_a, "",
+        "mcp_disabled=true must produce empty summary (order_a)"
+    );
+    assert_eq!(
+        disabled_b, "",
+        "mcp_disabled=true must produce empty summary (order_b)"
+    );
+    assert_eq!(
+        disabled_a, disabled_b,
+        "mcp_disabled=true summary must be identical regardless of insertion order"
+    );
+
+    // Sanity: with mcp_disabled = false, both orderings produce non-empty
+    // summaries that are byte-identical (the existing determinism contract).
+    let enabled_a = gate(&order_a, false);
+    let enabled_b = gate(&order_b, false);
+    assert!(
+        !enabled_a.is_empty(),
+        "mcp_disabled=false must produce a non-empty summary"
+    );
+    assert_eq!(
+        enabled_a, enabled_b,
+        "mcp_disabled=false summary must be byte-identical across insertion orders"
+    );
 }
 
 // ─── resolve_dispatch_session_id ──────────────────────────────────────────

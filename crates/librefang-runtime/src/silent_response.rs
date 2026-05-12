@@ -29,6 +29,71 @@
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
+// ---------------------------------------------------------------------------
+// Cascade-leak detection — canonical home for `is_cascade_leak` and the
+// constants it references. Historically these lived in `agent_loop.rs`; they
+// are here so the streaming early-abort path and its tests can share the same
+// implementation without a circular module dependency.
+// ---------------------------------------------------------------------------
+
+/// Channel-envelope prefixes the gateway prepends to inbound text.
+/// Shared between `is_cascade_leak` (drop on output) and
+/// `sanitize_for_memory` in `agent_loop.rs` (strip on persist).
+pub(crate) const ENVELOPE_LINE_PREFIXES: &[&str] = &[
+    "[Group message from ",
+    "[In risposta a:",
+    "[Replying to:",
+    "[Stranger from ",
+];
+
+/// Standalone envelope markers that occupy their own line.
+pub(crate) const ENVELOPE_STANDALONE_MARKERS: &[&str] = &["[Stranger]", "[Forwarded]", "[User]"];
+
+/// Prompt section headers that, when paired with a structural marker,
+/// indicate cascade scaffolding regurgitation.
+const THEMATIC_HEADERS: &[&str] = &[
+    "## Sender",
+    "## Today",
+    "## Calendar",
+    "## Tasks",
+    "## Response Style",
+];
+
+/// Structural turn-frame markers that almost never appear in legitimate
+/// agent replies.
+const STRUCTURAL_TURN_FRAMES: &[&str] = &["User asked:", "I responded:", "[Past exchange]"];
+
+/// Detect a cascade scaffolding leak: an agent response that contains
+/// scaffolding markers in a configuration real replies almost never
+/// produce.
+///
+/// Trip condition: **2+ structural** OR **1 structural + 1 thematic**.
+/// `2+ thematic alone` is intentionally NOT a leak.
+///
+/// Used both by the assembled-response guard (non-streaming and streaming
+/// EndTurn) and by the incremental streaming abort path.
+pub fn is_cascade_leak(text: &str) -> bool {
+    let mut structural_hits = 0u8;
+
+    for m in STRUCTURAL_TURN_FRAMES
+        .iter()
+        .chain(ENVELOPE_LINE_PREFIXES.iter())
+        .chain(ENVELOPE_STANDALONE_MARKERS.iter())
+    {
+        if text.contains(m) {
+            structural_hits += 1;
+            if structural_hits >= 2 {
+                return true;
+            }
+        }
+    }
+
+    if structural_hits == 0 {
+        return false;
+    }
+    THEMATIC_HEADERS.iter().any(|m| text.contains(m))
+}
+
 /// Env-flag rollback hatch: setting `LIBREFANG_SILENT_V2=off` reverts to
 /// the legacy (pre-Phase-2) detector semantics — exact match or trailing
 /// suffix only, no emoji/punctuation tolerance, no bracket-form
@@ -70,6 +135,9 @@ pub enum SilentReason {
     NotAddressed,
     /// Policy filter blocked the response (PII, safety, …).
     PolicyBlock,
+    /// The streaming response was aborted early because incremental
+    /// cascade-leak detection fired (system-prompt regurgitation).
+    PromptRegurgitated,
 }
 
 /// Canonical detector. Returns true when `text` should be treated as a
@@ -278,6 +346,8 @@ mod tests {
         assert_eq!(not_addressed, "\"not_addressed\"");
         let policy_block = serde_json::to_string(&SilentReason::PolicyBlock).unwrap();
         assert_eq!(policy_block, "\"policy_block\"");
+        let prompt_regurgitated = serde_json::to_string(&SilentReason::PromptRegurgitated).unwrap();
+        assert_eq!(prompt_regurgitated, "\"prompt_regurgitated\"");
     }
 
     #[test]
@@ -286,10 +356,127 @@ mod tests {
             SilentReason::NoReply,
             SilentReason::NotAddressed,
             SilentReason::PolicyBlock,
+            SilentReason::PromptRegurgitated,
         ] {
             let s = serde_json::to_string(&r).unwrap();
             let back: SilentReason = serde_json::from_str(&s).unwrap();
             assert_eq!(r, back);
         }
+    }
+
+    // --- Cascade-leak detection ---
+
+    #[test]
+    fn cascade_leak_two_structural_markers() {
+        // "User asked:" + "I responded:" → 2 structural → leak
+        assert!(is_cascade_leak("User asked: foo\nI responded: bar"));
+    }
+
+    #[test]
+    fn cascade_leak_structural_plus_thematic() {
+        // 1 structural + 1 thematic → leak
+        assert!(is_cascade_leak("User asked: hello\n## Sender\nAlice"));
+        assert!(is_cascade_leak("[Past exchange]\n## Today\n2024-01-01"));
+    }
+
+    #[test]
+    fn cascade_leak_thematic_headers_alone_are_legitimate() {
+        // 2+ thematic headers alone must NOT trigger the guard —
+        // legitimate markdown help replies use these freely.
+        assert!(!is_cascade_leak(
+            "## Sender\nAlice\n\n## Today\n2024-01-01\n\n## Response Style\nFormal"
+        ));
+        assert!(!is_cascade_leak(
+            "## Tasks\n- buy milk\n\n## Calendar\nTuesday"
+        ));
+    }
+
+    #[test]
+    fn cascade_leak_normal_reply_no_false_positive() {
+        // Completely legitimate agent reply — no markers at all.
+        assert!(!is_cascade_leak("Sure, I can help you with that!"));
+        assert!(!is_cascade_leak(
+            "Here is a summary:\n\n1. Point one\n2. Point two"
+        ));
+    }
+
+    #[test]
+    fn cascade_leak_envelope_prefix_counts_as_structural() {
+        // Envelope prefix ([Group message from …]) is structural; pairing
+        // with a thematic header trips the guard.
+        assert!(is_cascade_leak(
+            "[Group message from Alice]\n## Sender\nAlice"
+        ));
+        // Two envelope lines → 2 structural.
+        assert!(is_cascade_leak(
+            "[Group message from Alice]\n[Replying to: Bob]"
+        ));
+    }
+
+    // --- Incremental cascade-leak check (simulates streaming delta accumulation) ---
+
+    /// Simulate feeding text delta-by-delta and check at which point the
+    /// incremental `is_cascade_leak` check fires.
+    fn feed_deltas(deltas: &[&str]) -> (bool, usize) {
+        let mut accumulated = String::new();
+        for (i, delta) in deltas.iter().enumerate() {
+            accumulated.push_str(delta);
+            if is_cascade_leak(&accumulated) {
+                return (true, i);
+            }
+        }
+        (false, deltas.len())
+    }
+
+    #[test]
+    fn incremental_fires_on_second_structural_header() {
+        // Assemble "## Sender\nname\n\n## Today\nfoo\n\n## Style" in pieces.
+        // The thematic headers alone don't fire; "User asked:" is the
+        // structural marker needed to pair with the first thematic header.
+        let deltas = [
+            "User asked: ",
+            "what time is it?\n",
+            "## Today\n",
+            "2024-01-01\n",
+        ];
+        let (fired, idx) = feed_deltas(&deltas);
+        assert!(fired, "cascade leak should have fired");
+        // Must fire no later than after the 3rd delta (which adds "## Today")
+        assert!(idx <= 3, "should fire by delta index 3, fired at {idx}");
+    }
+
+    #[test]
+    fn incremental_single_structural_no_thematic_does_not_fire() {
+        // Only one structural marker, no thematic — should not fire.
+        let deltas = ["User asked: something\n", "and some prose follows.\n"];
+        let (fired, _) = feed_deltas(&deltas);
+        assert!(!fired, "single structural marker should not trigger leak");
+    }
+
+    #[test]
+    fn incremental_legitimate_reply_no_false_positive() {
+        let deltas = [
+            "Sure! Here is what I found:\n",
+            "\n",
+            "## Summary\n",
+            "The answer is 42.\n",
+        ];
+        let (fired, _) = feed_deltas(&deltas);
+        assert!(
+            !fired,
+            "legitimate reply must not trigger cascade-leak guard"
+        );
+    }
+
+    #[test]
+    fn incremental_two_structural_markers_fires() {
+        // Feed structural markers one at a time.
+        let deltas = [
+            "Here is a recap.\n",
+            "User asked: foo\n",
+            "I responded: bar\n",
+        ];
+        let (fired, _) = feed_deltas(&deltas);
+        assert!(fired, "two structural markers should trigger the guard");
     }
 }
