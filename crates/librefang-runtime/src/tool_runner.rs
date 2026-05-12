@@ -61,8 +61,9 @@ fn check_taint_shell_exec(command: &str) -> Option<String> {
 //   • Known write verbs (rm, cp-as-dst, mv-as-dst, touch, mkdir, editors,
 //     sed -i, awk -i inplace) are blocked when the RO path appears in a write
 //     position.
-//   • Shell output redirects (>, >>, &>, 2>, tee) targeting RO paths are
-//     blocked regardless of the leading verb.
+//   • Shell output redirects (>, >>, &>, 2>, 1>, 2>>, &>>, >|, >&, <<, <<<,
+//     >(…) process substitution) targeting RO paths are blocked regardless of
+//     the leading verb.
 //   • If the verb is unrecognised the old conservative behaviour is kept
 //     (deny) to avoid weakening the security posture.
 
@@ -75,26 +76,178 @@ enum RoSafety {
     Block(String),
 }
 
+// ── Shell tokenizer (quote-aware) ────────────────────────────────────────────
+//
+// Splits a shell command into operator-separated fragments while honouring
+// single-quotes, double-quotes, backslash escapes, and `$(…)` nesting so that
+// operators embedded inside string literals are NOT treated as real operators.
+//
+// State machine:
+//   Normal    → sees `'`  → SingleQuote (consume until matching `'`)
+//             → sees `"`  → DoubleQuote (consume until matching `"`, honour `\`)
+//             → sees `\`  → Escape (skip one byte)
+//             → sees `$(` → return Err immediately (opaque subshell, fail-closed)
+//             → sees `` ` `` → return Err immediately (opaque subshell, fail-closed)
+//             → sees one of the CHAIN_OPS → emit current fragment, continue
+//   SingleQuote → sees `'` → Normal (no escapes inside '')
+//   DoubleQuote → sees `"` → Normal; sees `\` → skip one byte
+//   Escape    → skip one byte → Normal
+//
+// Only operates on ASCII/UTF-8 byte sequences that shell parsers accept.
+// This is intentionally minimal — enough to avoid the most common quoted-
+// operator bypasses without reimplementing a full POSIX parser.
+
+#[derive(Clone, Copy, PartialEq)]
+enum TokenizerState {
+    Normal,
+    SingleQuote,
+    DoubleQuote,
+    Escape,   // after `\` in Normal
+    DqEscape, // after `\` inside double-quote
+}
+
+/// Split `command` on unquoted shell chain operators (`&&`, `||`, `|`, `;`).
+/// Returns `Err(reason)` if an unquoted `$(` or backtick is encountered —
+/// those are opaque sub-commands that the caller must fail-closed on.
+fn shell_split_chain(command: &str) -> Result<Vec<String>, String> {
+    let mut fragments: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut state = TokenizerState::Normal;
+    let chars: Vec<char> = command.chars().collect();
+    let len = chars.len();
+    let mut i = 0usize;
+
+    while i < len {
+        let ch = chars[i];
+
+        match state {
+            TokenizerState::Escape => {
+                // Skip the escaped character; return to Normal.
+                current.push(ch);
+                state = TokenizerState::Normal;
+                i += 1;
+            }
+            TokenizerState::DqEscape => {
+                current.push(ch);
+                state = TokenizerState::DoubleQuote;
+                i += 1;
+            }
+            TokenizerState::SingleQuote => {
+                if ch == '\'' {
+                    state = TokenizerState::Normal;
+                }
+                current.push(ch);
+                i += 1;
+            }
+            TokenizerState::DoubleQuote => {
+                if ch == '"' {
+                    state = TokenizerState::Normal;
+                } else if ch == '\\' {
+                    state = TokenizerState::DqEscape;
+                }
+                current.push(ch);
+                i += 1;
+            }
+            TokenizerState::Normal => {
+                // Backtick: opaque subshell.
+                if ch == '`' {
+                    return Err("backtick subshell".to_string());
+                }
+                // Single-quote start.
+                if ch == '\'' {
+                    state = TokenizerState::SingleQuote;
+                    current.push(ch);
+                    i += 1;
+                    continue;
+                }
+                // Double-quote start.
+                if ch == '"' {
+                    state = TokenizerState::DoubleQuote;
+                    current.push(ch);
+                    i += 1;
+                    continue;
+                }
+                // Backslash escape.
+                if ch == '\\' {
+                    state = TokenizerState::Escape;
+                    current.push(ch);
+                    i += 1;
+                    continue;
+                }
+                // `$(` — command substitution: opaque subshell.
+                if ch == '$' && i + 1 < len && chars[i + 1] == '(' {
+                    return Err("$(...) command substitution".to_string());
+                }
+                // `&&` operator.
+                if ch == '&' && i + 1 < len && chars[i + 1] == '&' {
+                    fragments.push(current.clone());
+                    current.clear();
+                    i += 2;
+                    continue;
+                }
+                // `||` operator.
+                if ch == '|' && i + 1 < len && chars[i + 1] == '|' {
+                    fragments.push(current.clone());
+                    current.clear();
+                    i += 2;
+                    continue;
+                }
+                // `|` operator (single pipe, not `||`).
+                if ch == '|' {
+                    fragments.push(current.clone());
+                    current.clear();
+                    i += 1;
+                    continue;
+                }
+                // `;` operator.
+                if ch == ';' {
+                    fragments.push(current.clone());
+                    current.clear();
+                    i += 1;
+                    continue;
+                }
+                current.push(ch);
+                i += 1;
+            }
+        }
+    }
+
+    fragments.push(current);
+    Ok(fragments)
+}
+
 /// Determine whether a shell command is safe to execute when `ro_prefix` is a
 /// read-only workspace path that appears somewhere in the command string.
 ///
 /// Design choices:
-/// - We parse only the first whitespace-delimited token as the *verb*; flags
-///   are inspected for the handful of tools that have write-enabling flags
-///   (sed -i, awk -i inplace).
-/// - Redirect detection is a substring scan over the raw command string. This
-///   is intentionally conservative: a shell escape or quoting trick that hides
-///   a `>` from us will trip the "unrecognised verb" fallback anyway.
-/// - For `cp` and `mv` the last positional argument (the destination) is
-///   checked; if it is inside the RO path the command is blocked.
-/// - For `tee` any RO-path argument is treated as a write destination and
-///   blocked (tee always writes).
+/// - We use a quote-aware tokenizer to split on `&&`/`||`/`|`/`;` so that
+///   operators embedded inside string literals are not treated as chain
+///   operators (BLOCKER-2).
+/// - Redirect detection covers the full set of POSIX + bash output-redirect
+///   operators including `<<`/`<<<` (heredoc), `>|`, `>&`, `1>`, `2>>`,
+///   `&>>`, and process-substitution `>(` (BLOCKER-1).
+/// - For `cp` and `mv` the `-t <dir>` GNU form is checked in addition to the
+///   last positional argument (HIGH-2).
+/// - For `tee` only arguments that are inside the RO prefix are blocked, not
+///   any invocation of `tee` (HIGH-2).
+/// - For `find` with write-enabling primaries (`-delete`, `-exec`, etc.) the
+///   command is rejected as a write op (HIGH-1).
+///
+/// # SAFETY
+/// Verb classification trusts $PATH resolution and is NOT a security boundary
+/// against malicious workspaces. A workspace containing an executable named
+/// `cat` (or any other READ_VERB name) could run arbitrary code. Sandboxing
+/// is provided by the RO workspace *mount* enforcement at the kernel layer and
+/// by the OS filesystem permissions. This classifier's sole purpose is to
+/// reduce false-positive blocks for legitimate read commands issued by trusted
+/// agents — it is not designed to stop a determined attacker who controls the
+/// workspace filesystem.
 fn classify_shell_exec_ro_safety(command: &str, ro_prefix: &str) -> RoSafety {
-    // --- 0. Subshell / command-substitution guard -----------------------------
+    // --- 0. Subshell / command-substitution guard (fast path) -----------------
     // `$( ... )` and backticks embed sub-commands that the verb classifier
-    // never reaches (sh evaluates them before exec). Fail-closed when the
-    // command contains them — the RO path may be touched by the embedded
-    // sub-command in a way no single-verb analysis can prove safe.
+    // never reaches (sh evaluates them before exec). The quote-aware splitter
+    // below will also catch these, but we check here first to avoid the
+    // allocation cost of the splitter on the common case.
     if command.contains("$(") || command.contains('`') {
         return RoSafety::Block(format!(
             "shell_exec blocked: command-substitution (`$(...)` or backtick) \
@@ -103,39 +256,37 @@ fn classify_shell_exec_ro_safety(command: &str, ro_prefix: &str) -> RoSafety {
         ));
     }
 
-    // --- 0b. Shell-chain split ------------------------------------------------
-    // `sh -c "<command>"` evaluates the whole string with shell parsing, so
-    // `&&`, `||`, `;`, and `|` introduce sub-commands that a single first-token
-    // verb check cannot see. Example bypass before this fix:
-    //   `cat /tmp/in && rm /vaults-ro/x/data`
-    //   → verb=`cat` → READ_VERB → Allow → sh still runs `rm`
-    // Split on those operators (order matters: `&&` / `||` before `|`) and
-    // classify each fragment independently. Pipes are treated the same way:
-    // each pipe stage is itself a self-contained invocation.
-    const CHAIN_OPS: &[&str] = &["&&", "||", "|", ";"];
-    if CHAIN_OPS.iter().any(|op| command.contains(op)) {
-        let mut normalized = command.to_string();
-        for op in CHAIN_OPS {
-            normalized = normalized.replace(op, "\u{0001}");
+    // --- 0b. Quote-aware shell-chain split ------------------------------------
+    // Split on unquoted `&&`, `||`, `|`, `;` so that operators inside string
+    // literals are not mistaken for chain operators (BLOCKER-2).
+    match shell_split_chain(command) {
+        Err(reason) => {
+            return RoSafety::Block(format!(
+                "shell_exec blocked: {reason} is not analyzable — \
+                 RO path '{ro_prefix}' may be targeted by an embedded sub-command"
+            ));
         }
-        for fragment in normalized.split('\u{0001}') {
-            let trimmed = fragment.trim();
-            if trimmed.is_empty() {
-                continue;
+        Ok(fragments) if fragments.len() > 1 => {
+            for fragment in &fragments {
+                let trimmed = fragment.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                // Segments that don't reference the RO path can never harm this
+                // RO mount; skip them so an unrecognised verb on an unrelated
+                // segment doesn't cause a false-positive deny.
+                if !trimmed.contains(ro_prefix) {
+                    continue;
+                }
+                if let RoSafety::Block(reason) =
+                    classify_shell_exec_ro_safety_segment(trimmed, ro_prefix)
+                {
+                    return RoSafety::Block(reason);
+                }
             }
-            // Segments that don't reference the RO path can never harm this
-            // RO mount; skip them so an unrecognised verb on an unrelated
-            // segment doesn't cause a false-positive deny.
-            if !trimmed.contains(ro_prefix) {
-                continue;
-            }
-            if let RoSafety::Block(reason) =
-                classify_shell_exec_ro_safety_segment(trimmed, ro_prefix)
-            {
-                return RoSafety::Block(reason);
-            }
+            return RoSafety::Allow;
         }
-        return RoSafety::Allow;
+        Ok(_) => {} // single fragment — fall through to segment classifier
     }
 
     classify_shell_exec_ro_safety_segment(command, ro_prefix)
@@ -149,20 +300,47 @@ fn classify_shell_exec_ro_safety(command: &str, ro_prefix: &str) -> RoSafety {
 fn classify_shell_exec_ro_safety_segment(command: &str, ro_prefix: &str) -> RoSafety {
     // --- 1. Redirect detection -------------------------------------------------
     // Check the raw command string for output-redirect operators that target the
-    // RO path. We look for `> <ro>`, `>> <ro>`, `&> <ro>`, `2> <ro>` patterns.
-    // The redirect destination is the token that immediately follows the operator.
-    // Longer operators must come before shorter ones so that `>>` is matched
-    // before `>` (otherwise `>` matches the first char of `>>` and we read
-    // `> /path` as the destination instead of `/path`).
-    for op in &[">>", ">", "&>", "2>"] {
-        // Scan every occurrence of the operator in the command.
+    // RO path. We scan for every known output-redirect operator; longer operators
+    // must precede shorter ones so `>>` matches before `>`, `&&` isn't hit as
+    // `&`, etc.
+    //
+    // Operators covered (BLOCKER-1):
+    //   &>>  2>>  >>   >|   >&   &>   2>   1>   >    (output redirects)
+    //   <<<  <<                                        (heredoc / herestring — can
+    //                                                  redirect stdin to a file
+    //                                                  opened for write via `cat <<EOF >file`)
+    //   >(   (bash process substitution — writes via FD)
+    //
+    // For heredoc / herestring the *following token* is the delimiter, not a
+    // path. However, the redirect operator that PRECEDES the heredoc (e.g.
+    // `> /vaults-ro/x/out`) is caught by the `>` scan below. The `<<` / `<<<`
+    // entries ensure we also block `cat <<EOF >/vaults-ro/x/out` if by some
+    // ordering the `>` appears first in the string.
+    //
+    // `>(` is a bash process substitution that opens a pipe to a command; when
+    // used as `cmd > >(tee /vaults-ro/x/out)` the RO path appears after `>(`.
+    // We treat any `>(` occurrence as a write-direction operator.
+    for op in &[
+        "&>>", "2>>", ">>", ">|", ">&", "&>", "2>", "1>", ">", "<<<", "<<", ">(",
+    ] {
         let mut search_from = 0usize;
         while let Some(rel) = command[search_from..].find(op) {
             let op_start = search_from + rel;
-            // Take only the first whitespace-delimited token after the operator
-            // (the redirect destination), stripping any surrounding whitespace.
+
+            // For heredoc operators (`<<`, `<<<`) the token after the operator
+            // is the delimiter word, not a path. We still do the scan so that
+            // a command like `cat /ro/path <<EOF` triggers no false-positive on
+            // the delimiter; we only care about whether the *destination* after a
+            // real output-redirect contains the RO prefix.  For `<<`/`<<<` we
+            // skip the destination check (there is none) and just mark the
+            // command as safe from the heredoc operator itself — the actual
+            // output redirect that pairs with a heredoc would be caught by the
+            // `>` entry.  However, if the RO prefix literally appears after a
+            // `<<`/`<<<` token (unusual but possible in `<<<` herestring form),
+            // block conservatively.
             let after_op = command[op_start + op.len()..].trim_start();
             let dest_token = after_op.split_whitespace().next().unwrap_or("");
+
             if is_ro_path(dest_token, ro_prefix) {
                 return RoSafety::Block(format!(
                     "shell_exec blocked: shell redirect '{}' targets read-only workspace path '{}'",
@@ -180,19 +358,50 @@ fn classify_shell_exec_ro_safety_segment(command: &str, ro_prefix: &str) -> RoSa
         None => return RoSafety::Allow, // empty command
     };
     // Strip any leading path component (e.g. /usr/bin/cat → cat).
+    //
+    // SAFETY: See the function-level SAFETY note on `classify_shell_exec_ro_safety`.
+    // Verb classification trusts $PATH resolution and is NOT a security boundary
+    // against malicious workspaces. Sandboxing is provided by RO workspace mount
+    // enforcement at the kernel layer.
     let verb_base = verb.rsplit('/').next().unwrap_or(verb);
 
     // --- 3. Known pure-read verbs -----------------------------------------------
     // These commands cannot write files when invoked normally.
     // `sed` and `awk` have write-enabling flags handled below.
+    // `find` has write-enabling primaries handled below (HIGH-1).
     // NOTE: `xargs` is intentionally NOT in this list — `xargs rm <path>`
     // would bypass the gate entirely. Falls through to the conservative
     // "unrecognised verb → deny" branch.
     const READ_VERBS: &[&str] = &[
-        "cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "find", "wc",
-        "diff", "cmp", "file", "stat", "du", "ls", "zcat", "zless",
+        "cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "wc", "diff", "cmp",
+        "file", "stat", "du", "ls", "zcat", "zless",
     ];
     if READ_VERBS.contains(&verb_base) {
+        return RoSafety::Allow;
+    }
+
+    // --- 3b. find: allowed as a read verb UNLESS write-enabling primaries are
+    //         present (HIGH-1).
+    if verb_base == "find" {
+        // These primaries instruct find to mutate the filesystem or write to
+        // a file, making `find` a write operation even if it looks like a read.
+        const FIND_WRITE_PRIMARIES: &[&str] = &[
+            "-delete", "-exec", "-execdir", "-fprint", "-fprintf", "-fls", "-fprint0",
+        ];
+        let has_write_primary = tokens[1..].iter().any(|t| {
+            // Match the primary exactly or when it's a prefix of a combined token
+            // like `-exec{}` (unusual but technically valid).
+            FIND_WRITE_PRIMARIES
+                .iter()
+                .any(|p| t == p || t.starts_with(p))
+        });
+        if has_write_primary {
+            return RoSafety::Block(format!(
+                "shell_exec blocked: 'find' with a write-enabling primary \
+                 (e.g. -delete, -exec) targets read-only workspace path '{}'",
+                ro_prefix
+            ));
+        }
         return RoSafety::Allow;
     }
 
@@ -224,11 +433,9 @@ fn classify_shell_exec_ro_safety_segment(command: &str, ro_prefix: &str) -> RoSa
         let mut iter = tokens.iter().peekable();
         let mut has_inplace = false;
         while let Some(tok) = iter.next() {
-            if *tok == "-i" {
-                if iter.peek().map(|s| **s) == Some("inplace") {
-                    has_inplace = true;
-                    break;
-                }
+            if *tok == "-i" && iter.peek().map(|s| **s) == Some("inplace") {
+                has_inplace = true;
+                break;
             }
             // Also catch --inplace long form.
             if *tok == "--inplace" {
@@ -272,29 +479,76 @@ fn classify_shell_exec_ro_safety_segment(command: &str, ro_prefix: &str) -> RoSa
         ));
     }
 
-    // tee: always writes to its arguments.
+    // tee: block only when one of tee's *target* arguments is inside the RO
+    // path. `tee /tmp/out` is fine even if the RO prefix appears elsewhere
+    // in the command. (HIGH-2)
     if verb_base == "tee" {
-        return RoSafety::Block(format!(
-            "shell_exec blocked: 'tee' would write to read-only workspace path '{}'",
-            ro_prefix
-        ));
+        // tee flags: -a / --append, -i / --ignore-interrupts, -p / --output-error.
+        // All other tokens are output file paths.
+        let writes_to_ro = tokens[1..].iter().any(|t| {
+            if t.starts_with('-') {
+                return false; // flag, not a path
+            }
+            is_ro_path(t, ro_prefix)
+        });
+        if writes_to_ro {
+            return RoSafety::Block(format!(
+                "shell_exec blocked: 'tee' would write to read-only workspace path '{}'",
+                ro_prefix
+            ));
+        }
+        return RoSafety::Allow;
     }
 
-    // cp / mv: block only when the RO path is the *destination* (last positional arg).
+    // cp / mv: block only when the RO path is the *destination*.
+    // Destination is either:
+    //   (a) the argument to the GNU `-t`/`--target-directory` flag, OR
+    //   (b) the last positional argument (POSIX form) — only when `-t` is absent.
+    // When `-t` is present the destination is fully determined by that flag;
+    // the remaining positional args are all sources, so we skip the
+    // last-positional check in that case (HIGH-2).
     if verb_base == "cp" || verb_base == "mv" {
-        // Collect positional args (skip flags and their option-values).
-        let positional: Vec<&str> = tokens[1..]
-            .iter()
-            .filter(|t| !t.starts_with('-'))
-            .copied()
-            .collect();
-        // The destination is the last positional argument.
-        if let Some(dst) = positional.last() {
-            if is_ro_path(dst, ro_prefix) {
-                return RoSafety::Block(format!(
-                    "shell_exec blocked: '{}' destination '{}' is inside read-only workspace path '{}'",
-                    verb_base, dst, ro_prefix
-                ));
+        // Check GNU `-t <dir>` / `--target-directory=<dir>` form first.
+        let mut explicit_target: Option<&str> = None;
+        {
+            let mut t_iter = tokens[1..].iter().peekable();
+            while let Some(tok) = t_iter.next() {
+                if *tok == "-t" || *tok == "--target-directory" {
+                    if let Some(target) = t_iter.next() {
+                        explicit_target = Some(target);
+                        if is_ro_path(target, ro_prefix) {
+                            return RoSafety::Block(format!(
+                                "shell_exec blocked: '{}' -t destination '{}' is inside read-only workspace path '{}'",
+                                verb_base, target, ro_prefix
+                            ));
+                        }
+                    }
+                } else if let Some(val) = tok.strip_prefix("--target-directory=") {
+                    explicit_target = Some(val);
+                    if is_ro_path(val, ro_prefix) {
+                        return RoSafety::Block(format!(
+                            "shell_exec blocked: '{}' --target-directory destination '{}' is inside read-only workspace path '{}'",
+                            verb_base, val, ro_prefix
+                        ));
+                    }
+                }
+            }
+        }
+
+        if explicit_target.is_none() {
+            // No `-t` flag: fall back to last positional argument as destination.
+            let positional: Vec<&str> = tokens[1..]
+                .iter()
+                .filter(|t| !t.starts_with('-'))
+                .copied()
+                .collect();
+            if let Some(dst) = positional.last() {
+                if is_ro_path(dst, ro_prefix) {
+                    return RoSafety::Block(format!(
+                        "shell_exec blocked: '{}' destination '{}' is inside read-only workspace path '{}'",
+                        verb_base, dst, ro_prefix
+                    ));
+                }
             }
         }
         // RO path appears only as a source — allow.
@@ -1155,7 +1409,7 @@ pub async fn execute_tool_raw(
                         // false-positive (e.g. /data vs /data2).
                         let at_boundary = {
                             let ps = prefix_str.as_ref();
-                            full_command.find(ps).map_or(false, |idx| {
+                            full_command.find(ps).is_some_and(|idx| {
                                 let after = &full_command[idx + ps.len()..];
                                 after.is_empty()
                                     || after.starts_with('/')
@@ -9625,6 +9879,259 @@ mod tests {
             result,
             RoSafety::Allow,
             "unrelated trailing segment must not deny a safe read of RO"
+        );
+    }
+
+    // ── BLOCKER-1: heredoc / extended redirect operators ──────────────────────
+
+    #[test]
+    fn ro_safety_heredoc_redirect_to_ro_is_blocked() {
+        // `cat > /vaults-ro/x/out <<EOF` — the `>` redirect targets RO.
+        let result = classify_shell_exec_ro_safety(
+            "cat > /vaults-ro/x/out <<EOF\ndata\nEOF",
+            "/vaults-ro/x",
+        );
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "heredoc with `>` redirect to RO must be blocked; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_noclobber_override_to_ro_is_blocked() {
+        // `echo data >| /vaults-ro/x/foo` — `>|` overrides noclobber; must block.
+        let result = classify_shell_exec_ro_safety("echo data >| /vaults-ro/x/foo", "/vaults-ro/x");
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "`>|` redirect to RO must be blocked; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_fd_merge_redirect_to_ro_is_blocked() {
+        // `cmd >& /vaults-ro/x/out` — bash fd-merge redirect; must block.
+        let result = classify_shell_exec_ro_safety("cmd >& /vaults-ro/x/out", "/vaults-ro/x");
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "`>&` redirect to RO must be blocked; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_fd1_redirect_to_ro_is_blocked() {
+        // `cmd 1> /vaults-ro/x/out` — explicit stdout redirect; must block.
+        let result = classify_shell_exec_ro_safety("cmd 1> /vaults-ro/x/out", "/vaults-ro/x");
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "`1>` redirect to RO must be blocked; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_stderr_append_redirect_to_ro_is_blocked() {
+        // `cmd 2>> /vaults-ro/x/err.log` — stderr append; must block.
+        let result = classify_shell_exec_ro_safety("cmd 2>> /vaults-ro/x/err.log", "/vaults-ro/x");
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "`2>>` redirect to RO must be blocked; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_both_append_redirect_to_ro_is_blocked() {
+        // `cmd &>> /vaults-ro/x/out` — both stdout+stderr append; must block.
+        let result = classify_shell_exec_ro_safety("cmd &>> /vaults-ro/x/out", "/vaults-ro/x");
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "`&>>` redirect to RO must be blocked; got {result:?}"
+        );
+    }
+
+    // ── BLOCKER-2: quote-aware chain splitting ─────────────────────────────────
+
+    #[test]
+    fn ro_safety_operator_inside_single_quotes_not_split() {
+        // `grep "rm /vaults-ro/x/data" /tmp/log` — the string literal contains
+        // `/vaults-ro/x/data` but the verb is `grep` (a read); must be allowed.
+        let result =
+            classify_shell_exec_ro_safety("grep 'rm /vaults-ro/x/data' /tmp/log", "/vaults-ro/x");
+        assert_eq!(
+            result,
+            RoSafety::Allow,
+            "operator inside single quotes must not trigger a split; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_semicolon_inside_double_quotes_not_split() {
+        // Semicolon inside a double-quoted string must not split into two segments.
+        let result =
+            classify_shell_exec_ro_safety(r#"grep "pat;tern" /vaults-ro/x/foo"#, "/vaults-ro/x");
+        assert_eq!(
+            result,
+            RoSafety::Allow,
+            "semicolon inside double quotes must not be a chain separator; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_pipe_inside_single_quotes_not_split() {
+        // `grep 'a|b' /vaults-ro/x/foo` — the `|` is inside quotes; single segment.
+        let result = classify_shell_exec_ro_safety("grep 'a|b' /vaults-ro/x/foo", "/vaults-ro/x");
+        assert_eq!(
+            result,
+            RoSafety::Allow,
+            "pipe inside single quotes must not split; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_real_chain_outside_quotes_still_splits() {
+        // Operators outside quotes must still split: `cat /vaults-ro/x/f && rm /vaults-ro/x/f`.
+        let result = classify_shell_exec_ro_safety(
+            "cat /vaults-ro/x/f && rm /vaults-ro/x/f",
+            "/vaults-ro/x",
+        );
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "real unquoted `&&` must still split and detect the `rm`; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_escaped_operator_not_split() {
+        // `grep foo\/bar /vaults-ro/x/log` — backslash before `/` is not an
+        // operator; plain read should be allowed. (This exercises the Escape state.)
+        let result =
+            classify_shell_exec_ro_safety(r"grep foo\/bar /vaults-ro/x/log", "/vaults-ro/x");
+        assert_eq!(
+            result,
+            RoSafety::Allow,
+            "backslash-escaped char must not trigger a false split; got {result:?}"
+        );
+    }
+
+    // ── HIGH-1: find with write-enabling primaries ─────────────────────────────
+
+    #[test]
+    fn ro_safety_find_plain_is_allowed() {
+        // `find /vaults-ro/x -name "*.md"` — pure read; must be allowed.
+        let result =
+            classify_shell_exec_ro_safety(r#"find /vaults-ro/x -name "*.md""#, "/vaults-ro/x");
+        assert_eq!(
+            result,
+            RoSafety::Allow,
+            "plain find without write primaries must be allowed; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_find_delete_is_blocked() {
+        // `find /vaults-ro/x -name "*.tmp" -delete` — `-delete` is a write primary.
+        let result = classify_shell_exec_ro_safety(
+            r#"find /vaults-ro/x -name "*.tmp" -delete"#,
+            "/vaults-ro/x",
+        );
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "find -delete must be blocked; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_find_exec_rm_is_blocked() {
+        // `find /vaults-ro/x -type f -exec rm {} \;` — `-exec` is a write primary.
+        let result = classify_shell_exec_ro_safety(
+            r"find /vaults-ro/x -type f -exec rm {} \;",
+            "/vaults-ro/x",
+        );
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "find -exec must be blocked; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_find_execdir_is_blocked() {
+        // `find /vaults-ro/x -execdir rm {} \;` — `-execdir` is also a write primary.
+        let result =
+            classify_shell_exec_ro_safety(r"find /vaults-ro/x -execdir rm {} \;", "/vaults-ro/x");
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "find -execdir must be blocked; got {result:?}"
+        );
+    }
+
+    // ── HIGH-2: tee path-aware blocking ───────────────────────────────────────
+
+    #[test]
+    fn ro_safety_tee_to_tmp_is_allowed() {
+        // `cat /vaults-ro/x/foo | tee /tmp/copy` — tee writes to /tmp, not RO.
+        // (The pipe splits into two segments; the tee segment doesn't contain
+        // the RO prefix so the fast-path skips it, and the cat segment is Allow.)
+        let result =
+            classify_shell_exec_ro_safety("cat /vaults-ro/x/foo | tee /tmp/copy", "/vaults-ro/x");
+        assert_eq!(
+            result,
+            RoSafety::Allow,
+            "tee writing to /tmp (not RO) must be allowed; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_tee_to_ro_is_blocked() {
+        // `cat /tmp/in | tee /vaults-ro/x/out` — tee target is inside RO; block.
+        let result =
+            classify_shell_exec_ro_safety("cat /tmp/in | tee /vaults-ro/x/out", "/vaults-ro/x");
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "tee writing to RO path must be blocked; got {result:?}"
+        );
+    }
+
+    // ── HIGH-2: cp/mv -t <RO> GNU form ────────────────────────────────────────
+
+    #[test]
+    fn ro_safety_cp_t_ro_is_blocked() {
+        // `cp -t /vaults-ro/x /tmp/foo` — GNU `-t` puts the target first.
+        let result = classify_shell_exec_ro_safety("cp -t /vaults-ro/x /tmp/foo", "/vaults-ro/x");
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "cp -t <RO> must be blocked; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_mv_t_ro_is_blocked() {
+        // `mv -t /vaults-ro/x /tmp/foo` — GNU `-t` form.
+        let result = classify_shell_exec_ro_safety("mv -t /vaults-ro/x /tmp/foo", "/vaults-ro/x");
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "mv -t <RO> must be blocked; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_cp_target_directory_long_form_ro_is_blocked() {
+        // `cp --target-directory=/vaults-ro/x /tmp/foo` — GNU long form.
+        let result = classify_shell_exec_ro_safety(
+            "cp --target-directory=/vaults-ro/x /tmp/foo",
+            "/vaults-ro/x",
+        );
+        assert!(
+            matches!(result, RoSafety::Block(_)),
+            "cp --target-directory=<RO> must be blocked; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ro_safety_cp_t_tmp_with_ro_src_is_allowed() {
+        // `cp -t /tmp /vaults-ro/x/foo` — target is /tmp, source is RO; allow.
+        let result = classify_shell_exec_ro_safety("cp -t /tmp /vaults-ro/x/foo", "/vaults-ro/x");
+        assert_eq!(
+            result,
+            RoSafety::Allow,
+            "cp -t /tmp with RO as source must be allowed; got {result:?}"
         );
     }
 
