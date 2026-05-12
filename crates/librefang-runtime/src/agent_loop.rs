@@ -1890,13 +1890,6 @@ pub fn apply_session_model_override_to_manifest(
     Ok(())
 }
 
-/// Internal alias used within this module.
-fn apply_session_model_override(manifest: &mut AgentManifest, override_str: &str) {
-    // Validation is best-effort at the write boundary (PATCH route); inside
-    // the loop we trust stored values are already valid and fall back silently.
-    let _ = apply_session_model_override_to_manifest(manifest, override_str);
-}
-
 #[cfg(test)]
 mod session_model_override_tests {
     use super::*;
@@ -3747,15 +3740,6 @@ pub async fn run_agent_loop(
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
-    // Per-session model override (#4898). Shadow `manifest` so every
-    // downstream read of `manifest.model.{model,provider}` sees the
-    // resolved effective model. NULL override = original manifest.
-    let mut _eff_manifest = manifest.clone();
-    if let Some(override_str) = session.model_override.as_deref() {
-        apply_session_model_override(&mut _eff_manifest, override_str);
-    }
-    let manifest = &_eff_manifest;
-
     // Start index of new messages added during this turn. Initialized to
     // current session length so early returns (before the user message is
     // pushed) expose an empty slice to callers. Updated after
@@ -5308,15 +5292,6 @@ pub async fn run_agent_loop_streaming(
     opts: &LoopOptions,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting streaming agent loop");
-
-    // Per-session model override (#4898). Same pattern as run_agent_loop:
-    // shadow `manifest` so every downstream read of
-    // `manifest.model.{model,provider}` resolves to the effective model.
-    let mut _eff_manifest = manifest.clone();
-    if let Some(override_str) = session.model_override.as_deref() {
-        apply_session_model_override(&mut _eff_manifest, override_str);
-    }
-    let manifest = &_eff_manifest;
 
     // Start index of new messages added during this turn. See the matching
     // comment in run_agent_loop for details. Initialized to the current

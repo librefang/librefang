@@ -579,7 +579,6 @@ impl LibreFangKernel {
             context_window_tokens: 0,
             label: Some("ephemeral /btw".to_string()),
             model_override: None,
-
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -1892,7 +1891,6 @@ impl LibreFangKernel {
             context_window_tokens: 0,
             label: None,
             model_override: None,
-
             messages_generation: 0,
             last_repaired_generation: None,
         });
@@ -1942,6 +1940,25 @@ impl LibreFangKernel {
             effective_session_id,
         );
         let mut manifest = entry.manifest.clone();
+
+        // Apply per-session model override (#4898) before any manifest field is
+        // read downstream (model catalog lookup, system prompt build, billing).
+        // The pre-lock session snapshot already carries model_override; the
+        // reload inside the spawn task will produce the same value because the
+        // PATCH route updates the persisted session before returning.
+        if let Some(override_str) = session.model_override.as_deref() {
+            librefang_runtime::agent_loop::apply_session_model_override_to_manifest(
+                &mut manifest,
+                override_str,
+            )
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "session model override apply failed on streaming path, falling back to manifest default"
+                );
+            });
+        }
 
         // Inject model_supports_tools for auto web search augmentation.
         // Refs #4745: honour user capability overrides via effective_capabilities.
