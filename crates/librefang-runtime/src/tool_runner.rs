@@ -180,7 +180,7 @@ fn shell_split_chain(command: &str) -> Result<Vec<String>, String> {
                 // cannot safely tokenize through that, so fail-closed (B3).
                 if ch == '$' && i + 1 < len {
                     if chars[i + 1] == '(' {
-                        return Err("$(...) command substitution".to_string());
+                        return Err("$(...) command-substitution".to_string());
                     }
                     if chars[i + 1] == '\'' {
                         return Err(
