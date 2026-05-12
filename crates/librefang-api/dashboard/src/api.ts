@@ -3203,14 +3203,27 @@ export async function deleteGoal(goalId: string): Promise<ApiActionResponse> {
 // ── Network / Peers ──────────────────────────────────
 
 export interface NetworkStatusResponse {
+  // `online` mirrors whether the OFP PeerNode is actually running on the
+  // daemon. `enabled` is the legacy/config-mirror field (`network_enabled
+  // && !shared_secret.is_empty()`) — both ship for SDK back-compat; the
+  // dashboard reads `online`.
   online?: boolean;
+  enabled?: boolean;
   node_id?: string;
   protocol_version?: string;
+  // Daemon emits both `listen_addr` (dashboard-aligned) and
+  // `listen_address` (legacy SDK consumers). Either may be undefined when
+  // OFP is disabled.
   listen_addr?: string;
+  listen_address?: string;
   peer_count?: number;
+  connected_peers?: number;
+  total_peers?: number;
   // SECURITY (#3873): null when this node has no Ed25519 identity
   // (HMAC-only legacy mode); operators should treat that as "new defense
-  // is dormant" and investigate.
+  // is dormant" and investigate. Distinct from "OFP disabled" — when
+  // `online === false` the identity simply has not been initialized
+  // because OFP never started.
   identity_fingerprint?: string | null;
   pinned_peers?: number;
   [key: string]: unknown;
