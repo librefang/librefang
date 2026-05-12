@@ -333,17 +333,32 @@ pub enum StopReason {
 }
 
 /// Token usage information from an LLM call.
+///
+/// **Convention**: `input_tokens` is the TOTAL prompt token count *including*
+/// any cached portion. `cache_read_input_tokens` and
+/// `cache_creation_input_tokens` are subsets of `input_tokens` that the
+/// provider re-priced (0.1x for reads, 1.25x for writes).
+///
+/// This matches the OpenAI / Groq / DeepSeek wire shape directly.
+/// Anthropic's API reports `input_tokens` as new-input-only with the two
+/// cache buckets reported separately
+/// (https://docs.anthropic.com/en/api/messages#response-usage); the
+/// Anthropic driver normalizes at the boundary so downstream consumers
+/// (`burst_tokens`, `librefang-kernel-metering::estimate_cost_from_rates`)
+/// can rely on a single shape.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
-    /// Tokens used for the input/prompt.
+    /// Total prompt tokens for this call, including any cached portion.
     pub input_tokens: u64,
     /// Tokens generated in the output.
     pub output_tokens: u64,
-    /// Tokens written to the prompt cache (Anthropic `cache_creation_input_tokens`).
+    /// Tokens written to the prompt cache during this call (subset of
+    /// `input_tokens`). Anthropic `cache_creation_input_tokens`.
     #[serde(default)]
     pub cache_creation_input_tokens: u64,
-    /// Tokens read from the prompt cache (Anthropic `cache_read_input_tokens`,
-    /// OpenAI `prompt_tokens_details.cached_tokens`).
+    /// Tokens read from the prompt cache (subset of `input_tokens`).
+    /// Anthropic `cache_read_input_tokens`,
+    /// OpenAI `prompt_tokens_details.cached_tokens`.
     #[serde(default)]
     pub cache_read_input_tokens: u64,
 }
@@ -357,23 +372,18 @@ impl TokenUsage {
     /// Tokens that count against burst / per-minute rate limits.
     ///
     /// Represents tokens the model actually processed this turn —
-    /// excludes prompt-cache hits (charged at ~10% of input rate, not
-    /// re-processed by the model) but includes cache writes (charged at
-    /// 1.25x and do go through the model). Issue #4943.
+    /// excludes prompt-cache reads (charged at ~10% of input rate, not
+    /// re-processed by the model) but keeps cache writes (charged at
+    /// 1.25x — still go through the model). Issue #4943.
     ///
-    /// Handles both provider conventions:
-    /// - OpenAI / Groq / DeepSeek: `input_tokens` is the TOTAL prompt
-    ///   tokens including cache hits; subtract `cache_read_input_tokens`
-    ///   to get the new portion. `cache_creation_input_tokens` is 0.
-    /// - Anthropic: `input_tokens` already excludes cached tokens;
-    ///   `cache_read_input_tokens` and `cache_creation_input_tokens` are
-    ///   reported separately. The `saturating_sub` is a no-op (no
-    ///   overlap) and `cache_creation_input_tokens` is added back so
-    ///   cache writes still count as new processing.
+    /// Relies on the workspace convention documented on [`TokenUsage`]:
+    /// `input_tokens` is the TOTAL prompt count, with cache_read /
+    /// cache_creation as subsets. So subtracting only `cache_read`
+    /// leaves cache_creation counted (correct) and the non-cached
+    /// portion counted (correct).
     pub fn burst_tokens(&self) -> u64 {
         self.input_tokens
             .saturating_sub(self.cache_read_input_tokens)
-            + self.cache_creation_input_tokens
             + self.output_tokens
     }
 

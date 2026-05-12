@@ -772,11 +772,17 @@ export function AgentsPage() {
     const samples = live?.samples ?? 0;
     const activeNow = live?.active_now ?? 0;
     const prev = live?.prev;
-    const skillNames: string[] = Array.isArray((agent as AgentView).skills)
-      ? ((agent as AgentView).skills as string[])
-      : Array.isArray((agent as AgentView).capabilities?.skills)
-        ? (((agent as AgentView).capabilities!.skills) as string[])
-        : [];
+    // Sort alphabetically (#4940) so the row preview shows the same
+    // first-3 every time — matches the Skills tab ordering.
+    const skillNames: string[] = (
+      Array.isArray((agent as AgentView).skills)
+        ? ((agent as AgentView).skills as string[])
+        : Array.isArray((agent as AgentView).capabilities?.skills)
+          ? (((agent as AgentView).capabilities!.skills) as string[])
+          : []
+    )
+      .slice()
+      .sort();
     const toolsMeta = skillNames.length > 0
       ? skillNames.slice(0, 3).join(" · ")
       : toolsCount > 0
@@ -1166,6 +1172,8 @@ export function AgentsPage() {
     const view = agent as AgentView;
     // Sort alphabetically (#4940) — the backend returns the manifest's
     // allowlist order, which is meaningless to humans scanning the tab.
+    // Skill names are slug-shape ASCII IDs, so plain codepoint sort is
+    // stable across locales (localeCompare would flip in tr-TR etc).
     const skills: string[] = (
       Array.isArray(view.skills)
         ? view.skills
@@ -1174,7 +1182,7 @@ export function AgentsPage() {
           : []
     )
       .slice()
-      .sort((a, b) => a.localeCompare(b));
+      .sort();
     // skills_mode: 'none' (skills_disabled), 'all' (no allowlist — uses
     // every skill in the registry, the default), or 'allowlist' (manifest
     // pinned a list). Each needs a different empty-state copy; the
@@ -1910,8 +1918,9 @@ export function AgentsPage() {
                 <section>
                   <h4 className="text-sm font-semibold mb-2">{t("agents.skills")}</h4>
                   <div className="flex flex-wrap gap-1.5">
-                    {detailAgent.skills.map((s: string, i: number) => (
-                      <Badge key={i} variant="default">{s}</Badge>
+                    {/* Sorted alphabetically (#4940) — matches the Skills tab. */}
+                    {detailAgent.skills.slice().sort().map((s: string) => (
+                      <Badge key={s} variant="default">{s}</Badge>
                     ))}
                   </div>
                 </section>
