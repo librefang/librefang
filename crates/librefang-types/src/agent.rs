@@ -539,6 +539,14 @@ pub struct ResourceQuota {
     /// - `Some(n)` = limit to `n` tokens per hour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_llm_tokens_per_hour: Option<u64>,
+    /// Fraction of the hourly token budget allowed in any single minute.
+    ///
+    /// - `None` = not configured (uses compiled default `0.2`, i.e. 1/5 of hourly budget).
+    /// - `Some(r)` = allow `r × max_llm_tokens_per_hour` tokens per minute.
+    ///
+    /// Clamped to `0.01..=1.0` at enforcement time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst_ratio: Option<f32>,
     /// Maximum network bytes per hour.
     pub max_network_bytes_per_hour: u64,
     /// Maximum cost in USD per hour.
@@ -547,10 +555,6 @@ pub struct ResourceQuota {
     pub max_cost_per_day_usd: f64,
     /// Maximum cost in USD per month (0.0 = unlimited).
     pub max_cost_per_month_usd: f64,
-    /// Per-agent burst ratio override. `None` = inherit global
-    /// `default_burst_ratio` (or compiled default 0.2).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub burst_ratio: Option<f32>,
 }
 
 impl Default for ResourceQuota {
@@ -560,11 +564,11 @@ impl Default for ResourceQuota {
             max_cpu_time_ms: 30_000,             // 30 seconds
             max_tool_calls_per_minute: 60,
             max_llm_tokens_per_hour: None, // inherit global default
+            burst_ratio: None,             // inherit compiled default (0.2 = 1/5)
             max_network_bytes_per_hour: 100 * 1024 * 1024, // 100 MB
             max_cost_per_hour_usd: 0.0,    // unlimited by default
             max_cost_per_day_usd: 0.0,     // unlimited
             max_cost_per_month_usd: 0.0,   // unlimited
-            burst_ratio: None,
         }
     }
 }
@@ -858,6 +862,20 @@ pub struct AgentManifest {
     /// MCP server allowlist (empty = all connected MCP servers available).
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub mcp_servers: Vec<String>,
+    /// Explicitly disable all MCP server tools for this agent. Mirrors
+    /// `skills_disabled` — `mcp_servers = []` means "all", this means "none".
+    ///
+    /// **Scope**: this flag hides MCP tools and the MCP server summary from
+    /// *this agent's* LLM prompt only. MCP servers defined in `KernelConfig`
+    /// still start globally if any other agent uses them — no server process
+    /// is stopped or skipped.
+    ///
+    /// **Hot-reload**: takes effect on the next `available_tools()` call after
+    /// the per-agent tools cache is evicted. `reload_agent_from_disk` (the
+    /// file-watcher path) evicts it automatically, so toggling `mcp_disabled`
+    /// in `agent.toml` at runtime takes effect without an agent respawn.
+    #[serde(default)]
+    pub mcp_disabled: bool,
     /// Custom metadata.
     #[serde(default, deserialize_with = "crate::serde_compat::map_lenient")]
     pub metadata: HashMap<String, serde_json::Value>,
@@ -1126,6 +1144,7 @@ impl Default for AgentManifest {
             skills: Vec::new(),
             skills_disabled: false,
             mcp_servers: Vec::new(),
+            mcp_disabled: false,
             metadata: HashMap::new(),
             tags: Vec::new(),
             routing: None,
@@ -2663,5 +2682,70 @@ mount = "/abs"
         let s = "mode = \"r\"\n";
         let d: WorkspaceDecl = toml::from_str(s).unwrap();
         assert!(d.path.is_none() && d.mount.is_none());
+    }
+
+    // ── mcp_disabled field (#4808) ─────────────────────────────────────────
+
+    #[test]
+    fn mcp_disabled_default_is_false() {
+        let manifest = AgentManifest::default();
+        assert!(!manifest.mcp_disabled, "mcp_disabled must default to false");
+    }
+
+    #[test]
+    fn mcp_disabled_toml_roundtrip() {
+        let toml_str = r#"
+name = "no-mcp-agent"
+mcp_disabled = true
+
+[model]
+provider = "anthropic"
+model = "claude-3-haiku-20240307"
+"#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert!(
+            manifest.mcp_disabled,
+            "mcp_disabled must survive TOML deserialization"
+        );
+
+        let re_serialized = toml::to_string(&manifest).unwrap();
+        let re_parsed: AgentManifest = toml::from_str(&re_serialized).unwrap();
+        assert!(
+            re_parsed.mcp_disabled,
+            "mcp_disabled must survive TOML roundtrip"
+        );
+    }
+
+    #[test]
+    fn mcp_disabled_json_roundtrip() {
+        let manifest = AgentManifest {
+            mcp_disabled: true,
+            mcp_servers: vec!["foo".to_string()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&manifest).unwrap();
+        let back: AgentManifest = serde_json::from_str(&json).unwrap();
+        assert!(
+            back.mcp_disabled,
+            "mcp_disabled must survive JSON roundtrip"
+        );
+        assert_eq!(back.mcp_servers, vec!["foo".to_string()]);
+    }
+
+    #[test]
+    fn mcp_disabled_absent_from_toml_is_false() {
+        // When the field is omitted from TOML, serde(default) should give false.
+        let toml_str = r#"
+name = "normal-agent"
+
+[model]
+provider = "anthropic"
+model = "claude-3-haiku-20240307"
+"#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert!(
+            !manifest.mcp_disabled,
+            "mcp_disabled must be false when absent from TOML"
+        );
     }
 }

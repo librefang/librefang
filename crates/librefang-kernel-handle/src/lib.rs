@@ -899,6 +899,26 @@ pub trait WorkflowRunner: Send + Sync {
         let _ = run_id;
         None
     }
+
+    /// Start a workflow asynchronously (fire-and-forget). Creates the run,
+    /// spawns execution in the background, and returns the `run_id`
+    /// immediately without blocking. Use `get_workflow_run` to poll status.
+    async fn start_workflow_async(
+        &self,
+        workflow_id: &str,
+        input: &str,
+    ) -> Result<String, KernelOpError> {
+        let _ = (workflow_id, input);
+        Err(KernelOpError::unavailable("Workflow engine"))
+    }
+
+    /// Cancel a running or paused workflow run by its UUID string.
+    /// Returns `Ok(())` on success, or an error describing why cancellation
+    /// failed (not found, already in a terminal state, etc.).
+    async fn cancel_workflow_run(&self, run_id: &str) -> Result<(), KernelOpError> {
+        let _ = run_id;
+        Err(KernelOpError::unavailable("Workflow engine"))
+    }
 }
 
 // ============================================================================

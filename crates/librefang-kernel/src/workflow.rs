@@ -16,9 +16,11 @@ use librefang_memory::{WorkflowRunRow, WorkflowStore};
 use librefang_types::agent::AgentId;
 use librefang_types::subagent::SubagentContext;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -48,6 +50,91 @@ impl std::fmt::Display for CancelRunError {
 }
 
 impl std::error::Error for CancelRunError {}
+
+/// Error type returned by [`WorkflowEngine::pause_run`].
+#[derive(Debug, Clone)]
+pub enum PauseRunError {
+    /// No run with that id exists in the engine.
+    NotFound(WorkflowRunId),
+    /// The run is already paused. Returns the hash of the existing token so
+    /// callers can confirm idempotency without leaking the plaintext token.
+    AlreadyPaused {
+        run_id: WorkflowRunId,
+        resume_token_hash: String,
+    },
+    /// The run has already finished and cannot be paused.
+    AlreadyTerminal {
+        run_id: WorkflowRunId,
+        /// One of `"completed"`, `"failed"`, or `"cancelled"`.
+        state: &'static str,
+    },
+}
+
+impl std::fmt::Display for PauseRunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PauseRunError::NotFound(id) => write!(f, "Workflow run not found: {id}"),
+            PauseRunError::AlreadyPaused { run_id, .. } => {
+                write!(f, "Workflow run {run_id} is already paused")
+            }
+            PauseRunError::AlreadyTerminal { run_id, state } => {
+                write!(f, "Cannot pause workflow run {run_id}: already {state}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PauseRunError {}
+
+/// Error type returned by [`WorkflowEngine::resume_run`].
+#[derive(Debug, Clone)]
+pub enum ResumeRunError {
+    /// No run with that id exists in the engine.
+    NotFound(WorkflowRunId),
+    /// The run is not in the `Paused` state.
+    NotPaused {
+        run_id: WorkflowRunId,
+        /// Actual state name, e.g. `"running"`, `"completed"`.
+        state: &'static str,
+    },
+    /// The supplied token does not match the stored hash.
+    TokenMismatch { run_id: WorkflowRunId },
+    /// The workflow uses DAG dependencies, which do not yet support pause/resume.
+    DagUnsupported { run_id: WorkflowRunId },
+    /// The resume itself failed (step error, persist error, etc.).
+    ExecutionFailed {
+        run_id: WorkflowRunId,
+        detail: String,
+    },
+}
+
+impl std::fmt::Display for ResumeRunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResumeRunError::NotFound(id) => write!(f, "Workflow run not found: {id}"),
+            ResumeRunError::NotPaused { run_id, state } => {
+                write!(
+                    f,
+                    "Cannot resume workflow run {run_id}: state is {state}, expected Paused"
+                )
+            }
+            ResumeRunError::TokenMismatch { run_id } => {
+                write!(f, "Resume token mismatch for run {run_id}: presented token does not match stored hash")
+            }
+            ResumeRunError::DagUnsupported { run_id } => {
+                write!(
+                    f,
+                    "Resuming a DAG workflow run {run_id} is not yet supported"
+                )
+            }
+            ResumeRunError::ExecutionFailed { run_id, detail } => {
+                write!(f, "Resume of run {run_id} failed: {detail}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ResumeRunError {}
 
 /// Unique identifier for a workflow definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -220,9 +307,12 @@ pub enum WorkflowRunState {
     Running,
     /// The run was paused mid-execution and is waiting for an external
     /// signal (an approval, a human-supplied input, etc.) before it
-    /// continues. Carry the `resume_token` the caller must present to
-    /// `WorkflowEngine::resume_run`, the wall-clock pause time, and a
+    /// continues. Carries the hex-encoded SHA-256 hash of the resume
+    /// token (never the plaintext), the wall-clock pause time, and a
     /// human-readable reason for log/UI surfaces.
+    ///
+    /// The plaintext token is returned to the caller by `pause_run` and
+    /// exposed at the HTTP layer only. It is never persisted.
     ///
     /// Per-run snapshot data (step index, variable bindings, current
     /// input) lives in fields on `WorkflowRun` rather than this variant
@@ -230,7 +320,9 @@ pub enum WorkflowRunState {
     /// snapshot needs to be readable without matching on the state. See
     /// #3335.
     Paused {
-        resume_token: Uuid,
+        /// Hex-encoded SHA-256 hash of the resume token. The plaintext
+        /// token exists only in memory at `pause_run` return time.
+        resume_token_hash: String,
         reason: String,
         /// Wall-clock pause time. Surfaced in logs / UI today; future
         /// follow-up will use this to drive a TTL-based GC sweep that
@@ -319,29 +411,28 @@ impl WorkflowRun {
 }
 
 /// External pause request lodged on a `WorkflowRun`. Pre-generates the
-/// `resume_token` so the caller can begin waiting for the corresponding
+/// resume token so the caller can begin waiting for the corresponding
 /// approval / input artifact before the execution loop has actually
 /// transitioned the run to `WorkflowRunState::Paused`. The execution loop
-/// reuses this same token when it honors the request, guaranteeing the
-/// caller's resume call will match. See #3335.
+/// reuses the hash when it honors the request. See #3335.
+///
+/// **Security model**: the plaintext token is generated in `pause_run`,
+/// returned to the caller as `Result::Ok(Uuid)`, and never persisted. Only
+/// the hex-encoded SHA-256 hash is stored here and in
+/// `WorkflowRunState::Paused`. Anyone with read access to
+/// `~/.librefang/workflow_runs.json` sees only the hash and cannot reverse
+/// it to obtain a valid resume credential.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PauseRequest {
     /// Human-readable explanation surfaced in logs and UI.
     ///
-    /// **SECURITY:** persisted plaintext to `workflow_runs.json` and
-    /// shown back to operators. Do not pass secrets, PII, or
-    /// approval-gating tokens here — use a side channel referenced by
-    /// id instead.
+    /// Do not pass secrets, PII, or approval-gating tokens here — use a
+    /// side channel referenced by id instead.
     pub reason: String,
-    /// Token the caller must present to [`WorkflowEngine::resume_run`].
-    ///
-    /// **SECURITY:** today this is stored plaintext in `workflow_runs.json`
-    /// alongside the run. Anyone with read access to the daemon home
-    /// directory can recover live tokens and resume an arbitrary paused
-    /// workflow. Acceptable for the kernel-internal foundation in this
-    /// PR; the future REST handler must hash tokens at rest before that
-    /// surface ships. Tracked as a follow-up against #3335.
-    pub resume_token: Uuid,
+    /// Hex-encoded SHA-256 hash of the resume token. The plaintext token
+    /// exists only at the `pause_run` call site (returned to the caller)
+    /// and at the HTTP response boundary. It is never written to disk.
+    pub resume_token_hash: String,
 }
 
 /// Result from a single workflow step.
@@ -407,6 +498,8 @@ pub struct WorkflowEngine {
     /// through SQLite instead of the JSON file. The JSON path is still
     /// kept for the one-time migration (`migrate_from_json`).
     store: Option<WorkflowStore>,
+    /// Directory for persisting workflow definitions (`~/.librefang/workflows/`).
+    workflows_dir: Option<PathBuf>,
     /// Kernel-level default total timeout for workflow runs (seconds).
     /// Individual workflows can override this via `Workflow::total_timeout_secs`.
     /// `None` means unbounded.
@@ -636,6 +729,7 @@ impl WorkflowEngine {
             persist_path: None,
             persist_lock: Arc::new(std::sync::Mutex::new(())),
             store: None,
+            workflows_dir: None,
             default_total_timeout_secs: None,
             cancel_notify: Arc::new(DashMap::new()),
         }
@@ -651,6 +745,7 @@ impl WorkflowEngine {
             persist_path: Some(home_dir.join("data").join("workflow_runs.json")),
             persist_lock: Arc::new(std::sync::Mutex::new(())),
             store: None,
+            workflows_dir: Some(home_dir.join("workflows")),
             default_total_timeout_secs: None,
             cancel_notify: Arc::new(DashMap::new()),
         }
@@ -668,9 +763,39 @@ impl WorkflowEngine {
             persist_path: Some(home_dir.join("data").join("workflow_runs.json")),
             persist_lock: Arc::new(std::sync::Mutex::new(())),
             store: Some(store),
+            workflows_dir: Some(home_dir.join("workflows")),
             default_total_timeout_secs: None,
             cancel_notify: Arc::new(DashMap::new()),
         }
+    }
+
+    // -- Token hashing --------------------------------------------------------
+
+    /// Hash a plaintext resume token for at-rest storage.
+    ///
+    /// Uses SHA-256 (already a dependency via `sha2`) and returns a
+    /// hex-encoded 32-byte digest. The plaintext UUID is serialized to its
+    /// canonical lowercase hyphenated form before hashing so the result is
+    /// stable across restarts regardless of endianness.
+    pub fn hash_resume_token(token: &Uuid) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(token.to_string().as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
+    /// Constant-time comparison of two hex-encoded token hashes.
+    ///
+    /// Uses `subtle::ConstantTimeEq` on raw bytes so the comparison does not
+    /// leak timing information about how many prefix bytes match, which would
+    /// be a partial-guess oracle for the stored hash.
+    fn hashes_equal(a: &str, b: &str) -> bool {
+        // Length check first. Unequal lengths can be compared in constant time
+        // by padding the shorter, but two SHA-256 hex strings are always 64
+        // bytes — a length mismatch is always a mismatch and reveals nothing.
+        if a.len() != b.len() {
+            return false;
+        }
+        a.as_bytes().ct_eq(b.as_bytes()).into()
     }
 
     // -- Run Persistence ------------------------------------------------------
@@ -897,9 +1022,38 @@ impl WorkflowEngine {
         }
     }
 
-    /// Register a new workflow definition.
+    /// Register a new workflow definition and persist it to disk.
+    ///
+    /// Persistence is atomic: serialise → write `<id>.workflow.json.tmp` →
+    /// rename to `<id>.workflow.json`. A crash mid-write leaves the `.tmp`
+    /// side-file (ignored by `load_from_dir_sync`'s extension filter) but
+    /// never a half-written `<id>.workflow.json` that would later refuse to
+    /// parse and stall startup.
     pub async fn register(&self, workflow: Workflow) -> WorkflowId {
         let id = workflow.id;
+        if let Some(ref dir) = self.workflows_dir {
+            let path = dir.join(format!("{id}.workflow.json"));
+            let tmp_path = dir.join(format!("{id}.workflow.json.tmp"));
+            match serde_json::to_string_pretty(&workflow) {
+                Ok(json) => {
+                    if let Err(e) = tokio::fs::create_dir_all(dir).await {
+                        warn!(workflow_id = %id, error = %e, "Failed to create workflows dir");
+                    } else if let Err(e) = tokio::fs::write(&tmp_path, &json).await {
+                        warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition (tmp write)");
+                    } else if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
+                        warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition (atomic rename)");
+                        // Best-effort cleanup so the next register attempt isn't
+                        // blocked by a stale tmp file.
+                        let _ = tokio::fs::remove_file(&tmp_path).await;
+                    } else {
+                        debug!(workflow_id = %id, path = %path.display(), "Persisted workflow definition");
+                    }
+                }
+                Err(e) => {
+                    warn!(workflow_id = %id, error = %e, "Failed to serialize workflow definition");
+                }
+            }
+        }
         self.workflows.write().await.insert(id, workflow);
         info!(workflow_id = %id, "Workflow registered");
         id
@@ -1041,9 +1195,20 @@ impl WorkflowEngine {
         }
     }
 
-    /// Remove a workflow definition.
+    /// Remove a workflow definition and its persisted file.
     pub async fn remove_workflow(&self, id: WorkflowId) -> bool {
-        self.workflows.write().await.remove(&id).is_some()
+        let removed = self.workflows.write().await.remove(&id).is_some();
+        if removed {
+            if let Some(ref dir) = self.workflows_dir {
+                let path = dir.join(format!("{id}.workflow.json"));
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        warn!(workflow_id = %id, error = %e, "Failed to delete workflow definition file");
+                    }
+                }
+            }
+        }
+        removed
     }
 
     /// Maximum number of retained workflow runs. Oldest completed/failed
@@ -1237,11 +1402,18 @@ impl WorkflowEngine {
                 state = ?run.state,
                 "Pausing in-flight workflow run for shutdown"
             );
+            // Generate a fresh token so the operator can resume via HTTP,
+            // but only store the hash at rest.
+            let shutdown_token = Uuid::new_v4();
+            let shutdown_token_hash = Self::hash_resume_token(&shutdown_token);
             run.state = WorkflowRunState::Paused {
-                resume_token: Uuid::new_v4(),
+                resume_token_hash: shutdown_token_hash,
                 reason: "Interrupted by daemon shutdown".to_string(),
                 paused_at: now,
             };
+            // The shutdown_token plaintext is intentionally discarded here.
+            // Shutdown-paused runs must be resumed via the HTTP endpoint with
+            // a fresh pause+resume cycle if the token is unknown to the caller.
             drained += 1;
         }
         // Flush only when something actually changed — `persist_runs`
@@ -1556,40 +1728,74 @@ impl WorkflowEngine {
     /// `workflow_runs.json` and surfaced to operators. Do not include
     /// secrets, PII, or approval-gating values in it.
     ///
+    /// **Token security:** the returned `Uuid` is the plaintext token. It
+    /// exists only in memory at this call site. Only the SHA-256 hash is
+    /// stored on the run and persisted to disk. Present the token to
+    /// `resume_run` to continue the workflow.
+    ///
     /// Errors:
-    /// - `Err` if the run is unknown.
-    /// - `Err` if the run has already finished (`Completed` / `Failed`).
+    /// - [`PauseRunError::NotFound`] if the run is unknown.
+    /// - [`PauseRunError::AlreadyPaused`] if the run is already in `Paused`
+    ///   state (returns the existing token hash for idempotency verification).
+    /// - [`PauseRunError::AlreadyTerminal`] if the run has finished.
     pub async fn pause_run(
         &self,
         run_id: WorkflowRunId,
         reason: impl Into<String>,
-    ) -> Result<Uuid, String> {
+    ) -> Result<Uuid, PauseRunError> {
         let mut run = self
             .runs
             .get_mut(&run_id)
-            .ok_or_else(|| format!("Workflow run not found: {run_id}"))?;
-        // We clone values out of the borrowed state before mutating, so we
-        // need to inspect the state in a block that ends before the write.
-        let existing_token = match &run.state {
-            WorkflowRunState::Pending | WorkflowRunState::Running => {
-                run.pause_request.as_ref().map(|r| r.resume_token)
+            .ok_or(PauseRunError::NotFound(run_id))?;
+        // Inspect state first; we need the state borrow to end before we
+        // can write pause_request below.
+        match &run.state {
+            WorkflowRunState::Pending | WorkflowRunState::Running => {}
+            WorkflowRunState::Paused {
+                resume_token_hash, ..
+            } => {
+                return Err(PauseRunError::AlreadyPaused {
+                    run_id,
+                    resume_token_hash: resume_token_hash.clone(),
+                })
             }
-            WorkflowRunState::Paused { resume_token, .. } => return Ok(*resume_token),
-            WorkflowRunState::Completed
-            | WorkflowRunState::Failed
-            | WorkflowRunState::Cancelled => {
-                return Err(format!(
-                    "Cannot pause workflow run {run_id}: state is terminal"
-                ))
+            WorkflowRunState::Completed => {
+                return Err(PauseRunError::AlreadyTerminal {
+                    run_id,
+                    state: "completed",
+                })
             }
-        };
-        if let Some(token) = existing_token {
-            return Ok(token);
+            WorkflowRunState::Failed => {
+                return Err(PauseRunError::AlreadyTerminal {
+                    run_id,
+                    state: "failed",
+                })
+            }
+            WorkflowRunState::Cancelled => {
+                return Err(PauseRunError::AlreadyTerminal {
+                    run_id,
+                    state: "cancelled",
+                })
+            }
+        }
+        // If a pause was already lodged (Pending/Running but not yet
+        // honored by the executor), reuse the existing token to stay
+        // idempotent across concurrent callers.
+        if let Some(ref existing) = run.pause_request {
+            // We only stored the hash, so we cannot return the plaintext.
+            // Generate a fresh one that hashes to the same stored value?
+            // No — we cannot invert a hash. Instead, treat a pre-existing
+            // pause_request as if it's already paused and return the hash.
+            return Err(PauseRunError::AlreadyPaused {
+                run_id,
+                resume_token_hash: existing.resume_token_hash.clone(),
+            });
         }
         let token = Uuid::new_v4();
+        let hash = Self::hash_resume_token(&token);
         run.pause_request = Some(PauseRequest {
             reason: reason.into(),
-            resume_token: token,
+            resume_token_hash: hash,
         });
         Ok(token)
     }
@@ -1693,7 +1899,7 @@ impl WorkflowEngine {
         resume_token: Uuid,
         agent_resolver: impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
         send_message: F,
-    ) -> Result<String, String>
+    ) -> Result<String, ResumeRunError>
     where
         F: Fn(AgentId, String) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
@@ -1707,25 +1913,51 @@ impl WorkflowEngine {
                 let mut run = self
                     .runs
                     .get_mut(&run_id)
-                    .ok_or_else(|| format!("Workflow run not found: {run_id}"))?;
+                    .ok_or(ResumeRunError::NotFound(run_id))?;
                 // Validate token inside a scope so the immutable borrow of
                 // `run.state` ends before we mutate it below.
                 {
                     match &run.state {
                         WorkflowRunState::Paused {
-                            resume_token: stored,
+                            resume_token_hash: stored_hash,
                             ..
                         } => {
-                            if *stored != resume_token {
-                                return Err(format!(
-                                    "Resume token mismatch for run {run_id}: presented token does not match stored token"
-                                ));
+                            // Hash the presented token and compare in constant
+                            // time so we do not leak partial-match timing.
+                            let presented_hash = Self::hash_resume_token(&resume_token);
+                            if !Self::hashes_equal(stored_hash, &presented_hash) {
+                                return Err(ResumeRunError::TokenMismatch { run_id });
                             }
                         }
-                        other => {
-                            return Err(format!(
-                                "Cannot resume workflow run {run_id}: state is {other:?}, expected Paused"
-                            ));
+                        WorkflowRunState::Pending => {
+                            return Err(ResumeRunError::NotPaused {
+                                run_id,
+                                state: "pending",
+                            })
+                        }
+                        WorkflowRunState::Running => {
+                            return Err(ResumeRunError::NotPaused {
+                                run_id,
+                                state: "running",
+                            })
+                        }
+                        WorkflowRunState::Completed => {
+                            return Err(ResumeRunError::NotPaused {
+                                run_id,
+                                state: "completed",
+                            })
+                        }
+                        WorkflowRunState::Failed => {
+                            return Err(ResumeRunError::NotPaused {
+                                run_id,
+                                state: "failed",
+                            })
+                        }
+                        WorkflowRunState::Cancelled => {
+                            return Err(ResumeRunError::NotPaused {
+                                run_id,
+                                state: "cancelled",
+                            })
                         }
                     }
                 }
@@ -1741,7 +1973,10 @@ impl WorkflowEngine {
                 .await
                 .get(&workflow_id)
                 .cloned()
-                .ok_or_else(|| format!("Workflow definition {workflow_id} not found"))?
+                .ok_or_else(|| ResumeRunError::ExecutionFailed {
+                    run_id,
+                    detail: format!("Workflow definition {workflow_id} not found"),
+                })?
         };
 
         // Re-enter the sequential path. It looks at paused_step_index /
@@ -1754,22 +1989,26 @@ impl WorkflowEngine {
             // the DAG branch was selected, which the DAG guard refuses to
             // do today. Belt-and-suspenders so resume can never fan out
             // into the unsupported DAG executor by accident.
-            Err(
-                "Resuming a workflow with DAG dependencies is not yet supported (#3335 follow-up)"
-                    .to_string(),
-            )
+            Err(ResumeRunError::DagUnsupported { run_id })
         } else {
             // `input` here is unused on the resume path because the loop
             // pulls `paused_current_input` off the run when present.
             self.execute_run_sequential(run_id, &workflow, "", &agent_resolver, &send_message)
                 .await
+                .map_err(|e| ResumeRunError::ExecutionFailed { run_id, detail: e })
         };
         self.cleanup_terminal_pause_state(run_id).await;
         // If persistence panicked, surface it instead of returning a fake Ok.
         if let Err(persist_err) = self.persist_runs_async().await {
             return Err(match result {
-                Ok(_) => persist_err,
-                Err(run_err) => format!("{run_err}; additionally: {persist_err}"),
+                Ok(_) => ResumeRunError::ExecutionFailed {
+                    run_id,
+                    detail: persist_err,
+                },
+                Err(run_err) => ResumeRunError::ExecutionFailed {
+                    run_id,
+                    detail: format!("{run_err}; additionally: {persist_err}"),
+                },
             });
         }
         result
@@ -1965,7 +2204,7 @@ impl WorkflowEngine {
                         .collect();
                     run.paused_current_input = Some(current_input.clone());
                     run.state = WorkflowRunState::Paused {
-                        resume_token: pause.resume_token,
+                        resume_token_hash: pause.resume_token_hash.clone(),
                         reason: pause.reason.clone(),
                         paused_at: Utc::now(),
                     };
@@ -2020,8 +2259,20 @@ impl WorkflowEngine {
 
             match &step.mode {
                 StepMode::Sequential => {
-                    let (agent_id, agent_name, agent_inherit) = agent_resolver(&step.agent)
-                        .ok_or_else(|| format!("Agent not found for step '{}'", step.name))?;
+                    let (agent_id, agent_name, agent_inherit) = match agent_resolver(&step.agent) {
+                        Some(v) => v,
+                        None => {
+                            let e = format!("Agent not found for step '{}'", step.name);
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                    r.state = WorkflowRunState::Failed;
+                                    r.error = Some(e.clone());
+                                    r.completed_at = Some(Utc::now());
+                                }
+                            }
+                            return Err(e);
+                        }
+                    };
 
                     let raw_prompt =
                         Self::expand_variables(&step.prompt_template, &current_input, &variables);
@@ -2121,10 +2372,21 @@ impl WorkflowEngine {
                         .unwrap_or_default();
 
                     for (idx, fan_step) in &fan_out_steps {
-                        let (agent_id, agent_name, agent_inherit) = agent_resolver(&fan_step.agent)
-                            .ok_or_else(|| {
-                                format!("Agent not found for step '{}'", fan_step.name)
-                            })?;
+                        let (agent_id, agent_name, agent_inherit) =
+                            match agent_resolver(&fan_step.agent) {
+                                Some(v) => v,
+                                None => {
+                                    let e = format!("Agent not found for step '{}'", fan_step.name);
+                                    if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                        if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                            r.state = WorkflowRunState::Failed;
+                                            r.error = Some(e.clone());
+                                            r.completed_at = Some(Utc::now());
+                                        }
+                                    }
+                                    return Err(e);
+                                }
+                            };
                         let raw_prompt = Self::expand_variables(
                             &fan_step.prompt_template,
                             &current_input,
@@ -3409,16 +3671,19 @@ impl Default for WorkflowTemplateRegistry {
 
 /// Convert a `WorkflowRun` to a flat `WorkflowRunRow` for SQLite storage.
 fn workflow_run_to_row(run: &WorkflowRun) -> WorkflowRunRow {
+    // The `resume_token` column in WorkflowRunRow now stores the hex-encoded
+    // SHA-256 hash (not the plaintext UUID). The column name is unchanged for
+    // backward compat with the SQLite schema; the value is the hash.
     let (state_str, resume_token, pause_reason, paused_at) = match &run.state {
         WorkflowRunState::Pending => ("pending".to_string(), None, None, None),
         WorkflowRunState::Running => ("running".to_string(), None, None, None),
         WorkflowRunState::Paused {
-            resume_token,
+            resume_token_hash,
             reason,
             paused_at,
         } => (
             "paused".to_string(),
-            Some(resume_token.to_string()),
+            Some(resume_token_hash.clone()),
             Some(reason.clone()),
             Some(paused_at.to_rfc3339()),
         ),
@@ -3471,11 +3736,30 @@ fn row_to_workflow_run(row: &WorkflowRunRow) -> Result<WorkflowRun, String> {
         "pending" => WorkflowRunState::Pending,
         "running" => WorkflowRunState::Running,
         "paused" => {
-            let resume_token = row
-                .resume_token
-                .as_deref()
-                .and_then(|s| Uuid::parse_str(s).ok())
-                .unwrap_or_else(Uuid::new_v4);
+            // The resume_token column holds the hex SHA-256 hash of the
+            // plaintext token since the at-rest hashing change. Old rows
+            // that stored a plaintext UUID (pre-migration) will be rejected
+            // here with a clear error rather than silently treated as a
+            // valid hash — the hash is 64 hex chars while a UUID string is
+            // 36 chars, so a length check is a reliable discriminator.
+            let resume_token_hash = match row.resume_token.as_deref() {
+                Some(s) if s.len() == 64 => s.to_string(),
+                Some(old_value) => {
+                    return Err(format!(
+                        "run '{}' has a legacy plaintext resume_token (len={}) \
+                         that cannot be used after the at-rest hashing migration; \
+                         the run must be re-paused",
+                        row.id,
+                        old_value.len()
+                    ))
+                }
+                None => {
+                    return Err(format!(
+                        "run '{}' has state=paused but no resume_token in the store",
+                        row.id
+                    ))
+                }
+            };
             let reason = row
                 .pause_reason
                 .clone()
@@ -3487,7 +3771,7 @@ fn row_to_workflow_run(row: &WorkflowRunRow) -> Result<WorkflowRun, String> {
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or_else(Utc::now);
             WorkflowRunState::Paused {
-                resume_token,
+                resume_token_hash,
                 reason,
                 paused_at,
             }
@@ -3621,6 +3905,60 @@ mod tests {
         let retrieved = engine.get_workflow(id).await;
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().name, "test-pipeline");
+    }
+
+    // Multi-thread flavor because `load_from_dir_sync` uses
+    // `blocking_write` on the workflows RwLock, which panics on the default
+    // current-thread runtime ("Cannot block the current thread from within
+    // a runtime").
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_writes_atomically_and_cleans_tmp() {
+        // Atomic-write invariant: after a successful register, the persisted
+        // file exists at <id>.workflow.json and the staging path
+        // <id>.workflow.json.tmp must NOT exist — otherwise the loader on
+        // the next boot would happily skip the .tmp file (extension filter)
+        // and the rename clearly didn't fire.
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = WorkflowEngine::new_with_persistence(tmp.path());
+        let wf = test_workflow();
+        let id = engine.register(wf.clone()).await;
+
+        let final_path = tmp
+            .path()
+            .join("workflows")
+            .join(format!("{id}.workflow.json"));
+        let tmp_path = tmp
+            .path()
+            .join("workflows")
+            .join(format!("{id}.workflow.json.tmp"));
+        assert!(
+            final_path.exists(),
+            "final file must exist after register: {}",
+            final_path.display()
+        );
+        assert!(
+            !tmp_path.exists(),
+            "tmp staging file must be cleaned after successful rename: {}",
+            tmp_path.display()
+        );
+
+        // The file must round-trip: load_from_dir_sync picks it up and the
+        // engine recognises the registered workflow by id. Drive
+        // `load_from_dir_sync` via `block_in_place` because it acquires
+        // `blocking_write` internally.
+        let engine2 = WorkflowEngine::new_with_persistence(tmp.path());
+        let loaded = tokio::task::block_in_place(|| {
+            engine2.load_from_dir_sync(&tmp.path().join("workflows"))
+        });
+        assert_eq!(loaded, 1, "expected exactly one workflow loaded back");
+        assert!(engine2.get_workflow(id).await.is_some());
+
+        // remove_workflow deletes the file too.
+        assert!(engine.remove_workflow(id).await);
+        assert!(
+            !final_path.exists(),
+            "persisted file must be gone after remove_workflow"
+        );
     }
 
     #[tokio::test]
@@ -5271,11 +5609,12 @@ prompt_template = "do {{x}}"
 
         // Pre-existing Paused run must survive untouched (drain only
         // touches Running/Pending) — proves we don't clobber an
-        // already-paused workflow's resume_token.
+        // already-paused workflow's resume_token_hash.
         let preexisting_paused_token = Uuid::new_v4();
+        let preexisting_paused_hash = WorkflowEngine::hash_resume_token(&preexisting_paused_token);
         let preexisting_paused = WorkflowRun {
             state: WorkflowRunState::Paused {
-                resume_token: preexisting_paused_token,
+                resume_token_hash: preexisting_paused_hash.clone(),
                 reason: "user pause".to_string(),
                 paused_at: Utc::now(),
             },
@@ -5343,11 +5682,14 @@ prompt_template = "do {{x}}"
             .expect("preexisting paused missing");
         match &pre.state {
             WorkflowRunState::Paused {
-                resume_token,
+                resume_token_hash,
                 reason,
                 ..
             } => {
-                assert_eq!(*resume_token, preexisting_paused_token);
+                assert_eq!(
+                    resume_token_hash, &preexisting_paused_hash,
+                    "preexisting hash must survive drain_on_shutdown"
+                );
                 assert_eq!(reason, "user pause");
             }
             other => panic!("preexisting paused was rewritten: {:?}", other),
@@ -5602,7 +5944,10 @@ prompt_template = "do {{x}}"
             .resume_run(run_id, bogus_token, mock_resolver, sender2)
             .await
             .expect_err("resume_run with wrong token must error");
-        assert!(err.contains("token"), "error should mention token: {err}");
+        assert!(
+            matches!(err, ResumeRunError::TokenMismatch { .. }),
+            "expected TokenMismatch, got: {err}"
+        );
 
         // Run is still Paused — a failed resume attempt does not flip state.
         let run = engine.get_run(run_id).await.unwrap();
@@ -5623,15 +5968,15 @@ prompt_template = "do {{x}}"
             .await
             .expect_err("resume_run on non-paused run must error");
         assert!(
-            err.contains("expected Paused"),
-            "error should mention required state: {err}"
+            matches!(err, ResumeRunError::NotPaused { .. }),
+            "expected NotPaused, got: {err}"
         );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn paused_run_round_trips_through_persist_and_load() {
         let tmp = tempfile::tempdir().unwrap();
-        let original_token: Uuid;
+        let original_hash: String;
         let original_run_id: WorkflowRunId;
 
         // Phase 1: build a paused run on engine instance #1, then persist.
@@ -5640,10 +5985,13 @@ prompt_template = "do {{x}}"
             let wf_id = engine.register(test_workflow()).await;
             let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
             original_run_id = run_id;
-            original_token = engine
+            // pause_run now returns the plaintext token; compute its hash for
+            // later verification (the hash is what's persisted).
+            let plaintext_token = engine
                 .pause_run(run_id, "before-start pause")
                 .await
                 .unwrap();
+            original_hash = WorkflowEngine::hash_resume_token(&plaintext_token);
             let sender = |_id: AgentId, msg: String| async move {
                 Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
             };
@@ -5657,7 +6005,7 @@ prompt_template = "do {{x}}"
         }
 
         // Phase 2: load from disk into a fresh engine, verify the
-        // Paused-state run came back with its token + snapshot intact.
+        // Paused-state run came back with its hash + snapshot intact.
         // `load_runs` uses `blocking_write` internally, so wrap in
         // `block_in_place` (requires multi-thread runtime, which this
         // test selects via the `flavor` attribute).
@@ -5666,10 +6014,12 @@ prompt_template = "do {{x}}"
         assert_eq!(count, 1);
         let run = engine.get_run(original_run_id).await.unwrap();
         match &run.state {
-            WorkflowRunState::Paused { resume_token, .. } => {
+            WorkflowRunState::Paused {
+                resume_token_hash, ..
+            } => {
                 assert_eq!(
-                    *resume_token, original_token,
-                    "persisted resume_token must match across daemon restart"
+                    resume_token_hash, &original_hash,
+                    "persisted resume_token_hash must match across daemon restart"
                 );
             }
             other => panic!("expected Paused after reload, got {:?}", other),
@@ -5813,16 +6163,32 @@ prompt_template = "do {{x}}"
     }
 
     #[tokio::test]
-    async fn pause_run_is_idempotent_returns_same_token() {
+    async fn pause_run_second_call_returns_already_paused_with_hash() {
         let engine = WorkflowEngine::new();
         let wf_id = engine.register(test_workflow()).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
 
+        // First call returns the plaintext token.
         let token1 = engine.pause_run(run_id, "first").await.unwrap();
-        let token2 = engine.pause_run(run_id, "second").await.unwrap();
-        let token3 = engine.pause_run(run_id, "third").await.unwrap();
-        assert_eq!(token1, token2);
-        assert_eq!(token2, token3);
+        let expected_hash = WorkflowEngine::hash_resume_token(&token1);
+
+        // Second call (pause_request already set) returns AlreadyPaused with
+        // the existing hash so callers can confirm idempotency.
+        let err2 = engine
+            .pause_run(run_id, "second")
+            .await
+            .expect_err("second pause_run must return AlreadyPaused");
+        match &err2 {
+            PauseRunError::AlreadyPaused {
+                resume_token_hash, ..
+            } => {
+                assert_eq!(
+                    resume_token_hash, &expected_hash,
+                    "AlreadyPaused must echo the stored hash"
+                );
+            }
+            other => panic!("expected AlreadyPaused, got: {other:?}"),
+        }
 
         // Reason from the *first* call wins — later calls must not
         // overwrite the message that surfaces in logs / UI.
@@ -5867,8 +6233,14 @@ prompt_template = "do {{x}}"
             .await
             .expect_err("double-resume on a completed run must error");
         assert!(
-            err.contains("expected Paused"),
-            "error should explain state mismatch: {err}"
+            matches!(
+                err,
+                ResumeRunError::NotPaused {
+                    state: "completed",
+                    ..
+                }
+            ),
+            "expected NotPaused(completed), got: {err}"
         );
     }
 
@@ -5889,9 +6261,12 @@ prompt_template = "do {{x}}"
             .expect("pause-at-zero path must not error");
 
         let run = engine.get_run(run_id).await.unwrap();
+        let expected_hash = WorkflowEngine::hash_resume_token(&token);
         match &run.state {
-            WorkflowRunState::Paused { resume_token, .. } => {
-                assert_eq!(*resume_token, token);
+            WorkflowRunState::Paused {
+                resume_token_hash, ..
+            } => {
+                assert_eq!(resume_token_hash, &expected_hash);
             }
             other => panic!("expected Paused, got {:?}", other),
         }
@@ -5914,8 +6289,9 @@ prompt_template = "do {{x}}"
     ///
     /// We assert the simpler invariant after a single pause+honor cycle:
     /// once execute_run returns having honored a pause, pause_request is
-    /// cleared AND the resume_token in state matches the token returned
-    /// by pause_run. Both must be true, simultaneously, on the same run.
+    /// cleared AND the resume_token_hash in state matches the hash of the
+    /// token returned by pause_run. Both must be true, simultaneously, on
+    /// the same run.
     #[tokio::test]
     async fn pause_take_and_state_set_are_atomic() {
         let engine = WorkflowEngine::new();
@@ -5932,11 +6308,17 @@ prompt_template = "do {{x}}"
         let run = engine.get_run(run_id).await.unwrap();
         // pause_request was taken under the same lock as state set.
         assert!(run.pause_request.is_none(), "pause_request must be taken");
-        // The token in state must match the one pause_run returned —
+        // The hash in state must correspond to the token pause_run returned —
         // not some stale value left from a split-lock race.
+        let expected_hash = WorkflowEngine::hash_resume_token(&token);
         match run.state {
-            WorkflowRunState::Paused { resume_token, .. } => {
-                assert_eq!(resume_token, token, "token mismatch implies torn pause");
+            WorkflowRunState::Paused {
+                resume_token_hash, ..
+            } => {
+                assert_eq!(
+                    resume_token_hash, expected_hash,
+                    "hash mismatch implies torn pause"
+                );
             }
             other => panic!("expected Paused, got {:?}", other),
         }

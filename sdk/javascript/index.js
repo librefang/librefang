@@ -1000,6 +1000,10 @@ class SessionsResource {
   async setSessionLabel(id, data) {
     return this._c._request("PUT", `/api/sessions/${id}/label`, data, undefined);
   }
+
+  async patchSessionModel(id, data) {
+    return this._c._request("PATCH", `/api/sessions/${id}/model`, data, undefined);
+  }
 }
 
 // ── Skills Resource

@@ -186,6 +186,7 @@ export {
   switchAgentSession,
   deleteSession,
   setSessionLabel,
+  setSessionModelOverride,
   deletePromptVersion,
   activatePromptVersion,
   createPromptVersion,

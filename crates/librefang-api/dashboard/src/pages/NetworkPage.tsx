@@ -150,9 +150,13 @@ export function NetworkPage() {
               >
                 {status.identity_fingerprint}
               </p>
-            ) : (
+            ) : status?.online ? (
               <p className="text-xs text-warning mt-2">
                 {t("network.identity_missing")}
+              </p>
+            ) : (
+              <p className="text-xs text-text-dim mt-2">
+                {t("network.ofp_disabled")}
               </p>
             )}
             <p className="text-[10px] text-text-dim mt-2">

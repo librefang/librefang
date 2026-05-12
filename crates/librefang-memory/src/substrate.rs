@@ -447,6 +447,16 @@ impl MemorySubstrate {
         self.sessions.set_session_label(session_id, label)
     }
 
+    /// Set (or clear) the per-session model override (#4898).
+    pub fn set_session_model_override(
+        &self,
+        session_id: SessionId,
+        model_override: Option<&str>,
+    ) -> LibreFangResult<()> {
+        self.sessions
+            .set_session_model_override(session_id, model_override)
+    }
+
     /// Find a session by label for a given agent.
     pub fn find_session_by_label(
         &self,

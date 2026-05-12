@@ -134,13 +134,13 @@ librefang session export <session-id> --format json
 
 ```bash
 # Store simple memory
-librefang memory store --key "user:preference:theme" --value "dark"
+librefang memory store <agent> "user:preference:theme" "dark"
 
-# Store structured data
-librefang memory store --key "project:details" --data '{"name": "LibreFang", "version": "1.0"}'
+# Store a key-value pair (positional: agent key value)
+librefang memory store coder "project:version" "1.0"
 
-# Store with tags
-librefang memory store --key "note:1" --value "Important note" --tags "work,urgent"
+# Equivalent long form using the set subcommand
+librefang memory set coder "note:1" "Important note"
 ```
 
 ### Search Memory

@@ -210,12 +210,28 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
     // map populate as peers are encountered. The fingerprint is the
     // out-of-band-comparable value — share it on a side channel so a
     // remote operator can check the value their kernel pinned.
+    // `online` = the OFP peer node is actually running (config-gated +
+    // shared_secret set + listener bound). `enabled` is kept for
+    // backwards compatibility with older SDK consumers but the dashboard
+    // reads `online` to render the status badge — the prior code
+    // returned `enabled` only and the dashboard's `status?.online`
+    // path always evaluated to `undefined`, so the badge was stuck on
+    // "offline" even when OFP was up.
+    //
+    // `listen_addr` and `protocol_version` similarly mirror the field
+    // names the dashboard already reads (NetworkPage.tsx:118,120). We
+    // keep `listen_address` for SDK back-compat.
+    let online = state.kernel.peer_node_ref().is_some();
     Json(serde_json::json!({
+        "online": online,
         "enabled": enabled,
         "node_id": node_id,
+        "listen_addr": listen_address,
         "listen_address": listen_address,
+        "protocol_version": format!("ofp/{}", librefang_wire::message::PROTOCOL_VERSION),
         "connected_peers": connected_peers,
         "total_peers": total_peers,
+        "peer_count": connected_peers,
         "identity_fingerprint": identity_fingerprint,
         "pinned_peers": pinned_peers,
     }))

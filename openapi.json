@@ -8586,6 +8586,55 @@
         }
       }
     },
+    "/api/sessions/{id}/model": {
+      "patch": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "PATCH /api/sessions/:id/model — Set or clear a per-session model override (#4898).",
+        "description": "Body: `{\"model_override\": \"provider/model\"}` to pin, or `{\"model_override\": null}`\nto clear and restore the agent manifest default.\n\nThe `model_override` string is validated before persistence:\n- Empty strings are rejected (400).\n- `\"provider/\"` (trailing slash, empty model) is rejected (400).\n- `\"/model\"` (leading slash, empty provider) is rejected (400).\n- Qualified identifiers like `\"meta-llama/Llama-3.3-70B\"` are accepted.",
+        "operationId": "patch_session_model",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Model override updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid session ID or model override format"
+          },
+          "404": {
+            "description": "Session not found"
+          }
+        }
+      }
+    },
     "/api/shutdown": {
       "post": {
         "tags": [
@@ -9771,6 +9820,7 @@
           "workflows"
         ],
         "summary": "POST /api/workflows/:id/run — Execute a workflow.",
+        "description": "By default (no query params) this is **asynchronous**: the run is spawned\nin the background and a 202 is returned immediately with `{\"run_id\":\"...\"}`.\nThe caller can poll `GET /api/workflows/runs/{run_id}` to track progress.\n\nWith `?wait=true` the request blocks until completion (original behavior,\nkept for backward compat). With `?wait=true&timeout_ms=N` the block is\ncapped at N milliseconds; if the run hasn't finished, 202 is returned\nand the run continues in the background.",
         "operationId": "run_workflow",
         "parameters": [
           {
@@ -9796,14 +9846,10 @@
         },
         "responses": {
           "200": {
-            "description": "Workflow run started",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
+            "description": "Workflow run completed (wait=true)"
+          },
+          "202": {
+            "description": "Workflow run started asynchronously"
           }
         }
       }

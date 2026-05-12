@@ -168,4 +168,9 @@ pub const OPERATIONAL_MIGRATIONS: &[Migration] = &[
         name: "approval_audit_second_factor_used_v1",
         sql: include_str!("sql/028_approval_audit_second_factor_used.surql"),
     },
+    Migration {
+        version: 29,
+        name: "sessions_model_override_v1",
+        sql: include_str!("sql/029_sessions_model_override.surql"),
+    },
 ];

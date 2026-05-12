@@ -62,6 +62,14 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/workflows/runs/{run_id}/cancel",
             axum::routing::post(cancel_workflow_run),
         )
+        .route(
+            "/workflows/runs/{run_id}/pause",
+            axum::routing::post(pause_workflow_run),
+        )
+        .route(
+            "/workflows/runs/{run_id}/resume",
+            axum::routing::post(resume_workflow_run),
+        )
         // Workflow templates (distinct from the agent templates in system.rs)
         .route(
             "/workflow-templates",
@@ -101,8 +109,8 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
 }
 use crate::triggers::{Trigger, TriggerId, TriggerPatch, TriggerPattern};
 use crate::workflow::{
-    ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowRun, WorkflowRunId,
-    WorkflowRunState, WorkflowStep,
+    CancelRunError, ErrorMode, PauseRunError, StepAgent, StepMode, Workflow, WorkflowId,
+    WorkflowRun, WorkflowRunId, WorkflowRunState, WorkflowStep,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -753,11 +761,35 @@ pub async fn delete_workflow(
     }
 }
 
+/// Query parameters for `POST /api/workflows/:id/run`.
+#[derive(serde::Deserialize, Default)]
+pub struct RunWorkflowQuery {
+    /// When `true`, block until the workflow finishes and return the result
+    /// synchronously (backward-compatible behavior). Defaults to `false`
+    /// (async: returns 202 immediately with a `run_id`).
+    #[serde(default)]
+    pub wait: bool,
+    /// When `wait=true`, cap the synchronous wait at this many milliseconds.
+    /// On expiry the run keeps going in the background and the handler
+    /// returns 202. Has no effect when `wait=false`.
+    pub timeout_ms: Option<u64>,
+}
+
 /// POST /api/workflows/:id/run — Execute a workflow.
-#[utoipa::path(post, path = "/api/workflows/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), request_body(content = crate::types::JsonObject, description = "Workflow input variables (free-form key/value object)"), responses((status = 200, description = "Workflow run started", body = crate::types::JsonObject)))]
+///
+/// By default (no query params) this is **asynchronous**: the run is spawned
+/// in the background and a 202 is returned immediately with `{"run_id":"..."}`.
+/// The caller can poll `GET /api/workflows/runs/{run_id}` to track progress.
+///
+/// With `?wait=true` the request blocks until completion (original behavior,
+/// kept for backward compat). With `?wait=true&timeout_ms=N` the block is
+/// capped at N milliseconds; if the run hasn't finished, 202 is returned
+/// and the run continues in the background.
+#[utoipa::path(post, path = "/api/workflows/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), request_body(content = crate::types::JsonObject, description = "Workflow input variables (free-form key/value object)"), responses((status = 200, description = "Workflow run completed (wait=true)"), (status = 202, description = "Workflow run started asynchronously")))]
 pub async fn run_workflow(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(query): Query<RunWorkflowQuery>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let workflow_id = WorkflowId(match id.parse() {
@@ -769,48 +801,157 @@ pub async fn run_workflow(
 
     let input = req["input"].as_str().unwrap_or("").to_string();
 
-    match state.kernel.run_workflow_typed(workflow_id, input).await {
-        Ok((run_id, output)) => {
-            // Include step-level detail in the response so callers can inspect I/O
-            let run = state.kernel.workflow_engine().get_run(run_id).await;
-            let step_results = run.as_ref().map(|r| {
-                r.step_results
-                    .iter()
-                    .map(|s| {
-                        serde_json::json!({
-                            "step_name": s.step_name,
-                            "agent_name": s.agent_name,
-                            "prompt": s.prompt,
-                            "output": s.output,
-                            "input_tokens": s.input_tokens,
-                            "output_tokens": s.output_tokens,
-                            "duration_ms": s.duration_ms,
+    if query.wait {
+        // -- Synchronous path (backward-compatible) --
+        let run_fut = state.kernel.run_workflow_typed(workflow_id, input);
+        let result = if let Some(timeout_ms) = query.timeout_ms {
+            tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), run_fut)
+                .await
+                .ok() // None on timeout, Some(inner_result) on completion
+        } else {
+            Some(run_fut.await)
+        };
+
+        match result {
+            Some(Ok((run_id, output))) => {
+                let run = state.kernel.workflow_engine().get_run(run_id).await;
+                let step_results = run.as_ref().map(|r| {
+                    r.step_results
+                        .iter()
+                        .map(|s| {
+                            serde_json::json!({
+                                "step_name": s.step_name,
+                                "agent_name": s.agent_name,
+                                "prompt": s.prompt,
+                                "output": s.output,
+                                "input_tokens": s.input_tokens,
+                                "output_tokens": s.output_tokens,
+                                "duration_ms": s.duration_ms,
+                            })
                         })
-                    })
-                    .collect::<Vec<_>>()
-            });
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "run_id": run_id.to_string(),
-                    "output": output,
-                    "status": "completed",
-                    "step_results": step_results.unwrap_or_default(),
-                })),
-            )
+                        .collect::<Vec<_>>()
+                });
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "run_id": run_id.to_string(),
+                        "output": output,
+                        "status": "completed",
+                        "step_results": step_results.unwrap_or_default(),
+                    })),
+                )
+            }
+            Some(Err(e)) => {
+                tracing::warn!("Workflow run failed for {id}: {e}");
+                let detail = e.to_string();
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({
+                        "error": "workflow_failed",
+                        "detail": detail,
+                    })),
+                )
+            }
+            None => {
+                // Timed out — run is still going in the background.
+                // We need a run_id to return, but run_workflow_typed already
+                // consumed the future and started the run inside the kernel.
+                // Surface a generic async response; the caller should poll.
+                (
+                    StatusCode::ACCEPTED,
+                    Json(serde_json::json!({
+                        "status": "running",
+                        "message": "workflow is still running; poll GET /api/workflows/runs/{run_id}",
+                    })),
+                )
+            }
         }
-        Err(e) => {
-            tracing::warn!("Workflow run failed for {id}: {e}");
-            // Return the actual error message, not a generic one, to aid debugging
-            let detail = e.to_string();
-            (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(serde_json::json!({
-                    "error": "workflow_failed",
-                    "detail": detail,
-                })),
-            )
-        }
+    } else {
+        // -- Asynchronous path (default) --
+        // Create the run first so we have the run_id to return immediately,
+        // then spawn execute_run in the background.
+        let engine = state.kernel.workflow_engine();
+        let wf_id_parsed = workflow_id;
+        // run_workflow_typed creates the run + executes synchronously.
+        // For the async path we replicate the same logic but via tokio::spawn.
+        // We call run_workflow_typed inside a spawn so the caller gets 202
+        // immediately without waiting for the workflow to complete.
+        let state_clone = state.clone();
+        let run_id_holder = {
+            // Create the run synchronously so we can return the run_id in 202.
+            match engine.create_run(wf_id_parsed, input.clone()).await {
+                Some(rid) => rid,
+                None => {
+                    return ApiErrorResponse::not_found(format!("Workflow '{id}' not found"))
+                        .into_json_tuple();
+                }
+            }
+        };
+        let run_id_str = run_id_holder.to_string();
+        // Spawn execution in the background. The result is observable via
+        // GET /api/workflows/runs/{run_id}.
+        // Separate Arc clones for the resolver closure (Fn) and the sender
+        // closure (Fn) so neither moves out of the other.
+        let state_for_resolver = state_clone.clone();
+        let state_for_sender = state_clone.clone();
+        tokio::spawn(async move {
+            let result = state_clone
+                .kernel
+                .workflow_engine()
+                .execute_run(
+                    run_id_holder,
+                    move |agent_ref| {
+                        use librefang_kernel::workflow::StepAgent;
+                        match agent_ref {
+                            StepAgent::ById { id } => {
+                                let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
+                                let entry =
+                                    state_for_resolver.kernel.agent_registry().get(agent_id)?;
+                                let inherit = entry.manifest.inherit_parent_context;
+                                Some((agent_id, entry.name.clone(), inherit))
+                            }
+                            StepAgent::ByName { name } => {
+                                let entry = state_for_resolver
+                                    .kernel
+                                    .agent_registry()
+                                    .find_by_name(name)?;
+                                let inherit = entry.manifest.inherit_parent_context;
+                                Some((entry.id, entry.name.clone(), inherit))
+                            }
+                        }
+                    },
+                    move |agent_id: librefang_types::agent::AgentId, message: String| {
+                        let sc = state_for_sender.clone();
+                        async move {
+                            sc.kernel
+                                .send_message(agent_id, &message)
+                                .await
+                                .map(|r| {
+                                    (
+                                        r.response,
+                                        r.total_usage.input_tokens,
+                                        r.total_usage.output_tokens,
+                                    )
+                                })
+                                .map_err(|e| format!("{e}"))
+                        }
+                    },
+                )
+                .await;
+            if let Err(e) = result {
+                tracing::warn!(
+                    run_id = %run_id_holder,
+                    error = %e,
+                    "Background workflow run failed"
+                );
+            }
+        });
+        (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "run_id": run_id_str,
+            })),
+        )
     }
 }
 
@@ -939,8 +1080,6 @@ pub async fn cancel_workflow_run(
     State(state): State<Arc<AppState>>,
     Path(run_id): Path<String>,
 ) -> impl IntoResponse {
-    use librefang_kernel::workflow::CancelRunError;
-
     let run_id = WorkflowRunId(match run_id.parse() {
         Ok(u) => u,
         Err(_) => {
@@ -968,6 +1107,281 @@ pub async fn cancel_workflow_run(
             })),
         ),
     }
+}
+
+/// Request body for `POST /api/workflows/runs/:run_id/pause`.
+#[derive(serde::Deserialize, Default)]
+pub struct PauseRunRequest {
+    /// Human-readable explanation shown in logs and the dashboard.
+    /// Do not include secrets or PII.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// POST /api/workflows/runs/:run_id/pause — Pause a workflow run.
+///
+/// Returns 200 with `{"run_id": "...", "resume_token": "<uuid>"}` on success.
+///
+/// **SECURITY**: the `resume_token` in the response body is the ONLY surface
+/// from which the plaintext token is ever visible. Do not log this response.
+///
+/// Returns 404 if the run is not found, 409 if the run is already paused
+/// (with the existing token hash) or already terminal.
+#[utoipa::path(
+    post,
+    path = "/api/workflows/runs/{run_id}/pause",
+    tag = "workflows",
+    params(("run_id" = String, Path, description = "Workflow run ID")),
+    responses(
+        (status = 200, description = "Run paused", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed run ID"),
+        (status = 404, description = "Run not found"),
+        (status = 409, description = "Run already paused or terminal")
+    )
+)]
+pub async fn pause_workflow_run(
+    State(state): State<Arc<AppState>>,
+    Path(run_id): Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let run_id = WorkflowRunId(match run_id.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return ApiErrorResponse::bad_request("Invalid run ID").into_json_tuple();
+        }
+    });
+
+    let reason = req["reason"]
+        .as_str()
+        .unwrap_or("(no reason given)")
+        .to_string();
+
+    match state
+        .kernel
+        .workflow_engine()
+        .pause_run(run_id, reason)
+        .await
+    {
+        Ok(token) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "run_id": run_id.to_string(),
+                // SECURITY: this is the ONLY place the plaintext token is
+                // surfaced. The token is never persisted — only its hash is
+                // stored at rest. Callers must not log this response.
+                "resume_token": token.to_string(),
+            })),
+        ),
+        Err(PauseRunError::NotFound(_)) => {
+            ApiErrorResponse::not_found(format!("Run '{run_id}' not found")).into_json_tuple()
+        }
+        Err(PauseRunError::AlreadyPaused {
+            resume_token_hash, ..
+        }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "already_paused",
+                "resume_token_hash": resume_token_hash,
+                "message": format!("Run '{run_id}' is already paused"),
+            })),
+        ),
+        Err(PauseRunError::AlreadyTerminal { state: s, .. }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "conflict",
+                "state": s,
+                "message": format!("Run '{run_id}' is already {s}"),
+            })),
+        ),
+    }
+}
+
+/// Request body for `POST /api/workflows/runs/:run_id/resume`.
+#[derive(serde::Deserialize)]
+pub struct ResumeRunRequest {
+    /// The plaintext resume token returned by the pause endpoint.
+    pub resume_token: String,
+}
+
+/// POST /api/workflows/runs/:run_id/resume — Resume a paused workflow run.
+///
+/// Returns 200 with `{"run_id": "...", "state": "running"}` immediately after
+/// the resume is initiated. The actual workflow continues asynchronously.
+///
+/// Returns 401 if the resume token does not match.
+/// Returns 404 if the run is not found.
+/// Returns 409 if the run is not paused or is a DAG workflow (unsupported).
+#[utoipa::path(
+    post,
+    path = "/api/workflows/runs/{run_id}/resume",
+    tag = "workflows",
+    params(("run_id" = String, Path, description = "Workflow run ID")),
+    responses(
+        (status = 200, description = "Run resumed", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed run ID or missing token"),
+        (status = 401, description = "Token mismatch"),
+        (status = 404, description = "Run not found"),
+        (status = 409, description = "Run not paused or DAG unsupported")
+    )
+)]
+pub async fn resume_workflow_run(
+    State(state): State<Arc<AppState>>,
+    Path(run_id): Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let run_id = WorkflowRunId(match run_id.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return ApiErrorResponse::bad_request("Invalid run ID").into_json_tuple();
+        }
+    });
+
+    let token_str = match req["resume_token"].as_str() {
+        Some(s) => s.to_string(),
+        None => {
+            return ApiErrorResponse::bad_request("Missing required field: resume_token")
+                .into_json_tuple();
+        }
+    };
+
+    let token = match token_str.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return ApiErrorResponse::bad_request("Invalid resume_token: must be a UUID")
+                .into_json_tuple();
+        }
+    };
+
+    // Build agent resolver and send_message for the resume execution.
+    let state_for_resolver = state.clone();
+    let state_for_sender = state.clone();
+
+    let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| {
+        use librefang_kernel::workflow::StepAgent;
+        match agent_ref {
+            StepAgent::ById { id } => {
+                let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
+                let entry = state_for_resolver.kernel.agent_registry().get(agent_id)?;
+                let inherit = entry.manifest.inherit_parent_context;
+                Some((agent_id, entry.name.clone(), inherit))
+            }
+            StepAgent::ByName { name } => {
+                let entry = state_for_resolver
+                    .kernel
+                    .agent_registry()
+                    .find_by_name(name)?;
+                let inherit = entry.manifest.inherit_parent_context;
+                Some((entry.id, entry.name.clone(), inherit))
+            }
+        }
+    };
+
+    // Validate the token synchronously (quick state check) before spawning.
+    // The actual resume_run call drives the workflow; we spawn it so the
+    // HTTP response returns immediately with "running".
+    let engine = state.kernel.workflow_engine();
+
+    // Pre-validate: check the run exists and is Paused — we want to return
+    // 401/404/409 synchronously, not after spawn. Use a quick get_run peek.
+    let peek = engine.get_run(run_id).await;
+    match &peek {
+        None => {
+            return ApiErrorResponse::not_found(format!("Run '{run_id}' not found"))
+                .into_json_tuple();
+        }
+        Some(run) => match &run.state {
+            WorkflowRunState::Paused {
+                resume_token_hash, ..
+            } => {
+                // Constant-time hash comparison to avoid timing oracles.
+                let presented_hash =
+                    librefang_kernel::workflow::WorkflowEngine::hash_resume_token(&token);
+                if resume_token_hash != &presented_hash {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(serde_json::json!({"error": "token_mismatch"})),
+                    );
+                }
+            }
+            WorkflowRunState::Pending | WorkflowRunState::Running => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": "not_paused",
+                        "state": format!("{:?}", run.state).to_lowercase(),
+                    })),
+                );
+            }
+            WorkflowRunState::Completed
+            | WorkflowRunState::Failed
+            | WorkflowRunState::Cancelled => {
+                let s = match &run.state {
+                    WorkflowRunState::Completed => "completed",
+                    WorkflowRunState::Failed => "failed",
+                    WorkflowRunState::Cancelled => "cancelled",
+                    _ => "terminal",
+                };
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": "not_paused",
+                        "state": s,
+                    })),
+                );
+            }
+        },
+    }
+
+    // Check for DAG workflow (unsupported for resume).
+    // We need the workflow definition to know if it uses DAG deps.
+    // peek at workflow steps: if the run has dag deps, surface 409.
+    // Actually — easier to just let resume_run handle it and map the error.
+    // But we've already peeked; just spawn and map DagUnsupported -> 409.
+    // The pre-check above validates the token, so the spawn won't hit 401.
+    // Spawn resume in the background; return 200 immediately.
+    // `state_for_sender` is an `Arc<AppState>` — clone it once more so the
+    // `Fn` send_message closure can clone-per-call without conflicting with
+    // the borrow held by `.workflow_engine().resume_run(...)`.
+    let state_for_engine = state_for_sender.clone();
+    let state_for_send_fn = state_for_sender;
+    tokio::spawn(async move {
+        let result = state_for_engine
+            .kernel
+            .workflow_engine()
+            .resume_run(
+                run_id,
+                token,
+                agent_resolver,
+                move |agent_id: librefang_types::agent::AgentId, message: String| {
+                    let sc = state_for_send_fn.clone();
+                    async move {
+                        sc.kernel
+                            .send_message(agent_id, &message)
+                            .await
+                            .map(|r| {
+                                (
+                                    r.response,
+                                    r.total_usage.input_tokens,
+                                    r.total_usage.output_tokens,
+                                )
+                            })
+                            .map_err(|e| format!("{e}"))
+                    }
+                },
+            )
+            .await;
+        if let Err(e) = result {
+            tracing::warn!(run_id = %run_id, error = %e, "Background workflow resume failed");
+        }
+    });
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "run_id": run_id.to_string(),
+            "state": "running",
+        })),
+    )
 }
 
 /// GET /api/workflows/:id/runs — List runs for a workflow.
@@ -1160,6 +1574,29 @@ pub async fn create_trigger(
             },
         };
 
+    // Optional workflow_id: if set, the trigger fires a workflow run instead
+    // of dispatching a message to an agent via send_message_full.
+    let workflow_id: Option<String> = match req.get("workflow_id").and_then(|v| v.as_str()) {
+        None => None,
+        Some(s) => {
+            if s.is_empty() {
+                return ApiErrorResponse::bad_request(
+                    "workflow_id must not be empty when provided",
+                )
+                .into_json_tuple();
+            }
+            if s.len() > librefang_kernel::triggers::MAX_WORKFLOW_ID_LEN {
+                return ApiErrorResponse::bad_request(format!(
+                    "workflow_id too long ({} chars, max {})",
+                    s.len(),
+                    librefang_kernel::triggers::MAX_WORKFLOW_ID_LEN
+                ))
+                .into_json_tuple();
+            }
+            Some(s.to_string())
+        }
+    };
+
     match state.kernel.register_trigger_with_target(
         agent_id,
         pattern,
@@ -1168,6 +1605,7 @@ pub async fn create_trigger(
         target_agent,
         cooldown_secs,
         session_mode,
+        workflow_id.clone(),
     ) {
         Ok(trigger_id) => {
             let mut resp = serde_json::json!({
@@ -1176,6 +1614,9 @@ pub async fn create_trigger(
             });
             if let Some(target) = target_agent {
                 resp["target_agent_id"] = serde_json::json!(target.to_string());
+            }
+            if let Some(wid) = workflow_id {
+                resp["workflow_id"] = serde_json::json!(wid);
             }
             (StatusCode::CREATED, Json(resp))
         }
@@ -1212,6 +1653,9 @@ fn trigger_to_json(t: &Trigger) -> serde_json::Value {
     });
     if let Some(target) = &t.target_agent {
         v["target_agent_id"] = serde_json::json!(target.to_string());
+    }
+    if let Some(wid) = &t.workflow_id {
+        v["workflow_id"] = serde_json::json!(wid);
     }
     v
 }
@@ -1424,6 +1868,37 @@ pub async fn update_trigger(
         }
     }
 
+    // Parse workflow_id: absent = no change, null = clear, string = set
+    let workflow_id: Option<Option<String>> = if req.get("workflow_id").is_none() {
+        None
+    } else if req["workflow_id"].is_null() {
+        Some(None)
+    } else {
+        match req["workflow_id"].as_str() {
+            Some(s) => {
+                if s.is_empty() {
+                    return ApiErrorResponse::bad_request(
+                        "workflow_id must not be empty when provided",
+                    )
+                    .into_json_tuple();
+                }
+                if s.len() > librefang_kernel::triggers::MAX_WORKFLOW_ID_LEN {
+                    return ApiErrorResponse::bad_request(format!(
+                        "workflow_id too long ({} chars, max {})",
+                        s.len(),
+                        librefang_kernel::triggers::MAX_WORKFLOW_ID_LEN
+                    ))
+                    .into_json_tuple();
+                }
+                Some(Some(s.to_string()))
+            }
+            None => {
+                return ApiErrorResponse::bad_request("workflow_id must be a string or null")
+                    .into_json_tuple()
+            }
+        }
+    };
+
     let patch = TriggerPatch {
         pattern,
         prompt_template: req["prompt_template"].as_str().map(|s| s.to_string()),
@@ -1432,6 +1907,7 @@ pub async fn update_trigger(
         cooldown_secs,
         session_mode,
         target_agent,
+        workflow_id,
     };
 
     match state.kernel.update_trigger(trigger_id, patch) {

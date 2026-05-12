@@ -800,6 +800,9 @@ class _SessionsResource(_Resource):
     def set_session_label(self, id: str, **data):
         return self._c._request("PUT", f"/api/sessions/{id}/label", data)
 
+    def patch_session_model(self, id: str, **data):
+        return self._c._request("PATCH", f"/api/sessions/{id}/model", data)
+
 
 # ── Skills Resource ────────────────────────────────────────────
 

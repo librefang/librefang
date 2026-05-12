@@ -635,6 +635,8 @@ impl ContextEngine for DefaultContextEngine {
             messages: messages.to_vec(),
             context_window_tokens: context_window_tokens as u64,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -5291,6 +5293,8 @@ ingest = "hooks/ingest.py"
             messages: vec![Message::user("Hello"), Message::assistant("Hi there")],
             context_window_tokens: 0,
             label: None,
+            model_override: None,
+
             messages_generation: 0,
             last_repaired_generation: None,
         };

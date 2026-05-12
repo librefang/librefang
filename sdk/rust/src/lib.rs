@@ -2906,6 +2906,18 @@ impl SessionsResource {
         )
         .await
     }
+
+    pub async fn patch_session_model(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PATCH,
+            &format!("/api/sessions/{}/model", id),
+            Some(data),
+            &[],
+        )
+        .await
+    }
 }
 
 // ── Skills ──

@@ -65,6 +65,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 
 # OpenTelemetry
+# DO NOT upgrade to 0.32 until `tracing-opentelemetry` releases a version
+# that depends on opentelemetry 0.32 (current latest 0.32.1 still pins
+# opentelemetry = "0.31"). Mixing 0.32 here with tracing-opentelemetry
+# 0.32.1 leaves two copies of `opentelemetry::trace::Tracer` in the
+# tree and breaks `SdkTracer: Tracer` trait bounds in telemetry.rs.
+# dependabot bump #4947 violated this constraint and was reverted.
 opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 # `default-features = false` is critical: opentelemetry-otlp's default feature
@@ -91,7 +97,7 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 # Database
 rusqlite = { version = "0.39.0", features = ["bundled", "serde_json"] }
 r2d2 = "0.8"
-r2d2_sqlite = "0.33"
+r2d2_sqlite = "0.34"
 # SurrealDB — pinned to =3.0.5 so librefang, surreal-memory, and UAR all link the
 # same client crate (see Phase 4b of plan surrealdb-storage-swap).
 surrealdb = { version = "=3.0.5", default-features = false, features = ["kv-rocksdb", "protocol-ws", "protocol-http"] }
@@ -127,7 +133,7 @@ bytes = "1"
 futures = "0.3"
 
 # MCP SDK
-rmcp = { version = "1.5", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
+rmcp = { version = "1.6", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 
 # ACP (Agent Client Protocol) SDK — official Zed-maintained crates for IDE integration (#3313)
 # `unstable` enables session/{resume,close,fork,list-additional-directories}, message-id, session-usage,
@@ -150,7 +156,7 @@ urlencoding = "2"
 # expects CommonMark in `body` and rendered HTML in `formatted_body`; the
 # canonical Rust pull-parser. ~7 kLOC, MIT, no transitive deps that aren't
 # already in our tree.
-pulldown-cmark = { version = "0.10", default-features = false, features = ["html"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 # Public Suffix List — used by mcp_auth to decide whether a metadata-declared
 # token_endpoint shares a registrable domain with the operator-typed issuer

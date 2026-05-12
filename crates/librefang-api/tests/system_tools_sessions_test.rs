@@ -9,10 +9,11 @@
 //! session state we do not seed here.
 //!
 //! Endpoints covered:
-//!   - `GET  /api/tools`              — list builtin tool definitions
-//!   - `GET  /api/tools/{name}`       — single tool lookup, 404 on miss
-//!   - `GET  /api/sessions`           — paginated session list (empty + seeded)
-//!   - `GET  /api/sessions/search`    — FTS5 search, 400 when `q` missing
+//!   - `GET   /api/tools`                      — list builtin tool definitions
+//!   - `GET   /api/tools/{name}`               — single tool lookup, 404 on miss
+//!   - `GET   /api/sessions`                   — paginated session list (empty + seeded)
+//!   - `GET   /api/sessions/search`            — FTS5 search, 400 when `q` missing
+//!   - `PATCH /api/sessions/{id}/model`        — per-session model override (#4898)
 //!
 //! The harness wires `routes::system::router()` directly under `/api` and
 //! drives requests with `tower::ServiceExt::oneshot`. No middleware is
@@ -314,4 +315,207 @@ async fn search_sessions_malformed_agent_id_is_silently_ignored() {
     let (status, body) = get_json(&h, "/api/sessions/search?q=anything&agent_id=not-a-uuid").await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert!(body["items"].is_array(), "{body:?}");
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/sessions/{id}/model  (#4898 — per-session model override)
+// ---------------------------------------------------------------------------
+
+async fn patch_json(
+    h: &Harness,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method(Method::PATCH)
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = h.app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let value: serde_json::Value = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+    (status, value)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_session_model_sets_override_and_reads_back() {
+    let h = boot().await;
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let substrate = h.state.kernel.memory_substrate();
+    let session = substrate.create_session(agent_id).expect("seed session");
+    let sid = session.id.0.to_string();
+
+    // Set the override.
+    let (status, body) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/model"),
+        serde_json::json!({"model_override": "groq/llama-3.3-70b"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "set override: {body:?}");
+    assert_eq!(body["status"].as_str(), Some("updated"), "{body:?}");
+    assert_eq!(
+        body["model_override"].as_str(),
+        Some("groq/llama-3.3-70b"),
+        "{body:?}"
+    );
+
+    // Read back through the substrate to confirm persistence.
+    let stored = substrate
+        .get_session(session.id)
+        .expect("get_session ok")
+        .expect("session must exist");
+    assert_eq!(
+        stored.model_override.as_deref(),
+        Some("groq/llama-3.3-70b"),
+        "model_override not persisted: {stored:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_session_model_clears_override_with_null() {
+    let h = boot().await;
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let substrate = h.state.kernel.memory_substrate();
+    let session = substrate.create_session(agent_id).expect("seed session");
+    let sid = session.id.0.to_string();
+
+    // Set then clear.
+    substrate
+        .set_session_model_override(session.id, Some("groq/llama-3.3-70b"))
+        .expect("pre-seed override");
+
+    let (status, body) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/model"),
+        serde_json::json!({"model_override": null}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "clear override: {body:?}");
+    assert!(
+        body["model_override"].is_null(),
+        "model_override must be null after clear: {body:?}"
+    );
+
+    let stored = substrate
+        .get_session(session.id)
+        .expect("get_session ok")
+        .expect("session must exist");
+    assert!(
+        stored.model_override.is_none(),
+        "stored override must be None after clear"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_session_model_rejects_empty_override() {
+    let h = boot().await;
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let session = h
+        .state
+        .kernel
+        .memory_substrate()
+        .create_session(agent_id)
+        .expect("seed session");
+    let sid = session.id.0.to_string();
+
+    let (status, _body) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/model"),
+        serde_json::json!({"model_override": ""}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "empty override must be 400"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_session_model_rejects_invalid_slash_forms() {
+    let h = boot().await;
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let session = h
+        .state
+        .kernel
+        .memory_substrate()
+        .create_session(agent_id)
+        .expect("seed session");
+    let sid = session.id.0.to_string();
+
+    for bad in ["/model", "groq/"] {
+        let (status, body) = patch_json(
+            &h,
+            &format!("/api/sessions/{sid}/model"),
+            serde_json::json!({"model_override": bad}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "expected 400 for {bad:?}: {body:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_session_model_returns_404_for_unknown_session() {
+    let h = boot().await;
+    let unknown = uuid::Uuid::new_v4().to_string();
+    let (status, _body) = patch_json(
+        &h,
+        &format!("/api/sessions/{unknown}/model"),
+        serde_json::json!({"model_override": "groq/llama-3.3-70b"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "unknown session must be 404");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_session_model_returns_400_for_malformed_session_id() {
+    let h = boot().await;
+    let (status, _body) = patch_json(
+        &h,
+        "/api/sessions/not-a-uuid/model",
+        serde_json::json!({"model_override": "groq/llama-3.3-70b"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "malformed id must be 400");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_session_model_accepts_qualified_model_id_with_multiple_slashes() {
+    // "meta-llama/Llama-3.3-70B" — provider contains a hyphen, model has
+    // a capital. The splitn(2,'/') logic must not truncate the model name.
+    let h = boot().await;
+    let agent_id = AgentId(uuid::Uuid::new_v4());
+    let substrate = h.state.kernel.memory_substrate();
+    let session = substrate.create_session(agent_id).expect("seed session");
+    let sid = session.id.0.to_string();
+
+    let (status, body) = patch_json(
+        &h,
+        &format!("/api/sessions/{sid}/model"),
+        serde_json::json!({"model_override": "meta-llama/Llama-3.3-70B"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "qualified id must be 200: {body:?}");
+
+    let stored = substrate
+        .get_session(session.id)
+        .expect("ok")
+        .expect("exists");
+    assert_eq!(
+        stored.model_override.as_deref(),
+        Some("meta-llama/Llama-3.3-70B")
+    );
 }

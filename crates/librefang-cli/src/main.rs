@@ -1714,7 +1714,8 @@ enum MemoryCommands {
     },
     /// Set a KV value.
     #[command(
-        long_about = "Store a key-value pair in an agent's memory.\n\nExamples:\n  librefang memory set coder my-key \"hello world\""
+        alias = "store",
+        long_about = "Store a key-value pair in an agent's memory.\n\nExamples:\n  librefang memory set coder my-key \"hello world\"\n  librefang memory store coder my-key \"hello world\"  # alias for set"
     )]
     Set {
         /// Agent name or ID.
@@ -13704,7 +13705,7 @@ mod tests {
         daemon_log_path_for_home, detached_daemon_args, find_daemon_with_probe,
         normalize_daemon_addr, normalize_release_tag, parse_toml_integer, parse_version_core,
         resolve_device_auth_start, resolve_hand_instance, AuthCommands, ChannelCommands, Cli,
-        Commands, DeviceAuthNextStep, GatewayCommands, ReleaseComparison,
+        Commands, DeviceAuthNextStep, GatewayCommands, MemoryCommands, ReleaseComparison,
     };
     use clap::Parser;
     use serde_json::json;
@@ -14683,5 +14684,36 @@ input_schema = { type = "object" }
         write_daemon_json(tmp.path(), "127.0.0.1:4545");
         let got = find_daemon_with_probe(tmp.path(), |_url| false);
         assert!(got.is_none());
+    }
+
+    // Regression guard for #4923: `memory store` must parse identically to
+    // `memory set` so the alias added in this PR is wired up correctly.
+    #[test]
+    fn memory_store_alias_parses_identically_to_memory_set() {
+        let via_set =
+            Cli::try_parse_from(["librefang", "memory", "set", "coder", "my-key", "my-value"])
+                .expect("memory set must parse");
+        let via_store = Cli::try_parse_from([
+            "librefang",
+            "memory",
+            "store",
+            "coder",
+            "my-key",
+            "my-value",
+        ])
+        .expect("memory store alias must parse");
+
+        let (set_agent, set_key, set_val) = match via_set.command.unwrap() {
+            Commands::Memory(MemoryCommands::Set { agent, key, value }) => (agent, key, value),
+            _ => panic!("unexpected variant from 'memory set'"),
+        };
+        let (store_agent, store_key, store_val) = match via_store.command.unwrap() {
+            Commands::Memory(MemoryCommands::Set { agent, key, value }) => (agent, key, value),
+            _ => panic!("unexpected variant from 'memory store'"),
+        };
+
+        assert_eq!(set_agent, store_agent);
+        assert_eq!(set_key, store_key);
+        assert_eq!(set_val, store_val);
     }
 }

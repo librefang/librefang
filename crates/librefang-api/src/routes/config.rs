@@ -2098,7 +2098,8 @@ pub fn ui_sections_overlay() -> serde_json::Value {
                 // Newly surfaced root-level scalars (#4678).
                 "update_channel", "max_history_messages", "max_upload_size_bytes",
                 "max_concurrent_bg_llm", "max_agent_call_depth", "max_request_body_bytes",
-                "workflow_stale_timeout_minutes", "tool_timeout_secs",
+                "workflow_stale_timeout_minutes", "workflow_default_total_timeout_secs",
+                "tool_timeout_secs",
                 "local_probe_interval_secs", "require_auth_for_reads",
                 "dashboard_user", "log_dir", "data_dir", "home_dir",
                 "cors_origin", "trust_forwarded_for",

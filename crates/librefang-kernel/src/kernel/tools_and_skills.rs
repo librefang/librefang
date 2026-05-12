@@ -62,7 +62,7 @@ impl LibreFangKernel {
         if entry.as_ref().is_some_and(|e| e.manifest.tools_disabled) {
             return Arc::new(Vec::new());
         }
-        let (skill_allowlist, mcp_allowlist, tool_profile, skills_disabled) = entry
+        let (skill_allowlist, mcp_allowlist, tool_profile, skills_disabled, mcp_disabled) = entry
             .as_ref()
             .map(|e| {
                 (
@@ -70,6 +70,7 @@ impl LibreFangKernel {
                     e.manifest.mcp_servers.clone(),
                     e.manifest.profile.clone(),
                     e.manifest.skills_disabled,
+                    e.manifest.mcp_disabled,
                 )
             })
             .unwrap_or_default();
@@ -183,50 +184,53 @@ impl LibreFangKernel {
         }
 
         // Step 3: Add MCP tools (filtered by agent's MCP server allowlist,
-        // then by declared tools).
-        if let Ok(mcp_tools) = self.mcp.mcp_tools.lock() {
-            let configured_servers: Vec<String> = self
-                .mcp
-                .effective_mcp_servers
-                .read()
-                .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
-                .unwrap_or_default();
-            let mut mcp_candidates: Vec<ToolDefinition> = if mcp_allowlist.is_empty() {
-                mcp_tools.iter().cloned().collect()
-            } else {
-                let normalized: Vec<String> = mcp_allowlist
-                    .iter()
-                    .map(|s| librefang_runtime::mcp::normalize_name(s))
-                    .collect();
-                mcp_tools
-                    .iter()
-                    .filter(|t| {
-                        librefang_runtime::mcp::resolve_mcp_server_from_known(
-                            &t.name,
-                            configured_servers.iter().map(String::as_str),
-                        )
-                        .map(|server| {
-                            let normalized_server = librefang_runtime::mcp::normalize_name(server);
-                            normalized.iter().any(|n| n == &normalized_server)
+        // then by declared tools). Skip entirely when MCP is disabled.
+        if !mcp_disabled {
+            if let Ok(mcp_tools) = self.mcp.mcp_tools.lock() {
+                let configured_servers: Vec<String> = self
+                    .mcp
+                    .effective_mcp_servers
+                    .read()
+                    .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
+                    .unwrap_or_default();
+                let mut mcp_candidates: Vec<ToolDefinition> = if mcp_allowlist.is_empty() {
+                    mcp_tools.iter().cloned().collect()
+                } else {
+                    let normalized: Vec<String> = mcp_allowlist
+                        .iter()
+                        .map(|s| librefang_runtime::mcp::normalize_name(s))
+                        .collect();
+                    mcp_tools
+                        .iter()
+                        .filter(|t| {
+                            librefang_runtime::mcp::resolve_mcp_server_from_known(
+                                &t.name,
+                                configured_servers.iter().map(String::as_str),
+                            )
+                            .map(|server| {
+                                let normalized_server =
+                                    librefang_runtime::mcp::normalize_name(server);
+                                normalized.iter().any(|n| n == &normalized_server)
+                            })
+                            .unwrap_or(false)
                         })
-                        .unwrap_or(false)
-                    })
-                    .cloned()
-                    .collect()
-            };
-            // Sort MCP tools by name so connect / hot-reload order does not
-            // mutate the prompt prefix and invalidate provider cache (#3765).
-            mcp_candidates.sort_by(|a, b| a.name.cmp(&b.name));
-            for t in mcp_candidates {
-                // MCP tools are NOT filtered by capabilities.tools.
-                // mcp_candidates is already scoped to the agent's allowed servers
-                // (via mcp_allowlist above), so no further declared_tools filtering
-                // is needed. capabilities.tools governs builtin tools only — MCP tool
-                // names are dynamic and unknown at agent-definition time. Use
-                // tool_blocklist to restrict specific MCP tools if needed.
-                all_tools.push(t);
+                        .cloned()
+                        .collect()
+                };
+                // Sort MCP tools by name so connect / hot-reload order does not
+                // mutate the prompt prefix and invalidate provider cache (#3765).
+                mcp_candidates.sort_by(|a, b| a.name.cmp(&b.name));
+                for t in mcp_candidates {
+                    // MCP tools are NOT filtered by capabilities.tools.
+                    // mcp_candidates is already scoped to the agent's allowed servers
+                    // (via mcp_allowlist above), so no further declared_tools filtering
+                    // is needed. capabilities.tools governs builtin tools only — MCP tool
+                    // names are dynamic and unknown at agent-definition time. Use
+                    // tool_blocklist to restrict specific MCP tools if needed.
+                    all_tools.push(t);
+                }
             }
-        }
+        } // end !mcp_disabled
 
         // Step 4: Apply per-agent tool_allowlist/tool_blocklist overrides.
         // These are separate from capabilities.tools and act as additional filters.

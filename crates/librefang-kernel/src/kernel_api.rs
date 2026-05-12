@@ -271,6 +271,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         &self,
         agent_id: AgentId,
         message: &str,
+        sender_context: Option<&librefang_channels::types::SenderContext>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
 
     // ====================================================================
@@ -320,6 +321,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         target_agent: Option<AgentId>,
         cooldown_secs: Option<u64>,
         session_mode: Option<librefang_types::agent::SessionMode>,
+        workflow_id: Option<String>,
     ) -> KernelResult<TriggerId>;
     fn remove_trigger(&self, trigger_id: TriggerId) -> bool;
     fn update_trigger(
@@ -876,8 +878,9 @@ impl KernelApi for LibreFangKernel {
         &self,
         agent_id: AgentId,
         message: &str,
+        sender_context: Option<&librefang_channels::types::SenderContext>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
-        Self::send_message_ephemeral(self, agent_id, message).await
+        Self::send_message_ephemeral(self, agent_id, message, sender_context).await
     }
 
     // -- Hands --
@@ -953,6 +956,7 @@ impl KernelApi for LibreFangKernel {
         target_agent: Option<AgentId>,
         cooldown_secs: Option<u64>,
         session_mode: Option<librefang_types::agent::SessionMode>,
+        workflow_id: Option<String>,
     ) -> KernelResult<TriggerId> {
         Self::register_trigger_with_target(
             self,
@@ -963,6 +967,7 @@ impl KernelApi for LibreFangKernel {
             target_agent,
             cooldown_secs,
             session_mode,
+            workflow_id,
         )
     }
     fn remove_trigger(&self, trigger_id: TriggerId) -> bool {

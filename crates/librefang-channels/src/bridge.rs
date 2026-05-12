@@ -156,11 +156,13 @@ pub trait ChannelBridgeHandle: Send + Sync {
     }
 
     /// Send an ephemeral "side question" (`/btw`) — answered with the agent's system
-    /// prompt but without loading or saving session history.
+    /// prompt but without loading or saving session history. `sender` is forwarded
+    /// for peer-scoped memory lookups (#4923).
     async fn send_message_ephemeral(
         &self,
         _agent_id: AgentId,
         _message: &str,
+        _sender: Option<&SenderContext>,
     ) -> Result<String, String> {
         Err("Not implemented".to_string())
     }
@@ -4081,6 +4083,94 @@ fn detect_image_magic(bytes: &[u8]) -> Option<String> {
     None
 }
 
+/// Detect audio format from the first few magic bytes.
+///
+/// Returns `Some("audio/...")` for OGG, MP3, WAV, FLAC, M4A, and WebM/Matroska.
+/// Used to recover a correct MIME type when the HTTP Content-Type header is
+/// the uninformative `application/octet-stream` (common with Telegram CDN).
+fn detect_audio_magic(bytes: &[u8]) -> Option<&'static str> {
+    // OGG container — covers Opus (.oga/.opus), Vorbis, etc.
+    if bytes.len() >= 4 && bytes[..4] == [0x4F, 0x67, 0x67, 0x53] {
+        return Some("audio/ogg");
+    }
+    // MP3: ID3 tag header
+    if bytes.len() >= 3 && bytes[..3] == [0x49, 0x44, 0x33] {
+        return Some("audio/mpeg");
+    }
+    // MP3: sync word (0xFF 0xEx or 0xFF 0xFx) with valid MPEG version/layer bits.
+    // Byte 1 encodes: sync(3 bits) | version(2) | layer(2) | crc(1).
+    // Reject version=00 (reserved) and layer=00 (reserved) to reduce false positives.
+    // Valid second bytes: 0xF2/0xF3 (MPEG-2), 0xFA/0xFB/0xF2/0xF3/0xE2/0xE3 (various).
+    // Simplified: require byte[0]==0xFF, upper nibble of byte[1] is 0xF or 0xE,
+    // version bits != 01 (reserved), layer bits != 00 (reserved).
+    if bytes.len() >= 2 && bytes[0] == 0xFF {
+        let b1 = bytes[1];
+        // Upper nibble must be 0xE or 0xF (sync continuation)
+        if b1 & 0xE0 == 0xE0 {
+            let version = (b1 >> 3) & 0x03; // bits 4-3
+            let layer = (b1 >> 1) & 0x03; // bits 2-1
+            if version != 0x01 && layer != 0x00 {
+                return Some("audio/mpeg");
+            }
+        }
+    }
+    // WAV: RIFF....WAVE
+    if bytes.len() >= 12
+        && bytes[..4] == [0x52, 0x49, 0x46, 0x46]
+        && bytes[8..12] == [0x57, 0x41, 0x56, 0x45]
+    {
+        return Some("audio/wav");
+    }
+    // FLAC
+    if bytes.len() >= 4 && bytes[..4] == [0x66, 0x4C, 0x61, 0x43] {
+        return Some("audio/flac");
+    }
+    // M4A / MP4 audio: ftyp box at offset 4 with a known audio-only brand.
+    // Brands: "M4A " (iTunes), "M4B " (audiobook), "mp42", "mp41", "isom", "dash".
+    if bytes.len() >= 12 && bytes[4..8] == [0x66, 0x74, 0x79, 0x70] {
+        let brand = &bytes[8..12];
+        if brand == b"M4A "
+            || brand == b"M4B "
+            || brand == b"mp42"
+            || brand == b"mp41"
+            || brand == b"isom"
+            || brand == b"dash"
+        {
+            return Some("audio/mp4");
+        }
+    }
+    // WebM / Matroska: EBML magic — but this also matches video/webm.
+    // Return None here and let filename-based detection resolve .weba → audio/webm.
+    // (Returning audio/webm unconditionally would misclassify video files.)
+    if bytes.len() >= 4 && bytes[..4] == [0x1A, 0x45, 0xDF, 0xA3] {
+        return None;
+    }
+    None
+}
+
+/// Infer an audio MIME type from a filename extension.
+///
+/// Returns `Some("audio/...")` for known audio extensions, `None` otherwise.
+/// Used as a fallback when magic-byte detection is inconclusive.
+fn audio_mime_from_filename(filename: &str) -> Option<&'static str> {
+    let lower = filename.to_ascii_lowercase();
+    if lower.ends_with(".ogg") || lower.ends_with(".oga") || lower.ends_with(".opus") {
+        Some("audio/ogg")
+    } else if lower.ends_with(".mp3") {
+        Some("audio/mpeg")
+    } else if lower.ends_with(".wav") {
+        Some("audio/wav")
+    } else if lower.ends_with(".flac") {
+        Some("audio/flac")
+    } else if lower.ends_with(".m4a") {
+        Some("audio/mp4")
+    } else if lower.ends_with(".webm") {
+        Some("audio/webm")
+    } else {
+        None
+    }
+}
+
 /// Guess image media type from the URL file extension.
 fn media_type_from_url(url: &str) -> String {
     if url.contains(".png") {
@@ -4293,6 +4383,10 @@ async fn download_file_to_blocks(
     };
 
     let mut total: u64 = 0;
+    // Retain the first 12 bytes of the response body so we can sniff the audio
+    // MIME type without a second read syscall (avoids sync IO in async context).
+    let mut magic_buf = [0u8; 12];
+    let mut magic_filled: usize = 0;
     use tokio::io::AsyncWriteExt;
     while let Some(chunk_result) = stream.next().await {
         match chunk_result {
@@ -4311,6 +4405,13 @@ async fn download_file_to_blocks(
                         ),
                         provider_metadata: None,
                     }];
+                }
+                // Fill magic buffer from the very first bytes of the stream.
+                if magic_filled < magic_buf.len() {
+                    let need = magic_buf.len() - magic_filled;
+                    let take = need.min(chunk.len());
+                    magic_buf[magic_filled..magic_filled + take].copy_from_slice(&chunk[..take]);
+                    magic_filled += take;
                 }
                 if let Err(e) = file.write_all(&chunk).await {
                     warn!("Failed to write chunk to {}: {e}", file_path.display());
@@ -4337,6 +4438,37 @@ async fn download_file_to_blocks(
     if let Err(e) = file.flush().await {
         warn!("Failed to flush file {}: {e}", file_path.display());
     }
+
+    // When the Content-Type header was uninformative (application/octet-stream
+    // or absent — common with Telegram and S3 CDNs), attempt to recover the
+    // real MIME type so the kernel STT pipeline fires correctly:
+    //   1. Magic-byte sniff from the bytes already buffered during streaming
+    //      (no extra read syscall — avoids blocking sync IO in async context).
+    //   2. Fall back to filename extension.
+    //   3. Keep application/octet-stream only when both are inconclusive.
+    let media_type = if media_type == "application/octet-stream" {
+        let sniffed_magic = detect_audio_magic(&magic_buf[..magic_filled]).map(str::to_string);
+        let sniffed_name = audio_mime_from_filename(filename).map(str::to_string);
+
+        // Log when magic and filename hint disagree so operators can debug
+        // files that land with the wrong MIME.
+        if let (Some(ref magic_mime), Some(ref name_mime)) = (&sniffed_magic, &sniffed_name) {
+            if magic_mime != name_mime {
+                debug!(
+                    sniffed_mime = %magic_mime,
+                    filename_mime = %name_mime,
+                    filename = %filename,
+                    "audio MIME source disagreement: magic-bytes and filename extension differ; \
+                     using magic-bytes result"
+                );
+            }
+        }
+
+        // Magic bytes take precedence; filename is the fallback.
+        sniffed_magic.or(sniffed_name).unwrap_or(media_type)
+    } else {
+        media_type
+    };
 
     // Probabilistic cleanup — avoids unbounded disk growth between restarts.
     // Triggers on ~1/256 downloads without a rand dependency.
@@ -4877,9 +5009,19 @@ async fn handle_command(
                 &sender.platform_id,
                 sender.librefang_user.as_deref(),
             );
+            // Build a minimal SenderContext so the kernel can apply the
+            // same peer-scoped memory lookup that the regular message path
+            // uses (#4923) — otherwise the agent re-asks the user's name
+            // for every `/btw` even after it was learned on a channel turn.
+            let sctx = crate::types::SenderContext {
+                channel: channel_type_str(channel_type).to_string(),
+                user_id: sender.platform_id.clone(),
+                display_name: sender.display_name.clone(),
+                ..Default::default()
+            };
             match agent_id {
                 Some(aid) => handle
-                    .send_message_ephemeral(aid, &question)
+                    .send_message_ephemeral(aid, &question, Some(&sctx))
                     .await
                     .unwrap_or_else(|e| format!("Error: {e}")),
                 None => "No agent selected. Use /agent <name> first.".to_string(),
@@ -6028,6 +6170,157 @@ mod tests {
     #[test]
     fn test_detect_image_magic_empty() {
         assert_eq!(detect_image_magic(&[]), None);
+    }
+
+    #[test]
+    fn test_detect_audio_magic_ogg() {
+        // OggS magic
+        let bytes = [0x4F, 0x67, 0x67, 0x53, 0x00, 0x02];
+        assert_eq!(detect_audio_magic(&bytes), Some("audio/ogg"));
+    }
+
+    #[test]
+    fn test_detect_audio_magic_mp3_id3() {
+        // ID3 tag
+        let bytes = [0x49, 0x44, 0x33, 0x03, 0x00, 0x00];
+        assert_eq!(detect_audio_magic(&bytes), Some("audio/mpeg"));
+    }
+
+    #[test]
+    fn test_detect_audio_magic_mp3_sync_fb() {
+        let bytes = [0xFF, 0xFB, 0x90, 0x00];
+        assert_eq!(detect_audio_magic(&bytes), Some("audio/mpeg"));
+    }
+
+    #[test]
+    fn test_detect_audio_magic_mp3_sync_f3() {
+        let bytes = [0xFF, 0xF3, 0x90, 0x00];
+        assert_eq!(detect_audio_magic(&bytes), Some("audio/mpeg"));
+    }
+
+    #[test]
+    fn test_detect_audio_magic_mp3_sync_f2() {
+        let bytes = [0xFF, 0xF2, 0x90, 0x00];
+        assert_eq!(detect_audio_magic(&bytes), Some("audio/mpeg"));
+    }
+
+    #[test]
+    fn test_detect_audio_magic_wav() {
+        // RIFF....WAVE
+        let bytes = [
+            0x52, 0x49, 0x46, 0x46, // RIFF
+            0x24, 0x00, 0x00, 0x00, // size
+            0x57, 0x41, 0x56, 0x45, // WAVE
+        ];
+        assert_eq!(detect_audio_magic(&bytes), Some("audio/wav"));
+    }
+
+    #[test]
+    fn test_detect_audio_magic_flac() {
+        // fLaC
+        let bytes = [0x66, 0x4C, 0x61, 0x43, 0x00, 0x00];
+        assert_eq!(detect_audio_magic(&bytes), Some("audio/flac"));
+    }
+
+    #[test]
+    fn test_detect_audio_magic_m4a() {
+        // ....ftypM4A
+        let bytes = [
+            0x00, 0x00, 0x00, 0x20, // box size
+            0x66, 0x74, 0x79, 0x70, // ftyp
+            0x4D, 0x34, 0x41, 0x20, // M4A
+        ];
+        assert_eq!(detect_audio_magic(&bytes), Some("audio/mp4"));
+    }
+
+    #[test]
+    fn test_detect_audio_magic_m4b() {
+        // ....ftypM4B  (audiobook brand)
+        let bytes = [
+            0x00, 0x00, 0x00, 0x20, // box size
+            0x66, 0x74, 0x79, 0x70, // ftyp
+            0x4D, 0x34, 0x42, 0x20, // M4B
+        ];
+        assert_eq!(detect_audio_magic(&bytes), Some("audio/mp4"));
+    }
+
+    #[test]
+    fn test_detect_audio_magic_isom() {
+        // ....ftypisom
+        let bytes = [
+            0x00, 0x00, 0x00, 0x1C, // box size
+            0x66, 0x74, 0x79, 0x70, // ftyp
+            0x69, 0x73, 0x6F, 0x6D, // isom
+        ];
+        assert_eq!(detect_audio_magic(&bytes), Some("audio/mp4"));
+    }
+
+    #[test]
+    fn test_detect_audio_magic_webm_ebml_returns_none() {
+        // EBML magic also matches video/webm, so magic alone returns None;
+        // filename-based detection (.weba) is the fallback for audio/webm.
+        let bytes = [0x1A, 0x45, 0xDF, 0xA3, 0x01, 0x00];
+        assert_eq!(detect_audio_magic(&bytes), None);
+    }
+
+    #[test]
+    fn test_detect_audio_magic_unknown() {
+        // Random bytes — must stay None
+        let bytes = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05];
+        assert_eq!(detect_audio_magic(&bytes), None);
+    }
+
+    #[test]
+    fn test_detect_audio_magic_empty() {
+        assert_eq!(detect_audio_magic(&[]), None);
+    }
+
+    #[test]
+    fn test_audio_mime_from_filename_oga() {
+        assert_eq!(audio_mime_from_filename("file_136.oga"), Some("audio/ogg"));
+    }
+
+    #[test]
+    fn test_audio_mime_from_filename_ogg() {
+        assert_eq!(audio_mime_from_filename("track.OGG"), Some("audio/ogg"));
+    }
+
+    #[test]
+    fn test_audio_mime_from_filename_opus() {
+        assert_eq!(audio_mime_from_filename("voice.opus"), Some("audio/ogg"));
+    }
+
+    #[test]
+    fn test_audio_mime_from_filename_mp3() {
+        assert_eq!(audio_mime_from_filename("song.mp3"), Some("audio/mpeg"));
+    }
+
+    #[test]
+    fn test_audio_mime_from_filename_wav() {
+        assert_eq!(audio_mime_from_filename("clip.wav"), Some("audio/wav"));
+    }
+
+    #[test]
+    fn test_audio_mime_from_filename_flac() {
+        assert_eq!(audio_mime_from_filename("album.flac"), Some("audio/flac"));
+    }
+
+    #[test]
+    fn test_audio_mime_from_filename_m4a() {
+        assert_eq!(audio_mime_from_filename("audio.m4a"), Some("audio/mp4"));
+    }
+
+    #[test]
+    fn test_audio_mime_from_filename_webm() {
+        assert_eq!(audio_mime_from_filename("clip.webm"), Some("audio/webm"));
+    }
+
+    #[test]
+    fn test_audio_mime_from_filename_unknown() {
+        // No audio extension — must return None
+        assert_eq!(audio_mime_from_filename("photo.jpg"), None);
+        assert_eq!(audio_mime_from_filename("document.pdf"), None);
+        assert_eq!(audio_mime_from_filename("noextension"), None);
     }
 
     #[tokio::test]
@@ -7309,6 +7602,72 @@ mod tests {
         fn rejects_empty_tool_name() {
             assert_eq!(extract_tool_marker_name("\n\n🔧 \n\n"), None);
             assert_eq!(extract_tool_marker_name("\n\n🔧    \n\n"), None);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // MIME sniff integration — verifies the detection pipeline end-to-end:
+    // bytes served as application/octet-stream over HTTP → detect_audio_magic
+    // returns the correct type.  Uses fetch_url_bytes_unchecked (which skips
+    // the SSRF guard) so wiremock's 127.0.0.1 binding is reachable from tests.
+    // -----------------------------------------------------------------------
+
+    mod audio_mime_sniff {
+        use super::super::{audio_mime_from_filename, detect_audio_magic};
+        use crate::http_client::fetch_url_bytes_unchecked;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        /// OGG bytes served with Content-Type: application/octet-stream.
+        /// Asserts detect_audio_magic correctly identifies audio/ogg from the
+        /// magic bytes, and that audio_mime_from_filename agrees via extension.
+        /// This locks BLOCKER-1: the sniff logic that runs before enrich must
+        /// produce "audio/ogg", not "application/octet-stream".
+        #[tokio::test]
+        async fn ogg_served_as_octet_stream_is_detected_as_audio_ogg() {
+            // Minimal OGG bytes: OggS magic + padding to fill 12-byte buffer.
+            let mut ogg_bytes = vec![
+                0x4F, 0x67, 0x67, 0x53, // OggS
+                0x00, 0x02, 0x00, 0x00, // version + header type
+                0x00, 0x00, 0x00, 0x00, // granule position (low)
+            ];
+            ogg_bytes.extend_from_slice(&[0u8; 64]);
+
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/file/bot123/voice/file_136.oga"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "application/octet-stream")
+                        .set_body_bytes(ogg_bytes),
+                )
+                .mount(&server)
+                .await;
+
+            let url = format!("{}/file/bot123/voice/file_136.oga", server.uri());
+            let client = crate::http_client::new_client();
+            let (body, content_type) = fetch_url_bytes_unchecked(&client, &url, 1024 * 1024, &[])
+                .await
+                .expect("fetch succeeded");
+
+            // Server sends application/octet-stream — same as Telegram CDN.
+            assert_eq!(
+                content_type.as_deref(),
+                Some("application/octet-stream"),
+                "expected server to return application/octet-stream"
+            );
+
+            // Magic-byte sniff must recover audio/ogg from the first 12 bytes.
+            let magic = detect_audio_magic(&body[..body.len().min(12)]);
+            assert_eq!(
+                magic,
+                Some("audio/ogg"),
+                "detect_audio_magic should identify OGG bytes as audio/ogg"
+            );
+
+            // Filename fallback also agrees (extension .oga).
+            let fname_mime = audio_mime_from_filename("file_136.oga");
+            assert_eq!(fname_mime, Some("audio/ogg"));
         }
     }
 }

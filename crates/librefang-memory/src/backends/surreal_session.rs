@@ -75,6 +75,7 @@ impl SurrealSessionBackend {
 
         let context_window_tokens = row["context_window_tokens"].as_u64().unwrap_or(0);
         let label = row["label"].as_str().map(str::to_string);
+        let model_override = row["model_override"].as_str().map(str::to_string);
 
         Ok(Session {
             id: session_id,
@@ -82,6 +83,7 @@ impl SurrealSessionBackend {
             messages,
             context_window_tokens,
             label,
+            model_override,
             // Generation counter starts at 0 on cold-load; the repair pass
             // will set last_repaired_generation once it runs.
             messages_generation: 0,
@@ -108,6 +110,7 @@ impl SessionBackend for SurrealSessionBackend {
         let messages = serde_json::to_value(&session.messages)
             .map_err(|e| LibreFangError::memory_msg(format!("serialise messages: {e}")))?;
         let label = session.label.clone();
+        let model_override = session.model_override.clone();
         let context_window_tokens = session.context_window_tokens;
         let message_count = session.messages.len() as i64;
         let now = chrono::Utc::now().to_rfc3339();
@@ -130,6 +133,7 @@ impl SessionBackend for SurrealSessionBackend {
                 "context_window_tokens": context_window_tokens,
                 "message_count": message_count,
                 "label": label,
+                "model_override": model_override,
                 "created_at": created_at,
                 "updated_at": now,
             });

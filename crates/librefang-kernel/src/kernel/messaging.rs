@@ -424,6 +424,7 @@ impl LibreFangKernel {
         &self,
         agent_id: AgentId,
         message: &str,
+        sender_context: Option<&SenderContext>,
     ) -> KernelResult<AgentLoopResult> {
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
@@ -446,10 +447,19 @@ impl LibreFangKernel {
         {
             let mcp_tool_count = self.mcp.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
+            // Mirror the peer-scoping that `memory_store` applies on write
+            // (#4923). When the ephemeral call carries a sender (channel
+            // bridge, /btw with auth context), we read the same peer-scoped
+            // key the agent wrote on a non-ephemeral turn — so the agent
+            // doesn't re-ask the user's name on `/btw` queries.
+            let peer_id = sender_context
+                .map(|s| s.user_id.as_str())
+                .filter(|s| !s.is_empty());
+            let user_name_key = peer_scoped_key("user_name", peer_id);
             let user_name = self
                 .memory
                 .substrate
-                .structured_get(shared_id, "user_name")
+                .structured_get(shared_id, &user_name_key)
                 .ok()
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
@@ -503,7 +513,7 @@ impl LibreFangKernel {
                 skill_count: 0,
                 skill_prompt_context: String::new(),
                 skill_config_section: String::new(),
-                mcp_summary: if mcp_tool_count > 0 {
+                mcp_summary: if mcp_tool_count > 0 && !manifest.mcp_disabled {
                     self.build_mcp_summary(&manifest.mcp_servers)
                 } else {
                     String::new()
@@ -578,6 +588,7 @@ impl LibreFangKernel {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: Some("ephemeral /btw".to_string()),
+            model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,
         };
@@ -1889,6 +1900,7 @@ impl LibreFangKernel {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            model_override: None,
             messages_generation: 0,
             last_repaired_generation: None,
         });
@@ -1939,6 +1951,25 @@ impl LibreFangKernel {
         );
         let mut manifest = entry.manifest.clone();
 
+        // Apply per-session model override (#4898) before any manifest field is
+        // read downstream (model catalog lookup, system prompt build, billing).
+        // The pre-lock session snapshot already carries model_override; the
+        // reload inside the spawn task will produce the same value because the
+        // PATCH route updates the persisted session before returning.
+        if let Some(override_str) = session.model_override.as_deref() {
+            librefang_runtime::agent_loop::apply_session_model_override_to_manifest(
+                &mut manifest,
+                override_str,
+            )
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "session model override apply failed on streaming path, falling back to manifest default"
+                );
+            });
+        }
+
         // Inject model_supports_tools for auto web search augmentation.
         // Refs #4745: honour user capability overrides via effective_capabilities.
         if let Some(supports) = Some(self.llm.model_catalog.load()).and_then(|cat| {
@@ -1982,10 +2013,17 @@ impl LibreFangKernel {
             let mcp_tool_count = self.mcp.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
             let stable_prefix_mode = cfg.stable_prefix_mode;
+            // Mirror the peer-scoping applied by `memory_store` on write: use
+            // the sender's user_id as the peer namespace so we read the same key
+            // the agent wrote.  Falls back to the unscoped key for system turns.
+            let peer_id = sender_context
+                .map(|s| s.user_id.as_str())
+                .filter(|s| !s.is_empty());
+            let user_name_key = peer_scoped_key("user_name", peer_id);
             let user_name = self
                 .memory
                 .substrate
-                .structured_get(shared_id, "user_name")
+                .structured_get(shared_id, &user_name_key)
                 .ok()
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
@@ -2059,7 +2097,7 @@ impl LibreFangKernel {
                     .as_ref()
                     .map(|s| s.skill_config_section.clone())
                     .unwrap_or_default(),
-                mcp_summary: if mcp_tool_count > 0 {
+                mcp_summary: if mcp_tool_count > 0 && !manifest.mcp_disabled {
                     self.build_mcp_summary(&manifest.mcp_servers)
                 } else {
                     String::new()
