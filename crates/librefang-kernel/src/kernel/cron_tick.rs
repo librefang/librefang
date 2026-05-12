@@ -597,16 +597,18 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                             }
                         };
 
-                        // Resolve workflow by UUID first, then by name
+                        // Resolve workflow by UUID first, then by name (case-insensitive,
+                        // matching WorkflowRunner::run_workflow and the trigger-workflow
+                        // dispatch path so cron/tool/trigger all agree on the same name).
                         let resolved_id =
                             if let Ok(uuid) = uuid::Uuid::parse_str(&workflow_id_owned) {
                                 Some(crate::workflow::WorkflowId(uuid))
                             } else {
-                                // Search by name
+                                let name_lower = workflow_id_owned.to_lowercase();
                                 let workflows = kernel_job.workflows.engine.list_workflows().await;
                                 workflows
                                     .iter()
-                                    .find(|w| w.name == workflow_id_owned)
+                                    .find(|w| w.name.to_lowercase() == name_lower)
                                     .map(|w| w.id)
                             };
 
