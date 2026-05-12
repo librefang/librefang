@@ -141,13 +141,16 @@ impl AgentScheduler {
     pub fn record_usage(&self, agent_id: AgentId, usage: &TokenUsage) {
         if let Some(mut tracker) = self.usage.get_mut(&agent_id) {
             tracker.reset_if_expired();
-            let total = usage.total();
-            tracker.total_tokens += total;
+            tracker.total_tokens += usage.total();
             tracker.input_tokens += usage.input_tokens;
             tracker.output_tokens += usage.output_tokens;
             tracker.llm_calls += 1;
-            // Record in the per-minute sliding window for burst detection
-            tracker.token_timestamps.push_back((Instant::now(), total));
+            // Per-minute sliding window for burst detection (#4943): use
+            // burst_tokens(), which excludes cache-read hits — they're
+            // 0.1x cost at the provider and shouldn't gate throughput.
+            tracker
+                .token_timestamps
+                .push_back((Instant::now(), usage.burst_tokens()));
         }
     }
 
@@ -326,10 +329,11 @@ impl AgentScheduler {
             tracker.output_tokens += usage.output_tokens;
             tracker.llm_calls += 1;
 
-            // Sliding-window for burst detection
+            // Sliding-window for burst detection (#4943): see record_usage
+            // — push burst_tokens() so cache-read hits don't gate throughput.
             tracker
                 .token_timestamps
-                .push_back((Instant::now(), actual_tokens));
+                .push_back((Instant::now(), usage.burst_tokens()));
         }
     }
 
@@ -500,6 +504,56 @@ mod tests {
             },
         );
         assert!(scheduler.check_quota(id).is_err());
+    }
+
+    /// Issue #4943: cache-read hits must not count toward the burst limit.
+    /// Without the fix, an agent with a large stable prompt that mostly
+    /// hits the prompt cache would trip the burst guard even though the
+    /// model is doing almost no new work.
+    #[test]
+    fn test_burst_limit_excludes_cache_read_tokens() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        // 1000 tokens/hour => burst cap = 200/min
+        let quota = ResourceQuota {
+            max_llm_tokens_per_hour: Some(1000),
+            max_tool_calls_per_minute: 0,
+            ..Default::default()
+        };
+        scheduler.register(id, quota);
+
+        // input=300, cache_read=250, output=50 — would total 350 (over the
+        // 200/min cap) under the old all-tokens accounting. With the fix
+        // burst_tokens = 300 - 250 + 50 = 100, well under the cap.
+        scheduler.record_usage(
+            id,
+            &TokenUsage {
+                input_tokens: 300,
+                output_tokens: 50,
+                cache_read_input_tokens: 250,
+                cache_creation_input_tokens: 0,
+            },
+        );
+        assert!(
+            scheduler.check_quota(id).is_ok(),
+            "cache-read hits should not gate burst throughput"
+        );
+
+        // But cache_creation IS new work — 250 creation + 100 input + 50
+        // output = 400 burst_tokens, which DOES exceed the 200 cap.
+        scheduler.record_usage(
+            id,
+            &TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 250,
+            },
+        );
+        assert!(
+            scheduler.check_quota(id).is_err(),
+            "cache-creation tokens should still count — they go through the model"
+        );
     }
 
     #[test]

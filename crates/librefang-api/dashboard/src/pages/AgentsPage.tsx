@@ -1164,11 +1164,17 @@ export function AgentsPage() {
   // ---------- Skills tab — 2-col card grid per design canvas
   const renderSkillsTab = (agent: AgentDetail) => {
     const view = agent as AgentView;
-    const skills: string[] = Array.isArray(view.skills)
-      ? view.skills
-      : Array.isArray(view.capabilities?.skills)
-        ? view.capabilities!.skills!
-        : [];
+    // Sort alphabetically (#4940) — the backend returns the manifest's
+    // allowlist order, which is meaningless to humans scanning the tab.
+    const skills: string[] = (
+      Array.isArray(view.skills)
+        ? view.skills
+        : Array.isArray(view.capabilities?.skills)
+          ? view.capabilities!.skills!
+          : []
+    )
+      .slice()
+      .sort((a, b) => a.localeCompare(b));
     // skills_mode: 'none' (skills_disabled), 'all' (no allowlist — uses
     // every skill in the registry, the default), or 'allowlist' (manifest
     // pinned a list). Each needs a different empty-state copy; the

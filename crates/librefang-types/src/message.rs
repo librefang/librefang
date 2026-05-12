@@ -354,6 +354,29 @@ impl TokenUsage {
         self.input_tokens + self.output_tokens
     }
 
+    /// Tokens that count against burst / per-minute rate limits.
+    ///
+    /// Represents tokens the model actually processed this turn —
+    /// excludes prompt-cache hits (charged at ~10% of input rate, not
+    /// re-processed by the model) but includes cache writes (charged at
+    /// 1.25x and do go through the model). Issue #4943.
+    ///
+    /// Handles both provider conventions:
+    /// - OpenAI / Groq / DeepSeek: `input_tokens` is the TOTAL prompt
+    ///   tokens including cache hits; subtract `cache_read_input_tokens`
+    ///   to get the new portion. `cache_creation_input_tokens` is 0.
+    /// - Anthropic: `input_tokens` already excludes cached tokens;
+    ///   `cache_read_input_tokens` and `cache_creation_input_tokens` are
+    ///   reported separately. The `saturating_sub` is a no-op (no
+    ///   overlap) and `cache_creation_input_tokens` is added back so
+    ///   cache writes still count as new processing.
+    pub fn burst_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_sub(self.cache_read_input_tokens)
+            + self.cache_creation_input_tokens
+            + self.output_tokens
+    }
+
     /// Prompt-cache hit ratio: `cache_read / (cache_read + cache_creation)`.
     ///
     /// Returns `None` when neither value was reported (provider doesn't
