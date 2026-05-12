@@ -7,6 +7,67 @@ use librefang_runtime::kernel_handle;
 
 use super::super::LibreFangKernel;
 
+/// Invoke `$mac!(field_ident, "channel_name")` for every channel type in
+/// [`librefang_types::config::ChannelsConfig`].
+///
+/// Both `resolve_channel_owner` (this file) and `resolve_agent_home_channel`
+/// (`messaging.rs`) iterate the same list.  A single source of truth here
+/// means adding a new channel adapter only requires one edit — the compiler
+/// catches any missed call site automatically because the macro must compile
+/// in both contexts.
+///
+/// The `#[macro_export]` attribute makes this available as
+/// `crate::for_each_channel_field!` from anywhere in `librefang-kernel`.
+#[macro_export]
+macro_rules! for_each_channel_field {
+    ($mac:ident) => {
+        $mac!(telegram, "telegram");
+        $mac!(discord, "discord");
+        $mac!(slack, "slack");
+        $mac!(whatsapp, "whatsapp");
+        $mac!(signal, "signal");
+        $mac!(matrix, "matrix");
+        $mac!(email, "email");
+        $mac!(teams, "teams");
+        $mac!(mattermost, "mattermost");
+        $mac!(irc, "irc");
+        $mac!(google_chat, "google_chat");
+        $mac!(twitch, "twitch");
+        $mac!(rocketchat, "rocketchat");
+        $mac!(zulip, "zulip");
+        $mac!(xmpp, "xmpp");
+        $mac!(line, "line");
+        $mac!(viber, "viber");
+        $mac!(messenger, "messenger");
+        $mac!(reddit, "reddit");
+        $mac!(mastodon, "mastodon");
+        $mac!(bluesky, "bluesky");
+        $mac!(feishu, "feishu");
+        $mac!(revolt, "revolt");
+        $mac!(nextcloud, "nextcloud");
+        $mac!(guilded, "guilded");
+        $mac!(keybase, "keybase");
+        $mac!(threema, "threema");
+        $mac!(nostr, "nostr");
+        $mac!(webex, "webex");
+        $mac!(pumble, "pumble");
+        $mac!(flock, "flock");
+        $mac!(twist, "twist");
+        $mac!(mumble, "mumble");
+        $mac!(dingtalk, "dingtalk");
+        $mac!(qq, "qq");
+        $mac!(discourse, "discourse");
+        $mac!(gitter, "gitter");
+        $mac!(ntfy, "ntfy");
+        $mac!(gotify, "gotify");
+        $mac!(webhook, "webhook");
+        $mac!(voice, "voice");
+        $mac!(linkedin, "linkedin");
+        $mac!(wechat, "wechat");
+        $mac!(wecom, "wecom");
+    };
+}
+
 #[async_trait::async_trait]
 impl kernel_handle::ChannelSender for LibreFangKernel {
     async fn send_channel_message(
@@ -342,8 +403,13 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         let channels = &cfg.channels;
 
         // Scan each channel type for the first instance whose `default_agent`
-        // names this channel.  Mirror of `resolve_agent_home_channel`, but
-        // inverted: channel name → agent name → AgentId.
+        // names this channel.  Inverted from `resolve_agent_home_channel`:
+        // channel name → agent name → AgentId.
+        //
+        // `for_each_channel_field!` expands the same exhaustive field list
+        // used by `resolve_agent_home_channel` in messaging.rs so both
+        // functions stay in sync automatically — adding a new channel adapter
+        // requires editing only `for_each_channel_field!`.
         macro_rules! check {
             ($field:ident, $channel_name:literal) => {{
                 if channel == $channel_name {
@@ -360,50 +426,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
             }};
         }
 
-        check!(telegram, "telegram");
-        check!(discord, "discord");
-        check!(slack, "slack");
-        check!(whatsapp, "whatsapp");
-        check!(signal, "signal");
-        check!(matrix, "matrix");
-        check!(email, "email");
-        check!(teams, "teams");
-        check!(mattermost, "mattermost");
-        check!(irc, "irc");
-        check!(google_chat, "google_chat");
-        check!(twitch, "twitch");
-        check!(rocketchat, "rocketchat");
-        check!(zulip, "zulip");
-        check!(xmpp, "xmpp");
-        check!(line, "line");
-        check!(viber, "viber");
-        check!(messenger, "messenger");
-        check!(reddit, "reddit");
-        check!(mastodon, "mastodon");
-        check!(bluesky, "bluesky");
-        check!(feishu, "feishu");
-        check!(revolt, "revolt");
-        check!(nextcloud, "nextcloud");
-        check!(guilded, "guilded");
-        check!(keybase, "keybase");
-        check!(threema, "threema");
-        check!(nostr, "nostr");
-        check!(webex, "webex");
-        check!(pumble, "pumble");
-        check!(flock, "flock");
-        check!(twist, "twist");
-        check!(mumble, "mumble");
-        check!(dingtalk, "dingtalk");
-        check!(qq, "qq");
-        check!(discourse, "discourse");
-        check!(gitter, "gitter");
-        check!(ntfy, "ntfy");
-        check!(gotify, "gotify");
-        check!(webhook, "webhook");
-        check!(voice, "voice");
-        check!(linkedin, "linkedin");
-        check!(wechat, "wechat");
-        check!(wecom, "wecom");
+        crate::for_each_channel_field!(check);
 
         None
     }

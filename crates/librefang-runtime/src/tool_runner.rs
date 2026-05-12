@@ -4929,7 +4929,8 @@ fn parse_poll_options(raw: Option<&serde_json::Value>) -> Result<Vec<String>, St
 ///
 /// Decision summary (issue #4824):
 /// 1. Mirror unconditionally — even when caller == channel owner.
-/// 2. Role = `system` with structured JSON content.
+/// 2. Role = `user` with `[mirror from {agent}]: {body}` text so the
+///    block is visible in prompt context without polluting the system role.
 /// 3. Mirror on partial-failure (platform delivery succeeded, ack lost).
 /// 4. Written directly to session storage; no adapter re-emit.
 async fn mirror_channel_send_to_session(
@@ -4962,30 +4963,20 @@ async fn mirror_channel_send_to_session(
     let session_id = SessionId::for_sender_scope(owner, channel, Some(recipient));
 
     let sent_at = chrono::Utc::now();
-    let mirror_content = serde_json::json!({
-        "from_agent_id": caller_agent_id.unwrap_or("unknown"),
-        "channel": channel,
-        "chat_id": recipient,
-        "body": body,
-        "sent_at": sent_at.to_rfc3339(),
-    });
+    let from = caller_agent_id.unwrap_or("unknown");
+    let mirror_text = format!("[mirror from {from}]: {body}");
 
     let msg = Message {
-        role: Role::System,
-        content: MessageContent::Text(mirror_content.to_string()),
+        role: Role::User,
+        content: MessageContent::Text(mirror_text),
         pinned: false,
         timestamp: Some(sent_at),
     };
 
-    // `append_to_session` acquires `session_msg_locks[session_id]` via
-    // `blocking_lock()` so it must run on the blocking thread pool, not on
-    // a tokio runtime worker. Drop the JoinError on the floor — mirror is
-    // best-effort by design (#4824 design decision 3).
-    let kh_clone = Arc::clone(kh);
-    let _ = tokio::task::spawn_blocking(move || {
-        kh_clone.append_to_session(session_id, owner, msg);
-    })
-    .await;
+    // `append_to_session` uses `block_in_place` internally so it is safe
+    // to call directly from an async context. Mirror is best-effort by
+    // design (#4824 decision 3) — errors are logged inside the impl.
+    kh.append_to_session(session_id, owner, msg);
 }
 
 async fn tool_channel_send(
@@ -7710,17 +7701,15 @@ mod tests {
         assert_eq!(msgs.len(), 1, "exactly one message should be mirrored");
         assert_eq!(
             msgs[0].role,
-            Role::System,
-            "mirrored message must use system role"
+            Role::User,
+            "mirrored message must use user role"
         );
 
         let content = msgs[0].content.text_content();
-        let parsed: serde_json::Value = serde_json::from_str(&content).expect("content is JSON");
-        assert_eq!(parsed["from_agent_id"], "caller-agent-id");
-        assert_eq!(parsed["channel"], "telegram");
-        assert_eq!(parsed["chat_id"], "99999");
-        assert_eq!(parsed["body"], "Hello from cron agent");
-        assert!(parsed["sent_at"].is_string(), "sent_at must be present");
+        assert_eq!(
+            content, "[mirror from caller-agent-id]: Hello from cron agent",
+            "mirror text must follow [mirror from <agent>]: <body> format"
+        );
     }
 
     #[tokio::test]
@@ -7757,7 +7746,7 @@ mod tests {
         assert!(result.is_ok(), "send should succeed: {:?}", result);
         let msgs = appended.lock().unwrap();
         assert_eq!(msgs.len(), 1, "mirror must land even when caller == owner");
-        assert_eq!(msgs[0].role, Role::System);
+        assert_eq!(msgs[0].role, Role::User);
     }
 
     #[tokio::test]

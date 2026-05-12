@@ -327,9 +327,9 @@ impl LibreFangKernel {
         // names this agent. The `first` semantics match `channel_overrides`
         // in channel_bridge.rs when multiple instances share a default_agent.
         //
-        // The macro keeps this compact across 40+ channel types without
-        // forgetting any; the `channel_name` str is used as the SenderContext
-        // `channel` field (matches `channel_adapters` map keys).
+        // `for_each_channel_field!` expands the exhaustive field list shared
+        // with `resolve_channel_owner` in channel_sender.rs — one edit point
+        // for all 40+ channel types keeps the two functions in sync.
         macro_rules! check {
             ($field:ident, $channel_name:literal) => {{
                 if let Some(entry) = channels
@@ -347,50 +347,7 @@ impl LibreFangKernel {
             }};
         }
 
-        check!(telegram, "telegram");
-        check!(discord, "discord");
-        check!(slack, "slack");
-        check!(whatsapp, "whatsapp");
-        check!(signal, "signal");
-        check!(matrix, "matrix");
-        check!(email, "email");
-        check!(teams, "teams");
-        check!(mattermost, "mattermost");
-        check!(irc, "irc");
-        check!(google_chat, "google_chat");
-        check!(twitch, "twitch");
-        check!(rocketchat, "rocketchat");
-        check!(zulip, "zulip");
-        check!(xmpp, "xmpp");
-        check!(line, "line");
-        check!(viber, "viber");
-        check!(messenger, "messenger");
-        check!(reddit, "reddit");
-        check!(mastodon, "mastodon");
-        check!(bluesky, "bluesky");
-        check!(feishu, "feishu");
-        check!(revolt, "revolt");
-        check!(nextcloud, "nextcloud");
-        check!(guilded, "guilded");
-        check!(keybase, "keybase");
-        check!(threema, "threema");
-        check!(nostr, "nostr");
-        check!(webex, "webex");
-        check!(pumble, "pumble");
-        check!(flock, "flock");
-        check!(twist, "twist");
-        check!(mumble, "mumble");
-        check!(dingtalk, "dingtalk");
-        check!(qq, "qq");
-        check!(discourse, "discourse");
-        check!(gitter, "gitter");
-        check!(ntfy, "ntfy");
-        check!(gotify, "gotify");
-        check!(webhook, "webhook");
-        check!(voice, "voice");
-        check!(linkedin, "linkedin");
-        check!(wechat, "wechat");
-        check!(wecom, "wecom");
+        crate::for_each_channel_field!(check);
 
         None
     }

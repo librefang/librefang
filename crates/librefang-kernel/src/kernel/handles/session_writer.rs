@@ -9,37 +9,34 @@ use librefang_runtime::kernel_handle;
 use super::super::LibreFangKernel;
 
 impl kernel_handle::SessionWriter for LibreFangKernel {
-    /// Acquires `session_msg_locks[session_id]` via `blocking_lock()` before
-    /// the read-modify-write so concurrent inbound-router writes to the same
-    /// session don't overwrite each other (`save_session` is an unconditional
-    /// `INSERT ON CONFLICT DO UPDATE` with no `messages_generation` CAS, so
-    /// last writer wins). Because `blocking_lock()` would panic if called
-    /// from a tokio runtime worker, every async caller (currently only
-    /// `mirror_channel_send_to_session` in librefang-runtime) MUST wrap the
-    /// invocation in `tokio::task::spawn_blocking` to move it onto a blocking
-    /// thread pool. The trait's existing "Blocking I/O notice" already
-    /// documents this contract.
+    /// Serializes with the inbound-router and any concurrent mirror call on
+    /// the same agent by acquiring `agent_msg_locks[agent_id]`.
     ///
-    /// `inject_attachment_blocks` carries the same race today but is **not**
-    /// fixed here — its callers (HTTP attachment upload path) would need
-    /// matching `spawn_blocking` wrappers and that is out of scope for #4824.
-    /// Both will graduate together when the substrate moves to async I/O.
+    /// Using the agent-scoped lock (same key space as `send_message_full`'s
+    /// no-override path) ensures that a concurrent `channel_send` mirror and
+    /// the live inbound-routing session write cannot race the same JSONL
+    /// append.  `session_msg_locks[session_id]` is a *different* key space
+    /// and would not exclude the inbound-router writer.
+    ///
+    /// `block_in_place` is used instead of `blocking_lock()` so this method
+    /// is safe to call from both async worker threads and `spawn_blocking`
+    /// threads without panicking.  The SQLite write underneath is still
+    /// synchronous; `block_in_place` parks the async worker while it runs.
     fn append_to_session(
         &self,
         session_id: librefang_types::agent::SessionId,
         agent_id: librefang_types::agent::AgentId,
         message: librefang_types::message::Message,
     ) {
-        // Serialize with the inbound-router and any concurrent mirror call
-        // on the same session id. See doc-comment for the spawn_blocking
-        // contract that makes `blocking_lock()` safe here.
+        // Acquire the per-agent lock using block_in_place so this is safe
+        // from both async contexts and spawn_blocking threads.
         let lock = self
             .agents
-            .session_msg_locks
-            .entry(session_id)
+            .agent_msg_locks
+            .entry(agent_id)
             .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
             .clone();
-        let _guard = lock.blocking_lock();
+        let _guard = tokio::task::block_in_place(|| lock.blocking_lock());
 
         // Load existing session or create a fresh one for this (agent, session) pair.
         let mut session = match self.memory.substrate.get_session(session_id) {
@@ -93,6 +90,17 @@ impl kernel_handle::SessionWriter for LibreFangKernel {
                 return;
             }
         };
+
+        // Serialize with any concurrent write to the same agent's session.
+        // block_in_place is safe from both async worker threads and
+        // spawn_blocking threads (unlike blocking_lock which panics in async).
+        let lock = self
+            .agents
+            .agent_msg_locks
+            .entry(agent_id)
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = tokio::task::block_in_place(|| lock.blocking_lock());
 
         let mut session = match self.memory.substrate.get_session(entry.session_id) {
             Ok(Some(s)) => s,
