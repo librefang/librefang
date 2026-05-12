@@ -2279,7 +2279,7 @@ mod tests {
             Some(TEST_ENCODING_AES_KEY.to_string()),
         );
 
-        let (router, _stream) = adapter
+        let (router, mut stream) = adapter
             .create_webhook_routes()
             .await
             .expect("Callback mode must return webhook routes");
@@ -2311,6 +2311,28 @@ mod tests {
             response_url_cache_size(&adapter).await,
             1,
             "cache must hold exactly one entry after inbound POST"
+        );
+
+        // The stream must yield exactly the ChannelMessage the handler sent.
+        let channel_msg = stream
+            .next()
+            .await
+            .expect("stream must yield one ChannelMessage");
+        assert_eq!(
+            channel_msg.sender.platform_id, expected_key,
+            "sender.platform_id must be composite user|chat key"
+        );
+        match &channel_msg.content {
+            ChannelContent::Text(t) => assert_eq!(
+                t.as_str(),
+                "hello from e2e test",
+                "content must match plaintext payload"
+            ),
+            other => panic!("expected ChannelContent::Text, got {other:?}"),
+        }
+        assert!(
+            channel_msg.is_group,
+            "chattype=group must set is_group=true"
         );
 
         // send() must consume the cached response_url — NOT fall back to webhook.
