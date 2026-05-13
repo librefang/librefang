@@ -306,6 +306,88 @@ impl AgentRouter {
         }
     }
 
+    /// Recipient peer IDs reachable on `(channel_str, account_id)` whose
+    /// `AgentBinding` resolves to `agent_id`.
+    ///
+    /// This is the binding-side counterpart of [`Self::channel_default`] used
+    /// by the approval listener (#5002): adapters configured with
+    /// `default_agent = None` but routed entirely via `AgentBinding` would
+    /// otherwise silently drop approvals — `channel_default` returns `None`,
+    /// and the listener has no other handle to "which chat belongs to the
+    /// requesting agent on this adapter".
+    ///
+    /// Filtering rules — a binding is yielded iff ALL of the following hold
+    /// (consistent with the inbound resolver in [`Self::binding_matches`],
+    /// re-stated rather than reused because that function takes a full
+    /// `BindingContext` for incoming messages, whereas here we only have the
+    /// adapter-level identity and want the *set* of bound peers, not the
+    /// first inbound match):
+    ///
+    /// 1. The binding's `agent` name resolves via `agent_name_cache` to the
+    ///    given `agent_id`. Bindings whose name is not in the cache (agent
+    ///    not yet spawned / typo in config) are silently skipped — the
+    ///    inbound resolver already logs that case, and dropping them here
+    ///    avoids double-noise.
+    /// 2. `match_rule.channel` is either unset or equals `channel_str`.
+    /// 3. `match_rule.account_id` is either unset or equals `account_id`.
+    ///    Note: this matches the inbound semantics — a binding with no
+    ///    `account_id` constraint applies to every adapter on that channel
+    ///    type, including multi-bot adapters.
+    /// 4. `match_rule.peer_id` is `Some(_)`. A binding without a `peer_id`
+    ///    names no chat to deliver to and is useless for fan-out (it would
+    ///    just route inbound messages from anyone to the agent). It does
+    ///    NOT count as a recipient.
+    ///
+    /// Role/guild constraints are intentionally NOT filtered here: roles are
+    /// per-message context we don't have for outbound approval fan-out, and
+    /// a role-gated binding still names a real `peer_id` chat the operator
+    /// wants the agent to be reachable in. If the operator wants approvals
+    /// to skip role-gated chats they should bind on a non-role-gated rule
+    /// for the same `peer_id`.
+    pub fn bound_recipients_for_agent(
+        &self,
+        agent_id: AgentId,
+        channel_str: &str,
+        account_id: Option<&str>,
+    ) -> Vec<String> {
+        let bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (binding, _agent_name) in bindings.iter() {
+            // Rule 1: name → id resolves to the requesting agent.
+            let resolved = match self.agent_name_cache.get(&binding.agent) {
+                Some(id) => *id,
+                None => continue,
+            };
+            if resolved != agent_id {
+                continue;
+            }
+            // Rule 2: channel constraint.
+            if let Some(ref ch) = binding.match_rule.channel {
+                if ch != channel_str {
+                    continue;
+                }
+            }
+            // Rule 3: account_id constraint.
+            if let Some(ref acc) = binding.match_rule.account_id {
+                match account_id {
+                    Some(ctx_acc) if ctx_acc == acc.as_str() => {}
+                    _ => continue,
+                }
+            }
+            // Rule 4: peer_id must be set to be a delivery target.
+            let Some(ref peer) = binding.match_rule.peer_id else {
+                continue;
+            };
+            // De-dup: two bindings can name the same peer with different
+            // role/guild gates. We only want one notification per chat.
+            if seen.insert(peer.clone()) {
+                out.push(peer.clone());
+            }
+        }
+        out
+    }
+
     /// Evaluate bindings against a context, returning the first matching agent ID.
     fn resolve_binding(&self, ctx: &BindingContext<'_>) -> Option<AgentId> {
         let bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
