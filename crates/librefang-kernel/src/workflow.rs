@@ -263,13 +263,71 @@ fn default_timeout() -> u64 {
 }
 
 /// How to identify the agent for a step.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Deserialization accepts THREE on-wire shapes for operator ergonomics
+/// (the issue / PR docs use the bare-string form; the kernel and HTTP
+/// payloads use the tagged forms):
+///
+/// 1. Bare string: `agent = "researcher"` → [`StepAgent::ByName`].
+/// 2. Tagged object: `{ name = "researcher" }` → [`StepAgent::ByName`].
+/// 3. Tagged object: `{ id = "<uuid>" }` → [`StepAgent::ById`].
+///
+/// Exactly one of `id` / `name` must be present in the tagged form;
+/// supplying both or neither is a deserialization error.
+///
+/// Serialization continues to emit the tagged-object form (`Serialize`
+/// derive on the untagged-style enum picks the matching variant cleanly).
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum StepAgent {
     /// Reference an agent by UUID.
     ById { id: String },
     /// Reference an agent by name (first match).
     ByName { name: String },
+}
+
+impl<'de> Deserialize<'de> for StepAgent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        // Accept either a bare string (treated as `ByName`) or an object
+        // with exactly one of `id` / `name`. Going through `serde_json::Value`
+        // keeps the impl format-agnostic — TOML, JSON, and YAML deserializers
+        // all feed through serde's data model and produce a `Value` here.
+        let v = serde_json::Value::deserialize(deserializer)?;
+        match v {
+            serde_json::Value::String(s) => Ok(StepAgent::ByName { name: s }),
+            serde_json::Value::Object(map) => {
+                let id = map.get("id").and_then(|x| x.as_str());
+                let name = map.get("name").and_then(|x| x.as_str());
+                match (id, name) {
+                    (Some(_), Some(_)) => Err(D::Error::custom(
+                        "StepAgent: object form must set exactly one of `id` or `name`, not both",
+                    )),
+                    (Some(id), None) => Ok(StepAgent::ById { id: id.to_string() }),
+                    (None, Some(name)) => Ok(StepAgent::ByName {
+                        name: name.to_string(),
+                    }),
+                    (None, None) => Err(D::Error::custom(
+                        "StepAgent: object form must set exactly one of `id` or `name`",
+                    )),
+                }
+            }
+            other => Err(D::Error::custom(format!(
+                "StepAgent: expected string or object, got {}",
+                match other {
+                    serde_json::Value::Null => "null",
+                    serde_json::Value::Bool(_) => "bool",
+                    serde_json::Value::Number(_) => "number",
+                    serde_json::Value::Array(_) => "array",
+                    _ => "other",
+                }
+            ))),
+        }
+    }
 }
 
 /// Execution mode for a workflow step.
@@ -7048,5 +7106,100 @@ prompt_template = "do {{x}}"
             "cancelled runs over the cap must be evictable, retained {} (cap 200)",
             all_runs.len()
         );
+    }
+
+    // ----------------------------------------------------------------------
+    // StepAgent deserialization — bare-string ergonomics regression tests
+    //
+    // The on-wire shape documented in the workflow issue / PR body is the
+    // bare `agent = "researcher"` form; if the custom `Deserialize` impl
+    // ever regresses to the derived untagged enum, the operator will hit
+    // an opaque untagged-enum error on first run. These tests guard the
+    // contract at the type boundary.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn step_agent_deserializes_bare_string_as_by_name() {
+        let v: StepAgent = serde_json::from_str("\"researcher\"").expect("bare string");
+        match v {
+            StepAgent::ByName { name } => assert_eq!(name, "researcher"),
+            other => panic!("expected ByName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_agent_deserializes_object_by_name() {
+        let v: StepAgent =
+            serde_json::from_str(r#"{"name":"researcher"}"#).expect("object form by name");
+        match v {
+            StepAgent::ByName { name } => assert_eq!(name, "researcher"),
+            other => panic!("expected ByName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_agent_deserializes_object_by_id() {
+        let v: StepAgent =
+            serde_json::from_str(r#"{"id":"agent-uuid-123"}"#).expect("object by id");
+        match v {
+            StepAgent::ById { id } => assert_eq!(id, "agent-uuid-123"),
+            other => panic!("expected ById, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_agent_rejects_garbage_input() {
+        // Number: not a string or object.
+        assert!(serde_json::from_str::<StepAgent>("42").is_err());
+        // Array: not a string or object.
+        assert!(serde_json::from_str::<StepAgent>("[\"researcher\"]").is_err());
+        // Both fields set: ambiguous.
+        assert!(
+            serde_json::from_str::<StepAgent>(r#"{"id":"a","name":"b"}"#).is_err(),
+            "must reject both id and name set"
+        );
+        // Neither field set: empty object.
+        assert!(
+            serde_json::from_str::<StepAgent>("{}").is_err(),
+            "must reject empty object"
+        );
+        // Null is also invalid.
+        assert!(serde_json::from_str::<StepAgent>("null").is_err());
+    }
+
+    #[test]
+    fn step_agent_round_trip_bare_string_through_toml() {
+        // TOML doesn't allow top-level scalar values, so wrap in a struct
+        // that holds a `StepAgent` field. The bare-string form is the form
+        // operators are expected to use in TOML workflow files.
+        #[derive(serde::Deserialize)]
+        struct Wrap {
+            agent: StepAgent,
+        }
+        let parsed: Wrap = toml::from_str(r#"agent = "researcher""#).expect("toml bare string");
+        match parsed.agent {
+            StepAgent::ByName { name } => assert_eq!(name, "researcher"),
+            other => panic!("expected ByName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_agent_round_trip_object_through_toml() {
+        #[derive(serde::Deserialize)]
+        struct Wrap {
+            agent: StepAgent,
+        }
+        let by_name: Wrap =
+            toml::from_str("agent = { name = \"researcher\" }").expect("toml object by name");
+        match by_name.agent {
+            StepAgent::ByName { name } => assert_eq!(name, "researcher"),
+            other => panic!("expected ByName, got {other:?}"),
+        }
+        let by_id: Wrap =
+            toml::from_str("agent = { id = \"agent-uuid-123\" }").expect("toml object by id");
+        match by_id.agent {
+            StepAgent::ById { id } => assert_eq!(id, "agent-uuid-123"),
+            other => panic!("expected ById, got {other:?}"),
+        }
     }
 }

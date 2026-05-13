@@ -149,6 +149,7 @@ fn workflow_to_json(w: &Workflow) -> serde_json::Value {
                 "error_mode": serde_json::to_value(&s.error_mode).unwrap_or_default(),
                 "output_var": s.output_var,
                 "depends_on": s.depends_on,
+                "session_mode": serde_json::to_value(s.session_mode).unwrap_or(serde_json::Value::Null),
             })
         }).collect::<Vec<_>>(),
         "created_at": w.created_at.to_rfc3339(),
@@ -324,6 +325,20 @@ fn parse_error_mode(val: &serde_json::Value, step: &serde_json::Value) -> ErrorM
     ErrorMode::Fail
 }
 
+/// Parse an optional per-step `session_mode` from a step JSON object.
+///
+/// Lenient at the boundary: absent / null / malformed values all return
+/// `None` so HTTP callers don't trip on minor schema quirks; the kernel's
+/// resolver ("per-step > manifest > kernel default") then falls back to
+/// the agent manifest or kernel default. Accepted values for the field
+/// are `"persistent"` and `"new"` (the serde rename of `SessionMode`).
+fn parse_step_session_mode(
+    step: &serde_json::Value,
+) -> Option<librefang_types::agent::SessionMode> {
+    step.get("session_mode")
+        .and_then(|v| serde_json::from_value::<librefang_types::agent::SessionMode>(v.clone()).ok())
+}
+
 // ---------------------------------------------------------------------------
 // Workflow routes
 // ---------------------------------------------------------------------------
@@ -392,7 +407,7 @@ pub async fn create_workflow(
             output_var: s["output_var"].as_str().map(String::from),
             inherit_context: s["inherit_context"].as_bool(),
             depends_on,
-            session_mode: None,
+            session_mode: parse_step_session_mode(s),
         });
     }
 
@@ -667,7 +682,7 @@ pub async fn update_workflow(
                 output_var: s["output_var"].as_str().map(String::from),
                 inherit_context: s["inherit_context"].as_bool(),
                 depends_on,
-                session_mode: None,
+                session_mode: parse_step_session_mode(s),
             });
         }
         parsed_steps

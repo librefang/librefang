@@ -273,12 +273,29 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         message: &str,
         sender_context: Option<&librefang_channels::types::SenderContext>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
+    /// Send a message to an agent with an optional per-call `session_mode` override.
+    ///
+    /// The default implementation delegates to [`KernelApi::send_message`] and
+    /// emits a `WARN` log so test mocks of `KernelApi` (which would otherwise
+    /// fail to compile after the trait gained this method) keep working
+    /// without manually implementing it. Production paths must override —
+    /// `LibreFangKernel` does so to honor the per-step / per-trigger
+    /// override documented in the workflow / trigger session-mode resolver.
     async fn send_message_with_session_mode(
         &self,
         agent_id: AgentId,
         message: &str,
         session_mode_override: Option<librefang_types::agent::SessionMode>,
-    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
+        if session_mode_override.is_some() {
+            tracing::warn!(
+                "KernelApi::send_message_with_session_mode: trait default ignores \
+                 session_mode_override={session_mode_override:?}; override the method on your impl \
+                 to honor it"
+            );
+        }
+        self.send_message(agent_id, message).await
+    }
 
     // ====================================================================
     // Hands
