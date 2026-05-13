@@ -1702,19 +1702,38 @@ pub async fn execute_tool_raw(
 
         // Image analysis tool
         "image_analyze" => {
-            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            // #4981: media read tools must see into the channel-bridge
+            // download dir (e.g. `/tmp/librefang_uploads/<uuid>.jpg`) the
+            // same way `file_read` does — the kernel itself delivers those
+            // paths to the agent in inbound channel messages, so refusing
+            // to open them is internally contradictory.
+            let mut extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            if let Some(dl) = kernel.and_then(|k| k.channel_file_download_dir()) {
+                extra.push(dl);
+            }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
             tool_image_analyze(input, *workspace_root, &extra_refs).await
         }
 
         // Media understanding tools
         "media_describe" => {
-            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            // #4981: see image_analyze above — staging dir is read-side allowlisted.
+            let mut extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            if let Some(dl) = kernel.and_then(|k| k.channel_file_download_dir()) {
+                extra.push(dl);
+            }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
             tool_media_describe(input, *media_engine, *workspace_root, &extra_refs).await
         }
         "media_transcribe" => {
-            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            // #4981: see image_analyze above — staging dir is read-side allowlisted.
+            // This is the primary path: Telegram voice messages land at
+            // `<staging>/<uuid>.oga` and the agent calls media_transcribe on
+            // exactly that path.
+            let mut extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            if let Some(dl) = kernel.and_then(|k| k.channel_file_download_dir()) {
+                extra.push(dl);
+            }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
             tool_media_transcribe(input, *media_engine, *workspace_root, &extra_refs).await
         }
@@ -1735,7 +1754,11 @@ pub async fn execute_tool_raw(
             tool_text_to_speech(input, *media_drivers, *tts_engine, *workspace_root).await
         }
         "speech_to_text" => {
-            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            // #4981: see image_analyze above — staging dir is read-side allowlisted.
+            let mut extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            if let Some(dl) = kernel.and_then(|k| k.channel_file_download_dir()) {
+                extra.push(dl);
+            }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
             tool_speech_to_text(input, *media_engine, *workspace_root, &extra_refs).await
         }
@@ -9863,6 +9886,192 @@ mod tests {
         assert!(!result.is_error, "got error: {}", result.content);
         assert!(result.content.contains("one.pdf"));
         assert!(result.content.contains("two.pdf"));
+    }
+
+    /// #4981: media read tools (`image_analyze`, `media_describe`,
+    /// `media_transcribe`, `speech_to_text`) must also see into the
+    /// channel-bridge staging dir. The kernel writes inbound voice
+    /// notes and images there (e.g.
+    /// `/var/folders/.../T/librefang_uploads/<uuid>.oga`) and hands
+    /// the path to the agent — the agent's first tool call against
+    /// that exact path must not be rejected by the sandbox.
+    ///
+    /// Tested via `image_analyze` because it has no `MediaEngine`
+    /// dependency. The dispatcher arm for the other three media
+    /// read tools (`media_describe`, `media_transcribe`,
+    /// `speech_to_text`) widens the allowlist with the same single
+    /// line — by inspection they share the security envelope this
+    /// test locks in.
+    #[tokio::test]
+    async fn test_image_analyze_allows_channel_download_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let download_canon = download.path().canonicalize().unwrap();
+        // Minimal valid PNG (1x1, fully transparent) so `tokio::fs::read`
+        // succeeds and `detect_image_format` returns "png".
+        let png_bytes: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let target = download_canon.join("inbound.png");
+        std::fs::write(&target, png_bytes).unwrap();
+
+        let kernel = make_download_dir_kernel(download_canon.clone());
+
+        let result = execute_tool(
+            "test-id",
+            "image_analyze",
+            &serde_json::json!({"path": target.to_str().unwrap()}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000020"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            !result.is_error,
+            "media read should accept staging-dir path, got error: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("\"format\": \"png\""),
+            "expected format=png in result, got: {}",
+            result.content
+        );
+    }
+
+    /// #4981 negative: a path that is OUTSIDE the workspace AND OUTSIDE
+    /// the channel staging dir must still be rejected by the media read
+    /// tools. This confirms the allowlist is scoped to the actual
+    /// staging-dir path, not its parent (e.g. `/var/folders/.../T/`).
+    #[tokio::test]
+    async fn test_image_analyze_rejects_path_outside_staging_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let outside = tempfile::tempdir().expect("outside");
+        let download_canon = download.path().canonicalize().unwrap();
+        // File lives in a sibling tempdir — neither under the primary
+        // workspace nor under the configured staging dir.
+        let target = outside.path().canonicalize().unwrap().join("evil.png");
+        std::fs::write(&target, [0x89, 0x50, 0x4E, 0x47]).unwrap();
+
+        let kernel = make_download_dir_kernel(download_canon.clone());
+
+        let result = execute_tool(
+            "test-id",
+            "image_analyze",
+            &serde_json::json!({"path": target.to_str().unwrap()}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000021"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "media read against path outside both workspace and staging dir must be rejected"
+        );
+        assert!(
+            result.content.contains("Access denied")
+                && result.content.contains("resolves outside workspace"),
+            "expected sandbox-escape error, got: {}",
+            result.content
+        );
+    }
+
+    /// #4981 negative: a `..` traversal anchored inside the staging
+    /// dir must NOT escape the allowlist. `resolve_sandbox_path_ext`
+    /// rejects all `..` components up front, so even a path whose
+    /// literal prefix is the staging dir gets denied as soon as a
+    /// `..` component appears.
+    #[tokio::test]
+    async fn test_image_analyze_rejects_dotdot_escape_from_staging_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let download_canon = download.path().canonicalize().unwrap();
+
+        let kernel = make_download_dir_kernel(download_canon.clone());
+
+        // `<staging>/..` would resolve to the parent (e.g. `/var/folders/.../T/`)
+        // which we MUST NOT widen the allowlist to.
+        let evil = format!("{}/../passwd", download_canon.to_str().unwrap());
+
+        let result = execute_tool(
+            "test-id",
+            "image_analyze",
+            &serde_json::json!({"path": evil}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000022"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "`..` from inside the staging dir must be rejected"
+        );
+        assert!(
+            result.content.contains("Path traversal denied"),
+            "expected path-traversal error, got: {}",
+            result.content
+        );
     }
 
     /// Defense-in-depth: the download dir is a *read-side* allowlist only.
