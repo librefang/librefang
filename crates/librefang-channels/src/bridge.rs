@@ -4239,7 +4239,7 @@ fn detect_image_magic(bytes: &[u8]) -> Option<String> {
 /// Returns `Some("audio/...")` for OGG, MP3, WAV, FLAC, M4A, and WebM/Matroska.
 /// Used to recover a correct MIME type when the HTTP Content-Type header is
 /// the uninformative `application/octet-stream` (common with Telegram CDN).
-fn detect_audio_magic(bytes: &[u8]) -> Option<&'static str> {
+pub(crate) fn detect_audio_magic(bytes: &[u8]) -> Option<&'static str> {
     // OGG container — covers Opus (.oga/.opus), Vorbis, etc.
     if bytes.len() >= 4 && bytes[..4] == [0x4F, 0x67, 0x67, 0x53] {
         return Some("audio/ogg");

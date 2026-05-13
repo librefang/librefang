@@ -1673,7 +1673,18 @@ impl TelegramAdapter {
                 // local-file path is the one users hit via `channel_send`'s
                 // `file_path` parameter and the one called out in the bug
                 // report.
-                if is_telegram_voice_payload(&mime_type, &filename) {
+                //
+                // Magic-byte sniff (#5004): MIME/filename may be wrong (e.g.
+                // an MP3 mislabeled as `voice.ogg` / `audio/ogg`). Telegram's
+                // sendVoice validates the container server-side and 400s,
+                // surfacing as a generic channel-send failure. Verify the
+                // bytes actually start with the OGG container magic before
+                // committing to sendVoice; otherwise fall through to
+                // sendDocument so the file still reaches the user.
+                let bytes_look_like_ogg =
+                    crate::bridge::detect_audio_magic(&data[..data.len().min(12)])
+                        == Some("audio/ogg");
+                if is_telegram_voice_payload(&mime_type, &filename) && bytes_look_like_ogg {
                     self.api_send_voice_upload(chat_id, data, &filename, &mime_type, thread_id)
                         .await?;
                 } else {
@@ -5778,7 +5789,10 @@ mod tests {
             .send(
                 &dummy_user("1"),
                 ChannelContent::FileData {
-                    data: vec![],
+                    // OggS magic — required by the #5004 magic-byte sniff so
+                    // the routing predicate can confirm the payload really is
+                    // an OGG container before committing to sendVoice.
+                    data: vec![0x4F, 0x67, 0x67, 0x53],
                     filename: "memo.oga".into(),
                     // Intentionally generic — extension must still win.
                     mime_type: "application/octet-stream".into(),
@@ -5850,6 +5864,48 @@ mod tests {
             )
             .await
             .expect("PDF must still go via sendDocument");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_file_data_ogg_labeled_but_mp3_bytes_routes_to_send_document() {
+        // #5004: caller-supplied MIME/filename can lie. An MP3 mislabeled as
+        // `voice.ogg` / `audio/ogg` must be downgraded to sendDocument —
+        // Telegram's sendVoice rejects non-OGG containers server-side, and
+        // the resulting 400 would surface as a generic channel-send failure
+        // with no hint that the label was wrong.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendDocument")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendVoice")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::FileData {
+                    // ID3v2 tag header — the standard MP3 magic. MIME and
+                    // filename below claim OGG; the bytes win.
+                    data: vec![
+                        0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    ],
+                    filename: "voice.ogg".into(),
+                    mime_type: "audio/ogg".into(),
+                },
+            )
+            .await
+            .expect("mislabeled MP3 must downgrade to sendDocument");
     }
 
     #[tokio::test]
