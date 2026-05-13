@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "LibreFang",
+  "productName": "BossFang",
   "version": "26.5.32131",
-  "identifier": "ai.librefang.desktop",
+  "identifier": "ai.bossfang.desktop",
   "build": {
     "frontendDist": "frontend"
   },
@@ -24,8 +24,8 @@
       "icons/128x128@2x.png"
     ],
     "category": "Productivity",
-    "shortDescription": "Open-source Agent Operating System",
-    "longDescription": "LibreFang is an open-source Agent Operating System \u2014 run, orchestrate, and extend AI agents across every channel from your desktop.",
+    "shortDescription": "BossFang \u2014 Agent Operating System",
+    "longDescription": "BossFang is an Agent Operating System \u2014 run, orchestrate, and extend AI agents across every channel from your desktop.",
     "linux": {
       "deb": {
         "depends": []

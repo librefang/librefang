@@ -2293,8 +2293,16 @@ pub async fn copilot_oauth_poll(
 #[utoipa::path(post, path = "/api/catalog/update", tag = "models", responses((status = 200, description = "Catalog updated", body = crate::types::JsonObject)))]
 pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = state.kernel.config_ref();
-    let mirror = &cfg.registry.registry_mirror;
-    match librefang_kernel::catalog_sync::sync_catalog_to(state.kernel.home_dir(), mirror).await {
+    let mirror = cfg.registry.registry_mirror.clone();
+    let base_url = cfg.registry.base_url.clone();
+    drop(cfg);
+    match librefang_kernel::catalog_sync::sync_catalog_to(
+        state.kernel.home_dir(),
+        &mirror,
+        &base_url,
+    )
+    .await
+    {
         Ok(result) => {
             // Refresh the in-memory catalog so the new models are available immediately
             {

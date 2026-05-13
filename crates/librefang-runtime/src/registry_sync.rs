@@ -12,15 +12,40 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
 
-/// GitHub tarball URL for the registry (no auth required).
+/// GitHub tarball URL for the upstream registry (no auth required).
+///
+/// Used when `RegistryConfig.base_url` is empty (no fork override
+/// configured). Kept as the original `librefang/librefang-registry` so
+/// emergency-rollback by clearing the config field still works without
+/// recompiling.
 const REGISTRY_TARBALL_URL: &str =
     "https://github.com/librefang/librefang-registry/archive/refs/heads/main.tar.gz";
 
-/// Fallback: git clone URL.
+/// Fallback: upstream git clone URL.
 const REGISTRY_REPO: &str = "https://github.com/librefang/librefang-registry.git";
 
-/// Prefix inside the tarball (GitHub convention: `{repo}-{branch}/`).
+/// Prefix inside the upstream tarball (GitHub convention: `{repo}-{branch}/`).
 const TARBALL_PREFIX: &str = "librefang-registry-main/";
+
+/// Resolve `(tarball_url, git_clone_url, tarball_prefix)` for a given
+/// `base_url`. An empty `base_url` falls back to the upstream constants.
+/// A non-empty `base_url` is treated as `https://host/owner/repo` and the
+/// tarball prefix is derived from the URL's last path segment.
+fn resolve_registry_urls(base_url: &str) -> (String, String, String) {
+    if base_url.is_empty() {
+        return (
+            REGISTRY_TARBALL_URL.to_string(),
+            REGISTRY_REPO.to_string(),
+            TARBALL_PREFIX.to_string(),
+        );
+    }
+    let trimmed = base_url.trim_end_matches('/');
+    let tarball = format!("{trimmed}/archive/refs/heads/main.tar.gz");
+    let git = format!("{trimmed}.git");
+    let repo_name = trimmed.rsplit('/').next().unwrap_or("registry");
+    let prefix = format!("{repo_name}-main/");
+    (tarball, git, prefix)
+}
 
 /// Default cache TTL: how long (in seconds) before we re-download the registry.
 /// Callers without access to `KernelConfig` can use this value directly.
@@ -50,13 +75,14 @@ pub fn refresh_registry_checkout(
     home_dir: &Path,
     cache_ttl_secs: u64,
     registry_mirror: &str,
+    base_url: &str,
 ) -> bool {
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let registry_cache = home_dir.join("registry");
 
     if should_refresh(&registry_cache, cache_ttl_secs) {
         // Try git first (faster incremental updates, private fork support)
-        let git_ok = match git_clone_fallback(&registry_cache, registry_mirror) {
+        let git_ok = match git_clone_fallback(&registry_cache, registry_mirror, base_url) {
             Ok(()) => true,
             Err(e) => {
                 tracing::debug!("Git sync unavailable: {e} — trying HTTP download");
@@ -66,7 +92,7 @@ pub fn refresh_registry_checkout(
 
         // Fall back to HTTP tarball if git failed
         if !git_ok {
-            if let Err(e) = download_and_extract(&registry_cache, registry_mirror) {
+            if let Err(e) = download_and_extract(&registry_cache, registry_mirror, base_url) {
                 tracing::warn!("HTTP registry download also failed: {e}");
                 return registry_cache.exists();
             }
@@ -92,13 +118,18 @@ pub fn refresh_registry_checkout(
 /// When non-empty, all GitHub URLs are prefixed with this value (e.g.
 /// `"https://ghproxy.cn"` rewrites `https://github.com/...` to
 /// `https://ghproxy.cn/https://github.com/...`).
-pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64, registry_mirror: &str) -> bool {
+pub fn sync_registry(
+    home_dir: &Path,
+    cache_ttl_secs: u64,
+    registry_mirror: &str,
+    base_url: &str,
+) -> bool {
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let registry_cache = home_dir.join("registry");
 
     if should_refresh(&registry_cache, cache_ttl_secs) {
         // Try git first (faster incremental updates, private fork support)
-        let git_ok = match git_clone_fallback(&registry_cache, registry_mirror) {
+        let git_ok = match git_clone_fallback(&registry_cache, registry_mirror, base_url) {
             Ok(()) => true,
             Err(e) => {
                 tracing::debug!("Git sync unavailable: {e} — trying HTTP download");
@@ -108,7 +139,7 @@ pub fn sync_registry(home_dir: &Path, cache_ttl_secs: u64, registry_mirror: &str
 
         // Fall back to HTTP tarball if git failed
         if !git_ok {
-            if let Err(e) = download_and_extract(&registry_cache, registry_mirror) {
+            if let Err(e) = download_and_extract(&registry_cache, registry_mirror, base_url) {
                 tracing::warn!("HTTP registry download also failed: {e}");
                 if !registry_cache.exists() {
                     return false;
@@ -260,8 +291,10 @@ fn apply_mirror(mirror: &str, url: &str) -> String {
 fn download_and_extract(
     registry_cache: &Path,
     registry_mirror: &str,
+    base_url: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let url = apply_mirror(registry_mirror, REGISTRY_TARBALL_URL);
+    let (tarball_url, _git_url, tarball_prefix) = resolve_registry_urls(base_url);
+    let url = apply_mirror(registry_mirror, &tarball_url);
     tracing::info!("Downloading registry from {url}");
 
     let resp = ureq::get(&url).call()?;
@@ -286,14 +319,14 @@ fn download_and_extract(
     }
     std::fs::create_dir_all(&tmp_dir)?;
 
-    // Extract, stripping the `librefang-registry-main/` prefix
+    // Extract, stripping the `{repo-name}-main/` prefix
     for entry in archive.entries()? {
         let mut entry: tar::Entry<_> = entry?;
         let path = entry.path()?;
         let path_str = path.to_string_lossy();
 
         // Strip the tarball prefix
-        let relative: String = match path_str.strip_prefix(TARBALL_PREFIX) {
+        let relative: String = match path_str.strip_prefix(tarball_prefix.as_str()) {
             Some(r) if !r.is_empty() => r.to_string(),
             _ => continue,
         };
@@ -330,6 +363,7 @@ fn download_and_extract(
 fn git_clone_fallback(
     registry_cache: &Path,
     registry_mirror: &str,
+    base_url: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Attempting git clone fallback");
 
@@ -357,7 +391,8 @@ fn git_clone_fallback(
         if registry_cache.exists() {
             std::fs::remove_dir_all(registry_cache)?;
         }
-        let repo_url = apply_mirror(registry_mirror, REGISTRY_REPO);
+        let (_tarball, git_url, _prefix) = resolve_registry_urls(base_url);
+        let repo_url = apply_mirror(registry_mirror, &git_url);
         let status = Command::new("git")
             .args([
                 "clone",
@@ -401,7 +436,7 @@ pub fn resolve_home_dir_for_tests() -> std::path::PathBuf {
                 .map(|d| d.count() == 0)
                 .unwrap_or(true)
         {
-            sync_registry(&home, DEFAULT_CACHE_TTL_SECS, "");
+            sync_registry(&home, DEFAULT_CACHE_TTL_SECS, "", "");
         }
         home
     })
@@ -641,6 +676,46 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_resolve_registry_urls_empty_base_falls_back_to_upstream() {
+        let (tarball, git, prefix) = super::resolve_registry_urls("");
+        assert_eq!(
+            tarball,
+            "https://github.com/librefang/librefang-registry/archive/refs/heads/main.tar.gz"
+        );
+        assert_eq!(git, "https://github.com/librefang/librefang-registry.git");
+        assert_eq!(prefix, "librefang-registry-main/");
+    }
+
+    #[test]
+    fn test_resolve_registry_urls_custom_base_derives_all_three() {
+        let (tarball, git, prefix) =
+            super::resolve_registry_urls("https://github.com/GQAdonis/librefang-registry");
+        assert_eq!(
+            tarball,
+            "https://github.com/GQAdonis/librefang-registry/archive/refs/heads/main.tar.gz"
+        );
+        assert_eq!(git, "https://github.com/GQAdonis/librefang-registry.git");
+        assert_eq!(prefix, "librefang-registry-main/");
+    }
+
+    #[test]
+    fn test_resolve_registry_urls_strips_trailing_slash() {
+        let (tarball, _, _) =
+            super::resolve_registry_urls("https://github.com/GQAdonis/my-registry/");
+        assert_eq!(
+            tarball,
+            "https://github.com/GQAdonis/my-registry/archive/refs/heads/main.tar.gz"
+        );
+    }
+
+    #[test]
+    fn test_resolve_registry_urls_derives_prefix_from_repo_name() {
+        let (_, _, prefix) =
+            super::resolve_registry_urls("https://github.com/GQAdonis/bossfang-registry");
+        assert_eq!(prefix, "bossfang-registry-main/");
+    }
 
     #[test]
     fn test_needs_sync_when_registry_cache_missing() {

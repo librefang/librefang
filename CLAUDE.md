@@ -295,30 +295,34 @@ Upstream's sky-blue tokens (`#0284c7`, `#38bdf8`, `#0ea5e9`) and dark background
 
 ### After every upstream merge — mandatory steps
 
-Before committing the resolved merge, run all four steps:
+Before committing the resolved merge, run all five steps:
 
 ```bash
-# 1. Fix any upstream sky-blue tokens
+# 1. Fix any upstream sky-blue tokens (idempotent)
 python3 scripts/enforce-branding.py
 
-# 2. Check for new upstream SQLite schema changes and add SurrealDB equivalents
+# 2. Audit — fail-loud if any upstream token survived the fix pass
+python3 scripts/enforce-branding.py --check   # exit 0 = clean
+
+# 3. Check for new upstream SQLite schema changes and add SurrealDB equivalents
 #    grep the diff for CREATE TABLE / ALTER TABLE / ADD COLUMN
 git diff <last-merge-base> upstream/main -- "*.rs" | grep -A5 "CREATE TABLE\|ALTER TABLE\|ADD COLUMN"
 #    For each new table/column: add a .surql migration in
 #    crates/librefang-storage/src/migrations/sql/NNN_<name>.surql
 #    and register it in crates/librefang-storage/src/migrations/mod.rs
 
-# 3. Compile-check
+# 4. Compile-check
 cargo check --workspace --lib
 
-# 4. Verify BossFang-exclusive feature crates still compile
+# 5. Verify BossFang-exclusive feature crates still compile
 cargo check -p librefang-storage -p librefang-uar-spec
 ```
 
-This script scans every `*.ts`, `*.tsx`, `*.css`, and `*.json` file under
-`crates/librefang-api/dashboard/src/` and `crates/librefang-api/static/` for
-upstream sky-blue tokens and replaces them with BossFang ember equivalents. It is
-idempotent — safe to run multiple times.
+The enforcement script scans `*.ts`, `*.tsx`, `*.css`, `*.html`, `*.json`,
+and `*.rs` files under `crates/librefang-api/dashboard/src/`,
+`crates/librefang-api/static/`, `crates/librefang-desktop/frontend/`, and
+`crates/librefang-desktop/src/` — replacing upstream sky-blue tokens with
+BossFang ember equivalents. Both modes are idempotent.
 
 ### Merge conflict resolution rules for branding files
 
@@ -330,6 +334,10 @@ idempotent — safe to run multiple times.
 | New upstream TSX components with inline `style={{ background: "linear-gradient(135deg,#38bdf8,...)" }}` | Take upstream content, then replace sky-blue hex values with ember (`#FF6A3D` for the bright side, `#E04E28` for the muted side). Run `scripts/enforce-branding.py` to catch any you miss. |
 | `dashboard/public/manifest.json` name / short_name | **Always take ours** — must say "BossFang Dashboard" / "BossFang". |
 | `dashboard/index.html` title / meta tags | **Always take ours** — must say "BossFang". |
+| `crates/librefang-desktop/tauri.conf.json` | **Always take ours** — `productName: "BossFang"`, `identifier: "ai.bossfang.desktop"`, descriptions, BossFang `shortDescription` / `longDescription`. Only the version number changes from upstream's release-tag bumps. |
+| `crates/librefang-desktop/tauri.desktop.conf.json` | **Always take ours** — `identifier: "ai.bossfang.desktop"`, updater endpoint pinned at `https://github.com/GQAdonis/librefang/releases/latest/download/latest.json`. Pubkey is upstream-derived; rotate to a BossFang minisign keypair when you start publishing signed updates. |
+| `crates/librefang-desktop/tauri.{ios,android}.conf.json` | **Always take ours** — `identifier: "ai.bossfang.app"`. Mobile bundles use the `.app` suffix (matches Apple/Play conventions). |
+| `crates/librefang-desktop/icons/*` | **Always take ours** — binary icon assets are BossFang-branded; never overwrite from upstream. Regenerate from `docs/branding/boss-libre.png` via `cargo tauri icon docs/branding/boss-libre.png` if a refresh is needed. |
 
 ### What the enforcement script does NOT fix
 
@@ -337,6 +345,12 @@ idempotent — safe to run multiple times.
   box as the logo — those must be manually replaced with `<img src="/boss-libre.png" alt="BossFang" ...>`.
 - The `card-glow` / `glow-text` CSS helpers if upstream rewrites them with
   hardcoded sky-blue rgba — check `index.css` after running the script.
+- Tauri `productName` / `identifier` string flips in any new `tauri.*.conf.json`
+  upstream introduces — the merge-conflict rules above are the source of truth.
+- New hardcoded `github.com/librefang` URLs in upstream Rust code — search with
+  `grep -rn 'github.com/librefang' crates/` after merge and repoint to
+  `github.com/GQAdonis` (the registry has a `[registry] base_url` knob; the
+  dashboard tarball is hardcoded in `webchat.rs`).
 
 ## BossFang-Exclusive Features — Always Preserved After Upstream Merge
 
