@@ -2235,6 +2235,49 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     fn channels_download_max_bytes(&self) -> Option<u64> {
         Some(self.kernel.config_ref().channels.file_download_max_bytes)
     }
+
+    /// Auto-transcribe inbound channel audio (#4975).
+    ///
+    /// Honors the kernel `[media] audio_transcription` flag (default OFF) —
+    /// returns `Ok(None)` when disabled so the bridge falls back to the
+    /// raw-path block. When enabled, materializes a `MediaAttachment` over the
+    /// already-downloaded file and dispatches to `MediaEngine::transcribe_audio`.
+    /// Errors propagate as `Err(reason)` so the bridge can render a
+    /// `[Transcription failed: …]` note instead of dropping the message.
+    async fn transcribe_inbound_audio(
+        &self,
+        path: &std::path::Path,
+        mime_type: &str,
+    ) -> Result<Option<String>, String> {
+        // Default-OFF respect — exit immediately when the operator hasn't
+        // opted in. Cheap config snapshot, no allocations on the cold path.
+        if !self.kernel.config_ref().media.audio_transcription {
+            return Ok(None);
+        }
+
+        // Probe size + reject unsupported MIME bases at the validation
+        // layer (mirrors `/api/uploads` / `/media/transcribe` semantics).
+        // We use `tokio::fs` rather than blocking `std::fs` because this
+        // method is called from inside the channel dispatch task.
+        let size_bytes = match tokio::fs::metadata(path).await {
+            Ok(m) => m.len(),
+            Err(e) => return Err(format!("stat saved audio failed: {e}")),
+        };
+
+        let attachment = librefang_types::media::MediaAttachment {
+            media_type: librefang_types::media::MediaType::Audio,
+            mime_type: mime_type.to_string(),
+            source: librefang_types::media::MediaSource::FilePath {
+                path: path.to_string_lossy().into_owned(),
+            },
+            size_bytes,
+        };
+
+        match self.kernel.media().transcribe_audio(&attachment).await {
+            Ok(result) => Ok(Some(result.description)),
+            Err(reason) => Err(reason),
+        }
+    }
 }
 
 /// Parse a trigger pattern string from chat into a `TriggerPattern`.
