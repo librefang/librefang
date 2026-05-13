@@ -1418,22 +1418,59 @@ fn home_dir() -> Option<std::path::PathBuf> {
 mod tests {
     use super::*;
 
+    /// Spawn a tiny cross-platform child process for the
+    /// `diagnose_stdin_write_failure` tests. POSIX runners can rely on
+    /// `/bin/sh`, but the Windows CI runner does not ship a POSIX shell on
+    /// PATH that round-trips stderr from a single-quoted echo back through
+    /// tokio's piped handle reliably (the test would observe an empty
+    /// stderr capture and trip the "no stderr captured" fallback branch
+    /// instead of the captured-stderr branch). Python 3 is preinstalled
+    /// on every GitHub Actions runner the project supports, so we use a
+    /// single-line `python -c` payload that exits immediately, optionally
+    /// writing a known string to stderr first. This keeps the failure
+    /// mode under test — child dies before reading stdin → caller sees
+    /// `BrokenPipe` on write — identical across all platforms.
+    fn spawn_dying_child(stderr_payload: Option<&str>) -> tokio::process::Child {
+        let script = match stderr_payload {
+            Some(msg) => {
+                // `{msg:?}` writes the payload as a Rust-debug quoted
+                // string, which is also a valid Python string literal for
+                // the ASCII payloads these tests use.
+                format!("import sys; sys.stderr.write({msg:?}); sys.exit(7)")
+            }
+            None => "import sys; sys.exit(0)".to_string(),
+        };
+        // Try `python3` first (canonical on Linux/macOS), fall back to
+        // `python` (the launcher name on the Windows GitHub runners).
+        // Either binary on PATH satisfies the test; spawning a known-good
+        // child avoids the brittle Git-Bash-on-Windows `sh` path that
+        // silently dropped piped stderr on the Test / Windows lane.
+        let build_cmd = |exe: &str| -> tokio::process::Command {
+            let mut cmd = tokio::process::Command::new(exe);
+            cmd.arg("-c").arg(&script);
+            cmd.stdin(std::process::Stdio::piped());
+            cmd.stdout(std::process::Stdio::piped());
+            cmd.stderr(std::process::Stdio::piped());
+            cmd
+        };
+        match build_cmd("python3").spawn() {
+            Ok(child) => child,
+            Err(_) => build_cmd("python")
+                .spawn()
+                .expect("neither python3 nor python is on PATH; install Python 3 to run this test"),
+        }
+    }
+
     /// Pin: when stdin write fails (child exits during init), the error
     /// surface must include any stderr the CLI emitted before death.
     /// Without this the operator gets a bare "Broken pipe" with no clue
     /// whether to re-auth, fix the workspace, or rebuild the binary.
     #[tokio::test]
     async fn diagnose_stdin_write_failure_includes_child_stderr() {
-        // Spawn /bin/sh that prints a recognisable error to stderr and
-        // immediately exits without ever reading stdin → next stdin
-        // write will EPIPE just like a real claude-code init failure.
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c")
-            .arg("echo 'mock cli: auth profile invalid' >&2; exit 7");
-        cmd.stdin(std::process::Stdio::piped());
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-        let mut child = cmd.spawn().expect("spawn mock cli");
+        // Child prints a recognisable error to stderr and immediately
+        // exits without ever reading stdin → next stdin write will EPIPE
+        // just like a real claude-code init failure.
+        let mut child = spawn_dying_child(Some("mock cli: auth profile invalid"));
 
         // Give the child a moment to exit so its stdin pipe is closed.
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -1456,13 +1493,7 @@ mod tests {
     /// auth/cwd/MCP causes rather than just leaking the io::Error.
     #[tokio::test]
     async fn diagnose_stdin_write_failure_falls_back_to_hint_when_silent() {
-        let mut cmd = tokio::process::Command::new("sh");
-        // No stderr output, just immediate exit.
-        cmd.arg("-c").arg("exit 0");
-        cmd.stdin(std::process::Stdio::piped());
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-        let mut child = cmd.spawn().expect("spawn silent child");
+        let mut child = spawn_dying_child(None);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let write_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Broken pipe");
