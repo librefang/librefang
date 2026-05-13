@@ -5,6 +5,137 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
+## [2026.5.12] - 2026-05-12
+
+_95 PRs from 5 contributors since v2026.5.8-beta.10._
+
+### Highlights
+
+- **Workflow Engine** — agents can now start, cancel, and monitor multi-step workflows natively via new tools (`workflow_start`, `workflow_cancel`, `workflow_list`, `workflow_status`), with run history persisted to SQLite, configurable retry backoff, timeouts, and event triggers that fire workflows directly
+- **Multi-Instance Dashboard Management** — manage multiple LibreFang instances from a single dashboard UI
+- **Redesigned Memory Page** — the Memory dashboard is rebuilt around a per-agent rail with tabs, and Auto-Dream settings move there from Settings; proactive memory extraction now supports provider-qualified model IDs and per-agent overrides
+- **Messaging & Channel Improvements** — full P1 parity for reactions, threads, streaming, redaction, edits, and media; channel messages now mirror into inbound-routing sessions; cron/autonomous fires are labeled with `[Scheduled trigger]` in history
+- **Security & Fetch Hardening** — new SSRF-safe `fetch_url_bytes` helper with redirect re-validation, `web_fetch_to_file` for downloading URLs directly to disk, streaming abort on prompt-leak detection, and at-rest token hashing for workflow credentials
+
+### Added
+
+- Defer rate-limit failures + claim verifier (#4754) (@f-liva)
+- Buffer text-only group messages skipped at gating (#4755) (@f-liva)
+- Configurable burst ratio with NaN guard and tests (#4830) (@DaBlitzStein)
+- P1 parity (reactions, threads, streaming, redaction, edit) + media (#4831) (@neo-wanderer)
+- Persist workflow runs to SQLite (#4838) (@DaBlitzStein)
+- Render per-parameter form fields for workflow runs (#4839) (@DaBlitzStein)
+- Separate IMAP and SMTP credentials in EmailConfig (#4841) (@DaBlitzStein)
+- Add bounded SSRF-safe fetch_url_bytes helper (#4846) (@houko)
+- Catalog-driven ReasoningEchoPolicy with substring fallback (#4842) (#4863) (@houko)
+- Multi-instance management from the dashboard (#4837) (#4865) (@houko)
+- Tls_root_ca_path + tls_accept_invalid_certs for self-hosted IMAP (#4877) (#4889) (@houko)
+- [proactive_memory] extraction_model honours provider-qualified ids (#4871, #4870) (#4892) (@houko)
+- Add workflow_list and workflow_status native tools (#4902) (@houko)
+- Add run cancel, total timeout, retry backoff (#4844) (#4906) (@houko)
+- Allow event triggers to fire workflows directly (#4844) (#4909) (@houko)
+- Add workflow_start and workflow_cancel native tools (#4844) (#4910) (@houko)
+- At-rest token hashing, typed errors, pause/resume HTTP endpoints, async POST /run (#4911) (@houko)
+- Accept .oga audio extension in media_transcribe tool (#4919) (@f-liva)
+- Make token burst ratio configurable per agent (#4921) (@DaBlitzStein)
+- Add mcp_disabled field to AgentManifest (#4930) (@houko)
+- Mirror channel_send into inbound-routing session (#4932) (@houko)
+- Web_fetch_to_file — download URLs straight to disk (#4964) (@houko)
+
+### Fixed
+
+- Cache response_url per user to enable per-message replies (#4751) (@f-liva)
+- Mark cron/autonomous fires with [Scheduled trigger] prefix (#4752) (@f-liva)
+- Resilience pass — heartbeat, dedup, crash-safety, sweep race (#4759) (@f-liva)
+- Allow same-eTLD+1 metadata endpoints at discovery (#4665, follow-up to #4779) (#4789) (@neo-wanderer)
+- Channel=current uses main HEAD, not the tag's frozen commit (#4813) (@houko)
+- Switch ollama provider to native Ollama API (#4810) (#4814) (@houko)
+- Release --channel current works without `gh repo set-default` (#4816) (@houko)
+- Channel=current dispatches against main, takes tag via input (#4817) (@houko)
+- Unbreak main clippy on parse_github_owner_repo (#4819) (@houko)
+- Use chrono for config-backup timestamp; drop deprecated libc::time_t (#4820) (@houko)
+- Xcconfig shim for iOS signing; use apple-actions for cert (#4821) (@houko)
+- Unit-fast lane should not error on binary-only crates (#4822) (@houko)
+- Unblock iOS exportArchive + idempotent crates.io publish (#4827) (@houko)
+- Pre-dispatch provider budget gate on all 3 dispatch paths (#4828) (@DaBlitzStein)
+- Classify workflow retry backoff by error type (#4829) (@DaBlitzStein)
+- Pin scheme on Rule 2 eTLD+1 acceptance (supersedes #4789) (#4848) (@houko)
+- Persist workflow runs to SQLite (supersedes #4838) (#4849) (@houko)
+- Case-insensitive retry classifier + honour Retry-After (supersedes #4829) (#4850) (@houko)
+- Snapshot sock at sendOrEdit entry (supersedes #4759) (#4851) (@houko)
+- Pre-dispatch provider budget gate + integration tests (supersedes #4828) (#4852) (@houko)
+- Parse-time validation for default_burst_ratio + dup doc fix (supersedes #4830) (#4853) (@houko)
+- Seed workflow param defaults + clarify {{var}} contract (supersedes #4839) (#4854) (@houko)
+- Test fallback resolver for split email creds + regen schema golden (supersedes #4841) (#4855) (@houko)
+- Round-trip reasoning_content for deepseek-v4-flash tool_calls (#4842) (#4856) (@houko)
+- Drain pipes during wait to avoid >pipe-buffer deadlock (#4857) (@neo-wanderer)
+- Re-validate redirect targets in fetch_url_bytes (security) (#4858) (@houko)
+- Persist Paused state immediately at pause-transition site (#4859) (@houko)
+- Channel-default key mismatch — resolver used Debug format (#4861) (@neo-wanderer)
+- Redirect dashboard login to / instead of /dashboard (#4860) (#4862) (@houko)
+- Persist PUT /api/budget to config.toml + hot-reload + dashboard read (#4797) (#4864) (@houko)
+- Actionable error when stdio MCP runtime is missing (#4836) (#4867) (@houko)
+- Keep iPad portrait on the desktop layout (#4873) (#4880) (@houko)
+- Deliver ApprovalRequested events to channel adapters (#4875) (#4881) (@houko)
+- Typed 429 retry + idempotent txn_id + edit size cap (#4831 follow-up) (#4882) (@houko)
+- Backfill approval_audit.second_factor_used on upgrade (#4874) (#4883) (@houko)
+- Real session summaries via aux LLM + per-agent proactive_memory override (#4869, #4870) (#4885) (@houko)
+- Honour suppression for CLI/local providers + un-suppress on URL reconfigure (#4803) (#4886) (@houko)
+- Raise DEFAULT_MAX_HISTORY_MESSAGES from 40 to 60 (#4891) (@houko)
+- Stop the dashboard 401 spam on initial mount (#4893) (@houko)
+- Make embedding & extraction model fields suggest options instead of being raw text inputs (#4894) (@houko)
+- Switch embedding/extraction model fields to real <select> dropdowns (#4897) (@houko)
+- Recognise known embedding models when provider is Auto-detect (#4900) (@houko)
+- Batch history_fold LLM call + persist rewrites to session (#4866) (#4901) (@houko)
+- Scope `/new` to the calling channel + purge JSONL on delete (#4868) (#4905) (@houko)
+- Eradicate cascade scaffolding leak in agent replies (#4907) (@f-liva)
+- Persist workflow definitions to disk on register/remove (#4920) (@DaBlitzStein)
+- Unblock main coverage — /api/health/detail auth + workflow timeout overlay (#4928) (@houko)
+- Abort streaming on incremental prompt-leak detection (#4931) (@houko)
+- Sweep stale ACP UDS orphan tempfiles on bind (#4933) (@houko)
+- Detect audio MIME via magic bytes / filename (#4934) (@houko)
+- Allow shell_exec read commands against RO workspaces (#4935) (@houko)
+- Memory store alias + peer-scoped /btw read fix + kv-write logs (#4936) (@houko)
+- Per-session model override (#4898) (#4937) (@houko)
+- Close gaps from #4907-#4910/#4920 audit (#4938) (@houko)
+- Unblock Security audit — Next.js patch + tanstack/history GHSA (#4944) (@houko)
+- Align status fields, fix OFP-disabled empty-state (#4945) (@houko)
+- Add missing model_override in Session literal (#4955) (@houko)
+- Exclude cache-read hits from burst limit; sort agent-detail skills (#4957) (@houko)
+
+### Changed
+
+- Move Auto-Dream runtime panel from Settings to Memory page (#4890) (@houko)
+- Fold Auto-Dream into per-agent memory card (#4896) (@houko)
+- Redesign /dashboard/memory around an agent rail + tabs (#4904) (@houko)
+
+<details>
+<summary>Documentation, maintenance, and other internal changes</summary>
+
+### Documentation
+
+- Clarify manifest allowlist vs MCP server registry split (#4845) (@houko)
+- Correct skill_workshop default to OFF in agent guide (#4872) (@neo-wanderer)
+- Require fixing review nits in-PR instead of punting to follow-ups (#4879) (@houko)
+
+### Maintenance
+
+- Clarify, clean up, and loosen the AI agent rules (#4815) (@houko)
+- Regenerate SDKs + rustfmt Rust output (#4887) (#4888) (@houko)
+- End-to-end inbound POST → cache → send round-trip (#4929) (@houko)
+- Bump the cargo-minor-patch group with 14 updates (#4946) (@app/dependabot)
+- Bump opentelemetry from 0.31.0 to 0.32.0 (#4947) (@app/dependabot)
+- Bump r2d2_sqlite from 0.33.0 to 0.34.0 (#4950) (@app/dependabot)
+- Bump pulldown-cmark from 0.10.3 to 0.13.3 (#4951) (@app/dependabot)
+- Bump sysinfo from 0.38.4 to 0.39.1 (#4952) (@app/dependabot)
+
+### Reverted
+
+- Pin opentelemetry to 0.31 (#4947 broke main) (#4953) (@houko)
+
+</details>
+
+
 ## [2026.5.8] - 2026-05-08
 
 _68 PRs from 5 contributors since v2026.5.6-beta.9._
@@ -841,6 +972,8 @@ _338 PRs from 7 contributors since v2026.4.28-beta7._
 
 ### Added
 
+- **New `web_fetch_to_file` tool — fetch a URL straight into a workspace file without round-tripping the body through the model** (#4964). Information-gathering agents (research, ingestion, scraping) previously had two bad options when `web_fetch` returned a body too large to want in context: regenerate it through `file_write` (burning tokens proportional to the body) or lose it. The escape hatch — `shell_exec curl ...` — was blocked under `Allowlist` mode by `contains_shell_metacharacters` (`?`/`&`/`*` in URLs trip the metachar check at `tool_runner.rs:1355-1369`), and a downgrade to `Full` mode also lifts every other shell restriction on that agent — not the trade-off researchers asked for. New built-in `web_fetch_to_file(url, dest_path)` (`crates/librefang-runtime/src/web_fetch_to_file.rs`) streams the response body directly to a workspace-relative path; the agent receives only a short summary line (`Wrote N bytes to ... (sha256:..., content-type: ..., status: ...)`). Same SSRF protection, DNS pinning, and redirect re-validation as `web_fetch` (reuses `WebFetchEngine::pinned_client` and `check_ssrf`, now exposed `pub(crate)`); same taint scans (`check_taint_net_fetch` / outbound text / outbound header) in the dispatch arm; same workspace-jail and read-only named-workspace pre-flight checks as `file_write`. `WebFetchConfig.max_file_bytes` (default 50 MiB) caps download size; per-call `max_bytes` is clamped down to this hard ceiling, never up. Stream-reads via `Response::chunk()` so a server that omits or lies about `Content-Length` cannot push past the cap. Lives in a new module rather than growing `tool_runner.rs`/`agent_loop.rs` (per `crates/librefang-runtime/CLAUDE.md`; both files are slated for #3710 split). Tests: 9 `#[tokio::test]` in `crates/librefang-runtime/tests/web_fetch_to_file_test.rs` (happy path with sha256 + content-type match, `..` rejection, absolute-path-outside-workspace rejection, configured `max_file_bytes` overflow, per-call clamp, SSRF loopback block, HTTP 4xx pass-through, missing required params), plus 5 `clamp_max_bytes` unit tests next to the impl. (@houko)
+
 - **Email channel: `tls_root_ca_path` and `tls_accept_invalid_certs` for self-hosted IMAP behind self-signed / expired certs** (#4877). The IMAP poll path used `RustlsConnector::new_with_native_certs()` with no operator-controlled escape hatch, so a self-hosted IMAP server behind a private CA (or with an expired self-signed cert) failed every poll with `TLS handshake failed: IO error: invalid peer certificate: certificate expired` and the only workaround was renewing the cert. Two new fields on `EmailConfig` cover the two real-world cases: (1) `tls_root_ca_path: Option<String>` — additionally trust certificates from a PEM file on top of the system root store; hostname / expiry / signature / chain validation **stay ON**. This is the recommended path for self-hosted IMAP behind a private CA. Multiple certs in one PEM are supported; missing file, empty file, and garbage non-PEM input each return a distinct error mentioning the path, so operators can locate the typo without reading source. (2) `tls_accept_invalid_certs: bool` (default `false`) — last-resort dev escape hatch that disables ALL certificate validation (hostname, expiry, signature, chain). Implemented as a custom `rustls::client::danger::ServerCertVerifier` that accepts unconditionally; advertises every standard `SignatureScheme` so peers don't filter the (no-op) verification. A WARN log fires on **every** IMAP connect attempt while this is enabled (every poll cycle and every flag-update RPC, ~30s default cadence), so the MITM-vulnerability stays visible in operator logs rather than being noticed once at startup and forgotten. Both knobs flow through new `EmailAdapter::with_tls_root_ca_path` / `with_tls_accept_invalid_certs` builder methods (no breaking change to `EmailAdapter::new`'s 11-arg signature). The TLS connector construction is factored into a single `build_imap_tls_connector` helper used by both `fetch_unseen_emails` and `mark_uids_outcome`, so the two TLS-using sites can never drift. Adds `rustls-pemfile = "2"` as a workspace dep for parsing the user-supplied PEM. Tests in `crates/librefang-channels/src/email.rs`: 7 new — default-validating connector, accept-invalid-certs opt-in, missing CA path (error mentions the path), empty CA file (error mentions "no PEM certificates"), garbage non-PEM file (same path), valid PEM CA loaded from a re-encoded native-store cert (skipped with `eprintln!` rather than failing on minimal CI images without `ca-certificates`), and an `EmailAdapter::with_tls_*` builder smoke test. Closes #4877. (@houko)
 
 - **`[proactive_memory] extraction_model` honours provider-qualified ids** (#4871). Before this change, `crates/librefang-kernel/src/kernel/boot.rs:1325-1328` always routed proactive-memory extraction through `kernel.llm.default_driver`, regardless of what `extraction_model` named — the model string was passed through `strip_provider_prefix` for the *default* provider, then sent to the default driver. So on a deployment with `default_model.provider = "ollama"` and `extraction_model = "anthropic/haiku"`, every extraction call dispatched the Anthropic model name through the Ollama driver and 404'd upstream. Operators were forced to route extraction through whatever provider they happened to have as default, even when that was wildly suboptimal for the extraction workload (e.g., expensive default model burned on every turn's extraction while a cheap haiku/openrouter alternative was just one config edit away). The fix: `extraction_model` now accepts three forms — `provider:model` (consistent with `[llm.auxiliary]` chain spec), `provider/model` (consistent with `aliases.toml` and `default_model` shape), or a bare model name (legacy behaviour, routes to `default_driver`). The provider prefix is only honoured when the LHS is a **registered provider** per the live model catalog (`ModelCatalog::get_provider().is_some()`) — this avoids misparsing OpenRouter-style model ids like `google/gemini-2.5-flash` where `google` isn't a separate provider, so the whole string belongs to the configured default provider verbatim. Colon parsing is attempted first; quirky ollama tag suffixes like `qwen3:4b` fall through to bare because `qwen3` isn't a registered provider. Nested slashes (`openrouter/anthropic/claude-3-5-haiku`) split on the FIRST `/` so the model id keeps the inner slash. When the resolved provider differs from the kernel's default, a fresh driver is built via `drivers::create_driver` with API key, base URL, proxy, request timeout, and MCP bridge config all resolved through the same paths the boot path uses for the primary driver — driver-build failure logs a WARN naming the spec + provider + cause and falls back to NO LLM extractor (proactive memory then uses substring extraction; explicit visible degradation beats silently 404'ing the operator's named provider on every turn). Bare model names continue to route through `default_driver` unchanged — fully backward-compatible. Note: this PR also **closes #4870** — the per-agent `[proactive_memory]` override shipped in #4885 but the original PR's body said "Closes #4870" inline rather than in a recognised GitHub keyword line, so the issue stayed open after merge. Tests: 8 in `librefang-kernel::kernel::boot::extraction_model_tests` (bare model, colon-form known provider, slash-form known provider, slash-form unknown LHS → bare, nested slash form, colon-form unknown LHS → bare, empty sides → bare, colon precedence over slash when both present). Closes #4871. Closes #4870. (@houko)
@@ -850,6 +983,10 @@ _338 PRs from 7 contributors since v2026.4.28-beta7._
 - **Skill workshop — passive after-turn capture of teaching signals** (#3328) (default-OFF; opt in per agent via `[skill_workshop] enabled = true` in `agent.toml`, matching the original #3328 acceptance criteria). New `librefang-kernel::skill_workshop` subsystem. Once enabled, an `AgentLoopEnd` hook (registered alongside `auto_dream` in `set_self_handle`) runs three regex scanners against the latest user message + recent tool history after every non-fork turn and produces draft `CandidateSkill` TOML files under `~/.librefang/skills/pending/<agent_uuid>/<candidate_uuid>.toml`. Three signals: `ExplicitInstruction` ("from now on always …", "every time …"; conversational subjects "I" / "we" / "you" filtered, trigger must sit at sentence-start), `UserCorrection` ("no, do it like …", "actually …"), `RepeatedToolPattern` (same tool sequence ≥ 3 turns, length-1 patterns require ≥ 4). Per-agent config in `agent.toml` `[skill_workshop]`: `enabled` (default false), `auto_capture` (default true), `approval_policy` ("pending" default / "auto"), `review_mode` ("heuristic" default / "threshold_llm" / "none"; `"both"` is a serde alias for `threshold_llm`), `max_pending` (default 20). Once enabled, the conservative knob set is heuristic-only review and pending policy — microseconds of regex per turn plus a few KB written when a candidate lands, no LLM call, no auto-promote. Operators that want LLM refinement opt in via `review_mode = "threshold_llm"`, which routes through a dedicated `AuxTask::SkillWorkshopReview` slot and the cheap-tier provider chain (haiku → gpt-4o-mini → openrouter-haiku); when no cheap-tier credentials are configured the workshop returns `Indeterminate` rather than billing the operator's primary provider, blocking a financial-DoS regression. Approval routes through `evolution::create_skill` (same path as marketplace skills) so the `SkillVerifier::scan_prompt_content` security gate runs at both `save_candidate` and `approve_candidate` — `prompt_context`, `description`, and both 800-char provenance excerpts are scanned at save; Critical hits abort with `SecurityBlocked` before any temp file is written. UUID validation guards every public storage entry point that addresses files by id, so a non-UUID id never reaches `Path::join`. CLI: `librefang skill pending list / show / approve / reject`; HTTP: `GET/POST /api/skills/pending[…]` (auth-gated, `WorkshopError::InvalidId` → 400, not-found → 404, security/conflict → 409); dashboard: `PendingSkillsSection` on the Skills page with Approve / Reject buttons (the section renders nothing while the queue is empty so it doesn't waste page space). Architecture doc at `docs/architecture/skill-workshop.md`. Tests: 56 in `librefang-kernel::skill_workshop` (heuristic / llm_review / storage / candidate / mod) + 13 integration in `librefang-api::skill_workshop_pending_routes_test` (status + side-effect read-back per the project's mandatory pattern, including UUID-validation 400 cases). (@houko)
 
 ### Fixed
+
+- **Prompt-cache hits no longer trip the per-minute burst limit; Anthropic driver normalizes `TokenUsage` to the workspace OpenAI-shape convention** (#4943, #4958). Two coupled issues. (1) `AgentScheduler`'s sliding-window burst guard at `crates/librefang-kernel/src/scheduler.rs:284-290` summed `usage.total()` (= `input_tokens + output_tokens`) into the per-minute window, so an agent with a large stable prompt — e.g. ~50k tokens of MCP tool definitions hitting the prompt cache every turn — would trip `Token burst limit would be exceeded: 411909 + 32128 reserved in last minute (max 240000/min)` despite the model doing almost no new work (provider charges ~0.1x of input rate for cache reads). New `TokenUsage::burst_tokens()` on `librefang-types::message::TokenUsage` returns `input_tokens.saturating_sub(cache_read_input_tokens) + output_tokens`. `record_usage` and `settle_reservation` switch the sliding-window push to `burst_tokens()`; the hourly absolute quota (`tracker.total_tokens` against `max_llm_tokens_per_hour`) continues to use `usage.total()` because that knob is operator-facing "raw tokens per hour" by historical contract — the asymmetry is deliberate (hourly = budget, burst = rate control). (2) For that formula to work on every provider, the workspace needs a single convention for what `input_tokens` represents. `librefang-kernel-metering::estimate_cost_from_rates` had been built on the OpenAI shape (`input_tokens` is the TOTAL prompt count, `cache_read` is a subset), and the cost tests confirm this in the comments (`test_estimate_cost_cache_read_discount`: "1M total input tokens, 500k are cache-read"). But the Anthropic driver was passing through raw API values, which use the opposite convention (`input_tokens` excludes cache, cache buckets reported separately — https://docs.anthropic.com/en/api/messages#response-usage). The result was silent: for every cache-using Anthropic turn `estimate_cost_from_rates`'s `saturating_sub` collapsed `regular_input` to 0, under-billing by the genuine new-input portion — and `budget` gates / dashboard rollups under-counted in the same direction. Anthropic driver now normalizes at the boundary (`convert_response` and the streaming `message_start` handler) by adding `cache_read_input_tokens + cache_creation_input_tokens` into `TokenUsage.input_tokens` so the wire shape downstream consumers see is identical across providers. The pre-existing `estimate_cost_from_rates` is now correct on Anthropic without further change; the new `burst_tokens` is correct on both. `TokenUsage` struct docstring documents the single convention. Tests: 4 in `scheduler::tests` — `test_burst_limit_excludes_cache_read_tokens` (cache-read-heavy turn passes the burst check that previously failed, plus a follow-up cache-creation-heavy turn that still hits the cap because cache writes are inside `input_tokens` and do go through the model), `test_burst_tokens_pure_cache_hit_is_zero_new_work`, `test_burst_tokens_saturates_when_cache_read_exceeds_input` (no panic / no wrap on malformed payloads), `test_burst_tokens_counts_cache_creation` (OpenAI and Anthropic-post-normalization shapes both produce the same `1100` / `1150` expected burst). Closes #4943. Closes #4958. (@houko)
+
+- **Agent detail page sorts skills alphabetically** (#4940 — partial). `renderSkillsTab`, the row-level skills preview (first-3 chips on agent cards), and the detail sidebar `Skills` section in `crates/librefang-api/dashboard/src/pages/AgentsPage.tsx` previously rendered skills in the backend's allowlist order — meaningless to humans scanning a long list. All three sites now `.slice().sort()` before rendering so the same agent's skills appear in the same order in every view. Plain codepoint sort (not `localeCompare`) because skill names are slug-shape ASCII IDs and `localeCompare` would flip ordering under non-en locales (tr-TR dotless-i, etc). The issue's MCP and Channels claims don't apply — those tabs don't exist on the agent detail page (Conversation / Memory / Skills / Schedule / Logs only); commented on the issue to clarify. (@houko)
 
 - **Approval requests now reach channel adapters instead of being kernel-only** (#4875). `BridgeManager::start_approval_listener` (`crates/librefang-channels/src/bridge.rs`) was defined as `pub async fn`, documented as the path that subscribes to `EventPayload::ApprovalRequested` and forwards each request to running channel adapters, but no code in the workspace ever called it — a repo-wide search for `start_approval_listener` returned exactly one hit (the definition). The lone bridge-startup path `start_channel_bridge_with_config` (`crates/librefang-api/src/channel_bridge.rs`) registered adapters and spawned their inbound tasks but never invoked the listener, so an agent attached to a Telegram channel that triggered a tool in `approval.require_approval` produced a pending request visible via `GET /api/approvals?status=pending` and in the dashboard, but **nothing** arrived in the originating chat — no text prompt, no `/approve <id>` hint, no daemon-log entry for delivery. The pre-existing listener body was also a stub: it formatted the notification text but then only called `info!(...)` per adapter (with a `let _ = &msg;` to silence the unused-variable warning) — even if it had been wired up, no `ChannelAdapter::send()` would have fired. Three changes land the actual delivery path: (1) `start_channel_bridge_with_config` now calls `manager.start_approval_listener().await` after the adapter-registration loop, before returning the manager — only when at least one adapter started successfully, so an all-failed bridge does not leak a listener task; lifetime is tied to `BridgeManager::shutdown_tx`, so hot-reload cancels the listener together with the rest of the bridge. (2) The listener body now actually delivers: for each running adapter, it iterates `adapter.notification_recipients()` and calls `adapter.send(user, ChannelContent::Text(msg))`; the `adapters: Vec<Arc<dyn ChannelAdapter>>` parameter is dropped from the signature in favour of `self.adapters.clone()` since the manager already owns the adapter list (the old parameter only existed because the function was never called and the type system had nothing to enforce). Delivery is best-effort per-recipient — `send()` errors log a warning with `adapter`, `request_id`, `recipient` fields and continue to the next user, so a transient failure on one platform does not block the broadcast to the rest. (3) A new `ChannelAdapter::notification_recipients() -> Vec<ChannelUser>` trait method (default empty Vec) exposes each adapter's operator inbox. `TelegramAdapter` overrides it to project `allowed_users` into `ChannelUser`s, filtering out bare `@username` entries because Telegram `sendMessage` requires a numeric `chat_id` and there is no API call that resolves `@username → chat_id` without a prior message from that user (the bot has no way to DM a stranger by handle). Other adapters keep the default empty-Vec impl, which means they silently skip the broadcast rather than `panic!`-ing or fanning out to wrong recipients — group-only adapters that have no concept of an operator DM (Mastodon, Reddit) are correctly handled by the default; configuring per-adapter recipients on Discord / Slack / Signal / WhatsApp / WeChat is a follow-up override that the new trait method already supports without further plumbing. Inline-keyboard delivery for adapters that support it (Telegram inline keyboards, Slack Block Kit, Feishu cards) is also a follow-up — the current payload is plain text with the truncated 8-char approval ID and `/approve <id>` / `/reject <id>` instructions, which is enough to unblock the user-visible "nothing arrives in the chat" symptom. Test coverage in `crates/librefang-channels/tests/bridge_integration_test.rs`: `test_approval_listener_delivers_to_configured_recipients` builds a `BridgeManager` with a mock adapter that overrides `notification_recipients()`, wires a real `tokio::broadcast` event bus through a new `EventBusHandle`, emits an `ApprovalRequested` event, and asserts the adapter received exactly one `send()` carrying the approval id prefix, tool name, and `/approve` / `/reject` hints to the correct recipient; `test_approval_listener_skips_adapter_without_recipients` pins the default-empty-Vec contract so future adapters that forget to override stay silent instead of crashing the listener task. Closes #4875. (@houko)
 

@@ -91,6 +91,7 @@ pub mod tts;
 pub mod web_cache;
 pub mod web_content;
 pub mod web_fetch;
+pub mod web_fetch_to_file;
 pub mod web_search;
 pub mod workspace_context;
 pub mod workspace_sandbox;

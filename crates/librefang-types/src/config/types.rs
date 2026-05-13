@@ -755,6 +755,15 @@ pub struct WebFetchConfig {
     /// Cloud metadata endpoints (169.254.x.x, etc.) remain blocked unconditionally.
     #[serde(default)]
     pub ssrf_allowed_hosts: Vec<String>,
+    /// Maximum bytes a single `web_fetch_to_file` download may write to disk.
+    /// Caps response size before the body reaches the workspace; an agent-supplied
+    /// `max_bytes` parameter is further clamped down to this value, never up.
+    #[serde(default = "default_web_fetch_to_file_max_bytes")]
+    pub max_file_bytes: u64,
+}
+
+fn default_web_fetch_to_file_max_bytes() -> u64 {
+    50 * 1024 * 1024
 }
 
 impl Default for WebFetchConfig {
@@ -765,6 +774,7 @@ impl Default for WebFetchConfig {
             timeout_secs: 30,
             readability: true,
             ssrf_allowed_hosts: vec![],
+            max_file_bytes: default_web_fetch_to_file_max_bytes(),
         }
     }
 }

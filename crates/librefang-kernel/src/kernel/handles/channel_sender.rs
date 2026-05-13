@@ -7,6 +7,72 @@ use librefang_runtime::kernel_handle;
 
 use super::super::LibreFangKernel;
 
+/// Invoke `$mac!(field_ident, "channel_name")` for every channel type in
+/// [`librefang_types::config::ChannelsConfig`].
+///
+/// Both `resolve_channel_owner` (this file) and `resolve_agent_home_channel`
+/// (`messaging.rs`) iterate the same list.  A single source of truth here
+/// means adding a new channel adapter only requires one edit — the compiler
+/// catches any missed call site automatically because the macro must compile
+/// in both contexts.
+///
+/// The `#[macro_export]` attribute makes this available as
+/// `crate::for_each_channel_field!` from anywhere in `librefang-kernel`.
+#[macro_export]
+macro_rules! for_each_channel_field {
+    ($mac:ident) => {
+        // Alphabetical order is mandatory — `resolve_agent_home_channel` uses
+        // first()-match semantics, so non-deterministic ordering across
+        // processes or compilations would silently change which agent wins
+        // when multiple channel instances share a `default_agent`. See
+        // CLAUDE.md "Deterministic prompt ordering".
+        $mac!(bluesky, "bluesky");
+        $mac!(dingtalk, "dingtalk");
+        $mac!(discord, "discord");
+        $mac!(discourse, "discourse");
+        $mac!(email, "email");
+        $mac!(feishu, "feishu");
+        $mac!(flock, "flock");
+        $mac!(gitter, "gitter");
+        $mac!(google_chat, "google_chat");
+        $mac!(gotify, "gotify");
+        $mac!(guilded, "guilded");
+        $mac!(irc, "irc");
+        $mac!(keybase, "keybase");
+        $mac!(line, "line");
+        $mac!(linkedin, "linkedin");
+        $mac!(mastodon, "mastodon");
+        $mac!(matrix, "matrix");
+        $mac!(mattermost, "mattermost");
+        $mac!(messenger, "messenger");
+        $mac!(mumble, "mumble");
+        $mac!(nextcloud, "nextcloud");
+        $mac!(nostr, "nostr");
+        $mac!(ntfy, "ntfy");
+        $mac!(pumble, "pumble");
+        $mac!(qq, "qq");
+        $mac!(reddit, "reddit");
+        $mac!(revolt, "revolt");
+        $mac!(rocketchat, "rocketchat");
+        $mac!(signal, "signal");
+        $mac!(slack, "slack");
+        $mac!(teams, "teams");
+        $mac!(telegram, "telegram");
+        $mac!(threema, "threema");
+        $mac!(twist, "twist");
+        $mac!(twitch, "twitch");
+        $mac!(viber, "viber");
+        $mac!(voice, "voice");
+        $mac!(webex, "webex");
+        $mac!(webhook, "webhook");
+        $mac!(wechat, "wechat");
+        $mac!(wecom, "wecom");
+        $mac!(whatsapp, "whatsapp");
+        $mac!(xmpp, "xmpp");
+        $mac!(zulip, "zulip");
+    };
+}
+
 #[async_trait::async_trait]
 impl kernel_handle::ChannelSender for LibreFangKernel {
     async fn send_channel_message(
@@ -331,5 +397,130 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
             .roster()
             .remove_member(channel, chat_id, user_id);
         Ok(())
+    }
+
+    fn resolve_channel_owner(
+        &self,
+        channel: &str,
+        _chat_id: &str,
+    ) -> Option<librefang_types::agent::AgentId> {
+        let cfg = self.config.load_full();
+        let channels = &cfg.channels;
+
+        // Scan each channel type for the first instance whose `default_agent`
+        // names this channel.  Inverted from `resolve_agent_home_channel`:
+        // channel name → agent name → AgentId.
+        //
+        // `for_each_channel_field!` expands the same exhaustive field list
+        // used by `resolve_agent_home_channel` in messaging.rs so both
+        // functions stay in sync automatically — adding a new channel adapter
+        // requires editing only `for_each_channel_field!`.
+        macro_rules! check {
+            ($field:ident, $channel_name:literal) => {{
+                if channel == $channel_name {
+                    for entry in channels.$field.iter() {
+                        if let Some(agent_name) = entry.default_agent.as_deref() {
+                            if let Some(registry_entry) =
+                                self.agents.registry.find_by_name(agent_name)
+                            {
+                                return Some(registry_entry.id);
+                            }
+                        }
+                    }
+                }
+            }};
+        }
+
+        crate::for_each_channel_field!(check);
+
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Regression guard: `for_each_channel_field!` must expand in strict
+    /// alphabetical (dictionary) order.  `resolve_agent_home_channel` uses
+    /// first-match semantics, so the expansion order determines which agent
+    /// wins when multiple channel instances share a `default_agent`.
+    /// Non-alphabetical order is a silent non-determinism bug.
+    ///
+    /// If you add a new channel, insert it at its alphabetical position both
+    /// in the macro body above AND in `EXPECTED` below — the test will fail
+    /// to compile if the counts diverge, and fail at runtime if the order drifts.
+    #[test]
+    fn for_each_channel_field_macro_uses_dictionary_order() {
+        let mut collected: Vec<&'static str> = Vec::new();
+
+        macro_rules! gather {
+            ($field:ident, $name:literal) => {
+                collected.push($name);
+            };
+        }
+
+        crate::for_each_channel_field!(gather);
+
+        // Hardcoded sorted reference — must match the macro body exactly.
+        const EXPECTED: &[&str] = &[
+            "bluesky",
+            "dingtalk",
+            "discord",
+            "discourse",
+            "email",
+            "feishu",
+            "flock",
+            "gitter",
+            "google_chat",
+            "gotify",
+            "guilded",
+            "irc",
+            "keybase",
+            "line",
+            "linkedin",
+            "mastodon",
+            "matrix",
+            "mattermost",
+            "messenger",
+            "mumble",
+            "nextcloud",
+            "nostr",
+            "ntfy",
+            "pumble",
+            "qq",
+            "reddit",
+            "revolt",
+            "rocketchat",
+            "signal",
+            "slack",
+            "teams",
+            "telegram",
+            "threema",
+            "twist",
+            "twitch",
+            "viber",
+            "voice",
+            "webex",
+            "webhook",
+            "wechat",
+            "wecom",
+            "whatsapp",
+            "xmpp",
+            "zulip",
+        ];
+
+        assert_eq!(
+            collected, EXPECTED,
+            "for_each_channel_field! must expand in strict alphabetical order; \
+             re-sort the macro body in channel_sender.rs if this fails"
+        );
+
+        // Also verify it is already sorted (catches future drift even if
+        // EXPECTED is accidentally updated out of order).
+        let mut sorted = collected.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            collected, sorted,
+            "for_each_channel_field! expansion order is not alphabetically sorted"
+        );
     }
 }

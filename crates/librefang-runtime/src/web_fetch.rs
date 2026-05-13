@@ -24,6 +24,13 @@ impl WebFetchEngine {
         Self { config, cache }
     }
 
+    /// Read-only access to the engine's config.
+    /// Used by sibling modules (e.g. `web_fetch_to_file`) that share the
+    /// SSRF / DNS-pin pipeline but enforce a different size cap.
+    pub(crate) fn config(&self) -> &WebFetchConfig {
+        &self.config
+    }
+
     /// Build a per-request reqwest client pinned to the SSRF-validated IPs.
     ///
     /// Uses the resolved addresses from [`check_ssrf`] to configure DNS
@@ -34,7 +41,7 @@ impl WebFetchEngine {
     /// host could respond with `302 Location: http://169.254.169.254/...`
     /// and reqwest's default policy would silently follow — the DNS pin
     /// only protects the original hostname, not redirect targets.
-    fn pinned_client(&self, resolution: SsrfResolution) -> reqwest::Client {
+    pub(crate) fn pinned_client(&self, resolution: SsrfResolution) -> reqwest::Client {
         let allowed_hosts = self.config.ssrf_allowed_hosts.clone();
         let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() >= 10 {

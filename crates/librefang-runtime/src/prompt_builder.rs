@@ -1070,7 +1070,7 @@ pub fn tool_category(name: &str) -> &'static str {
         "file_read" | "file_write" | "file_list" | "file_delete" | "file_move" | "file_copy"
         | "file_search" => "Files",
 
-        "web_search" | "web_fetch" => "Web",
+        "web_search" | "web_fetch" | "web_fetch_to_file" => "Web",
 
         "browser_navigate" | "browser_click" | "browser_type" | "browser_screenshot"
         | "browser_read_page" | "browser_close" | "browser_scroll" | "browser_wait"
@@ -1115,6 +1115,9 @@ pub fn tool_hint(name: &str) -> &'static str {
         // Web
         "web_search" => "search the web for information",
         "web_fetch" => "fetch a URL and get its content as markdown",
+        "web_fetch_to_file" => {
+            "fetch a URL straight into a workspace file (body never enters context)"
+        }
 
         // Browser
         "browser_navigate" => "open a URL in the browser",

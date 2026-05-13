@@ -723,6 +723,24 @@ pub trait ChannelSender: Send + Sync {
     ) -> Result<(), KernelOpError> {
         Ok(())
     }
+
+    /// Resolve the agent that owns a given `(channel, chat_id)` pair.
+    ///
+    /// Returns the `AgentId` of the agent whose channel config has
+    /// `default_agent` pointing at the named channel instance.  Used by
+    /// `tool_channel_send` to mirror outbound messages into the inbound-
+    /// routing session so the channel-owning agent has context for the
+    /// user's reply.
+    ///
+    /// Returns `None` when no agent is bound to that channel (e.g. in test
+    /// stubs or when the channel has no `default_agent` configured).
+    fn resolve_channel_owner(
+        &self,
+        _channel: &str,
+        _chat_id: &str,
+    ) -> Option<librefang_types::agent::AgentId> {
+        None
+    }
 }
 
 // ============================================================================
@@ -1103,6 +1121,24 @@ pub trait SessionWriter: Send + Sync {
         agent_id: librefang_types::agent::AgentId,
         blocks: Vec<librefang_types::message::ContentBlock>,
     );
+
+    /// Append a single message to an existing session identified by
+    /// `session_id`.  Used by `tool_channel_send` to mirror outbound
+    /// messages into the channel-owner agent's inbound-routing session.
+    ///
+    /// Best-effort: implementations should log a `warn!` on failure rather
+    /// than propagating the error — the platform send already succeeded and
+    /// the caller must not fail the tool call because of a persistence blip.
+    ///
+    /// **Blocking I/O notice** — same caveat as `inject_attachment_blocks`.
+    fn append_to_session(
+        &self,
+        session_id: librefang_types::agent::SessionId,
+        agent_id: librefang_types::agent::AgentId,
+        message: librefang_types::message::Message,
+    ) {
+        let _ = (session_id, agent_id, message);
+    }
 }
 
 // ============================================================================
