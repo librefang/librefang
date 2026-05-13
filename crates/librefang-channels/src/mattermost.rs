@@ -501,6 +501,16 @@ impl ChannelAdapter for MattermostAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the
+    /// Mattermost team ID or server URL identifier) so the bridge approval
+    /// listener builds the same `mattermost:<account_id>` key the router
+    /// stores in `channel_defaults`, scoping ApprovalRequested delivery to
+    /// the team bound to the requesting agent (#5003, follow-up to
+    /// #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -600,6 +610,29 @@ mod tests {
         );
         assert_eq!(adapter.name(), "mattermost");
         assert_eq!(adapter.channel_type(), ChannelType::Mattermost);
+    }
+
+    #[test]
+    fn test_mattermost_account_id_default_none() {
+        let adapter = MattermostAdapter::new(
+            "https://mattermost.example.com".to_string(),
+            "test-token".to_string(),
+            vec![],
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_mattermost_account_id_returns_configured_value() {
+        // #5003: two Mattermost teams / servers must resolve under distinct
+        // `mattermost:<account_id>` keys via the trait override.
+        let adapter = MattermostAdapter::new(
+            "https://mattermost.example.com".to_string(),
+            "test-token".to_string(),
+            vec![],
+        )
+        .with_account_id(Some("team-acme".to_string()));
+        assert_eq!(adapter.account_id(), Some("team-acme"));
     }
 
     #[test]

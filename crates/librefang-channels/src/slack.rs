@@ -816,6 +816,15 @@ impl ChannelAdapter for SlackAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Slack
+    /// workspace / `team_id`) so the bridge approval listener builds the
+    /// same `slack:<account_id>` key the router stores in `channel_defaults`,
+    /// scoping ApprovalRequested delivery to the workspace bound to the
+    /// requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 /// Helper to get Socket Mode WebSocket URL.
@@ -1667,6 +1676,24 @@ mod tests {
         );
         assert_eq!(adapter.name(), "slack");
         assert_eq!(adapter.channel_type(), ChannelType::Slack);
+    }
+
+    #[test]
+    fn test_slack_account_id_default_none() {
+        // Without `with_account_id`, the trait override returns `None`,
+        // matching the bare `<channel_type>` key the bridge stores.
+        let adapter = SlackAdapter::new("xapp-test".to_string(), "xoxb-test".to_string(), vec![]);
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_slack_account_id_returns_configured_value() {
+        // #5003: multi-bot deployments must expose `account_id()` so the
+        // bridge approval listener builds `slack:<team_id>` instead of
+        // bare `slack`.
+        let adapter = SlackAdapter::new("xapp-test".to_string(), "xoxb-test".to_string(), vec![])
+            .with_account_id(Some("T0ACME".to_string()));
+        assert_eq!(adapter.account_id(), Some("T0ACME"));
     }
 
     #[tokio::test]
