@@ -127,13 +127,14 @@ pub fn run_all(ctx: &AuditContext) -> Vec<AuditResult> {
 }
 
 // ---------------------------------------------------------------------------
-// VaultKeyCheck — LIBREFANG_VAULT_KEY must base64-decode to exactly 32 bytes.
+// VaultKeyCheck — BOSSFANG_VAULT_KEY (or legacy LIBREFANG_VAULT_KEY) must
+// base64-decode to exactly 32 bytes.
 //
 // CLAUDE.md "Common Gotchas" calls this out specifically:
 //
-// > LIBREFANG_VAULT_KEY env var must base64-decode to exactly 32 bytes
-// > (use `openssl rand -base64 32` which gives 44 chars). 32 ASCII chars ≠
-// > 32 bytes.
+// > BOSSFANG_VAULT_KEY / LIBREFANG_VAULT_KEY env var must base64-decode
+// > to exactly 32 bytes (use `openssl rand -base64 32` which gives 44
+// > chars). 32 ASCII chars ≠ 32 bytes.
 //
 // People keep tripping on this because the env var "looks 32 chars long"
 // to the eye.
@@ -141,15 +142,28 @@ pub fn run_all(ctx: &AuditContext) -> Vec<AuditResult> {
 
 pub struct VaultKeyCheck;
 
+/// Read the vault key from env, preferring BOSSFANG_VAULT_KEY and
+/// falling back to LIBREFANG_VAULT_KEY. Returns `(value, source_name)`
+/// so the audit output can name which variable was resolved.
+fn vault_key_env() -> Option<(String, &'static str)> {
+    if let Ok(v) = std::env::var("BOSSFANG_VAULT_KEY") {
+        return Some((v, "BOSSFANG_VAULT_KEY"));
+    }
+    if let Ok(v) = std::env::var("LIBREFANG_VAULT_KEY") {
+        return Some((v, "LIBREFANG_VAULT_KEY"));
+    }
+    None
+}
+
 impl AuditCheck for VaultKeyCheck {
     fn run(&self, _ctx: &AuditContext) -> AuditResult {
         const NAME: &str = "vault_key_length";
-        let raw = match std::env::var("LIBREFANG_VAULT_KEY") {
-            Ok(v) => v,
-            Err(_) => {
+        let (raw, source) = match vault_key_env() {
+            Some(pair) => pair,
+            None => {
                 return AuditResult::info(
                     NAME,
-                    "LIBREFANG_VAULT_KEY not set — vault encryption disabled.",
+                    "BOSSFANG_VAULT_KEY / LIBREFANG_VAULT_KEY not set — vault encryption disabled.",
                 );
             }
         };
@@ -160,13 +174,13 @@ impl AuditCheck for VaultKeyCheck {
         match base64::engine::general_purpose::STANDARD.decode(raw.as_bytes()) {
             Err(e) => AuditResult::error(
                 NAME,
-                format!("LIBREFANG_VAULT_KEY is not valid base64: {e}"),
+                format!("{source} is not valid base64: {e}"),
                 Some("Generate one with: openssl rand -base64 32".into()),
             ),
             Ok(bytes) if bytes.len() != 32 => AuditResult::error(
                 NAME,
                 format!(
-                    "LIBREFANG_VAULT_KEY decodes to {} bytes; must be exactly 32. \
+                    "{source} decodes to {} bytes; must be exactly 32. \
                      Note that 32 ASCII characters is NOT 32 bytes after base64 decode.",
                     bytes.len()
                 ),
@@ -174,7 +188,7 @@ impl AuditCheck for VaultKeyCheck {
                     "Generate a fresh 32-byte key: openssl rand -base64 32 (44-char output)".into(),
                 ),
             ),
-            Ok(_) => AuditResult::pass(NAME, "LIBREFANG_VAULT_KEY decodes to 32 bytes."),
+            Ok(_) => AuditResult::pass(NAME, format!("{source} decodes to 32 bytes.")),
         }
     }
 }
@@ -327,18 +341,27 @@ mod tests {
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
-    /// Run a closure with `LIBREFANG_VAULT_KEY` temporarily set to `value`.
-    /// Holds [`env_lock`] for the entire body so concurrent vault-key tests
-    /// (and any other env-var test in this binary) don't race. The original
-    /// value is restored before the lock is released.
+    /// Run a closure with `LIBREFANG_VAULT_KEY` temporarily set to `value`
+    /// AND `BOSSFANG_VAULT_KEY` explicitly cleared. Holds [`env_lock`] for
+    /// the entire body so concurrent vault-key tests (and any other
+    /// env-var test in this binary) don't race. Both originals are
+    /// restored before the lock is released.
+    ///
+    /// BossFang fork: the audit now reads `BOSSFANG_VAULT_KEY` first and
+    /// falls back to `LIBREFANG_VAULT_KEY`. Tests set the legacy name
+    /// (to keep the existing assertions accurate against the
+    /// "{source} ..." messages) and must guarantee no stray
+    /// `BOSSFANG_VAULT_KEY` from the developer's shell wins the lookup.
     fn with_vault_key<F: FnOnce() -> AuditResult>(value: Option<&str>, f: F) -> AuditResult {
         // poison is fine — a panicking sibling test shouldn't make the rest
         // hang or incorrectly skip.
         let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("LIBREFANG_VAULT_KEY").ok();
+        let prev_librefang = std::env::var("LIBREFANG_VAULT_KEY").ok();
+        let prev_bossfang = std::env::var("BOSSFANG_VAULT_KEY").ok();
         // SAFETY: guarded by env_lock() mutex; no concurrent thread reads/writes
-        // LIBREFANG_VAULT_KEY while the lock is held.
+        // either vault-key env var while the lock is held.
         unsafe {
+            std::env::remove_var("BOSSFANG_VAULT_KEY");
             match value {
                 Some(v) => std::env::set_var("LIBREFANG_VAULT_KEY", v),
                 None => std::env::remove_var("LIBREFANG_VAULT_KEY"),
@@ -347,9 +370,13 @@ mod tests {
         let result = f();
         // SAFETY: same as above.
         unsafe {
-            match prev {
+            match prev_librefang {
                 Some(p) => std::env::set_var("LIBREFANG_VAULT_KEY", p),
                 None => std::env::remove_var("LIBREFANG_VAULT_KEY"),
+            }
+            match prev_bossfang {
+                Some(p) => std::env::set_var("BOSSFANG_VAULT_KEY", p),
+                None => std::env::remove_var("BOSSFANG_VAULT_KEY"),
             }
         }
         result

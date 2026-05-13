@@ -424,6 +424,38 @@ surrealdb = { version = "=3.0.5", default-features = false, features = ["kv-rock
 **NEVER** upgrade this without simultaneously updating surreal-memory and UAR git refs.
 Version drift causes duplicate dep link errors that break the entire build.
 
+### 4. Env-var aliases (BOSSFANG_* preferred, LIBREFANG_* fallback)
+
+BossFang adds higher-priority `BOSSFANG_*` aliases for two env vars and leaves the
+matching `LIBREFANG_*` names as fallbacks. The deliberate non-goal: we DO NOT alias
+every `LIBREFANG_*` env var the codebase reads (70+ of them). The merge cost of
+aliasing everything outweighs the benefit, and most of those names are operational
+plumbing nobody types into a shell.
+
+**Aliased today:**
+
+| Primary (new) | Fallback (legacy) | Resolution helper |
+|---|---|---|
+| `BOSSFANG_HOME` | `LIBREFANG_HOME` | `librefang_home()` in `crates/librefang-kernel/src/config.rs:431` |
+| `BOSSFANG_VAULT_KEY` | `LIBREFANG_VAULT_KEY` | `vault_key_from_env()` in `crates/librefang-extensions/src/vault.rs` + `vault_key_env()` in `crates/librefang-cli/src/doctor.rs:148` |
+
+**Resolution order** for both: `BOSSFANG_*` wins if set, `LIBREFANG_*` wins if only the
+legacy is set, otherwise the compiled default applies. Both are checked at the same
+call site (no scattered direct reads).
+
+**Default home directory stays `~/.librefang/`** so existing installations upgrade
+in-place with zero data migration. Renaming the default to `~/.bossfang/` would
+orphan every existing user's config / vault / registry-cache and is deliberately
+deferred. Power users on a fresh install who want the BossFang-flavoured path can
+set `BOSSFANG_HOME=~/.bossfang` and pay the migration cost themselves.
+
+**Function names stay `librefang_home`, `VAULT_KEY_ENV_LEGACY`, etc.** These are
+Layer-Internal Rust identifiers and renaming them explodes upstream-merge conflict
+surface (see the Phase-2 three-layer principle elsewhere in this file).
+
+**To upstream this back to LibreFang**: drop the `BOSSFANG_*` branches from both
+helpers; the function signatures don't change.
+
 ## Git Conventions
 - **Format**: Use conventional commits (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `perf:`, `test:`)
 - **No AI / Claude attribution** in commit messages, PR bodies, or

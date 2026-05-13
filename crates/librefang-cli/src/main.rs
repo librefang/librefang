@@ -2750,10 +2750,14 @@ fn cmd_init(quick: bool) {
         });
     }
 
-    // Sync registry content (downloads to registry/, pre-installs providers/integrations/assistant)
+    // Sync registry content (downloads to registry/, pre-installs providers/integrations/assistant).
+    // PR-A/PR-B (BossFang): sync_registry now takes (registry_mirror, base_url) trailing args.
+    // Empty strings preserve historical CLI-init behaviour — the kernel-boot path is where the
+    // operator-configured RegistryConfig values actually flow in.
     librefang_runtime::registry_sync::sync_registry(
         &librefang_dir,
         librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        "",
         "",
     );
 
@@ -2821,7 +2825,7 @@ fn cmd_init_upgrade() {
 
     // 3. Sync registry (TTL=0 forces refresh regardless of last sync time)
     p.set_message("Syncing registry");
-    if librefang_runtime::registry_sync::sync_registry(&librefang_dir, 0, "") {
+    if librefang_runtime::registry_sync::sync_registry(&librefang_dir, 0, "", "") {
         p.tick(1);
         ui::success("Registry synced");
     } else {
