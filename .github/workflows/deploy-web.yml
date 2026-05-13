@@ -34,7 +34,7 @@ jobs:
       # Pin pnpm explicitly via web/package.json so PATH carries the right
       # version before setup-node's cache pre-step runs.
       - name: Install pnpm (version from web/package.json packageManager)
-        uses: pnpm/action-setup@8912a9102ac27614460f54aedde9e1e7f9aec20d # v6
+        uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6
         with:
           package_json_file: web/package.json
           run_install: false
