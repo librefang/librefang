@@ -4668,15 +4668,16 @@ pub struct RegistryConfig {
     #[serde(default)]
     pub registry_mirror: String,
     /// Full base URL of the registry repository (no trailing slash).
-    /// When non-empty, replaces the built-in upstream default
-    /// (`https://github.com/librefang/librefang-registry`). The tarball
-    /// URL is derived as `{base_url}/archive/refs/heads/main.tar.gz` and
-    /// the git clone URL as `{base_url}.git`. The tarball prefix
-    /// (`{repo-name}-main/`) is derived from the URL's last path segment.
+    /// The tarball URL is derived as
+    /// `{base_url}/archive/refs/heads/main.tar.gz` and the git clone URL
+    /// as `{base_url}.git`. The tarball prefix (`{repo-name}-main/`) is
+    /// derived from the URL's last path segment.
     ///
-    /// Empty string = use the upstream default (for fallback / emergency
-    /// rollback without recompiling).
-    #[serde(default)]
+    /// BossFang fork default: `https://github.com/GQAdonis/librefang-registry`.
+    /// Set to `""` to fall back to the historical upstream constants
+    /// (emergency rollback without recompiling). Set to any other URL
+    /// to point at a custom fork.
+    #[serde(default = "default_registry_base_url")]
     pub base_url: String,
 }
 
@@ -4684,12 +4685,19 @@ fn default_registry_cache_ttl_secs() -> u64 {
     86400
 }
 
+/// BossFang fork: registry comes from GQAdonis/librefang-registry by default.
+/// To upstream this back to LibreFang, change this to return `String::new()`
+/// so the historical upstream URL constants take effect.
+fn default_registry_base_url() -> String {
+    "https://github.com/GQAdonis/librefang-registry".to_string()
+}
+
 impl Default for RegistryConfig {
     fn default() -> Self {
         Self {
             cache_ttl_secs: default_registry_cache_ttl_secs(),
             registry_mirror: String::new(),
-            base_url: String::new(),
+            base_url: default_registry_base_url(),
         }
     }
 }
@@ -8953,5 +8961,34 @@ rule_sets = ["browser_handles", "pii_baseline"]
     fn default_burst_ratio_defaults_to_zero_when_missing() {
         let cfg: BudgetConfig = toml::from_str("").unwrap();
         assert_eq!(cfg.default_burst_ratio, 0.0);
+    }
+
+    // BossFang fork: registry base_url defaults to GQAdonis/librefang-registry.
+    #[test]
+    fn registry_config_default_base_url_points_at_gqadonis_fork() {
+        let cfg = RegistryConfig::default();
+        assert_eq!(
+            cfg.base_url,
+            "https://github.com/GQAdonis/librefang-registry"
+        );
+    }
+
+    #[test]
+    fn registry_config_empty_toml_uses_bossfang_default_base_url() {
+        let cfg: RegistryConfig = toml::from_str("").unwrap();
+        assert_eq!(
+            cfg.base_url,
+            "https://github.com/GQAdonis/librefang-registry",
+            "missing [registry] section in config.toml should still resolve to the BossFang default"
+        );
+    }
+
+    #[test]
+    fn registry_config_explicit_empty_base_url_opts_back_to_upstream_constants() {
+        let cfg: RegistryConfig = toml::from_str("base_url = \"\"").unwrap();
+        assert_eq!(
+            cfg.base_url, "",
+            "explicit empty string is the emergency-rollback signal — registry_sync falls back to upstream constants"
+        );
     }
 }
