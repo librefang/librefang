@@ -158,19 +158,38 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
                     }
                 }
             };
-            let send_message = move |agent_id: librefang_types::agent::AgentId, message: String| {
+            // `session_mode_override` carries `WorkflowStep::session_mode`
+            // (#4834). Threaded through `send_message_full`'s existing
+            // session-mode-override slot so the async-spawn path matches the
+            // synchronous `run_workflow` path in precedence: per-step
+            // override > target agent manifest > Persistent default.
+            let send_message = move |agent_id: librefang_types::agent::AgentId,
+                                     message: String,
+                                     session_mode_override: Option<
+                librefang_types::agent::SessionMode,
+            >| {
                 let k = std::sync::Arc::clone(&k2);
                 async move {
-                    k.send_message(agent_id, &message)
-                        .await
-                        .map(|r| {
-                            (
-                                r.response,
-                                r.total_usage.input_tokens,
-                                r.total_usage.output_tokens,
-                            )
-                        })
-                        .map_err(|e| format!("{e}"))
+                    let handle = k.kernel_handle();
+                    k.send_message_full(
+                        agent_id,
+                        &message,
+                        handle,
+                        None,
+                        None,
+                        session_mode_override,
+                        None,
+                        None,
+                    )
+                    .await
+                    .map(|r| {
+                        (
+                            r.response,
+                            r.total_usage.input_tokens,
+                            r.total_usage.output_tokens,
+                        )
+                    })
+                    .map_err(|e| format!("{e}"))
                 }
             };
             // Don't swallow the result — without a log the agent that

@@ -13,7 +13,7 @@
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use librefang_memory::{WorkflowRunRow, WorkflowStore};
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentId, SessionMode};
 use librefang_types::subagent::SubagentContext;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -238,6 +238,24 @@ pub struct WorkflowStep {
     /// instead of the default sequential/mode-based execution.
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// Per-step override for the target agent's `SessionMode`.
+    ///
+    /// Resolution precedence (per CLAUDE.md): per-step override > target
+    /// agent manifest `session_mode` > kernel default (`Persistent`).
+    ///
+    /// - `Some(Persistent)` — reuse the target registry agent's persistent
+    ///   `(agent, _)` session, even if its manifest defaults to `New`. Used
+    ///   to thread a workflow's step output into an agent's long-running
+    ///   context.
+    /// - `Some(New)` — mint a fresh `SessionId` for this step's invocation,
+    ///   even if the target agent's manifest defaults to `Persistent`. Used
+    ///   to isolate a workflow step from any prior agent state.
+    /// - `None` (default) — defer to the target agent's manifest.
+    ///
+    /// Has no effect when the target agent's module is `wasm:`/`python:`
+    /// (those modules don't use the session abstraction).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_mode: Option<librefang_types::agent::SessionMode>,
 }
 
 fn default_timeout() -> u64 {
@@ -508,6 +526,28 @@ pub struct WorkflowEngine {
     /// on the entry for `run_id` so that retry sleeps can wake up immediately
     /// instead of blocking for the full backoff duration.
     cancel_notify: Arc<DashMap<WorkflowRunId, Arc<tokio::sync::Notify>>>,
+}
+
+/// Format the error returned when a workflow step's `agent_resolver` returns
+/// `None` — i.e. the referenced registry agent does not exist (or, for
+/// `StepAgent::ById`, the UUID is malformed / unregistered).
+///
+/// We surface both the step name and the agent reference the workflow
+/// configured so an operator reading the failure can fix the workflow without
+/// having to map "step X" back to "which agent did that step want". Without
+/// the agent name in the error, the user only knew which step failed — not
+/// which spelling / id mismatch caused it (#4834).
+fn format_missing_agent_error(step_name: &str, agent: &StepAgent) -> String {
+    match agent {
+        StepAgent::ByName { name } => format!(
+            "Registry agent '{name}' not found for workflow step '{step_name}' \
+             (referenced by name; ensure the agent is registered in the kernel)"
+        ),
+        StepAgent::ById { id } => format!(
+            "Registry agent with id '{id}' not found for workflow step '{step_name}' \
+             (referenced by id; check the agent exists and the id is well-formed)"
+        ),
+    }
 }
 
 /// Evaluate a conditional expression against the previous step output.
@@ -1506,26 +1546,33 @@ impl WorkflowEngine {
         cancel_notify: &Arc<DashMap<WorkflowRunId, Arc<tokio::sync::Notify>>>,
     ) -> Result<Option<(String, u64, u64)>, String>
     where
-        F: Fn(AgentId, String) -> Fut,
+        F: Fn(AgentId, String, Option<SessionMode>) -> Fut,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>>,
     {
         let timeout_dur = std::time::Duration::from_secs(step.timeout_secs);
+        let session_mode = step.session_mode;
 
         match &step.error_mode {
             ErrorMode::Fail => {
-                let result = tokio::time::timeout(timeout_dur, send_message(agent_id, prompt))
-                    .await
-                    .map_err(|_| {
-                        format!(
-                            "Step '{}' timed out after {}s",
-                            step.name, step.timeout_secs
-                        )
-                    })?
-                    .map_err(|e| format!("Step '{}' failed: {}", step.name, e))?;
+                let result =
+                    tokio::time::timeout(timeout_dur, send_message(agent_id, prompt, session_mode))
+                        .await
+                        .map_err(|_| {
+                            format!(
+                                "Step '{}' timed out after {}s",
+                                step.name, step.timeout_secs
+                            )
+                        })?
+                        .map_err(|e| format!("Step '{}' failed: {}", step.name, e))?;
                 Ok(Some(result))
             }
             ErrorMode::Skip => {
-                match tokio::time::timeout(timeout_dur, send_message(agent_id, prompt)).await {
+                match tokio::time::timeout(
+                    timeout_dur,
+                    send_message(agent_id, prompt, session_mode),
+                )
+                .await
+                {
                     Ok(Ok(result)) => Ok(Some(result)),
                     Ok(Err(e)) => {
                         warn!("Step '{}' failed (skipping): {e}", step.name);
@@ -1547,8 +1594,11 @@ impl WorkflowEngine {
             } => {
                 let mut last_err = String::new();
                 for attempt in 0..=*max_retries {
-                    match tokio::time::timeout(timeout_dur, send_message(agent_id, prompt.clone()))
-                        .await
+                    match tokio::time::timeout(
+                        timeout_dur,
+                        send_message(agent_id, prompt.clone(), session_mode),
+                    )
+                    .await
                     {
                         Ok(Ok(result)) => return Ok(Some(result)),
                         Ok(Err(e)) => {
@@ -1901,7 +1951,7 @@ impl WorkflowEngine {
         send_message: F,
     ) -> Result<String, ResumeRunError>
     where
-        F: Fn(AgentId, String) -> Fut + Sync,
+        F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
     {
         // Validate state + token, snapshot what we need, flip state back to
@@ -2029,7 +2079,7 @@ impl WorkflowEngine {
         send_message: F,
     ) -> Result<String, String>
     where
-        F: Fn(AgentId, String) -> Fut + Sync,
+        F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
     {
         // Get the run and workflow. Mutate the run's state synchronously
@@ -2146,7 +2196,7 @@ impl WorkflowEngine {
         send_message: &F,
     ) -> Result<String, String>
     where
-        F: Fn(AgentId, String) -> Fut + Sync,
+        F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
     {
         // Resume snapshot: when the run was previously paused, the prior
@@ -2262,7 +2312,7 @@ impl WorkflowEngine {
                     let (agent_id, agent_name, agent_inherit) = match agent_resolver(&step.agent) {
                         Some(v) => v,
                         None => {
-                            let e = format!("Agent not found for step '{}'", step.name);
+                            let e = format_missing_agent_error(&step.name, &step.agent);
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 if !matches!(r.state, WorkflowRunState::Cancelled) {
                                     r.state = WorkflowRunState::Failed;
@@ -2376,7 +2426,8 @@ impl WorkflowEngine {
                             match agent_resolver(&fan_step.agent) {
                                 Some(v) => v,
                                 None => {
-                                    let e = format!("Agent not found for step '{}'", fan_step.name);
+                                    let e =
+                                        format_missing_agent_error(&fan_step.name, &fan_step.agent);
                                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                                         if !matches!(r.state, WorkflowRunState::Cancelled) {
                                             r.state = WorkflowRunState::Failed;
@@ -2406,7 +2457,7 @@ impl WorkflowEngine {
                         step_prompts.push(prompt.clone());
                         futures.push(tokio::time::timeout(
                             timeout_dur,
-                            send_message(agent_id, prompt),
+                            send_message(agent_id, prompt, fan_step.session_mode),
                         ));
                     }
 
@@ -2536,7 +2587,7 @@ impl WorkflowEngine {
 
                     // Condition met — execute like sequential
                     let (agent_id, agent_name, agent_inherit) = agent_resolver(&step.agent)
-                        .ok_or_else(|| format!("Agent not found for step '{}'", step.name))?;
+                        .ok_or_else(|| format_missing_agent_error(&step.name, &step.agent))?;
 
                     let raw_prompt =
                         Self::expand_variables(&step.prompt_template, &current_input, &variables);
@@ -2607,7 +2658,7 @@ impl WorkflowEngine {
                     until,
                 } => {
                     let (agent_id, agent_name, agent_inherit) = agent_resolver(&step.agent)
-                        .ok_or_else(|| format!("Agent not found for step '{}'", step.name))?;
+                        .ok_or_else(|| format_missing_agent_error(&step.name, &step.agent))?;
 
                     let until_lower = until.to_lowercase();
 
@@ -2740,7 +2791,7 @@ impl WorkflowEngine {
         send_message: &F,
     ) -> Result<String, String>
     where
-        F: Fn(AgentId, String) -> Fut + Sync,
+        F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
     {
         // Pause/resume support is sequential-path only in #3335. If a pause
@@ -2827,7 +2878,7 @@ impl WorkflowEngine {
                 }
 
                 let (agent_id, agent_name, _agent_inherit) = agent_resolver(&step.agent)
-                    .ok_or_else(|| format!("Agent not found for step '{}'", step.name))?;
+                    .ok_or_else(|| format_missing_agent_error(&step.name, &step.agent))?;
 
                 let prompt = Self::expand_variables(&step.prompt_template, input, &variables);
                 let prompt_sent = prompt.clone();
@@ -2897,7 +2948,7 @@ impl WorkflowEngine {
                     let dep_failed = step.depends_on.iter().any(|dep| failed_steps.contains(dep));
 
                     let (agent_id, agent_name, _agent_inherit) = agent_resolver(&step.agent)
-                        .ok_or_else(|| format!("Agent not found for step '{}'", step.name))?;
+                        .ok_or_else(|| format_missing_agent_error(&step.name, &step.agent))?;
 
                     step_metas.push((
                         step_idx,
@@ -2937,12 +2988,15 @@ impl WorkflowEngine {
                         let timeout_dur = std::time::Duration::from_secs(step.timeout_secs);
                         let err_mode = step.error_mode.clone();
                         let step_name = step.name.clone();
+                        let step_session_mode = step.session_mode;
 
                         futures.push(Box::pin(async move {
                             let step_start = std::time::Instant::now();
-                            let result =
-                                tokio::time::timeout(timeout_dur, send_message(agent_id, prompt))
-                                    .await;
+                            let result = tokio::time::timeout(
+                                timeout_dur,
+                                send_message(agent_id, prompt, step_session_mode),
+                            )
+                            .await;
                             let step_duration = step_start.elapsed().as_millis() as u64;
                             let r = match result {
                                 Ok(Ok(output)) => Ok(Some(output)),
@@ -3643,6 +3697,7 @@ impl WorkflowTemplateRegistry {
                     output_var: Some(ts.name.clone()),
                     inherit_context: None,
                     depends_on: ts.depends_on.clone(),
+                    session_mode: None,
                 }
             })
             .collect();
@@ -3864,6 +3919,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "summarize".to_string(),
@@ -3877,6 +3933,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
@@ -4005,7 +4062,7 @@ mod tests {
             .await
             .unwrap();
 
-        let sender = |_id: AgentId, msg: String| async move {
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 100u64, 50u64))
         };
 
@@ -4041,6 +4098,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "only-if-error".to_string(),
@@ -4056,6 +4114,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
@@ -4068,8 +4127,9 @@ mod tests {
             .await
             .unwrap();
 
-        let sender =
-            |_id: AgentId, msg: String| async move { Ok((format!("OK: {msg}"), 10u64, 5u64)) };
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
+            Ok((format!("OK: {msg}"), 10u64, 5u64))
+        };
 
         let result = engine.execute_run(run_id, mock_resolver, sender).await;
         assert!(result.is_ok());
@@ -4099,6 +4159,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "only-if-error".to_string(),
@@ -4114,6 +4175,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
@@ -4124,7 +4186,7 @@ mod tests {
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
 
         // This sender returns output containing "ERROR"
-        let sender = |_id: AgentId, _msg: String| async move {
+        let sender = |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
             Ok(("Found an ERROR in the data".to_string(), 10u64, 5u64))
         };
 
@@ -4158,6 +4220,7 @@ mod tests {
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             }],
             created_at: Utc::now(),
             layout: None,
@@ -4168,7 +4231,7 @@ mod tests {
 
         let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let cc = call_count.clone();
-        let sender = move |_id: AgentId, _msg: String| {
+        let sender = move |_id: AgentId, _msg: String, _sm: Option<SessionMode>| {
             let cc = cc.clone();
             async move {
                 let n = cc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -4208,6 +4271,7 @@ mod tests {
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             }],
             created_at: Utc::now(),
             layout: None,
@@ -4216,7 +4280,7 @@ mod tests {
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
 
-        let sender = |_id: AgentId, _msg: String| async move {
+        let sender = |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
             Ok(("iteration output".to_string(), 10u64, 5u64))
         };
 
@@ -4247,6 +4311,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "succeeds".to_string(),
@@ -4260,6 +4325,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
@@ -4271,7 +4337,7 @@ mod tests {
 
         let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let cc = call_count.clone();
-        let sender = move |_id: AgentId, _msg: String| {
+        let sender = move |_id: AgentId, _msg: String, _sm: Option<SessionMode>| {
             let cc = cc.clone();
             async move {
                 let n = cc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -4315,6 +4381,7 @@ mod tests {
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             }],
             created_at: Utc::now(),
             layout: None,
@@ -4325,7 +4392,7 @@ mod tests {
 
         let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let cc = call_count.clone();
-        let sender = move |_id: AgentId, _msg: String| {
+        let sender = move |_id: AgentId, _msg: String, _sm: Option<SessionMode>| {
             let cc = cc.clone();
             async move {
                 let n = cc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -4363,6 +4430,7 @@ mod tests {
                     output_var: Some("first_result".to_string()),
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "transform".to_string(),
@@ -4376,6 +4444,7 @@ mod tests {
                     output_var: Some("second_result".to_string()),
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "combine".to_string(),
@@ -4390,6 +4459,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
@@ -4401,7 +4471,7 @@ mod tests {
 
         let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let cc = call_count.clone();
-        let sender = move |_id: AgentId, msg: String| {
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
             let cc = cc.clone();
             async move {
                 let n = cc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -4441,6 +4511,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "task-b".to_string(),
@@ -4454,6 +4525,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "collect".to_string(),
@@ -4467,6 +4539,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
@@ -4476,8 +4549,9 @@ mod tests {
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
 
-        let sender =
-            |_id: AgentId, msg: String| async move { Ok((format!("Done: {msg}"), 10u64, 5u64)) };
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
+            Ok((format!("Done: {msg}"), 10u64, 5u64))
+        };
 
         let result = engine.execute_run(run_id, mock_resolver, sender).await;
         assert!(result.is_ok());
@@ -4885,7 +4959,7 @@ prompt_template = "do {{x}}"
 
         let received_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
         let rp = received_prompts.clone();
-        let sender = move |_id: AgentId, msg: String| {
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
             let rp = rp.clone();
             async move {
                 rp.lock().unwrap().push(msg.clone());
@@ -4917,7 +4991,7 @@ prompt_template = "do {{x}}"
 
         let received_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
         let rp = received_prompts.clone();
-        let sender = move |_id: AgentId, msg: String| {
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
             let rp = rp.clone();
             async move {
                 rp.lock().unwrap().push(msg.clone());
@@ -4957,6 +5031,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "second".to_string(),
@@ -4970,6 +5045,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: Some(false),
                     depends_on: vec![],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
@@ -4984,7 +5060,7 @@ prompt_template = "do {{x}}"
 
         let received_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
         let rp = received_prompts.clone();
-        let sender = move |_id: AgentId, msg: String| {
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
             let rp = rp.clone();
             async move {
                 rp.lock().unwrap().push(msg.clone());
@@ -5020,6 +5096,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             },
             WorkflowStep {
                 name: "B".to_string(),
@@ -5033,6 +5110,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec!["A".to_string()],
+                session_mode: None,
             },
             WorkflowStep {
                 name: "C".to_string(),
@@ -5046,6 +5124,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec!["B".to_string()],
+                session_mode: None,
             },
         ];
 
@@ -5077,6 +5156,7 @@ prompt_template = "do {{x}}"
                     output_var: Some("a_result".to_string()),
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "B".to_string(),
@@ -5090,6 +5170,7 @@ prompt_template = "do {{x}}"
                     output_var: Some("b_result".to_string()),
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "C".to_string(),
@@ -5104,6 +5185,7 @@ prompt_template = "do {{x}}"
                     // Explicitly disable context for this step
                     inherit_context: Some(false),
                     depends_on: vec!["A".to_string(), "B".to_string()],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
@@ -5115,7 +5197,7 @@ prompt_template = "do {{x}}"
 
         let received_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
         let rp = received_prompts.clone();
-        let sender = move |_id: AgentId, msg: String| {
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
             let rp = rp.clone();
             async move {
                 rp.lock().unwrap().push(msg.clone());
@@ -5146,6 +5228,7 @@ prompt_template = "do {{x}}"
             output_var: None,
             inherit_context: None,
             depends_on: vec![],
+            session_mode: None,
         };
         let result = WorkflowEngine::build_context_prompt("hello", &step, 0, "wf", &[], true);
         // No previous results => no preamble
@@ -5166,6 +5249,7 @@ prompt_template = "do {{x}}"
             output_var: None,
             inherit_context: None,
             depends_on: vec![],
+            session_mode: None,
         };
         let results = vec![StepResult {
             step_name: "s1".to_string(),
@@ -5205,6 +5289,7 @@ prompt_template = "do {{x}}"
             output_var: None,
             inherit_context: None,
             depends_on: vec![],
+            session_mode: None,
         };
         let results = vec![StepResult {
             step_name: "s1".to_string(),
@@ -5262,6 +5347,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             },
             WorkflowStep {
                 name: "B".to_string(),
@@ -5275,6 +5361,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             },
             WorkflowStep {
                 name: "C".to_string(),
@@ -5288,6 +5375,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec!["A".to_string(), "B".to_string()],
+                session_mode: None,
             },
         ])
         .unwrap();
@@ -5312,6 +5400,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec!["B".to_string()],
+                session_mode: None,
             },
             WorkflowStep {
                 name: "B".to_string(),
@@ -5325,6 +5414,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec!["A".to_string()],
+                session_mode: None,
             },
         ];
 
@@ -5352,6 +5442,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "B".to_string(),
@@ -5365,6 +5456,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "C".to_string(),
@@ -5378,6 +5470,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec!["A".to_string(), "B".to_string()],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
@@ -5416,6 +5509,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "B".to_string(),
@@ -5429,6 +5523,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec!["A".to_string()],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
@@ -5440,7 +5535,7 @@ prompt_template = "do {{x}}"
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
 
         // Sender always fails
-        let sender = |_id: AgentId, _msg: String| async move {
+        let sender = |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
             Err::<(String, u64, u64), String>("simulated failure".to_string())
         };
 
@@ -5842,7 +5937,7 @@ prompt_template = "do {{x}}"
         let captured_for_sender = Arc::clone(&captured_token);
         let pause_for_sender = Arc::clone(&pause_requested);
 
-        let sender = move |_id: AgentId, msg: String| {
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
             let engine = Arc::clone(&engine_for_sender);
             let captured = Arc::clone(&captured_for_sender);
             let pause_flag = Arc::clone(&pause_for_sender);
@@ -5888,7 +5983,7 @@ prompt_template = "do {{x}}"
             .expect("sender should have captured a token");
 
         // Resume: replay from saved snapshot, executing the remaining step.
-        let sender_resume = |_id: AgentId, msg: String| async move {
+        let sender_resume = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 100_u64, 50_u64))
         };
         let result = engine
@@ -5924,7 +6019,7 @@ prompt_template = "do {{x}}"
             .pause_run(run_id, "before-start pause")
             .await
             .unwrap();
-        let sender = |_id: AgentId, msg: String| async move {
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         engine
@@ -5937,7 +6032,7 @@ prompt_template = "do {{x}}"
 
         let bogus_token = Uuid::new_v4();
         assert_ne!(bogus_token, real_token);
-        let sender2 = |_id: AgentId, msg: String| async move {
+        let sender2 = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         let err = engine
@@ -5960,7 +6055,7 @@ prompt_template = "do {{x}}"
         let wf_id = engine.register(test_workflow()).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
         // No pause requested — run is in Pending.
-        let sender = |_id: AgentId, msg: String| async move {
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         let err = engine
@@ -5992,7 +6087,7 @@ prompt_template = "do {{x}}"
                 .await
                 .unwrap();
             original_hash = WorkflowEngine::hash_resume_token(&plaintext_token);
-            let sender = |_id: AgentId, msg: String| async move {
+            let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
                 Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
             };
             engine
@@ -6110,6 +6205,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "b".into(),
@@ -6121,6 +6217,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec!["a".into()],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
@@ -6133,7 +6230,7 @@ prompt_template = "do {{x}}"
         // Lodge a pause request *before* execute_run — DAG executor must
         // refuse cleanly rather than silently dropping the request.
         let _ = engine.pause_run(run_id, "dag pause").await.unwrap();
-        let sender = |_id: AgentId, msg: String| async move {
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         let err = engine
@@ -6206,14 +6303,14 @@ prompt_template = "do {{x}}"
         // Pause-before-execute → loop pauses at step 0 → resume runs
         // the workflow to completion.
         let token = engine.pause_run(run_id, "before-start").await.unwrap();
-        let sender = |_id: AgentId, msg: String| async move {
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         engine
             .execute_run(run_id, mock_resolver, sender)
             .await
             .unwrap();
-        let sender2 = |_id: AgentId, msg: String| async move {
+        let sender2 = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         engine
@@ -6225,7 +6322,7 @@ prompt_template = "do {{x}}"
         // must error rather than silently re-running the workflow.
         let run = engine.get_run(run_id).await.unwrap();
         assert!(matches!(run.state, WorkflowRunState::Completed));
-        let sender3 = |_id: AgentId, msg: String| async move {
+        let sender3 = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         let err = engine
@@ -6252,7 +6349,7 @@ prompt_template = "do {{x}}"
 
         // Run is Pending — pause is lodged before any step has executed.
         let token = engine.pause_run(run_id, "pre-start").await.unwrap();
-        let sender = |_id: AgentId, msg: String| async move {
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         engine
@@ -6298,8 +6395,9 @@ prompt_template = "do {{x}}"
         let wf_id = engine.register(test_workflow()).await;
         let run_id = engine.create_run(wf_id, "x".to_string()).await.unwrap();
         let token = engine.pause_run(run_id, "atomic-take").await.unwrap();
-        let sender =
-            |_id: AgentId, msg: String| async move { Ok((format!("R:{msg}"), 1_u64, 1_u64)) };
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
+            Ok((format!("R:{msg}"), 1_u64, 1_u64))
+        };
         engine
             .execute_run(run_id, mock_resolver, sender)
             .await
@@ -6544,6 +6642,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "step2".to_string(),
@@ -6557,6 +6656,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "step3".to_string(),
@@ -6570,6 +6670,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
@@ -6588,23 +6689,27 @@ prompt_template = "do {{x}}"
         // Spawn execute_run so cancel can race it.
         let handle = tokio::spawn(async move {
             engine_exec
-                .execute_run(run_id, mock_resolver, move |_id: AgentId, _msg: String| {
-                    let gate = gate.clone();
-                    let s1_done = s1_done.clone();
-                    let counter = counter.clone();
-                    async move {
-                        let call = counter.fetch_add(1, Ordering::SeqCst);
-                        if call == 0 {
-                            // step 1: return immediately, signal the driver.
-                            s1_done.notify_one();
-                            Ok(("step1_done".to_string(), 1u64, 1u64))
-                        } else {
-                            // step 2 (or 3): block until the gate opens.
-                            gate.notified().await;
-                            Ok(("step_done".to_string(), 1u64, 1u64))
+                .execute_run(
+                    run_id,
+                    mock_resolver,
+                    move |_id: AgentId, _msg: String, _sm: Option<SessionMode>| {
+                        let gate = gate.clone();
+                        let s1_done = s1_done.clone();
+                        let counter = counter.clone();
+                        async move {
+                            let call = counter.fetch_add(1, Ordering::SeqCst);
+                            if call == 0 {
+                                // step 1: return immediately, signal the driver.
+                                s1_done.notify_one();
+                                Ok(("step1_done".to_string(), 1u64, 1u64))
+                            } else {
+                                // step 2 (or 3): block until the gate opens.
+                                gate.notified().await;
+                                Ok(("step_done".to_string(), 1u64, 1u64))
+                            }
                         }
-                    }
-                })
+                    },
+                )
                 .await
         });
 
@@ -6676,6 +6781,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             }],
             created_at: Utc::now(),
             layout: None,
@@ -6687,11 +6793,14 @@ prompt_template = "do {{x}}"
 
         // execute_run will tokio::time::timeout(1s, inner_fut). The sender
         // sleeps for 3s. We advance time by 2s to fire the timeout.
-        let exec_fut =
-            engine.execute_run(run_id, mock_resolver, |_id: AgentId, _msg: String| async {
+        let exec_fut = engine.execute_run(
+            run_id,
+            mock_resolver,
+            |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 Ok(("done".to_string(), 0u64, 0u64))
-            });
+            },
+        );
 
         // Drive execute_run and advance time concurrently. With time paused
         // the sleep inside the sender won't advance unless we explicitly
@@ -6828,6 +6937,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             }],
             created_at: Utc::now(),
             layout: None,
@@ -6842,9 +6952,13 @@ prompt_template = "do {{x}}"
         // sleep (30s) after the first attempt.
         let handle = tokio::spawn(async move {
             engine_exec
-                .execute_run(run_id, mock_resolver, |_id: AgentId, _msg: String| async {
-                    Err("forced failure".to_string())
-                })
+                .execute_run(
+                    run_id,
+                    mock_resolver,
+                    |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async {
+                        Err("forced failure".to_string())
+                    },
+                )
                 .await
         });
 
@@ -6909,6 +7023,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             }],
             created_at: Utc::now(),
             layout: None,

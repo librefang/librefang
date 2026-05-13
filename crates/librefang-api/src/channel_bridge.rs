@@ -1158,11 +1158,15 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                         Some((entry.id, entry.name.clone(), inherit))
                     }
                 },
-                |agent_id, message| {
+                |agent_id, message, session_mode_override| {
                     let k = kernel.clone();
                     async move {
                         let result = k
-                            .send_message(agent_id, &message)
+                            .send_message_with_session_mode(
+                                agent_id,
+                                &message,
+                                session_mode_override,
+                            )
                             .await
                             .map_err(|e| format!("{e}"))?;
                         Ok((

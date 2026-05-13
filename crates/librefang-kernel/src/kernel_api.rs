@@ -273,6 +273,12 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         message: &str,
         sender_context: Option<&librefang_channels::types::SenderContext>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
+    async fn send_message_with_session_mode(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        session_mode_override: Option<librefang_types::agent::SessionMode>,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
 
     // ====================================================================
     // Hands
@@ -881,6 +887,14 @@ impl KernelApi for LibreFangKernel {
         sender_context: Option<&librefang_channels::types::SenderContext>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
         Self::send_message_ephemeral(self, agent_id, message, sender_context).await
+    }
+    async fn send_message_with_session_mode(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        session_mode_override: Option<librefang_types::agent::SessionMode>,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
+        Self::send_message_with_session_mode(self, agent_id, message, session_mode_override).await
     }
 
     // -- Hands --
