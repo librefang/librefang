@@ -1477,11 +1477,14 @@ impl ChannelBridgeHandle for EventBusHandle {
 
 /// Mock adapter that overrides `notification_recipients()` to expose a
 /// configured operator user, mirroring how `TelegramAdapter` exposes its
-/// `allowed_users`.
+/// `allowed_users`. Optionally carries an `account_id` so the bridge's
+/// approval scoping (#4985) can resolve the right router channel key for
+/// multi-bot configurations.
 struct NotifyingAdapter {
     name: String,
     recipients: Vec<ChannelUser>,
     sent: Arc<Mutex<Vec<(String, String)>>>,
+    account_id: Option<String>,
 }
 
 impl NotifyingAdapter {
@@ -1490,6 +1493,16 @@ impl NotifyingAdapter {
             name: name.to_string(),
             recipients,
             sent: Arc::new(Mutex::new(Vec::new())),
+            account_id: None,
+        })
+    }
+
+    fn with_account(name: &str, account_id: &str, recipients: Vec<ChannelUser>) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.to_string(),
+            recipients,
+            sent: Arc::new(Mutex::new(Vec::new())),
+            account_id: Some(account_id.to_string()),
         })
     }
 
@@ -1543,6 +1556,10 @@ impl ChannelAdapter for NotifyingAdapter {
     fn notification_recipients(&self) -> Vec<ChannelUser> {
         self.recipients.clone()
     }
+
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 /// End-to-end check: with the listener wired up, an `ApprovalRequested`
@@ -1554,7 +1571,12 @@ async fn test_approval_listener_delivers_to_configured_recipients() {
 
     let (handle, event_tx) = EventBusHandle::new();
     let handle = Arc::new(handle);
-    let router = Arc::new(AgentRouter::new());
+    let agent_id = AgentId::new();
+    // #4985: bind the channel default to the requesting agent so the scoping
+    // check in the listener allows delivery through this adapter.
+    let router = AgentRouter::new();
+    router.set_channel_default("telegram".to_string(), agent_id);
+    let router = Arc::new(router);
     let adapter = NotifyingAdapter::new(
         "telegram-mock",
         vec![ChannelUser {
@@ -1579,7 +1601,7 @@ async fn test_approval_listener_delivers_to_configured_recipients() {
 
     let approval = ApprovalRequestedEvent {
         request_id: "abcdef0123456789".to_string(),
-        agent_id: "agent-7".to_string(),
+        agent_id: agent_id.0.to_string(),
         tool_name: "shell_exec".to_string(),
         description: "rm -rf /tmp/foo".to_string(),
         risk_level: "high".to_string(),
@@ -1627,7 +1649,10 @@ async fn test_approval_listener_skips_adapter_without_recipients() {
 
     let (handle, event_tx) = EventBusHandle::new();
     let handle = Arc::new(handle);
-    let router = Arc::new(AgentRouter::new());
+    let agent_id = AgentId::new();
+    let router = AgentRouter::new();
+    router.set_channel_default("telegram".to_string(), agent_id);
+    let router = Arc::new(router);
     let adapter = NotifyingAdapter::new("telegram-no-users", Vec::new());
     let adapter_ref = adapter.clone();
 
@@ -1646,7 +1671,7 @@ async fn test_approval_listener_skips_adapter_without_recipients() {
             EventTarget::System,
             EventPayload::ApprovalRequested(ApprovalRequestedEvent {
                 request_id: "deadbeef".to_string(),
-                agent_id: "agent-1".to_string(),
+                agent_id: agent_id.0.to_string(),
                 tool_name: "shell_exec".to_string(),
                 description: "ls".to_string(),
                 risk_level: "low".to_string(),
@@ -1662,6 +1687,227 @@ async fn test_approval_listener_skips_adapter_without_recipients() {
     assert!(
         adapter_ref.get_sent().is_empty(),
         "adapter with no recipients must not receive notifications, got: {:?}",
+        adapter_ref.get_sent()
+    );
+
+    manager.stop().await;
+}
+
+/// #4985 regression guard.
+///
+/// Before this fix, every `ApprovalRequested` event was broadcast to every
+/// running adapter's notification recipients, regardless of which agent
+/// triggered it — so a tool approval from agent A leaked into the bot/chat
+/// of unrelated agent B. The fix scopes delivery through the router's
+/// per-channel agent binding.
+///
+/// This test wires two adapters bound to two different agents via
+/// `AgentRouter::set_channel_default` on account-qualified channel keys
+/// (`telegram:bot-a` and `telegram:bot-b`), emits an approval for agent A,
+/// and asserts that only adapter A's recipient received the notification.
+#[tokio::test]
+async fn test_approval_listener_scopes_delivery_to_requesting_agent_adapter() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+
+    let agent_a = AgentId::new();
+    let agent_b = AgentId::new();
+
+    // Two Telegram bots in the same daemon, each bound to a different agent
+    // via account-qualified channel keys — the same shape
+    // channel_bridge.rs uses for multi-bot Telegram configs.
+    let router = AgentRouter::new();
+    router.set_channel_default("telegram:bot-a".to_string(), agent_a);
+    router.set_channel_default("telegram:bot-b".to_string(), agent_b);
+    let router = Arc::new(router);
+
+    let adapter_a = NotifyingAdapter::with_account(
+        "telegram",
+        "bot-a",
+        vec![ChannelUser {
+            platform_id: "user-a".to_string(),
+            display_name: String::new(),
+            librefang_user: None,
+        }],
+    );
+    let adapter_b = NotifyingAdapter::with_account(
+        "telegram",
+        "bot-b",
+        vec![ChannelUser {
+            platform_id: "user-b".to_string(),
+            display_name: String::new(),
+            librefang_user: None,
+        }],
+    );
+    let adapter_a_ref = adapter_a.clone();
+    let adapter_b_ref = adapter_b.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter_a.clone()).await.unwrap();
+    manager.start_adapter(adapter_b.clone()).await.unwrap();
+    manager.start_approval_listener().await;
+
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    // Emit an approval triggered by agent A only.
+    event_tx
+        .send(Arc::new(Event::new(
+            agent_a,
+            EventTarget::System,
+            EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                request_id: "abcdef0123456789".to_string(),
+                agent_id: agent_a.0.to_string(),
+                tool_name: "shell_exec".to_string(),
+                description: "rm -rf /tmp/foo".to_string(),
+                risk_level: "high".to_string(),
+            }),
+        )))
+        .expect("broadcast send");
+
+    wait_until("approval delivered to adapter A", || {
+        !adapter_a_ref.get_sent().is_empty()
+    })
+    .await;
+
+    // Give the listener some additional time to (incorrectly) deliver to
+    // adapter B before asserting the negative. 100ms is well above the
+    // in-process dispatch latency.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let sent_a = adapter_a_ref.get_sent();
+    let sent_b = adapter_b_ref.get_sent();
+
+    assert_eq!(
+        sent_a.len(),
+        1,
+        "adapter bound to requesting agent should receive exactly one approval notification, got: {sent_a:?}"
+    );
+    assert_eq!(
+        sent_a[0].0, "user-a",
+        "approval should land in adapter A's configured recipient"
+    );
+    assert!(
+        sent_b.is_empty(),
+        "#4985: adapter bound to a DIFFERENT agent must NOT receive the approval notification, got: {sent_b:?}"
+    );
+
+    manager.stop().await;
+}
+
+/// #4985 follow-up: an adapter with no router binding (no
+/// `channel_default` set for its channel key) is suppressed rather than
+/// leaked to. Pre-fix code would have broadcast to it; the post-fix
+/// listener treats "no bound agent" as "I cannot scope this safely, drop".
+#[tokio::test]
+async fn test_approval_listener_skips_unbound_adapter() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+    let agent_id = AgentId::new();
+
+    // Router has no channel_default for "telegram" — the adapter is
+    // effectively unbound.
+    let router = Arc::new(AgentRouter::new());
+
+    let adapter = NotifyingAdapter::new(
+        "telegram-unbound",
+        vec![ChannelUser {
+            platform_id: "operator".to_string(),
+            display_name: String::new(),
+            librefang_user: None,
+        }],
+    );
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+    manager.start_approval_listener().await;
+
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(Event::new(
+            agent_id,
+            EventTarget::System,
+            EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                request_id: "feedface".to_string(),
+                agent_id: agent_id.0.to_string(),
+                tool_name: "shell_exec".to_string(),
+                description: "ls".to_string(),
+                risk_level: "low".to_string(),
+            }),
+        )))
+        .expect("broadcast send");
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        adapter_ref.get_sent().is_empty(),
+        "unbound adapter must not receive approval notifications, got: {:?}",
+        adapter_ref.get_sent()
+    );
+
+    manager.stop().await;
+}
+
+/// Defense-in-depth: a malformed `agent_id` on the event drops the
+/// notification rather than reverting to the pre-fix broadcast.
+#[tokio::test]
+async fn test_approval_listener_drops_malformed_agent_id() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+    let agent_id = AgentId::new();
+    let router = AgentRouter::new();
+    router.set_channel_default("telegram".to_string(), agent_id);
+    let router = Arc::new(router);
+
+    let adapter = NotifyingAdapter::new(
+        "telegram-mock",
+        vec![ChannelUser {
+            platform_id: "555".to_string(),
+            display_name: String::new(),
+            librefang_user: None,
+        }],
+    );
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+    manager.start_approval_listener().await;
+
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(Event::new(
+            AgentId::new(),
+            EventTarget::System,
+            EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                request_id: "abcdef0123456789".to_string(),
+                agent_id: "not-a-uuid".to_string(),
+                tool_name: "shell_exec".to_string(),
+                description: "rm -rf /tmp/foo".to_string(),
+                risk_level: "high".to_string(),
+            }),
+        )))
+        .expect("broadcast send");
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        adapter_ref.get_sent().is_empty(),
+        "malformed agent_id must drop the notification rather than broadcast, got: {:?}",
         adapter_ref.get_sent()
     );
 

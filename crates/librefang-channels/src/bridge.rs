@@ -1420,6 +1420,7 @@ impl BridgeManager {
         let mut shutdown = self.shutdown_rx.clone();
         let handle = self.handle.clone();
         let adapters = self.adapters.clone();
+        let router = self.router.clone();
 
         let task = tokio::spawn(async move {
             loop {
@@ -1441,6 +1442,26 @@ impl BridgeManager {
                         match result {
                             Ok(event) => {
                                 if let librefang_types::event::EventPayload::ApprovalRequested(approval) = &event.payload {
+                                    // Parse the requesting agent's UUID once.
+                                    // The event ships `agent_id` as a String for
+                                    // wire stability; the router stores `AgentId`
+                                    // (UUID-wrapped). A malformed value here
+                                    // means we cannot scope safely — drop the
+                                    // event rather than fall back to the pre-fix
+                                    // broadcast behaviour (#4985).
+                                    let requesting_agent = match uuid::Uuid::parse_str(&approval.agent_id) {
+                                        Ok(u) => AgentId(u),
+                                        Err(e) => {
+                                            warn!(
+                                                request_id = %approval.request_id,
+                                                agent_id = %approval.agent_id,
+                                                error = %e,
+                                                "ApprovalRequested.agent_id is not a valid UUID — dropping notification (cannot scope to bound adapter)"
+                                            );
+                                            continue;
+                                        }
+                                    };
+
                                     let short_id = &approval.request_id[..8.min(approval.request_id.len())];
                                     let msg = format!(
                                         "Approval required for agent {}\n\
@@ -1455,6 +1476,54 @@ impl BridgeManager {
                                     );
 
                                     for adapter in &adapters {
+                                        // #4985: scope delivery to adapters
+                                        // bound to the requesting agent. We
+                                        // build the same channel key the
+                                        // bridge boot sets when populating
+                                        // `channel_defaults` — bare
+                                        // `<channel_type>` for single-bot
+                                        // adapters, account-qualified
+                                        // `<channel_type>:<account_id>` for
+                                        // multi-bot adapters. We try the
+                                        // account-qualified key first and
+                                        // fall back to the bare key, matching
+                                        // the resolver's own precedence
+                                        // (router::resolve_with_context).
+                                        let channel_type = adapter.channel_type();
+                                        let ct_str = channel_type_str(&channel_type);
+                                        let bound_agent = adapter
+                                            .account_id()
+                                            .and_then(|aid| router.channel_default(&format!("{ct_str}:{aid}")))
+                                            .or_else(|| router.channel_default(ct_str));
+
+                                        match bound_agent {
+                                            Some(bound) if bound == requesting_agent => {}
+                                            Some(_) => {
+                                                debug!(
+                                                    adapter = adapter.name(),
+                                                    account_id = adapter.account_id().unwrap_or(""),
+                                                    request_id = %approval.request_id,
+                                                    requesting_agent = %requesting_agent,
+                                                    "Adapter bound to a different agent — skipping approval broadcast"
+                                                );
+                                                continue;
+                                            }
+                                            None => {
+                                                // No default agent on this
+                                                // channel = no bound recipient
+                                                // we can attribute the
+                                                // approval to. Suppress rather
+                                                // than leak (#4985).
+                                                debug!(
+                                                    adapter = adapter.name(),
+                                                    account_id = adapter.account_id().unwrap_or(""),
+                                                    request_id = %approval.request_id,
+                                                    "Adapter has no bound default agent — skipping approval broadcast"
+                                                );
+                                                continue;
+                                            }
+                                        }
+
                                         let recipients = adapter.notification_recipients();
                                         if recipients.is_empty() {
                                             debug!(

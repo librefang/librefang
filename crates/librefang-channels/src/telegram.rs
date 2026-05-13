@@ -2365,6 +2365,14 @@ impl ChannelAdapter for TelegramAdapter {
             })
             .collect()
     }
+
+    /// Expose the configured multi-bot `account_id` so the bridge approval
+    /// listener can build the same account-qualified channel key the router
+    /// uses (`telegram:<account_id>`) and scope ApprovalRequested delivery to
+    /// the adapter(s) bound to the requesting agent (#4985).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 fn map_reaction_emoji(emoji: &str) -> &str {
