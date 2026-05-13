@@ -78,6 +78,11 @@ pub struct DiscordAdapter {
     /// Caching the `None` case stops the resolver from re-hitting
     /// Discord every time a user DMs the bot.
     channel_to_guild: Arc<DashMap<String, Option<String>>>,
+    /// True when `with_proxy(Some(_))` set a per-channel proxy on `client`.
+    /// Drives a one-shot WARN at `start()` because the gateway WebSocket
+    /// bypasses the proxy — see `http_client::warn_ws_proxy_bypass`
+    /// (#4795 follow-up).
+    proxy_configured: bool,
 }
 
 impl DiscordAdapter {
@@ -108,6 +113,7 @@ impl DiscordAdapter {
             session_id: Arc::new(RwLock::new(None)),
             resume_gateway_url: Arc::new(RwLock::new(None)),
             channel_to_guild: Arc::new(DashMap::new()),
+            proxy_configured: false,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -141,6 +147,7 @@ impl DiscordAdapter {
     ) -> Result<Self, crate::http_client::ChannelProxyError> {
         if proxy_url.is_some() {
             self.client = crate::http_client::new_proxied_client(proxy_url)?;
+            self.proxy_configured = true;
         }
         Ok(self)
     }
@@ -386,6 +393,12 @@ impl ChannelAdapter for DiscordAdapter {
         Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
+        // Surface the per-channel proxy WS-bypass limitation in startup
+        // logs the first time we open the gateway (#4795 follow-up).
+        if self.proxy_configured {
+            crate::http_client::warn_ws_proxy_bypass("discord");
+        }
+
         let gateway_url = self.get_gateway_url().await?;
         info!("Discord gateway URL obtained");
 
@@ -938,13 +951,40 @@ mod tests {
 
     #[test]
     fn discord_with_proxy_rejects_garbage_url() {
-        let err = DiscordAdapter::new("t".to_string(), vec![], vec![], true, vec![], 0)
-            .with_proxy(Some("not a url"))
-            .expect_err("garbage proxy URL must fail at init");
-        assert!(matches!(
-            err,
-            crate::http_client::ChannelProxyError::InvalidUrl { .. }
-        ));
+        // `expect_err` requires `T: Debug` and `DiscordAdapter` does
+        // not derive Debug (zeroized token, `Arc<DashMap<…>>`, …).
+        // Pattern match on the Result instead of forcing a Debug derive
+        // on the adapter just to make this single test compile.
+        let result = DiscordAdapter::new("t".to_string(), vec![], vec![], true, vec![], 0)
+            .with_proxy(Some("not a url"));
+        match result {
+            Err(crate::http_client::ChannelProxyError::InvalidUrl { .. }) => {}
+            Err(other) => panic!("expected InvalidUrl, got: {other:?}"),
+            Ok(_) => panic!("garbage proxy URL must fail at init"),
+        }
+    }
+
+    /// Setting a per-channel proxy flips the `proxy_configured` flag
+    /// that drives the one-shot WS-bypass WARN at `start()` (#4795
+    /// follow-up). Leaving it `None` must keep the flag false so a
+    /// vanilla startup stays log-clean.
+    #[test]
+    fn discord_with_proxy_some_sets_ws_bypass_warn_flag() {
+        let a = DiscordAdapter::new("t".to_string(), vec![], vec![], true, vec![], 0)
+            .with_proxy(Some("http://127.0.0.1:8080"))
+            .expect("valid proxy URL");
+        assert!(
+            a.proxy_configured,
+            "with_proxy(Some(_)) must set proxy_configured so start() emits the WS-bypass WARN"
+        );
+
+        let b = DiscordAdapter::new("t".to_string(), vec![], vec![], true, vec![], 0)
+            .with_proxy(None)
+            .expect("None proxy URL");
+        assert!(
+            !b.proxy_configured,
+            "with_proxy(None) must NOT set proxy_configured (no WARN on clean startup)"
+        );
     }
 
     fn dummy_user(channel_id: &str) -> ChannelUser {

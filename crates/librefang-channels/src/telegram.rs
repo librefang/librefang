@@ -6004,15 +6004,19 @@ mod tests {
 
     #[test]
     fn with_proxy_invalid_url_errors() {
-        let err = TelegramAdapter::new("t".to_string(), vec![], Duration::from_secs(1), None)
-            .with_proxy(Some("not a url"))
-            .expect_err("garbage proxy URL must fail at init");
+        // `expect_err` requires `T: Debug` and `TelegramAdapter` does
+        // not derive Debug. Match on the Result so the test compiles
+        // without forcing a Debug derive across the adapter just for
+        // this single line.
+        let result = TelegramAdapter::new("t".to_string(), vec![], Duration::from_secs(1), None)
+            .with_proxy(Some("not a url"));
         // Pin only the variant — the inner string comes from reqwest.
-        match err {
-            crate::http_client::ChannelProxyError::InvalidUrl { value, .. } => {
+        match result {
+            Err(crate::http_client::ChannelProxyError::InvalidUrl { value, .. }) => {
                 assert_eq!(value, "not a url");
             }
-            other => panic!("expected InvalidUrl, got: {other:?}"),
+            Err(other) => panic!("expected InvalidUrl, got: {other:?}"),
+            Ok(_) => panic!("garbage proxy URL must fail at init"),
         }
     }
 }

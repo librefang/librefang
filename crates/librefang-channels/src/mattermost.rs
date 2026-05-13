@@ -46,6 +46,11 @@ pub struct MattermostAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Bot's own user ID (populated after /api/v4/users/me).
     bot_user_id: Arc<RwLock<Option<String>>>,
+    /// True when `with_proxy(Some(_))` set a per-channel proxy on `client`.
+    /// Drives a one-shot WARN at `start()` because the Mattermost
+    /// WebSocket bypasses the proxy — see
+    /// `http_client::warn_ws_proxy_bypass` (#4795 follow-up).
+    proxy_configured: bool,
 }
 
 impl MattermostAdapter {
@@ -67,6 +72,7 @@ impl MattermostAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             bot_user_id: Arc::new(RwLock::new(None)),
+            proxy_configured: false,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -92,6 +98,7 @@ impl MattermostAdapter {
     ) -> Result<Self, crate::http_client::ChannelProxyError> {
         if proxy_url.is_some() {
             self.client = crate::http_client::new_proxied_client(proxy_url)?;
+            self.proxy_configured = true;
         }
         Ok(self)
     }
@@ -276,6 +283,12 @@ impl ChannelAdapter for MattermostAdapter {
         Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
+        // Surface the per-channel proxy WS-bypass limitation in startup
+        // logs the first time we open the websocket (#4795 follow-up).
+        if self.proxy_configured {
+            crate::http_client::warn_ws_proxy_bypass("mattermost");
+        }
+
         // Validate token and get bot user ID
         let user_id = self.validate_token().await?;
         *self.bot_user_id.write().await = Some(user_id);
@@ -545,13 +558,40 @@ mod tests {
 
     #[test]
     fn mattermost_with_proxy_rejects_garbage_url() {
-        let err = MattermostAdapter::new("https://mm".into(), "t".into(), vec![])
-            .with_proxy(Some("not a url"))
-            .expect_err("garbage proxy URL must fail at init");
-        assert!(matches!(
-            err,
-            crate::http_client::ChannelProxyError::InvalidUrl { .. }
-        ));
+        // `expect_err` requires `T: Debug` and `MattermostAdapter` does
+        // not derive Debug (zeroized token, `Arc<RwLock<…>>`, …).
+        // Pattern match on the Result instead of forcing a Debug derive
+        // on the adapter just to make this single test compile.
+        let result = MattermostAdapter::new("https://mm".into(), "t".into(), vec![])
+            .with_proxy(Some("not a url"));
+        match result {
+            Err(crate::http_client::ChannelProxyError::InvalidUrl { .. }) => {}
+            Err(other) => panic!("expected InvalidUrl, got: {other:?}"),
+            Ok(_) => panic!("garbage proxy URL must fail at init"),
+        }
+    }
+
+    /// Setting a per-channel proxy flips the `proxy_configured` flag
+    /// that drives the one-shot WS-bypass WARN at `start()` (#4795
+    /// follow-up). Leaving it `None` must keep the flag false so a
+    /// vanilla startup stays log-clean.
+    #[test]
+    fn mattermost_with_proxy_some_sets_ws_bypass_warn_flag() {
+        let a = MattermostAdapter::new("https://mm".into(), "t".into(), vec![])
+            .with_proxy(Some("http://127.0.0.1:8080"))
+            .expect("valid proxy URL");
+        assert!(
+            a.proxy_configured,
+            "with_proxy(Some(_)) must set proxy_configured so start() emits the WS-bypass WARN"
+        );
+
+        let b = MattermostAdapter::new("https://mm".into(), "t".into(), vec![])
+            .with_proxy(None)
+            .expect("None proxy URL");
+        assert!(
+            !b.proxy_configured,
+            "with_proxy(None) must NOT set proxy_configured (no WARN on clean startup)"
+        );
     }
 
     fn dummy_user(channel_id: &str) -> ChannelUser {

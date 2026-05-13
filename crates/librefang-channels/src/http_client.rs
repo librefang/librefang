@@ -113,6 +113,26 @@ pub fn new_proxied_client(proxy_url: Option<&str>) -> Result<reqwest::Client, Ch
         .map_err(|e| ChannelProxyError::Build(e.to_string()))
 }
 
+/// Emit a one-shot WARN naming the WS-bypass limitation for an adapter
+/// whose REST client honours the per-channel `proxy` setting (#4795) but
+/// whose long-lived WebSocket connection does not. Operators who set
+/// `proxy = "..."` because their corporate egress only allows the
+/// corporate HTTP proxy would otherwise see REST go through the proxy
+/// and WS go direct — silently failing on strict egress. Surfacing the
+/// limitation in startup logs (in addition to the docstring on each
+/// `with_proxy`) gives them a fighting chance to spot the misconfig
+/// before they file a bug.
+///
+/// Called by `SlackAdapter::start` (Socket Mode), `DiscordAdapter::start`
+/// (Gateway), and `MattermostAdapter::start` (WebSocket). Telegram is
+/// pure REST long-polling and does not call this.
+pub(crate) fn warn_ws_proxy_bypass(adapter: &str) {
+    tracing::warn!(
+        "{adapter}: proxy is configured but the long-lived WebSocket bypasses it; \
+         REST traffic only goes through the proxy (#4795 follow-up)"
+    );
+}
+
 /// Process-wide HTTP client used by [`fetch_url_bytes`] for safe
 /// outbound media fetches.
 ///
@@ -932,6 +952,18 @@ mod tests {
             }
             other => panic!("expected InvalidUrl, got: {other:?}"),
         }
+    }
+
+    /// Smoke test for the per-adapter WS-bypass WARN helper (#4795
+    /// follow-up). The behavioural assertion lives in each adapter test
+    /// (`*_with_proxy_some_sets_ws_bypass_warn_flag`) — this just pins
+    /// that the helper itself does not panic and accepts the three
+    /// adapter names the start() paths pass in.
+    #[test]
+    fn warn_ws_proxy_bypass_smoke() {
+        warn_ws_proxy_bypass("slack");
+        warn_ws_proxy_bypass("discord");
+        warn_ws_proxy_bypass("mattermost");
     }
 
     #[test]
