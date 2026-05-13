@@ -23,7 +23,12 @@ uar-driver = ["dep:universal-agent-runtime"]
 #   conflict with librefang's own `rusqlite`/`libsqlite3-sys` versions.
 # * `surreal-backend` is enabled explicitly so UAR uses embedded SurrealDB
 #   (RocksDB) for persistence — fully self-contained, no external services.
-universal-agent-runtime = { git = "https://github.com/Prometheus-AGS/universal-agent-runtime.git", branch = "main", optional = true, default-features = false, features = ["surreal-backend"] }
+# * BossFang fork: dep points at GQAdonis/universal-agent-runtime instead of
+#   Prometheus-AGS/universal-agent-runtime. The fork commits frontend/
+#   package-lock.json + .npmrc so `npm ci` (UAR build.rs fallback when bun
+#   isn't installed) succeeds. To upstream this back to LibreFang, revert
+#   the git URL to Prometheus-AGS/universal-agent-runtime.
+universal-agent-runtime = { git = "https://github.com/GQAdonis/universal-agent-runtime.git", branch = "main", optional = true, default-features = false, features = ["surreal-backend"] }
 
 librefang-types = { path = "../librefang-types" }
 librefang-llm-driver = { path = "../librefang-llm-driver" }
