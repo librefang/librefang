@@ -1921,7 +1921,7 @@ export function AgentsPage() {
           </div>
           {isContinuous ? (
             <Button variant="ghost" size="sm" onClick={() => {
-              patchAgentMutation.mutate({ agentId: agent.id, body: { schedule: "manual" } }, {
+              patchAgentMutation.mutate({ agentId: agent.id, body: { schedule: "reactive" } }, {
                 onSuccess: () => addToast(t("agents.detail.schedule_updated", { defaultValue: "Schedule updated" }), "success"),
               });
             }}>
