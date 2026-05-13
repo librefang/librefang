@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use librefang_types::config::{AzureOpenAiConfig, ResponseFormat, VertexAiConfig};
+use librefang_types::config::{
+    AzureOpenAiConfig, PromptCacheStrategy, ResponseFormat, VertexAiConfig,
+};
 use librefang_types::message::{ContentBlock, Message, StopReason, TokenUsage};
 use librefang_types::tool::{ToolCall, ToolDefinition};
 use serde::{Deserialize, Serialize};
@@ -230,6 +232,26 @@ pub struct CompletionRequest {
     ///
     /// Ignored by drivers that don't implement `cache_control` markers.
     pub cache_ttl: Option<&'static str>,
+    /// Breakpoint strategy when [`Self::prompt_caching`] is enabled
+    /// (#4970).
+    ///
+    /// - `None` → driver picks its built-in default
+    ///   (Anthropic: `system_and_3`).
+    /// - `Some(PromptCacheStrategy::Disabled)` → no markers emitted
+    ///   even if `prompt_caching = true` (lets callers force-off the
+    ///   strategy without flipping the master switch).
+    /// - `Some(PromptCacheStrategy::SystemOnly)` → only the
+    ///   system-block marker is emitted; tools and message tail are
+    ///   not stamped.
+    /// - `Some(PromptCacheStrategy::SystemAndN(n))` → system +
+    ///   tools-last + N trailing-message markers, clipped to the
+    ///   provider's breakpoint cap (4 on Anthropic).
+    ///
+    /// Ignored by drivers that don't implement `cache_control`
+    /// breakpoints (OpenAI, DeepSeek, Gemini, Ollama, etc.). When
+    /// `prompt_caching` is `false` the strategy is ignored
+    /// unconditionally.
+    pub prompt_cache_strategy: Option<PromptCacheStrategy>,
     /// Desired response format (structured output).
     ///
     /// When set, instructs the LLM to return output in the specified format.
@@ -828,6 +850,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -893,6 +916,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,

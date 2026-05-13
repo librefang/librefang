@@ -3089,6 +3089,7 @@ async fn generate_search_queries(
         thinking: None,
         prompt_caching: false,
         cache_ttl: None,
+        prompt_cache_strategy: None,
         response_format: None,
         timeout_secs: Some(15),
         extra_body: None,
@@ -4204,6 +4205,32 @@ pub async fn run_agent_loop(
             .get("prompt_caching")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+        // Resolve the prompt-cache strategy (#4970). Kernel forwards
+        // it as a string ("disabled" / "system_only" / "system_and_N");
+        // a parse failure falls back to the driver's built-in default
+        // (Anthropic: `system_and_3`) with a warning. We do NOT crash
+        // the request on a bad value — the worst case is a turn that
+        // is cached less aggressively than the operator intended.
+        let prompt_cache_strategy = manifest
+            .metadata
+            .get("prompt_cache_strategy")
+            .and_then(|v| v.as_str())
+            .and_then(|s| match s.parse::<librefang_types::config::PromptCacheStrategy>() {
+                Ok(strategy) => Some(strategy),
+                Err(e) => {
+                    tracing::warn!(error = %e, "ignoring invalid prompt_cache_strategy metadata");
+                    None
+                }
+            });
+        // Map `prompt_cache.cache_ttl_hint_secs` to Anthropic's two
+        // discrete cache windows: ≥ 1800 s selects the 1h beta cache,
+        // everything else stays on the default 5m ephemeral cache. The
+        // CompletionRequest API only accepts `&'static str` here.
+        let cache_ttl = manifest
+            .metadata
+            .get("prompt_cache_ttl_hint_secs")
+            .and_then(|v| v.as_u64())
+            .and_then(|secs| if secs >= 1800 { Some("1h") } else { None });
 
         let timeout_override = manifest
             .metadata
@@ -4242,7 +4269,8 @@ pub async fn run_agent_loop(
             system: Some(system_prompt_snapshot.clone()),
             thinking: manifest.thinking.clone(),
             prompt_caching,
-            cache_ttl: None,
+            cache_ttl,
+            prompt_cache_strategy,
             response_format: manifest.response_format.clone(),
             timeout_secs: timeout_override,
             extra_body: if manifest.model.extra_params.is_empty() {
@@ -5852,6 +5880,32 @@ pub async fn run_agent_loop_streaming(
             .get("prompt_caching")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+        // Resolve the prompt-cache strategy (#4970). Kernel forwards
+        // it as a string ("disabled" / "system_only" / "system_and_N");
+        // a parse failure falls back to the driver's built-in default
+        // (Anthropic: `system_and_3`) with a warning. We do NOT crash
+        // the request on a bad value — the worst case is a turn that
+        // is cached less aggressively than the operator intended.
+        let prompt_cache_strategy = manifest
+            .metadata
+            .get("prompt_cache_strategy")
+            .and_then(|v| v.as_str())
+            .and_then(|s| match s.parse::<librefang_types::config::PromptCacheStrategy>() {
+                Ok(strategy) => Some(strategy),
+                Err(e) => {
+                    tracing::warn!(error = %e, "ignoring invalid prompt_cache_strategy metadata");
+                    None
+                }
+            });
+        // Map `prompt_cache.cache_ttl_hint_secs` to Anthropic's two
+        // discrete cache windows: ≥ 1800 s selects the 1h beta cache,
+        // everything else stays on the default 5m ephemeral cache. The
+        // CompletionRequest API only accepts `&'static str` here.
+        let cache_ttl = manifest
+            .metadata
+            .get("prompt_cache_ttl_hint_secs")
+            .and_then(|v| v.as_u64())
+            .and_then(|secs| if secs >= 1800 { Some("1h") } else { None });
 
         // Per-request timeout: manifest metadata takes priority, then browser
         // heuristic, then driver default (None = use driver's configured value).
@@ -5889,7 +5943,8 @@ pub async fn run_agent_loop_streaming(
             system: Some(system_prompt_snapshot.clone()),
             thinking: manifest.thinking.clone(),
             prompt_caching,
-            cache_ttl: None,
+            cache_ttl,
+            prompt_cache_strategy,
             response_format: manifest.response_format.clone(),
             timeout_secs: timeout_override,
             extra_body: if manifest.model.extra_params.is_empty() {

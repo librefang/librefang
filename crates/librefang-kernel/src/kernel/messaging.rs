@@ -2124,6 +2124,16 @@ impl LibreFangKernel {
                 "prompt_caching".to_string(),
                 serde_json::Value::Bool(cfg.prompt_caching),
             );
+            // Pass the prompt-cache strategy (#4970) as a string —
+            // the agent loop parses it back into a `PromptCacheStrategy`.
+            manifest.metadata.insert(
+                "prompt_cache_strategy".to_string(),
+                serde_json::Value::String(cfg.prompt_cache.strategy.to_string()),
+            );
+            manifest.metadata.insert(
+                "prompt_cache_ttl_hint_secs".to_string(),
+                serde_json::Value::from(cfg.prompt_cache.cache_ttl_hint_secs),
+            );
 
             // Pass privacy config to the agent loop via metadata.
             if let Ok(privacy_json) = serde_json::to_value(&cfg.privacy) {
