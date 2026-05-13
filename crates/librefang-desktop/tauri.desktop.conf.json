@@ -3,7 +3,7 @@
   "identifier": "ai.bossfang.desktop",
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJDOTE5MDhCRDNGMTUyMEQKUldRTlV2SFRpNUNSdkZRZDcvektwZkN6bUsyM0NJZC9OeXhHRU5id1FnZWllQmNlZGRoSGRQOHkK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkgRTMyOUE2QjI4NjNGMTcwNwpSV1FIRnorR3NxWXA0OTMvdi85OHQ0dExyQ2t3aktRaWFUOHhlemt3UjJNaDFOWmFZbEtlS0ZtRwo=",
       "endpoints": [
         "https://github.com/GQAdonis/librefang/releases/latest/download/latest.json"
       ],
