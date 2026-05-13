@@ -2118,6 +2118,23 @@ pub struct LoopOptions {
     ///
     /// Kernel populates this from `KernelConfig.runtime.tool_results`.
     pub tool_results_config: Option<librefang_types::config::ToolResultsConfig>,
+    /// Compaction config snapshot (#4976).
+    ///
+    /// When `Some`, the agent loop builds its
+    /// [`crate::context_compressor::ContextCompressor`] from this config,
+    /// honouring `keep_recent` / `max_summary_tokens` /
+    /// `token_threshold_ratio` that may have been overridden by the
+    /// agent's `[compaction]` block in `agent.toml`. When `None` (the
+    /// default and the legacy test path), the compressor falls back to
+    /// `CompressionConfig::default()`.
+    ///
+    /// Kernel populates this by merging
+    /// [`AgentManifest::compaction`] on top of
+    /// `KernelConfig.compaction` via
+    /// [`librefang_types::agent::CompactionOverrides::resolve`] before
+    /// constructing the loop. Pre-merging in the kernel keeps the
+    /// agent-loop blind to override semantics.
+    pub compaction_config: Option<librefang_types::config::CompactionTomlConfig>,
 }
 
 /// Result of an agent loop execution.
@@ -3967,7 +3984,15 @@ pub async fn run_agent_loop(
     let tr_fold_min_batch_size = tool_results_cfg.fold_min_batch_size;
     // Context compressor — triggers LLM-based summarisation when token usage
     // exceeds 80% of the context window, before falling back to brute-force trim.
-    let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();
+    // #4976: when LoopOptions carries a pre-merged compaction snapshot
+    // (per-agent overrides resolved against global config in the kernel),
+    // honour its keep_recent / max_summary_tokens / token_threshold_ratio.
+    let context_compressor = match opts.compaction_config.as_ref() {
+        Some(toml) => crate::context_compressor::ContextCompressor::new(
+            crate::context_compressor::CompressionConfig::from_compaction_toml(toml),
+        ),
+        None => crate::context_compressor::ContextCompressor::with_defaults(),
+    };
     let mut any_tools_executed = false;
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
     // §A — accumulated owner_notice payloads from notify_owner tool calls.

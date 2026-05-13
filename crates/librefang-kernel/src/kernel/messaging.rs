@@ -601,6 +601,10 @@ impl LibreFangKernel {
                 // byte-budget enforcement (defaults: 16 KB per result,
                 // 50 KB per turn) still applies — only fold no-ops here.
                 tool_results_config: None,
+                // #4976: ephemeral /btw uses an empty session — the
+                // compressor will never fire here. Leave at None so the
+                // loop falls back to compiled defaults.
+                compaction_config: None,
             },
         )
         .await
@@ -1350,6 +1354,10 @@ impl LibreFangKernel {
             aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: None,
             tool_results_config: Some(self.config.load().tool_results.clone()),
+            // #4976: per-agent compaction overrides are resolved inside
+            // `send_message_streaming_with_sender_and_opts` once the
+            // agent registry has been consulted — leave as None here.
+            compaction_config: None,
         };
         self.send_message_streaming_with_sender_and_opts(
             effective_id,
@@ -1537,6 +1545,13 @@ impl LibreFangKernel {
             aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: Some(parent_session_id),
             tool_results_config: Some(self.config.load().tool_results.clone()),
+            // #4976: per-agent compaction overrides are resolved inside
+            // `send_message_streaming_with_sender_and_opts` once the
+            // agent registry has been consulted — leave as None here.
+            // Forks inherit the parent agent's compaction policy (the
+            // forked agent_id is identical to the parent's at this
+            // layer; allowed_tools is the only fork-specific override).
+            compaction_config: None,
         };
         // INVARIANT: forks must use the canonical session so the parent turn's
         // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
@@ -1611,6 +1626,9 @@ impl LibreFangKernel {
             aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: None,
             tool_results_config: Some(self.config.load().tool_results.clone()),
+            // #4976: resolved inside the `_with_opts` callee once the
+            // registry has been consulted for this agent's manifest.
+            compaction_config: None,
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
@@ -1638,7 +1656,7 @@ impl LibreFangKernel {
         sender_context: Option<&SenderContext>,
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
-        loop_opts: librefang_runtime::agent_loop::LoopOptions,
+        mut loop_opts: librefang_runtime::agent_loop::LoopOptions,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
@@ -1651,6 +1669,20 @@ impl LibreFangKernel {
         let entry = self.agents.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
+
+        // #4976: resolve per-agent [compaction] overrides against the
+        // kernel-global config and stash the merged snapshot on
+        // `loop_opts` so the in-loop `ContextCompressor` builder picks
+        // up the agent's keep_recent / max_summary_tokens /
+        // token_threshold_ratio. Callers that already populated this
+        // field (forks, future overrides) win.
+        if loop_opts.compaction_config.is_none() {
+            let merged = match entry.manifest.compaction.as_ref() {
+                Some(o) if !o.is_empty() => o.resolve(&cfg.compaction),
+                _ => cfg.compaction.clone(),
+            };
+            loop_opts.compaction_config = Some(merged);
+        }
 
         // Pre-dispatch provider budget gate (streaming path). Placed
         // BEFORE `check_quota_and_reserve` so a rejection cannot leak
@@ -1877,9 +1909,16 @@ impl LibreFangKernel {
         // Computing it here on the pre-lock snapshot would make it stale: a
         // concurrent turn that committed history while we were waiting for
         // the lock could push us across (or back below) the threshold.
+        //
+        // #4976: merge per-agent `[compaction]` overrides on top of the
+        // global config so a chat agent and an orchestrator can use
+        // different thresholds / summary budgets in the same daemon.
         let compaction_config_snapshot = {
             use librefang_runtime::compactor::CompactionConfig;
-            CompactionConfig::from_toml(&cfg.compaction)
+            CompactionConfig::from_toml_with_overrides(
+                &cfg.compaction,
+                entry.manifest.compaction.as_ref(),
+            )
         };
 
         let tools = self.available_tools(agent_id);
@@ -2610,7 +2649,15 @@ impl LibreFangKernel {
                             estimate_token_count, needs_compaction_by_tokens, CompactionConfig,
                         };
                         let compact_cfg = kernel_clone.config.load();
-                        let config = CompactionConfig::from_toml(&compact_cfg.compaction);
+                        // #4976: merge per-agent [compaction] overrides on
+                        // top of the global config. The token threshold
+                        // ratio is the field that primarily gates this
+                        // post-loop check, and it's now per-agent
+                        // tunable.
+                        let config = CompactionConfig::from_toml_with_overrides(
+                            &compact_cfg.compaction,
+                            manifest.compaction.as_ref(),
+                        );
                         let estimated = estimate_token_count(&session.messages, None, None);
                         if needs_compaction_by_tokens(estimated, &config) {
                             let kc = kernel_clone.clone();

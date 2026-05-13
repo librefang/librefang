@@ -925,6 +925,14 @@ impl LibreFangKernel {
         self.agents
             .session_interrupts
             .insert((agent_id, effective_session_id), session_interrupt.clone());
+        // #4976: merge per-agent [compaction] overrides on top of the
+        // kernel-global config so the in-loop ContextCompressor honours
+        // this agent's keep_recent / max_summary_tokens /
+        // token_threshold_ratio.
+        let compaction_snapshot = match manifest.compaction.as_ref() {
+            Some(o) if !o.is_empty() => o.resolve(&cfg.compaction),
+            _ => cfg.compaction.clone(),
+        };
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: false,
             incognito,
@@ -935,6 +943,7 @@ impl LibreFangKernel {
             aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: None,
             tool_results_config: Some(cfg.tool_results.clone()),
+            compaction_config: Some(compaction_snapshot),
         };
 
         // Build a per-execution MCP pool that includes the agent workspace as
