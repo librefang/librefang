@@ -202,7 +202,10 @@ fn drop_oldest_until_under(
 
     // Recompute the threshold check each iteration. Capped to prevent
     // pathological loops on inputs we can never bring under threshold
-    // (entirely pinned history): bound by total length.
+    // (entirely pinned history): bound by total length. The cap is a
+    // safety net only — the real termination guard is "no candidate
+    // was droppable this iteration → break" below, which fires before
+    // we ever spin.
     let max_iterations = history.len();
     for _ in 0..max_iterations {
         // Non-pinned, non-system count. When it hits keep_recent we stop.
@@ -218,19 +221,23 @@ fn drop_oldest_until_under(
             break;
         }
 
-        // Find the oldest non-pinned, non-system message. We skip
-        // (a) pinned messages, (b) system messages. The first such index
-        // is our drop target.
-        let Some(idx) = history
-            .iter()
-            .position(|m| !m.pinned && m.role != Role::System)
-        else {
+        // Find the oldest droppable candidate. A `tool_use` whose paired
+        // `tool_result` at `idx+1` is pinned is untouchable — dropping
+        // the `tool_use` alone would orphan the pinned `tool_result` and
+        // the provider would 400 on the resulting payload. Skip past
+        // such stuck pairs and keep searching forward.
+        let Some(idx) = next_droppable_index(history) else {
+            // Every remaining non-pinned candidate is locked by a pinned
+            // paired partner. No further progress possible; bail rather
+            // than spin.
             break;
         };
 
         // If this message holds a tool_use, its paired tool_result lives in
         // the *next* message (assistant tool_use → user tool_result is the
         // canonical layout). Drop both together so the chain stays whole.
+        // `next_droppable_index` guarantees the paired `tool_result`, if
+        // present, is itself non-pinned.
         let removed_now = if message_contains_tool_use(&history[idx])
             && idx + 1 < history.len()
             && message_contains_tool_result(&history[idx + 1])
@@ -254,6 +261,34 @@ fn drop_oldest_until_under(
     }
 
     dropped
+}
+
+/// Return the index of the oldest non-pinned, non-system message that is
+/// safe to drop. A `tool_use` followed by a pinned `tool_result` is NOT
+/// safe (dropping the tool_use would orphan the pinned tool_result), so
+/// we step past it and keep looking. Returns `None` when no droppable
+/// candidate exists.
+fn next_droppable_index(history: &[Message]) -> Option<usize> {
+    let mut i = 0;
+    while i < history.len() {
+        let msg = &history[i];
+        if msg.pinned || msg.role == Role::System {
+            i += 1;
+            continue;
+        }
+        // A tool_use whose paired tool_result is pinned is untouchable —
+        // skip past both to look for a later candidate.
+        if message_contains_tool_use(msg)
+            && i + 1 < history.len()
+            && message_contains_tool_result(&history[i + 1])
+            && history[i + 1].pinned
+        {
+            i += 2;
+            continue;
+        }
+        return Some(i);
+    }
+    None
 }
 
 fn message_contains_tool_use(msg: &Message) -> bool {
@@ -588,6 +623,110 @@ mod tests {
         assert_eq!(clamp_ratio(0.10), 0.70);
         assert_eq!(clamp_ratio(0.85), 0.85);
         assert_eq!(clamp_ratio(1.5), 0.99);
+    }
+
+    #[test]
+    fn tool_use_with_pinned_paired_result_is_not_dropped() {
+        // Phase-2 regression: a non-pinned tool_use whose paired
+        // tool_result at idx+1 is pinned MUST stay whole. Single-dropping
+        // the tool_use would orphan the pinned tool_result and providers
+        // 400 on that shape. The chain has to remain well-formed.
+        let mut pinned_result = tool_result_msg("call-keep", &"k".repeat(200));
+        pinned_result.pinned = true;
+        let mut history = vec![
+            tool_use_msg("call-keep", "demo"),
+            pinned_result,
+            // Padding to force the gateway pass to fire and look for
+            // candidates to drop.
+            small_user(&format!("padding-1 {}", "y".repeat(2_000))),
+            small_user(&format!("padding-2 {}", "z".repeat(2_000))),
+            small_user(&format!("padding-3 {}", "q".repeat(2_000))),
+            small_user("recent"),
+        ];
+        let cfg = GatewayCompressionConfig {
+            keep_recent_messages: 2,
+            ..GatewayCompressionConfig::default()
+        };
+        let report = apply_if_needed(&mut history, 1_000, &cfg);
+        assert!(report.fired, "should have fired: {report:?}");
+
+        // The pinned tool_result must still be present and pinned.
+        let pinned_still_present = history.iter().any(|m| {
+            m.pinned
+                && matches!(
+                    &m.content,
+                    MessageContent::Blocks(b)
+                        if b.iter().any(|cb| matches!(
+                            cb,
+                            ContentBlock::ToolResult { tool_use_id, .. }
+                                if tool_use_id == "call-keep"
+                        ))
+                )
+        });
+        assert!(
+            pinned_still_present,
+            "pinned tool_result must survive — history = {history:?}"
+        );
+
+        // Orphan-free invariant: every remaining tool_result has a
+        // preceding tool_use with the same id.
+        for (i, msg) in history.iter().enumerate() {
+            if let MessageContent::Blocks(blocks) = &msg.content {
+                for b in blocks {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = b {
+                        let has_pair = history.iter().take(i).any(|prior| {
+                            matches!(
+                                &prior.content,
+                                MessageContent::Blocks(pb)
+                                    if pb.iter().any(|cb| matches!(
+                                        cb,
+                                        ContentBlock::ToolUse { id, .. } if id == tool_use_id
+                                    ))
+                            )
+                        });
+                        assert!(
+                            has_pair,
+                            "orphan tool_result at idx {i} with id {tool_use_id} — \
+                             history = {history:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn drop_loop_terminates_when_no_candidate_can_be_dropped() {
+        // Every non-pinned candidate is a tool_use locked by a pinned
+        // paired tool_result. Plus a system message and a pinned message,
+        // none of which are ever droppable. There must be nothing the
+        // drop loop CAN drop, and it must terminate (not spin) — even
+        // though we're well over threshold.
+        let big = "Q".repeat(8_000);
+        let mut pinned_result_1 = tool_result_msg("call-1", &big);
+        pinned_result_1.pinned = true;
+        let mut pinned_result_2 = tool_result_msg("call-2", &big);
+        pinned_result_2.pinned = true;
+        let mut history = vec![
+            tool_use_msg("call-1", "demo"),
+            pinned_result_1,
+            tool_use_msg("call-2", "demo"),
+            pinned_result_2,
+        ];
+        let before = history.clone();
+        let report = apply_if_needed(&mut history, 1_000, &default_cfg());
+        assert!(report.fired);
+        // Nothing was droppable — history must be identical to the input.
+        assert_eq!(history.len(), before.len(), "history length changed");
+        assert_eq!(report.messages_dropped, 0);
+        // Pinned tool_results both still present and still pinned.
+        assert!(history[1].pinned);
+        assert!(history[3].pinned);
+        // tool_use ↔ pinned tool_result chains both intact.
+        assert!(message_contains_tool_use(&history[0]));
+        assert!(message_contains_tool_result(&history[1]));
+        assert!(message_contains_tool_use(&history[2]));
+        assert!(message_contains_tool_result(&history[3]));
     }
 
     #[test]
