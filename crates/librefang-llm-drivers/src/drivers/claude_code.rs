@@ -1433,10 +1433,18 @@ mod tests {
     fn spawn_dying_child(stderr_payload: Option<&str>) -> tokio::process::Child {
         let script = match stderr_payload {
             Some(msg) => {
+                // Explicit `flush()` before `sys.exit` because Python's
+                // text-IO layer over stderr is line-buffered: a no-newline
+                // payload sits in the wrapper buffer until interpreter
+                // shutdown flushes it. On loaded macOS GHA runners the
+                // diagnostic helper's `child.kill()` (SIGKILL) has been
+                // observed to land before that shutdown flush completes,
+                // dropping the payload before the OS pipe sees it and
+                // tripping the silent-fallback branch under test.
                 // `{msg:?}` writes the payload as a Rust-debug quoted
                 // string, which is also a valid Python string literal for
                 // the ASCII payloads these tests use.
-                format!("import sys; sys.stderr.write({msg:?}); sys.exit(7)")
+                format!("import sys; sys.stderr.write({msg:?}); sys.stderr.flush(); sys.exit(7)")
             }
             None => "import sys; sys.exit(0)".to_string(),
         };
@@ -1447,7 +1455,9 @@ mod tests {
         // silently dropped piped stderr on the Test / Windows lane.
         let build_cmd = |exe: &str| -> tokio::process::Command {
             let mut cmd = tokio::process::Command::new(exe);
-            cmd.arg("-c").arg(&script);
+            // `-u` forces Python's stdio binary layer unbuffered, defence
+            // in depth alongside the explicit flush in the script body.
+            cmd.arg("-u").arg("-c").arg(&script);
             cmd.stdin(std::process::Stdio::piped());
             cmd.stdout(std::process::Stdio::piped());
             cmd.stderr(std::process::Stdio::piped());
@@ -1458,6 +1468,30 @@ mod tests {
             Err(_) => build_cmd("python")
                 .spawn()
                 .expect("neither python3 nor python is on PATH; install Python 3 to run this test"),
+        }
+    }
+
+    /// Wait deterministically for `child` to exit, polling `try_wait`
+    /// with a 2 s budget. Replaces fixed `tokio::time::sleep` guesses
+    /// (150 ms / 100 ms in earlier revisions of these tests) that left a
+    /// race window: on a loaded macOS GHA runner the Python interpreter's
+    /// startup + shutdown can exceed the budget, so the subsequent
+    /// `child.kill()` inside `diagnose_stdin_write_failure` lands during
+    /// interpreter teardown and steals the stderr that hadn't yet
+    /// reached the OS pipe. Polling until exit removes the guess.
+    async fn await_child_exit(child: &mut tokio::process::Child) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(_) => return,
+            }
         }
     }
 
@@ -1472,8 +1506,10 @@ mod tests {
         // just like a real claude-code init failure.
         let mut child = spawn_dying_child(Some("mock cli: auth profile invalid"));
 
-        // Give the child a moment to exit so its stdin pipe is closed.
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // Wait until the child has actually exited so its stdio is fully
+        // flushed and its stdin pipe is closed before we ask the
+        // diagnostic helper to read stderr.
+        await_child_exit(&mut child).await;
 
         let write_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Broken pipe");
         let diag = ClaudeCodeDriver::diagnose_stdin_write_failure(&mut child, &write_err).await;
@@ -1494,7 +1530,7 @@ mod tests {
     #[tokio::test]
     async fn diagnose_stdin_write_failure_falls_back_to_hint_when_silent() {
         let mut child = spawn_dying_child(None);
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        await_child_exit(&mut child).await;
 
         let write_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Broken pipe");
         let diag = ClaudeCodeDriver::diagnose_stdin_write_failure(&mut child, &write_err).await;
