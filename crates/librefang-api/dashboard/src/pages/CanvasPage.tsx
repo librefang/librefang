@@ -864,7 +864,7 @@ function CanvasPageInner() {
 
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
   const [spacePressed, setSpacePressed] = useState(false);
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId?: string } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId?: string; edgeId?: string } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [showHelp, setShowHelp] = useState(false);
   const [showTemplateBrowser, setShowTemplateBrowser] = useState(false);
@@ -2302,8 +2302,17 @@ function CanvasPageInner() {
               e.preventDefault();
               setContextMenu({ x: e.clientX, y: e.clientY, nodeId: node.id });
             }}
+            onEdgeContextMenu={(e, edge) => {
+              e.preventDefault();
+              setContextMenu({ x: e.clientX, y: e.clientY, edgeId: edge.id });
+            }}
+            onEdgeClick={() => { setContextMenu(null); setEditingNode(null); }}
             nodeTypes={nodeTypes} colorMode={theme}
             defaultEdgeOptions={defaultEdgeOptions}
+            // Both Backspace (xyflow default) and Delete — Windows / external
+            // keyboards expose Delete as a separate key from Backspace, and
+            // the shortcut help advertises "Delete" already (#4978).
+            deleteKeyCode={["Backspace", "Delete"]}
             defaultViewport={{ x: 50, y: 80, zoom: 1 }}
             minZoom={0.1} maxZoom={2}
             snapToGrid snapGrid={[12, 12]}
@@ -2354,7 +2363,16 @@ function CanvasPageInner() {
               className="fixed z-50 rounded-xl border border-border-subtle bg-surface shadow-2xl py-1 min-w-[160px]"
               style={{ left: contextMenu.x, top: contextMenu.y }}
               onKeyDown={e => { if (e.key === "Escape") setContextMenu(null); }}>
-              {contextMenu.nodeId ? (
+              {contextMenu.edgeId ? (
+                <button role="menuitem" className="w-full px-3 py-1.5 text-xs text-left hover:bg-error/10 text-error flex items-center gap-2"
+                  onClick={() => {
+                    pushHistory();
+                    setEdges(eds => eds.filter(ed => ed.id !== contextMenu.edgeId));
+                    setContextMenu(null);
+                  }}>
+                  <Trash2 className="w-3 h-3" /> {t("canvas.ctx_delete_connection")}
+                </button>
+              ) : contextMenu.nodeId ? (
                 <>
                   <button role="menuitem" className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
                     onClick={() => { setEditingNode(nodes.find(n => n.id === contextMenu.nodeId) || null); setContextMenu(null); }}>
