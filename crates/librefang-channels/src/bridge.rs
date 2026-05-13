@@ -567,6 +567,33 @@ pub trait ChannelBridgeHandle: Send + Sync {
     fn channels_download_max_bytes(&self) -> Option<u64> {
         None
     }
+
+    /// Transcribe an inbound channel audio attachment that has already been
+    /// downloaded to disk by the bridge.
+    ///
+    /// Implementations should:
+    ///   1. Honor the `[media] audio_transcription` kernel config (default OFF) —
+    ///      return `Ok(None)` when transcription is disabled.
+    ///   2. On enabled, hand the attachment to the kernel `MediaEngine`
+    ///      (`transcribe_audio`), returning `Ok(Some(text))` on success.
+    ///   3. On provider error / no credentials / oversize file, return
+    ///      `Err(reason)` so the bridge can surface an opaque
+    ///      `[Transcription unavailable]` note next to the saved path
+    ///      without dropping the message. The bridge sanitizes the
+    ///      reason out of the user-facing block (see #4999) — operator
+    ///      logs still carry the full error.
+    ///
+    /// The default impl (used by mocks) is "feature off" — returns `Ok(None)`.
+    /// See issue #4975: `MediaEngine::process_attachments` previously had no
+    /// callers, so inbound voice messages were never auto-transcribed even
+    /// when `[media].audio_transcription = true`.
+    async fn transcribe_inbound_audio(
+        &self,
+        _path: &std::path::Path,
+        _mime_type: &str,
+    ) -> Result<Option<String>, String> {
+        Ok(None)
+    }
 }
 
 struct PendingMessage {
@@ -3043,8 +3070,9 @@ async fn dispatch_message(
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
         let extra_headers = adapter.fetch_headers_for(url);
-        let blocks =
+        let downloaded =
             download_file_to_blocks(url, filename, max_bytes, &download_dir, &extra_headers).await;
+        let blocks = downloaded.blocks;
         if has_file_saved_block(&blocks) {
             dispatch_with_blocks(
                 blocks,
@@ -3079,9 +3107,16 @@ async fn dispatch_message(
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
         let filename = filename_from_url(url).unwrap_or_else(|| "voice.ogg".to_string());
         let extra_headers = adapter.fetch_headers_for(url);
-        let mut blocks =
+        let downloaded =
             download_file_to_blocks(url, &filename, max_bytes, &download_dir, &extra_headers).await;
+        let mut blocks = downloaded.blocks;
         if has_file_saved_block(&blocks) {
+            // Auto-transcription when `[media] audio_transcription = true` (#4975).
+            // The kernel checks the flag and falls back to `Ok(None)` when disabled,
+            // so the existing default-OFF behaviour is preserved verbatim.
+            let transcription_block =
+                maybe_transcribe_inbound_audio(handle, downloaded.saved.as_ref()).await;
+
             // Prepend a context block carrying duration + caption so the
             // model knows this is voice (not an arbitrary file) and any
             // user-supplied caption survives the save-path replacement.
@@ -3098,6 +3133,9 @@ async fn dispatch_message(
                     provider_metadata: None,
                 },
             );
+            if let Some(t) = transcription_block {
+                blocks.insert(1, t);
+            }
             dispatch_with_blocks(
                 blocks,
                 message,
@@ -3134,9 +3172,14 @@ async fn dispatch_message(
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
         let filename = filename_from_url(url).unwrap_or_else(|| "audio.mp3".to_string());
         let extra_headers = adapter.fetch_headers_for(url);
-        let mut blocks =
+        let downloaded =
             download_file_to_blocks(url, &filename, max_bytes, &download_dir, &extra_headers).await;
+        let mut blocks = downloaded.blocks;
         if has_file_saved_block(&blocks) {
+            // Auto-transcription when `[media] audio_transcription = true` (#4975).
+            let transcription_block =
+                maybe_transcribe_inbound_audio(handle, downloaded.saved.as_ref()).await;
+
             let mut header = format!("[Audio ({duration_seconds}s)");
             match (title.as_deref(), performer.as_deref()) {
                 (Some(t), Some(p)) if !t.is_empty() && !p.is_empty() => {
@@ -3158,6 +3201,9 @@ async fn dispatch_message(
                     provider_metadata: None,
                 },
             );
+            if let Some(t) = transcription_block {
+                blocks.insert(1, t);
+            }
             dispatch_with_blocks(
                 blocks,
                 message,
@@ -3197,7 +3243,7 @@ async fn dispatch_message(
             .or_else(|| filename_from_url(url))
             .unwrap_or_else(|| "video.mp4".to_string());
         let extra_headers = adapter.fetch_headers_for(url);
-        let mut blocks = download_file_to_blocks(
+        let downloaded = download_file_to_blocks(
             url,
             &resolved_filename,
             max_bytes,
@@ -3205,6 +3251,7 @@ async fn dispatch_message(
             &extra_headers,
         )
         .await;
+        let mut blocks = downloaded.blocks;
         if has_file_saved_block(&blocks) {
             let context = match caption {
                 Some(c) if !c.is_empty() => {
@@ -4298,6 +4345,27 @@ const CHANNEL_FILE_DOWNLOAD_MAX_BYTES: u64 = 50 * 1024 * 1024;
 /// `dispatch_message` to detect success vs failure.
 const FILE_SAVED_BLOCK_PREFIX: &str = "[File: ";
 
+/// Result of downloading a channel attachment to disk.
+///
+/// `blocks` is the content blocks the agent should receive (path block plus
+/// any inline-enriched text). `saved` is `Some((path, media_type))` when the
+/// download produced bytes on disk — callers that need to invoke media
+/// understanding (e.g. inbound audio transcription, #4975) use this to drive
+/// `MediaEngine` without re-parsing the path-block text.
+struct DownloadedFile {
+    blocks: Vec<ContentBlock>,
+    saved: Option<(std::path::PathBuf, String)>,
+}
+
+impl DownloadedFile {
+    fn failed(blocks: Vec<ContentBlock>) -> Self {
+        Self {
+            blocks,
+            saved: None,
+        }
+    }
+}
+
 /// Returns `true` when [`download_file_to_blocks`] produced a block that
 /// represents a successfully saved download — either an inline `ImageFile`
 /// (when the response was image-typed) or a `Text` block whose content
@@ -4318,6 +4386,122 @@ fn has_file_saved_block(blocks: &[ContentBlock]) -> bool {
         _ => false,
     })
 }
+
+/// Auto-transcribe an inbound channel audio attachment when the kernel's
+/// `[media] audio_transcription` flag is enabled (#4975).
+///
+/// Returns a `ContentBlock::Text` to insert next to the saved-path block:
+///   - `Some([Transcription: …])` when transcription succeeded.
+///   - `Some([Transcription unavailable])` when the kernel reported an
+///     error (no provider configured, oversize file, provider 5xx, …) or
+///     the STT call exceeded [`INBOUND_TRANSCRIPTION_TIMEOUT`]. The raw
+///     path block is still delivered so the agent can fall back to
+///     `media_transcribe` or just acknowledge the voice note. The
+///     opaque text deliberately omits the provider reason — provider
+///     error envelopes can echo API keys / URLs (e.g. Gemini's
+///     `?key=…`); leaking the verbose reason into the message stream
+///     would also leak it into every downstream LLM's prompt cache.
+///     Operators see the full reason in logs.
+///   - `None` when transcription is disabled (the default) or there is no
+///     saved file (download failed earlier).
+///
+/// Non-audio MIME types (e.g. a `video/mp4` that hit the Voice arm because
+/// of an upstream classification bug) are skipped silently so we never
+/// bill an STT provider for the wrong shape.
+async fn maybe_transcribe_inbound_audio(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    saved: Option<&(std::path::PathBuf, String)>,
+) -> Option<ContentBlock> {
+    maybe_transcribe_inbound_audio_with_timeout(handle, saved, INBOUND_TRANSCRIPTION_TIMEOUT).await
+}
+
+/// Inner variant of [`maybe_transcribe_inbound_audio`] that takes the
+/// timeout explicitly. Production callers go through the wrapper above,
+/// which pins the timeout to [`INBOUND_TRANSCRIPTION_TIMEOUT`]; tests use
+/// this entry point with a small duration to exercise the timeout branch
+/// without sitting on the wall clock.
+async fn maybe_transcribe_inbound_audio_with_timeout(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    saved: Option<&(std::path::PathBuf, String)>,
+    timeout_dur: std::time::Duration,
+) -> Option<ContentBlock> {
+    let (path, media_type) = saved?;
+    // Cheap ASCII prefix check without allocating a lowercase copy on
+    // every voice message.
+    if !media_type
+        .as_bytes()
+        .get(..6)
+        .is_some_and(|p| p.eq_ignore_ascii_case(b"audio/"))
+    {
+        return None;
+    }
+    let fut = handle.transcribe_inbound_audio(path, media_type);
+    let result = match tokio::time::timeout(timeout_dur, fut).await {
+        Ok(inner) => inner,
+        Err(_elapsed) => {
+            // STT hung past the budget — dispatch must move on so the
+            // per-(agent,channel) session doesn't pile up behind one
+            // 60s voice note. Treat identically to the provider-error
+            // path: opaque unavailable block + raw saved-path block.
+            warn!(
+                path = %path.display(),
+                mime = %media_type,
+                timeout_secs = timeout_dur.as_secs(),
+                "Inbound audio transcription timed out; passing raw file to agent"
+            );
+            return Some(ContentBlock::Text {
+                text: TRANSCRIPTION_UNAVAILABLE_BLOCK.to_string(),
+                provider_metadata: None,
+            });
+        }
+    };
+    match result {
+        Ok(Some(text)) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            Some(ContentBlock::Text {
+                text: format!("[Transcription: {trimmed}]"),
+                provider_metadata: None,
+            })
+        }
+        Ok(None) => None,
+        Err(reason) => {
+            // Never drop the message — surface the failure as a sibling
+            // block so the agent knows transcription was attempted and
+            // failed. Operator log keeps the full reason; the LLM-facing
+            // block is intentionally opaque (see SECURITY note in the
+            // doc-comment above).
+            warn!(
+                path = %path.display(),
+                mime = %media_type,
+                error = %reason,
+                "Inbound audio transcription failed; passing raw file to agent"
+            );
+            Some(ContentBlock::Text {
+                text: TRANSCRIPTION_UNAVAILABLE_BLOCK.to_string(),
+                provider_metadata: None,
+            })
+        }
+    }
+}
+
+/// Hard deadline for the kernel STT round-trip during channel dispatch.
+///
+/// Whisper / Groq normally return in 2-5s for a 1-minute voice; 30s is
+/// generous but short enough that a hung provider can't pin the
+/// per-(agent,channel) session indefinitely. On expiry the helper
+/// returns the opaque "unavailable" block and the raw saved-path block
+/// continues to the agent.
+const INBOUND_TRANSCRIPTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// User-facing text for an inbound transcription that didn't produce a
+/// usable result — provider error, missing credentials, oversize file,
+/// or [`INBOUND_TRANSCRIPTION_TIMEOUT`] expiry. Deliberately opaque to
+/// avoid leaking provider error envelopes (which can echo API keys /
+/// request URLs) into the LLM prompt and downstream cache.
+const TRANSCRIPTION_UNAVAILABLE_BLOCK: &str = "[Transcription unavailable]";
 
 /// Extract a basename-style filename from the path component of a URL.
 ///
@@ -4381,14 +4565,14 @@ async fn download_file_to_blocks(
     max_bytes: u64,
     download_dir: &std::path::Path,
     extra_headers: &[(String, String)],
-) -> Vec<ContentBlock> {
+) -> DownloadedFile {
     // Validate URL scheme
     if let Err(reason) = validate_url_scheme(url) {
         warn!("{reason}");
-        return vec![ContentBlock::Text {
+        return DownloadedFile::failed(vec![ContentBlock::Text {
             text: format!("[File download rejected: {reason}]"),
             provider_metadata: None,
-        }];
+        }]);
     }
 
     let client = crate::http_client::new_client();
@@ -4400,10 +4584,10 @@ async fn download_file_to_blocks(
         Ok(r) => r,
         Err(e) => {
             warn!("Failed to download file from channel: {e}");
-            return vec![ContentBlock::Text {
+            return DownloadedFile::failed(vec![ContentBlock::Text {
                 text: format!("[File download failed: {e}]"),
                 provider_metadata: None,
-            }];
+            }]);
         }
     };
 
@@ -4421,10 +4605,10 @@ async fn download_file_to_blocks(
             url = %url,
             "File download returned non-success status"
         );
-        return vec![ContentBlock::Text {
+        return DownloadedFile::failed(vec![ContentBlock::Text {
             text: format!("[File download failed: HTTP {status} ({filename})]"),
             provider_metadata: None,
-        }];
+        }]);
     }
 
     // Fast-reject via Content-Length header when available.
@@ -4434,12 +4618,12 @@ async fn download_file_to_blocks(
                 content_length = cl,
                 max_bytes, "File exceeds size cap (Content-Length), skipping download"
             );
-            return vec![ContentBlock::Text {
+            return DownloadedFile::failed(vec![ContentBlock::Text {
                 text: format!(
                     "[File too large: {cl} bytes exceeds {max_bytes} byte limit ({filename})]"
                 ),
                 provider_metadata: None,
-            }];
+            }]);
         }
     }
 
@@ -4467,10 +4651,10 @@ async fn download_file_to_blocks(
             "Failed to create download dir {}: {e}",
             download_dir.display()
         );
-        return vec![ContentBlock::Text {
+        return DownloadedFile::failed(vec![ContentBlock::Text {
             text: format!("[File download failed: cannot create directory: {e}]"),
             provider_metadata: None,
-        }];
+        }]);
     }
 
     // Stream body to disk chunk by chunk, enforcing size cap.
@@ -4479,10 +4663,10 @@ async fn download_file_to_blocks(
         Ok(f) => f,
         Err(e) => {
             warn!("Failed to create file {}: {e}", file_path.display());
-            return vec![ContentBlock::Text {
+            return DownloadedFile::failed(vec![ContentBlock::Text {
                 text: format!("[File download failed: {e}]"),
                 provider_metadata: None,
-            }];
+            }]);
         }
     };
 
@@ -4503,12 +4687,12 @@ async fn download_file_to_blocks(
                     );
                     drop(file);
                     let _ = tokio::fs::remove_file(&file_path).await;
-                    return vec![ContentBlock::Text {
+                    return DownloadedFile::failed(vec![ContentBlock::Text {
                         text: format!(
                             "[File too large: exceeded {max_bytes} byte limit ({filename})]"
                         ),
                         provider_metadata: None,
-                    }];
+                    }]);
                 }
                 // Fill magic buffer from the very first bytes of the stream.
                 if magic_filled < magic_buf.len() {
@@ -4521,20 +4705,20 @@ async fn download_file_to_blocks(
                     warn!("Failed to write chunk to {}: {e}", file_path.display());
                     drop(file);
                     let _ = tokio::fs::remove_file(&file_path).await;
-                    return vec![ContentBlock::Text {
+                    return DownloadedFile::failed(vec![ContentBlock::Text {
                         text: format!("[File download failed: write error: {e}]"),
                         provider_metadata: None,
-                    }];
+                    }]);
                 }
             }
             Err(e) => {
                 warn!("Stream error downloading file: {e}");
                 drop(file);
                 let _ = tokio::fs::remove_file(&file_path).await;
-                return vec![ContentBlock::Text {
+                return DownloadedFile::failed(vec![ContentBlock::Text {
                     text: format!("[File download failed: {e}]"),
                     provider_metadata: None,
-                }];
+                }]);
             }
         }
     }
@@ -4595,9 +4779,9 @@ async fn download_file_to_blocks(
     );
 
     let path_str = file_path.to_string_lossy().into_owned();
-    if media_type.starts_with("image/") {
+    let blocks = if media_type.starts_with("image/") {
         vec![ContentBlock::ImageFile {
-            media_type,
+            media_type: media_type.clone(),
             path: path_str,
         }]
     } else {
@@ -4613,6 +4797,10 @@ async fn download_file_to_blocks(
             provider_metadata: None,
         });
         blocks
+    };
+    DownloadedFile {
+        blocks,
+        saved: Some((file_path, media_type)),
     }
 }
 
@@ -7621,7 +7809,7 @@ mod tests {
         #[tokio::test]
         async fn test_file_download_rejects_bad_scheme() {
             let dir = std::env::temp_dir().join("librefang_test_download");
-            let blocks = download_file_to_blocks(
+            let result = download_file_to_blocks(
                 "ftp://evil.com/malware.exe",
                 "malware.exe",
                 1024,
@@ -7629,6 +7817,8 @@ mod tests {
                 &[],
             )
             .await;
+            let blocks = result.blocks;
+            assert!(result.saved.is_none());
             assert_eq!(blocks.len(), 1);
             match &blocks[0] {
                 ContentBlock::Text { text, .. } => {
@@ -7772,6 +7962,325 @@ mod tests {
             // Filename fallback also agrees (extension .oga).
             let fname_mime = audio_mime_from_filename("file_136.oga");
             assert_eq!(fname_mime, Some("audio/ogg"));
+        }
+    }
+
+    /// Regression coverage for #4975 — inbound audio attachments must hand
+    /// the saved file off to the kernel's `MediaEngine` (via the
+    /// `transcribe_inbound_audio` trait method) whenever `[media]
+    /// audio_transcription = true`. Before the fix the path-block was
+    /// dispatched as-is and `MediaEngine::process_attachments` was
+    /// orphaned, so a Telegram voice note never reached Whisper / Groq.
+    mod inbound_audio_transcription {
+        use super::*;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        /// Mock that captures every `transcribe_inbound_audio` call.
+        ///
+        /// The fixed/error response lets us simulate the kernel returning:
+        ///   - `Ok(Some(text))` — transcription succeeded
+        ///   - `Ok(None)`       — config disabled (`audio_transcription = false`)
+        ///   - `Err(reason)`    — provider error / oversize / missing creds
+        struct RecordingHandle {
+            calls: Mutex<Vec<(PathBuf, String)>>,
+            response: Result<Option<String>, String>,
+        }
+
+        #[async_trait]
+        impl ChannelBridgeHandle for RecordingHandle {
+            async fn send_message(
+                &self,
+                _agent_id: AgentId,
+                _message: &str,
+            ) -> Result<String, String> {
+                Ok(String::new())
+            }
+            async fn find_agent_by_name(&self, _name: &str) -> Result<Option<AgentId>, String> {
+                Ok(None)
+            }
+            async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+                Ok(Vec::new())
+            }
+            async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+                Err("unused in this test".into())
+            }
+            fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
+
+            async fn transcribe_inbound_audio(
+                &self,
+                path: &std::path::Path,
+                mime_type: &str,
+            ) -> Result<Option<String>, String> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((path.to_path_buf(), mime_type.to_string()));
+                self.response.clone()
+            }
+        }
+
+        fn handle_with(
+            response: Result<Option<String>, String>,
+        ) -> (Arc<dyn ChannelBridgeHandle>, Arc<RecordingHandle>) {
+            let inner = Arc::new(RecordingHandle {
+                calls: Mutex::new(Vec::new()),
+                response,
+            });
+            let h: Arc<dyn ChannelBridgeHandle> = inner.clone();
+            (h, inner)
+        }
+
+        fn saved(path: &str, mime: &str) -> Option<(PathBuf, String)> {
+            Some((PathBuf::from(path), mime.to_string()))
+        }
+
+        #[tokio::test]
+        async fn enabled_success_returns_transcription_block() {
+            // Kernel reports `Ok(Some("hello world"))` → bridge appends a
+            // `[Transcription: hello world]` block. This is the path that
+            // was completely broken before #4975 — no caller ever invoked
+            // `MediaEngine::process_attachments` so `Some(...)` was never
+            // produced for inbound audio.
+            let (h, rec) = handle_with(Ok(Some("hello world".into())));
+            let s = saved("/tmp/x.ogg", "audio/ogg");
+            let block = maybe_transcribe_inbound_audio(&h, s.as_ref()).await;
+            match block {
+                Some(ContentBlock::Text { text, .. }) => {
+                    assert_eq!(text, "[Transcription: hello world]");
+                }
+                other => panic!("expected transcription text block, got {other:?}"),
+            }
+            let calls = rec.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, PathBuf::from("/tmp/x.ogg"));
+            assert_eq!(calls[0].1, "audio/ogg");
+        }
+
+        #[tokio::test]
+        async fn disabled_returns_none_and_preserves_raw_path() {
+            // `audio_transcription = false` → kernel returns Ok(None) → the
+            // bridge does NOT insert a transcription block. The raw saved-
+            // path block continues straight to the agent (verified by
+            // absence of any sibling Text insertion at the call site —
+            // see Voice/Audio branches in dispatch_message).
+            let (h, rec) = handle_with(Ok(None));
+            let s = saved("/tmp/x.ogg", "audio/ogg");
+            let block = maybe_transcribe_inbound_audio(&h, s.as_ref()).await;
+            assert!(block.is_none(), "disabled-config must produce no block");
+            // The trait call still happens — the kernel is the one that
+            // honors the flag. This guarantees mocks/integration tests
+            // can't accidentally hide the dispatch.
+            assert_eq!(rec.calls.lock().unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn provider_failure_surfaces_opaque_block_not_drop() {
+            // Provider 5xx, missing creds, or oversize → `Err(reason)`.
+            // Message MUST still reach the agent: we return an opaque
+            // `[Transcription unavailable]` text block (the raw reason
+            // never reaches the LLM prompt because provider error
+            // envelopes can echo API keys — see #4999); the raw
+            // saved-path block is preserved by the caller, so the agent
+            // can fall back to `media_transcribe` or just acknowledge
+            // the voice note. Never drop the message.
+            let leak = "Gemini API error (401): https://generativelanguage.googleapis.com/v1beta/models/foo:generateContent?key=SECRET_KEY_DO_NOT_LEAK";
+            let (h, _rec) = handle_with(Err(leak.into()));
+            let s = saved("/tmp/x.ogg", "audio/ogg");
+            let block = maybe_transcribe_inbound_audio(&h, s.as_ref()).await;
+            match block {
+                Some(ContentBlock::Text { text, .. }) => {
+                    assert_eq!(
+                        text, "[Transcription unavailable]",
+                        "failure block must be the opaque sentinel"
+                    );
+                    assert!(
+                        !text.contains("SECRET_KEY_DO_NOT_LEAK"),
+                        "provider reason (which may contain credentials) must not leak into the block"
+                    );
+                    assert!(
+                        !text.contains("?key="),
+                        "URL query params from the provider error must not leak into the block"
+                    );
+                }
+                other => panic!("expected failure text block, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn no_saved_file_skips_dispatch() {
+            // Download failed earlier in the pipeline → no path/mime to
+            // send. Helper must return None without touching the trait —
+            // saves a no-op kernel round-trip.
+            let (h, rec) = handle_with(Ok(Some("should never be returned".into())));
+            let block = maybe_transcribe_inbound_audio(&h, None).await;
+            assert!(block.is_none());
+            assert!(rec.calls.lock().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn non_audio_mime_is_silently_skipped() {
+            // Defense in depth: if upstream classification routes a video
+            // through the Voice/Audio arm (it shouldn't, but #4927 wasn't
+            // shipped yet at the time the bug was reported), don't waste
+            // an STT call on a non-audio file. The agent still gets the
+            // raw path block.
+            let (h, rec) = handle_with(Ok(Some("would have transcribed".into())));
+            let s = saved("/tmp/clip.mp4", "video/mp4");
+            let block = maybe_transcribe_inbound_audio(&h, s.as_ref()).await;
+            assert!(block.is_none());
+            assert!(
+                rec.calls.lock().unwrap().is_empty(),
+                "non-audio MIME must never hit the kernel STT path"
+            );
+        }
+
+        #[tokio::test]
+        async fn empty_transcription_is_discarded() {
+            // Whisper occasionally returns empty/whitespace when the
+            // audio is silence. Don't pollute the agent's prompt with
+            // `[Transcription: ]`.
+            let (h, _rec) = handle_with(Ok(Some("   ".into())));
+            let s = saved("/tmp/x.ogg", "audio/ogg");
+            let block = maybe_transcribe_inbound_audio(&h, s.as_ref()).await;
+            assert!(block.is_none(), "empty transcription must be dropped");
+        }
+
+        /// Mirror the Voice/Audio dispatch sites in `dispatch_message`:
+        /// after `download_file_to_blocks` we have `[Text("[File: …]")]`
+        /// → caller `insert(0, header)` → caller `insert(1, transcription)`.
+        /// The resulting order must be:
+        ///   blocks[0] = "[Voice message …]" header
+        ///   blocks[1] = "[Transcription: …]"
+        ///   blocks[2] = "[File: …]" saved-path block
+        ///
+        /// This pins the position so a future refactor can't silently
+        /// move the transcription after the path block — which would
+        /// change how the model reads the message (transcription serves
+        /// as the *spoken content*; it must precede the file metadata).
+        #[tokio::test]
+        async fn transcription_block_lands_between_header_and_file_path() {
+            let (h, _rec) = handle_with(Ok(Some("hello world".into())));
+            let s = saved("/tmp/voice.ogg", "audio/ogg");
+
+            // Simulate what `download_file_to_blocks` produced on success.
+            let mut blocks = vec![ContentBlock::Text {
+                text: "[File: /tmp/voice.ogg]".into(),
+                provider_metadata: None,
+            }];
+
+            // Same sequence as the Voice/Audio arms of dispatch_message.
+            let transcription = maybe_transcribe_inbound_audio(&h, s.as_ref()).await;
+            blocks.insert(
+                0,
+                ContentBlock::Text {
+                    text: "[Voice message (4s)]".into(),
+                    provider_metadata: None,
+                },
+            );
+            if let Some(t) = transcription {
+                blocks.insert(1, t);
+            }
+
+            assert_eq!(blocks.len(), 3, "want header + transcription + file block");
+            match &blocks[0] {
+                ContentBlock::Text { text, .. } => {
+                    assert!(text.starts_with("[Voice message"), "blocks[0] header");
+                }
+                other => panic!("blocks[0] should be the voice header, got {other:?}"),
+            }
+            match &blocks[1] {
+                ContentBlock::Text { text, .. } => {
+                    assert_eq!(
+                        text, "[Transcription: hello world]",
+                        "blocks[1] must be the transcription, not the file path"
+                    );
+                }
+                other => panic!("blocks[1] should be the transcription, got {other:?}"),
+            }
+            match &blocks[2] {
+                ContentBlock::Text { text, .. } => {
+                    assert!(
+                        text.starts_with("[File:"),
+                        "blocks[2] must be the saved-path block"
+                    );
+                }
+                other => panic!("blocks[2] should be the file path block, got {other:?}"),
+            }
+        }
+
+        /// A hung STT provider must not pin the dispatch task. The
+        /// production helper wraps the kernel call in a 30s
+        /// `tokio::time::timeout`; on expiry it delivers the opaque
+        /// "unavailable" block (same shape as the provider-error path)
+        /// and lets dispatch move on. We exercise the timeout branch
+        /// via `maybe_transcribe_inbound_audio_with_timeout` so the
+        /// test finishes in milliseconds, not 30s. Using `test-util`'s
+        /// paused-time runtime would be cleaner but requires an extra
+        /// dev-dep — the parameterized helper is the cheapest path.
+        #[tokio::test]
+        async fn provider_hang_times_out_and_returns_unavailable_block() {
+            // Custom hand-rolled handle whose `transcribe_inbound_audio`
+            // future never resolves. `RecordingHandle` can't model this
+            // because it returns a cloned response immediately.
+            struct HangHandle;
+            #[async_trait]
+            impl ChannelBridgeHandle for HangHandle {
+                async fn send_message(
+                    &self,
+                    _agent_id: AgentId,
+                    _message: &str,
+                ) -> Result<String, String> {
+                    Ok(String::new())
+                }
+                async fn find_agent_by_name(&self, _name: &str) -> Result<Option<AgentId>, String> {
+                    Ok(None)
+                }
+                async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+                    Ok(Vec::new())
+                }
+                async fn spawn_agent_by_name(
+                    &self,
+                    _manifest_name: &str,
+                ) -> Result<AgentId, String> {
+                    Err("unused".into())
+                }
+                fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}
+
+                async fn transcribe_inbound_audio(
+                    &self,
+                    _path: &std::path::Path,
+                    _mime_type: &str,
+                ) -> Result<Option<String>, String> {
+                    // Block forever; the helper's timeout must fire.
+                    std::future::pending::<()>().await;
+                    unreachable!("pending future cannot resolve")
+                }
+            }
+
+            let h: Arc<dyn ChannelBridgeHandle> = Arc::new(HangHandle);
+            let s = saved("/tmp/x.ogg", "audio/ogg");
+            let started = std::time::Instant::now();
+            let block = maybe_transcribe_inbound_audio_with_timeout(
+                &h,
+                s.as_ref(),
+                std::time::Duration::from_millis(50),
+            )
+            .await;
+
+            // The timeout must actually have fired — sanity-check the
+            // wall-clock elapsed is on the order of the budget, not 30s.
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "helper waited too long; timeout did not fire"
+            );
+
+            match block {
+                Some(ContentBlock::Text { text, .. }) => {
+                    assert_eq!(text, "[Transcription unavailable]");
+                }
+                other => panic!("timeout must produce the unavailable block, got {other:?}"),
+            }
         }
     }
 }
