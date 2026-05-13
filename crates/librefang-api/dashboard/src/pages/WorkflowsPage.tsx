@@ -42,6 +42,8 @@ import {
 } from "../lib/mutations/workflows";
 import { useCreateSchedule } from "../lib/mutations/schedules";
 import { useUIStore } from "../lib/store";
+import { extractImageRefs } from "../lib/workflowOutputImages";
+import { WorkflowStepImageGallery } from "../components/WorkflowStepImageGallery";
 
 const categoryIconMap: Record<string, React.ComponentType<{ className?: string }>> = {
   creation: FileText, language: Bot, thinking: Activity, business: Calendar,
@@ -585,25 +587,38 @@ export function WorkflowsPage() {
     </button>
   );
 
-  const stepResultContent = (step: WorkflowStepResult, _idx: number) => (
-    <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
-      <div>
-        <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
-        <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
-          {step.prompt || "(empty)"}
-        </pre>
+  const stepResultContent = (step: WorkflowStepResult, _idx: number) => {
+    // Detect images embedded in the step output (image_generate tool
+    // results, bare URLs in agent prose, etc.) and render them above
+    // the raw text — operators still need the raw output for debugging
+    // and for the human-in-the-loop approval flow (#4977).
+    const imageRefs = extractImageRefs(step.output);
+    return (
+      <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
+        <div>
+          <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
+          <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
+            {step.prompt || "(empty)"}
+          </pre>
+        </div>
+        {imageRefs.length > 0 && (
+          <WorkflowStepImageGallery
+            refs={imageRefs}
+            label={t("workflows.generated_images", { defaultValue: "Generated images:" })}
+          />
+        )}
+        <div>
+          <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.output", { defaultValue: "Output:" })}</p>
+          <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
+            {step.output || "(empty)"}
+          </pre>
+        </div>
+        <p className="text-[9px] text-text-dim/40">
+          {step.agent_name} · {step.input_tokens} in / {step.output_tokens} out tokens
+        </p>
       </div>
-      <div>
-        <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.output", { defaultValue: "Output:" })}</p>
-        <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
-          {step.output || "(empty)"}
-        </pre>
-      </div>
-      <p className="text-[9px] text-text-dim/40">
-        {step.agent_name} · {step.input_tokens} in / {step.output_tokens} out tokens
-      </p>
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
