@@ -279,8 +279,25 @@ pub(super) fn safe_path_component(input: &str, fallback: &str) -> String {
 }
 
 pub(super) fn has_unsafe_relative_components(path: &Path) -> bool {
-    path.components()
-        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+    // `ParentDir` (..) is always unsafe — it can escape the workspaces root
+    // after joining regardless of the rest of the path.
+    //
+    // `Prefix` (Windows drive / UNC prefix like `C:` or `\\?\C:`) is unsafe
+    // ONLY when the path is not already absolute. A fully absolute Windows
+    // path *always* begins with a `Prefix` component (e.g. `C:\Users\foo`
+    // decomposes into `Prefix("C:")`, `RootDir`, `Normal("Users")`, …), so
+    // treating `Prefix` as unsafe unconditionally rejects every well-formed
+    // absolute path on Windows — including ones already validated by
+    // `starts_with(workspaces_root)`. What we actually want to block is
+    // drive-relative inputs like `C:foo` where `is_absolute()` is false yet
+    // the components still carry a `Prefix` that would let the path escape
+    // a `<root>.join(rel)` operation.
+    let is_absolute = path.is_absolute();
+    path.components().any(|c| match c {
+        Component::ParentDir => true,
+        Component::Prefix(_) => !is_absolute,
+        _ => false,
+    })
 }
 
 pub(super) fn resolve_workspace_dir(
