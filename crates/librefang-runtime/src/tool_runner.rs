@@ -10074,6 +10074,346 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------
+    // #4981 follow-up (PR #4995 review): the three remaining media read
+    // tools — `media_describe`, `media_transcribe`, `speech_to_text` —
+    // each get their own named positive / outside / dotdot test so a
+    // future copy-paste asymmetry in any one dispatcher arm fails CI
+    // with a precise test name, instead of being noticed only by
+    // inspection that all four arms "look identical".
+    //
+    // These tools require a real `MediaEngine` and will surface a
+    // provider-lookup error *after* the sandbox check (no API keys are
+    // set in tests). The positive case therefore asserts the negative
+    // invariant: the result MUST NOT carry a sandbox-rejection message.
+    // A future regression that drops the staging-dir widening from one
+    // of these arms would resurface as "Access denied: path '...'
+    // resolves outside workspace", which the positive assertion catches.
+    // -----------------------------------------------------------------
+
+    /// Bytes for a real Ogg/Opus voice note are not needed — the
+    /// sandbox check fires before the provider call, and the read of
+    /// the staged file just needs the file to exist. A tiny payload
+    /// keeps the tempdir cheap and avoids any accidental decode.
+    fn write_staged_audio(dir: &Path, name: &str) -> std::path::PathBuf {
+        let p = dir.join(name);
+        // "OggS" magic — harmless filler, the test never decodes it.
+        std::fs::write(&p, [0x4F, 0x67, 0x67, 0x53]).unwrap();
+        p
+    }
+
+    /// Drive `execute_tool` for one of the media read tools against
+    /// (primary workspace, staging dir kernel, target path) and return
+    /// the raw `ToolResult`. Centralising the 28-arg call keeps the
+    /// per-tool tests focused on the assertion that matters.
+    async fn run_media_read_tool(
+        tool: &str,
+        target_path: &str,
+        primary: &Path,
+        kernel: &Arc<dyn KernelHandle>,
+        tool_use_id: &str,
+    ) -> ToolResult {
+        use crate::media_understanding::MediaEngine;
+        use librefang_types::media::MediaConfig;
+
+        // A real engine — `Option::None` would short-circuit with
+        // "Media engine not available" BEFORE the sandbox check fires
+        // and the test would no longer exercise the allowlist.
+        let engine = MediaEngine::new(MediaConfig::default());
+
+        execute_tool(
+            "test-id",
+            tool,
+            &serde_json::json!({ "path": target_path }),
+            Some(kernel),
+            None,
+            Some(tool_use_id),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary),
+            Some(&engine),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Assert that a `ToolResult` did NOT come back with a sandbox
+    /// rejection. The media tools fail downstream (no provider keys
+    /// in tests) — that's expected and is NOT what these tests care
+    /// about. A regression in the dispatcher arm would surface as
+    /// "Access denied: path '...' resolves outside workspace", which
+    /// is what we lock out here.
+    fn assert_not_sandbox_reject(result: &ToolResult, tool: &str) {
+        assert!(
+            !(result.content.contains("Access denied")
+                && result.content.contains("resolves outside workspace")),
+            "{tool} rejected staging-dir path as sandbox escape — \
+             allowlist widening regression. content: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("Path traversal denied"),
+            "{tool} flagged staging-dir path as traversal — \
+             allowlist widening regression. content: {}",
+            result.content
+        );
+    }
+
+    // ---------- media_describe ----------
+
+    #[tokio::test]
+    async fn test_media_describe_allows_channel_download_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let download_canon = download.path().canonicalize().unwrap();
+        // `media_describe` keys MIME off extension — `.png` is
+        // accepted; the file body is never decoded before the
+        // provider call, so the magic bytes only need to satisfy
+        // `tokio::fs::read`.
+        let target = download_canon.join("inbound.png");
+        std::fs::write(&target, [0x89, 0x50, 0x4E, 0x47]).unwrap();
+
+        let kernel = make_download_dir_kernel(download_canon.clone());
+        let result = run_media_read_tool(
+            "media_describe",
+            target.to_str().unwrap(),
+            primary.path(),
+            &kernel,
+            "00000000-0000-0000-0000-000000000030",
+        )
+        .await;
+        assert_not_sandbox_reject(&result, "media_describe");
+    }
+
+    #[tokio::test]
+    async fn test_media_describe_rejects_path_outside_staging_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let outside = tempfile::tempdir().expect("outside");
+        let download_canon = download.path().canonicalize().unwrap();
+        let target = outside.path().canonicalize().unwrap().join("evil.png");
+        std::fs::write(&target, [0x89, 0x50, 0x4E, 0x47]).unwrap();
+
+        let kernel = make_download_dir_kernel(download_canon.clone());
+        let result = run_media_read_tool(
+            "media_describe",
+            target.to_str().unwrap(),
+            primary.path(),
+            &kernel,
+            "00000000-0000-0000-0000-000000000031",
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "media_describe must reject path outside both workspace and staging dir"
+        );
+        assert!(
+            result.content.contains("Access denied")
+                && result.content.contains("resolves outside workspace"),
+            "expected sandbox-escape error, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_media_describe_rejects_dotdot_escape_from_staging_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let download_canon = download.path().canonicalize().unwrap();
+        let kernel = make_download_dir_kernel(download_canon.clone());
+
+        let evil = format!("{}/../passwd", download_canon.to_str().unwrap());
+        let result = run_media_read_tool(
+            "media_describe",
+            &evil,
+            primary.path(),
+            &kernel,
+            "00000000-0000-0000-0000-000000000032",
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "`..` from inside the staging dir must be rejected"
+        );
+        assert!(
+            result.content.contains("Path traversal denied"),
+            "expected path-traversal error, got: {}",
+            result.content
+        );
+    }
+
+    // ---------- media_transcribe ----------
+
+    #[tokio::test]
+    async fn test_media_transcribe_allows_channel_download_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let download_canon = download.path().canonicalize().unwrap();
+        // `.oga` is the Telegram voice-note extension — the primary
+        // path that motivated #4981.
+        let target = write_staged_audio(&download_canon, "voice.oga");
+
+        let kernel = make_download_dir_kernel(download_canon.clone());
+        let result = run_media_read_tool(
+            "media_transcribe",
+            target.to_str().unwrap(),
+            primary.path(),
+            &kernel,
+            "00000000-0000-0000-0000-000000000033",
+        )
+        .await;
+        assert_not_sandbox_reject(&result, "media_transcribe");
+    }
+
+    #[tokio::test]
+    async fn test_media_transcribe_rejects_path_outside_staging_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let outside = tempfile::tempdir().expect("outside");
+        let download_canon = download.path().canonicalize().unwrap();
+        let target = write_staged_audio(&outside.path().canonicalize().unwrap(), "evil.oga");
+
+        let kernel = make_download_dir_kernel(download_canon.clone());
+        let result = run_media_read_tool(
+            "media_transcribe",
+            target.to_str().unwrap(),
+            primary.path(),
+            &kernel,
+            "00000000-0000-0000-0000-000000000034",
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "media_transcribe must reject path outside both workspace and staging dir"
+        );
+        assert!(
+            result.content.contains("Access denied")
+                && result.content.contains("resolves outside workspace"),
+            "expected sandbox-escape error, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_media_transcribe_rejects_dotdot_escape_from_staging_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let download_canon = download.path().canonicalize().unwrap();
+        let kernel = make_download_dir_kernel(download_canon.clone());
+
+        let evil = format!("{}/../secret.oga", download_canon.to_str().unwrap());
+        let result = run_media_read_tool(
+            "media_transcribe",
+            &evil,
+            primary.path(),
+            &kernel,
+            "00000000-0000-0000-0000-000000000035",
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "`..` from inside the staging dir must be rejected"
+        );
+        assert!(
+            result.content.contains("Path traversal denied"),
+            "expected path-traversal error, got: {}",
+            result.content
+        );
+    }
+
+    // ---------- speech_to_text ----------
+
+    #[tokio::test]
+    async fn test_speech_to_text_allows_channel_download_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let download_canon = download.path().canonicalize().unwrap();
+        let target = write_staged_audio(&download_canon, "voice.mp3");
+
+        let kernel = make_download_dir_kernel(download_canon.clone());
+        let result = run_media_read_tool(
+            "speech_to_text",
+            target.to_str().unwrap(),
+            primary.path(),
+            &kernel,
+            "00000000-0000-0000-0000-000000000036",
+        )
+        .await;
+        assert_not_sandbox_reject(&result, "speech_to_text");
+    }
+
+    #[tokio::test]
+    async fn test_speech_to_text_rejects_path_outside_staging_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let outside = tempfile::tempdir().expect("outside");
+        let download_canon = download.path().canonicalize().unwrap();
+        let target = write_staged_audio(&outside.path().canonicalize().unwrap(), "evil.mp3");
+
+        let kernel = make_download_dir_kernel(download_canon.clone());
+        let result = run_media_read_tool(
+            "speech_to_text",
+            target.to_str().unwrap(),
+            primary.path(),
+            &kernel,
+            "00000000-0000-0000-0000-000000000037",
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "speech_to_text must reject path outside both workspace and staging dir"
+        );
+        assert!(
+            result.content.contains("Access denied")
+                && result.content.contains("resolves outside workspace"),
+            "expected sandbox-escape error, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_speech_to_text_rejects_dotdot_escape_from_staging_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let download_canon = download.path().canonicalize().unwrap();
+        let kernel = make_download_dir_kernel(download_canon.clone());
+
+        let evil = format!("{}/../secret.mp3", download_canon.to_str().unwrap());
+        let result = run_media_read_tool(
+            "speech_to_text",
+            &evil,
+            primary.path(),
+            &kernel,
+            "00000000-0000-0000-0000-000000000038",
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "`..` from inside the staging dir must be rejected"
+        );
+        assert!(
+            result.content.contains("Path traversal denied"),
+            "expected path-traversal error, got: {}",
+            result.content
+        );
+    }
+
     /// Defense-in-depth: the download dir is a *read-side* allowlist only.
     /// `file_write` still uses `named_ws_prefixes_writable`, so writes into
     /// the bridge's directory must remain rejected.
