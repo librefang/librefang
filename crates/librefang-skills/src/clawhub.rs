@@ -326,7 +326,7 @@ impl ClawHubClient {
             let result = self
                 .client
                 .get(url)
-                .header("User-Agent", "LibreFang/0.1")
+                .header("User-Agent", "BossFang/0.1")
                 .send()
                 .await;
 

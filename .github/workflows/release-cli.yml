@@ -93,23 +93,23 @@ jobs:
         with:
           key: cli-${{ matrix.target }}-${{ inputs.tag }}
       - name: Build CLI
-        run: cargo build --release --target ${{ matrix.target }} --bin librefang
+        run: cargo build --release --target ${{ matrix.target }} --bin bossfang
       - name: Ad-hoc codesign
         run: |
-          xattr -cr target/${{ matrix.target }}/release/librefang || true
-          codesign --force --sign - target/${{ matrix.target }}/release/librefang
+          xattr -cr target/${{ matrix.target }}/release/bossfang || true
+          codesign --force --sign - target/${{ matrix.target }}/release/bossfang
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang
+          tar czf ../../../bossfang-${{ matrix.target }}.tar.gz bossfang
           cd ../../..
-          shasum -a 256 librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
+          shasum -a 256 bossfang-${{ matrix.target }}.tar.gz > bossfang-${{ matrix.target }}.tar.gz.sha256
       - name: Upload to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for attempt in $(seq 1 5); do
-            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}.* --clobber; then
+            if gh release upload "${{ inputs.tag }}" bossfang-${{ matrix.target }}.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
@@ -154,22 +154,22 @@ jobs:
       - name: Build CLI
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} --bin librefang
+            cross build --release --target ${{ matrix.target }} --bin bossfang
           else
-            cargo build --release --target ${{ matrix.target }} --bin librefang
+            cargo build --release --target ${{ matrix.target }} --bin bossfang
           fi
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang
+          tar czf ../../../bossfang-${{ matrix.target }}.tar.gz bossfang
           cd ../../..
-          sha256sum librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
+          sha256sum bossfang-${{ matrix.target }}.tar.gz > bossfang-${{ matrix.target }}.tar.gz.sha256
       - name: Upload to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for attempt in $(seq 1 5); do
-            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}.* --clobber; then
+            if gh release upload "${{ inputs.tag }}" bossfang-${{ matrix.target }}.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
@@ -201,19 +201,19 @@ jobs:
       - name: Build CLI (Android aarch64)
         # channel-email excluded: rustls-connector 0.23.0 calls Verifier::new_with_extra_roots
         # which is not implemented in rustls-platform-verifier 0.7.0 on Android.
-        run: cross build --release --target aarch64-linux-android --bin librefang --no-default-features --features android,telemetry
+        run: cross build --release --target aarch64-linux-android --bin bossfang --no-default-features --features android,telemetry
       - name: Package
         run: |
           cd target/aarch64-linux-android/release
-          tar czf ../../../librefang-aarch64-linux-android.tar.gz librefang
+          tar czf ../../../bossfang-aarch64-linux-android.tar.gz bossfang
           cd ../../..
-          sha256sum librefang-aarch64-linux-android.tar.gz > librefang-aarch64-linux-android.tar.gz.sha256
+          sha256sum bossfang-aarch64-linux-android.tar.gz > bossfang-aarch64-linux-android.tar.gz.sha256
       - name: Upload to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for attempt in $(seq 1 5); do
-            if gh release upload "${{ inputs.tag }}" librefang-aarch64-linux-android.* --clobber; then
+            if gh release upload "${{ inputs.tag }}" bossfang-aarch64-linux-android.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
@@ -250,19 +250,19 @@ jobs:
         with:
           key: cli-mini-${{ matrix.target }}-${{ inputs.tag }}
       - name: Build CLI (mini)
-        run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features --features mini
+        run: cargo build --release --target ${{ matrix.target }} --bin bossfang --no-default-features --features mini
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../librefang-${{ matrix.target }}-mini.tar.gz librefang
+          tar czf ../../../bossfang-${{ matrix.target }}-mini.tar.gz bossfang
           cd ../../..
-          sha256sum librefang-${{ matrix.target }}-mini.tar.gz > librefang-${{ matrix.target }}-mini.tar.gz.sha256
+          sha256sum bossfang-${{ matrix.target }}-mini.tar.gz > bossfang-${{ matrix.target }}-mini.tar.gz.sha256
       - name: Upload to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for attempt in $(seq 1 5); do
-            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}-mini.* --clobber; then
+            if gh release upload "${{ inputs.tag }}" bossfang-${{ matrix.target }}-mini.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
@@ -300,10 +300,10 @@ jobs:
         with:
           key: cli-${{ matrix.target }}-${{ inputs.tag }}
       - name: Build static CLI
-        run: cross build --release --target ${{ matrix.target }} --bin librefang
+        run: cross build --release --target ${{ matrix.target }} --bin bossfang
       - name: Verify static linking
         run: |
-          FILE_OUT=$(file target/${{ matrix.target }}/release/librefang)
+          FILE_OUT=$(file target/${{ matrix.target }}/release/bossfang)
           echo "$FILE_OUT"
           if ! echo "$FILE_OUT" | grep -qE "statically linked|static-pie linked"; then
             echo "::error::Binary is not statically linked!"
@@ -312,15 +312,15 @@ jobs:
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang
+          tar czf ../../../bossfang-${{ matrix.target }}.tar.gz bossfang
           cd ../../..
-          sha256sum librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
+          sha256sum bossfang-${{ matrix.target }}.tar.gz > bossfang-${{ matrix.target }}.tar.gz.sha256
       - name: Upload to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for attempt in $(seq 1 5); do
-            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}.* --clobber; then
+            if gh release upload "${{ inputs.tag }}" bossfang-${{ matrix.target }}.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
@@ -356,20 +356,20 @@ jobs:
         with:
           key: cli-${{ matrix.target }}-${{ inputs.tag }}
       - name: Build CLI
-        run: cargo build --release --target ${{ matrix.target }} --bin librefang
+        run: cargo build --release --target ${{ matrix.target }} --bin bossfang
       - name: Package
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/librefang.exe" -DestinationPath "librefang-${{ matrix.target }}.zip"
-          $hash = (Get-FileHash "librefang-${{ matrix.target }}.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  librefang-${{ matrix.target }}.zip" | Out-File -Encoding ASCII "librefang-${{ matrix.target }}.zip.sha256"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/bossfang.exe" -DestinationPath "bossfang-${{ matrix.target }}.zip"
+          $hash = (Get-FileHash "bossfang-${{ matrix.target }}.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  bossfang-${{ matrix.target }}.zip" | Out-File -Encoding ASCII "bossfang-${{ matrix.target }}.zip.sha256"
       - name: Upload to GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for attempt in $(seq 1 5); do
-            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}.* --clobber; then
+            if gh release upload "${{ inputs.tag }}" bossfang-${{ matrix.target }}.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
@@ -404,23 +404,23 @@ jobs:
         with:
           key: cli-mini-${{ matrix.target }}-${{ inputs.tag }}
       - name: Build CLI (mini)
-        run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features --features mini
+        run: cargo build --release --target ${{ matrix.target }} --bin bossfang --no-default-features --features mini
       - name: Ad-hoc codesign
         run: |
-          xattr -cr target/${{ matrix.target }}/release/librefang || true
-          codesign --force --sign - target/${{ matrix.target }}/release/librefang
+          xattr -cr target/${{ matrix.target }}/release/bossfang || true
+          codesign --force --sign - target/${{ matrix.target }}/release/bossfang
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../librefang-${{ matrix.target }}-mini.tar.gz librefang
+          tar czf ../../../bossfang-${{ matrix.target }}-mini.tar.gz bossfang
           cd ../../..
-          shasum -a 256 librefang-${{ matrix.target }}-mini.tar.gz > librefang-${{ matrix.target }}-mini.tar.gz.sha256
+          shasum -a 256 bossfang-${{ matrix.target }}-mini.tar.gz > bossfang-${{ matrix.target }}-mini.tar.gz.sha256
       - name: Upload to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for attempt in $(seq 1 5); do
-            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}-mini.* --clobber; then
+            if gh release upload "${{ inputs.tag }}" bossfang-${{ matrix.target }}-mini.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
@@ -455,20 +455,20 @@ jobs:
         with:
           key: cli-mini-${{ matrix.target }}-${{ inputs.tag }}
       - name: Build CLI (mini)
-        run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features --features mini
+        run: cargo build --release --target ${{ matrix.target }} --bin bossfang --no-default-features --features mini
       - name: Package
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/librefang.exe" -DestinationPath "librefang-${{ matrix.target }}-mini.zip"
-          $hash = (Get-FileHash "librefang-${{ matrix.target }}-mini.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  librefang-${{ matrix.target }}-mini.zip" | Out-File -Encoding ASCII "librefang-${{ matrix.target }}-mini.zip.sha256"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/bossfang.exe" -DestinationPath "bossfang-${{ matrix.target }}-mini.zip"
+          $hash = (Get-FileHash "bossfang-${{ matrix.target }}-mini.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  bossfang-${{ matrix.target }}-mini.zip" | Out-File -Encoding ASCII "bossfang-${{ matrix.target }}-mini.zip.sha256"
       - name: Upload to GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for attempt in $(seq 1 5); do
-            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}-mini.* --clobber; then
+            if gh release upload "${{ inputs.tag }}" bossfang-${{ matrix.target }}-mini.* --clobber; then
               echo "✓ Upload succeeded (attempt $attempt)"
               exit 0
             fi
@@ -588,7 +588,7 @@ jobs:
           TAG: ${{ inputs.tag }}
       - name: Publish CLI wheels to PyPI (OIDC)
         # OIDC trusted publishing — configure at:
-        # pypi.org/manage/project/librefang/settings/publishing
+        # pypi.org/manage/project/bossfang-sdk/settings/publishing
         # workflow filename: release-cli.yml, environment: release-pypi
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:

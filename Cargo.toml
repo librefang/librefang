@@ -36,8 +36,11 @@ members = [
 version = "2026.5.12-beta.11"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/librefang/librefang"
-homepage = "https://librefang.ai"
+# BossFang fork: repository + homepage point at GQAdonis's fork.
+# Internal crate names (librefang-*) stay as-is — they're Layer-Internal
+# and must not be renamed (see CLAUDE.md Phase-2 three-layer principle).
+repository = "https://github.com/GQAdonis/librefang"
+homepage = "https://github.com/GQAdonis/librefang"
 rust-version = "1.94.1"
 
 [workspace.dependencies]

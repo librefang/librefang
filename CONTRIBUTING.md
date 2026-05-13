@@ -1,10 +1,10 @@
-# Contributing to LibreFang
+# Contributing to BossFang
 
-Thank you for your interest in contributing to LibreFang! "Libre" means freedom, and we mean it — this project is built by its community.
+Thank you for your interest in contributing to BossFang! "Libre" means freedom, and we mean it — this project is built by its community.
 
 **Our promise:** if your contribution positively helps the project, we merge it as-is. If it needs improvement, we provide active, constructive review to help you get it merged. Every contributor matters.
 
-Active contributors are invited to join the LibreFang GitHub org — core participants who consistently contribute get commit access and a voice in project direction.
+Active contributors are invited to join the BossFang GitHub org — core participants who consistently contribute get commit access and a voice in project direction.
 
 This guide covers everything you need to get started, from setting up your development environment to submitting pull requests.
 
@@ -31,7 +31,7 @@ This guide covers everything you need to get started, from setting up your devel
 
 ## Ways to Contribute
 
-**You don't need to know Rust to contribute to LibreFang.** We have contribution paths for every skill level:
+**You don't need to know Rust to contribute to BossFang.** We have contribution paths for every skill level:
 
 ### No Rust Required
 
@@ -72,7 +72,7 @@ This guide covers everything you need to get started, from setting up your devel
 | Python SDK | Python | varies | `sdk/python/` |
 | WhatsApp gateway | Node.js | varies | `packages/whatsapp-gateway/` |
 
-> **Tip:** Look for issues labeled [`good first issue`](https://github.com/librefang/librefang/labels/good%20first%20issue) — they include the files to modify, how to test, and estimated difficulty.
+> **Tip:** Look for issues labeled [`good first issue`](https://github.com/GQAdonis/librefang/labels/good%20first%20issue) — they include the files to modify, how to test, and estimated difficulty.
 
 ### Quick Start by Contribution Type
 
@@ -86,12 +86,12 @@ cp -r agents/hello-world agents/my-agent
 **I want to write a Python skill** (no Rust):
 ```bash
 mkdir -p ~/.librefang/skills/my-skill
-# See https://docs.librefang.ai/agent/skills for the skill format
+# See https://github.com/GQAdonis/librefang/blob/main/docs/agent/skills for the skill format
 ```
 
 **I want to fix a bug or add a Rust feature**:
 ```bash
-git clone https://github.com/librefang/librefang.git && cd librefang
+git clone https://github.com/GQAdonis/librefang.git && cd librefang
 cargo build --workspace        # Build
 cargo test --workspace         # Test
 cargo clippy --workspace --all-targets -- -D warnings  # Lint
@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets -- -D warnings  # Lint
 
 ## Contributing to the Registry
 
-The [`librefang-registry`](https://github.com/librefang/librefang-registry) repo is the shared catalog the website browses (at [librefang.ai/skills](https://librefang.ai/skills), `/hands`, etc.) and the CLI pulls from. Contributions are welcome without touching the main Rust codebase.
+The [`librefang-registry`](https://github.com/GQAdonis/librefang-registry) repo is the shared catalog the dashboard browses and the CLI pulls from. Contributions are welcome without touching the main Rust codebase.
 
 ### What lives in the registry
 
@@ -118,12 +118,12 @@ The [`librefang-registry`](https://github.com/librefang/librefang-registry) repo
 
 ### Submitting a new entry
 
-1. Fork [`librefang-registry`](https://github.com/librefang/librefang-registry).
+1. Fork [`librefang-registry`](https://github.com/GQAdonis/librefang-registry).
 2. Add your manifest to the right category directory. Follow the schema of an existing neighbour.
 3. Required TOML fields for every entry: `id`, `name`, `description`, `category`, `icon` (one emoji).
 4. Add i18n descriptions in `[i18n.zh]`, `[i18n.ja]`, `[i18n.ko]` if you can — the website renders localized descriptions when available.
 5. Tag with `tags = ["popular"]` only if you've validated real usage; the site visually promotes popular entries.
-6. Open a PR against the registry repo. On merge, the entry is live on librefang.ai within an hour (the Cloudflare Worker at `stats.librefang.ai` runs stale-while-revalidate with a 1-hour fresh window).
+6. Open a PR against the registry repo. On merge, the entry is visible to BossFang installs after the next registry cache TTL (default 24h; force-refresh with `bossfang catalog update`). The BossFang fork doesn't currently operate the upstream LibreFang Cloudflare cache layer (`stats.librefang.ai`); local installs pull directly from the registry repo.
 
 ### Testing your manifest locally
 
@@ -133,7 +133,7 @@ cd librefang/web
 pnpm dev
 
 # Or install a single skill directly into a running daemon
-librefang skill install /path/to/librefang-registry/skills/your-skill
+bossfang skill install /path/to/librefang-registry/skills/your-skill
 ```
 
 ### What the website expects
@@ -160,7 +160,7 @@ Click the green **"Code"** button on GitHub → **"Codespaces"** → **"Create c
 #### Clone and Build
 
 ```bash
-git clone https://github.com/librefang/librefang.git
+git clone https://github.com/GQAdonis/librefang.git
 cd librefang
 just setup        # one-time per clone — activates git hooks + fetches deps
 cargo build
@@ -380,7 +380,7 @@ Existing values for `CARGO_BUILD_JOBS` / `RUST_MIN_STACK` are preserved
 
 ## Dependency Policy
 
-LibreFang ships as a single binary that runs other people's agents on your hardware, so every crate we pull in is part of the trust boundary. The rules below codify how we add, audit, and remove third-party code.
+BossFang ships as a single binary that runs other people's agents on your hardware, so every crate we pull in is part of the trust boundary. The rules below codify how we add, audit, and remove third-party code.
 
 ### Adding a new crate
 
@@ -421,7 +421,7 @@ A `RUSTSEC-*` advisory that we cannot immediately fix may be temporarily ignored
 
 ## Architecture Overview
 
-LibreFang is organized as a Cargo workspace with 14 crates:
+BossFang is organized as a Cargo workspace with 14 crates:
 
 | Crate | Role |
 |-------|------|
@@ -433,7 +433,7 @@ LibreFang is organized as a Cargo workspace with 14 crates:
 | `librefang-kernel` | Assembles all subsystems: workflow engine, RBAC auth, heartbeat monitor, cron scheduler, config hot-reload |
 | `librefang-api` | REST/WS/SSE API (Axum 0.8), 76 endpoints, 14-page SPA dashboard, OpenAI-compatible `/v1/chat/completions` |
 | `librefang-channels` | 40 channel adapters (Telegram, Discord, Slack, WhatsApp, and 36 more), formatter, rate limiter |
-| `librefang-wire` | OFP (LibreFang Protocol): TCP P2P networking with HMAC-SHA256 mutual authentication |
+| `librefang-wire` | OFP (BossFang Protocol): TCP P2P networking with HMAC-SHA256 mutual authentication |
 | `librefang-cli` | Clap CLI with daemon auto-detect (HTTP mode vs. in-process fallback), MCP server |
 | `librefang-migrate` | Migration engine for importing from OpenClaw (and future frameworks) |
 | `librefang-skills` | Skill system: 60 bundled skills, FangHub marketplace, OpenClaw compatibility, prompt injection scanning |
@@ -499,7 +499,7 @@ You are a specialized agent that...
 4. Test by spawning:
 
 ```bash
-librefang agent spawn agents/my-agent/agent.toml
+bossfang agent spawn agents/my-agent/agent.toml
 ```
 
 5. Submit a PR with the new template.
@@ -555,7 +555,7 @@ def run(input: dict) -> str:
 4. Test locally:
 
 ```bash
-librefang skill test ./my-skill --input '{"url": "https://example.com"}'
+bossfang skill test ./my-skill --input '{"url": "https://example.com"}'
 ```
 
 5. Submit as a PR to `skills/community/` or publish to FangHub.
@@ -642,7 +642,7 @@ pub mod myplatform;
 
 ## How to Add a New LLM Provider
 
-LLM provider drivers live in `crates/librefang-runtime/src/`. LibreFang uses three driver families that cover most providers:
+LLM provider drivers live in `crates/librefang-runtime/src/`. BossFang uses three driver families that cover most providers:
 
 | Driver | Covers |
 |--------|--------|
@@ -728,11 +728,11 @@ tools = ["my_tool"]
 
 ## How to Write Integration Tests
 
-LibreFang has 2,100+ tests covering all crates. Every new feature must include tests. This section explains where tests live, how to structure them, and how to run them.
+BossFang has 2,100+ tests covering all crates. Every new feature must include tests. This section explains where tests live, how to structure them, and how to run them.
 
 ### Where Tests Live
 
-Tests in LibreFang are **inline** — they live alongside the source code in `#[cfg(test)]` modules at the bottom of each `.rs` file:
+Tests in BossFang are **inline** — they live alongside the source code in `#[cfg(test)]` modules at the bottom of each `.rs` file:
 
 ```
 crates/librefang-kernel/src/metering.rs     # contains #[cfg(test)] mod tests { ... }
@@ -838,7 +838,7 @@ mod tests {
 
 ### Tips
 
-- **Use `#[tokio::test]`** for any test that calls `.await`. Most crates in LibreFang already depend on `tokio` with the `test-util` feature.
+- **Use `#[tokio::test]`** for any test that calls `.await`. Most crates in BossFang already depend on `tokio` with the `test-util` feature.
 - **Use in-memory databases** for isolation. `MemorySubstrate::open_in_memory(0.1)` avoids touching the real filesystem.
 - **Use `tempfile::TempDir`** when you need a real directory (e.g., skill loading, file I/O tests). The directory is automatically cleaned up when the `TempDir` value is dropped.
 - **Use `Default::default()`** to construct config structs with sensible defaults, then override only the fields relevant to your test.
@@ -956,7 +956,7 @@ Please report unacceptable behavior to the maintainers.
 
 ## Questions?
 
-- Ask in [GitHub Discussions](https://github.com/librefang/librefang/discussions) for questions or ideas.
-- Open a [GitHub Issue](https://github.com/librefang/librefang/issues) for bugs or feature requests.
+- Ask in [GitHub Discussions](https://github.com/GQAdonis/librefang/discussions) for questions or ideas.
+- Open a [GitHub Issue](https://github.com/GQAdonis/librefang/issues) for bugs or feature requests.
 - Check the [docs/](docs/) directory for detailed guides on specific topics.
 - Read [GOVERNANCE.md](GOVERNANCE.md) for decision-making, maintainer expectations, and attribution rules.

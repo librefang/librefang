@@ -746,7 +746,7 @@ pub async fn test_webhook(
     let mut request = client
         .post(&webhook.url)
         .header("Content-Type", "application/json")
-        .header("User-Agent", "LibreFang-Webhook/1.0");
+        .header("User-Agent", "BossFang-Webhook/1.0");
 
     // Add HMAC signature if secret is configured
     if let Some(ref secret) = webhook.secret {

@@ -3,7 +3,7 @@ name = "librefang-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CLI tool for the LibreFang Agent OS"
+description = "CLI tool for the BossFang Agent OS"
 readme = "README.md"
 
 [features]
@@ -31,6 +31,14 @@ sqlite-backend = [
     "librefang-storage/sqlite-backend",
     "librefang-api/sqlite-backend",
 ]
+
+# BossFang fork: primary binary is `bossfang`. The legacy `librefang`
+# binary alias is kept so existing install scripts, CI runners, and
+# muscle-memory keep working. Both binaries are built from src/main.rs
+# and behave identically — the only difference is the executable name.
+[[bin]]
+name = "bossfang"
+path = "src/main.rs"
 
 [[bin]]
 name = "librefang"

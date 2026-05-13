@@ -26,9 +26,18 @@ pub const SUPPORTED_VERSIONS: &[&str] = &["v1"];
 /// Versions that are deprecated but still functional.
 pub const DEPRECATED_VERSIONS: &[&str] = &[];
 
-/// Vendor media-type prefix used in the `Accept` header.
-/// Full form: `application/vnd.librefang.v1+json`
-const VENDOR_PREFIX: &str = "application/vnd.librefang.";
+/// Vendor media-type prefixes accepted in the `Accept` header, in
+/// preference order.
+///
+/// BossFang fork: primary form is `application/vnd.bossfang.v1+json`.
+/// The legacy `application/vnd.librefang.*` prefix stays accepted so
+/// clients pinned to the LibreFang vendor type don't break on the
+/// cutover. [`VENDOR_PREFIXES[0]`] is the canonical prefix new code
+/// should reach for; the parser tries every entry.
+const VENDOR_PREFIXES: &[&str] = &[
+    "application/vnd.bossfang.",
+    "application/vnd.librefang.",
+];
 
 // ---------------------------------------------------------------------------
 // ApiVersion enum
@@ -87,11 +96,15 @@ pub fn version_from_path(path: &str) -> Option<ApiVersion> {
 
 /// Try to extract an [`ApiVersion`] from the `Accept` header.
 ///
-/// Supports the vendor media type `application/vnd.librefang.v1+json`.
+/// Supports both `application/vnd.bossfang.v1+json` (primary) and
+/// `application/vnd.librefang.v1+json` (legacy, accepted for back-compat).
 pub fn requested_version_from_accept_header(accept: &str) -> Option<&str> {
     for part in accept.split(',') {
         let media_type = part.trim().split(';').next().unwrap_or("").trim();
-        if let Some(rest) = media_type.strip_prefix(VENDOR_PREFIX) {
+        let rest = VENDOR_PREFIXES
+            .iter()
+            .find_map(|p| media_type.strip_prefix(*p));
+        if let Some(rest) = rest {
             let (version, suffix) = rest.rsplit_once('+')?;
             if suffix == "json" && !version.is_empty() {
                 return Some(version);
@@ -223,6 +236,53 @@ mod tests {
     #[test]
     fn test_api_version_display() {
         assert_eq!(ApiVersion::V1.to_string(), "v1");
+    }
+
+    // BossFang fork: vendor prefix renamed to vnd.bossfang.* with
+    // vnd.librefang.* kept for back-compat. The tests above cover the
+    // legacy path; the tests below cover the primary path.
+    #[test]
+    fn test_version_from_bossfang_accept_header() {
+        assert_eq!(
+            version_from_accept_header("application/vnd.bossfang.v1+json"),
+            Some(ApiVersion::V1)
+        );
+    }
+
+    #[test]
+    fn test_version_from_bossfang_accept_header_with_other_types() {
+        assert_eq!(
+            version_from_accept_header("text/html, application/vnd.bossfang.v1+json, */*"),
+            Some(ApiVersion::V1)
+        );
+    }
+
+    #[test]
+    fn test_version_from_bossfang_accept_header_with_parameters() {
+        assert_eq!(
+            version_from_accept_header("application/vnd.bossfang.v1+json; charset=utf-8"),
+            Some(ApiVersion::V1)
+        );
+    }
+
+    #[test]
+    fn test_version_from_bossfang_accept_header_unknown_version() {
+        assert_eq!(
+            version_from_accept_header("application/vnd.bossfang.v99+json"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_requested_version_from_bossfang_accept_header_requires_json_suffix() {
+        assert_eq!(
+            requested_version_from_accept_header("application/vnd.bossfang.v1+xml"),
+            None
+        );
+        assert_eq!(
+            requested_version_from_accept_header("application/vnd.bossfang.v1"),
+            None
+        );
     }
 
     #[test]
