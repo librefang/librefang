@@ -601,6 +601,9 @@ impl LibreFangKernel {
                 // byte-budget enforcement (defaults: 16 KB per result,
                 // 50 KB per turn) still applies — only fold no-ops here.
                 tool_results_config: None,
+                // Ephemeral /btw also starts empty — gateway pass would
+                // no-op (under threshold) so we skip it explicitly.
+                gateway_compression: None,
             },
         )
         .await
@@ -1350,6 +1353,7 @@ impl LibreFangKernel {
             aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: None,
             tool_results_config: Some(self.config.load().tool_results.clone()),
+            gateway_compression: Some(self.config.load().gateway_compression.clone()),
         };
         self.send_message_streaming_with_sender_and_opts(
             effective_id,
@@ -1537,6 +1541,7 @@ impl LibreFangKernel {
             aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: Some(parent_session_id),
             tool_results_config: Some(self.config.load().tool_results.clone()),
+            gateway_compression: Some(self.config.load().gateway_compression.clone()),
         };
         // INVARIANT: forks must use the canonical session so the parent turn's
         // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
@@ -1611,6 +1616,7 @@ impl LibreFangKernel {
             aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: None,
             tool_results_config: Some(self.config.load().tool_results.clone()),
+            gateway_compression: Some(self.config.load().gateway_compression.clone()),
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,

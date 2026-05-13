@@ -2276,6 +2276,74 @@ impl Default for CompactionTomlConfig {
     }
 }
 
+/// Gateway-level safety-net compression (exposed in `[gateway_compression]`
+/// TOML section). Runs at the top of the agent loop, *before* the first LLM
+/// call and *before* the LLM-based [`CompactionTomlConfig`] runs.
+///
+/// Purpose: catch sessions that grew between turns (overnight Telegram
+/// backlog, cron-job output piling up, etc.) and have already exceeded the
+/// model's context window when the next turn starts. Without this pass the
+/// first LLM call would 400 with "context too long" before the agent-level
+/// compactor ever gets a chance to run.
+///
+/// Trade-off vs. [`CompactionTomlConfig`]:
+/// - Gateway pass: cheap (rough token estimation, no LLM call), runs at a
+///   *higher* threshold (default 0.85), prunes tool results + drops oldest
+///   non-pinned messages.
+/// - Agent-level compactor: LLM-summarises, runs at a *lower* threshold
+///   (default 0.70). Owns history compaction proper.
+///
+/// The gateway pass aims to bring the session below ~0.80 so the agent-level
+/// compactor can run normally on the next iteration. It never calls the LLM.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct GatewayCompressionConfig {
+    /// Master switch. Default ON. Set to `false` to disable the gateway
+    /// safety-net pass entirely (the agent-level compactor still runs).
+    #[serde(default = "default_gateway_compression_enabled")]
+    pub enabled: bool,
+    /// Trigger ratio: gateway pass fires when estimated session tokens
+    /// exceed `context_window * threshold_ratio` (default: 0.85). Must be
+    /// strictly greater than [`CompactionTomlConfig::token_threshold_ratio`]
+    /// (default 0.70) so the agent-level compactor gets first crack.
+    #[serde(default = "default_gateway_compression_threshold_ratio")]
+    pub threshold_ratio: f32,
+    /// Tool results larger than this character count get stubbed (default:
+    /// 200). Stubbing preserves `tool_use_id` pairing so the assistant ↔
+    /// tool-result chain stays well-formed for the provider.
+    #[serde(default = "default_gateway_compression_max_tool_result_chars")]
+    pub max_tool_result_chars: usize,
+    /// Number of most-recent messages always kept verbatim (default: 5).
+    /// Older non-pinned messages are dropped first if stubbing tool results
+    /// alone does not bring the estimate below the threshold.
+    #[serde(default = "default_gateway_compression_keep_recent")]
+    pub keep_recent_messages: usize,
+}
+
+fn default_gateway_compression_enabled() -> bool {
+    true
+}
+fn default_gateway_compression_threshold_ratio() -> f32 {
+    0.85
+}
+fn default_gateway_compression_max_tool_result_chars() -> usize {
+    200
+}
+fn default_gateway_compression_keep_recent() -> usize {
+    5
+}
+
+impl Default for GatewayCompressionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_gateway_compression_enabled(),
+            threshold_ratio: default_gateway_compression_threshold_ratio(),
+            max_tool_result_chars: default_gateway_compression_max_tool_result_chars(),
+            keep_recent_messages: default_gateway_compression_keep_recent(),
+        }
+    }
+}
+
 /// Where a context injection should be placed in the session message list.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -3024,6 +3092,14 @@ pub struct KernelConfig {
     /// Session compaction configuration (LLM-based history summarization).
     #[serde(default)]
     pub compaction: CompactionTomlConfig,
+    /// Gateway-level safety-net compression (#4972). Cheap pre-loop pass
+    /// that prunes oversized tool results and oldest non-pinned messages
+    /// when a session has grown past the model's context window *between*
+    /// turns, before the first LLM call. Runs at a higher threshold (0.85)
+    /// than the agent-level compactor (0.70) — they are complementary, not
+    /// alternatives. See [`GatewayCompressionConfig`].
+    #[serde(default)]
+    pub gateway_compression: GatewayCompressionConfig,
     /// Message queue configuration (depth limits, TTL, concurrency).
     #[serde(default)]
     pub queue: QueueConfig,
@@ -5085,6 +5161,7 @@ impl Default for KernelConfig {
             prompt_caching: default_prompt_caching(),
             session: SessionConfig::default(),
             compaction: CompactionTomlConfig::default(),
+            gateway_compression: GatewayCompressionConfig::default(),
             queue: QueueConfig::default(),
             task_board: TaskBoardConfig::default(),
             external_auth: ExternalAuthConfig::default(),
