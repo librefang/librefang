@@ -1485,6 +1485,7 @@ struct NotifyingAdapter {
     recipients: Vec<ChannelUser>,
     sent: Arc<Mutex<Vec<(String, String)>>>,
     account_id: Option<String>,
+    channel_type: ChannelType,
 }
 
 impl NotifyingAdapter {
@@ -1494,6 +1495,7 @@ impl NotifyingAdapter {
             recipients,
             sent: Arc::new(Mutex::new(Vec::new())),
             account_id: None,
+            channel_type: ChannelType::Telegram,
         })
     }
 
@@ -1503,6 +1505,25 @@ impl NotifyingAdapter {
             recipients,
             sent: Arc::new(Mutex::new(Vec::new())),
             account_id: Some(account_id.to_string()),
+            channel_type: ChannelType::Telegram,
+        })
+    }
+
+    /// Build an adapter on a non-Telegram channel type with an `account_id`
+    /// override — used by the scoping regression test that pins the
+    /// listener's key construction is not Telegram-specific.
+    fn with_channel_and_account(
+        name: &str,
+        channel_type: ChannelType,
+        account_id: &str,
+        recipients: Vec<ChannelUser>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.to_string(),
+            recipients,
+            sent: Arc::new(Mutex::new(Vec::new())),
+            account_id: Some(account_id.to_string()),
+            channel_type,
         })
     }
 
@@ -1518,7 +1539,7 @@ impl ChannelAdapter for NotifyingAdapter {
     }
 
     fn channel_type(&self) -> ChannelType {
-        ChannelType::Telegram
+        self.channel_type.clone()
     }
 
     async fn start(
@@ -1860,6 +1881,14 @@ async fn test_approval_listener_skips_unbound_adapter() {
 
 /// Defense-in-depth: a malformed `agent_id` on the event drops the
 /// notification rather than reverting to the pre-fix broadcast.
+///
+/// Note: PR #4994 follow-up raised the log level for this branch from WARN
+/// to ERROR (a misconfigured `require_approval` caller emitting a non-UUID
+/// silently swallowed every approval — the failure mode #4875 was about).
+/// The log-level assertion is left as a comment rather than a hard check
+/// because `tracing_test` is not a dependency of `librefang-channels`;
+/// introducing it just to assert level emission would inflate the test
+/// dep graph for no real coverage gain.
 #[tokio::test]
 async fn test_approval_listener_drops_malformed_agent_id() {
     use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
@@ -1909,6 +1938,198 @@ async fn test_approval_listener_drops_malformed_agent_id() {
         adapter_ref.get_sent().is_empty(),
         "malformed agent_id must drop the notification rather than broadcast, got: {:?}",
         adapter_ref.get_sent()
+    );
+
+    manager.stop().await;
+}
+
+/// PR #4994 follow-up regression: in a mixed config (one single-bot adapter
+/// + one account-qualified adapter on the same channel type), the
+/// qualified adapter must NOT fall back to the bare-key binding. The bare
+/// `telegram` default was set by the single-bot adapter for agent X; the
+/// multi-bot adapter is not registered in `channel_defaults` and so MUST
+/// receive nothing — pre-fix listener code did `account_id ?
+/// qualified-lookup : bare-lookup` with `.or_else()` fallback to bare,
+/// which leaked the approval to the multi-bot adapter when its requesting
+/// agent happened to match the bare-key binding.
+#[tokio::test]
+async fn test_approval_listener_does_not_fall_back_from_qualified_to_bare_key() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+
+    let agent_x = AgentId::new();
+
+    // Only the bare `telegram` key is bound. The account-qualified
+    // `telegram:bot-b` key is intentionally absent.
+    let router = AgentRouter::new();
+    router.set_channel_default("telegram".to_string(), agent_x);
+    let router = Arc::new(router);
+
+    // Single-bot adapter: account_id = None → looked up under bare
+    // `telegram` key, which IS bound to agent_x.
+    let adapter_single = NotifyingAdapter::new(
+        "telegram-single",
+        vec![ChannelUser {
+            platform_id: "user-single".to_string(),
+            display_name: String::new(),
+            librefang_user: None,
+        }],
+    );
+    // Multi-bot adapter: account_id = Some("bot-b") → MUST look up under
+    // `telegram:bot-b` only. No fallback to bare `telegram` is allowed,
+    // otherwise an approval for agent_x leaks here too.
+    let adapter_multi = NotifyingAdapter::with_account(
+        "telegram-multi",
+        "bot-b",
+        vec![ChannelUser {
+            platform_id: "user-multi".to_string(),
+            display_name: String::new(),
+            librefang_user: None,
+        }],
+    );
+    let adapter_single_ref = adapter_single.clone();
+    let adapter_multi_ref = adapter_multi.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter_single.clone()).await.unwrap();
+    manager.start_adapter(adapter_multi.clone()).await.unwrap();
+    manager.start_approval_listener().await;
+
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(Event::new(
+            agent_x,
+            EventTarget::System,
+            EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                request_id: "deadbeef00000000".to_string(),
+                agent_id: agent_x.0.to_string(),
+                tool_name: "shell_exec".to_string(),
+                description: "rm -rf /tmp/foo".to_string(),
+                risk_level: "high".to_string(),
+            }),
+        )))
+        .expect("broadcast send");
+
+    wait_until("approval delivered to single-bot adapter", || {
+        !adapter_single_ref.get_sent().is_empty()
+    })
+    .await;
+
+    // 100ms grace window for an (incorrect) bare-fallback delivery before
+    // asserting the negative — well above in-process dispatch latency.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let sent_single = adapter_single_ref.get_sent();
+    let sent_multi = adapter_multi_ref.get_sent();
+
+    assert_eq!(
+        sent_single.len(),
+        1,
+        "single-bot adapter bound to agent_x via bare `telegram` key should receive the approval, got: {sent_single:?}"
+    );
+    assert!(
+        sent_multi.is_empty(),
+        "PR #4994: account-qualified adapter MUST NOT fall back to bare-key binding — the multi-bot adapter has no `telegram:bot-b` entry and must receive nothing, got: {sent_multi:?}"
+    );
+
+    manager.stop().await;
+}
+
+/// PR #4994 follow-up: the scoping mechanism is channel-type-agnostic.
+/// Even though `TelegramAdapter` is the only adapter that overrides
+/// `account_id()` today, the listener must build the right key for any
+/// adapter that does. This test uses a mock adapter on `ChannelType::Discord`
+/// with `account_id = Some("guild-1")` and asserts the qualified key
+/// `discord:guild-1` is the one that gates delivery.
+#[tokio::test]
+async fn test_approval_listener_scopes_to_non_telegram_multibot_adapter() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+
+    let agent_a = AgentId::new();
+    let agent_b = AgentId::new();
+
+    // Two Discord adapters bound to different agents via account-qualified
+    // keys. Approval for agent A must only reach adapter A.
+    let router = AgentRouter::new();
+    router.set_channel_default("discord:guild-1".to_string(), agent_a);
+    router.set_channel_default("discord:guild-2".to_string(), agent_b);
+    let router = Arc::new(router);
+
+    let adapter_a = NotifyingAdapter::with_channel_and_account(
+        "discord-a",
+        ChannelType::Discord,
+        "guild-1",
+        vec![ChannelUser {
+            platform_id: "admin-a".to_string(),
+            display_name: String::new(),
+            librefang_user: None,
+        }],
+    );
+    let adapter_b = NotifyingAdapter::with_channel_and_account(
+        "discord-b",
+        ChannelType::Discord,
+        "guild-2",
+        vec![ChannelUser {
+            platform_id: "admin-b".to_string(),
+            display_name: String::new(),
+            librefang_user: None,
+        }],
+    );
+    let adapter_a_ref = adapter_a.clone();
+    let adapter_b_ref = adapter_b.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter_a.clone()).await.unwrap();
+    manager.start_adapter(adapter_b.clone()).await.unwrap();
+    manager.start_approval_listener().await;
+
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(Event::new(
+            agent_a,
+            EventTarget::System,
+            EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                request_id: "cafef00d12345678".to_string(),
+                agent_id: agent_a.0.to_string(),
+                tool_name: "shell_exec".to_string(),
+                description: "rm -rf /tmp/foo".to_string(),
+                risk_level: "high".to_string(),
+            }),
+        )))
+        .expect("broadcast send");
+
+    wait_until("approval delivered to discord adapter A", || {
+        !adapter_a_ref.get_sent().is_empty()
+    })
+    .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let sent_a = adapter_a_ref.get_sent();
+    let sent_b = adapter_b_ref.get_sent();
+
+    assert_eq!(
+        sent_a.len(),
+        1,
+        "discord adapter bound to agent A via `discord:guild-1` should receive the approval, got: {sent_a:?}"
+    );
+    assert_eq!(sent_a[0].0, "admin-a");
+    assert!(
+        sent_b.is_empty(),
+        "discord adapter bound to agent B via `discord:guild-2` must NOT receive an approval triggered by agent A, got: {sent_b:?}"
     );
 
     manager.stop().await;

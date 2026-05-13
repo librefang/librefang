@@ -1452,7 +1452,23 @@ impl BridgeManager {
                                     let requesting_agent = match uuid::Uuid::parse_str(&approval.agent_id) {
                                         Ok(u) => AgentId(u),
                                         Err(e) => {
-                                            warn!(
+                                            // ERROR (not WARN): a malformed
+                                            // agent_id here means some
+                                            // `require_approval` caller is
+                                            // emitting a non-UUID string,
+                                            // which silently swallows every
+                                            // approval from that source —
+                                            // exactly the failure mode #4875
+                                            // was about. Operators need to
+                                            // notice this in logs.
+                                            // Metrics counter intentionally
+                                            // not added: librefang-channels
+                                            // does not currently depend on
+                                            // the `metrics` crate, and per
+                                            // PR #4994 review guidance we
+                                            // do not introduce a new dep
+                                            // for a single counter.
+                                            error!(
                                                 request_id = %approval.request_id,
                                                 agent_id = %approval.agent_id,
                                                 error = %e,
@@ -1476,25 +1492,44 @@ impl BridgeManager {
                                     );
 
                                     for adapter in &adapters {
-                                        // #4985: scope delivery to adapters
-                                        // bound to the requesting agent. We
-                                        // build the same channel key the
-                                        // bridge boot sets when populating
-                                        // `channel_defaults` — bare
+                                        // #4985 / PR #4994 follow-up: scope
+                                        // delivery to adapters bound to the
+                                        // requesting agent. We build the same
+                                        // channel key the bridge boot stores
+                                        // in `channel_defaults` — bare
                                         // `<channel_type>` for single-bot
-                                        // adapters, account-qualified
+                                        // adapters (`account_id().is_none()`),
+                                        // account-qualified
                                         // `<channel_type>:<account_id>` for
-                                        // multi-bot adapters. We try the
-                                        // account-qualified key first and
-                                        // fall back to the bare key, matching
-                                        // the resolver's own precedence
-                                        // (router::resolve_with_context).
+                                        // multi-bot adapters
+                                        // (`account_id().is_some()`).
+                                        //
+                                        // Crucially, when the adapter exposes
+                                        // an `account_id`, ONLY the qualified
+                                        // key counts. A bare-key fallback in
+                                        // mixed configs (one single-bot
+                                        // adapter + one multi-bot adapter
+                                        // both on the same channel type)
+                                        // would point the multi-bot
+                                        // adapter's qualified miss at the
+                                        // single-bot adapter's default,
+                                        // leaking the approval into the
+                                        // multi-bot adapter's chat. The
+                                        // resolver's "qualified > bare"
+                                        // precedence is for inbound routing
+                                        // where the same physical message
+                                        // can fall through; the approval
+                                        // listener has no such fallback
+                                        // semantics — each adapter must
+                                        // match on its own configured key.
                                         let channel_type = adapter.channel_type();
                                         let ct_str = channel_type_str(&channel_type);
-                                        let bound_agent = adapter
-                                            .account_id()
-                                            .and_then(|aid| router.channel_default(&format!("{ct_str}:{aid}")))
-                                            .or_else(|| router.channel_default(ct_str));
+                                        let bound_agent = match adapter.account_id() {
+                                            Some(aid) => {
+                                                router.channel_default(&format!("{ct_str}:{aid}"))
+                                            }
+                                            None => router.channel_default(ct_str),
+                                        };
 
                                         match bound_agent {
                                             Some(bound) if bound == requesting_agent => {}
