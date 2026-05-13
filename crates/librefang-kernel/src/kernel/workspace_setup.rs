@@ -298,7 +298,28 @@ pub(super) fn resolve_workspace_dir(
     let root = workspaces_root.to_path_buf();
 
     if let Some(path) = requested {
-        if path.is_absolute() || has_unsafe_relative_components(&path) {
+        // Reject `..` traversal or Windows drive prefixes anywhere in the
+        // requested path — these can escape `workspaces_root` even after
+        // joining and must never be honoured.
+        if has_unsafe_relative_components(&path) {
+            return Err(KernelError::LibreFang(LibreFangError::Internal(
+                "Invalid workspace path".to_string(),
+            )));
+        }
+        // Refs #4991: an absolute path is acceptable iff it lies inside
+        // `workspaces_root`. Spawn previously rewrote `manifest.workspace`
+        // to the resolved absolute directory and `persist_manifest_to_disk`
+        // round-tripped it back into `agent.toml`. Re-spawning the agent
+        // (recreate after delete, template instantiation, daemon restart)
+        // would then feed that absolute path back through this helper and
+        // hit the blanket `is_absolute()` reject below — hence the
+        // user-visible `Internal error: Invalid workspace path` 500 on
+        // recreate with a previously-used name. Accept absolute paths
+        // under the root; everything outside still fails closed.
+        if path.is_absolute() {
+            if path.starts_with(&root) {
+                return Ok(path);
+            }
             return Err(KernelError::LibreFang(LibreFangError::Internal(
                 "Invalid workspace path".to_string(),
             )));
