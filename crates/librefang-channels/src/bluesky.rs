@@ -564,6 +564,15 @@ impl ChannelAdapter for BlueskyAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Bluesky
+    /// handle / DID) so the bridge approval listener builds the same
+    /// `bluesky:<account_id>` key the router stores in `channel_defaults`,
+    /// scoping ApprovalRequested delivery to the account bound to the
+    /// requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -842,5 +851,22 @@ mod tests {
             }
             other => panic!("Expected Command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_bluesky_account_id_default_none() {
+        let adapter =
+            BlueskyAdapter::new("test.bsky.social".to_string(), "app-password".to_string());
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_bluesky_account_id_returns_configured_value() {
+        // #5003: two Bluesky accounts (each with its own DID) must resolve
+        // under distinct `bluesky:<account_id>` keys via the trait override.
+        let adapter =
+            BlueskyAdapter::new("test.bsky.social".to_string(), "app-password".to_string())
+                .with_account_id(Some("did:plc:testbot".to_string()));
+        assert_eq!(adapter.account_id(), Some("did:plc:testbot"));
     }
 }

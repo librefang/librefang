@@ -446,6 +446,15 @@ impl ChannelAdapter for NostrAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Nostr
+    /// pubkey identifier) so the bridge approval listener builds the same
+    /// `nostr:<account_id>` key the router stores in `channel_defaults`,
+    /// scoping ApprovalRequested delivery to the pubkey bound to the
+    /// requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -609,5 +618,26 @@ mod tests {
                 .unwrap_or(false),
             "pubkey must be a 32-byte hex string (64 chars)"
         );
+    }
+
+    #[test]
+    fn test_nostr_account_id_default_none() {
+        let adapter = NostrAdapter::new(
+            TEST_PRIVKEY.to_string(),
+            vec!["wss://relay.damus.io".to_string()],
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_nostr_account_id_returns_configured_value() {
+        // #5003: two Nostr pubkeys must resolve under distinct
+        // `nostr:<account_id>` keys via the trait override.
+        let adapter = NostrAdapter::new(
+            TEST_PRIVKEY.to_string(),
+            vec!["wss://relay.damus.io".to_string()],
+        )
+        .with_account_id(Some("npub-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("npub-42"));
     }
 }

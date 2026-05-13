@@ -451,6 +451,16 @@ impl ChannelAdapter for NextcloudAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the
+    /// Nextcloud server / user identifier) so the bridge approval listener
+    /// builds the same `nextcloud:<account_id>` key the router stores in
+    /// `channel_defaults`, scoping ApprovalRequested delivery to the
+    /// server bound to the requesting agent (#5003, follow-up to
+    /// #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -603,5 +613,28 @@ mod tests {
             vec![],
         );
         assert_eq!(adapter.token.as_str(), "secret-token-value");
+    }
+
+    #[test]
+    fn test_nextcloud_account_id_default_none() {
+        let adapter = NextcloudAdapter::new(
+            "https://cloud.example.com".to_string(),
+            "token".to_string(),
+            vec![],
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_nextcloud_account_id_returns_configured_value() {
+        // #5003: two Nextcloud servers must resolve under distinct
+        // `nextcloud:<account_id>` keys via the trait override.
+        let adapter = NextcloudAdapter::new(
+            "https://cloud.example.com".to_string(),
+            "token".to_string(),
+            vec![],
+        )
+        .with_account_id(Some("server-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("server-42"));
     }
 }

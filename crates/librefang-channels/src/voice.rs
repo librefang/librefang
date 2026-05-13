@@ -702,6 +702,16 @@ impl ChannelAdapter for VoiceAdapter {
             last_error: None,
         }
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the voice
+    /// endpoint / device identifier) so the bridge approval listener builds
+    /// the same `voice:<account_id>` key the router stores in
+    /// `channel_defaults`, scoping ApprovalRequested delivery to the
+    /// endpoint bound to the requesting agent (#5003, follow-up to
+    /// #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -796,5 +806,34 @@ mod tests {
         assert!(!status.connected);
         assert_eq!(status.messages_received, 0);
         assert_eq!(status.messages_sent, 0);
+    }
+
+    #[test]
+    fn test_voice_account_id_default_none() {
+        let adapter = VoiceAdapter::new(
+            0,
+            "key".to_string(),
+            "https://api.example.com".to_string(),
+            "https://api.example.com".to_string(),
+            "alloy".to_string(),
+            32768,
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_voice_account_id_returns_configured_value() {
+        // #5003: two voice endpoints must resolve under distinct
+        // `voice:<account_id>` keys via the trait override.
+        let adapter = VoiceAdapter::new(
+            0,
+            "key".to_string(),
+            "https://api.example.com".to_string(),
+            "https://api.example.com".to_string(),
+            "alloy".to_string(),
+            32768,
+        )
+        .with_account_id(Some("endpoint-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("endpoint-42"));
     }
 }

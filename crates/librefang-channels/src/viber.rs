@@ -498,6 +498,15 @@ impl ChannelAdapter for ViberAdapter {
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Viber
+    /// bot / account identifier) so the bridge approval listener builds the
+    /// same `viber:<account_id>` key the router stores in `channel_defaults`,
+    /// scoping ApprovalRequested delivery to the bot bound to the
+    /// requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -777,5 +786,28 @@ mod tests {
         });
 
         assert!(parse_viber_event(&event).is_none());
+    }
+
+    #[test]
+    fn test_viber_account_id_default_none() {
+        let adapter = ViberAdapter::new(
+            "token".to_string(),
+            "https://example.com/webhook".to_string(),
+            0,
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_viber_account_id_returns_configured_value() {
+        // #5003: two Viber bots must resolve under distinct
+        // `viber:<account_id>` keys via the trait override.
+        let adapter = ViberAdapter::new(
+            "token".to_string(),
+            "https://example.com/webhook".to_string(),
+            0,
+        )
+        .with_account_id(Some("bot-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("bot-42"));
     }
 }

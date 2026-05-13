@@ -515,6 +515,15 @@ impl ChannelAdapter for LineAdapter {
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the LINE
+    /// channel / bot identifier) so the bridge approval listener builds the
+    /// same `line:<account_id>` key the router stores in `channel_defaults`,
+    /// scoping ApprovalRequested delivery to the channel bound to the
+    /// requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -853,5 +862,20 @@ mod tests {
         assert!(!verify_line_signature(secret, body, ""));
         assert!(!verify_line_signature(secret, body, "   "));
         assert!(!verify_line_signature(secret, body, "not-base64!@#"));
+    }
+
+    #[test]
+    fn test_line_account_id_default_none() {
+        let adapter = LineAdapter::new("secret".to_string(), "token".to_string(), 0);
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_line_account_id_returns_configured_value() {
+        // #5003: two LINE channels must resolve under distinct
+        // `line:<account_id>` keys via the trait override.
+        let adapter = LineAdapter::new("secret".to_string(), "token".to_string(), 0)
+            .with_account_id(Some("channel-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("channel-42"));
     }
 }

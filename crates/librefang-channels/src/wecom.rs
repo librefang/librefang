@@ -1602,6 +1602,16 @@ impl ChannelAdapter for WeComAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the WeCom
+    /// (Enterprise WeChat) corp / bot identifier) so the bridge approval
+    /// listener builds the same `wecom:<account_id>` key the router stores
+    /// in `channel_defaults`, scoping ApprovalRequested delivery to the
+    /// bot bound to the requesting agent (#5003, follow-up to
+    /// #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -2468,5 +2478,20 @@ mod tests {
             redact_credential_query_params("https://example.com/path"),
             "https://example.com/path"
         );
+    }
+
+    #[test]
+    fn test_wecom_account_id_default_none() {
+        let adapter = WeComAdapter::new("bot-id".to_string(), "secret".to_string());
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_wecom_account_id_returns_configured_value() {
+        // #5003: two WeCom bots must resolve under distinct
+        // `wecom:<account_id>` keys via the trait override.
+        let adapter = WeComAdapter::new("bot-id".to_string(), "secret".to_string())
+            .with_account_id(Some("corp-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("corp-42"));
     }
 }
