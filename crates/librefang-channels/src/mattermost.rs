@@ -82,6 +82,20 @@ impl MattermostAdapter {
         self
     }
 
+    /// Route this adapter's REST client through `proxy_url` (#4795).
+    /// Affects REST API calls only — the Mattermost WebSocket is not
+    /// currently routed through the proxy. See
+    /// `TelegramAdapter::with_proxy` for the URL contract.
+    pub fn with_proxy(
+        mut self,
+        proxy_url: Option<&str>,
+    ) -> Result<Self, crate::http_client::ChannelProxyError> {
+        if proxy_url.is_some() {
+            self.client = crate::http_client::new_proxied_client(proxy_url)?;
+        }
+        Ok(self)
+    }
+
     /// Validate the token by calling `GET /api/v4/users/me`.
     async fn validate_token(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/api/v4/users/me", self.server_url);
@@ -518,6 +532,26 @@ mod tests {
 
     fn make_adapter(server_url: String) -> MattermostAdapter {
         MattermostAdapter::new(server_url, "test-mm-token".to_string(), vec![])
+    }
+
+    // -------- per-channel proxy (#4795) -----------------------------------
+
+    #[test]
+    fn mattermost_with_proxy_accepts_valid_url() {
+        let _a = MattermostAdapter::new("https://mm".into(), "t".into(), vec![])
+            .with_proxy(Some("http://127.0.0.1:8080"))
+            .expect("valid http proxy URL must succeed");
+    }
+
+    #[test]
+    fn mattermost_with_proxy_rejects_garbage_url() {
+        let err = MattermostAdapter::new("https://mm".into(), "t".into(), vec![])
+            .with_proxy(Some("not a url"))
+            .expect_err("garbage proxy URL must fail at init");
+        assert!(matches!(
+            err,
+            crate::http_client::ChannelProxyError::InvalidUrl { .. }
+        ));
     }
 
     fn dummy_user(channel_id: &str) -> ChannelUser {

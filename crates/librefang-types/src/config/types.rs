@@ -5967,6 +5967,17 @@ pub struct TelegramConfig {
     /// ```
     #[serde(default)]
     pub thread_routes: std::collections::HashMap<String, String>,
+    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Telegram
+    /// adapter's REST client (#4795). When unset, the adapter follows
+    /// reqwest's normal env-var fallback (`HTTP_PROXY` / `HTTPS_PROXY`
+    /// / `ALL_PROXY` / `NO_PROXY`). When set, the per-channel value
+    /// overrides any env var.
+    ///
+    /// Accepted schemes: `http://`, `https://`, `socks5://`,
+    /// `socks5h://`. Auth is supported via `user:pass@host:port`.
+    /// Invalid URLs are rejected at adapter init.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 impl Default for TelegramConfig {
@@ -5984,6 +5995,7 @@ impl Default for TelegramConfig {
             overrides: ChannelOverrides::default(),
             message_coalesce_window_ms: None,
             thread_routes: std::collections::HashMap::new(),
+            proxy: None,
         }
     }
 }
@@ -6048,6 +6060,13 @@ pub struct DiscordConfig {
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Discord
+    /// adapter's REST client (#4795). Affects REST API calls only —
+    /// the gateway WebSocket is not currently routed through the
+    /// proxy. See `TelegramConfig::proxy` for accepted URL shapes
+    /// and env-var interaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 impl Default for DiscordConfig {
@@ -6064,6 +6083,7 @@ impl Default for DiscordConfig {
             initial_backoff_secs: default_channel_initial_backoff_secs(),
             max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
+            proxy: None,
         }
     }
 }
@@ -6102,6 +6122,13 @@ pub struct SlackConfig {
     /// of threaded replies. Defaults to `None` (i.e. use normal threading).
     #[serde(default)]
     pub force_flat_replies: Option<bool>,
+    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Slack
+    /// adapter's REST client (#4795). Affects Web API calls only —
+    /// the Socket Mode WebSocket is not currently routed through the
+    /// proxy. See `TelegramConfig::proxy` for accepted URL shapes
+    /// and env-var interaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 impl Default for SlackConfig {
@@ -6117,6 +6144,7 @@ impl Default for SlackConfig {
             max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
             force_flat_replies: None,
+            proxy: None,
         }
     }
 }
@@ -6442,6 +6470,13 @@ pub struct MattermostConfig {
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Mattermost
+    /// adapter's REST client (#4795). Affects REST API calls only —
+    /// the Mattermost WebSocket connection is not currently routed
+    /// through the proxy. See `TelegramConfig::proxy` for accepted
+    /// URL shapes and env-var interaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 impl Default for MattermostConfig {
@@ -6455,6 +6490,7 @@ impl Default for MattermostConfig {
             initial_backoff_secs: default_channel_initial_backoff_secs(),
             max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
+            proxy: None,
         }
     }
 }

@@ -336,6 +336,32 @@ impl TelegramAdapter {
         }
     }
 
+    /// Route this adapter's REST client through `proxy_url`
+    /// (#4795). `None` leaves the default client untouched —
+    /// reqwest's env-var fallback (`HTTP_PROXY` / `HTTPS_PROXY` /
+    /// `ALL_PROXY`) still applies. `Some(url)` rebuilds the
+    /// internal `reqwest::Client` with an explicit
+    /// `Proxy::all(url)` override (env vars are ignored).
+    ///
+    /// Returns [`crate::http_client::ChannelProxyError`] when the URL is
+    /// not a shape `reqwest::Proxy::all` accepts (`http://`,
+    /// `https://`, `socks5://`, `socks5h://`, optionally with
+    /// `user:pass@`). Validation runs at construction time so a
+    /// typo in `config.toml` fails fast instead of breaking the
+    /// first message send.
+    pub fn with_proxy(
+        mut self,
+        proxy_url: Option<&str>,
+    ) -> Result<Self, crate::http_client::ChannelProxyError> {
+        // `None` keeps the default no-proxy client built in `new` —
+        // a redundant rebuild would defeat reqwest's connection-pool
+        // reuse without changing observable behavior.
+        if proxy_url.is_some() {
+            self.client = crate::http_client::new_proxied_client(proxy_url)?;
+        }
+        Ok(self)
+    }
+
     /// When enabled, the Done reaction is removed (cleared) instead of
     /// showing a completion emoji.  Returns self for builder chaining.
     pub fn with_clear_done_reaction(mut self, clear: bool) -> Self {
@@ -5945,5 +5971,48 @@ mod tests {
         assert!(!is_telegram_voice_payload("application/pdf", "doc.pdf"));
         assert!(!is_telegram_voice_payload("image/png", "pic.png"));
         assert!(!is_telegram_voice_payload("", ""));
+    }
+
+    // -------- per-channel proxy (#4795) -----------------------------------
+
+    #[test]
+    fn with_proxy_none_keeps_default_client() {
+        let a = TelegramAdapter::new("t".to_string(), vec![], Duration::from_secs(1), None)
+            .with_proxy(None)
+            .expect("None proxy must always succeed");
+        // Smoke: the adapter must still be usable after the no-op proxy
+        // call. We can't introspect reqwest's internal proxy config,
+        // so this is the strongest assertion the public API allows.
+        drop(a);
+    }
+
+    #[test]
+    fn with_proxy_some_valid_url_rebuilds_client() {
+        let a = TelegramAdapter::new("t".to_string(), vec![], Duration::from_secs(1), None)
+            .with_proxy(Some("http://127.0.0.1:8080"))
+            .expect("valid http proxy URL must succeed");
+        drop(a);
+    }
+
+    #[test]
+    fn with_proxy_socks5_url_rebuilds_client() {
+        let a = TelegramAdapter::new("t".to_string(), vec![], Duration::from_secs(1), None)
+            .with_proxy(Some("socks5://127.0.0.1:1080"))
+            .expect("socks5 URL requires the reqwest `socks` feature");
+        drop(a);
+    }
+
+    #[test]
+    fn with_proxy_invalid_url_errors() {
+        let err = TelegramAdapter::new("t".to_string(), vec![], Duration::from_secs(1), None)
+            .with_proxy(Some("not a url"))
+            .expect_err("garbage proxy URL must fail at init");
+        // Pin only the variant — the inner string comes from reqwest.
+        match err {
+            crate::http_client::ChannelProxyError::InvalidUrl { value, .. } => {
+                assert_eq!(value, "not a url");
+            }
+            other => panic!("expected InvalidUrl, got: {other:?}"),
+        }
     }
 }

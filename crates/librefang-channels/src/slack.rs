@@ -127,6 +127,20 @@ impl SlackAdapter {
         self
     }
 
+    /// Route this adapter's REST client through `proxy_url` (#4795).
+    /// Affects Slack Web API calls only — the Socket Mode WebSocket
+    /// is not currently routed through the proxy. See
+    /// `TelegramAdapter::with_proxy` for the URL contract.
+    pub fn with_proxy(
+        mut self,
+        proxy_url: Option<&str>,
+    ) -> Result<Self, crate::http_client::ChannelProxyError> {
+        if proxy_url.is_some() {
+            self.client = crate::http_client::new_proxied_client(proxy_url)?;
+        }
+        Ok(self)
+    }
+
     /// Set backoff configuration. Returns self for builder chaining.
     pub fn with_backoff(mut self, initial_backoff_secs: u64, max_backoff_secs: u64) -> Self {
         self.initial_backoff = Duration::from_secs(initial_backoff_secs);
@@ -1092,6 +1106,26 @@ mod tests {
             vec![],
         )
         .with_api_base(api_base)
+    }
+
+    // -------- per-channel proxy (#4795) -----------------------------------
+
+    #[test]
+    fn slack_with_proxy_accepts_valid_url() {
+        let _a = SlackAdapter::new("a".into(), "b".into(), vec![])
+            .with_proxy(Some("http://127.0.0.1:8080"))
+            .expect("valid http proxy URL must succeed");
+    }
+
+    #[test]
+    fn slack_with_proxy_rejects_garbage_url() {
+        let err = SlackAdapter::new("a".into(), "b".into(), vec![])
+            .with_proxy(Some("not a url"))
+            .expect_err("garbage proxy URL must fail at init");
+        assert!(matches!(
+            err,
+            crate::http_client::ChannelProxyError::InvalidUrl { .. }
+        ));
     }
 
     fn dummy_user(channel_id: &str) -> ChannelUser {
