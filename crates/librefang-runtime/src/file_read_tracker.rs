@@ -113,13 +113,20 @@ impl FileReadTracker {
             None => ReadOutcome::First,
         };
 
-        self.entries.insert(
-            key,
-            FileReadEntry {
-                content_hash: hash,
-                turn_id: turn,
-            },
-        );
+        // Only First and Changed write a new entry. Unchanged must leave the
+        // recorded turn_id anchored to the turn that actually carried the
+        // file body — otherwise the stub on call N points at call N-1, which
+        // is itself a stub, and the "see above for full content" trail
+        // drifts forward away from the real content.
+        if !matches!(outcome, ReadOutcome::Unchanged { .. }) {
+            self.entries.insert(
+                key,
+                FileReadEntry {
+                    content_hash: hash,
+                    turn_id: turn,
+                },
+            );
+        }
 
         // Bound memory growth: when above the cap, drop the lowest-turn (i.e.
         // oldest-recorded) entry. BTreeMap iteration is by key, not insertion
@@ -214,6 +221,28 @@ mod tests {
         let second = t.observe(&PathBuf::from("/tmp/a"), "hello");
         // First call recorded turn=1; second call sees that entry.
         assert_eq!(second, ReadOutcome::Unchanged { first_turn: 1 });
+    }
+
+    #[test]
+    fn unchanged_anchor_does_not_drift_forward() {
+        // Repeated unchanged reads must all point back to the FIRST turn
+        // that actually stored the file body. If the anchor advanced on each
+        // unchanged observation, the stub on call N would reference call N-1
+        // (itself a stub), losing the trail to the turn that carries the
+        // real content.
+        let mut t = FileReadTracker::new();
+        let r1 = t.observe(&PathBuf::from("/tmp/a"), "hello");
+        assert_eq!(r1, ReadOutcome::First);
+        let r2 = t.observe(&PathBuf::from("/tmp/a"), "hello");
+        assert_eq!(r2, ReadOutcome::Unchanged { first_turn: 1 });
+        let r3 = t.observe(&PathBuf::from("/tmp/a"), "hello");
+        assert_eq!(
+            r3,
+            ReadOutcome::Unchanged { first_turn: 1 },
+            "anchor must stay on turn 1 — the only turn carrying full content"
+        );
+        let r4 = t.observe(&PathBuf::from("/tmp/a"), "hello");
+        assert_eq!(r4, ReadOutcome::Unchanged { first_turn: 1 });
     }
 
     #[test]
