@@ -577,6 +577,20 @@ model = "test-model"
         "recreate after delete must succeed; got {status} body={body:?}"
     );
     assert_eq!(body["name"], "recreated", "body={body:?}");
+    // AgentId is a deterministic UUIDv5 derived from the agent name
+    // (`AgentId::new_for_name`), so the recreated agent intentionally
+    // shares its UUID with the deleted one. We only assert the response
+    // carries an agent_id at all — confirming the second spawn went
+    // through the full code path rather than returning a stale 200 from
+    // the idempotency cache.
+    let id2 = body["agent_id"]
+        .as_str()
+        .expect("recreate response must carry the new agent id");
+    assert_eq!(
+        id2,
+        id1.to_string(),
+        "AgentId is name-deterministic; recreated UUID must match the original"
+    );
 }
 
 /// Refs #4991: the security boundary the original blanket `is_absolute()`
@@ -618,6 +632,51 @@ model = "test-model"
         status,
         StatusCode::INTERNAL_SERVER_ERROR,
         "absolute workspace outside the workspaces root must still be rejected"
+    );
+}
+
+/// Refs #4991: even when the absolute path's prefix matches `workspaces_root`,
+/// a `..` component anywhere in the path must still be rejected. Without this
+/// guard, `<workspaces_root>/x/../../escape` would syntactically `starts_with`
+/// the root yet resolve outside it once the OS canonicalizes the path.
+/// `has_unsafe_relative_components` runs *before* the `is_absolute()` branch
+/// in `resolve_workspace_dir`, so any `ParentDir` component fails closed
+/// regardless of which branch would otherwise accept the input.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_spawn_agent_with_absolute_workspace_dotdot_traversal_rejected() {
+    let h = boot(TEST_TOKEN).await;
+
+    // Build an absolute path that starts with the real workspaces root but
+    // contains a `..` segment further down. Without the unsafe-component
+    // check this would slip past the `starts_with(&root)` branch.
+    let cfg = h.state.kernel.config_ref();
+    let root = cfg.effective_agent_workspaces_dir();
+    let traversal = root.join("x").join("..").join("escape");
+
+    let manifest_toml = format!(
+        r#"
+name = "dotdot-escape"
+workspace = "{}"
+
+[model]
+provider = "ollama"
+model = "test-model"
+"#,
+        traversal.display().to_string().replace('\\', "\\\\"),
+    );
+
+    let (status, _body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/agents",
+            serde_json::json!({ "manifest_toml": manifest_toml }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "absolute workspace with `..` traversal must be rejected even when the prefix matches workspaces_root"
     );
 }
 
