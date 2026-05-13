@@ -2181,7 +2181,7 @@ jobs:
         # everything up via its `post:` hook at job end. Replaces ~25
         # lines of `security create-keychain / import / set-key-partition-list`
         # shell that we used to maintain by hand (refs #4385).
-        uses: apple-actions/import-codesign-certs@b2e261033a9e248f91a9b57201e8d1e12b15a24e # v7.0.0
+        uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7.0.0
         with:
           p12-file-base64: ${{ secrets.APPLE_CERT_P12 }}
           p12-password: ${{ secrets.APPLE_CERT_PASSWORD }}
