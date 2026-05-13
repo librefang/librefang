@@ -1041,8 +1041,20 @@ pub async fn execute_tool_raw(
                     let path = std::path::PathBuf::from(path_str);
                     let line = input["line"].as_u64().map(|v| v as u32);
                     let limit = input["limit"].as_u64().map(|v| v as u32);
-                    return match client.read_text_file(path, line, limit).await {
-                        Ok(content) => ToolResult::ok(tool_use_id.to_string(), content),
+                    return match client.read_text_file(path.clone(), line, limit).await {
+                        Ok(content) => {
+                            // #4971: dedup repeated reads of the same buffer.
+                            // Only applies when no slicing args were supplied —
+                            // a partial read (`line` / `limit`) returns a
+                            // window, not the full content, so hashing would
+                            // be lossy.
+                            let final_content = if line.is_none() && limit.is_none() {
+                                maybe_dedup_file_read(*kernel, *session_id, &path, content)
+                            } else {
+                                content
+                            };
+                            ToolResult::ok(tool_use_id.to_string(), final_content)
+                        }
                         Err(e) => ToolResult::error(
                             tool_use_id.to_string(),
                             format!("ACP fs/read_text_file failed: {e}"),
@@ -1051,7 +1063,17 @@ pub async fn execute_tool_raw(
                 }
             }
             let extra_refs: Vec<&Path> = allowed.iter().map(|p| p.as_path()).collect();
-            tool_file_read(input, *workspace_root, &extra_refs).await
+            let raw_input_path = input.get("path").and_then(|v| v.as_str());
+            let resolved_for_dedup = raw_input_path
+                .and_then(|p| resolve_file_path_ext(p, *workspace_root, &extra_refs).ok());
+            tool_file_read(input, *workspace_root, &extra_refs)
+                .await
+                .map(|content| match resolved_for_dedup {
+                    Some(resolved) => {
+                        maybe_dedup_file_read(*kernel, *session_id, &resolved, content)
+                    }
+                    None => content,
+                })
         }
         "file_write" => {
             // Enforce named workspace read-only restrictions before the sandbox resolves the path.
@@ -3817,6 +3839,44 @@ async fn tool_file_read(
     tokio::fs::read_to_string(&resolved)
         .await
         .map_err(|e| format!("Failed to read file: {e}"))
+}
+
+/// `file_read` deduplication shim (#4971).
+///
+/// Returns the content the model should see — either the original content
+/// unchanged, a short "already read" stub, or the original content prefixed
+/// with a "file updated" header. The transformation is bypassed (i.e. always
+/// returns `content` unchanged) when any of the gating conditions don't hold:
+///
+/// - no kernel handle (legacy / test call sites),
+/// - no session id (can't isolate state across concurrent sessions),
+/// - `[context_engine] deduplicate_file_reads = false`.
+fn maybe_dedup_file_read(
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    session_id: Option<librefang_types::agent::SessionId>,
+    path: &Path,
+    content: String,
+) -> String {
+    let Some(k) = kernel else { return content };
+    let Some(sid) = session_id else {
+        return content;
+    };
+    if !k.deduplicate_file_reads() {
+        return content;
+    }
+    match crate::file_read_tracker::with_session(sid, |t| t.observe(path, &content)) {
+        crate::file_read_tracker::ReadOutcome::First => content,
+        crate::file_read_tracker::ReadOutcome::Unchanged { first_turn } => {
+            crate::file_read_tracker::unchanged_stub(first_turn)
+        }
+        crate::file_read_tracker::ReadOutcome::Changed { previous_turn } => {
+            format!(
+                "{}\n\n{}",
+                crate::file_read_tracker::changed_header(previous_turn),
+                content
+            )
+        }
+    }
 }
 
 async fn tool_file_write(
@@ -9472,6 +9532,9 @@ mod tests {
         /// `KernelHandle::channel_file_download_dir` (#4434 regression test
         /// hook). `None` matches the default trait behaviour.
         download_dir: Option<std::path::PathBuf>,
+        /// Whether `ToolPolicy::deduplicate_file_reads()` should return `true`
+        /// (#4971 regression test hook). The stub trait default is `false`.
+        dedup_enabled: bool,
     }
 
     // ---- BEGIN role-trait impls (split from former `impl KernelHandle for NamedWsKernel`, #3746) ----
@@ -9657,6 +9720,9 @@ mod tests {
         fn channel_file_download_dir(&self) -> Option<std::path::PathBuf> {
             self.download_dir.clone()
         }
+        fn deduplicate_file_reads(&self) -> bool {
+            self.dedup_enabled
+        }
     }
 
     // No-op role-trait impls (#3746) — mock relies on default bodies.
@@ -9693,6 +9759,7 @@ mod tests {
         Arc::new(NamedWsKernel {
             named,
             download_dir: None,
+            dedup_enabled: false,
         })
     }
 
@@ -9700,6 +9767,7 @@ mod tests {
         Arc::new(NamedWsKernel {
             named: vec![],
             download_dir: Some(download_dir),
+            dedup_enabled: false,
         })
     }
 
@@ -13936,6 +14004,143 @@ description = "test"
             r_none.loaded_tool.map(|d| d.name).as_deref(),
             Some("file_write")
         );
+    }
+
+    // ── file_read deduplication (#4971) ───────────────────────────────
+
+    fn make_dedup_kernel(enabled: bool) -> Arc<dyn KernelHandle> {
+        // `NamedWsKernel`'s `ToolPolicy::deduplicate_file_reads` reads the
+        // `dedup_enabled` field below — see its impl in this module.
+        Arc::new(NamedWsKernel {
+            named: vec![],
+            download_dir: None,
+            dedup_enabled: enabled,
+        })
+    }
+
+    async fn run_file_read_for_dedup(
+        kernel: &Arc<dyn KernelHandle>,
+        workspace: &Path,
+        rel_path: &str,
+        session_id: &str,
+    ) -> librefang_types::tool::ToolResult {
+        execute_tool(
+            "test-id",
+            "file_read",
+            &serde_json::json!({"path": rel_path}),
+            Some(kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000099"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(workspace),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(session_id),
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn file_read_dedup_second_unchanged_read_returns_stub() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        std::fs::write(workspace.path().join("a.txt"), "hello world").unwrap();
+        let kernel = make_dedup_kernel(true);
+        // Unique session id so the global tracker doesn't bleed between tests.
+        let sid = uuid::Uuid::new_v4().to_string();
+
+        let first = run_file_read_for_dedup(&kernel, workspace.path(), "a.txt", &sid).await;
+        assert!(!first.is_error, "first read errored: {}", first.content);
+        assert_eq!(first.content, "hello world");
+
+        let second = run_file_read_for_dedup(&kernel, workspace.path(), "a.txt", &sid).await;
+        assert!(!second.is_error, "second read errored: {}", second.content);
+        assert!(
+            second.content.contains("already read"),
+            "expected stub, got: {}",
+            second.content
+        );
+        assert!(
+            second.content.contains("turn 1"),
+            "stub must reference the first turn, got: {}",
+            second.content
+        );
+        assert!(
+            !second.content.contains("hello world"),
+            "stub must not leak full content, got: {}",
+            second.content
+        );
+    }
+
+    #[tokio::test]
+    async fn file_read_dedup_changed_content_returns_updated_header() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let target = workspace.path().join("a.txt");
+        std::fs::write(&target, "v1").unwrap();
+        let kernel = make_dedup_kernel(true);
+        let sid = uuid::Uuid::new_v4().to_string();
+
+        let first = run_file_read_for_dedup(&kernel, workspace.path(), "a.txt", &sid).await;
+        assert_eq!(first.content, "v1");
+
+        std::fs::write(&target, "v2-updated").unwrap();
+        let second = run_file_read_for_dedup(&kernel, workspace.path(), "a.txt", &sid).await;
+        assert!(
+            second.content.contains("updated since last read"),
+            "expected updated header, got: {}",
+            second.content
+        );
+        assert!(
+            second.content.contains("v2-updated"),
+            "full new content must follow the header, got: {}",
+            second.content
+        );
+    }
+
+    #[tokio::test]
+    async fn file_read_dedup_disabled_returns_full_content_each_time() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        std::fs::write(workspace.path().join("a.txt"), "hello world").unwrap();
+        let kernel = make_dedup_kernel(false);
+        let sid = uuid::Uuid::new_v4().to_string();
+
+        let first = run_file_read_for_dedup(&kernel, workspace.path(), "a.txt", &sid).await;
+        assert_eq!(first.content, "hello world");
+        let second = run_file_read_for_dedup(&kernel, workspace.path(), "a.txt", &sid).await;
+        // No stub, no header — verbatim.
+        assert_eq!(second.content, "hello world");
+    }
+
+    #[tokio::test]
+    async fn file_read_dedup_reset_after_compression_clears_state() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        std::fs::write(workspace.path().join("a.txt"), "hello").unwrap();
+        let kernel = make_dedup_kernel(true);
+        let sid_str = uuid::Uuid::new_v4().to_string();
+        let sid = librefang_types::agent::SessionId(uuid::Uuid::parse_str(&sid_str).unwrap());
+
+        let _ = run_file_read_for_dedup(&kernel, workspace.path(), "a.txt", &sid_str).await;
+        // Simulate the compressor's reset hook.
+        crate::context_compressor::reset_post_compression_side_state(sid);
+        // After reset, the next read is treated as the first read again —
+        // the agent sees full content rather than a stub.
+        let after = run_file_read_for_dedup(&kernel, workspace.path(), "a.txt", &sid_str).await;
+        assert_eq!(after.content, "hello");
     }
 
     #[test]
