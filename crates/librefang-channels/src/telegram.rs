@@ -5873,6 +5873,44 @@ mod tests {
             .expect("OGG URL send must succeed against mock");
     }
 
+    #[tokio::test]
+    async fn telegram_send_file_url_with_mp3_extension_routes_to_send_document() {
+        // Negative counterpart to the OGG URL test above: non-OGG audio URLs
+        // must keep the existing sendDocument path. The URL branch has no
+        // MIME hint, so this exercises the filename-only classifier — a
+        // regression here would mean a stray match on the OGG predicate
+        // (e.g. substring rather than extension check) silently re-routing
+        // MP3 / WAV / etc. to sendVoice, which Telegram would then reject.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendDocument")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendVoice")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::File {
+                    url: "https://example.com/song.mp3".into(),
+                    filename: "song.mp3".into(),
+                },
+            )
+            .await
+            .expect("MP3 URL must still go via sendDocument");
+    }
+
     #[test]
     fn is_telegram_voice_payload_classification() {
         // Pure-function table check — cheaper than spinning up a MockServer
