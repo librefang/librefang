@@ -127,6 +127,28 @@ fn is_group_chat(chat_type: &str) -> bool {
     chat_type == "group" || chat_type == "supergroup"
 }
 
+/// Whether an outbound file should be sent as a Telegram voice memo
+/// (`sendVoice`) rather than a generic document (`sendDocument`).
+///
+/// Telegram renders voice memos as native push-to-talk bubbles with a
+/// waveform, which requires the file to be uploaded via `sendVoice` so the
+/// resulting `Document` carries `DocumentAttributeAudio(voice=True)`. The
+/// expected container is OGG Opus (see #4959 for the bug report — the agent
+/// sent a `.ogg` payload but it landed in the chat as a downloadable file
+/// because we were calling `sendDocument`).
+///
+/// MP3 / FLAC / WAV / M4A do *not* qualify as voice memos and continue to go
+/// through `sendAudio` / `sendDocument` as before; Telegram's `sendVoice`
+/// endpoint rejects non-OGG payloads.
+fn is_telegram_voice_payload(mime_type: &str, filename: &str) -> bool {
+    let mime_lower = mime_type.trim().to_ascii_lowercase();
+    if mime_lower == "audio/ogg" || mime_lower == "audio/opus" {
+        return true;
+    }
+    let name_lower = filename.to_ascii_lowercase();
+    name_lower.ends_with(".ogg") || name_lower.ends_with(".oga") || name_lower.ends_with(".opus")
+}
+
 /// Fire-and-forget HTTP POST. Logs errors at debug level.
 fn fire_and_forget_post(client: reqwest::Client, url: String, body: serde_json::Value) {
     tokio::spawn(async move {
@@ -611,6 +633,34 @@ impl TelegramAdapter {
         self.api_send_media_upload(
             "sendDocument",
             "document",
+            chat_id,
+            data,
+            filename,
+            mime_type,
+            None,
+            thread_id,
+        )
+        .await
+    }
+
+    /// Call `sendVoice` with multipart upload for local file data.
+    ///
+    /// Used by the proactive `channel_send` tool when an OGG audio payload is
+    /// detected (issue #4959). Telegram renders the result as a native voice
+    /// memo bubble (waveform + push-to-talk) instead of a generic file
+    /// download — the document path produces `MessageMediaDocument` with
+    /// `voice=False`, which is the user-visible bug being fixed here.
+    async fn api_send_voice_upload(
+        &self,
+        chat_id: i64,
+        data: Vec<u8>,
+        filename: &str,
+        mime_type: &str,
+        thread_id: Option<i64>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.api_send_media_upload(
+            "sendVoice",
+            "voice",
             chat_id,
             data,
             filename,
@@ -1602,16 +1652,34 @@ impl TelegramAdapter {
                     .await?;
             }
             ChannelContent::File { url, filename } => {
-                self.api_send_document(chat_id, &url, &filename, thread_id)
-                    .await?;
+                // Route OGG payloads through sendVoice so Telegram renders a
+                // native voice-memo bubble (#4959). The URL path has no MIME
+                // hint, so we classify on filename only — note that
+                // `api_send_voice` already handles the private-URL → multipart
+                // fallback inside, mirroring `api_send_document`.
+                if is_telegram_voice_payload("", &filename) {
+                    self.api_send_voice(chat_id, &url, None, thread_id).await?;
+                } else {
+                    self.api_send_document(chat_id, &url, &filename, thread_id)
+                        .await?;
+                }
             }
             ChannelContent::FileData {
                 data,
                 filename,
                 mime_type,
             } => {
-                self.api_send_document_upload(chat_id, data, &filename, &mime_type, thread_id)
-                    .await?;
+                // Same OGG voice-routing rule as the URL branch (#4959). The
+                // local-file path is the one users hit via `channel_send`'s
+                // `file_path` parameter and the one called out in the bug
+                // report.
+                if is_telegram_voice_payload(&mime_type, &filename) {
+                    self.api_send_voice_upload(chat_id, data, &filename, &mime_type, thread_id)
+                        .await?;
+                } else {
+                    self.api_send_document_upload(chat_id, data, &filename, &mime_type, thread_id)
+                        .await?;
+                }
             }
             ChannelContent::Voice { url, caption, .. } => {
                 self.api_send_voice(chat_id, &url, caption.as_deref(), thread_id)
@@ -5640,5 +5708,242 @@ mod tests {
             res.is_ok(),
             "interactive send currently swallows 5xx (see PR #3820 production observation)"
         );
+    }
+
+    // ----- Outbound voice routing (#4959) -------------------------------------
+    //
+    // `channel_send` with an OGG payload must reach Telegram via `sendVoice`,
+    // not `sendDocument`, so the message renders as a native voice memo
+    // (waveform + push-to-talk) instead of a generic file download.
+    //
+    // We assert the routing at the API-path level by registering a wiremock
+    // expectation on `/bot{token}/sendVoice` (or `/sendDocument`) and counting
+    // hits. The OGG bytes are an empty body — wiremock doesn't validate the
+    // multipart contents, only that the right endpoint was hit, which is what
+    // the bug is about.
+
+    #[tokio::test]
+    async fn telegram_send_file_data_ogg_routes_to_send_voice() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendVoice")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // Ensure sendDocument is NOT called — any hit here means the bug
+        // regressed.
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendDocument")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::FileData {
+                    data: vec![0x4F, 0x67, 0x67, 0x53], // "OggS" — not validated, just illustrative
+                    filename: "voice.ogg".into(),
+                    mime_type: "audio/ogg".into(),
+                },
+            )
+            .await
+            .expect("OGG send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_file_data_oga_extension_routes_to_send_voice() {
+        // `.oga` is the IANA-registered extension for OGG audio; some browsers
+        // and the Telegram CDN itself emit this when a voice memo is saved.
+        // Routing must catch it even when the MIME hint is generic.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendVoice")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::FileData {
+                    data: vec![],
+                    filename: "memo.oga".into(),
+                    // Intentionally generic — extension must still win.
+                    mime_type: "application/octet-stream".into(),
+                },
+            )
+            .await
+            .expect("OGA send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_file_data_mp3_still_routes_to_send_document() {
+        // Backwards-compat guard: non-OGG audio must NOT be re-routed to
+        // sendVoice (Telegram's voice endpoint rejects non-OGG payloads).
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendDocument")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendVoice")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::FileData {
+                    data: vec![],
+                    filename: "song.mp3".into(),
+                    mime_type: "audio/mpeg".into(),
+                },
+            )
+            .await
+            .expect("MP3 file_data must still go via sendDocument");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_file_data_unknown_routes_to_send_document() {
+        // Unknown / generic payloads keep the existing sendDocument path so
+        // the OGG branch is purely additive.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendDocument")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::FileData {
+                    data: vec![],
+                    filename: "report.pdf".into(),
+                    mime_type: "application/pdf".into(),
+                },
+            )
+            .await
+            .expect("PDF must still go via sendDocument");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_file_url_with_ogg_extension_routes_to_send_voice() {
+        // The URL-based `ChannelContent::File` branch carries no MIME, so
+        // routing must classify on filename. This matches the behaviour of
+        // the local-file branch above.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendVoice")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::File {
+                    url: "https://example.com/voice.ogg".into(),
+                    filename: "voice.ogg".into(),
+                },
+            )
+            .await
+            .expect("OGG URL send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_file_url_with_mp3_extension_routes_to_send_document() {
+        // Negative counterpart to the OGG URL test above: non-OGG audio URLs
+        // must keep the existing sendDocument path. The URL branch has no
+        // MIME hint, so this exercises the filename-only classifier — a
+        // regression here would mean a stray match on the OGG predicate
+        // (e.g. substring rather than extension check) silently re-routing
+        // MP3 / WAV / etc. to sendVoice, which Telegram would then reject.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendDocument")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendVoice")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::File {
+                    url: "https://example.com/song.mp3".into(),
+                    filename: "song.mp3".into(),
+                },
+            )
+            .await
+            .expect("MP3 URL must still go via sendDocument");
+    }
+
+    #[test]
+    fn is_telegram_voice_payload_classification() {
+        // Pure-function table check — cheaper than spinning up a MockServer
+        // and serves as a regression net for the routing predicate itself.
+        assert!(is_telegram_voice_payload("audio/ogg", "voice.ogg"));
+        assert!(is_telegram_voice_payload("audio/ogg", "anything.bin"));
+        assert!(is_telegram_voice_payload(
+            "application/octet-stream",
+            "memo.ogg"
+        ));
+        assert!(is_telegram_voice_payload(
+            "application/octet-stream",
+            "memo.oga"
+        ));
+        assert!(is_telegram_voice_payload(
+            "application/octet-stream",
+            "track.opus"
+        ));
+        assert!(is_telegram_voice_payload("AUDIO/OGG", "x")); // case-insensitive
+        assert!(is_telegram_voice_payload("", "x.OGG")); // case-insensitive ext
+
+        assert!(!is_telegram_voice_payload("audio/mpeg", "song.mp3"));
+        assert!(!is_telegram_voice_payload("audio/wav", "clip.wav"));
+        assert!(!is_telegram_voice_payload("application/pdf", "doc.pdf"));
+        assert!(!is_telegram_voice_payload("image/png", "pic.png"));
+        assert!(!is_telegram_voice_payload("", ""));
     }
 }
