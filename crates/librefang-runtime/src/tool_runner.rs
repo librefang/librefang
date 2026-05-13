@@ -5808,6 +5808,10 @@ async fn tool_channel_send(
             "tar" => "application/x-tar",
             "mp3" => "audio/mpeg",
             "wav" => "audio/wav",
+            // OGG / Opus voice payloads — channel adapters (e.g. Telegram)
+            // use this MIME to route to native voice-memo endpoints rather
+            // than generic file send (#4959).
+            "ogg" | "oga" | "opus" => "audio/ogg",
             "mp4" => "video/mp4",
             "doc" => "application/msword",
             "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
