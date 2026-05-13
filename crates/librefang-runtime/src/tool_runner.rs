@@ -10139,10 +10139,18 @@ mod tests {
             result.is_error,
             "`..` from inside the staging dir must be rejected"
         );
+        // Either error wording satisfies the "dotdot escape rejected"
+        // contract. Windows normalises `\\?\C:\…\..\passwd` into the
+        // canonical UNC-extended form before `..` is examined, so the
+        // sandbox-escape branch fires first there; Unix sees the literal
+        // `..` component and trips `Path traversal denied`. Both are the
+        // same security outcome — an attempted escape was rejected.
+        let traversal_or_sandbox = result.content.contains("Path traversal denied")
+            || result.content.contains("resolves outside workspace");
         assert!(
-            result.content.contains("Path traversal denied"),
-            "expected path-traversal error, got: {}",
-            result.content
+            traversal_or_sandbox,
+            "expected path-traversal or sandbox-escape error, got: {}",
+            result.content,
         );
     }
 
@@ -10323,10 +10331,18 @@ mod tests {
             result.is_error,
             "`..` from inside the staging dir must be rejected"
         );
+        // Either error wording satisfies the "dotdot escape rejected"
+        // contract. Windows normalises `\\?\C:\…\..\passwd` into the
+        // canonical UNC-extended form before `..` is examined, so the
+        // sandbox-escape branch fires first there; Unix sees the literal
+        // `..` component and trips `Path traversal denied`. Both are the
+        // same security outcome — an attempted escape was rejected.
+        let traversal_or_sandbox = result.content.contains("Path traversal denied")
+            || result.content.contains("resolves outside workspace");
         assert!(
-            result.content.contains("Path traversal denied"),
-            "expected path-traversal error, got: {}",
-            result.content
+            traversal_or_sandbox,
+            "expected path-traversal or sandbox-escape error, got: {}",
+            result.content,
         );
     }
 
@@ -10402,10 +10418,18 @@ mod tests {
             result.is_error,
             "`..` from inside the staging dir must be rejected"
         );
+        // Either error wording satisfies the "dotdot escape rejected"
+        // contract. Windows normalises `\\?\C:\…\..\secret.oga` into the
+        // canonical UNC-extended form before `..` is examined, so the
+        // sandbox-escape branch fires first there; Unix sees the literal
+        // `..` component and trips `Path traversal denied`. Both are the
+        // same security outcome — an attempted escape was rejected.
+        let traversal_or_sandbox = result.content.contains("Path traversal denied")
+            || result.content.contains("resolves outside workspace");
         assert!(
-            result.content.contains("Path traversal denied"),
-            "expected path-traversal error, got: {}",
-            result.content
+            traversal_or_sandbox,
+            "expected path-traversal or sandbox-escape error, got: {}",
+            result.content,
         );
     }
 
@@ -10479,10 +10503,18 @@ mod tests {
             result.is_error,
             "`..` from inside the staging dir must be rejected"
         );
+        // Either error wording satisfies the "dotdot escape rejected"
+        // contract. Windows normalises `\\?\C:\…\..\secret.mp3` into the
+        // canonical UNC-extended form before `..` is examined, so the
+        // sandbox-escape branch fires first there; Unix sees the literal
+        // `..` component and trips `Path traversal denied`. Both are the
+        // same security outcome — an attempted escape was rejected.
+        let traversal_or_sandbox = result.content.contains("Path traversal denied")
+            || result.content.contains("resolves outside workspace");
         assert!(
-            result.content.contains("Path traversal denied"),
-            "expected path-traversal error, got: {}",
-            result.content
+            traversal_or_sandbox,
+            "expected path-traversal or sandbox-escape error, got: {}",
+            result.content,
         );
     }
 
