@@ -5649,8 +5649,17 @@ pub async fn run_agent_loop_streaming(
     let tr_max_artifact_bytes = tool_results_cfg.max_artifact_bytes;
     let tr_fold_after_turns = tool_results_cfg.history_fold_after_turns;
     let tr_fold_min_batch_size = tool_results_cfg.fold_min_batch_size;
-    // Context compressor — LLM-based soft compression before hard trim.
-    let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();
+    // Context compressor — triggers LLM-based summarisation when token usage
+    // exceeds 80% of the context window, before falling back to brute-force trim.
+    // #4976: when LoopOptions carries a pre-merged compaction snapshot
+    // (per-agent overrides resolved against global config in the kernel),
+    // honour its keep_recent / max_summary_tokens / token_threshold_ratio.
+    let context_compressor = match opts.compaction_config.as_ref() {
+        Some(toml) => crate::context_compressor::ContextCompressor::new(
+            crate::context_compressor::CompressionConfig::from_compaction_toml(toml),
+        ),
+        None => crate::context_compressor::ContextCompressor::with_defaults(),
+    };
     let mut any_tools_executed = false;
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
     // §A — accumulated owner_notice payloads from notify_owner tool calls.
