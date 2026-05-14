@@ -324,7 +324,12 @@ impl LibreFangKernel {
                 last_repaired_generation: None,
             });
 
-        let config = CompactionConfig::from_toml(&cfg.compaction);
+        // #4976: merge per-agent [compaction] overrides on top of the
+        // global config before deciding thresholds / summary budget.
+        let config = CompactionConfig::from_toml_with_overrides(
+            &cfg.compaction,
+            entry.manifest.compaction.as_ref(),
+        );
 
         if !needs_compaction(&session, &config) {
             return Ok(format!(

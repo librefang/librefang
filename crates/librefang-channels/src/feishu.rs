@@ -1789,6 +1789,15 @@ impl ChannelAdapter for FeishuAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Feishu /
+    /// Lark tenant or app identifier) so the bridge approval listener builds
+    /// the same `feishu:<account_id>` key the router stores in
+    /// `channel_defaults`, scoping ApprovalRequested delivery to the tenant
+    /// bound to the requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2886,5 +2895,32 @@ mod tests {
             )
             .await
             .expect("send with unsupported content must succeed");
+    }
+
+    #[test]
+    fn test_feishu_account_id_default_none() {
+        let adapter = FeishuAdapter::new(
+            "cli_abc123".to_string(),
+            "secret".to_string(),
+            0,
+            FeishuRegion::Cn,
+            FeishuReceiveMode::Websocket,
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_feishu_account_id_returns_configured_value() {
+        // #5003: two Feishu / Lark tenants must resolve under distinct
+        // `feishu:<account_id>` keys via the trait override.
+        let adapter = FeishuAdapter::new(
+            "cli_abc123".to_string(),
+            "secret".to_string(),
+            0,
+            FeishuRegion::Cn,
+            FeishuReceiveMode::Websocket,
+        )
+        .with_account_id(Some("tenant-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("tenant-42"));
     }
 }

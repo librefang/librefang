@@ -1500,6 +1500,7 @@
     "run_history": "Run History",
     "prompt_sent": "Prompt sent:",
     "output": "Output:",
+    "generated_images": "Generated images:",
     "loading_details": "Loading details…"
   },
   "scheduler": {

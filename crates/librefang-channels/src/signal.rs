@@ -722,6 +722,16 @@ impl ChannelAdapter for SignalAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Signal
+    /// account phone number or device hash) so the bridge approval listener
+    /// builds the same `signal:<account_id>` key the router stores in
+    /// `channel_defaults`, scoping ApprovalRequested delivery to the
+    /// account bound to the requesting agent (#5003, follow-up to
+    /// #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -741,6 +751,36 @@ mod tests {
         .expect("should build with allow_local=true");
         assert_eq!(adapter.name(), "signal");
         assert_eq!(adapter.channel_type(), ChannelType::Signal);
+    }
+
+    #[test]
+    fn test_signal_account_id_default_none() {
+        let adapter = SignalAdapter::with_options(
+            "http://localhost:8080".to_string(),
+            "+1234567890".to_string(),
+            vec![],
+            None,
+            true,
+        )
+        .expect("should build");
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_signal_account_id_returns_configured_value() {
+        // #5003: two Signal accounts (each with its own phone number /
+        // device hash) must resolve under distinct `signal:<account_id>`
+        // keys via the trait override.
+        let adapter = SignalAdapter::with_options(
+            "http://localhost:8080".to_string(),
+            "+1234567890".to_string(),
+            vec![],
+            None,
+            true,
+        )
+        .expect("should build")
+        .with_account_id(Some("+1234567890".to_string()));
+        assert_eq!(adapter.account_id(), Some("+1234567890"));
     }
 
     #[test]

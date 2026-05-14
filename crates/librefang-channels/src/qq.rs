@@ -527,6 +527,15 @@ impl ChannelAdapter for QqAdapter {
             last_error,
         }
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the QQ
+    /// app / bot identifier) so the bridge approval listener builds the
+    /// same `qq:<account_id>` key the router stores in `channel_defaults`,
+    /// scoping ApprovalRequested delivery to the bot bound to the
+    /// requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 // Helper functions to avoid borrowing self in the spawned task
@@ -730,5 +739,20 @@ mod tests {
             "qq send must not hit the network when platform_id has no pipe; got {} request(s)",
             received.len()
         );
+    }
+
+    #[test]
+    fn test_qq_account_id_default_none() {
+        let adapter = QqAdapter::new("app".to_string(), "secret".to_string(), vec![]);
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_qq_account_id_returns_configured_value() {
+        // #5003: two QQ bots must resolve under distinct
+        // `qq:<account_id>` keys via the trait override.
+        let adapter = QqAdapter::new("app".to_string(), "secret".to_string(), vec![])
+            .with_account_id(Some("bot-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("bot-42"));
     }
 }

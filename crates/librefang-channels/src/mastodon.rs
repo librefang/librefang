@@ -558,6 +558,16 @@ impl ChannelAdapter for MastodonAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Mastodon
+    /// instance / account identifier) so the bridge approval listener builds
+    /// the same `mastodon:<account_id>` key the router stores in
+    /// `channel_defaults`, scoping ApprovalRequested delivery to the
+    /// instance bound to the requesting agent (#5003, follow-up to
+    /// #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -818,5 +828,23 @@ mod tests {
             adapter.suppress_error_responses(),
             "MastodonAdapter should suppress error responses to avoid posting them publicly"
         );
+    }
+
+    #[test]
+    fn test_mastodon_account_id_default_none() {
+        let adapter =
+            MastodonAdapter::new("https://mastodon.social".to_string(), "token".to_string());
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_mastodon_account_id_returns_configured_value() {
+        // #5003: two Mastodon accounts (different instances or accounts on
+        // the same instance) must resolve under distinct
+        // `mastodon:<account_id>` keys via the trait override.
+        let adapter =
+            MastodonAdapter::new("https://mastodon.social".to_string(), "token".to_string())
+                .with_account_id(Some("acct-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("acct-42"));
     }
 }

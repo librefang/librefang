@@ -2118,6 +2118,31 @@ pub struct LoopOptions {
     ///
     /// Kernel populates this from `KernelConfig.runtime.tool_results`.
     pub tool_results_config: Option<librefang_types::config::ToolResultsConfig>,
+    /// Compaction config snapshot (#4976).
+    ///
+    /// When `Some`, the agent loop builds its
+    /// [`crate::context_compressor::ContextCompressor`] from this config,
+    /// honouring `keep_recent` / `max_summary_tokens` /
+    /// `token_threshold_ratio` that may have been overridden by the
+    /// agent's `[compaction]` block in `agent.toml`. When `None` (the
+    /// default and the legacy test path), the compressor falls back to
+    /// `CompressionConfig::default()`.
+    ///
+    /// Kernel populates this by merging
+    /// [`AgentManifest::compaction`] on top of
+    /// `KernelConfig.compaction` via
+    /// [`librefang_types::agent::CompactionOverrides::resolve`] before
+    /// constructing the loop. Pre-merging in the kernel keeps the
+    /// agent-loop blind to override semantics.
+    pub compaction_config: Option<librefang_types::config::CompactionTomlConfig>,
+    /// Gateway compression configuration (#4972). When `Some`, the
+    /// runtime runs a cheap safety-net compression pass at the top of the
+    /// loop, before the first LLM call, when the session has grown past
+    /// the configured threshold (default 85 % of context window). When
+    /// `None`, the gateway pass is skipped entirely — kept `None` in tests
+    /// and other call-paths that don't need it. Kernel populates this
+    /// from `KernelConfig.gateway_compression`.
+    pub gateway_compression: Option<librefang_types::config::GatewayCompressionConfig>,
 }
 
 /// Result of an agent loop execution.
@@ -3089,6 +3114,7 @@ async fn generate_search_queries(
         thinking: None,
         prompt_caching: false,
         cache_ttl: None,
+        prompt_cache_strategy: None,
         response_format: None,
         timeout_secs: Some(15),
         extra_body: None,
@@ -3700,6 +3726,48 @@ pub async fn run_agent_loop(
         });
     }
 
+    // Gateway-level safety-net compression (#4972). Runs before any prompt
+    // build / first LLM call: catches sessions that grew between turns
+    // (overnight channel backlog, cron output piling up) and have already
+    // exceeded the context window before the agent-level compactor would
+    // ever get a chance to fire. No-op when the session is under threshold,
+    // when ctx_window is unknown, or when the kernel did not enable it.
+    if let (Some(cfg), Some(ctx_window)) = (
+        opts.gateway_compression.as_ref(),
+        context_window_tokens.filter(|w| *w > 0),
+    ) {
+        let ctx_window_u32: u32 = ctx_window.try_into().unwrap_or(u32::MAX);
+        let report =
+            crate::gateway_compression::apply_if_needed(&mut session.messages, ctx_window_u32, cfg);
+        if report.mutated() {
+            // `new_messages_start` is recomputed unconditionally in
+            // `prepare_messages` (set to `session.messages.len() - 1`
+            // after `safe_trim_messages` runs), so no fixup is needed
+            // here — the gateway prune only narrows the prior history
+            // and the just-pushed user message hasn't been added yet.
+            session.mark_messages_mutated();
+            info!(
+                agent = %manifest.name,
+                session_id = %session.id,
+                tokens_before = report.tokens_before,
+                tokens_after = report.tokens_after,
+                tool_results_stubbed = report.tool_results_stubbed,
+                tool_result_bytes_elided = report.tool_result_bytes_elided,
+                messages_dropped = report.messages_dropped,
+                "Gateway compression pruned session before agent loop (#4972)"
+            );
+        } else if report.fired {
+            // Fired but nothing pruned (e.g. entirely pinned history). The
+            // LLM compactor's summarisation is the only remedy.
+            tracing::warn!(
+                agent = %manifest.name,
+                session_id = %session.id,
+                tokens_before = report.tokens_before,
+                "Gateway compression fired but could not prune (entirely pinned?)"
+            );
+        }
+    }
+
     let PromptExperimentSelection {
         experiment_context,
         running_experiment,
@@ -3967,7 +4035,15 @@ pub async fn run_agent_loop(
     let tr_fold_min_batch_size = tool_results_cfg.fold_min_batch_size;
     // Context compressor — triggers LLM-based summarisation when token usage
     // exceeds 80% of the context window, before falling back to brute-force trim.
-    let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();
+    // #4976: when LoopOptions carries a pre-merged compaction snapshot
+    // (per-agent overrides resolved against global config in the kernel),
+    // honour its keep_recent / max_summary_tokens / token_threshold_ratio.
+    let context_compressor = match opts.compaction_config.as_ref() {
+        Some(toml) => crate::context_compressor::ContextCompressor::new(
+            crate::context_compressor::CompressionConfig::from_compaction_toml(toml),
+        ),
+        None => crate::context_compressor::ContextCompressor::with_defaults(),
+    };
     let mut any_tools_executed = false;
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
     // §A — accumulated owner_notice payloads from notify_owner tool calls.
@@ -4160,6 +4236,9 @@ pub async fn run_agent_loop(
                 messages = compressed;
                 messages = crate::session_repair::validate_and_repair(&messages);
                 messages = crate::session_repair::ensure_starts_with_user(messages);
+                // #4971: drop file_read dedup state — the bodies its stubs
+                // referenced have been summarised away.
+                crate::context_compressor::reset_post_compression_side_state(session.id);
             }
 
             // Hard-trim only if still above threshold after soft compression
@@ -4204,6 +4283,32 @@ pub async fn run_agent_loop(
             .get("prompt_caching")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+        // Resolve the prompt-cache strategy (#4970). Kernel forwards
+        // it as a string ("disabled" / "system_only" / "system_and_N");
+        // a parse failure falls back to the driver's built-in default
+        // (Anthropic: `system_and_3`) with a warning. We do NOT crash
+        // the request on a bad value — the worst case is a turn that
+        // is cached less aggressively than the operator intended.
+        let prompt_cache_strategy = manifest
+            .metadata
+            .get("prompt_cache_strategy")
+            .and_then(|v| v.as_str())
+            .and_then(|s| match s.parse::<librefang_types::config::PromptCacheStrategy>() {
+                Ok(strategy) => Some(strategy),
+                Err(e) => {
+                    tracing::warn!(error = %e, "ignoring invalid prompt_cache_strategy metadata");
+                    None
+                }
+            });
+        // Map `prompt_cache.cache_ttl_hint_secs` to Anthropic's two
+        // discrete cache windows: ≥ 1800 s selects the 1h beta cache,
+        // everything else stays on the default 5m ephemeral cache. The
+        // CompletionRequest API only accepts `&'static str` here.
+        let cache_ttl = manifest
+            .metadata
+            .get("prompt_cache_ttl_hint_secs")
+            .and_then(|v| v.as_u64())
+            .and_then(|secs| if secs >= 1800 { Some("1h") } else { None });
 
         let timeout_override = manifest
             .metadata
@@ -4242,7 +4347,8 @@ pub async fn run_agent_loop(
             system: Some(system_prompt_snapshot.clone()),
             thinking: manifest.thinking.clone(),
             prompt_caching,
-            cache_ttl: None,
+            cache_ttl,
+            prompt_cache_strategy,
             response_format: manifest.response_format.clone(),
             timeout_secs: timeout_override,
             extra_body: if manifest.model.extra_params.is_empty() {
@@ -5362,6 +5468,40 @@ pub async fn run_agent_loop_streaming(
         });
     }
 
+    // Gateway-level safety-net compression (#4972). See the matching block
+    // in `run_agent_loop` for rationale. Same pure-function entry point.
+    if let (Some(cfg), Some(ctx_window)) = (
+        opts.gateway_compression.as_ref(),
+        context_window_tokens.filter(|w| *w > 0),
+    ) {
+        let ctx_window_u32: u32 = ctx_window.try_into().unwrap_or(u32::MAX);
+        let report =
+            crate::gateway_compression::apply_if_needed(&mut session.messages, ctx_window_u32, cfg);
+        if report.mutated() {
+            // See the matching block in `run_agent_loop` for why we don't
+            // touch `new_messages_start` here — `prepare_messages`
+            // recomputes it unconditionally after `safe_trim_messages`.
+            session.mark_messages_mutated();
+            info!(
+                agent = %manifest.name,
+                session_id = %session.id,
+                tokens_before = report.tokens_before,
+                tokens_after = report.tokens_after,
+                tool_results_stubbed = report.tool_results_stubbed,
+                tool_result_bytes_elided = report.tool_result_bytes_elided,
+                messages_dropped = report.messages_dropped,
+                "Gateway compression pruned session before streaming loop (#4972)"
+            );
+        } else if report.fired {
+            tracing::warn!(
+                agent = %manifest.name,
+                session_id = %session.id,
+                tokens_before = report.tokens_before,
+                "Gateway compression fired but could not prune (entirely pinned?)"
+            );
+        }
+    }
+
     let PromptExperimentSelection {
         experiment_context,
         running_experiment,
@@ -5624,8 +5764,17 @@ pub async fn run_agent_loop_streaming(
     let tr_max_artifact_bytes = tool_results_cfg.max_artifact_bytes;
     let tr_fold_after_turns = tool_results_cfg.history_fold_after_turns;
     let tr_fold_min_batch_size = tool_results_cfg.fold_min_batch_size;
-    // Context compressor — LLM-based soft compression before hard trim.
-    let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();
+    // Context compressor — triggers LLM-based summarisation when token usage
+    // exceeds 80% of the context window, before falling back to brute-force trim.
+    // #4976: when LoopOptions carries a pre-merged compaction snapshot
+    // (per-agent overrides resolved against global config in the kernel),
+    // honour its keep_recent / max_summary_tokens / token_threshold_ratio.
+    let context_compressor = match opts.compaction_config.as_ref() {
+        Some(toml) => crate::context_compressor::ContextCompressor::new(
+            crate::context_compressor::CompressionConfig::from_compaction_toml(toml),
+        ),
+        None => crate::context_compressor::ContextCompressor::with_defaults(),
+    };
     let mut any_tools_executed = false;
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
     // §A — accumulated owner_notice payloads from notify_owner tool calls.
@@ -5793,6 +5942,9 @@ pub async fn run_agent_loop_streaming(
                 messages = compressed;
                 messages = crate::session_repair::validate_and_repair(&messages);
                 messages = crate::session_repair::ensure_starts_with_user(messages);
+                // #4971: drop file_read dedup state — the bodies its stubs
+                // referenced have been summarised away.
+                crate::context_compressor::reset_post_compression_side_state(session.id);
             }
 
             let remaining_tokens = crate::compactor::estimate_token_count(
@@ -5852,6 +6004,32 @@ pub async fn run_agent_loop_streaming(
             .get("prompt_caching")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+        // Resolve the prompt-cache strategy (#4970). Kernel forwards
+        // it as a string ("disabled" / "system_only" / "system_and_N");
+        // a parse failure falls back to the driver's built-in default
+        // (Anthropic: `system_and_3`) with a warning. We do NOT crash
+        // the request on a bad value — the worst case is a turn that
+        // is cached less aggressively than the operator intended.
+        let prompt_cache_strategy = manifest
+            .metadata
+            .get("prompt_cache_strategy")
+            .and_then(|v| v.as_str())
+            .and_then(|s| match s.parse::<librefang_types::config::PromptCacheStrategy>() {
+                Ok(strategy) => Some(strategy),
+                Err(e) => {
+                    tracing::warn!(error = %e, "ignoring invalid prompt_cache_strategy metadata");
+                    None
+                }
+            });
+        // Map `prompt_cache.cache_ttl_hint_secs` to Anthropic's two
+        // discrete cache windows: ≥ 1800 s selects the 1h beta cache,
+        // everything else stays on the default 5m ephemeral cache. The
+        // CompletionRequest API only accepts `&'static str` here.
+        let cache_ttl = manifest
+            .metadata
+            .get("prompt_cache_ttl_hint_secs")
+            .and_then(|v| v.as_u64())
+            .and_then(|secs| if secs >= 1800 { Some("1h") } else { None });
 
         // Per-request timeout: manifest metadata takes priority, then browser
         // heuristic, then driver default (None = use driver's configured value).
@@ -5889,7 +6067,8 @@ pub async fn run_agent_loop_streaming(
             system: Some(system_prompt_snapshot.clone()),
             thinking: manifest.thinking.clone(),
             prompt_caching,
-            cache_ttl: None,
+            cache_ttl,
+            prompt_cache_strategy,
             response_format: manifest.response_format.clone(),
             timeout_secs: timeout_override,
             extra_body: if manifest.model.extra_params.is_empty() {
