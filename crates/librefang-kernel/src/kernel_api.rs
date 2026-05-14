@@ -47,7 +47,7 @@ use crate::auth::AuthManager;
 use crate::auto_dream::{AbortOutcome, AutoDreamStatus};
 use crate::config_reload::ReloadPlan;
 use crate::cron::CronScheduler;
-use crate::error::KernelResult;
+use crate::error::{KernelError, KernelResult};
 use crate::event_bus::EventBus;
 use crate::inbox::InboxStatus;
 use crate::kernel_handle::KernelHandle;
@@ -275,24 +275,26 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
     /// Send a message to an agent with an optional per-call `session_mode` override.
     ///
-    /// The default implementation delegates to [`KernelApi::send_message`] and
-    /// emits a `WARN` log so test mocks of `KernelApi` (which would otherwise
-    /// fail to compile after the trait gained this method) keep working
-    /// without manually implementing it. Production paths must override —
-    /// `LibreFangKernel` does so to honor the per-step / per-trigger
-    /// override documented in the workflow / trigger session-mode resolver.
+    /// The default implementation delegates to [`KernelApi::send_message`] when
+    /// the override is `None`, so test mocks of `KernelApi` keep compiling
+    /// without manually implementing this method. When `Some(_)` is requested
+    /// the default refuses with `InvalidInput` rather than silently dropping
+    /// the override — silent fallback is the bug class this method exists to
+    /// prevent. Production impls (`LibreFangKernel`) override and honor the
+    /// per-step / per-trigger session_mode resolver.
     async fn send_message_with_session_mode(
         &self,
         agent_id: AgentId,
         message: &str,
         session_mode_override: Option<librefang_types::agent::SessionMode>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
-        if session_mode_override.is_some() {
-            tracing::warn!(
-                "KernelApi::send_message_with_session_mode: trait default ignores \
-                 session_mode_override={session_mode_override:?}; override the method on your impl \
-                 to honor it"
-            );
+        if let Some(mode) = session_mode_override {
+            return Err(KernelError::LibreFang(
+                librefang_types::error::LibreFangError::InvalidInput(format!(
+                    "KernelApi::send_message_with_session_mode: this impl does not honor \
+                     session_mode_override={mode:?}; override the method on your KernelApi impl"
+                )),
+            ));
         }
         self.send_message(agent_id, message).await
     }

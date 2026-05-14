@@ -327,16 +327,31 @@ fn parse_error_mode(val: &serde_json::Value, step: &serde_json::Value) -> ErrorM
 
 /// Parse an optional per-step `session_mode` from a step JSON object.
 ///
-/// Lenient at the boundary: absent / null / malformed values all return
-/// `None` so HTTP callers don't trip on minor schema quirks; the kernel's
-/// resolver ("per-step > manifest > kernel default") then falls back to
-/// the agent manifest or kernel default. Accepted values for the field
-/// are `"persistent"` and `"new"` (the serde rename of `SessionMode`).
+/// Absent or null returns `None` so HTTP callers don't trip on minor schema
+/// quirks; the kernel's resolver ("per-step > manifest > kernel default")
+/// then falls back to the agent manifest or kernel default. Accepted values
+/// for the field are `"persistent"` and `"new"` (the serde rename of
+/// `SessionMode`). Malformed values (typos, wrong types) also fall back to
+/// `None` but log a `WARN` so operators can spot a bad payload — silent
+/// drop is the bug class this PR works to prevent.
 fn parse_step_session_mode(
     step: &serde_json::Value,
 ) -> Option<librefang_types::agent::SessionMode> {
-    step.get("session_mode")
-        .and_then(|v| serde_json::from_value::<librefang_types::agent::SessionMode>(v.clone()).ok())
+    let raw = step.get("session_mode")?;
+    if raw.is_null() {
+        return None;
+    }
+    match serde_json::from_value::<librefang_types::agent::SessionMode>(raw.clone()) {
+        Ok(mode) => Some(mode),
+        Err(err) => {
+            tracing::warn!(
+                field = ?raw,
+                error = %err,
+                "ignoring malformed session_mode on workflow step; expected \"persistent\" or \"new\""
+            );
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
