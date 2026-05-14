@@ -109,8 +109,8 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
 }
 use crate::triggers::{Trigger, TriggerId, TriggerPatch, TriggerPattern};
 use crate::workflow::{
-    BranchArm, CancelRunError, ErrorMode, PauseRunError, StepAgent, StepMode, Workflow, WorkflowId,
-    WorkflowRun, WorkflowRunId, WorkflowRunState, WorkflowStep,
+    BranchArm, CancelRunError, ErrorMode, GateCondition, GateOp, PauseRunError, StepAgent,
+    StepMode, Workflow, WorkflowId, WorkflowRun, WorkflowRunId, WorkflowRunState, WorkflowStep,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -224,13 +224,36 @@ fn parse_step_mode(val: &serde_json::Value, step: &serde_json::Value) -> StepMod
                 StepMode::Wait { duration_secs }
             }
             "gate" => {
-                let condition = step["condition"]
-                    .as_str()
-                    .unwrap_or_else(|| {
-                        warn!("gate step missing 'condition' field, defaulting to empty");
-                        ""
-                    })
-                    .to_string();
+                // The `condition` field is a typed comparator AST
+                // (#4980 step 2). Parse it through serde so a malformed
+                // shape (missing `op`, unknown operator, wrong types)
+                // surfaces as a structured warn rather than silently
+                // defaulting to a passing gate. We fail-closed on error
+                // — `Eq` against `Value::Null` will fail any real input,
+                // making the misconfiguration loud rather than silent.
+                let condition: GateCondition = match step.get("condition") {
+                    Some(c) => match serde_json::from_value(c.clone()) {
+                        Ok(parsed) => parsed,
+                        Err(e) => {
+                            warn!(
+                                "gate step 'condition' failed to parse: {e}; failing closed with Eq=null"
+                            );
+                            GateCondition {
+                                field: None,
+                                op: GateOp::Eq,
+                                value: serde_json::Value::Null,
+                            }
+                        }
+                    },
+                    None => {
+                        warn!("gate step missing 'condition' field; failing closed with Eq=null");
+                        GateCondition {
+                            field: None,
+                            op: GateOp::Eq,
+                            value: serde_json::Value::Null,
+                        }
+                    }
+                };
                 StepMode::Gate { condition }
             }
             "approval" => {

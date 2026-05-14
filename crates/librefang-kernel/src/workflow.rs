@@ -368,13 +368,25 @@ pub enum StepMode {
     /// unchanged so downstream `{{input}}` substitutions still work.
     Wait { duration_secs: u64 },
     /// Operator node: short-circuit-style condition over the previous
-    /// step's output. String-form for V1 — declarative shapes
-    /// (`{ field: "score", op: "gt", value: 0.8 }`) can land as additive
-    /// variants without breaking existing payloads. The executor is a
-    /// no-op-with-warn in this PR; semantics land in a follow-up once
-    /// the condition mini-language vs JSONPath question is resolved
-    /// (#4980).
-    Gate { condition: String },
+    /// step's output. The condition is a declarative comparator AST
+    /// (`field`, `op`, `value`) — deliberately not a string DSL, so the
+    /// wire format is the same shape that the dashboard editor and any
+    /// future linter would consume. The executor evaluates the
+    /// comparator against the previous step's output; if the condition
+    /// passes, execution continues to the next step. If it fails, the
+    /// run halts (`WorkflowRunState::Failed`) with a human-readable
+    /// reason naming the gate, the field, and the operator. See
+    /// [`GateCondition`] for the shape and [`GateOp`] for the operator
+    /// vocabulary.
+    ///
+    /// Design decision (deferred from step 1, locked in step 2 of
+    /// #4980): we picked a typed comparator over a string-DSL evaluator
+    /// because a string DSL forces a one-shot wire-format commitment —
+    /// callers would persist arbitrary expression strings that a later
+    /// richer DSL would have to either reparse or break. The comparator
+    /// shape is additive: future operators (regex, range, in-set) land
+    /// as new [`GateOp`] variants without touching anything else.
+    Gate { condition: GateCondition },
     /// Operator node: human-in-the-loop pause. `recipients` is a
     /// free-form `Vec<String>` like `["telegram:@pakman",
     /// "email:foo@bar"]` for V1; the operator-identity model question
@@ -422,6 +434,192 @@ pub struct BranchArm {
     pub match_value: serde_json::Value,
     /// Name of the step to jump to when this arm matches.
     pub then: String,
+}
+
+/// Comparator AST consumed by [`StepMode::Gate`]. Picked over a string
+/// DSL because the typed shape is analysable end-to-end (dashboard
+/// editor, dry-run preview, future workflow linter) without inventing a
+/// parser. Each field is required on the wire — there is no default —
+/// so a manifest that omits any of them fails deserialization at load
+/// time rather than silently defaulting to a passing gate. See #4980.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateCondition {
+    /// JSON Pointer (RFC 6901) into the previous step's output. `None`
+    /// (or the root pointer `""`) compares against the whole output. A
+    /// missing pointer target causes the gate to fail with a reason
+    /// naming the missing field — never silently pass.
+    ///
+    /// If the previous step's output is not parseable as JSON the
+    /// pointer is ignored and the comparison happens against the raw
+    /// string (only `Eq`, `Ne`, `Contains` are meaningful on raw
+    /// strings; ordering ops on strings use lexicographic order).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// Comparison operator.
+    pub op: GateOp,
+    /// Right-hand-side value. JSON-typed so numbers, booleans, strings,
+    /// objects, and arrays all round-trip from TOML/JSON without a
+    /// stringification round-trip at the API boundary.
+    pub value: serde_json::Value,
+}
+
+/// Operators understood by [`GateCondition`]. Deliberately small: the
+/// step-2 surface area is the boring eq/ne/ord/contains set, which is
+/// enough for the issue's "score > 0.8" / "status == approved" /
+/// "tags contains beta" cases and trivially extensible later
+/// (`Regex`, `In`, `NotIn`, `Between`, …). Snake-case on the wire so
+/// the TOML shape matches the issue body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateOp {
+    /// Strict equality on JSON values. Mixed-type (e.g. `"0.8"` vs
+    /// `0.8`) does NOT coerce — explicit by design so an editor mistake
+    /// surfaces as a failed gate, not a silent type coercion.
+    Eq,
+    /// Strict inequality.
+    Ne,
+    /// Numeric `>`. Both sides must coerce to f64; otherwise the gate
+    /// fails with a typed reason. For non-JSON output, lexicographic
+    /// string comparison applies.
+    Gt,
+    /// Numeric `<` (or lexicographic for strings).
+    Lt,
+    /// Numeric `>=` (or lexicographic for strings).
+    Gte,
+    /// Numeric `<=` (or lexicographic for strings).
+    Lte,
+    /// Substring check: `value` (as string) is a substring of the
+    /// resolved field (rendered as a string). Case-sensitive — the
+    /// existing `evaluate_condition` already case-folds for
+    /// `StepMode::Conditional`; we keep the contracts distinct so an
+    /// operator who explicitly picks `Gate` gets predictable behaviour.
+    Contains,
+}
+
+impl std::fmt::Display for GateOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            GateOp::Eq => "eq",
+            GateOp::Ne => "ne",
+            GateOp::Gt => "gt",
+            GateOp::Lt => "lt",
+            GateOp::Gte => "gte",
+            GateOp::Lte => "lte",
+            GateOp::Contains => "contains",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Evaluate a [`GateCondition`] against the previous step's output.
+///
+/// Returns `Ok(())` when the gate passes, `Err(reason)` when it fails
+/// (caller halts the workflow with the reason). The reason string is
+/// deliberately verbose: it surfaces in `workflow_runs.json` and in the
+/// dashboard run history, where the operator wants enough information
+/// to fix the manifest or the producing step without re-running the
+/// workflow.
+///
+/// Resolution order:
+///
+/// 1. If `cond.field` is `Some(ptr)`, try to parse `output` as JSON and
+///    look up `ptr` via [`serde_json::Value::pointer`]. A missing
+///    pointer or a non-JSON output fails the gate with a typed reason
+///    — silently defaulting to "no field, pass" would defeat the gate.
+/// 2. If `cond.field` is `None`, the comparison runs against the whole
+///    output. If `output` parses as JSON, the comparison is JSON-typed
+///    (`Eq`/`Ne` use JSON deep equality); otherwise it falls back to
+///    string comparison.
+pub fn evaluate_gate_condition(cond: &GateCondition, output: &str) -> Result<(), String> {
+    let parsed_root: Option<serde_json::Value> = serde_json::from_str(output).ok();
+
+    // Resolve the left-hand side. `lhs_json` is `Some` when the resolved
+    // value parses as JSON (which lets us do JSON-typed equality and
+    // numeric ordering); `lhs_str` is always present as a fallback for
+    // contains / string ordering on non-JSON inputs.
+    let (lhs_json, lhs_str): (Option<serde_json::Value>, String) = match &cond.field {
+        Some(ptr) if !ptr.is_empty() => match parsed_root.as_ref() {
+            Some(root) => match root.pointer(ptr) {
+                Some(v) => {
+                    let s = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    (Some(v.clone()), s)
+                }
+                None => {
+                    return Err(format!("field '{ptr}' not found in previous step output"));
+                }
+            },
+            None => {
+                return Err(format!(
+                    "previous step output is not JSON; cannot resolve field '{ptr}'"
+                ));
+            }
+        },
+        _ => {
+            let s = output.to_string();
+            (parsed_root.clone(), s)
+        }
+    };
+
+    let rhs_str = match &cond.value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+
+    let passes = match cond.op {
+        GateOp::Eq => match &lhs_json {
+            Some(l) => l == &cond.value,
+            None => lhs_str == rhs_str,
+        },
+        GateOp::Ne => match &lhs_json {
+            Some(l) => l != &cond.value,
+            None => lhs_str != rhs_str,
+        },
+        GateOp::Contains => {
+            // Always string-domain: "does the rendered LHS contain the
+            // rendered RHS as a substring". The JSON path is not
+            // meaningful for `contains` since arrays/objects don't have
+            // a universally agreed-on "contains" semantics.
+            lhs_str.contains(&rhs_str)
+        }
+        GateOp::Gt | GateOp::Lt | GateOp::Gte | GateOp::Lte => {
+            // Numeric path when both sides parse as f64; otherwise
+            // lexicographic string compare.
+            let lhs_num = lhs_json
+                .as_ref()
+                .and_then(|v| v.as_f64())
+                .or_else(|| lhs_str.parse::<f64>().ok());
+            let rhs_num = cond.value.as_f64().or_else(|| rhs_str.parse::<f64>().ok());
+            match (lhs_num, rhs_num) {
+                (Some(l), Some(r)) => match cond.op {
+                    GateOp::Gt => l > r,
+                    GateOp::Lt => l < r,
+                    GateOp::Gte => l >= r,
+                    GateOp::Lte => l <= r,
+                    _ => unreachable!(),
+                },
+                _ => match cond.op {
+                    GateOp::Gt => lhs_str.as_str() > rhs_str.as_str(),
+                    GateOp::Lt => lhs_str.as_str() < rhs_str.as_str(),
+                    GateOp::Gte => lhs_str.as_str() >= rhs_str.as_str(),
+                    GateOp::Lte => lhs_str.as_str() <= rhs_str.as_str(),
+                    _ => unreachable!(),
+                },
+            }
+        }
+    };
+
+    if passes {
+        Ok(())
+    } else {
+        let field_repr = cond.field.as_deref().unwrap_or("<root>");
+        Err(format!(
+            "gate condition failed: field '{field_repr}' {} {}",
+            cond.op, rhs_str
+        ))
+    }
 }
 
 /// Error handling mode for a workflow step.
@@ -3001,33 +3199,106 @@ impl WorkflowEngine {
                 }
 
                 StepMode::Gate { condition } => {
-                    warn!(
-                        step = i + 1,
-                        name = %step.name,
-                        condition = %condition,
-                        "Gate executor not yet implemented — refs #4980 (returning success)"
-                    );
-                    Self::record_operator_noop_step_result(
-                        &self.runs,
-                        run_id,
-                        step,
-                        "_operator:gate",
-                        &current_input,
-                        &mut variables,
-                        &mut all_outputs,
-                    );
+                    let start = std::time::Instant::now();
+                    let eval = evaluate_gate_condition(condition, &current_input);
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    match eval {
+                        Ok(()) => {
+                            let output = current_input.clone();
+                            let step_result = StepResult {
+                                step_name: step.name.clone(),
+                                agent_id: String::new(),
+                                agent_name: "_operator:gate".to_string(),
+                                // Prompt slot doubles as a structured trace of
+                                // *what* the gate evaluated, so the run history
+                                // surfaces the comparator without re-fetching
+                                // the workflow definition. JSON shape so a
+                                // future dashboard renderer can decode it.
+                                prompt: serde_json::to_string(condition)
+                                    .unwrap_or_else(|_| String::from("<gate>")),
+                                output: output.clone(),
+                                input_tokens: 0,
+                                output_tokens: 0,
+                                duration_ms,
+                            };
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                r.step_results.push(step_result);
+                            }
+                            if let Some(ref var) = step.output_var {
+                                variables.insert(var.clone(), output.clone());
+                            }
+                            all_outputs.push(output);
+                            info!(
+                                step = i + 1,
+                                name = %step.name,
+                                field = ?condition.field,
+                                op = %condition.op,
+                                duration_ms,
+                                "Gate step passed"
+                            );
+                        }
+                        Err(reason) => {
+                            // A failed gate halts the run with a recorded
+                            // reason. We surface a synthetic StepResult so
+                            // the operator can see *which* step blocked the
+                            // workflow in the dashboard run history; the
+                            // run itself transitions to Failed via the
+                            // standard error path below.
+                            let step_result = StepResult {
+                                step_name: step.name.clone(),
+                                agent_id: String::new(),
+                                agent_name: "_operator:gate".to_string(),
+                                prompt: serde_json::to_string(condition)
+                                    .unwrap_or_else(|_| String::from("<gate>")),
+                                output: reason.clone(),
+                                input_tokens: 0,
+                                output_tokens: 0,
+                                duration_ms,
+                            };
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                r.step_results.push(step_result);
+                            }
+                            let err =
+                                format!("Gate step '{}' blocked workflow: {reason}", step.name);
+                            warn!(
+                                step = i + 1,
+                                name = %step.name,
+                                field = ?condition.field,
+                                op = %condition.op,
+                                reason = %reason,
+                                "Gate step blocked workflow"
+                            );
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                    r.state = WorkflowRunState::Failed;
+                                    r.error = Some(err.clone());
+                                    r.completed_at = Some(Utc::now());
+                                }
+                            }
+                            return Err(err);
+                        }
+                    }
                 }
 
                 StepMode::Approval {
                     recipients,
                     timeout_secs,
                 } => {
+                    // Cross-issue dependency marker, not a vanilla TODO:
+                    // the Approval executor needs the async-task-tracker
+                    // landing in #4983 to suspend the run on a channel
+                    // and resume it when a human replies. Until #4983
+                    // lands the stub stays a structured warn-and-noop so
+                    // a workflow that includes Approval still completes
+                    // visibly rather than failing closed.
+                    // TODO(#4983): wire real Approval executor once the
+                    // long-pending async-task tracker is available.
                     warn!(
                         step = i + 1,
                         name = %step.name,
                         recipients = ?recipients,
                         timeout_secs = ?timeout_secs,
-                        "Approval executor not yet implemented — refs #4980 (returning success)"
+                        "Approval executor not yet implemented — blocked on async-task-tracker landing in #4983 (refs #4980)"
                     );
                     Self::record_operator_noop_step_result(
                         &self.runs,
@@ -4959,11 +5230,97 @@ mod tests {
     #[tokio::test]
     async fn test_step_mode_gate_serialization() {
         let mode = StepMode::Gate {
-            condition: "score > 0.8".to_string(),
+            condition: GateCondition {
+                field: Some("/score".to_string()),
+                op: GateOp::Gt,
+                value: serde_json::json!(0.8),
+            },
         };
         let json = serde_json::to_string(&mode).unwrap();
         let parsed: StepMode = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, StepMode::Gate { condition } if condition == "score > 0.8"));
+        match parsed {
+            StepMode::Gate { condition } => {
+                assert_eq!(condition.field.as_deref(), Some("/score"));
+                assert_eq!(condition.op, GateOp::Gt);
+                assert_eq!(condition.value, serde_json::json!(0.8));
+            }
+            other => panic!("expected Gate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_step_mode_gate_malformed_fails_deserialization() {
+        // Missing `op` — the gate cannot default to "passing" silently,
+        // so a malformed comparator MUST surface as a deserialisation
+        // error at manifest load time rather than at run time.
+        let bad = r#"{"gate":{"condition":{"field":"/score","value":0.8}}}"#;
+        let err = serde_json::from_str::<StepMode>(bad).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("op") || msg.contains("missing"),
+            "expected serde to flag missing 'op'; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn evaluate_gate_condition_passes_when_field_satisfies_op() {
+        let cond = GateCondition {
+            field: Some("/score".to_string()),
+            op: GateOp::Gt,
+            value: serde_json::json!(0.8),
+        };
+        assert!(evaluate_gate_condition(&cond, r#"{"score": 0.95}"#).is_ok());
+    }
+
+    #[test]
+    fn evaluate_gate_condition_fails_when_field_does_not_satisfy_op() {
+        let cond = GateCondition {
+            field: Some("/score".to_string()),
+            op: GateOp::Gt,
+            value: serde_json::json!(0.8),
+        };
+        let err = evaluate_gate_condition(&cond, r#"{"score": 0.5}"#).unwrap_err();
+        assert!(err.contains("gate condition failed"), "{err}");
+    }
+
+    #[test]
+    fn evaluate_gate_condition_missing_field_fails_with_reason() {
+        let cond = GateCondition {
+            field: Some("/score".to_string()),
+            op: GateOp::Gt,
+            value: serde_json::json!(0.8),
+        };
+        let err = evaluate_gate_condition(&cond, r#"{"other": 1}"#).unwrap_err();
+        assert!(
+            err.contains("/score"),
+            "missing-field reason should name the field; got {err}"
+        );
+    }
+
+    #[test]
+    fn evaluate_gate_condition_string_eq_works_against_raw_output() {
+        let cond = GateCondition {
+            field: None,
+            op: GateOp::Eq,
+            value: serde_json::json!("approved"),
+        };
+        // `"approved"` (a JSON string) compares JSON-equal to the parsed
+        // root when the previous output is the literal JSON `"approved"`.
+        assert!(evaluate_gate_condition(&cond, r#""approved""#).is_ok());
+        // Raw (non-JSON) string output also matches via the string fallback.
+        assert!(evaluate_gate_condition(&cond, "approved").is_ok());
+        assert!(evaluate_gate_condition(&cond, "rejected").is_err());
+    }
+
+    #[test]
+    fn evaluate_gate_condition_contains_substring() {
+        let cond = GateCondition {
+            field: None,
+            op: GateOp::Contains,
+            value: serde_json::json!("urgent"),
+        };
+        assert!(evaluate_gate_condition(&cond, "this is urgent work").is_ok());
+        assert!(evaluate_gate_condition(&cond, "this is fine").is_err());
     }
 
     #[tokio::test]

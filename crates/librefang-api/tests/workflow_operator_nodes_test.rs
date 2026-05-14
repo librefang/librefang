@@ -1,16 +1,23 @@
-//! Integration tests for workflow operator-node step modes (#4980 step 1/N).
+//! Integration tests for workflow operator-node step modes (#4980 step
+//! 1/N → step 2/N).
 //!
-//! Five new `StepMode` variants land here:
+//! Five new `StepMode` variants total:
 //!
 //! * `Wait` — fully wired: sleeps for `duration_secs`, emits a structured
 //!   `info!` log, returns success. Cancellation-aware via the run's
-//!   `cancel_notify`.
-//! * `Gate` / `Approval` / `Transform` / `Branch` — no-op-with-warn for
-//!   V1. The wire format is locked so workflows can serialise these
-//!   variants today; the executor bodies land in follow-up PRs once the
-//!   deferred design questions (Gate.condition syntax,
-//!   Approval operator-identity, Transform.code shape, Branch jump
-//!   semantics) are resolved.
+//!   `cancel_notify`. (step 1)
+//! * `Gate` — fully wired since step 2: a declarative comparator AST
+//!   (`{field, op, value}`) evaluated against the previous step's
+//!   output. Passing condition routes onwards; failing condition halts
+//!   the run with a recorded reason; a malformed condition surfaces a
+//!   serde deserialisation error at manifest-load time. The
+//!   string-DSL alternative was rejected because it would have forced
+//!   a one-shot wire-format commitment incompatible with a future
+//!   richer expression language.
+//! * `Approval` — no-op-with-warn; blocked on #4983 (async-task
+//!   tracker). The executor will wire there once the dependency lands.
+//! * `Transform` / `Branch` — no-op-with-warn; wired in step 3 and step
+//!   4 of the #4980 series respectively.
 //!
 //! The tests run the workflow engine directly (no HTTP) via
 //! `kernel.workflow_engine().execute_run(...)` with a mock
@@ -21,7 +28,8 @@
 //! the mock panic on call.
 
 use librefang_kernel::workflow::{
-    BranchArm, ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowRunState, WorkflowStep,
+    BranchArm, ErrorMode, GateCondition, GateOp, StepAgent, StepMode, Workflow, WorkflowId,
+    WorkflowRunState, WorkflowStep,
 };
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use librefang_types::agent::{AgentId, SessionMode};
@@ -180,10 +188,10 @@ async fn wait_step_zero_duration_completes_immediately() {
 }
 
 // ---------------------------------------------------------------------------
-// `Gate` / `Approval` / `Transform` / `Branch` — no-op-with-warn for V1
+// `Approval` / `Transform` / `Branch` — no-op-with-warn for V1
 // ---------------------------------------------------------------------------
 //
-// These four log a structured `warn!` and return success. We can't
+// These three log a structured `warn!` and return success. We can't
 // easily capture `tracing` output from within an integration test
 // without pulling in a subscriber dependency, so each test asserts the
 // observable behaviour: the run completes successfully, exactly one
@@ -192,21 +200,34 @@ async fn wait_step_zero_duration_completes_immediately() {
 // panic). The "not yet implemented" warn-log itself is exercised
 // manually when the file is run with `RUST_LOG=warn cargo test ...`.
 
+// ---------------------------------------------------------------------------
+// `Gate` — fully wired in #4980 step 2/N
+// ---------------------------------------------------------------------------
+
+/// A Gate whose comparator passes against the previous step's output
+/// must route execution onwards: the run state is `Completed`, the
+/// step result carries `_operator:gate` as the synthetic agent name,
+/// and `current_input` flows through unchanged so downstream
+/// `{{input}}` substitutions still see the producing step's output.
 #[tokio::test(flavor = "multi_thread")]
-async fn gate_step_is_noop_with_warn_and_completes() {
+async fn gate_step_passes_and_routes_onwards() {
     let test = boot();
     let engine = test.state.kernel.workflow_engine();
     let workflow = workflow_with_op_step(
-        "gate-stub",
+        "gate-pass",
         StepMode::Gate {
-            condition: "score > 0.8".to_string(),
+            condition: GateCondition {
+                field: Some("/score".to_string()),
+                op: GateOp::Gt,
+                value: serde_json::json!(0.8),
+            },
         },
     );
     let wf_id = workflow.id;
     engine.register(workflow).await;
 
     let run_id = engine
-        .create_run(wf_id, "in".to_string())
+        .create_run(wf_id, r#"{"score": 0.95}"#.to_string())
         .await
         .expect("create_run");
     let result = engine
@@ -220,7 +241,7 @@ async fn gate_step_is_noop_with_warn_and_completes() {
             },
         )
         .await;
-    assert!(result.is_ok(), "Gate stub must succeed: {result:?}");
+    assert!(result.is_ok(), "Gate pass must succeed: {result:?}");
 
     let run = engine.get_run(run_id).await.expect("run exists");
     assert!(matches!(run.state, WorkflowRunState::Completed));
@@ -228,6 +249,142 @@ async fn gate_step_is_noop_with_warn_and_completes() {
     assert_eq!(run.step_results[0].agent_name, "_operator:gate");
     assert_eq!(run.step_results[0].input_tokens, 0);
     assert_eq!(run.step_results[0].output_tokens, 0);
+    assert_eq!(
+        run.step_results[0].output, r#"{"score": 0.95}"#,
+        "Gate must preserve current_input on pass"
+    );
+}
+
+/// A Gate whose comparator fails halts the run with `Failed` state and
+/// a human-readable error referencing the gate name. The
+/// `step_results` history still carries the gate step (so the operator
+/// can see *which* gate blocked the run in the dashboard) and its
+/// `output` field carries the failure reason rather than the
+/// previous-step output.
+#[tokio::test(flavor = "multi_thread")]
+async fn gate_step_fails_and_halts_workflow_with_recorded_reason() {
+    let test = boot();
+    let engine = test.state.kernel.workflow_engine();
+    let workflow = workflow_with_op_step(
+        "gate-block",
+        StepMode::Gate {
+            condition: GateCondition {
+                field: Some("/score".to_string()),
+                op: GateOp::Gt,
+                value: serde_json::json!(0.8),
+            },
+        },
+    );
+    let wf_id = workflow.id;
+    engine.register(workflow).await;
+
+    let run_id = engine
+        .create_run(wf_id, r#"{"score": 0.4}"#.to_string())
+        .await
+        .expect("create_run");
+    let result = engine
+        .execute_run(
+            run_id,
+            panicking_agent_resolver,
+            |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
+                panic!("operator-node executor must not call send_message");
+                #[allow(unreachable_code)]
+                Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
+            },
+        )
+        .await;
+    let err = result.expect_err("Gate must halt failing runs");
+    assert!(
+        err.contains("Gate step 'op_step' blocked workflow"),
+        "halt error must name the gate; got: {err}"
+    );
+
+    let run = engine.get_run(run_id).await.expect("run exists");
+    assert!(
+        matches!(run.state, WorkflowRunState::Failed),
+        "run must be Failed, got {:?}",
+        run.state
+    );
+    let recorded_err = run.error.as_deref().unwrap_or("");
+    assert!(
+        recorded_err.contains("Gate step 'op_step' blocked workflow"),
+        "recorded run.error must carry the gate halt reason; got: {recorded_err}"
+    );
+    assert_eq!(
+        run.step_results.len(),
+        1,
+        "the blocking gate step must still appear in run history"
+    );
+    let sr = &run.step_results[0];
+    assert_eq!(sr.agent_name, "_operator:gate");
+    assert!(
+        sr.output.contains("gate condition failed"),
+        "step_result.output must surface the comparator failure; got: {}",
+        sr.output
+    );
+}
+
+/// A manifest carrying a Gate condition that omits the `op` field must
+/// fail at serde deserialisation time — never reach the executor. This
+/// is the "malformed condition surfaces a deserialisation error at
+/// manifest load" contract: the gate cannot default to passing, so a
+/// missing operator MUST be a load-time error rather than a silent
+/// runtime no-op.
+#[test]
+fn gate_step_malformed_condition_fails_deserialization_at_load_time() {
+    let manifest = r#"{
+        "gate": {
+            "condition": { "field": "/score", "value": 0.8 }
+        }
+    }"#;
+    let err = serde_json::from_str::<StepMode>(manifest)
+        .expect_err("malformed gate condition must not deserialise");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("op") || msg.contains("missing"),
+        "deserialisation error must flag the missing `op` field; got: {msg}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn gate_step_completed_when_field_omitted_compares_whole_input() {
+    // Sanity check that the `field: None` path works end-to-end (string
+    // comparison against the raw previous-step output), so the typed
+    // shape is not de-facto locking callers into JSON inputs only.
+    let test = boot();
+    let engine = test.state.kernel.workflow_engine();
+    let workflow = workflow_with_op_step(
+        "gate-root-eq",
+        StepMode::Gate {
+            condition: GateCondition {
+                field: None,
+                op: GateOp::Eq,
+                value: serde_json::json!("approved"),
+            },
+        },
+    );
+    let wf_id = workflow.id;
+    engine.register(workflow).await;
+
+    let run_id = engine
+        .create_run(wf_id, "approved".to_string())
+        .await
+        .expect("create_run");
+    let result = engine
+        .execute_run(
+            run_id,
+            panicking_agent_resolver,
+            |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
+                panic!("operator-node executor must not call send_message");
+                #[allow(unreachable_code)]
+                Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
+            },
+        )
+        .await;
+    assert!(result.is_ok(), "Gate (root, Eq) must pass: {result:?}");
+
+    let run = engine.get_run(run_id).await.expect("run exists");
+    assert!(matches!(run.state, WorkflowRunState::Completed));
 }
 
 #[tokio::test(flavor = "multi_thread")]
