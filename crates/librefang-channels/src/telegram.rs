@@ -1681,6 +1681,10 @@ impl TelegramAdapter {
                 // bytes actually start with the OGG container magic before
                 // committing to sendVoice; otherwise fall through to
                 // sendDocument so the file still reaches the user.
+                // 12 = the longest prefix `detect_audio_magic` inspects
+                // (M4A's `ftyp` box). OGG itself only needs the first 4
+                // bytes, but feeding 12 keeps the call site future-proof
+                // for additional container formats added to the helper.
                 let bytes_look_like_ogg =
                     crate::bridge::detect_audio_magic(&data[..data.len().min(12)])
                         == Some("audio/ogg");
