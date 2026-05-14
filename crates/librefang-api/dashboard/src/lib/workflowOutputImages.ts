@@ -32,12 +32,17 @@ export interface ImageRef {
 
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|svg|avif|bmp|ico)(\?[^\s"'<>)]*)?$/i;
 const ARTIFACT_PATH_RE = /^\/api\/media\/artifacts\/[A-Za-z0-9_-]+/;
-const UPLOAD_PATH_RE = /^\/api\/uploads\/[A-Za-z0-9_.-]+/;
+// `save_upload` mints `file_id = uuid::Uuid::new_v4().to_string()` (hex +
+// hyphen, never a dot — see crates/librefang-api/src/routes/media.rs). Disallow
+// `.` so a hostile / mistaken path like `/api/uploads/foo.html` is not
+// classified as an image and rendered as `<img src>`.
+const UPLOAD_PATH_RE = /^\/api\/uploads\/[A-Za-z0-9_-]+$/;
 const DATA_IMAGE_RE = /^data:image\/[a-z0-9.+-]+;[^,]*,/i;
 
 const HTTP_URL_RE = /https?:\/\/[^\s"'<>)]+/gi;
 const DATA_URI_RE = /data:image\/[a-z0-9.+-]+;[^,]*,[A-Za-z0-9+/=_-]+/gi;
-const APIPATH_RE = /\/api\/(?:uploads|media\/artifacts)\/[A-Za-z0-9_.-]+/gi;
+// Same UUID constraint as UPLOAD_PATH_RE; artifacts already follow it.
+const APIPATH_RE = /\/api\/(?:uploads|media\/artifacts)\/[A-Za-z0-9_-]+/gi;
 
 /**
  * Validate a string is a safe image source we'll render as `<img src>`.
@@ -105,14 +110,21 @@ interface CandidateNode {
  *   - { images: [ ... ] }
  *   - Arrays of any of the above.
  */
+// Cap traversal depth so deeply self-similar tool blobs (e.g. nested
+// debug payloads echoing the same fields) can't make harvest cost
+// super-linear. 32 covers every realistic image-tool result; anything
+// deeper is almost certainly a non-image payload that just happens to
+// contain `{` characters.
+const MAX_HARVEST_DEPTH = 32;
+
 function harvestFromJson(root: unknown, out: ImageRef[], seen: Set<string>): void {
   // FIFO queue so iteration order matches document order — galleries
   // should render images in the same sequence the agent produced them.
-  const queue: CandidateNode[] = [{ value: root }];
+  const queue: (CandidateNode & { depth: number })[] = [{ value: root, depth: 0 }];
   let head = 0;
 
   while (head < queue.length) {
-    const { value, alt } = queue[head++];
+    const { value, alt, depth } = queue[head++];
 
     if (value == null) continue;
 
@@ -125,8 +137,10 @@ function harvestFromJson(root: unknown, out: ImageRef[], seen: Set<string>): voi
       continue;
     }
 
+    if (depth >= MAX_HARVEST_DEPTH) continue;
+
     if (Array.isArray(value)) {
-      for (const item of value) queue.push({ value: item, alt });
+      for (const item of value) queue.push({ value: item, alt, depth: depth + 1 });
       continue;
     }
 
@@ -187,7 +201,7 @@ function harvestFromJson(root: unknown, out: ImageRef[], seen: Set<string>): voi
       // Recurse into known container fields and any unknown nested values.
       for (const v of Object.values(obj)) {
         if (v !== null && (typeof v === "object")) {
-          queue.push({ value: v, alt: altText });
+          queue.push({ value: v, alt: altText, depth: depth + 1 });
         }
       }
     }
