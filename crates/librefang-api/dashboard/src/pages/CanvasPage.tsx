@@ -2393,9 +2393,20 @@ function CanvasPageInner() {
                       const nodeId = contextMenu.nodeId;
                       if (!nodeId) { setContextMenu(null); return; }
                       pushHistory();
-                      const next = removeNodeAndCascadeEdges(nodesRef.current, edgesRef.current, nodeId);
-                      setNodes(next.nodes);
-                      setEdges(next.edges);
+                      // Group nodes own their child nodes via `_childIds`;
+                      // dropping the group alone would orphan those children
+                      // (they'd still carry `_groupId`/`parentId` pointing at
+                      // a vanished group). Route to the group-aware deleter
+                      // so the children + their edges go too, matching the
+                      // GroupNodeComponent's _onDeleteGroup contract.
+                      const node = nodesRef.current.find(n => n.id === nodeId);
+                      if (node?.type === "groupNode") {
+                        deleteGroupAndChildrenRef.current(nodeId);
+                      } else {
+                        const next = removeNodeAndCascadeEdges(nodesRef.current, edgesRef.current, nodeId);
+                        setNodes(next.nodes);
+                        setEdges(next.edges);
+                      }
                       setContextMenu(null);
                     }}>
                     <Trash2 className="w-3 h-3" /> {t("common.delete")}
