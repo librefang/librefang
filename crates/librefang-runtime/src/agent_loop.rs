@@ -4160,6 +4160,9 @@ pub async fn run_agent_loop(
                 messages = compressed;
                 messages = crate::session_repair::validate_and_repair(&messages);
                 messages = crate::session_repair::ensure_starts_with_user(messages);
+                // #4971: drop file_read dedup state — the bodies its stubs
+                // referenced have been summarised away.
+                crate::context_compressor::reset_post_compression_side_state(session.id);
             }
 
             // Hard-trim only if still above threshold after soft compression
@@ -5793,6 +5796,9 @@ pub async fn run_agent_loop_streaming(
                 messages = compressed;
                 messages = crate::session_repair::validate_and_repair(&messages);
                 messages = crate::session_repair::ensure_starts_with_user(messages);
+                // #4971: drop file_read dedup state — the bodies its stubs
+                // referenced have been summarised away.
+                crate::context_compressor::reset_post_compression_side_state(session.id);
             }
 
             let remaining_tokens = crate::compactor::estimate_token_count(

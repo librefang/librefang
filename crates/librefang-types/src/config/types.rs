@@ -3404,6 +3404,23 @@ pub struct ContextEngineTomlConfig {
     /// Defaults to the official `librefang/librefang-registry`.
     #[serde(default = "default_plugin_registries")]
     pub plugin_registries: Vec<PluginRegistrySource>,
+    /// When `true` (default), repeated `file_read` calls on the same path in a
+    /// session are collapsed: if the on-disk content's hash matches a prior
+    /// read in the same session, the tool returns a short
+    /// `[File already read — content unchanged since turn N. See above for
+    /// full content.]` stub instead of the full body. If the hash differs,
+    /// the result is prefixed with
+    /// `[File updated since last read at turn N]`. Set to `false` to send the
+    /// full file content every time (legacy behaviour). The tracker is reset
+    /// whenever automatic context compression fires, because the prior full
+    /// content is no longer present in the history (#4971).
+    #[serde(default = "default_deduplicate_file_reads")]
+    pub deduplicate_file_reads: bool,
+}
+
+/// Default for [`ContextEngineTomlConfig::deduplicate_file_reads`]: enabled.
+fn default_deduplicate_file_reads() -> bool {
+    true
 }
 
 impl Default for ContextEngineTomlConfig {
@@ -3415,6 +3432,7 @@ impl Default for ContextEngineTomlConfig {
             plugin_stack_weights: Vec::new(),
             hooks: ContextEngineHooks::default(),
             plugin_registries: default_plugin_registries(),
+            deduplicate_file_reads: default_deduplicate_file_reads(),
         }
     }
 }
