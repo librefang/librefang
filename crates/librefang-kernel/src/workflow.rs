@@ -159,26 +159,13 @@ impl std::fmt::Display for WorkflowId {
 }
 
 /// Unique identifier for a running workflow instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct WorkflowRunId(pub Uuid);
-
-impl WorkflowRunId {
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
-
-impl Default for WorkflowRunId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for WorkflowRunId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+///
+/// Canonical definition lives in `librefang_types::task::WorkflowRunId`
+/// (re-exported here for source compatibility with pre-#4983 call sites).
+/// `librefang-types` sits at the bottom of the crate DAG so the kernel can
+/// re-use the same `Uuid`-shaped newtype that step 1 (PR #5033) introduced
+/// for the async-task tracker. One type, not two. Refs #4983.
+pub use librefang_types::task::WorkflowRunId;
 
 /// A workflow definition — a named sequence of steps.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -99,8 +99,26 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
         workflow_id: &str,
         input: &str,
     ) -> Result<String, kernel_handle::KernelOpError> {
+        // Forward to the tracker-aware variant with no caller context.
+        // Historical call sites (cron, triggers) that don't carry an
+        // `(agent, session)` keep their previous behaviour — the
+        // async-task tracker simply does not register an entry, so no
+        // `TaskCompletionEvent` is injected. Refs #4983.
+        self.start_workflow_async_tracked(workflow_id, input, None, None)
+            .await
+    }
+
+    async fn start_workflow_async_tracked(
+        &self,
+        workflow_id: &str,
+        input: &str,
+        caller_agent_id: Option<&str>,
+        caller_session_id: Option<&str>,
+    ) -> Result<String, kernel_handle::KernelOpError> {
         use crate::workflow::WorkflowId;
         use kernel_handle::KernelOpError;
+        use librefang_types::agent::{AgentId, SessionId};
+        use librefang_types::task::{TaskKind, TaskStatus};
 
         // Resolve workflow_id (UUID or name) — same logic as run_workflow.
         let wf_id = if let Ok(uuid) = uuid::Uuid::parse_str(workflow_id) {
@@ -123,6 +141,33 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             .create_run(wf_id, input.to_string())
             .await
             .ok_or_else(|| KernelOpError::Internal("Workflow not found".to_string()))?;
+
+        // Async task tracker registration (#4983 step 2). Only register
+        // when both pieces of caller context were supplied AND parse
+        // successfully; otherwise spawn the workflow without tracking so
+        // historical cron / trigger callers keep working unchanged.
+        let task_id = match (caller_agent_id, caller_session_id) {
+            (Some(aid), Some(sid)) => match (aid.parse::<AgentId>(), sid.parse::<SessionId>()) {
+                (Ok(agent_id), Ok(session_id)) => {
+                    let handle = self.register_async_task(
+                        agent_id,
+                        session_id,
+                        TaskKind::Workflow { run_id },
+                    );
+                    Some(handle.id)
+                }
+                _ => {
+                    tracing::debug!(
+                        caller_agent_id = %aid,
+                        caller_session_id = %sid,
+                        run_id = %run_id,
+                        "start_workflow_async_tracked: caller context failed to parse; skipping registry registration"
+                    );
+                    None
+                }
+            },
+            _ => None,
+        };
 
         // Spawn execution in the background via self_handle (same pattern as
         // trigger dispatch — upgrade the stored Weak<LibreFangKernel> so the
@@ -195,12 +240,35 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             // Don't swallow the result — without a log the agent that
             // called workflow_start has no way to learn the run failed
             // except by polling get_workflow_run for the Failed state.
-            if let Err(e) = kernel_arc
+            let exec_result = kernel_arc
                 .workflows
                 .engine
                 .execute_run(run_id, resolver, send_message)
-                .await
-            {
+                .await;
+
+            // Async task tracker delivery (#4983 step 2). Only emit a
+            // completion event if a registration happened above.
+            if let Some(task_id) = task_id {
+                let terminal_status = match &exec_result {
+                    Ok(output) => TaskStatus::Completed(serde_json::json!({
+                        "run_id": run_id.0.to_string(),
+                        "output": output,
+                    })),
+                    Err(e) => TaskStatus::Failed(format!("workflow run failed: {e}")),
+                };
+                if let Err(err) = kernel_arc
+                    .complete_async_task(task_id, terminal_status)
+                    .await
+                {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        run_id = %run_id,
+                        "Failed to inject TaskCompletionEvent: {err}"
+                    );
+                }
+            }
+
+            if let Err(e) = exec_result {
                 tracing::warn!(
                     run_id = %run_id,
                     "Async workflow execution failed: {e}"

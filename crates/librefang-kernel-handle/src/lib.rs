@@ -921,12 +921,42 @@ pub trait WorkflowRunner: Send + Sync {
     /// Start a workflow asynchronously (fire-and-forget). Creates the run,
     /// spawns execution in the background, and returns the `run_id`
     /// immediately without blocking. Use `get_workflow_run` to poll status.
+    ///
+    /// Default impl forwards to [`Self::start_workflow_async_tracked`]
+    /// with no caller context — historical callers that don't carry an
+    /// `(agent, session)` keep working but get no async-task tracker
+    /// registration (#4983).
     async fn start_workflow_async(
         &self,
         workflow_id: &str,
         input: &str,
     ) -> Result<String, KernelOpError> {
-        let _ = (workflow_id, input);
+        self.start_workflow_async_tracked(workflow_id, input, None, None)
+            .await
+    }
+
+    /// Tracker-aware variant of [`Self::start_workflow_async`] introduced
+    /// for the async task tracker (#4983). When the optional
+    /// `caller_agent_id` and `caller_session_id` are both `Some`, the
+    /// kernel registers a [`librefang_types::task::TaskKind::Workflow`]
+    /// entry against the originating session and will inject a
+    /// [`librefang_types::task::TaskCompletionEvent`] when the workflow
+    /// reaches a terminal state.
+    ///
+    /// Both inputs are `&str` for trait-object compatibility: the kernel
+    /// parses them into `AgentId` / `SessionId` internally. If either
+    /// parses to `None`, the call still spawns the workflow normally but
+    /// skips the registry registration (no completion event will be
+    /// injected). This mirrors the existing pattern in
+    /// `KernelHandle::run_workflow`'s string-id surface.
+    async fn start_workflow_async_tracked(
+        &self,
+        workflow_id: &str,
+        input: &str,
+        caller_agent_id: Option<&str>,
+        caller_session_id: Option<&str>,
+    ) -> Result<String, KernelOpError> {
+        let _ = (workflow_id, input, caller_agent_id, caller_session_id);
         Err(KernelOpError::unavailable("Workflow engine"))
     }
 
