@@ -1,0 +1,177 @@
+//! Long-horizon RL rollout trajectory exporter.
+//!
+//! This crate is the LibreFang-side egress surface that turns a finished
+//! agent rollout into an upload to an upstream RL-tracking service. It
+//! is the first concrete piece of issue #3331 ("Long-horizon RL rollout
+//! entry point").
+//!
+//! # Scope of this crate (#3331 step 1 of 3)
+//!
+//! - **Step 1 — Weights & Biases (this PR).** Most upstream-stable of
+//!   the three target services; their public REST API has been frozen
+//!   for years and is the conventional first integration for any
+//!   trajectory producer.
+//! - **Step 2 — Tinker** (follow-up PR). Lands as an additive
+//!   `ExportTarget::Tinker { … }` variant + `src/tinker.rs` module;
+//!   no breaking change to the public API of this crate.
+//! - **Step 3 — Atropos** (follow-up PR). Same shape: additive
+//!   `ExportTarget::Atropos { … }` + `src/atropos.rs`.
+//!
+//! # Wire-format decoupling (#3330)
+//!
+//! The exporter is intentionally **format-agnostic**. A
+//! [`TrajectoryExport`] carries the trajectory as an opaque
+//! `Vec<u8>` plus structured metadata; whatever bytes the rollout
+//! producer hands us are uploaded verbatim. The companion RFC #3330
+//! locks the on-the-wire serialization for trajectories, but **this
+//! crate does not depend on that RFC** — it can land and be
+//! integration-tested today, and the wire format can be decided later
+//! without changing the `export()` surface.
+//!
+//! # HTTP client
+//!
+//! All outbound HTTP flows through
+//! [`librefang_http::proxied_client`], the workspace's shared
+//! reqwest client. This is non-negotiable per the
+//! `librefang-extensions` AGENTS.md ("no bespoke `reqwest::Client`"):
+//! the shared client carries the configured proxy, TLS fallback
+//! roots, and `User-Agent: librefang/<version>`.
+
+#![deny(missing_docs)]
+
+pub mod error;
+mod wandb;
+
+pub use error::ExportError;
+
+use chrono::{DateTime, Utc};
+
+/// Target service to export a trajectory to.
+///
+/// This enum is **non-exhaustive in spirit** — additional variants
+/// (`Tinker`, `Atropos`) land in follow-up PRs (#3331 steps 2 and 3).
+/// Callers must match all variants explicitly today, but the marker
+/// is intentional: any code that constructs an `ExportTarget`
+/// should expect new variants over time.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub enum ExportTarget {
+    /// Export to Weights & Biases (<https://wandb.ai>). The W&B REST
+    /// surface accepts run metadata + arbitrary file artefacts; we
+    /// post the trajectory bytes as one file under a freshly-created
+    /// (or pre-existing) run.
+    WandB {
+        /// W&B project name. Required by the W&B REST surface. The
+        /// project must already exist; we do not auto-create.
+        project: String,
+        /// W&B entity (team or username). When `None`, W&B resolves
+        /// the personal entity from the API key on the server side.
+        entity: Option<String>,
+        /// Optional client-supplied run id hint. W&B accepts the hint
+        /// when creating the run; the server-assigned id is what
+        /// ends up in the [`ExportReceipt`].
+        run_id: Option<String>,
+        /// W&B API key. Sent as the password half of HTTP Basic
+        /// auth with the literal user `api`. See
+        /// <https://docs.wandb.ai/ref/api/rest/>.
+        api_key: String,
+    },
+}
+
+/// A single trajectory ready to be exported.
+///
+/// `trajectory_bytes` is opaque — the wire format is owned by the
+/// producer (and ultimately locked by #3330). The exporter does not
+/// inspect, validate, or transcode the payload; it forwards the bytes
+/// to the upstream verbatim. This keeps the exporter stable across
+/// wire-format iterations.
+#[derive(Debug, Clone)]
+pub struct TrajectoryExport {
+    /// Caller-side run identifier. Used as a default hint when the
+    /// target accepts one (e.g. W&B's `run_id` field); upstreams may
+    /// reassign and return their own server-side id, which ends up in
+    /// the receipt.
+    pub run_id: String,
+    /// Opaque trajectory bytes. See module-level docs on wire-format
+    /// decoupling — this crate does not parse, validate, or
+    /// transcode them.
+    pub trajectory_bytes: Vec<u8>,
+    /// Optional structured metadata describing the toolset / agent /
+    /// environment that produced the trajectory. Forwarded to the
+    /// upstream as the run's metadata blob when the target supports
+    /// one (W&B does). `None` is fine.
+    pub toolset_metadata: Option<serde_json::Value>,
+    /// Wall-clock start of the rollout window. Forwarded to the
+    /// upstream so the run's reported duration matches reality.
+    pub started_at: DateTime<Utc>,
+    /// Wall-clock end of the rollout window.
+    pub finished_at: DateTime<Utc>,
+}
+
+/// Receipt returned by a successful [`export`] call.
+///
+/// All fields point at the **upstream's** view of the upload — in
+/// particular `target_run_url` is whatever URL the upstream returned
+/// (e.g. `https://wandb.ai/<entity>/<project>/runs/<id>`), so the
+/// operator can click straight through to the experiment page.
+#[derive(Debug, Clone)]
+pub struct ExportReceipt {
+    /// Public, browser-loadable URL of the run on the upstream.
+    pub target_run_url: String,
+    /// Number of trajectory bytes uploaded. Mirrors
+    /// `TrajectoryExport::trajectory_bytes.len()` on success.
+    pub bytes_uploaded: u64,
+    /// Wall-clock time the upload completed, as observed locally.
+    pub uploaded_at: DateTime<Utc>,
+}
+
+/// Export a trajectory to the chosen [`ExportTarget`].
+///
+/// This is the only public entry point; per-target implementations
+/// live in private modules (`wandb`, plus future `tinker` / `atropos`)
+/// and are dispatched on the variant. The function is fully `async`
+/// and performs all I/O via the workspace shared HTTP client; the
+/// caller is expected to run it on a Tokio runtime.
+///
+/// # Errors
+///
+/// - [`ExportError::InvalidConfig`] — caller-supplied configuration
+///   (empty API key, empty project, …) was rejected before any
+///   network I/O happened.
+/// - [`ExportError::AuthError`] — upstream rejected the credentials
+///   (HTTP 401 / 403).
+/// - [`ExportError::UpstreamRejected`] — upstream returned a non-auth
+///   4xx / 5xx. Status code and (truncated) body are forwarded.
+/// - [`ExportError::NetworkError`] — transport-layer failure.
+/// - [`ExportError::MalformedResponse`] — upstream returned a 2xx but
+///   the body did not match the expected shape.
+pub async fn export(
+    target: ExportTarget,
+    export: TrajectoryExport,
+) -> Result<ExportReceipt, ExportError> {
+    match target {
+        ExportTarget::WandB {
+            project,
+            entity,
+            run_id,
+            api_key,
+        } => {
+            wandb::export_to_wandb(
+                &project,
+                entity.as_deref(),
+                run_id.as_deref(),
+                &api_key,
+                export,
+            )
+            .await
+        }
+    }
+}
+
+// Forward-compatibility anchor: re-export the workspace types crate so
+// follow-up integrations (Tinker / Atropos) that need to project
+// rollout-side structs (agent ids, session ids, tool metadata) into
+// upstream-specific request bodies have one canonical import path
+// without each adding their own `librefang-types = { … }` line.
+#[doc(hidden)]
+pub use librefang_types as _types;
