@@ -14,10 +14,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
+mod a2a;
 mod agent;
 mod cron;
 mod event;
 mod goal;
+mod hand;
 mod knowledge;
 mod memory;
 mod notify;
@@ -29,10 +31,12 @@ mod task;
 mod wiki;
 mod workflow;
 
+use self::a2a::{tool_a2a_discover, tool_a2a_send};
 use self::agent::tool_agent_find;
 use self::cron::{tool_cron_cancel, tool_cron_create, tool_cron_list};
 use self::event::tool_event_publish;
 use self::goal::tool_goal_update;
+use self::hand::{tool_hand_activate, tool_hand_deactivate, tool_hand_list, tool_hand_status};
 use self::knowledge::{
     tool_knowledge_add_entity, tool_knowledge_add_relation, tool_knowledge_query,
 };
@@ -4311,192 +4315,6 @@ async fn tool_channel_send(
             .await;
     }
     result
-}
-
-// ---------------------------------------------------------------------------
-// Hand tools (delegated to kernel via KernelHandle trait)
-// ---------------------------------------------------------------------------
-
-async fn tool_hand_list(kernel: Option<&Arc<dyn KernelHandle>>) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let hands = kh.hand_list().await.map_err(|e| e.to_string())?;
-
-    if hands.is_empty() {
-        return Ok(
-            "No Hands available. Install hands to enable curated autonomous packages.".to_string(),
-        );
-    }
-
-    let mut lines = vec!["Available Hands:".to_string(), String::new()];
-    for h in &hands {
-        let icon = h["icon"].as_str().unwrap_or("");
-        let name = h["name"].as_str().unwrap_or("?");
-        let id = h["id"].as_str().unwrap_or("?");
-        let status = h["status"].as_str().unwrap_or("unknown");
-        let desc = h["description"].as_str().unwrap_or("");
-
-        let status_marker = match status {
-            "Active" => "[ACTIVE]",
-            "Paused" => "[PAUSED]",
-            _ => "[available]",
-        };
-
-        lines.push(format!("{} {} ({}) {}", icon, name, id, status_marker));
-        if !desc.is_empty() {
-            lines.push(format!("  {}", desc));
-        }
-        if let Some(iid) = h["instance_id"].as_str() {
-            lines.push(format!("  Instance: {}", iid));
-        }
-        lines.push(String::new());
-    }
-
-    Ok(lines.join("\n"))
-}
-
-async fn tool_hand_activate(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let hand_id = input["hand_id"]
-        .as_str()
-        .ok_or("Missing 'hand_id' parameter")?;
-    let config: std::collections::HashMap<String, serde_json::Value> =
-        if let Some(obj) = input["config"].as_object() {
-            obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-        } else {
-            std::collections::HashMap::new()
-        };
-
-    let result = kh
-        .hand_activate(hand_id, config)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let instance_id = result["instance_id"].as_str().unwrap_or("?");
-    let agent_name = result["agent_name"].as_str().unwrap_or("?");
-    let status = result["status"].as_str().unwrap_or("?");
-
-    Ok(format!(
-        "Hand '{}' activated!\n  Instance: {}\n  Agent: {} ({})",
-        hand_id, instance_id, agent_name, status
-    ))
-}
-
-async fn tool_hand_status(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let hand_id = input["hand_id"]
-        .as_str()
-        .ok_or("Missing 'hand_id' parameter")?;
-
-    let result = kh.hand_status(hand_id).await.map_err(|e| e.to_string())?;
-
-    let icon = result["icon"].as_str().unwrap_or("");
-    let name = result["name"].as_str().unwrap_or(hand_id);
-    let status = result["status"].as_str().unwrap_or("unknown");
-    let instance_id = result["instance_id"].as_str().unwrap_or("?");
-    let agent_name = result["agent_name"].as_str().unwrap_or("?");
-    let activated = result["activated_at"].as_str().unwrap_or("?");
-
-    Ok(format!(
-        "{} {} — {}\n  Instance: {}\n  Agent: {}\n  Activated: {}",
-        icon, name, status, instance_id, agent_name, activated
-    ))
-}
-
-async fn tool_hand_deactivate(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let instance_id = input["instance_id"]
-        .as_str()
-        .ok_or("Missing 'instance_id' parameter")?;
-    kh.hand_deactivate(instance_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(format!("Hand instance '{}' deactivated.", instance_id))
-}
-
-// ---------------------------------------------------------------------------
-// A2A outbound tools (cross-instance agent communication)
-// ---------------------------------------------------------------------------
-
-/// Discover an external A2A agent by fetching its agent card.
-async fn tool_a2a_discover(input: &serde_json::Value) -> Result<String, String> {
-    let url = input["url"].as_str().ok_or("Missing 'url' parameter")?;
-
-    // SSRF protection: block private/metadata IPs
-    if crate::web_fetch::check_ssrf(url, &[]).is_err() {
-        return Err("SSRF blocked: URL resolves to a private or metadata address".to_string());
-    }
-
-    let client = crate::a2a::A2aClient::new();
-    let card = client.discover(url).await?;
-
-    serde_json::to_string_pretty(&card).map_err(|e| format!("Serialization error: {e}"))
-}
-
-/// Send a task to an external A2A agent.
-async fn tool_a2a_send(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let message = input["message"]
-        .as_str()
-        .ok_or("Missing 'message' parameter")?;
-
-    // Resolve agent URL: either directly provided or looked up by name.
-    // Canonicalize early so the trust gate below sees the same string the
-    // approve flow stored.
-    let url = if let Some(raw) = input["agent_url"].as_str() {
-        // SSRF protection
-        if crate::web_fetch::check_ssrf(raw, &[]).is_err() {
-            return Err("SSRF blocked: URL resolves to a private or metadata address".to_string());
-        }
-        crate::a2a::canonicalize_a2a_url(raw).unwrap_or_else(|| raw.to_string())
-    } else if let Some(name) = input["agent_name"].as_str() {
-        kh.get_a2a_agent_url(name)
-            .ok_or_else(|| format!("No known A2A agent with name '{name}'. Use a2a_discover first or provide agent_url directly."))?
-    } else {
-        return Err("Missing 'agent_url' or 'agent_name' parameter".to_string());
-    };
-
-    // Taint sink: block secrets from being exfiltrated to an external A2A peer.
-    // Runs before the trust gate so a tainted-message attempt always reports
-    // the data-exfil reason (the test suite asserts this contract) — the
-    // trust gate is purely about target authorization and would mask the
-    // more serious finding.
-    if let Some(violation) = check_taint_outbound_text(message, &TaintSink::agent_message()) {
-        return Err(violation);
-    }
-    // Also gate the URL itself against query-string credential leaks.
-    if let Some(violation) = check_taint_net_fetch(&url) {
-        return Err(violation);
-    }
-
-    // SECURITY (Bug #3786): the HTTP route at `/api/a2a/send` enforces a
-    // trust gate that requires the URL to live in `kernel.list_a2a_agents()`.
-    // The agent-side tool path bypassed that gate entirely, so an LLM could
-    // exfiltrate to any non-private URL the SSRF allowlist accepted. Mirror
-    // the same check here.
-    let trusted_urls: Vec<String> = kh.list_a2a_agents().into_iter().map(|(_, u)| u).collect();
-    if !trusted_urls.iter().any(|u| u == &url) {
-        return Err(format!(
-            "A2A target '{url}' is not on the trusted-agent list. Discover and have an operator approve it via POST /api/a2a/agents/{{url}}/approve before agents may send to it."
-        ));
-    }
-
-    let session_id = input["session_id"].as_str();
-    let client = crate::a2a::A2aClient::new();
-    let task = client.send_task(&url, message, session_id).await?;
-
-    serde_json::to_string_pretty(&task).map_err(|e| format!("Serialization error: {e}"))
 }
 
 // ---------------------------------------------------------------------------
