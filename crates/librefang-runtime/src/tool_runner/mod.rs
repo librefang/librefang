@@ -14,16 +14,32 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
+mod agent;
+mod event;
+mod goal;
+mod memory;
+mod notify;
 mod shell_safety;
 mod system;
 mod taint;
+mod task;
+mod wiki;
 
+use self::agent::tool_agent_find;
+use self::event::tool_event_publish;
+use self::goal::tool_goal_update;
+use self::memory::{tool_memory_list, tool_memory_recall, tool_memory_store};
+use self::notify::tool_notify_owner;
 use self::shell_safety::{classify_shell_exec_ro_safety, RoSafety};
 use self::system::{tool_location_get, tool_system_time};
 use self::taint::{
     check_taint_net_fetch, check_taint_outbound_header, check_taint_outbound_text,
     check_taint_shell_exec,
 };
+use self::task::{
+    tool_task_claim, tool_task_complete, tool_task_list, tool_task_post, tool_task_status,
+};
+use self::wiki::{tool_wiki_get, tool_wiki_search, tool_wiki_write};
 
 /// Maximum inter-agent call depth to prevent infinite recursion (A->B->C->...).
 #[allow(dead_code)]
@@ -3487,7 +3503,7 @@ async fn tool_shell_exec(
 // Inter-agent tools
 // ---------------------------------------------------------------------------
 
-fn require_kernel(
+pub(super) fn require_kernel(
     kernel: Option<&Arc<dyn KernelHandle>>,
 ) -> Result<&Arc<dyn KernelHandle>, String> {
     kernel.ok_or_else(|| {
@@ -3878,333 +3894,6 @@ fn tool_meta_search(
             lines.join("\n")
         ),
     )
-}
-
-fn tool_notify_owner(tool_use_id: &str, input: &serde_json::Value) -> ToolResult {
-    let reason = input
-        .get("reason")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    let summary = input
-        .get("summary")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-
-    if reason.is_empty() || summary.is_empty() {
-        return ToolResult {
-            tool_use_id: tool_use_id.to_string(),
-            content: "Error: notify_owner requires non-empty 'reason' and 'summary' string fields."
-                .to_string(),
-            is_error: true,
-            ..Default::default()
-        };
-    }
-
-    // Compose the owner-side payload. The reason is prefixed so the operator
-    // can scan a long stream of notices without parsing the body. Format:
-    //     🎩 {reason}: {summary}
-    let owner_payload = format!("🎩 {reason}: {summary}");
-
-    // Structured log per OBS-01 — dispatch decision is recorded even before
-    // the gateway fans it out. Target JID(s) are resolved downstream.
-    tracing::info!(
-        event = "owner_notify",
-        reason = %reason,
-        summary_len = summary.len(),
-        "notify_owner tool invoked"
-    );
-
-    ToolResult {
-        tool_use_id: tool_use_id.to_string(),
-        // Opaque ack — intentionally devoid of summary content.
-        content: "Notice queued for the owner. Do not repeat the summary in your public reply."
-            .to_string(),
-        is_error: false,
-        owner_notice: Some(owner_payload),
-        ..Default::default()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Shared memory tools
-// ---------------------------------------------------------------------------
-
-fn tool_memory_store(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-    peer_id: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
-    let value = input.get("value").ok_or("Missing 'value' parameter")?;
-    kh.memory_store(key, value.clone(), peer_id)
-        .map_err(|e| e.to_string())?;
-    Ok(format!("Stored value under key '{key}'."))
-}
-
-fn tool_memory_recall(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-    peer_id: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
-    match kh.memory_recall(key, peer_id).map_err(|e| e.to_string())? {
-        Some(val) => Ok(serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string())),
-        None => Ok(format!("No value found for key '{key}'.")),
-    }
-}
-
-fn tool_memory_list(
-    kernel: Option<&Arc<dyn KernelHandle>>,
-    peer_id: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let keys = kh.memory_list(peer_id).map_err(|e| e.to_string())?;
-    if keys.is_empty() {
-        return Ok("No entries found in shared memory.".to_string());
-    }
-    Ok(serde_json::to_string_pretty(&keys).unwrap_or_else(|_| format!("{:?}", keys)))
-}
-
-// ---------------------------------------------------------------------------
-// Memory wiki tools (issue #3329)
-// ---------------------------------------------------------------------------
-
-fn tool_wiki_get(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let topic = input["topic"].as_str().ok_or("Missing 'topic' parameter")?;
-    let value = kh.wiki_get(topic).map_err(|e| e.to_string())?;
-    Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
-}
-
-fn tool_wiki_search(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let query = input["query"].as_str().ok_or("Missing 'query' parameter")?;
-    let limit = input
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
-        .unwrap_or(10);
-    let value = kh.wiki_search(query, limit).map_err(|e| e.to_string())?;
-    Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
-}
-
-fn tool_wiki_write(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-    caller_agent_id: Option<&str>,
-    sender_id: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let topic = input["topic"].as_str().ok_or("Missing 'topic' parameter")?;
-    let body = input["body"].as_str().ok_or("Missing 'body' parameter")?;
-    let force = input
-        .get("force")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    // Provenance is constructed kernel-side rather than left to the LLM:
-    // (1) every write is required to carry an agent attribution per #3329's
-    //     acceptance criterion #3, and (2) the calling agent / sender ids
-    //     are authoritative — letting the model spoof them would defeat the
-    //     audit value of the frontmatter.
-    let agent = caller_agent_id
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    let provenance = serde_json::json!({
-        "agent": agent,
-        "channel": sender_id,
-        "at": chrono::Utc::now().to_rfc3339(),
-    });
-
-    let value = kh
-        .wiki_write(topic, body, provenance, force)
-        .map_err(|e| e.to_string())?;
-    Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
-}
-
-// ---------------------------------------------------------------------------
-// Collaboration tools
-// ---------------------------------------------------------------------------
-
-fn tool_agent_find(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let query = input["query"].as_str().ok_or("Missing 'query' parameter")?;
-    let agents = kh.find_agents(query);
-    if agents.is_empty() {
-        return Ok(format!("No agents found matching '{query}'."));
-    }
-    let result: Vec<serde_json::Value> = agents
-        .iter()
-        .map(|a| {
-            serde_json::json!({
-                "id": a.id,
-                "name": a.name,
-                "state": a.state,
-                "description": a.description,
-                "tags": a.tags,
-                "tools": a.tools,
-                "model": format!("{}:{}", a.model_provider, a.model_name),
-            })
-        })
-        .collect();
-    serde_json::to_string_pretty(&result).map_err(|e| format!("Serialize error: {e}"))
-}
-
-async fn tool_task_post(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-    caller_agent_id: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let title = input["title"].as_str().ok_or("Missing 'title' parameter")?;
-    let description = input["description"]
-        .as_str()
-        .ok_or("Missing 'description' parameter")?;
-    let assigned_to = input["assigned_to"].as_str();
-    let task_id = kh
-        .task_post(title, description, assigned_to, caller_agent_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(format!("Task created with ID: {task_id}"))
-}
-
-async fn tool_task_claim(
-    kernel: Option<&Arc<dyn KernelHandle>>,
-    caller_agent_id: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let agent_id = caller_agent_id.ok_or("task_claim requires a calling agent context")?;
-    match kh.task_claim(agent_id).await.map_err(|e| e.to_string())? {
-        Some(task) => {
-            serde_json::to_string_pretty(&task).map_err(|e| format!("Serialize error: {e}"))
-        }
-        None => Ok("No tasks available.".to_string()),
-    }
-}
-
-async fn tool_task_complete(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-    caller_agent_id: Option<&str>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let agent_id = caller_agent_id.ok_or("task_complete requires a calling agent context")?;
-    let task_id = input["task_id"]
-        .as_str()
-        .ok_or("Missing 'task_id' parameter")?;
-    let result = input["result"]
-        .as_str()
-        .ok_or("Missing 'result' parameter")?;
-    kh.task_complete(agent_id, task_id, result)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(format!("Task {task_id} marked as completed."))
-}
-
-async fn tool_task_list(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let status = input["status"].as_str();
-    let tasks = kh.task_list(status).await.map_err(|e| e.to_string())?;
-    if tasks.is_empty() {
-        return Ok("No tasks found.".to_string());
-    }
-    serde_json::to_string_pretty(&tasks).map_err(|e| format!("Serialize error: {e}"))
-}
-
-async fn tool_task_status(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let task_id = input["task_id"]
-        .as_str()
-        .ok_or("Missing 'task_id' parameter")?;
-    match kh.task_get(task_id).await.map_err(|e| e.to_string())? {
-        Some(task) => {
-            // Project to the same six columns comms_task_status returns from
-            // the bridge SQL — keeps the native tool's contract tight even if
-            // task_get later grows additional fields.
-            let projected = serde_json::json!({
-                "status":       task.get("status").cloned().unwrap_or(serde_json::Value::Null),
-                "result":       task.get("result").cloned().unwrap_or(serde_json::Value::Null),
-                "title":        task.get("title").cloned().unwrap_or(serde_json::Value::Null),
-                "assigned_to":  task.get("assigned_to").cloned().unwrap_or(serde_json::Value::Null),
-                "created_at":   task.get("created_at").cloned().unwrap_or(serde_json::Value::Null),
-                "completed_at": task.get("completed_at").cloned().unwrap_or(serde_json::Value::Null),
-            });
-            serde_json::to_string_pretty(&projected).map_err(|e| format!("Serialize error: {e}"))
-        }
-        None => Ok(format!("Task '{task_id}' not found.")),
-    }
-}
-
-async fn tool_event_publish(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
-    let kh = require_kernel(kernel)?;
-    let event_type = input["event_type"]
-        .as_str()
-        .ok_or("Missing 'event_type' parameter")?;
-    let payload = input
-        .get("payload")
-        .cloned()
-        .unwrap_or(serde_json::json!({}));
-    kh.publish_event(event_type, payload)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(format!("Event '{event_type}' published successfully."))
-}
-
-// ---------------------------------------------------------------------------
-// Goal tracking tools
-// ---------------------------------------------------------------------------
-
-fn tool_goal_update(
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
-) -> Result<String, String> {
-    // Validate input before touching the kernel
-    let goal_id = input["goal_id"]
-        .as_str()
-        .ok_or("Missing 'goal_id' parameter")?;
-    let status = input["status"].as_str();
-    let progress = input["progress"].as_u64().map(|p| p.min(100) as u8);
-
-    if status.is_none() && progress.is_none() {
-        return Err("At least one of 'status' or 'progress' must be provided".to_string());
-    }
-
-    if let Some(s) = status {
-        if !["pending", "in_progress", "completed", "cancelled"].contains(&s) {
-            return Err(format!(
-                "Invalid status '{}'. Must be: pending, in_progress, completed, or cancelled",
-                s
-            ));
-        }
-    }
-
-    let kh = require_kernel(kernel)?;
-    let updated = kh
-        .goal_update(goal_id, status, progress)
-        .map_err(|e| e.to_string())?;
-    Ok(serde_json::to_string_pretty(&updated).unwrap_or_else(|_| updated.to_string()))
 }
 
 // ---------------------------------------------------------------------------
