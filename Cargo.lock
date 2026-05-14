@@ -4747,6 +4747,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "librefang-rl-export"
+version = "2026.5.12-beta.11"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "librefang-http",
+ "librefang-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
 name = "librefang-runtime"
 version = "2026.5.12-beta.11"
 dependencies = [
