@@ -40,6 +40,7 @@
 #![deny(missing_docs)]
 
 pub mod error;
+mod tinker;
 mod wandb;
 
 pub use error::ExportError;
@@ -48,11 +49,9 @@ use chrono::{DateTime, Utc};
 
 /// Target service to export a trajectory to.
 ///
-/// This enum is **non-exhaustive in spirit** — additional variants
-/// (`Tinker`, `Atropos`) land in follow-up PRs (#3331 steps 2 and 3).
-/// Callers must match all variants explicitly today, but the marker
-/// is intentional: any code that constructs an `ExportTarget`
-/// should expect new variants over time.
+/// This enum is `#[non_exhaustive]` so additional variants can land
+/// without breaking callers — the `Atropos` variant follows in #3331
+/// step 3.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum ExportTarget {
@@ -75,6 +74,31 @@ pub enum ExportTarget {
         /// auth with the literal user `api`. See
         /// <https://docs.wandb.ai/ref/api/rest/>.
         api_key: String,
+    },
+    /// Export to Tinker (<https://thinkingmachines.ai/tinker/>).
+    ///
+    /// Tinker's REST surface is training-call-centric and doesn't
+    /// expose a dedicated opaque-trajectory upload endpoint today.
+    /// This variant maps the rollout onto the closest stable
+    /// `(create_session, telemetry)` pair Tinker actually accepts;
+    /// see the module-level docs in `tinker.rs` for the assumption
+    /// flagged for maintainer sign-off and the SDK source links.
+    Tinker {
+        /// Tinker API key. Sent as the `X-API-Key` header verbatim.
+        /// Tinker's own SDK requires the `tml-` prefix; this crate
+        /// forwards the key as-is and lets the upstream enforce the
+        /// prefix (so JWT-style credentials surfaced by
+        /// `TINKER_CREDENTIAL_CMD` still flow through).
+        api_key: String,
+        /// Project identifier sent as `project_id` on the create-session
+        /// call and also surfaced as a session tag. Required.
+        project: String,
+        /// Optional override for the Tinker REST base URL. When
+        /// `None` the crate uses Tinker's documented prod default
+        /// (`https://tinker.thinkingmachines.dev/services/tinker-prod`).
+        /// Operators on a self-hosted control plane set this; tests
+        /// point it at a `wiremock::MockServer`.
+        base_url: Option<String>,
     },
 }
 
@@ -165,6 +189,11 @@ pub async fn export(
             )
             .await
         }
+        ExportTarget::Tinker {
+            api_key,
+            project,
+            base_url,
+        } => tinker::export_to_tinker(&project, &api_key, base_url.as_deref(), export).await,
     }
 }
 
