@@ -1,3 +1,4 @@
+import type { KeyboardEvent } from "react";
 import { Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -30,9 +31,23 @@ export function AgentSkillItem({ name, description, onClick }: AgentSkillItemPro
   const subtitle = trimmedDescription && trimmedDescription.length > 0
     ? trimmedDescription
     : t("agents.detail.skill_meta", { defaultValue: "installed" });
+  // The row is interactive when an onClick is provided. Mirror that to
+  // keyboard + assistive tech with role/tabIndex/Enter+Space handling so
+  // it isn't a mouse-only target.
+  const handleKeyDown = onClick
+    ? (event: KeyboardEvent<HTMLDivElement>) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onClick();
+        }
+      }
+    : undefined;
   return (
     <div
       onClick={onClick}
+      onKeyDown={handleKeyDown}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
       className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 cursor-pointer hover:border-brand/40 transition-colors flex items-start justify-between gap-2"
       data-testid="agent-skill-item"
     >
