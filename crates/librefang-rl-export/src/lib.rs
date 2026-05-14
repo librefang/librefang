@@ -39,6 +39,7 @@
 
 #![deny(missing_docs)]
 
+mod atropos;
 pub mod error;
 mod tinker;
 mod wandb;
@@ -50,8 +51,7 @@ use chrono::{DateTime, Utc};
 /// Target service to export a trajectory to.
 ///
 /// This enum is `#[non_exhaustive]` so additional variants can land
-/// without breaking callers — the `Atropos` variant follows in #3331
-/// step 3.
+/// without breaking callers.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum ExportTarget {
@@ -98,6 +98,31 @@ pub enum ExportTarget {
         /// (`https://tinker.thinkingmachines.dev/services/tinker-prod`).
         /// Operators on a self-hosted control plane set this; tests
         /// point it at a `wiremock::MockServer`.
+        base_url: Option<String>,
+    },
+    /// Export to Atropos (<https://github.com/NousResearch/atropos>),
+    /// NousResearch's RL environments microservice.
+    ///
+    /// Unlike W&B / Tinker, Atropos is **not a cloud-hosted service**:
+    /// the API server is a local process the operator runs as part of
+    /// their training stack (default `http://localhost:8000`). There
+    /// is no authentication. This variant maps the rollout onto
+    /// Atropos's `register-env` / `scored_data` pair; see the module
+    /// docs in `atropos.rs` for the trainer-must-be-running assumption.
+    ///
+    /// `TrajectoryExport.trajectory_bytes` MUST already be valid
+    /// `ScoredData` JSON (`tokens` / `masks` / `scores` / …); the
+    /// exporter forwards the bytes verbatim and lets Atropos validate.
+    Atropos {
+        /// Producer name registered with Atropos as `desired_name`.
+        /// Atropos appends an index (`<name>_<n>`) and returns the
+        /// resolved name in the receipt. Required.
+        project: String,
+        /// Optional override for the Atropos `run-api` base URL. When
+        /// `None` the crate uses `http://localhost:8000` (the
+        /// Atropos `run-api` default). Operators running the trainer
+        /// on a different host or port set this; tests point it at a
+        /// `wiremock::MockServer`.
         base_url: Option<String>,
     },
 }
@@ -194,6 +219,9 @@ pub async fn export(
             project,
             base_url,
         } => tinker::export_to_tinker(&project, &api_key, base_url.as_deref(), export).await,
+        ExportTarget::Atropos { project, base_url } => {
+            atropos::export_to_atropos(&project, base_url.as_deref(), export).await
+        }
     }
 }
 
