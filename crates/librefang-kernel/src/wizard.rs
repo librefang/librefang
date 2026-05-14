@@ -206,6 +206,7 @@ impl SetupWizard {
             tool_exec_backend: None,
             skill_workshop: librefang_types::agent::SkillWorkshopConfig::default(),
             proactive_memory: librefang_types::memory::ProactiveMemoryOverrides::default(),
+            compaction: None,
         };
 
         let skills_to_install: Vec<String> = intent
