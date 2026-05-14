@@ -420,15 +420,30 @@ pub fn deep_merge_toml(base: &mut toml::Value, overlay: &toml::Value) {
 
 /// Get the default config file path.
 ///
-/// Respects `LIBREFANG_HOME` env var (e.g. `LIBREFANG_HOME=/opt/librefang`).
+/// Respects `BOSSFANG_HOME` / `LIBREFANG_HOME` env vars (in that order).
 pub fn default_config_path() -> PathBuf {
     librefang_home().join("config.toml")
 }
 
-/// Get the LibreFang home directory.
+/// Get the home directory for on-disk state (config, vault, registry
+/// cache, agent workspaces, …).
 ///
-/// Priority: `LIBREFANG_HOME` env var > `~/.librefang`.
+/// BossFang fork: `BOSSFANG_HOME` takes priority over `LIBREFANG_HOME`
+/// so users on a fresh BossFang install can pick the BossFang-flavored
+/// variable name. Existing installations setting `LIBREFANG_HOME`
+/// continue to work unchanged.
+///
+/// The default path is still `~/.librefang/`. Renaming the default
+/// directory to `~/.bossfang/` would orphan every existing user's
+/// data on upgrade — see the Phase-2 plan for the dual-prefix
+/// alternative (deferred). For now, BossFang installs share storage
+/// with any LibreFang installation that was on the same machine.
+///
+/// Priority: `BOSSFANG_HOME` > `LIBREFANG_HOME` > `~/.librefang`.
 pub fn librefang_home() -> PathBuf {
+    if let Ok(home) = std::env::var("BOSSFANG_HOME") {
+        return PathBuf::from(home);
+    }
     if let Ok(home) = std::env::var("LIBREFANG_HOME") {
         return PathBuf::from(home);
     }
@@ -446,6 +461,53 @@ mod tests {
     fn test_load_config_defaults() {
         let config = load_config(None);
         assert_eq!(config.log_level, "info");
+    }
+
+    // BossFang fork: BOSSFANG_HOME takes priority over LIBREFANG_HOME.
+    //
+    // These tests poke real env vars and therefore can't run in
+    // parallel with each other — they live in `#[serial_test::serial]`
+    // groups. librefang-kernel's existing test layout already has a
+    // serial group for env-mutating tests; we slot in here.
+    #[test]
+    #[serial_test::serial]
+    fn librefang_home_prefers_bossfang_home_over_librefang_home() {
+        let original_bossfang = std::env::var_os("BOSSFANG_HOME");
+        let original_librefang = std::env::var_os("LIBREFANG_HOME");
+        std::env::set_var("BOSSFANG_HOME", "/tmp/bossfang-test-home");
+        std::env::set_var("LIBREFANG_HOME", "/tmp/librefang-test-home");
+        assert_eq!(librefang_home(), PathBuf::from("/tmp/bossfang-test-home"));
+        // Cleanup
+        match original_bossfang {
+            Some(v) => std::env::set_var("BOSSFANG_HOME", v),
+            None => std::env::remove_var("BOSSFANG_HOME"),
+        }
+        match original_librefang {
+            Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+            None => std::env::remove_var("LIBREFANG_HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn librefang_home_falls_back_to_librefang_home_when_bossfang_unset() {
+        let original_bossfang = std::env::var_os("BOSSFANG_HOME");
+        let original_librefang = std::env::var_os("LIBREFANG_HOME");
+        std::env::remove_var("BOSSFANG_HOME");
+        std::env::set_var("LIBREFANG_HOME", "/tmp/librefang-only-test-home");
+        assert_eq!(
+            librefang_home(),
+            PathBuf::from("/tmp/librefang-only-test-home")
+        );
+        // Cleanup
+        match original_bossfang {
+            Some(v) => std::env::set_var("BOSSFANG_HOME", v),
+            None => std::env::remove_var("BOSSFANG_HOME"),
+        }
+        match original_librefang {
+            Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+            None => std::env::remove_var("LIBREFANG_HOME"),
+        }
     }
 
     #[test]

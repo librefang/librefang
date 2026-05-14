@@ -25,8 +25,20 @@ use tracing::{debug, info, warn};
 use tracing::error;
 use zeroize::Zeroizing;
 
-/// Env var fallback for vault key.
-const VAULT_KEY_ENV: &str = "LIBREFANG_VAULT_KEY";
+/// Primary env var name for the vault key (BossFang flavoured).
+const VAULT_KEY_ENV: &str = "BOSSFANG_VAULT_KEY";
+
+/// Legacy env var name, kept as an alias so existing LibreFang installs
+/// keep working without changing their deployment env.
+const VAULT_KEY_ENV_LEGACY: &str = "LIBREFANG_VAULT_KEY";
+
+/// Read the vault key from env, preferring `BOSSFANG_VAULT_KEY` and
+/// falling back to `LIBREFANG_VAULT_KEY`.
+///
+/// Returns `Err(VarError::NotPresent)` only when *neither* var is set.
+fn vault_key_from_env() -> Result<String, std::env::VarError> {
+    std::env::var(VAULT_KEY_ENV).or_else(|_| std::env::var(VAULT_KEY_ENV_LEGACY))
+}
 
 /// Reserved vault key for the startup-validated sentinel (#3651).
 ///
@@ -295,10 +307,17 @@ impl CredentialVault {
             ));
         }
 
-        // Check if a master key is already available (env var or keyring)
-        let key_bytes = if let Ok(existing_b64) = std::env::var(VAULT_KEY_ENV) {
-            // Use the existing key from env var
-            info!("Using existing vault key from {}", VAULT_KEY_ENV);
+        // Check if a master key is already available (env var or keyring).
+        // BossFang fork: vault_key_from_env() checks BOSSFANG_VAULT_KEY first,
+        // falls back to LIBREFANG_VAULT_KEY. The log line names whichever was
+        // resolved so operators can spot a stale legacy var.
+        let key_bytes = if let Ok(existing_b64) = vault_key_from_env() {
+            let source_name = if std::env::var(VAULT_KEY_ENV).is_ok() {
+                VAULT_KEY_ENV
+            } else {
+                VAULT_KEY_ENV_LEGACY
+            };
+            info!("Using existing vault key from {}", source_name);
             decode_master_key(&existing_b64)?
         } else if let Ok(existing_b64) = load_keyring_key() {
             info!("Using existing vault key from OS keyring");
@@ -641,14 +660,15 @@ impl CredentialVault {
         }
 
         // Env var wins over the keyring — matches `init()`'s precedence
-        // (line ~279) so an explicit `LIBREFANG_VAULT_KEY` survives across
-        // re-opens of the same vault. Without this, `init()` would honor
-        // the env key but a subsequent `unlock()` on a fresh instance
-        // would silently switch to whatever the (process-shared) keyring
-        // file currently holds — which races between parallel tests
-        // (#TOTP flake) and surprises CI/headless deployments that set
-        // the env var as the source of truth.
-        if let Ok(key_b64) = std::env::var(VAULT_KEY_ENV) {
+        // so an explicit BOSSFANG_VAULT_KEY (or legacy LIBREFANG_VAULT_KEY)
+        // survives across re-opens of the same vault. Without this,
+        // `init()` would honor the env key but a subsequent `unlock()`
+        // on a fresh instance would silently switch to whatever the
+        // (process-shared) keyring file currently holds — which races
+        // between parallel tests (#TOTP flake) and surprises CI/
+        // headless deployments that set the env var as the source of
+        // truth.
+        if let Ok(key_b64) = vault_key_from_env() {
             let key_b64 = Zeroizing::new(key_b64);
             return decode_master_key(&key_b64);
         }

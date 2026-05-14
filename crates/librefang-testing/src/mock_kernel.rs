@@ -79,12 +79,21 @@ const TEST_VAULT_KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
 fn ensure_test_vault_key() {
     VAULT_KEY_INIT.call_once(|| {
-        if std::env::var_os("LIBREFANG_VAULT_KEY").is_none() {
-            // SAFETY: only runs once, before any kernel is booted in this
-            // process — no other thread can be reading the env at this point
-            // because all paths into the vault go through MockKernelBuilder
-            // (or `LibreFangKernel::boot_with_config`, which the builder
-            // owns the entry to).
+        // BossFang fork: vault.rs reads BOSSFANG_VAULT_KEY first and falls
+        // back to LIBREFANG_VAULT_KEY. Set both so tests pass regardless
+        // of which name a future caller checks. If either is already set
+        // by the developer's shell, respect that value — tests should
+        // not silently overwrite an operator-provided key.
+        //
+        // SAFETY: only runs once, before any kernel is booted in this
+        // process — no other thread can be reading the env at this point
+        // because all paths into the vault go through MockKernelBuilder
+        // (or `LibreFangKernel::boot_with_config`, which the builder
+        // owns the entry to).
+        let bossfang_set = std::env::var_os("BOSSFANG_VAULT_KEY").is_some();
+        let librefang_set = std::env::var_os("LIBREFANG_VAULT_KEY").is_some();
+        if !bossfang_set && !librefang_set {
+            std::env::set_var("BOSSFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
             std::env::set_var("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
         }
     });
