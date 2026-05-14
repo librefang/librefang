@@ -5,10 +5,10 @@
 
 use crate::kernel_handle::prelude::*;
 use crate::mcp;
-use crate::web_search::{parse_ddg_results, WebToolsContext};
+use crate::web_search::WebToolsContext;
 use librefang_skills::registry::SkillRegistry;
 use librefang_types::taint::TaintSink;
-use librefang_types::tool::{ToolDefinition, ToolExecutionStatus, ToolResult};
+use librefang_types::tool::{ToolDefinition, ToolResult};
 use librefang_types::tool_compat::normalize_tool_name;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,14 +24,17 @@ mod goal;
 mod hand;
 mod knowledge;
 mod memory;
+mod meta;
 mod notify;
 mod process;
+mod sandbox;
 mod schedule;
 mod shell_safety;
 mod skill;
 mod system;
 mod taint;
 mod task;
+mod web_legacy;
 mod wiki;
 mod workflow;
 
@@ -48,10 +51,12 @@ use self::knowledge::{
     tool_knowledge_add_entity, tool_knowledge_add_relation, tool_knowledge_query,
 };
 use self::memory::{tool_memory_list, tool_memory_recall, tool_memory_store};
+use self::meta::{tool_meta_load, tool_meta_search};
 use self::notify::tool_notify_owner;
 use self::process::{
     tool_process_kill, tool_process_list, tool_process_poll, tool_process_start, tool_process_write,
 };
+use self::sandbox::tool_docker_exec;
 use self::schedule::{tool_schedule_create, tool_schedule_delete, tool_schedule_list};
 use self::shell_safety::{classify_shell_exec_ro_safety, RoSafety};
 use self::skill::{
@@ -67,6 +72,7 @@ use self::taint::{
 use self::task::{
     tool_task_claim, tool_task_complete, tool_task_list, tool_task_post, tool_task_status,
 };
+use self::web_legacy::{tool_web_fetch_legacy, tool_web_search_legacy};
 use self::wiki::{tool_wiki_get, tool_wiki_search, tool_wiki_write};
 use self::workflow::{
     tool_workflow_cancel, tool_workflow_list, tool_workflow_run, tool_workflow_start,
@@ -3237,108 +3243,6 @@ fn spill_or_passthrough(
     }
 }
 
-/// Legacy web fetch (no SSRF protection, no readability). Used when WebToolsContext is unavailable.
-async fn tool_web_fetch_legacy(
-    input: &serde_json::Value,
-    spill_threshold: u64,
-    max_artifact_bytes: u64,
-) -> Result<String, String> {
-    let url = input["url"].as_str().ok_or("Missing 'url' parameter")?;
-    let client = crate::http_client::proxied_client_builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("HTTP request failed: {e}"))?;
-    let status = resp.status();
-    // Reject responses larger than 10MB to prevent memory exhaustion
-    if let Some(len) = resp.content_length() {
-        if len > 10 * 1024 * 1024 {
-            return Err(format!("Response too large: {len} bytes (max 10MB)"));
-        }
-    }
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read response body: {e}"))?;
-    // Artifact spill: if the body exceeds the configured threshold, write it
-    // to the artifact store and return a compact stub with a handle.  On write
-    // failure (including per-artifact size cap exceeded), fall through to the
-    // existing byte-cap truncation so callers always get a usable (if partial)
-    // response.
-    let body_bytes = body.as_bytes();
-    if let Some(stub) = crate::artifact_store::maybe_spill(
-        "web_fetch",
-        body_bytes,
-        spill_threshold,
-        max_artifact_bytes,
-        &crate::artifact_store::default_artifact_storage_dir(),
-    ) {
-        return Ok(format!("HTTP {status}\n\n{stub}"));
-    }
-
-    let max_len = 50_000;
-    let truncated = if body.len() > max_len {
-        format!(
-            "{}... [truncated, {} total bytes]",
-            crate::str_utils::safe_truncate_str(&body, max_len),
-            body.len()
-        )
-    } else {
-        body
-    };
-    Ok(format!("HTTP {status}\n\n{truncated}"))
-}
-
-/// Legacy web search via DuckDuckGo HTML only. Used when WebToolsContext is unavailable.
-async fn tool_web_search_legacy(input: &serde_json::Value) -> Result<String, String> {
-    let query = input["query"].as_str().ok_or("Missing 'query' parameter")?;
-    let max_results = input["max_results"].as_u64().unwrap_or(5) as usize;
-
-    debug!(query, "Executing web search via DuckDuckGo HTML");
-
-    let client = crate::http_client::proxied_client_builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
-
-    let resp = client
-        .get("https://html.duckduckgo.com/html/")
-        .query(&[("q", query)])
-        .header("User-Agent", "Mozilla/5.0 (compatible; LibreFangAgent/0.1)")
-        .send()
-        .await
-        .map_err(|e| format!("Search request failed: {e}"))?;
-
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read search response: {e}"))?;
-
-    // Parse DuckDuckGo HTML results
-    let results = parse_ddg_results(&body, max_results);
-
-    if results.is_empty() {
-        return Ok(format!("No results found for '{query}'."));
-    }
-
-    let mut output = format!("Search results for '{query}':\n\n");
-    for (i, (title, url, snippet)) in results.iter().enumerate() {
-        output.push_str(&format!(
-            "{}. {}\n   URL: {}\n   {}\n\n",
-            i + 1,
-            title,
-            url,
-            snippet
-        ));
-    }
-
-    Ok(output)
-}
-
 // ---------------------------------------------------------------------------
 // Shell tool
 // ---------------------------------------------------------------------------
@@ -3782,151 +3686,6 @@ fn tool_agent_kill(
 ///
 /// Errors are returned via `ToolResult.is_error = true` with a descriptive
 /// message; the model is expected to retry with corrected arguments.
-/// Resolve the pool `tool_load` / `tool_search` search against.
-///
-/// - `Some(pool)` — the agent's granted `ToolDefinition` list from the
-///   agent-loop (builtin + MCP + skills). The authoritative source: if the
-///   caller supplied one, we honor it verbatim — including an empty slice,
-///   which means "nothing is granted". Falling back to builtin on empty
-///   would leak the catalog to an agent that has none of it.
-/// - `None` — caller didn't thread the granted list through (legacy
-///   `execute_tool` paths: REST/MCP bridges, approval resume, unit tests).
-///   Fall back to the builtin catalog so these code paths keep working.
-fn meta_lookup_pool(available: Option<&[ToolDefinition]>) -> Vec<ToolDefinition> {
-    match available {
-        Some(list) => list.to_vec(),
-        None => builtin_tool_definitions(),
-    }
-}
-
-/// Meta-tool: load a tool's full schema by name (issue #3044). The returned
-/// schema is both printed into `content` for the LLM to read AND attached as
-/// `ToolResult.loaded_tool` so the agent loop can register it in the session's
-/// lazy-load cache — making the tool callable on the next turn.
-fn tool_meta_load(
-    input: &serde_json::Value,
-    available_tools: Option<&[ToolDefinition]>,
-) -> ToolResult {
-    let name = input
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    if name.is_empty() {
-        return ToolResult::error(
-            "".to_string(),
-            "tool_load requires a 'name' string".to_string(),
-        );
-    }
-    let pool = meta_lookup_pool(available_tools);
-    match pool.into_iter().find(|t| t.name == name) {
-        Some(def) => {
-            let schema = serde_json::json!({
-                "name": def.name,
-                "description": def.description,
-                "input_schema": def.input_schema,
-            });
-            let content = format!(
-                "Loaded tool '{}'. Schema:\n{}\n\nYou can call this tool on your next turn.",
-                def.name,
-                serde_json::to_string_pretty(&schema).unwrap_or_else(|_| schema.to_string()),
-            );
-            ToolResult {
-                tool_use_id: String::new(),
-                content,
-                is_error: false,
-                status: ToolExecutionStatus::Completed,
-                loaded_tool: Some(def),
-                ..Default::default()
-            }
-        }
-        None => ToolResult::error(
-            String::new(),
-            format!(
-                "Unknown tool '{}'. Call tool_search(query) to find available tools.",
-                name
-            ),
-        ),
-    }
-}
-
-/// Meta-tool: search the tool catalog by keyword (issue #3044). Returns a
-/// short list of matching tool names and one-line hints sourced from the
-/// prompt_builder catalog.
-fn tool_meta_search(
-    input: &serde_json::Value,
-    available_tools: Option<&[ToolDefinition]>,
-) -> ToolResult {
-    let query = input
-        .get("query")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
-    if query.is_empty() {
-        return ToolResult::error(
-            String::new(),
-            "tool_search requires a non-empty 'query' string".to_string(),
-        );
-    }
-    let limit = input
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(10)
-        .clamp(1, 50) as usize;
-
-    // Tokenize query — any token in the tool name, description, or hint makes a hit.
-    let tokens: Vec<&str> = query.split_whitespace().collect();
-    let mut matches: Vec<(usize, String, String)> = Vec::new();
-    for def in meta_lookup_pool(available_tools) {
-        let name_lc = def.name.to_lowercase();
-        let desc_lc = def.description.to_lowercase();
-        let hint = crate::prompt_builder::tool_hint(&def.name);
-        let hint_lc = hint.to_lowercase();
-        let score = tokens.iter().fold(0usize, |acc, tok| {
-            let tok = tok.trim();
-            if tok.is_empty() {
-                return acc;
-            }
-            acc + (name_lc.contains(tok) as usize) * 3
-                + (hint_lc.contains(tok) as usize) * 2
-                + (desc_lc.contains(tok) as usize)
-        });
-        if score > 0 {
-            matches.push((score, def.name, hint.to_string()));
-        }
-    }
-    matches.sort_by_key(|m| std::cmp::Reverse(m.0));
-    matches.truncate(limit);
-
-    if matches.is_empty() {
-        return ToolResult::ok(
-            String::new(),
-            format!(
-                "No tools matched '{}'. Browse the tool catalog in the system prompt.",
-                query
-            ),
-        );
-    }
-    let lines: Vec<String> = matches
-        .into_iter()
-        .map(|(_, name, hint)| {
-            if hint.is_empty() {
-                name
-            } else {
-                format!("{name}: {hint}")
-            }
-        })
-        .collect();
-    ToolResult::ok(
-        String::new(),
-        format!(
-            "Matches for '{}' (call tool_load(name) to get a tool's schema):\n{}",
-            query,
-            lines.join("\n")
-        ),
-    )
-}
 
 // ---------------------------------------------------------------------------
 // Channel send tool (proactive outbound messaging via configured adapters)
@@ -5335,60 +5094,6 @@ async fn tool_speech_to_text(
         "transcript": understanding.description,
         "provider": understanding.provider,
         "model": understanding.model,
-    });
-
-    serde_json::to_string_pretty(&response).map_err(|e| format!("Serialize error: {e}"))
-}
-
-// ---------------------------------------------------------------------------
-// Docker sandbox tool
-// ---------------------------------------------------------------------------
-
-async fn tool_docker_exec(
-    input: &serde_json::Value,
-    docker_config: Option<&librefang_types::config::DockerSandboxConfig>,
-    workspace_root: Option<&Path>,
-    caller_agent_id: Option<&str>,
-) -> Result<String, String> {
-    let config = docker_config.ok_or("Docker sandbox not configured")?;
-
-    if !config.enabled {
-        return Err("Docker sandbox is disabled. Set docker.enabled=true in config.".into());
-    }
-
-    let command = input["command"]
-        .as_str()
-        .ok_or("Missing 'command' parameter")?;
-
-    let workspace = workspace_root.ok_or("Docker exec requires a workspace directory")?;
-    let agent_id = caller_agent_id.unwrap_or("default");
-
-    // Check Docker availability
-    if !crate::docker_sandbox::is_docker_available().await {
-        return Err(
-            "Docker is not available on this system. Install Docker to use docker_exec.".into(),
-        );
-    }
-
-    // Create sandbox container
-    let container = crate::docker_sandbox::create_sandbox(config, agent_id, workspace).await?;
-
-    // Execute command with timeout
-    let timeout = std::time::Duration::from_secs(config.timeout_secs);
-    let result = crate::docker_sandbox::exec_in_sandbox(&container, command, timeout).await;
-
-    // Always destroy the container after execution
-    if let Err(e) = crate::docker_sandbox::destroy_sandbox(&container).await {
-        warn!("Failed to destroy Docker sandbox: {e}");
-    }
-
-    let exec_result = result?;
-
-    let response = serde_json::json!({
-        "exit_code": exec_result.exit_code,
-        "stdout": exec_result.stdout,
-        "stderr": exec_result.stderr,
-        "container_id": container.container_id,
     });
 
     serde_json::to_string_pretty(&response).map_err(|e| format!("Serialize error: {e}"))
