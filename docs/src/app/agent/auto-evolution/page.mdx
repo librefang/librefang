@@ -1,0 +1,219 @@
+# Auto-Evolution Mode
+
+Auto-Evolution Mode is an opt-in capability of the **DevOps Hand** that lets the daemon watch GitHub repositories on a schedule and act on what it finds without human prompting: review open pull requests, triage open issues, and produce draft pull requests that implement triaged bug fixes or feature requests via a Brainstorm → Architect → PRD → Implement (BMAD) pipeline.
+
+<Note>
+**Auto-evolution is not a separate Hand.** It is a Phase-7 extension of the existing DevOps Hand, sharing the same agents (coordinator, engineer, ops, code-reviewer) plus one new sub-agent (implementer). Activate it by flipping the DevOps Hand's `auto_evolve` setting to `true` — no extra install required once `librefang hand install devops` is done.
+</Note>
+
+## Table of Contents
+
+- [What it does](#what-it-does)
+- [Where it fits in the platform](#where-it-fits-in-the-platform)
+- [Setup](#setup)
+- [Required GitHub token scopes](#required-github-token-scopes)
+- [Configuration reference](#configuration-reference)
+- [Safety model](#safety-model)
+- [BMAD pipeline phases](#bmad-pipeline-phases)
+- [Observability](#observability)
+- [Troubleshooting](#troubleshooting)
+- [What it does NOT do](#what-it-does-not-do)
+
+---
+
+## What it does
+
+Every `evolution_check_interval` (default 15 min) the Hand wakes up and, for each `owner/repo` in `evolution_repos`:
+
+1. **Reviews open PRs** — pulls each PR's diff, asks the existing `code-reviewer` sub-agent for a structured verdict, posts a single `COMMENT` review (or `REQUEST_CHANGES` on blocking findings — never auto-`APPROVE`). PRs already reviewed at their current `head_sha` are skipped.
+2. **Triages open issues** — labels first (`bug` / `feature` / `question` / `wontfix`), single-prompt LLM fallback when labels are absent. Outcomes: `bug-fix | feature | needs-info | skip`.
+3. **Implements actionable issues** — dispatches `bug-fix` and `feature` issues to the `implementer` sub-agent, which runs the BMAD pipeline scaled by `bmad_strictness` and opens a **draft PR**.
+
+Bot-authored PRs (dependabot, renovate, etc.) get a token-cheap pass: recorded but not deeply reviewed. PRs with `> 200` changed files are surfaced for human review rather than spending tokens on a diff the reviewer can't usefully ground.
+
+---
+
+## Where it fits in the platform
+
+LibreFang ships three autonomous self-improvement subsystems. They are designed to complement each other, not duplicate:
+
+| Subsystem | Scope | Trigger | Output |
+|---|---|---|---|
+| **`auto_dream`** | Agent's own memory | Time + session-count gate, per-agent opt-in | Consolidated memory entries |
+| **`skill_workshop`** | Reusable workflows captured from agent turns | Post-turn hook, opt-in per agent | Candidate skill drafts in `~/.librefang/skills/pending/` |
+| **`auto_evolve`** (this page) | Source code in upstream repos | Cron gate inside DevOps Hand, opt-in per Hand instance | PR review comments + draft PRs |
+
+Together they form the platform's "code evolves" / "memory consolidates" / "workflows distill" triad. Each is independently gated and independently safe to disable. See `docs/architecture/skill-workshop.md` in the repo for the same pattern applied to skill capture.
+
+---
+
+## Setup
+
+The Hand definition lives in [`librefang/librefang-registry`](https://github.com/librefang/librefang-registry) under `hands/devops/`. Install, configure, and activate:
+
+```bash
+# 1. Install or update the DevOps Hand
+librefang hand install devops
+# or, if already installed:
+librefang hand update devops
+
+# 2. Provide a GitHub Personal Access Token (see scopes below)
+export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+# (Or write GITHUB_TOKEN=... to ~/.librefang/.env)
+
+# 3. Configure the four evolution settings
+librefang hand config devops auto_evolve=true
+librefang hand config devops evolution_repos=librefang/librefang,librefang/librefang-registry
+librefang hand config devops evolution_check_interval=15min
+librefang hand config devops bmad_strictness=standard
+# Optional: tighten or relax the per-PR file-touch budget
+librefang hand config devops max_changed_files=30
+
+# 4. Activate (or restart if already active)
+librefang hand activate devops
+```
+
+The full Hand-side config matrix (with each option's effect and default) is in the [`hands/devops/README.md`](https://github.com/librefang/librefang-registry/blob/main/hands/devops/README.md) of the registry. This page focuses on platform behaviour, not the Hand itself.
+
+---
+
+## Required GitHub token scopes
+
+For **public-repo evolution**, a fine-grained token needs:
+
+- **Pull requests** — read & write (posting reviews, opening draft PRs)
+- **Issues** — read & write (triage comments, cross-link comments on the source issue)
+- **Contents** — read & write (pushing the implementation branch)
+- **Metadata** — read (resolving `default_branch` for PR creation)
+
+For **private-repo evolution**, add the classic `repo` scope and ensure each target repo is listed in `evolution_repos`. Forks of public repos still count as private for token purposes if the fork is private.
+
+<Note>
+**Never store the PAT in `librefang.toml` or in a Hand setting.** Keep it in the `GITHUB_TOKEN` environment variable read at daemon start, or in `~/.librefang/.env`. The Hand's `shell_exec` calls reference `$GITHUB_TOKEN` directly so the token never lands in agent message history or memory.
+</Note>
+
+---
+
+## Configuration reference
+
+| Setting | Type | Default | Effect |
+|---|---|---|---|
+| `auto_evolve` | toggle | `false` | Master switch. When `false`, Phase 7 is skipped entirely on every tick. |
+| `evolution_repos` | text | `""` | Comma-separated `owner/repo` pairs. Empty disables the loop without needing to flip `auto_evolve`. |
+| `evolution_check_interval` | select | `15min` | Per-repo cadence. Values: `5min` / `15min` / `1hour` / `6hour` / `1day`. |
+| `bmad_strictness` | select | `standard` | Depth of the BMAD pipeline (see below). Values: `light` / `standard` / `strict`. |
+| `max_changed_files` | select | `30` | Hard cap on files touched by a single auto-generated draft PR. Larger work is split into multiple PRs. |
+| `approval_mode` | toggle (inherited) | `true` | When `true`, deployment-style and destructive actions go through `devops_queue.json` for human approval — this applies to evolution work too. |
+
+---
+
+## Safety model
+
+Auto-evolution operates under three layered guarantees that the operator cannot accidentally turn off:
+
+**1. Draft-only PRs.** Every PR the implementer creates is `draft: true`. The Hand never marks a PR ready-for-review and never merges. A human is always the one to flip the readiness flag and click merge.
+
+**2. No protected-branch writes.** The implementer never pushes to `main`, `master`, `trunk`, or any branch protected by a GitHub ruleset. It never uses `--force`, `--no-verify`, `--no-gpg-sign`, or `--amend` against a remote branch. Upstream pre-commit / pre-push / commit-msg hooks are discovered via `git config core.hooksPath` and honored — hook failure aborts the task rather than triggering a retry.
+
+**3. Path safety floor.** The implementer stops and writes to `devops_queue.json` (for human triage) rather than committing if the change would touch:
+
+- `Cargo.toml` workspace `members = [...]` entries
+- migration files (any `*/migrations/*`, `*/migrate/*`, or `*.sql`)
+- secrets (`.env*`, `*.pem`, `*.p12`, `id_rsa`, `id_ed25519`, `credentials*`, `secrets*`, `vault_*.key`)
+- more files than the `max_changed_files` setting allows (default 30)
+
+In addition, each evolution tick self-paces against ~70% of the per-turn token budget so subsequent ticks have headroom and a runaway pipeline can't starve the rest of the Hand.
+
+---
+
+## BMAD pipeline phases
+
+When the implementer is dispatched to an actionable issue (`bug-fix` or `feature`), it runs a four-phase pipeline whose depth scales with `bmad_strictness`:
+
+| Phase | `light` | `standard` | `strict` |
+|---|---|---|---|
+| **B**rainstorm | skip | inline (≤200 words) | inline + queue gate |
+| **A**rchitect | always | always | always + queue gate |
+| **P**RD | skip | required | required + queue gate |
+| **I**mplement | always | always | always |
+
+Each phase's output is appended to a `BMAD.md` file committed alongside the implementation so reviewers can see the reasoning that led to the diff.
+
+For bug fixes, the implement phase is **strictly test-first**: the failing reproduction test is committed *before* the fix, in the same PR. For features, tests land alongside the code.
+
+**Strict mode queue gate.** Between every phase, the implementer writes the produced artifact to `devops_queue.json` with `status: "pending"` and ends the current turn. The next continuous tick re-reads the queue; if the user (out-of-band) has flipped `status` to `approved`, the implementer resumes from the next phase. There is no in-turn polling or sleep — the queue persists across turns by design.
+
+---
+
+## Observability
+
+Three new metrics surface on the agent dashboard at `http://127.0.0.1:4545`:
+
+- **PRs Reviewed** — total successful review postings (`devops_hand_prs_reviewed`)
+- **Issues Processed** — total triaged issues, regardless of outcome (`devops_hand_issues_processed`)
+- **Draft PRs Opened** — total auto-generated draft PRs (`devops_hand_draft_prs_opened`)
+
+The Hand also publishes four advisory events that subscribers (dashboard, audit log, downstream Hands) can consume:
+
+| Event | Payload | When |
+|---|---|---|
+| `devops_evolution_pr_reviewed` | `{ pr_url, verdict, head_sha }` | After a PR review is posted |
+| `devops_evolution_pr_opened` | `{ pr_url, issue_url, classification }` | After a draft PR is created from an issue |
+| `devops_evolution_blocked` | `{ reason, pr_or_issue_url, retry_after }` | When a tick aborts (safety floor / API / hook) |
+| `devops_evolution_skipped` | `{ pr_or_issue_url, reason }` | When the cadence gate or filters skip an item |
+
+Per-PR / per-issue state lives in memory under keys like `devops_pr_review_<owner>_<repo>_<num>` and `devops_issue_state_<owner>_<repo>_<num>` so progress survives daemon restarts.
+
+---
+
+## Troubleshooting
+
+### "Nothing seems to be happening"
+
+Check, in order:
+
+1. **`auto_evolve` is actually on**: `librefang hand config devops` and confirm the setting reads `true`.
+2. **`evolution_repos` is non-empty** and the pairs are `owner/repo` (no leading `https://`, no trailing slash).
+3. **`GITHUB_TOKEN` is set in the daemon's environment**, not just your interactive shell. If you started the daemon before exporting the token, restart it.
+4. **The cadence gate hasn't fired yet** — check `devops_evolution_cursor_<owner>_<repo>` in memory; if `last_tick_at` is recent (`< evolution_check_interval` ago), the next tick is still in the future.
+
+### "Reviews are posted but with weird verdicts"
+
+The reviewer sub-agent returns one of `approve | request_changes | block | comment_only`. The mapping to GitHub review events is:
+
+- `approve` → posted as `COMMENT` (the Hand never auto-`APPROVE`s; a human still has to)
+- `request_changes` → `REQUEST_CHANGES`
+- `block` → `REQUEST_CHANGES` with a `**Reviewer flagged as BLOCKING — escalate to a maintainer**` prefix in the body
+- `comment_only` / anything unexpected → `COMMENT`
+
+If you're seeing `REQUEST_CHANGES` more often than expected, inspect the reviewer's `summary` in the GitHub review body or in memory under `devops_pr_review_<owner>_<repo>_<num>`.
+
+### "Draft PRs land but `cargo` checks fail in CI"
+
+The implementer runs the project's own lint/test gate locally before pushing (typically `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test -p <crate>`). A CI-only failure usually means:
+
+- the project gates CI on commands the implementer didn't run (custom integration tests, `xtask` jobs) — add them to the implementer's lint/test invocations via the project's `justfile` or a `CONTRIBUTING.md` runbook the agent can pick up
+- the implementer-local cache differs from CI's clean build — usually surfaces as a `Cargo.lock` regeneration the implementer didn't commit; the BMAD pipeline should always re-stage `Cargo.lock` after a dependency-affecting change
+
+### "The Hand wants to touch `Cargo.toml` / migrations / secrets and stops"
+
+That's the path safety floor doing its job. Inspect `devops_queue.json`; if the change is legitimately needed, manually take it from the queue, perform the edit out-of-band, and the implementer will pick up the next tick on a clean tree.
+
+### "Hooks reject the implementer's push"
+
+Most often the upstream repo enforces `Co-Authored-By: Claude` rejection or similar AI-attribution bans. The implementer's prompt forbids LLM-vendor attribution in commit messages, but process attribution (`Generated by DevOps Hand → implementer`) is fine and encouraged. If the upstream rejects the latter too, customize the implementer's commit-message template in the Hand definition — do not add `--no-verify` (the Hand's safety floor blocks it anyway).
+
+---
+
+## What it does NOT do
+
+To set realistic expectations:
+
+- It does **not** merge PRs. A human always merges.
+- It does **not** mark draft PRs as ready-for-review.
+- It does **not** push to `main` / `master` / protected branches.
+- It does **not** operate on private repos unless the configured PAT has `repo` scope and the repo is listed in `evolution_repos`.
+- It does **not** modify `Cargo.toml` workspace members, migration files, secrets, or > `max_changed_files` files in a single PR.
+- It does **not** consume more than ~70% of the per-turn token budget in a single tick.
+
+For the full Hand-level specification and the prompts each sub-agent runs, see the source: [`hands/devops/HAND.toml`](https://github.com/librefang/librefang-registry/blob/main/hands/devops/HAND.toml) and [`hands/devops/SKILL.md`](https://github.com/librefang/librefang-registry/blob/main/hands/devops/SKILL.md) in the registry.
