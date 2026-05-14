@@ -199,7 +199,7 @@ const OVERLOADED_PATTERNS: &[&str] = &[
     "internal_server_error",
 ];
 
-/// Timeout / network patterns.
+/// Timeout / network / subprocess crash patterns.
 const TIMEOUT_PATTERNS: &[&str] = &[
     "timeout",
     "timed out",
@@ -215,6 +215,7 @@ const TIMEOUT_PATTERNS: &[&str] = &[
     "connection refused",
     "network error",
     "fetch failed",
+    "exited with code",
 ];
 
 /// SSL/TLS transient error patterns — these indicate a mid-stream record-layer
