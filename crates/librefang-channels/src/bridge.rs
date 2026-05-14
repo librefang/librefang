@@ -1558,35 +1558,128 @@ impl BridgeManager {
                                             None => router.channel_default(ct_str),
                                         };
 
-                                        match bound_agent {
-                                            Some(bound) if bound == requesting_agent => {}
+                                        // Recipients to notify on this adapter.
+                                        // Two sources, in order of precedence:
+                                        //   1. If `channel_default` resolves
+                                        //      to the requesting agent, the
+                                        //      adapter's static
+                                        //      `notification_recipients()`
+                                        //      list (the operator inbox /
+                                        //      admin list shape pre-#5002).
+                                        //   2. If `channel_default` is None
+                                        //      or points elsewhere, fall
+                                        //      back to `AgentBinding`-derived
+                                        //      `peer_id`s on this adapter
+                                        //      that route to the requesting
+                                        //      agent — this is the #5002
+                                        //      fix for adapters with
+                                        //      `default_agent = None` that
+                                        //      route purely via bindings.
+                                        //
+                                        // The two are NOT merged when (1)
+                                        // applies: pre-#5002 behaviour for
+                                        // operator-inbox channels is
+                                        // unchanged, and bindings on those
+                                        // channels are already covered by
+                                        // the inbound routing path. Mixing
+                                        // would re-enable the leak shape
+                                        // #4985 was about (admin inbox +
+                                        // unrelated bound chat both
+                                        // receiving the same approval).
+                                        let recipients: Vec<ChannelUser> = match bound_agent {
+                                            Some(bound) if bound == requesting_agent => {
+                                                adapter.notification_recipients()
+                                            }
                                             Some(_) => {
-                                                debug!(
-                                                    adapter = adapter.name(),
-                                                    account_id = adapter.account_id().unwrap_or(""),
-                                                    request_id = %approval.request_id,
-                                                    requesting_agent = %requesting_agent,
-                                                    "Adapter bound to a different agent — skipping approval broadcast"
+                                                // channel_default points at a
+                                                // DIFFERENT agent. Even so,
+                                                // an explicit binding on the
+                                                // same adapter that targets
+                                                // the requesting agent is a
+                                                // valid delivery target —
+                                                // operators set the binding
+                                                // deliberately. This is the
+                                                // "Telegram bot bound to
+                                                // agent A by default but
+                                                // also bound to agent B in
+                                                // chat Z via AgentBinding"
+                                                // case. Fan out to those
+                                                // bound chats only; do NOT
+                                                // touch the static
+                                                // notification_recipients
+                                                // (that's agent A's
+                                                // operator inbox).
+                                                let peers = router.bound_recipients_for_agent(
+                                                    requesting_agent,
+                                                    ct_str,
+                                                    adapter.account_id(),
                                                 );
-                                                continue;
+                                                if peers.is_empty() {
+                                                    debug!(
+                                                        adapter = adapter.name(),
+                                                        account_id = adapter.account_id().unwrap_or(""),
+                                                        request_id = %approval.request_id,
+                                                        requesting_agent = %requesting_agent,
+                                                        "Adapter bound to a different agent and no peer-binding override — skipping approval broadcast"
+                                                    );
+                                                    continue;
+                                                }
+                                                peers
+                                                    .into_iter()
+                                                    .map(|peer| ChannelUser {
+                                                        platform_id: peer,
+                                                        display_name: String::new(),
+                                                        librefang_user: None,
+                                                    })
+                                                    .collect()
                                             }
                                             None => {
-                                                // No default agent on this
-                                                // channel = no bound recipient
-                                                // we can attribute the
-                                                // approval to. Suppress rather
-                                                // than leak (#4985).
-                                                debug!(
-                                                    adapter = adapter.name(),
-                                                    account_id = adapter.account_id().unwrap_or(""),
-                                                    request_id = %approval.request_id,
-                                                    "Adapter has no bound default agent — skipping approval broadcast"
+                                                // No `channel_default` for
+                                                // this adapter's key. Pre-
+                                                // #5002 silently dropped
+                                                // here — that's the bug.
+                                                // Walk bindings and fan out
+                                                // to every `peer_id` whose
+                                                // binding resolves to the
+                                                // requesting agent on this
+                                                // (channel, account_id).
+                                                let peers = router.bound_recipients_for_agent(
+                                                    requesting_agent,
+                                                    ct_str,
+                                                    adapter.account_id(),
                                                 );
-                                                continue;
+                                                if peers.is_empty() {
+                                                    // No default AND no
+                                                    // binding-derived peers.
+                                                    // Surface this loudly:
+                                                    // the operator probably
+                                                    // forgot to configure
+                                                    // either (and would
+                                                    // otherwise have no
+                                                    // signal that approvals
+                                                    // are being dropped on
+                                                    // the floor).
+                                                    warn!(
+                                                        adapter = adapter.name(),
+                                                        account_id = adapter.account_id().unwrap_or(""),
+                                                        channel = ct_str,
+                                                        request_id = %approval.request_id,
+                                                        requesting_agent = %requesting_agent,
+                                                        "Approval dropped: no channel_default and no AgentBinding peer_id covers the requesting agent on this adapter"
+                                                    );
+                                                    continue;
+                                                }
+                                                peers
+                                                    .into_iter()
+                                                    .map(|peer| ChannelUser {
+                                                        platform_id: peer,
+                                                        display_name: String::new(),
+                                                        librefang_user: None,
+                                                    })
+                                                    .collect()
                                             }
-                                        }
+                                        };
 
-                                        let recipients = adapter.notification_recipients();
                                         if recipients.is_empty() {
                                             debug!(
                                                 adapter = adapter.name(),
