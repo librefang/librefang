@@ -1,5 +1,5 @@
 //! Integration tests for workflow operator-node step modes (#4980 step
-//! 1/N → step 3/N).
+//! 1/N → step 4/N).
 //!
 //! Five new `StepMode` variants total:
 //!
@@ -22,9 +22,17 @@
 //!   reason. Tera picked over `mlua` / `rhai` / a hand-rolled DSL
 //!   because it ships sandboxed by default and is the smallest
 //!   addition to the dependency tree.
+//! * `Branch` — fully wired since step 4: exact-match dispatch.
+//!   Previous step output is JSON-parsed when possible and compared
+//!   against each arm's `match_value`; the first matching arm's
+//!   `then` field names a later step the dispatcher forward-jumps
+//!   to. No arm matches → halt with a recorded reason; target step
+//!   missing or at/before the current index → halt with a typed
+//!   reason (backward jumps forbidden — `Loop` exists for that
+//!   semantic). Range / regex / in-set matchers will land as
+//!   additive `BranchArm` fields in a follow-up.
 //! * `Approval` — no-op-with-warn; blocked on #4983 (async-task
 //!   tracker). The executor will wire there once the dependency lands.
-//! * `Branch` — no-op-with-warn; wired in step 4 of the #4980 series.
 //!
 //! The tests run the workflow engine directly (no HTTP) via
 //! `kernel.workflow_engine().execute_run(...)` with a mock
@@ -572,30 +580,212 @@ fn transform_step_syntax_error_caught_by_workflow_validate_at_load_time() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// `Branch` — fully wired in #4980 step 4/N
+// ---------------------------------------------------------------------------
+
+/// Build a multi-step workflow for Branch dispatch testing.
+///
+/// Two intermediate "skipped" Transform steps sit between the Branch
+/// and the target Transform terminal. The point of the layout: we
+/// can demonstrate that the Branch jumps directly to the named
+/// target and *bypasses* the skipped steps (their `_operator:transform`
+/// step result is NOT recorded). The target step is always the LAST
+/// step in the workflow so sequential dispatch terminates there
+/// naturally.
+///
+///   step 0: seed Transform — emits a literal string controlled by the
+///           test, so we can drive different branch decisions without
+///           dispatching an agent.
+///   step 1: Branch — single arm `match_value: $literal => then: $target`.
+///   step 2: skipped Transform — `marker:skipped_a:{{ prev }}` (must
+///           NOT appear in step_results when the arm hits).
+///   step 3: skipped Transform — `marker:skipped_b:{{ prev }}` (must
+///           NOT appear in step_results when the arm hits).
+///   step 4: target Transform — `terminal:$tag:{{ prev }}` (must
+///           appear when the arm hits; is the last step so the
+///           workflow naturally completes here).
+fn branch_skip_workflow(literal: &str, target_name: &str, target_template: &str) -> Workflow {
+    let step = |name: &str, code: &str, mode: StepMode| WorkflowStep {
+        name: name.to_string(),
+        agent: StepAgent::ByName {
+            name: "_operator_placeholder".to_string(),
+        },
+        prompt_template: code.to_string(),
+        mode,
+        timeout_secs: 120,
+        error_mode: ErrorMode::Fail,
+        output_var: None,
+        inherit_context: None,
+        depends_on: vec![],
+        session_mode: None,
+    };
+    Workflow {
+        id: WorkflowId::new(),
+        name: format!("branch-skip-{literal}"),
+        description: "branch executor integration test".to_string(),
+        steps: vec![
+            step(
+                "seed",
+                "ignored",
+                StepMode::Transform {
+                    code: literal.to_string(),
+                },
+            ),
+            step(
+                "decide",
+                "ignored",
+                StepMode::Branch {
+                    arms: vec![BranchArm {
+                        match_value: serde_json::json!(literal),
+                        then: target_name.to_string(),
+                    }],
+                },
+            ),
+            step(
+                "skipped_a",
+                "ignored",
+                StepMode::Transform {
+                    code: "marker:skipped_a:{{ prev }}".to_string(),
+                },
+            ),
+            step(
+                "skipped_b",
+                "ignored",
+                StepMode::Transform {
+                    code: "marker:skipped_b:{{ prev }}".to_string(),
+                },
+            ),
+            step(
+                target_name,
+                "ignored",
+                StepMode::Transform {
+                    code: target_template.to_string(),
+                },
+            ),
+        ],
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: None,
+    }
+}
+
+/// An arm whose `match_value` matches the previous step's output
+/// forward-jumps execution to the named target, bypassing the steps
+/// in between. The test drives the same shape with two literals
+/// against two workflows that name different terminals — the
+/// "multiple workflows fan-out" case from the brief — and asserts
+/// each run's step trail.
 #[tokio::test(flavor = "multi_thread")]
-async fn branch_step_is_noop_with_warn_and_completes() {
+async fn branch_step_arm_hit_routes_to_target_and_skips_intermediate_steps() {
     let test = boot();
     let engine = test.state.kernel.workflow_engine();
-    let workflow = workflow_with_op_step(
-        "branch-stub",
-        StepMode::Branch {
-            arms: vec![
-                BranchArm {
-                    match_value: serde_json::json!("approved"),
-                    then: "publish".to_string(),
-                },
-                BranchArm {
-                    match_value: serde_json::json!("rejected"),
-                    then: "rewrite".to_string(),
-                },
-            ],
-        },
+
+    // Run A — branch jumps to `publish` (the last step), skipping
+    // `skipped_a` and `skipped_b`.
+    let wf_a = branch_skip_workflow("approved", "publish", "published:{{ prev }}");
+    let wf_a_id = wf_a.id;
+    engine.register(wf_a).await;
+    let run_a = engine
+        .create_run(wf_a_id, "ignored".to_string())
+        .await
+        .expect("create_run");
+    let result_a = engine
+        .execute_run(
+            run_a,
+            panicking_agent_resolver,
+            |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
+                panic!("operator-node executor must not call send_message");
+                #[allow(unreachable_code)]
+                Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
+            },
+        )
+        .await;
+    assert!(result_a.is_ok(), "Run A must succeed: {result_a:?}");
+    let run_a_full = engine.get_run(run_a).await.expect("run A exists");
+    assert!(matches!(run_a_full.state, WorkflowRunState::Completed));
+    assert_eq!(
+        run_a_full.output.as_deref(),
+        Some("published:approved"),
+        "approved input must hit publish arm and skip both intermediates"
     );
+    let step_names_a: Vec<&str> = run_a_full
+        .step_results
+        .iter()
+        .map(|s| s.step_name.as_str())
+        .collect();
+    assert_eq!(
+        step_names_a,
+        vec!["seed", "decide", "publish"],
+        "intermediates must be skipped; got step trail: {step_names_a:?}"
+    );
+    // Branch prompt slot records the dispatched arm for the dashboard.
+    let branch_sr = &run_a_full.step_results[1];
+    assert_eq!(branch_sr.agent_name, "_operator:branch");
+    assert!(
+        branch_sr.prompt.contains("branch -> 'publish'"),
+        "branch step's prompt slot must record the dispatched target; got: {}",
+        branch_sr.prompt
+    );
+
+    // Run B — same shape, different terminal — proves the routing
+    // really depends on which arm hits, not workflow-shape coincidence.
+    let wf_b = branch_skip_workflow("rejected", "rewrite", "rewritten:{{ prev }}");
+    let wf_b_id = wf_b.id;
+    engine.register(wf_b).await;
+    let run_b = engine
+        .create_run(wf_b_id, "ignored".to_string())
+        .await
+        .expect("create_run");
+    let result_b = engine
+        .execute_run(
+            run_b,
+            panicking_agent_resolver,
+            |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
+                panic!("operator-node executor must not call send_message");
+                #[allow(unreachable_code)]
+                Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
+            },
+        )
+        .await;
+    assert!(result_b.is_ok(), "Run B must succeed: {result_b:?}");
+    let run_b_full = engine.get_run(run_b).await.expect("run B exists");
+    assert!(matches!(run_b_full.state, WorkflowRunState::Completed));
+    assert_eq!(run_b_full.output.as_deref(), Some("rewritten:rejected"));
+    let step_names_b: Vec<&str> = run_b_full
+        .step_results
+        .iter()
+        .map(|s| s.step_name.as_str())
+        .collect();
+    assert_eq!(step_names_b, vec!["seed", "decide", "rewrite"]);
+}
+
+/// When no arm matches the previous step's output, the run halts
+/// with `WorkflowRunState::Failed` and a recorded reason that names
+/// the unmatched output. Downstream terminals must not execute.
+#[tokio::test(flavor = "multi_thread")]
+async fn branch_step_no_arm_match_halts_workflow_with_recorded_reason() {
+    let test = boot();
+    let engine = test.state.kernel.workflow_engine();
+    // Use the same skip-workflow layout but with a literal the
+    // single arm does NOT match — the arm reads `approved`; the seed
+    // emits `needs_review`. No arm matches → halt; the three
+    // downstream terminals (`skipped_a`, `skipped_b`, `publish`)
+    // must not execute.
+    let workflow = branch_skip_workflow("needs_review", "publish", "published:{{ prev }}");
+    // Override the arm so it cannot match the seed output.
+    let mut workflow = workflow;
+    workflow.steps[1].mode = StepMode::Branch {
+        arms: vec![BranchArm {
+            match_value: serde_json::json!("approved"),
+            then: "publish".to_string(),
+        }],
+    };
     let wf_id = workflow.id;
     engine.register(workflow).await;
 
     let run_id = engine
-        .create_run(wf_id, "in".to_string())
+        .create_run(wf_id, "ignored".to_string())
         .await
         .expect("create_run");
     let result = engine
@@ -609,10 +799,68 @@ async fn branch_step_is_noop_with_warn_and_completes() {
             },
         )
         .await;
-    assert!(result.is_ok(), "Branch stub must succeed: {result:?}");
+    let err = result.expect_err("Branch with no matching arm must halt");
+    assert!(
+        err.contains("Branch step 'decide' had no matching arm"),
+        "halt error must name the branch step; got: {err}"
+    );
+    assert!(
+        err.contains("needs_review"),
+        "halt error must surface the unmatched output; got: {err}"
+    );
 
     let run = engine.get_run(run_id).await.expect("run exists");
-    assert!(matches!(run.state, WorkflowRunState::Completed));
-    assert_eq!(run.step_results.len(), 1);
-    assert_eq!(run.step_results[0].agent_name, "_operator:branch");
+    assert!(
+        matches!(run.state, WorkflowRunState::Failed),
+        "run must be Failed, got {:?}",
+        run.state
+    );
+    // step_results: seed, decide (branch failure). No terminals ran.
+    let step_names: Vec<&str> = run
+        .step_results
+        .iter()
+        .map(|s| s.step_name.as_str())
+        .collect();
+    assert_eq!(step_names, vec!["seed", "decide"]);
+}
+
+/// Single-step Branch (no preceding seed): when the only step is a
+/// Branch with no matching arm, we still halt — the engine should
+/// not silently complete because Branch is an explicit decision
+/// point. Mirrors `gate_step_fails_and_halts_workflow_with_recorded_reason`
+/// in spirit.
+#[tokio::test(flavor = "multi_thread")]
+async fn branch_step_no_match_solo_halts_workflow() {
+    let test = boot();
+    let engine = test.state.kernel.workflow_engine();
+    let workflow = workflow_with_op_step(
+        "branch-solo",
+        StepMode::Branch {
+            arms: vec![BranchArm {
+                match_value: serde_json::json!("never"),
+                then: "nowhere".to_string(),
+            }],
+        },
+    );
+    let wf_id = workflow.id;
+    engine.register(workflow).await;
+    let run_id = engine
+        .create_run(wf_id, "actually-fed-in".to_string())
+        .await
+        .expect("create_run");
+    let result = engine
+        .execute_run(
+            run_id,
+            panicking_agent_resolver,
+            |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
+                panic!("operator-node executor must not call send_message");
+                #[allow(unreachable_code)]
+                Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
+            },
+        )
+        .await;
+    let err = result.expect_err("solo Branch with no match must halt");
+    assert!(err.contains("had no matching arm"), "got: {err}");
+    let run = engine.get_run(run_id).await.expect("run exists");
+    assert!(matches!(run.state, WorkflowRunState::Failed));
 }
