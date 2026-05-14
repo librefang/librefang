@@ -161,6 +161,13 @@ fn is_telegram_voice_payload(mime_type: &str, filename: &str) -> bool {
 /// the ASCII magic `OpusHead`; Vorbis with `\x01vorbis`. The caller has
 /// already confirmed the `OggS` prefix via `detect_audio_magic`, so this
 /// helper only inspects the codec-id slot.
+///
+/// Limitation: only single-segment BOS pages are recognised. Non-canonical
+/// encoders that emit a multi-segment first page (`page_segments > 1`) push
+/// the codec id past offset 28, which this helper conservatively reports as
+/// "not Opus" — the caller then downgrades to `sendDocument`. That's an
+/// acceptable false negative; the alternative (sending a Vorbis OGG as
+/// `sendVoice`) trips Telegram's `VOICE_MESSAGES_FORBIDDEN`.
 fn is_ogg_opus(bytes: &[u8]) -> bool {
     bytes.len() >= 36 && &bytes[28..36] == b"OpusHead"
 }
