@@ -1057,7 +1057,7 @@
       "default": {
         "cache_ttl_secs": 86400,
         "registry_mirror": "",
-        "base_url": ""
+        "base_url": "https://github.com/GQAdonis/librefang-registry"
       },
       "allOf": [
         {
@@ -12504,8 +12504,8 @@
       "type": "object",
       "properties": {
         "base_url": {
-          "description": "Full base URL of the registry repository (no trailing slash). When non-empty, replaces the built-in upstream default (`https://github.com/librefang/librefang-registry`). The tarball URL is derived as `{base_url}/archive/refs/heads/main.tar.gz` and the git clone URL as `{base_url}.git`. The tarball prefix (`{repo-name}-main/`) is derived from the URL's last path segment.\n\nEmpty string = use the upstream default (for fallback / emergency rollback without recompiling).",
-          "default": "",
+          "description": "Full base URL of the registry repository (no trailing slash). The tarball URL is derived as `{base_url}/archive/refs/heads/main.tar.gz` and the git clone URL as `{base_url}.git`. The tarball prefix (`{repo-name}-main/`) is derived from the URL's last path segment.\n\nBossFang fork default: `https://github.com/GQAdonis/librefang-registry`. Set to `\"\"` to fall back to the historical upstream constants (emergency rollback without recompiling). Set to any other URL to point at a custom fork.",
+          "default": "https://github.com/GQAdonis/librefang-registry",
           "type": "string"
         },
         "cache_ttl_secs": {
