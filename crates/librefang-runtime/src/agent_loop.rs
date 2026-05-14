@@ -2118,6 +2118,14 @@ pub struct LoopOptions {
     ///
     /// Kernel populates this from `KernelConfig.runtime.tool_results`.
     pub tool_results_config: Option<librefang_types::config::ToolResultsConfig>,
+    /// Gateway compression configuration (#4972). When `Some`, the
+    /// runtime runs a cheap safety-net compression pass at the top of the
+    /// loop, before the first LLM call, when the session has grown past
+    /// the configured threshold (default 85 % of context window). When
+    /// `None`, the gateway pass is skipped entirely — kept `None` in tests
+    /// and other call-paths that don't need it. Kernel populates this
+    /// from `KernelConfig.gateway_compression`.
+    pub gateway_compression: Option<librefang_types::config::GatewayCompressionConfig>,
 }
 
 /// Result of an agent loop execution.
@@ -3701,6 +3709,48 @@ pub async fn run_agent_loop(
         });
     }
 
+    // Gateway-level safety-net compression (#4972). Runs before any prompt
+    // build / first LLM call: catches sessions that grew between turns
+    // (overnight channel backlog, cron output piling up) and have already
+    // exceeded the context window before the agent-level compactor would
+    // ever get a chance to fire. No-op when the session is under threshold,
+    // when ctx_window is unknown, or when the kernel did not enable it.
+    if let (Some(cfg), Some(ctx_window)) = (
+        opts.gateway_compression.as_ref(),
+        context_window_tokens.filter(|w| *w > 0),
+    ) {
+        let ctx_window_u32: u32 = ctx_window.try_into().unwrap_or(u32::MAX);
+        let report =
+            crate::gateway_compression::apply_if_needed(&mut session.messages, ctx_window_u32, cfg);
+        if report.mutated() {
+            // `new_messages_start` is recomputed unconditionally in
+            // `prepare_messages` (set to `session.messages.len() - 1`
+            // after `safe_trim_messages` runs), so no fixup is needed
+            // here — the gateway prune only narrows the prior history
+            // and the just-pushed user message hasn't been added yet.
+            session.mark_messages_mutated();
+            info!(
+                agent = %manifest.name,
+                session_id = %session.id,
+                tokens_before = report.tokens_before,
+                tokens_after = report.tokens_after,
+                tool_results_stubbed = report.tool_results_stubbed,
+                tool_result_bytes_elided = report.tool_result_bytes_elided,
+                messages_dropped = report.messages_dropped,
+                "Gateway compression pruned session before agent loop (#4972)"
+            );
+        } else if report.fired {
+            // Fired but nothing pruned (e.g. entirely pinned history). The
+            // LLM compactor's summarisation is the only remedy.
+            tracing::warn!(
+                agent = %manifest.name,
+                session_id = %session.id,
+                tokens_before = report.tokens_before,
+                "Gateway compression fired but could not prune (entirely pinned?)"
+            );
+        }
+    }
+
     let PromptExperimentSelection {
         experiment_context,
         running_experiment,
@@ -4161,6 +4211,9 @@ pub async fn run_agent_loop(
                 messages = compressed;
                 messages = crate::session_repair::validate_and_repair(&messages);
                 messages = crate::session_repair::ensure_starts_with_user(messages);
+                // #4971: drop file_read dedup state — the bodies its stubs
+                // referenced have been summarised away.
+                crate::context_compressor::reset_post_compression_side_state(session.id);
             }
 
             // Hard-trim only if still above threshold after soft compression
@@ -5390,6 +5443,40 @@ pub async fn run_agent_loop_streaming(
         });
     }
 
+    // Gateway-level safety-net compression (#4972). See the matching block
+    // in `run_agent_loop` for rationale. Same pure-function entry point.
+    if let (Some(cfg), Some(ctx_window)) = (
+        opts.gateway_compression.as_ref(),
+        context_window_tokens.filter(|w| *w > 0),
+    ) {
+        let ctx_window_u32: u32 = ctx_window.try_into().unwrap_or(u32::MAX);
+        let report =
+            crate::gateway_compression::apply_if_needed(&mut session.messages, ctx_window_u32, cfg);
+        if report.mutated() {
+            // See the matching block in `run_agent_loop` for why we don't
+            // touch `new_messages_start` here — `prepare_messages`
+            // recomputes it unconditionally after `safe_trim_messages`.
+            session.mark_messages_mutated();
+            info!(
+                agent = %manifest.name,
+                session_id = %session.id,
+                tokens_before = report.tokens_before,
+                tokens_after = report.tokens_after,
+                tool_results_stubbed = report.tool_results_stubbed,
+                tool_result_bytes_elided = report.tool_result_bytes_elided,
+                messages_dropped = report.messages_dropped,
+                "Gateway compression pruned session before streaming loop (#4972)"
+            );
+        } else if report.fired {
+            tracing::warn!(
+                agent = %manifest.name,
+                session_id = %session.id,
+                tokens_before = report.tokens_before,
+                "Gateway compression fired but could not prune (entirely pinned?)"
+            );
+        }
+    }
+
     let PromptExperimentSelection {
         experiment_context,
         running_experiment,
@@ -5821,6 +5908,9 @@ pub async fn run_agent_loop_streaming(
                 messages = compressed;
                 messages = crate::session_repair::validate_and_repair(&messages);
                 messages = crate::session_repair::ensure_starts_with_user(messages);
+                // #4971: drop file_read dedup state — the bodies its stubs
+                // referenced have been summarised away.
+                crate::context_compressor::reset_post_compression_side_state(session.id);
             }
 
             let remaining_tokens = crate::compactor::estimate_token_count(

@@ -52,7 +52,9 @@ const SENSITIVE_ENV_EXACT: &[&str] = &[
 ];
 
 /// Suffixes that indicate a secret — remove any env var ending with these
-/// unless it starts with `CLAUDE_`.
+/// unless it starts with `CLAUDE_` or `ANTHROPIC_` (our own provider's
+/// credentials, including gateway / proxy variants like
+/// `ANTHROPIC_AUTH_TOKEN`).
 const SENSITIVE_SUFFIXES: &[&str] = &["_SECRET", "_TOKEN", "_PASSWORD"];
 
 /// Default subprocess timeout in seconds (5 minutes).
@@ -399,8 +401,16 @@ impl ClaudeCodeDriver {
             cmd.env_remove(key);
         }
         // Remove any env var with a sensitive suffix, unless it's CLAUDE_*
+        // or ANTHROPIC_*. The ANTHROPIC_ exception covers gateway / proxy
+        // credentials such as ANTHROPIC_AUTH_TOKEN, typically paired with
+        // ANTHROPIC_BASE_URL for Bedrock-style routing.
+        //
+        // The prefix match is case-sensitive by design — Unix env var names
+        // are case-sensitive, and the exact-list above also matches verbatim.
+        // A user typing `anthropic_foo_token` would still hit the suffix
+        // strip below, which is the intended fail-safe.
         for (key, _) in std::env::vars() {
-            if key.starts_with("CLAUDE_") {
+            if key.starts_with("CLAUDE_") || key.starts_with("ANTHROPIC_") {
                 continue;
             }
             let upper = key.to_uppercase();
@@ -1908,6 +1918,72 @@ mod tests {
         assert!(SENSITIVE_ENV_EXACT.contains(&"GEMINI_API_KEY"));
         assert!(SENSITIVE_ENV_EXACT.contains(&"GROQ_API_KEY"));
         assert!(SENSITIVE_ENV_EXACT.contains(&"DEEPSEEK_API_KEY"));
+    }
+
+    #[test]
+    fn test_apply_env_filter_keeps_anthropic_auth_token() {
+        // Regression for #5006: the suffix-sweep used to strip
+        // ANTHROPIC_AUTH_TOKEN because it ends in _TOKEN and lacks the
+        // CLAUDE_ prefix. The ANTHROPIC_* exception keeps gateway / proxy
+        // credentials (ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL pattern)
+        // intact while still stripping other providers' secrets.
+        //
+        // SAFETY: unique env var names; the test removes each one before
+        // returning.
+        unsafe {
+            std::env::set_var("ANTHROPIC_AUTH_TOKEN", "keep-me-5006");
+            std::env::set_var("OPENAI_API_KEY", "strip-openai-5006");
+            std::env::set_var("GROQ_API_KEY", "strip-groq-5006");
+            std::env::set_var("GEMINI_API_KEY", "strip-gemini-5006");
+            std::env::set_var("LIBREFANG_TEST_5006_OTHER_TOKEN", "strip-suffix-5006");
+        }
+
+        let mut cmd = tokio::process::Command::new("echo");
+        ClaudeCodeDriver::apply_env_filter(&mut cmd);
+
+        // `env_remove` records `(key, None)` in the Command's env table.
+        // Inspect it to learn which keys the filter targeted for removal.
+        let removed: std::collections::HashSet<String> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| {
+                if v.is_none() {
+                    Some(k.to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            !removed.contains("ANTHROPIC_AUTH_TOKEN"),
+            "ANTHROPIC_AUTH_TOKEN must be preserved for gateway / proxy users (#5006)"
+        );
+        assert!(
+            removed.contains("OPENAI_API_KEY"),
+            "OPENAI_API_KEY must still be stripped"
+        );
+        assert!(
+            removed.contains("GROQ_API_KEY"),
+            "GROQ_API_KEY must still be stripped"
+        );
+        assert!(
+            removed.contains("GEMINI_API_KEY"),
+            "GEMINI_API_KEY must still be stripped"
+        );
+        assert!(
+            removed.contains("LIBREFANG_TEST_5006_OTHER_TOKEN"),
+            "Generic *_TOKEN env vars (no CLAUDE_/ANTHROPIC_ prefix) must still be stripped"
+        );
+
+        // SAFETY: matches the set_var calls above.
+        unsafe {
+            std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("GROQ_API_KEY");
+            std::env::remove_var("GEMINI_API_KEY");
+            std::env::remove_var("LIBREFANG_TEST_5006_OTHER_TOKEN");
+        }
     }
 
     #[test]

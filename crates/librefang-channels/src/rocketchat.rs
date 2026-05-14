@@ -400,6 +400,16 @@ impl ChannelAdapter for RocketChatAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the
+    /// Rocket.Chat server / user identifier) so the bridge approval
+    /// listener builds the same `rocketchat:<account_id>` key the router
+    /// stores in `channel_defaults`, scoping ApprovalRequested delivery to
+    /// the server bound to the requesting agent (#5003, follow-up to
+    /// #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -546,5 +556,30 @@ mod tests {
             err.to_string().contains("401"),
             "error should mention status code, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_rocketchat_account_id_default_none() {
+        let adapter = RocketChatAdapter::new(
+            "https://chat.example.com".to_string(),
+            "token".to_string(),
+            "user".to_string(),
+            vec![],
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_rocketchat_account_id_returns_configured_value() {
+        // #5003: two Rocket.Chat servers must resolve under distinct
+        // `rocketchat:<account_id>` keys via the trait override.
+        let adapter = RocketChatAdapter::new(
+            "https://chat.example.com".to_string(),
+            "token".to_string(),
+            "user".to_string(),
+            vec![],
+        )
+        .with_account_id(Some("server-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("server-42"));
     }
 }

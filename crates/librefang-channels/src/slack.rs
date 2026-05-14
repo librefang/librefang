@@ -62,6 +62,10 @@ pub struct SlackAdapter {
     /// Tracks pending "eyes" reactions so they can be removed before replying.
     /// Key: (channel_id, message_ts), Value: emoji name added.
     pending_reactions: Arc<RwLock<HashMap<ReactionKey, String>>>,
+    /// True when `with_proxy(Some(_))` set a per-channel proxy on `client`.
+    /// Drives a one-shot WARN at `start()` because Socket Mode bypasses the
+    /// proxy — see `http_client::warn_ws_proxy_bypass` (#4795 follow-up).
+    proxy_configured: bool,
 }
 
 impl SlackAdapter {
@@ -88,6 +92,7 @@ impl SlackAdapter {
             force_flat_replies: false,
             reactions_enabled,
             pending_reactions: Arc::new(RwLock::new(HashMap::new())),
+            proxy_configured: false,
         }
     }
 
@@ -125,6 +130,21 @@ impl SlackAdapter {
     pub fn with_unfurl_links(mut self, unfurl_links: Option<bool>) -> Self {
         self.unfurl_links = unfurl_links;
         self
+    }
+
+    /// Route this adapter's REST client through `proxy_url` (#4795).
+    /// Affects Slack Web API calls only — the Socket Mode WebSocket
+    /// is not currently routed through the proxy. See
+    /// `TelegramAdapter::with_proxy` for the URL contract.
+    pub fn with_proxy(
+        mut self,
+        proxy_url: Option<&str>,
+    ) -> Result<Self, crate::http_client::ChannelProxyError> {
+        if proxy_url.is_some() {
+            self.client = crate::http_client::new_proxied_client(proxy_url)?;
+            self.proxy_configured = true;
+        }
+        Ok(self)
     }
 
     /// Set backoff configuration. Returns self for builder chaining.
@@ -481,6 +501,12 @@ impl ChannelAdapter for SlackAdapter {
         Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
+        // Surface the per-channel proxy WS-bypass limitation in startup
+        // logs the first time we open Socket Mode (#4795 follow-up).
+        if self.proxy_configured {
+            crate::http_client::warn_ws_proxy_bypass("slack");
+        }
+
         // Validate bot token first
         let bot_user_id_val = self.validate_bot_token().await?;
         *self.bot_user_id.write().await = Some(bot_user_id_val.clone());
@@ -816,6 +842,15 @@ impl ChannelAdapter for SlackAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Slack
+    /// workspace / `team_id`) so the bridge approval listener builds the
+    /// same `slack:<account_id>` key the router stores in `channel_defaults`,
+    /// scoping ApprovalRequested delivery to the workspace bound to the
+    /// requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 /// Helper to get Socket Mode WebSocket URL.
@@ -1092,6 +1127,53 @@ mod tests {
             vec![],
         )
         .with_api_base(api_base)
+    }
+
+    // -------- per-channel proxy (#4795) -----------------------------------
+
+    #[test]
+    fn slack_with_proxy_accepts_valid_url() {
+        let _a = SlackAdapter::new("a".into(), "b".into(), vec![])
+            .with_proxy(Some("http://127.0.0.1:8080"))
+            .expect("valid http proxy URL must succeed");
+    }
+
+    #[test]
+    fn slack_with_proxy_rejects_garbage_url() {
+        // `expect_err` requires `T: Debug` and `SlackAdapter` does not
+        // derive Debug (zeroized tokens, `Arc<RwLock<…>>`, …). Pattern
+        // match on the Result instead of forcing a Debug derive on the
+        // adapter just to make this single test compile.
+        let result =
+            SlackAdapter::new("a".into(), "b".into(), vec![]).with_proxy(Some("not a url"));
+        match result {
+            Err(crate::http_client::ChannelProxyError::InvalidUrl { .. }) => {}
+            Err(other) => panic!("expected InvalidUrl, got: {other:?}"),
+            Ok(_) => panic!("garbage proxy URL must fail at init"),
+        }
+    }
+
+    /// Setting a per-channel proxy flips the `proxy_configured` flag
+    /// that drives the one-shot WS-bypass WARN at `start()` (#4795
+    /// follow-up). Leaving it `None` must keep the flag false so a
+    /// vanilla startup stays log-clean.
+    #[test]
+    fn slack_with_proxy_some_sets_ws_bypass_warn_flag() {
+        let a = SlackAdapter::new("a".into(), "b".into(), vec![])
+            .with_proxy(Some("http://127.0.0.1:8080"))
+            .expect("valid proxy URL");
+        assert!(
+            a.proxy_configured,
+            "with_proxy(Some(_)) must set proxy_configured so start() emits the WS-bypass WARN"
+        );
+
+        let b = SlackAdapter::new("a".into(), "b".into(), vec![])
+            .with_proxy(None)
+            .expect("None proxy URL");
+        assert!(
+            !b.proxy_configured,
+            "with_proxy(None) must NOT set proxy_configured (no WARN on clean startup)"
+        );
     }
 
     fn dummy_user(channel_id: &str) -> ChannelUser {
@@ -1667,6 +1749,24 @@ mod tests {
         );
         assert_eq!(adapter.name(), "slack");
         assert_eq!(adapter.channel_type(), ChannelType::Slack);
+    }
+
+    #[test]
+    fn test_slack_account_id_default_none() {
+        // Without `with_account_id`, the trait override returns `None`,
+        // matching the bare `<channel_type>` key the bridge stores.
+        let adapter = SlackAdapter::new("xapp-test".to_string(), "xoxb-test".to_string(), vec![]);
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_slack_account_id_returns_configured_value() {
+        // #5003: multi-bot deployments must expose `account_id()` so the
+        // bridge approval listener builds `slack:<team_id>` instead of
+        // bare `slack`.
+        let adapter = SlackAdapter::new("xapp-test".to_string(), "xoxb-test".to_string(), vec![])
+            .with_account_id(Some("T0ACME".to_string()));
+        assert_eq!(adapter.account_id(), Some("T0ACME"));
     }
 
     #[tokio::test]

@@ -719,9 +719,29 @@ impl LibreFangKernel {
             }
         };
 
-        // Message sender: sends to agent and returns (output, in_tokens, out_tokens)
-        let send_message = |agent_id: AgentId, message: String| async move {
-            self.send_message(agent_id, &message)
+        // Message sender: sends to agent and returns (output, in_tokens, out_tokens).
+        //
+        // `session_mode_override` carries the per-step `WorkflowStep::session_mode`
+        // (#4834). When `Some`, it overrides the target registry agent's
+        // manifest `session_mode` for this dispatch — per CLAUDE.md
+        // precedence: per-step override > target agent manifest default.
+        // Threaded into `send_message_full`'s existing `session_mode_override`
+        // slot so workflow-step-driven dispatch reuses the same session-id
+        // resolution path as cron and trigger fires.
+        let send_message =
+            |agent_id: AgentId,
+             message: String,
+             session_mode_override: Option<librefang_types::agent::SessionMode>| async move {
+                self.send_message_full(
+                    agent_id,
+                    &message,
+                    self.kernel_handle(),
+                    None,
+                    None,
+                    session_mode_override,
+                    None,
+                    None,
+                )
                 .await
                 .map(|r| {
                     (
@@ -731,7 +751,7 @@ impl LibreFangKernel {
                     )
                 })
                 .map_err(|e| format!("{e}"))
-        };
+            };
 
         // SECURITY: Global workflow timeout to prevent runaway execution.
         let max_workflow_secs = cfg.triggers.max_workflow_secs;

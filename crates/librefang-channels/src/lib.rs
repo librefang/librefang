@@ -12,7 +12,7 @@ pub mod bridge;
 pub mod commands;
 pub mod formatter;
 pub mod group_history;
-pub(crate) mod http_client;
+pub mod http_client;
 pub mod message_journal;
 pub mod message_truncator;
 pub mod rate_limiter;
