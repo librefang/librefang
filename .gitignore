@@ -85,6 +85,14 @@ result
 !.claude/hooks/lib/check-bash-rules.py
 !.claude/prompts/
 !.claude/prompts/*.md
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/librefang-upstream-merge/
+!.claude/skills/librefang-upstream-merge/SKILL.md
+!.claude/skills/librefang-upstream-merge/references/
+!.claude/skills/librefang-upstream-merge/references/*.md
+!.claude/skills/librefang-upstream-merge/scripts/
+!.claude/skills/librefang-upstream-merge/scripts/*.sh
 .codex
 .omc/
 .qwen/
