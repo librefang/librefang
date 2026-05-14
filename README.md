@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="public/assets/logo.png" width="160" alt="LibreFang Logo" />
+  <img src="public/assets/logo.png" width="160" alt="BossFang Logo" />
 </p>
 
-<h1 align="center">LibreFang</h1>
+<h1 align="center">BossFang</h1>
 <h3 align="center">Libre Agent Operating System — Free as in Freedom</h3>
 
 <p align="center">
@@ -14,14 +14,14 @@
 </p>
 
 <p align="center">
-  <a href="https://librefang.ai/">Website</a> &bull;
-  <a href="https://docs.librefang.ai">Docs</a> &bull;
+  <a href="https://github.com/GQAdonis/librefang/">Website</a> &bull;
+  <a href="https://github.com/GQAdonis/librefang/blob/main/docs">Docs</a> &bull;
   <a href="CONTRIBUTING.md">Contributing</a> &bull;
   <a href="https://discord.gg/DzTYqAZZmc">Discord</a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/librefang/librefang/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/librefang/librefang/ci.yml?style=flat-square&label=CI" alt="CI" /></a>
+  <a href="https://github.com/GQAdonis/librefang/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/librefang/librefang/ci.yml?style=flat-square&label=CI" alt="CI" /></a>
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/github/stars/librefang/librefang?style=flat-square" alt="Stars" />
@@ -32,32 +32,32 @@
 
 ---
 
-## What is LibreFang?
+## What is BossFang?
 
-LibreFang is an **Agent Operating System** — a full platform for running autonomous AI agents, built from scratch in Rust. Not a chatbot framework, not a Python wrapper.
+BossFang is an **Agent Operating System** — a full platform for running autonomous AI agents, built from scratch in Rust. Not a chatbot framework, not a Python wrapper.
 
-Traditional agent frameworks wait for you to type something. LibreFang runs **agents that work for you** — on schedules, 24/7, monitoring targets, generating leads, managing social media, and reporting to your dashboard.
+Traditional agent frameworks wait for you to type something. BossFang runs **agents that work for you** — on schedules, 24/7, monitoring targets, generating leads, managing social media, and reporting to your dashboard.
 
-> LibreFang is a community fork of [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) with open governance and a merge-first PR policy. See [GOVERNANCE.md](GOVERNANCE.md) for details.
+> BossFang is a community fork of [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) with open governance and a merge-first PR policy. See [GOVERNANCE.md](GOVERNANCE.md) for details.
 
 <p align="center">
-  <img src="public/assets/dashboard.png" width="800" alt="LibreFang Dashboard" />
+  <img src="public/assets/dashboard.png" width="800" alt="BossFang Dashboard" />
 </p>
 
 ## Quick Start
 
 ```bash
 # Install (Linux/macOS/WSL)
-curl -fsSL https://librefang.ai/install.sh | sh
+curl -fsSL https://github.com/GQAdonis/librefang/raw/main/install.sh | sh
 
 # Or install via Cargo
-cargo install --git https://github.com/librefang/librefang librefang-cli
+cargo install --git https://github.com/GQAdonis/librefang librefang-cli
 
 # Start — auto-initializes on first run, dashboard at http://localhost:4545
-librefang start
+bossfang start
 
 # Or run the setup wizard manually for interactive provider selection
-# librefang init
+# bossfang init
 ```
 
 <details>
@@ -86,7 +86,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 <details>
 <summary><strong>Cloud Deploy</strong></summary>
 
-[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](deploy/gcp/README.md)
+[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://github.com/GQAdonis/librefang/tree/main/deploy) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://github.com/GQAdonis/librefang/tree/main/deploy) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/GQAdonis/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](deploy/gcp/README.md)
 
 </details>
 
@@ -98,12 +98,12 @@ Example Hand definitions (Researcher, Collector, Predictor, Strategist, Analytic
 
 ```bash
 # Install a community Hand, then:
-librefang hand activate researcher   # Starts working immediately
-librefang hand status researcher     # Check progress
-librefang hand list                  # See all installed Hands
+bossfang hand activate researcher   # Starts working immediately
+bossfang hand status researcher     # Check progress
+bossfang hand list                  # See all installed Hands
 ```
 
-Build your own: define a `HAND.toml` + system prompt + `SKILL.md`. [Guide](https://docs.librefang.ai/agent/skills)
+Build your own: define a `HAND.toml` + system prompt + `SKILL.md`. [Guide](https://github.com/GQAdonis/librefang/blob/main/docs/agent/skills)
 
 ## Architecture
 
@@ -125,15 +125,15 @@ librefang-desktop           Tauri 2.0 native app (tray, notifications, shortcuts
 librefang-migrate           OpenClaw, LangChain, AutoGPT migration engine
 librefang-http              Shared HTTP client builder, proxy, TLS fallback
 librefang-testing           Test infrastructure: mock kernel, mock LLM driver and API route test utilities
-librefang-telemetry         OpenTelemetry + Prometheus metrics instrumentation for LibreFang
-librefang-llm-driver        LLM driver trait and shared types for LibreFang
+librefang-telemetry         OpenTelemetry + Prometheus metrics instrumentation for BossFang
+librefang-llm-driver        LLM driver trait and shared types for BossFang
 librefang-llm-drivers       Concrete LLM provider drivers (anthropic, openai, gemini, …) implementing librefang-llm-driver trait
-librefang-runtime-mcp       MCP (Model Context Protocol) client for LibreFang runtime
-librefang-kernel-handle     KernelHandle trait for in-process callers into the LibreFang kernel
-librefang-runtime-wasm      WASM skill sandbox for LibreFang runtime
-librefang-kernel-router     Hand/Template routing engine for the LibreFang kernel
-librefang-runtime-oauth     OAuth flows (ChatGPT, GitHub Copilot) for LibreFang runtime drivers
-librefang-kernel-metering   Cost metering, quota enforcement for the LibreFang kernel
+librefang-runtime-mcp       MCP (Model Context Protocol) client for BossFang runtime
+librefang-kernel-handle     KernelHandle trait for in-process callers into the BossFang kernel
+librefang-runtime-wasm      WASM skill sandbox for BossFang runtime
+librefang-kernel-router     Hand/Template routing engine for the BossFang kernel
+librefang-runtime-oauth     OAuth flows (ChatGPT, GitHub Copilot) for BossFang runtime drivers
+librefang-kernel-metering   Cost metering, quota enforcement for the BossFang kernel
 xtask                       Build automation
 ```
 
@@ -141,25 +141,25 @@ xtask                       Build automation
 > HMAC + nonce replay protection cover *active* attackers, but frame contents
 > are not encrypted. For cross-network federation, run OFP behind a private
 > overlay (WireGuard, Tailscale, SSH tunnel) or a service-mesh mTLS layer.
-> Details: [docs.librefang.ai/architecture/ofp-wire](https://docs.librefang.ai/architecture/ofp-wire)
+> Details: [github.com/GQAdonis/librefang/blob/main/docs/architecture/ofp-wire](https://github.com/GQAdonis/librefang/blob/main/docs/architecture/ofp-wire)
 
 ## Key Features
 
-**45 Channel Adapters** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky, and 32 more. [Full list](https://docs.librefang.ai/integrations/channels)
+**45 Channel Adapters** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky, and 32 more. [Full list](https://github.com/GQAdonis/librefang/blob/main/docs/integrations/channels)
 
-**28 LLM Providers** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama, Alibaba Coding Plan, and 20 more. Intelligent routing, automatic fallback, cost tracking. [Details](https://docs.librefang.ai/configuration/providers)
+**28 LLM Providers** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama, Alibaba Coding Plan, and 20 more. Intelligent routing, automatic fallback, cost tracking. [Details](https://github.com/GQAdonis/librefang/blob/main/docs/configuration/providers)
 
-**16 Security Layers** — WASM sandbox, Merkle audit trail, taint tracking, Ed25519 signing, SSRF protection, secret zeroization, and more. [Details](https://docs.librefang.ai/getting-started/comparison#16-security-systems--defense-in-depth)
+**16 Security Layers** — WASM sandbox, Merkle audit trail, taint tracking, Ed25519 signing, SSRF protection, secret zeroization, and more. [Details](https://github.com/GQAdonis/librefang/blob/main/docs/getting-started/comparison#16-security-systems--defense-in-depth)
 
-**OpenAI-Compatible API** — Drop-in `/v1/chat/completions` endpoint. 140+ REST/WS/SSE endpoints. [API Reference](https://docs.librefang.ai/integrations/api)
+**OpenAI-Compatible API** — Drop-in `/v1/chat/completions` endpoint. 140+ REST/WS/SSE endpoints. [API Reference](https://github.com/GQAdonis/librefang/blob/main/docs/integrations/api)
 
 **Client SDKs** — Full REST client with streaming support.
 
 ```javascript
 // JavaScript/TypeScript
-npm install @librefang/sdk
-const { LibreFang } = require("@librefang/sdk");
-const client = new LibreFang("http://localhost:4545");
+npm install @bossfang/sdk
+const { BossFang } = require("@bossfang/sdk");
+const client = new BossFang("http://localhost:4545");
 const agent = await client.agents.create({ template: "assistant" });
 const reply = await client.agents.message(agent.id, "Hello!");
 ```
@@ -176,22 +176,22 @@ reply = client.agents.message(agent["id"], "Hello!")
 ```rust
 // Rust
 cargo add librefang
-use librefang::LibreFang;
-let client = LibreFang::new("http://localhost:4545");
+use librefang::BossFang;
+let client = BossFang::new("http://localhost:4545");
 let agent = client.agents().create(CreateAgentRequest { template: Some("assistant".into()), .. }).await?;
 ```
 
 ```go
 // Go
-go get github.com/librefang/librefang/sdk/go
-import "github.com/librefang/librefang/sdk/go"
+go get github.com/GQAdonis/librefang/sdk/go
+import "github.com/GQAdonis/librefang/sdk/go"
 client := librefang.New("http://localhost:4545")
 agent, _ := client.Agents.Create(map[string]interface{}{"template": "assistant"})
 ```
 
-**MCP Support** — Built-in MCP client and server. Connect to IDEs, extend with custom tools, compose agent pipelines. [Details](https://docs.librefang.ai/integrations/mcp-a2a)
+**MCP Support** — Built-in MCP client and server. Connect to IDEs, extend with custom tools, compose agent pipelines. [Details](https://github.com/GQAdonis/librefang/blob/main/docs/integrations/mcp-a2a)
 
-**A2A Protocol** — Google Agent-to-Agent protocol support. Discover, communicate, and delegate tasks across agent systems. [Details](https://docs.librefang.ai/integrations/mcp-a2a)
+**A2A Protocol** — Google Agent-to-Agent protocol support. Discover, communicate, and delegate tasks across agent systems. [Details](https://github.com/GQAdonis/librefang/blob/main/docs/integrations/mcp-a2a)
 
 **Desktop App** — Tauri 2.0 native app with system tray, notifications, and global shortcuts.
 
@@ -224,28 +224,28 @@ commit.
 
 ## Comparison
 
-See [Comparison](https://docs.librefang.ai/getting-started/comparison#16-security-systems--defense-in-depth) for benchmarks and feature-by-feature comparison vs OpenClaw, ZeroClaw, CrewAI, AutoGen, and LangGraph.
+See [Comparison](https://github.com/GQAdonis/librefang/blob/main/docs/getting-started/comparison#16-security-systems--defense-in-depth) for benchmarks and feature-by-feature comparison vs OpenClaw, ZeroClaw, CrewAI, AutoGen, and LangGraph.
 
 ## Links
 
-- [Documentation](https://docs.librefang.ai) &bull; [API Reference](https://docs.librefang.ai/integrations/api) &bull; [Getting Started](https://docs.librefang.ai/getting-started) &bull; [Troubleshooting](https://docs.librefang.ai/operations/troubleshooting)
+- [Documentation](https://github.com/GQAdonis/librefang/blob/main/docs) &bull; [API Reference](https://github.com/GQAdonis/librefang/blob/main/docs/integrations/api) &bull; [Getting Started](https://github.com/GQAdonis/librefang/blob/main/docs/getting-started) &bull; [Troubleshooting](https://github.com/GQAdonis/librefang/blob/main/docs/operations/troubleshooting)
 - [Contributing](CONTRIBUTING.md) &bull; [Governance](GOVERNANCE.md) &bull; [Security](SECURITY.md)
-- Discussions: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [Use Cases](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [Feature Votes](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [Announcements](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
+- Discussions: [Q&A](https://github.com/GQAdonis/librefang/discussions/categories/q-a) &bull; [Use Cases](https://github.com/GQAdonis/librefang/discussions/categories/show-and-tell) &bull; [Feature Votes](https://github.com/GQAdonis/librefang/discussions/categories/ideas) &bull; [Announcements](https://github.com/GQAdonis/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## Contributors
 
-<a href="https://github.com/librefang/librefang/graphs/contributors">
+<a href="https://github.com/GQAdonis/librefang/graphs/contributors">
   <img src="web/public/assets/contributors.svg" alt="Contributors" />
 </a>
 
 <p align="center">
   We welcome contributions of all kinds — code, docs, translations, bug reports.<br/>
-  Check the <a href="CONTRIBUTING.md">Contributing Guide</a> and pick a <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> to get started!<br/>
+  Check the <a href="CONTRIBUTING.md">Contributing Guide</a> and pick a <a href="https://github.com/GQAdonis/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> to get started!<br/>
   You can also visit the <a href="https://leszek3737.github.io/librefang-WIki/">unofficial wiki</a>, which is updated with helpful information for new contributors.
 </p>
 
 <p align="center">
-  <a href="https://github.com/librefang/librefang/stargazers">
+  <a href="https://github.com/GQAdonis/librefang/stargazers">
     <img src="web/public/assets/star-history.svg" alt="Star History" />
   </a>
 </p>

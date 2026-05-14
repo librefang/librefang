@@ -75,36 +75,40 @@ fn install_ctrlc_handler() {
     }
 }
 
+// BossFang fork: examples + usage line say `bossfang` (the primary binary
+// name added in librefang-cli/Cargo.toml). The legacy `librefang` binary
+// is still produced as an alias, so users running old commands continue
+// to work; help output advertises the new name.
 const AFTER_HELP: &str = "\
 \x1b[1mHint:\x1b[0m Commands suffixed with [*] have subcommands. Run `<command> --help` for details.
 
 \x1b[1;36mExamples:\x1b[0m
-  librefang init                 Initialize config and data directories
-  librefang start                Start the kernel daemon
-  librefang update               Update the CLI to the latest release
-  librefang tui                  Launch the interactive terminal dashboard
-  librefang chat                 Quick chat with the default agent
-  librefang agent new coder      Spawn a new agent from a template
-  librefang models list          Browse available LLM models
-  librefang mcp add github       Install the GitHub MCP server
-  librefang doctor               Run diagnostic health checks
-  librefang channel setup        Interactive channel setup wizard
-  librefang cron list            List scheduled jobs
-  librefang uninstall            Completely remove BossFang from your system
+  bossfang init                 Initialize config and data directories
+  bossfang start                Start the kernel daemon
+  bossfang update               Update the CLI to the latest release
+  bossfang tui                  Launch the interactive terminal dashboard
+  bossfang chat                 Quick chat with the default agent
+  bossfang agent new coder      Spawn a new agent from a template
+  bossfang models list          Browse available LLM models
+  bossfang mcp add github       Install the GitHub MCP server
+  bossfang doctor               Run diagnostic health checks
+  bossfang channel setup        Interactive channel setup wizard
+  bossfang cron list            List scheduled jobs
+  bossfang uninstall            Completely remove BossFang from your system
 
 \x1b[1;36mQuick Start:\x1b[0m
-  1. librefang init              Set up config + API key
-  2. librefang start             Launch the daemon
-  3. librefang chat              Start chatting!
+  1. bossfang init              Set up config + API key
+  2. bossfang start             Launch the daemon
+  3. bossfang chat              Start chatting!
 
 \x1b[1;36mMore:\x1b[0m
-  Docs:       https://github.com/librefang/librefang
+  Docs:       https://github.com/GQAdonis/librefang
   Dashboard:  http://127.0.0.1:4545/ (when daemon is running)";
 
 /// BossFang — the open-source Agent Operating System.
 #[derive(Parser)]
 #[command(
-    name = "librefang",
+    name = "bossfang",
     version,
     about = "\u{1F40D} BossFang \u{2014} Open-source Agent Operating System",
     long_about = "\u{1F40D} BossFang \u{2014} Open-source Agent Operating System\n\n\
@@ -125,7 +129,7 @@ pub(crate) struct Cli {
 enum Commands {
     /// Initialize BossFang (create ~/.librefang/ and default config).
     #[command(
-        long_about = "Initialize BossFang by creating the ~/.librefang/ directory and a default config.toml.\n\nThis is the first command you should run after installing BossFang. It sets up\nthe data directory, writes a default configuration, and optionally prompts for\nan API key.\n\nExamples:\n  librefang init              # Interactive setup with prompts\n  librefang init --quick      # Non-interactive, just write defaults (CI/scripts)"
+        long_about = "Initialize BossFang by creating the ~/.librefang/ directory and a default config.toml.\n\nThis is the first command you should run after installing BossFang. It sets up\nthe data directory, writes a default configuration, and optionally prompts for\nan API key.\n\nExamples:\n  bossfang init              # Interactive setup with prompts\n  bossfang init --quick      # Non-interactive, just write defaults (CI/scripts)"
     )]
     Init {
         /// Quick mode: no prompts, just write config + .env (for CI/scripts).
@@ -137,7 +141,7 @@ enum Commands {
     },
     /// Start the BossFang kernel daemon (API server + kernel).
     #[command(
-        long_about = "Start the BossFang kernel daemon, which runs the API server and agent runtime.\n\nBy default the daemon detaches into the background. Use --foreground to keep it\nattached to the current terminal, or --tail to detach but stream logs.\n\nThe bind address is resolved in priority order:\n  --bind flag > LIBREFANG_LISTEN env var > api_listen in config.toml > compiled default (0.0.0.0:4545)\n\nExamples:\n  librefang start                              # Start daemon in the background\n  librefang start --tail                       # Start and follow log output\n  librefang start --foreground                 # Run in the foreground (Ctrl+C to stop)\n  librefang start --bind 127.0.0.1:4545        # Loopback only\n  librefang start --bind 0.0.0.0:9000          # All interfaces, custom port"
+        long_about = "Start the BossFang kernel daemon, which runs the API server and agent runtime.\n\nBy default the daemon detaches into the background. Use --foreground to keep it\nattached to the current terminal, or --tail to detach but stream logs.\n\nThe bind address is resolved in priority order:\n  --bind flag > LIBREFANG_LISTEN env var > api_listen in config.toml > compiled default (0.0.0.0:4545)\n\nExamples:\n  bossfang start                              # Start daemon in the background\n  bossfang start --tail                       # Start and follow log output\n  bossfang start --foreground                 # Run in the foreground (Ctrl+C to stop)\n  bossfang start --bind 127.0.0.1:4545        # Loopback only\n  bossfang start --bind 0.0.0.0:9000          # All interfaces, custom port"
     )]
     Start {
         /// Follow the daemon log after launching it in the background.

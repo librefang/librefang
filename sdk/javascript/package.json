@@ -1,19 +1,19 @@
 {
-  "name": "@librefang/sdk",
+  "name": "@bossfang/sdk",
   "version": "2026.5.12-beta.11",
-  "description": "Official JavaScript/TypeScript client for the LibreFang Agent OS REST API",
+  "description": "Official JavaScript/TypeScript client for the BossFang Agent OS REST API",
   "main": "index.js",
   "types": "index.d.ts",
-  "keywords": ["librefang", "agent", "ai", "llm", "autonomous-agent", "sdk"],
+  "keywords": ["bossfang", "librefang", "agent", "ai", "llm", "autonomous-agent", "sdk"],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/librefang/librefang",
+    "url": "https://github.com/GQAdonis/librefang",
     "directory": "sdk/javascript"
   },
-  "homepage": "https://librefang.ai",
+  "homepage": "https://github.com/GQAdonis/librefang",
   "bugs": {
-    "url": "https://github.com/librefang/librefang/issues"
+    "url": "https://github.com/GQAdonis/librefang/issues"
   },
   "engines": {
     "node": ">=18.0.0"

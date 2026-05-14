@@ -153,7 +153,7 @@ impl SkillhubClient {
         let resp = self
             .http
             .get(&url)
-            .header("User-Agent", "LibreFang/0.1")
+            .header("User-Agent", "BossFang/0.1")
             .header("Accept", "application/json")
             .send()
             .await
@@ -222,7 +222,7 @@ impl SkillhubClient {
         let index_resp = self
             .http
             .get(SKILLHUB_INDEX_URL)
-            .header("User-Agent", "LibreFang/0.1")
+            .header("User-Agent", "BossFang/0.1")
             .send()
             .await
             .map_err(|e| SkillError::Network(format!("Skillhub index fetch failed: {e}")))?;
@@ -253,7 +253,7 @@ impl SkillhubClient {
         let dl_resp = self
             .http
             .get(&cos_url)
-            .header("User-Agent", "LibreFang/0.1")
+            .header("User-Agent", "BossFang/0.1")
             .send()
             .await
             .map_err(|e| SkillError::Network(format!("Skillhub COS download failed: {e}")))?;
@@ -355,7 +355,7 @@ impl SkillhubClient {
         let resp = self
             .http
             .get(SKILLHUB_INDEX_URL)
-            .header("User-Agent", "LibreFang/0.1")
+            .header("User-Agent", "BossFang/0.1")
             .send()
             .await
             .map_err(|e| SkillError::Network(format!("Skillhub index fetch failed: {e}")))?;

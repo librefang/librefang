@@ -363,7 +363,7 @@ pub fn convert_skillmd_str(name_hint: &str, content: &str) -> Result<ConvertedSk
             name: skill_name,
             version: librefang_types::VERSION.to_string(),
             description: frontmatter.description.clone(),
-            author: "LibreFang".to_string(),
+            author: "BossFang".to_string(),
             license: "Apache-2.0".to_string(),
             tags: vec!["prompt-only".to_string()],
         },

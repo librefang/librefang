@@ -90,7 +90,7 @@ impl MarketplaceClient {
         Self {
             config,
             http: crate::http_client::client_builder()
-                .user_agent("librefang-skills/0.1")
+                .user_agent("bossfang-skills/0.1")
                 .build()
                 .expect("Failed to build HTTP client"),
         }

@@ -1,14 +1,17 @@
 [workspace]
 
 [package]
-name = "librefang"
+# BossFang fork: SDK crate renamed to bossfang-sdk on crates.io to keep
+# the upstream `librefang` name available for legitimate library uses
+# and to avoid confusion between the two builds.
+name = "bossfang-sdk"
 version = "2026.5.12-beta.11"
 edition = "2021"
-description = "Official Rust client for LibreFang Agent OS"
+description = "Official Rust client for BossFang Agent OS"
 license = "MIT"
-repository = "https://github.com/librefang/librefang"
-keywords = ["librefang", "agent", "ai"]
-authors = ["LibreFang Team"]
+repository = "https://github.com/GQAdonis/librefang"
+keywords = ["bossfang", "agent", "ai"]
+authors = ["BossFang Maintainers"]
 
 [dependencies]
 reqwest = { version = "0.12", features = ["json", "stream"] }

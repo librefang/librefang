@@ -1579,7 +1579,7 @@ pub async fn plugin_update_check(
 
     // Fetch registry manifest for this plugin (proxy-aware, #3577).
     let client = match librefang_http::proxied_client_builder()
-        .user_agent("librefang-plugin-updater/1.0")
+        .user_agent("bossfang-plugin-updater/1.0")
         .timeout(std::time::Duration::from_secs(10))
         .build()
     {
@@ -1830,7 +1830,7 @@ pub async fn plugin_registry_search(
 
     // Plugin registry search uses librefang-http so it honors [proxy] (#3577).
     let client = match librefang_http::proxied_client_builder()
-        .user_agent("librefang-plugin-search/1.0")
+        .user_agent("bossfang-plugin-search/1.0")
         .timeout(std::time::Duration::from_secs(10))
         .build()
     {
