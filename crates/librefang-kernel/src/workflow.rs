@@ -402,10 +402,25 @@ pub enum StepMode {
         timeout_secs: Option<u64>,
     },
     /// Operator node: data transform / template expansion against the
-    /// previous step's output. `code` is a free-form `String` for V1 —
-    /// the expression-language-vs-registered-functions question
-    /// (Tera / Handlebars / Rhai / WASM extension) is deferred to a
-    /// follow-up. Executor is no-op-with-warn in this PR (#4980).
+    /// previous step's output. `code` is a Tera template string. The
+    /// renderer exposes the previous step's output under two names:
+    /// `prev` is always the raw string; when the output parses as JSON
+    /// it is *also* exposed under `prev_json` so templates can index
+    /// into objects / arrays directly (`{{ prev_json.score }}`).
+    /// Workflow variables bound by earlier `output_var` steps are
+    /// exposed under `vars.<name>`.
+    ///
+    /// Design decision (deferred from step 1, locked in step 3 of
+    /// #4980): Tera was picked over a hand-rolled DSL, `mlua`, and
+    /// `rhai`. The discriminator: Tera is sandboxed by default (no
+    /// I/O, no shell escape, bounded recursion), MIT-licensed,
+    /// well-maintained, and adds a tree-of-five small crates. `mlua`
+    /// drags `liblua` in via FFI and would have to be sandboxed
+    /// manually; `rhai` is heavier and would force callers to learn a
+    /// bespoke scripting language for what is structurally a template
+    /// expansion. A future operator that wants real scripting can land
+    /// as a separate `Script` variant — it is not in scope here. Shell
+    /// exec is explicitly NOT considered.
     Transform { code: String },
     /// Operator node: conditional routing on the previous step's
     /// output. Each `arm.match_value` is a `serde_json::Value` so a
@@ -509,6 +524,70 @@ impl std::fmt::Display for GateOp {
         };
         f.write_str(s)
     }
+}
+
+/// Render a [`StepMode::Transform`] template against the previous
+/// step's output and the workflow's bound variables.
+///
+/// The Tera context is:
+///
+/// * `prev` — the previous step's raw output (always a string).
+/// * `prev_json` — the parsed JSON value, when `prev` parses as JSON.
+///   Missing from the context when the parse fails, so a template
+///   that references `prev_json` against a non-JSON predecessor surfaces
+///   a clear Tera "variable not found" error rather than silently
+///   rendering an empty string.
+/// * `vars` — a `BTreeMap<String, String>` of `output_var`-bound
+///   workflow variables. `BTreeMap` for deterministic iteration order
+///   in templates that iterate the map (`{% for k, v in vars %}`),
+///   matching the determinism contract from #3298.
+///
+/// Returns `Ok(rendered)` on success and `Err(reason)` when Tera
+/// either fails to parse the template (syntax error) or fails to
+/// render (missing variable, type mismatch). The reason string is
+/// surfaced verbatim in the workflow's `error` field; Tera's own
+/// errors carry line / column information, so the operator can pin
+/// the bad placeholder without re-running the workflow.
+///
+/// Templates are parsed via `Tera::one_off` rather than registered into
+/// a long-lived `Tera` instance. The Transform executor is rare
+/// (operator-node, not hot-path) and `one_off` keeps the runner
+/// stateless — no per-engine template registry to keep coherent
+/// across hot reloads, no shared mutable state to lock around.
+pub fn render_transform_template(
+    template: &str,
+    prev: &str,
+    vars: &std::collections::BTreeMap<String, String>,
+) -> Result<String, String> {
+    let mut ctx = tera::Context::new();
+    ctx.insert("prev", prev);
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(prev) {
+        ctx.insert("prev_json", &parsed);
+    }
+    ctx.insert("vars", vars);
+
+    // `one_off(autoescape=false)` — Tera's HTML autoescape is off
+    // because Transform output flows back into the workflow's
+    // `current_input` (downstream consumers may be CSV, Markdown, or
+    // raw text). HTML escaping of those payloads is foot-gun, not
+    // safety; if a future workflow surface needs HTML escaping it
+    // should opt in at the consumer boundary.
+    tera::Tera::one_off(template, &ctx, false).map_err(|e| format!("transform render failed: {e}"))
+}
+
+/// Validate that a Tera template parses cleanly, without rendering it.
+///
+/// Surface used by `Workflow::validate` to fail at manifest-load time
+/// when a template contains a syntax error (`{% if %}` without
+/// `{% endif %}`, an unterminated `{{ expression`, etc.). Distinct
+/// from `render_transform_template` because parse-time errors should be
+/// caught before any run starts — operators do not want to discover a
+/// typo on production input.
+pub fn validate_transform_template(template: &str) -> Result<(), String> {
+    let mut t = tera::Tera::default();
+    t.add_raw_template("__transform_validate__", template)
+        .map_err(|e| format!("transform template parse failed: {e}"))?;
+    Ok(())
 }
 
 /// Evaluate a [`GateCondition`] against the previous step's output.
@@ -3312,21 +3391,87 @@ impl WorkflowEngine {
                 }
 
                 StepMode::Transform { code } => {
-                    warn!(
-                        step = i + 1,
-                        name = %step.name,
-                        code_len = code.len(),
-                        "Transform executor not yet implemented — refs #4980 (returning success)"
-                    );
-                    Self::record_operator_noop_step_result(
-                        &self.runs,
-                        run_id,
-                        step,
-                        "_operator:transform",
-                        &current_input,
-                        &mut variables,
-                        &mut all_outputs,
-                    );
+                    let start = std::time::Instant::now();
+                    // Tera's context iterates its insertion order, so
+                    // copy `variables` into a `BTreeMap` for
+                    // determinism (#3298). The Tera renderer never
+                    // reaches an LLM prompt directly today, but the
+                    // rendered output flows into `current_input` and
+                    // is consumed by downstream agent steps via
+                    // `{{input}}` expansion — a non-deterministic iteration
+                    // order through `vars` would silently change
+                    // prompts across processes and invalidate the
+                    // provider prompt cache.
+                    let bt_vars: std::collections::BTreeMap<String, String> = variables
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    let result = render_transform_template(code, &current_input, &bt_vars);
+                    let duration_ms = start.elapsed().as_millis() as u64;
+
+                    match result {
+                        Ok(rendered) => {
+                            let step_result = StepResult {
+                                step_name: step.name.clone(),
+                                agent_id: String::new(),
+                                agent_name: "_operator:transform".to_string(),
+                                prompt: code.clone(),
+                                output: rendered.clone(),
+                                input_tokens: 0,
+                                output_tokens: 0,
+                                duration_ms,
+                            };
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                r.step_results.push(step_result);
+                            }
+                            if let Some(ref var) = step.output_var {
+                                variables.insert(var.clone(), rendered.clone());
+                            }
+                            all_outputs.push(rendered.clone());
+                            current_input = rendered;
+                            info!(
+                                step = i + 1,
+                                name = %step.name,
+                                duration_ms,
+                                "Transform step rendered"
+                            );
+                        }
+                        Err(reason) => {
+                            let err = format!("Transform step '{}' failed: {reason}", step.name);
+                            warn!(
+                                step = i + 1,
+                                name = %step.name,
+                                reason = %reason,
+                                "Transform step failed"
+                            );
+                            // Record a synthetic StepResult so the
+                            // operator can see which transform step
+                            // blew up in the run history; the
+                            // `output` slot carries the Tera error
+                            // (line + column included by Tera).
+                            let step_result = StepResult {
+                                step_name: step.name.clone(),
+                                agent_id: String::new(),
+                                agent_name: "_operator:transform".to_string(),
+                                prompt: code.clone(),
+                                output: reason.clone(),
+                                input_tokens: 0,
+                                output_tokens: 0,
+                                duration_ms,
+                            };
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                r.step_results.push(step_result);
+                            }
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                    r.state = WorkflowRunState::Failed;
+                                    r.error = Some(err.clone());
+                                    r.completed_at = Some(Utc::now());
+                                }
+                            }
+                            return Err(err);
+                        }
+                    }
                 }
 
                 StepMode::Branch { arms } => {
@@ -4095,6 +4240,33 @@ impl Workflow {
             created_at: Some(chrono::Utc::now().to_rfc3339()),
             i18n: Default::default(),
         }
+    }
+
+    /// Validate workflow definition before execution.
+    ///
+    /// Today this only checks Tera template syntax for
+    /// [`StepMode::Transform`] steps — a syntax error in a template
+    /// (`{% if %}` without `{% endif %}`, an unclosed expression
+    /// delimiter, etc.) must surface at manifest-load / register time,
+    /// not when the workflow finally hits that step at run time. Other
+    /// validations (DAG cycles, missing agent refs) live in
+    /// [`WorkflowEngine::topological_sort`] and the executor's
+    /// `agent_resolver` callback respectively; this method intentionally
+    /// covers only what cannot already be detected elsewhere.
+    ///
+    /// Returns a vector of `(step_name, reason)` pairs — one per
+    /// failing step. Empty vec means the workflow is valid. Callers
+    /// that want a single error string can map / join.
+    pub fn validate(&self) -> Vec<(String, String)> {
+        let mut errs = Vec::new();
+        for step in &self.steps {
+            if let StepMode::Transform { code } = &step.mode {
+                if let Err(reason) = validate_transform_template(code) {
+                    errs.push((step.name.clone(), reason));
+                }
+            }
+        }
+        errs
     }
 }
 
@@ -5321,6 +5493,89 @@ mod tests {
         };
         assert!(evaluate_gate_condition(&cond, "this is urgent work").is_ok());
         assert!(evaluate_gate_condition(&cond, "this is fine").is_err());
+    }
+
+    // --- Transform / Tera tests (#4980 step 3) -----------------------------
+
+    #[test]
+    fn render_transform_template_renders_prev_string() {
+        let vars = std::collections::BTreeMap::new();
+        let out = render_transform_template("hello {{ prev }}", "world", &vars).unwrap();
+        assert_eq!(out, "hello world");
+    }
+
+    #[test]
+    fn render_transform_template_indexes_into_prev_json() {
+        let vars = std::collections::BTreeMap::new();
+        let out =
+            render_transform_template("score={{ prev_json.score }}", r#"{"score":0.95}"#, &vars)
+                .unwrap();
+        assert_eq!(out, "score=0.95");
+    }
+
+    #[test]
+    fn render_transform_template_exposes_workflow_vars() {
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert("title".to_string(), "Release Notes".to_string());
+        let out = render_transform_template("# {{ vars.title }}", "ignored", &vars).unwrap();
+        assert_eq!(out, "# Release Notes");
+    }
+
+    #[test]
+    fn render_transform_template_missing_variable_returns_error() {
+        // A template that references an undefined variable should
+        // surface as a render error rather than silently producing an
+        // empty placeholder. Tera's default strict mode does this for
+        // us.
+        let vars = std::collections::BTreeMap::new();
+        let err = render_transform_template("hello {{ missing }}", "prev", &vars).unwrap_err();
+        assert!(
+            err.contains("transform render failed"),
+            "expected render-error wrapper, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_transform_template_accepts_clean_template() {
+        assert!(validate_transform_template("hello {{ prev }}").is_ok());
+        assert!(validate_transform_template("{% if x %}y{% endif %}").is_ok());
+    }
+
+    #[test]
+    fn validate_transform_template_rejects_syntax_error() {
+        // Unterminated `{{ prev` — Tera must reject at parse time so
+        // the operator catches it at manifest load, not in production
+        // run history.
+        let err = validate_transform_template("hello {{ prev").unwrap_err();
+        assert!(
+            err.contains("transform template parse failed"),
+            "expected parse-error wrapper, got: {err}"
+        );
+    }
+
+    #[test]
+    fn workflow_validate_surfaces_transform_syntax_errors() {
+        let mut wf = test_workflow();
+        wf.steps.push(WorkflowStep {
+            name: "bad-transform".to_string(),
+            agent: StepAgent::ByName {
+                name: "_op".to_string(),
+            },
+            prompt_template: "{{input}}".to_string(),
+            mode: StepMode::Transform {
+                code: "hello {{ prev".to_string(),
+            },
+            timeout_secs: 30,
+            error_mode: ErrorMode::Fail,
+            output_var: None,
+            inherit_context: None,
+            depends_on: vec![],
+            session_mode: None,
+        });
+        let errs = wf.validate();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].0, "bad-transform");
+        assert!(errs[0].1.contains("transform template parse failed"));
     }
 
     #[tokio::test]

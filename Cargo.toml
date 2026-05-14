@@ -159,6 +159,15 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 # self-contained and reproducible.
 psl = "2"
 
+# Tera template engine — Jinja2-flavoured templates used by the workflow
+# `Transform` operator (#4980 step 3). Sandboxed by default (no I/O,
+# bounded recursion), well-maintained, MIT, and the standard pick when
+# the alternative is `mlua` / `rhai` / a hand-rolled DSL — all heavier
+# trees that we would have to babysit for security. Pin a single major
+# so a future bump is a deliberate review, not a transient dependabot
+# ping.
+tera = { version = "1", default-features = false }
+
 # WASM sandbox
 wasmtime = "44"
 
