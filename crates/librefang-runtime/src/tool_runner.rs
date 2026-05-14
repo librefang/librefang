@@ -3190,15 +3190,15 @@ use instead of web_fetch + file_write (which round-trips the entire body through
         // --- TTS/STT tools ---
         ToolDefinition {
             name: "text_to_speech".to_string(),
-            description: "Convert text to speech audio. Supports multiple providers (OpenAI, Gemini, MiniMax). Saves audio to workspace output/ directory.".to_string(),
+            description: "Convert text to speech audio. Supports multiple providers (OpenAI, ElevenLabs, Gemini, MiniMax). Saves audio to workspace output/ directory.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "text": { "type": "string", "description": "The text to convert to speech (max 4096 chars)" },
-                    "voice": { "type": "string", "description": "Voice name (provider-specific). OpenAI: 'alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'. Default: 'alloy'" },
+                    "voice": { "type": "string", "description": "Voice name (provider-specific). OpenAI: 'alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'. ElevenLabs: 'Rachel' (default), 'Bill', 'Alice', voice ID string. Default: 'alloy' (OpenAI) or 'Rachel' (ElevenLabs)" },
                     "format": { "type": "string", "description": "Output format: 'mp3', 'opus', 'aac', 'flac', 'wav' (default: 'mp3')" },
                     "output_format": { "type": "string", "enum": ["mp3", "ogg_opus"], "description": "Final output format. 'ogg_opus' converts to OGG Opus via ffmpeg (required for WhatsApp voice notes); falls back to provider format if ffmpeg is unavailable or conversion fails. Default: 'mp3'" },
-                    "provider": { "type": "string", "description": "Provider: 'openai', 'gemini', 'minimax'. Auto-detected if omitted." },
+                    "provider": { "type": "string", "description": "Provider: 'openai', 'elevenlabs', 'gemini', 'minimax'. Auto-detected if omitted." },
                     "model": { "type": "string", "description": "Model ID (provider-specific). OpenAI: 'tts-1', 'tts-1-hd'. Default varies by provider." },
                     "speed": { "type": "number", "description": "Playback speed (0.25-4.0). OpenAI only. Default: 1.0" }
                 },
