@@ -200,14 +200,14 @@ fn drop_oldest_until_under(
 ) -> usize {
     let mut dropped = 0usize;
 
-    // Recompute the threshold check each iteration. Capped to prevent
-    // pathological loops on inputs we can never bring under threshold
-    // (entirely pinned history): bound by total length. The cap is a
-    // safety net only — the real termination guard is "no candidate
-    // was droppable this iteration → break" below, which fires before
-    // we ever spin.
-    let max_iterations = history.len();
-    for _ in 0..max_iterations {
+    // Termination is guaranteed by two explicit breaks below:
+    //   (1) `non_pinned_count <= keep_recent` once enough drops have happened, and
+    //   (2) `next_droppable_index` returning `None` when every remaining
+    //       non-pinned candidate is locked by a pinned paired partner.
+    // Each iteration removes at least one message (1 for solo, 2 for a
+    // tool_use/tool_result pair), so the non-pinned count is strictly
+    // monotonically decreasing — `loop {}` cannot spin.
+    loop {
         // Non-pinned, non-system count. When it hits keep_recent we stop.
         let non_pinned_count = history
             .iter()
