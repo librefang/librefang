@@ -3195,7 +3195,7 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                 "type": "object",
                 "properties": {
                     "text": { "type": "string", "description": "The text to convert to speech (max 4096 chars)" },
-                    "voice": { "type": "string", "description": "Voice name (provider-specific). OpenAI: 'alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'. ElevenLabs: 'Rachel' (default), 'Bill', 'Alice', voice ID string. Default: 'alloy' (OpenAI) or 'Rachel' (ElevenLabs)" },
+                    "voice": { "type": "string", "description": "Voice name (provider-specific). OpenAI: 'alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'. ElevenLabs: 'Rachel' (default), 'Domi', 'Bella', 'Antoni', 'Elli', 'Josh', 'Arnold', 'Adam', 'Sam', 'Bill', 'Chris', 'Daniel', 'Dorothy', 'Ethan', 'Freya', 'Gerard', 'Glinda', 'Liam', 'Maya', 'Michael', 'Mia', 'Patrick', 'Serena', 'William', or a raw voice_id string. Default: 'alloy' (OpenAI) or 'Rachel' (ElevenLabs)" },
                     "format": { "type": "string", "description": "Output format: 'mp3', 'opus', 'aac', 'flac', 'wav' (default: 'mp3')" },
                     "output_format": { "type": "string", "enum": ["mp3", "ogg_opus"], "description": "Final output format. 'ogg_opus' converts to OGG Opus via ffmpeg (required for WhatsApp voice notes); falls back to provider format if ffmpeg is unavailable or conversion fails. Default: 'mp3'" },
                     "provider": { "type": "string", "description": "Provider: 'openai', 'elevenlabs', 'gemini', 'minimax'. Auto-detected if omitted." },

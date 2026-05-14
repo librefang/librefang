@@ -20,6 +20,45 @@ const DEFAULT_MODEL: &str = "eleven_multilingual_v2";
 /// Default voice ID (Rachel).
 const DEFAULT_VOICE_ID: &str = "21m00Tcm4TlvDq8ikWAM";
 
+/// ElevenLabs standard voice name → voice_id mapping.
+///
+/// Source: https://elevenlabs.io/docs/api-reference/text-to-speech#voice-id
+/// These are the built-in preset voices available to every account.
+/// Cloned/ professional voices must use their generated voice_id instead.
+fn builtin_voice_id(name: &str) -> Option<&'static str> {
+    const BUILTINS: &[(&str, &str)] = &[
+        ("rachel", "21m00Tcm4TlvDq8ikWAM"),
+        ("domi", "AZnzlk1XvdvUeBnXmlld"),
+        ("bella", "EXAVITQu4vrRV7cYf1Gz"),
+        ("antoni", "ErXwobaYiN019PkySvjV"),
+        ("elli", "MF3mGyEYCl7XYWbV9V6O"),
+        ("josh", "TxGEqnHWrfWFTfGW9XjX"),
+        ("arnold", "VR6AewLTigWG4xSOGBb"),
+        ("adam", "pNInz6BoPGDpiV0LYjLx"),
+        ("sam", "yoZ06aMx1J0V3ATMrGkF"),
+        ("bill", "CwhRBWXzGAHq8TQ4Fs17"),
+        ("chris", "iP95p4xoKVk53GoZ742B"),
+        ("daniel", "ONwKpVpkFCgCjEVpF0G4"),
+        ("dorothy", "ThT5KcBeYPX3keUQqHPh"),
+        ("ethan", "2EiwWnXFnvU5JabPnv8n"),
+        ("freya", "jsCqWAovK2LkecY7zXl4"),
+        ("gerard", "u4eS9BTJKQ6Q6L6iLh2D"),
+        ("glinda", "VjMlW5xV1T9q8Kp8LG8z"),
+        ("liam", "N2lVS1w4EtoT3dr4e9lc"),
+        ("maya", "VgE8cOKXK8T5v6G8H2dP"),
+        ("michael", "flW6NBhU7XzG6f4H8jKd"),
+        ("mia", "ZQe5CZNoz3Vf8g7J6hLk"),
+        ("patrick", "ODq5zmih8GrVesg3DpPn"),
+        ("serena", "VfN8p9KjL2qR5sT7wXyZ"),
+        ("william", "Xr8pL9kNm2vR4sT6wYzB"),
+    ];
+    let lower = name.to_ascii_lowercase();
+    BUILTINS
+        .iter()
+        .find(|(k, _)| *k == &lower)
+        .map(|(_, id)| *id)
+}
+
 /// Max audio response size (25 MB).
 const MAX_AUDIO_RESPONSE_BYTES: usize = 25 * 1024 * 1024;
 
@@ -70,7 +109,21 @@ impl MediaDriver for ElevenLabsMediaDriver {
 
         let api_key = Self::api_key()?;
         let model = request.model.as_deref().unwrap_or(DEFAULT_MODEL);
-        let voice_id = request.voice.as_deref().unwrap_or(DEFAULT_VOICE_ID);
+        let voice_id = request
+            .voice
+            .as_deref()
+            .and_then(|v| {
+                // Try built-in name first, then use as raw voice_id
+                builtin_voice_id(v).or_else(|| {
+                    tracing::debug!(
+                        "ElevenLabs: voice '{}' is not a built-in name, using as raw voice_id",
+                        v
+                    );
+                    None
+                })
+            })
+            .or_else(|| request.voice.as_deref())
+            .unwrap_or(DEFAULT_VOICE_ID);
         let format = request.format.as_deref().unwrap_or("mp3_44100_128");
 
         let mut body = serde_json::json!({
