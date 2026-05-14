@@ -28,7 +28,7 @@
     "flexsearch": "^0.8.205",
     "focus-visible": "^5.2.1",
     "hast-util-from-html": "^2.0.3",
-    "lucide-react": "^1.14.0",
+    "lucide-react": "^1.16.0",
     "marked": "18.0.3",
     "mdast-util-to-string": "^4.0.0",
     "mdx-annotations": "^0.1.4",
@@ -43,15 +43,15 @@
     "remark-gfm": "^4.0.1",
     "remark-mdx": "3.1.1",
     "shiki": "^4.0.2",
-    "tailwind-merge": "^3.3.1",
+    "tailwind-merge": "^3.6.0",
     "unist-util-filter": "^5.0.1",
     "unist-util-visit": "^5.0.0",
     "zustand": "5.0.13"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.2.4",
+    "@tailwindcss/postcss": "^4.3.0",
     "@types/mdx": "^2.0.13",
-    "@types/node": "^25.6.2",
+    "@types/node": "^25.8.0",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@types/react-highlight-words": "^0.20.0",
@@ -60,7 +60,7 @@
     "postcss": "^8.5.14",
     "postcss-focus-visible": "^11.0.0",
     "simple-functional-loader": "^1.2.1",
-    "tailwindcss": "4.2.4",
+    "tailwindcss": "4.3.0",
     "typescript": "^5.7.0"
   },
   "engines": {
