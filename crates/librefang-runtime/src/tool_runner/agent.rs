@@ -94,7 +94,7 @@ pub(super) async fn tool_agent_send(
 }
 
 /// Build agent manifest TOML from parsed parameters.
-fn build_agent_manifest_toml(
+pub(super) fn build_agent_manifest_toml(
     name: &str,
     system_prompt: &str,
     tools: Vec<String>,
@@ -140,7 +140,9 @@ fn build_agent_manifest_toml(
 /// cannot cover a child's `NetConnect("*")` — they are different enum variants.
 ///
 /// This mirrors the `ToolProfile::implied_capabilities()` logic in agent.rs.
-fn tools_to_parent_capabilities(tools: &[String]) -> Vec<librefang_types::capability::Capability> {
+pub(super) fn tools_to_parent_capabilities(
+    tools: &[String],
+) -> Vec<librefang_types::capability::Capability> {
     use librefang_types::capability::Capability;
 
     let mut caps: Vec<Capability> = tools

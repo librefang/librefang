@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// sent a poll missing the user's third option. This helper fails fast
 /// when any entry is the wrong type so the agent can surface the mistake
 /// instead of producing a malformed poll.
-fn parse_poll_options(raw: Option<&serde_json::Value>) -> Result<Vec<String>, String> {
+pub(super) fn parse_poll_options(raw: Option<&serde_json::Value>) -> Result<Vec<String>, String> {
     let arr = raw
         .and_then(|v| v.as_array())
         .ok_or_else(|| "poll_options must be an array of strings".to_string())?;

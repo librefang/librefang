@@ -93,7 +93,7 @@ pub(super) fn detect_image_format(data: &[u8]) -> String {
 }
 
 /// Extract image dimensions from common formats.
-fn extract_image_dimensions(data: &[u8], format: &str) -> Option<(u32, u32)> {
+pub(super) fn extract_image_dimensions(data: &[u8], format: &str) -> Option<(u32, u32)> {
     match format {
         "png" => {
             // PNG: IHDR chunk starts at byte 16, width at 16-19, height at 20-23
@@ -134,7 +134,7 @@ fn extract_image_dimensions(data: &[u8], format: &str) -> Option<(u32, u32)> {
 }
 
 /// Extract JPEG dimensions by scanning for SOF markers.
-fn extract_jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+pub(super) fn extract_jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     let mut i = 2; // Skip SOI marker
     while i + 1 < data.len() {
         if data[i] != 0xFF {
@@ -159,7 +159,7 @@ fn extract_jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
 }
 
 /// Format file size in human-readable form.
-fn format_file_size(bytes: usize) -> String {
+pub(super) fn format_file_size(bytes: usize) -> String {
     if bytes < 1024 {
         format!("{bytes} B")
     } else if bytes < 1024 * 1024 {

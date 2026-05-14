@@ -8,7 +8,7 @@ use crate::kernel_handle::prelude::*;
 use std::sync::Arc;
 
 /// Parse a natural language schedule into a cron expression.
-fn parse_schedule_to_cron(input: &str) -> Result<String, String> {
+pub(super) fn parse_schedule_to_cron(input: &str) -> Result<String, String> {
     let input = input.trim().to_lowercase();
 
     // If it already looks like a cron expression (5 space-separated fields), pass through
@@ -90,7 +90,7 @@ fn parse_schedule_to_cron(input: &str) -> Result<String, String> {
 }
 
 /// Parse a time string like "9am", "6pm", "14:00", "9:30am" into an hour (0-23).
-fn parse_time_to_hour(s: &str) -> Result<u32, String> {
+pub(super) fn parse_time_to_hour(s: &str) -> Result<u32, String> {
     let s = s.trim().to_lowercase();
 
     // Handle "9am", "6pm", "12pm", "12am"
