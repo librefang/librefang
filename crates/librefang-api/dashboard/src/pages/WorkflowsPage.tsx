@@ -42,6 +42,8 @@ import {
 } from "../lib/mutations/workflows";
 import { useCreateSchedule } from "../lib/mutations/schedules";
 import { useUIStore } from "../lib/store";
+import { extractImageRefs } from "../lib/workflowOutputImages";
+import { WorkflowStepImageGallery } from "../components/WorkflowStepImageGallery";
 
 const categoryIconMap: Record<string, React.ComponentType<{ className?: string }>> = {
   creation: FileText, language: Bot, thinking: Activity, business: Calendar,
@@ -157,6 +159,40 @@ const getErrorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
 const isRunState = (state: WorkflowRunItem["state"]): state is string => typeof state === "string";
+
+// Image detection is `O(n²)` worst-case on malformed JSON-ish output (a
+// run of unmatched `{` triggers a fresh scan from each one). Memoize so
+// unrelated re-renders of the parent (poll ticks, prop bag churn) don't
+// re-pay the cost on long step outputs.
+function StepResultContent({ step }: { step: WorkflowStepResult }) {
+  const { t } = useTranslation();
+  const imageRefs = useMemo(() => extractImageRefs(step.output), [step.output]);
+  return (
+    <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
+      <div>
+        <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
+        <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
+          {step.prompt || "(empty)"}
+        </pre>
+      </div>
+      {imageRefs.length > 0 && (
+        <WorkflowStepImageGallery
+          refs={imageRefs}
+          label={t("workflows.generated_images", { defaultValue: "Generated images:" })}
+        />
+      )}
+      <div>
+        <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.output", { defaultValue: "Output:" })}</p>
+        <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
+          {step.output || "(empty)"}
+        </pre>
+      </div>
+      <p className="text-[9px] text-text-dim/40">
+        {step.agent_name} · {step.input_tokens} in / {step.output_tokens} out tokens
+      </p>
+    </div>
+  );
+}
 
 function StepAccordion<T>({
   steps,
@@ -586,23 +622,7 @@ export function WorkflowsPage() {
   );
 
   const stepResultContent = (step: WorkflowStepResult, _idx: number) => (
-    <div className="px-3 pb-3 space-y-2 border-t border-border-subtle">
-      <div>
-        <p className="text-[9px] font-bold text-text-dim/50 mt-2">{t("workflows.prompt_sent", { defaultValue: "Prompt sent:" })}</p>
-        <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
-          {step.prompt || "(empty)"}
-        </pre>
-      </div>
-      <div>
-        <p className="text-[9px] font-bold text-text-dim/50">{t("workflows.output", { defaultValue: "Output:" })}</p>
-        <pre className="text-[10px] text-text whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface rounded-lg p-2 mt-1">
-          {step.output || "(empty)"}
-        </pre>
-      </div>
-      <p className="text-[9px] text-text-dim/40">
-        {step.agent_name} · {step.input_tokens} in / {step.output_tokens} out tokens
-      </p>
-    </div>
+    <StepResultContent step={step} />
   );
 
   return (
