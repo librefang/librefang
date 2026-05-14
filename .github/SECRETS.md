@@ -118,8 +118,8 @@ owner's account scope.
 | `MAC_NOTARIZE_APPLE_ID` | Apple ID used for `notarytool submit` |
 | `MAC_NOTARIZE_PASSWORD` | App-specific password for that Apple ID |
 | `MAC_NOTARIZE_TEAM_ID` | Apple team ID for notarisation |
-| `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater signing key (PEM) — DO NOT confuse with the Apple Developer cert; this signs auto-update manifests |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Passphrase for the updater key |
+| `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater signing key (minisign secret-key file contents) — DO NOT confuse with the Apple Developer cert; this signs auto-update manifests. BossFang fork uses a fresh minisign keypair (public half lives in `crates/librefang-desktop/tauri.desktop.conf.json`), not upstream's. |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Passphrase for the updater key. Empty string is acceptable if the keypair was generated without a passphrase (`minisign -GW`). Leave the secret unset to mean empty — `secrets.X` evaluates to `""` for missing names. |
 
 ---
 

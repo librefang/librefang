@@ -96,6 +96,18 @@ Backed by the `registry-worker` Cloudflare Worker
 `REGISTRY_PUBLIC_KEY` env var. The default URL is overridable via
 `LIBREFANG_REGISTRY_PUBKEY_URL` for self-hosted registries.
 
+**BossFang fork status**: the plugin-registry trust root is not yet
+rotated. The default URL (`librefang.ai/.well-known/registry-pubkey`)
+still points at upstream's Cloudflare Worker. For now, BossFang users
+who install signed plugins continue to verify against upstream's
+public key. To rotate to a BossFang-hosted trust root: generate an
+ed25519 keypair, host the public half at any reachable URL (the
+recommended path is `https://github.com/GQAdonis/librefang/raw/main/.well-known/registry-pubkey`
+since it requires no DNS / Cloudflare setup), and set
+`LIBREFANG_REGISTRY_PUBKEY_URL` (or `LIBREFANG_REGISTRY_PUBKEY` with
+the base64 value) at deploy time. Tracked as a follow-up — see
+the Phase-2 plan.
+
 Network failures (timeout, non-2xx, malformed body) propagate as `Err` from
 the resolver. The caller decides whether to hard-fail (index verification)
 or fall through to SHA-256-only (archive install).
