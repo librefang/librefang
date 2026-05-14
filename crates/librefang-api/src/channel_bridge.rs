@@ -557,13 +557,20 @@ where
             Err(e) => {
                 let is_cancelled = e.is_cancelled();
                 error!("Streaming kernel task panicked: {e}");
-                let user_msg = if is_cancelled {
-                    "Previous response was interrupted by your new message.".to_string()
+                if is_cancelled {
+                    // Silent: when the user sends a new message the old
+                    // task is aborted. No notification needed — the new
+                    // message is already being processed.
+                    (None, Ok(()))
                 } else {
-                    "Sorry, something went wrong on my end. Please try again in a moment."
-                        .to_string()
-                };
-                (Some(user_msg), Err(format!("kernel task panicked: {e}")))
+                    (
+                        Some(
+                            "Sorry, something went wrong on my end. Please try again in a moment."
+                                .to_string(),
+                        ),
+                        Err(format!("kernel task panicked: {e}")),
+                    )
+                }
             }
             Ok(Err(e)) => {
                 let err_str = e.to_string();
