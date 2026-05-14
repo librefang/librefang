@@ -78,6 +78,11 @@ pub struct DiscordAdapter {
     /// Caching the `None` case stops the resolver from re-hitting
     /// Discord every time a user DMs the bot.
     channel_to_guild: Arc<DashMap<String, Option<String>>>,
+    /// True when `with_proxy(Some(_))` set a per-channel proxy on `client`.
+    /// Drives a one-shot WARN at `start()` because the gateway WebSocket
+    /// bypasses the proxy — see `http_client::warn_ws_proxy_bypass`
+    /// (#4795 follow-up).
+    proxy_configured: bool,
 }
 
 impl DiscordAdapter {
@@ -108,6 +113,7 @@ impl DiscordAdapter {
             session_id: Arc::new(RwLock::new(None)),
             resume_gateway_url: Arc::new(RwLock::new(None)),
             channel_to_guild: Arc::new(DashMap::new()),
+            proxy_configured: false,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -129,6 +135,21 @@ impl DiscordAdapter {
         self.initial_backoff = Duration::from_secs(initial_backoff_secs);
         self.max_backoff = Duration::from_secs(max_backoff_secs);
         self
+    }
+
+    /// Route this adapter's REST client through `proxy_url` (#4795).
+    /// Affects REST API calls only — the gateway WebSocket is not
+    /// currently routed through the proxy. See
+    /// `TelegramAdapter::with_proxy` for the URL contract.
+    pub fn with_proxy(
+        mut self,
+        proxy_url: Option<&str>,
+    ) -> Result<Self, crate::http_client::ChannelProxyError> {
+        if proxy_url.is_some() {
+            self.client = crate::http_client::new_proxied_client(proxy_url)?;
+            self.proxy_configured = true;
+        }
+        Ok(self)
     }
 
     /// Get the WebSocket gateway URL from the Discord API.
@@ -372,6 +393,12 @@ impl ChannelAdapter for DiscordAdapter {
         Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
+        // Surface the per-channel proxy WS-bypass limitation in startup
+        // logs the first time we open the gateway (#4795 follow-up).
+        if self.proxy_configured {
+            crate::http_client::warn_ws_proxy_bypass("discord");
+        }
+
         let gateway_url = self.get_gateway_url().await?;
         info!("Discord gateway URL obtained");
 
@@ -671,6 +698,15 @@ impl ChannelAdapter for DiscordAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Discord
+    /// guild / application ID) so the bridge approval listener builds the
+    /// same `discord:<account_id>` key the router stores in
+    /// `channel_defaults`, scoping ApprovalRequested delivery to the guild
+    /// bound to the requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 /// Parse a Discord MESSAGE_CREATE or MESSAGE_UPDATE payload into a `ChannelMessage`.
@@ -911,6 +947,53 @@ mod tests {
             0,
         )
         .with_api_base(api_base)
+    }
+
+    // -------- per-channel proxy (#4795) -----------------------------------
+
+    #[test]
+    fn discord_with_proxy_accepts_valid_url() {
+        let _a = DiscordAdapter::new("t".to_string(), vec![], vec![], true, vec![], 0)
+            .with_proxy(Some("http://127.0.0.1:8080"))
+            .expect("valid http proxy URL must succeed");
+    }
+
+    #[test]
+    fn discord_with_proxy_rejects_garbage_url() {
+        // `expect_err` requires `T: Debug` and `DiscordAdapter` does
+        // not derive Debug (zeroized token, `Arc<DashMap<…>>`, …).
+        // Pattern match on the Result instead of forcing a Debug derive
+        // on the adapter just to make this single test compile.
+        let result = DiscordAdapter::new("t".to_string(), vec![], vec![], true, vec![], 0)
+            .with_proxy(Some("not a url"));
+        match result {
+            Err(crate::http_client::ChannelProxyError::InvalidUrl { .. }) => {}
+            Err(other) => panic!("expected InvalidUrl, got: {other:?}"),
+            Ok(_) => panic!("garbage proxy URL must fail at init"),
+        }
+    }
+
+    /// Setting a per-channel proxy flips the `proxy_configured` flag
+    /// that drives the one-shot WS-bypass WARN at `start()` (#4795
+    /// follow-up). Leaving it `None` must keep the flag false so a
+    /// vanilla startup stays log-clean.
+    #[test]
+    fn discord_with_proxy_some_sets_ws_bypass_warn_flag() {
+        let a = DiscordAdapter::new("t".to_string(), vec![], vec![], true, vec![], 0)
+            .with_proxy(Some("http://127.0.0.1:8080"))
+            .expect("valid proxy URL");
+        assert!(
+            a.proxy_configured,
+            "with_proxy(Some(_)) must set proxy_configured so start() emits the WS-bypass WARN"
+        );
+
+        let b = DiscordAdapter::new("t".to_string(), vec![], vec![], true, vec![], 0)
+            .with_proxy(None)
+            .expect("None proxy URL");
+        assert!(
+            !b.proxy_configured,
+            "with_proxy(None) must NOT set proxy_configured (no WARN on clean startup)"
+        );
     }
 
     fn dummy_user(channel_id: &str) -> ChannelUser {
@@ -1489,6 +1572,36 @@ mod tests {
         );
         assert_eq!(adapter.name(), "discord");
         assert_eq!(adapter.channel_type(), ChannelType::Discord);
+    }
+
+    #[test]
+    fn test_discord_account_id_default_none() {
+        let adapter = DiscordAdapter::new(
+            "test-token".to_string(),
+            vec![],
+            vec![],
+            true,
+            vec![],
+            37376,
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_discord_account_id_returns_configured_value() {
+        // #5003: two Discord guilds in the same daemon must resolve under
+        // distinct `discord:<guild_id>` keys; this override is what the
+        // bridge approval listener consults.
+        let adapter = DiscordAdapter::new(
+            "test-token".to_string(),
+            vec![],
+            vec![],
+            true,
+            vec![],
+            37376,
+        )
+        .with_account_id(Some("guild-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("guild-42"));
     }
 
     #[test]

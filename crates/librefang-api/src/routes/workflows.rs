@@ -149,6 +149,7 @@ fn workflow_to_json(w: &Workflow) -> serde_json::Value {
                 "error_mode": serde_json::to_value(&s.error_mode).unwrap_or_default(),
                 "output_var": s.output_var,
                 "depends_on": s.depends_on,
+                "session_mode": serde_json::to_value(s.session_mode).unwrap_or(serde_json::Value::Null),
             })
         }).collect::<Vec<_>>(),
         "created_at": w.created_at.to_rfc3339(),
@@ -324,6 +325,35 @@ fn parse_error_mode(val: &serde_json::Value, step: &serde_json::Value) -> ErrorM
     ErrorMode::Fail
 }
 
+/// Parse an optional per-step `session_mode` from a step JSON object.
+///
+/// Absent or null returns `None` so HTTP callers don't trip on minor schema
+/// quirks; the kernel's resolver ("per-step > manifest > kernel default")
+/// then falls back to the agent manifest or kernel default. Accepted values
+/// for the field are `"persistent"` and `"new"` (the serde rename of
+/// `SessionMode`). Malformed values (typos, wrong types) also fall back to
+/// `None` but log a `WARN` so operators can spot a bad payload — silent
+/// drop is the bug class this PR works to prevent.
+fn parse_step_session_mode(
+    step: &serde_json::Value,
+) -> Option<librefang_types::agent::SessionMode> {
+    let raw = step.get("session_mode")?;
+    if raw.is_null() {
+        return None;
+    }
+    match serde_json::from_value::<librefang_types::agent::SessionMode>(raw.clone()) {
+        Ok(mode) => Some(mode),
+        Err(err) => {
+            tracing::warn!(
+                field = ?raw,
+                error = %err,
+                "ignoring malformed session_mode on workflow step; expected \"persistent\" or \"new\""
+            );
+            None
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Workflow routes
 // ---------------------------------------------------------------------------
@@ -392,6 +422,7 @@ pub async fn create_workflow(
             output_var: s["output_var"].as_str().map(String::from),
             inherit_context: s["inherit_context"].as_bool(),
             depends_on,
+            session_mode: parse_step_session_mode(s),
         });
     }
 
@@ -666,6 +697,7 @@ pub async fn update_workflow(
                 output_var: s["output_var"].as_str().map(String::from),
                 inherit_context: s["inherit_context"].as_bool(),
                 depends_on,
+                session_mode: parse_step_session_mode(s),
             });
         }
         parsed_steps
@@ -895,49 +927,59 @@ pub async fn run_workflow(
         let state_for_resolver = state_clone.clone();
         let state_for_sender = state_clone.clone();
         tokio::spawn(async move {
-            let result = state_clone
-                .kernel
-                .workflow_engine()
-                .execute_run(
-                    run_id_holder,
-                    move |agent_ref| {
-                        use librefang_kernel::workflow::StepAgent;
-                        match agent_ref {
-                            StepAgent::ById { id } => {
-                                let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
-                                let entry =
-                                    state_for_resolver.kernel.agent_registry().get(agent_id)?;
-                                let inherit = entry.manifest.inherit_parent_context;
-                                Some((agent_id, entry.name.clone(), inherit))
+            let result =
+                state_clone
+                    .kernel
+                    .workflow_engine()
+                    .execute_run(
+                        run_id_holder,
+                        move |agent_ref| {
+                            use librefang_kernel::workflow::StepAgent;
+                            match agent_ref {
+                                StepAgent::ById { id } => {
+                                    let agent_id: librefang_types::agent::AgentId =
+                                        id.parse().ok()?;
+                                    let entry =
+                                        state_for_resolver.kernel.agent_registry().get(agent_id)?;
+                                    let inherit = entry.manifest.inherit_parent_context;
+                                    Some((agent_id, entry.name.clone(), inherit))
+                                }
+                                StepAgent::ByName { name } => {
+                                    let entry = state_for_resolver
+                                        .kernel
+                                        .agent_registry()
+                                        .find_by_name(name)?;
+                                    let inherit = entry.manifest.inherit_parent_context;
+                                    Some((entry.id, entry.name.clone(), inherit))
+                                }
                             }
-                            StepAgent::ByName { name } => {
-                                let entry = state_for_resolver
-                                    .kernel
-                                    .agent_registry()
-                                    .find_by_name(name)?;
-                                let inherit = entry.manifest.inherit_parent_context;
-                                Some((entry.id, entry.name.clone(), inherit))
-                            }
-                        }
-                    },
-                    move |agent_id: librefang_types::agent::AgentId, message: String| {
-                        let sc = state_for_sender.clone();
-                        async move {
-                            sc.kernel
-                                .send_message(agent_id, &message)
-                                .await
-                                .map(|r| {
-                                    (
-                                        r.response,
-                                        r.total_usage.input_tokens,
-                                        r.total_usage.output_tokens,
+                        },
+                        move |agent_id: librefang_types::agent::AgentId,
+                              message: String,
+                              session_mode_override: Option<
+                            librefang_types::agent::SessionMode,
+                        >| {
+                            let sc = state_for_sender.clone();
+                            async move {
+                                sc.kernel
+                                    .send_message_with_session_mode(
+                                        agent_id,
+                                        &message,
+                                        session_mode_override,
                                     )
-                                })
-                                .map_err(|e| format!("{e}"))
-                        }
-                    },
-                )
-                .await;
+                                    .await
+                                    .map(|r| {
+                                        (
+                                            r.response,
+                                            r.total_usage.input_tokens,
+                                            r.total_usage.output_tokens,
+                                        )
+                                    })
+                                    .map_err(|e| format!("{e}"))
+                            }
+                        },
+                    )
+                    .await;
             if let Err(e) = result {
                 tracing::warn!(
                     run_id = %run_id_holder,
@@ -1352,11 +1394,19 @@ pub async fn resume_workflow_run(
                 run_id,
                 token,
                 agent_resolver,
-                move |agent_id: librefang_types::agent::AgentId, message: String| {
+                move |agent_id: librefang_types::agent::AgentId,
+                      message: String,
+                      session_mode_override: Option<
+                    librefang_types::agent::SessionMode,
+                >| {
                     let sc = state_for_send_fn.clone();
                     async move {
                         sc.kernel
-                            .send_message(agent_id, &message)
+                            .send_message_with_session_mode(
+                                agent_id,
+                                &message,
+                                session_mode_override,
+                            )
                             .await
                             .map(|r| {
                                 (

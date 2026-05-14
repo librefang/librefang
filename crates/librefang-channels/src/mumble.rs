@@ -528,6 +528,16 @@ impl ChannelAdapter for MumbleAdapter {
         *lock = None;
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Mumble
+    /// server / certificate identifier) so the bridge approval listener
+    /// builds the same `mumble:<account_id>` key the router stores in
+    /// `channel_defaults`, scoping ApprovalRequested delivery to the
+    /// server bound to the requesting agent (#5003, follow-up to
+    /// #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -734,5 +744,32 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[test]
+    fn test_mumble_account_id_default_none() {
+        let adapter = MumbleAdapter::new(
+            "mumble.example.com".to_string(),
+            0,
+            "secret".to_string(),
+            "bot".to_string(),
+            "General".to_string(),
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_mumble_account_id_returns_configured_value() {
+        // #5003: two Mumble servers must resolve under distinct
+        // `mumble:<account_id>` keys via the trait override.
+        let adapter = MumbleAdapter::new(
+            "mumble.example.com".to_string(),
+            0,
+            "secret".to_string(),
+            "bot".to_string(),
+            "General".to_string(),
+        )
+        .with_account_id(Some("server-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("server-42"));
     }
 }

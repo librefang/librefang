@@ -359,6 +359,15 @@ impl ChannelAdapter for NtfyAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the ntfy
+    /// server / topic identifier) so the bridge approval listener builds the
+    /// same `ntfy:<account_id>` key the router stores in `channel_defaults`,
+    /// scoping ApprovalRequested delivery to the topic bound to the
+    /// requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -531,5 +540,28 @@ mod tests {
     #[test]
     fn test_ntfy_parse_invalid_json() {
         assert!(NtfyAdapter::parse_sse_data("not json").is_none());
+    }
+
+    #[test]
+    fn test_ntfy_account_id_default_none() {
+        let adapter = NtfyAdapter::new(
+            "https://ntfy.sh".to_string(),
+            "topic".to_string(),
+            "token".to_string(),
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_ntfy_account_id_returns_configured_value() {
+        // #5003: two ntfy topics must resolve under distinct
+        // `ntfy:<account_id>` keys via the trait override.
+        let adapter = NtfyAdapter::new(
+            "https://ntfy.sh".to_string(),
+            "topic".to_string(),
+            "token".to_string(),
+        )
+        .with_account_id(Some("topic-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("topic-42"));
     }
 }

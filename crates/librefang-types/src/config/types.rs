@@ -2276,6 +2276,74 @@ impl Default for CompactionTomlConfig {
     }
 }
 
+/// Gateway-level safety-net compression (exposed in `[gateway_compression]`
+/// TOML section). Runs at the top of the agent loop, *before* the first LLM
+/// call and *before* the LLM-based [`CompactionTomlConfig`] runs.
+///
+/// Purpose: catch sessions that grew between turns (overnight Telegram
+/// backlog, cron-job output piling up, etc.) and have already exceeded the
+/// model's context window when the next turn starts. Without this pass the
+/// first LLM call would 400 with "context too long" before the agent-level
+/// compactor ever gets a chance to run.
+///
+/// Trade-off vs. [`CompactionTomlConfig`]:
+/// - Gateway pass: cheap (rough token estimation, no LLM call), runs at a
+///   *higher* threshold (default 0.85), prunes tool results + drops oldest
+///   non-pinned messages.
+/// - Agent-level compactor: LLM-summarises, runs at a *lower* threshold
+///   (default 0.70). Owns history compaction proper.
+///
+/// The gateway pass aims to bring the session below ~0.80 so the agent-level
+/// compactor can run normally on the next iteration. It never calls the LLM.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct GatewayCompressionConfig {
+    /// Master switch. Default ON. Set to `false` to disable the gateway
+    /// safety-net pass entirely (the agent-level compactor still runs).
+    #[serde(default = "default_gateway_compression_enabled")]
+    pub enabled: bool,
+    /// Trigger ratio: gateway pass fires when estimated session tokens
+    /// exceed `context_window * threshold_ratio` (default: 0.85). Must be
+    /// strictly greater than [`CompactionTomlConfig::token_threshold_ratio`]
+    /// (default 0.70) so the agent-level compactor gets first crack.
+    #[serde(default = "default_gateway_compression_threshold_ratio")]
+    pub threshold_ratio: f32,
+    /// Tool results larger than this character count get stubbed (default:
+    /// 200). Stubbing preserves `tool_use_id` pairing so the assistant ↔
+    /// tool-result chain stays well-formed for the provider.
+    #[serde(default = "default_gateway_compression_max_tool_result_chars")]
+    pub max_tool_result_chars: usize,
+    /// Number of most-recent messages always kept verbatim (default: 5).
+    /// Older non-pinned messages are dropped first if stubbing tool results
+    /// alone does not bring the estimate below the threshold.
+    #[serde(default = "default_gateway_compression_keep_recent")]
+    pub keep_recent_messages: usize,
+}
+
+fn default_gateway_compression_enabled() -> bool {
+    true
+}
+fn default_gateway_compression_threshold_ratio() -> f32 {
+    0.85
+}
+fn default_gateway_compression_max_tool_result_chars() -> usize {
+    200
+}
+fn default_gateway_compression_keep_recent() -> usize {
+    5
+}
+
+impl Default for GatewayCompressionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_gateway_compression_enabled(),
+            threshold_ratio: default_gateway_compression_threshold_ratio(),
+            max_tool_result_chars: default_gateway_compression_max_tool_result_chars(),
+            keep_recent_messages: default_gateway_compression_keep_recent(),
+        }
+    }
+}
+
 /// Where a context injection should be placed in the session message list.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -3024,6 +3092,14 @@ pub struct KernelConfig {
     /// Session compaction configuration (LLM-based history summarization).
     #[serde(default)]
     pub compaction: CompactionTomlConfig,
+    /// Gateway-level safety-net compression (#4972). Cheap pre-loop pass
+    /// that prunes oversized tool results and oldest non-pinned messages
+    /// when a session has grown past the model's context window *between*
+    /// turns, before the first LLM call. Runs at a higher threshold (0.85)
+    /// than the agent-level compactor (0.70) — they are complementary, not
+    /// alternatives. See [`GatewayCompressionConfig`].
+    #[serde(default)]
+    pub gateway_compression: GatewayCompressionConfig,
     /// Message queue configuration (depth limits, TTL, concurrency).
     #[serde(default)]
     pub queue: QueueConfig,
@@ -3404,6 +3480,23 @@ pub struct ContextEngineTomlConfig {
     /// Defaults to the official `librefang/librefang-registry`.
     #[serde(default = "default_plugin_registries")]
     pub plugin_registries: Vec<PluginRegistrySource>,
+    /// When `true` (default), repeated `file_read` calls on the same path in a
+    /// session are collapsed: if the on-disk content's hash matches a prior
+    /// read in the same session, the tool returns a short
+    /// `[File already read — content unchanged since turn N. See above for
+    /// full content.]` stub instead of the full body. If the hash differs,
+    /// the result is prefixed with
+    /// `[File updated since last read at turn N]`. Set to `false` to send the
+    /// full file content every time (legacy behaviour). The tracker is reset
+    /// whenever automatic context compression fires, because the prior full
+    /// content is no longer present in the history (#4971).
+    #[serde(default = "default_deduplicate_file_reads")]
+    pub deduplicate_file_reads: bool,
+}
+
+/// Default for [`ContextEngineTomlConfig::deduplicate_file_reads`]: enabled.
+fn default_deduplicate_file_reads() -> bool {
+    true
 }
 
 impl Default for ContextEngineTomlConfig {
@@ -3415,6 +3508,7 @@ impl Default for ContextEngineTomlConfig {
             plugin_stack_weights: Vec::new(),
             hooks: ContextEngineHooks::default(),
             plugin_registries: default_plugin_registries(),
+            deduplicate_file_reads: default_deduplicate_file_reads(),
         }
     }
 }
@@ -5085,6 +5179,7 @@ impl Default for KernelConfig {
             prompt_caching: default_prompt_caching(),
             session: SessionConfig::default(),
             compaction: CompactionTomlConfig::default(),
+            gateway_compression: GatewayCompressionConfig::default(),
             queue: QueueConfig::default(),
             task_board: TaskBoardConfig::default(),
             external_auth: ExternalAuthConfig::default(),
@@ -5967,6 +6062,17 @@ pub struct TelegramConfig {
     /// ```
     #[serde(default)]
     pub thread_routes: std::collections::HashMap<String, String>,
+    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Telegram
+    /// adapter's REST client (#4795). When unset, the adapter follows
+    /// reqwest's normal env-var fallback (`HTTP_PROXY` / `HTTPS_PROXY`
+    /// / `ALL_PROXY` / `NO_PROXY`). When set, the per-channel value
+    /// overrides any env var.
+    ///
+    /// Accepted schemes: `http://`, `https://`, `socks5://`,
+    /// `socks5h://`. Auth is supported via `user:pass@host:port`.
+    /// Invalid URLs are rejected at adapter init.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 impl Default for TelegramConfig {
@@ -5984,6 +6090,7 @@ impl Default for TelegramConfig {
             overrides: ChannelOverrides::default(),
             message_coalesce_window_ms: None,
             thread_routes: std::collections::HashMap::new(),
+            proxy: None,
         }
     }
 }
@@ -6048,6 +6155,13 @@ pub struct DiscordConfig {
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Discord
+    /// adapter's REST client (#4795). Affects REST API calls only —
+    /// the gateway WebSocket is not currently routed through the
+    /// proxy. See `TelegramConfig::proxy` for accepted URL shapes
+    /// and env-var interaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 impl Default for DiscordConfig {
@@ -6064,6 +6178,7 @@ impl Default for DiscordConfig {
             initial_backoff_secs: default_channel_initial_backoff_secs(),
             max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
+            proxy: None,
         }
     }
 }
@@ -6102,6 +6217,13 @@ pub struct SlackConfig {
     /// of threaded replies. Defaults to `None` (i.e. use normal threading).
     #[serde(default)]
     pub force_flat_replies: Option<bool>,
+    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Slack
+    /// adapter's REST client (#4795). Affects Web API calls only —
+    /// the Socket Mode WebSocket is not currently routed through the
+    /// proxy. See `TelegramConfig::proxy` for accepted URL shapes
+    /// and env-var interaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 impl Default for SlackConfig {
@@ -6117,6 +6239,7 @@ impl Default for SlackConfig {
             max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
             force_flat_replies: None,
+            proxy: None,
         }
     }
 }
@@ -6442,6 +6565,13 @@ pub struct MattermostConfig {
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Mattermost
+    /// adapter's REST client (#4795). Affects REST API calls only —
+    /// the Mattermost WebSocket connection is not currently routed
+    /// through the proxy. See `TelegramConfig::proxy` for accepted
+    /// URL shapes and env-var interaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 impl Default for MattermostConfig {
@@ -6455,6 +6585,7 @@ impl Default for MattermostConfig {
             initial_backoff_secs: default_channel_initial_backoff_secs(),
             max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
+            proxy: None,
         }
     }
 }

@@ -52,7 +52,9 @@ const SENSITIVE_ENV_EXACT: &[&str] = &[
 ];
 
 /// Suffixes that indicate a secret — remove any env var ending with these
-/// unless it starts with `CLAUDE_`.
+/// unless it starts with `CLAUDE_` or `ANTHROPIC_` (our own provider's
+/// credentials, including gateway / proxy variants like
+/// `ANTHROPIC_AUTH_TOKEN`).
 const SENSITIVE_SUFFIXES: &[&str] = &["_SECRET", "_TOKEN", "_PASSWORD"];
 
 /// Default subprocess timeout in seconds (5 minutes).
@@ -399,8 +401,16 @@ impl ClaudeCodeDriver {
             cmd.env_remove(key);
         }
         // Remove any env var with a sensitive suffix, unless it's CLAUDE_*
+        // or ANTHROPIC_*. The ANTHROPIC_ exception covers gateway / proxy
+        // credentials such as ANTHROPIC_AUTH_TOKEN, typically paired with
+        // ANTHROPIC_BASE_URL for Bedrock-style routing.
+        //
+        // The prefix match is case-sensitive by design — Unix env var names
+        // are case-sensitive, and the exact-list above also matches verbatim.
+        // A user typing `anthropic_foo_token` would still hit the suffix
+        // strip below, which is the intended fail-safe.
         for (key, _) in std::env::vars() {
-            if key.starts_with("CLAUDE_") {
+            if key.starts_with("CLAUDE_") || key.starts_with("ANTHROPIC_") {
                 continue;
             }
             let upper = key.to_uppercase();
@@ -1433,10 +1443,18 @@ mod tests {
     fn spawn_dying_child(stderr_payload: Option<&str>) -> tokio::process::Child {
         let script = match stderr_payload {
             Some(msg) => {
+                // Explicit `flush()` before `sys.exit` because Python's
+                // text-IO layer over stderr is line-buffered: a no-newline
+                // payload sits in the wrapper buffer until interpreter
+                // shutdown flushes it. On loaded macOS GHA runners the
+                // diagnostic helper's `child.kill()` (SIGKILL) has been
+                // observed to land before that shutdown flush completes,
+                // dropping the payload before the OS pipe sees it and
+                // tripping the silent-fallback branch under test.
                 // `{msg:?}` writes the payload as a Rust-debug quoted
                 // string, which is also a valid Python string literal for
                 // the ASCII payloads these tests use.
-                format!("import sys; sys.stderr.write({msg:?}); sys.exit(7)")
+                format!("import sys; sys.stderr.write({msg:?}); sys.stderr.flush(); sys.exit(7)")
             }
             None => "import sys; sys.exit(0)".to_string(),
         };
@@ -1447,7 +1465,9 @@ mod tests {
         // silently dropped piped stderr on the Test / Windows lane.
         let build_cmd = |exe: &str| -> tokio::process::Command {
             let mut cmd = tokio::process::Command::new(exe);
-            cmd.arg("-c").arg(&script);
+            // `-u` forces Python's stdio binary layer unbuffered, defence
+            // in depth alongside the explicit flush in the script body.
+            cmd.arg("-u").arg("-c").arg(&script);
             cmd.stdin(std::process::Stdio::piped());
             cmd.stdout(std::process::Stdio::piped());
             cmd.stderr(std::process::Stdio::piped());
@@ -1458,6 +1478,30 @@ mod tests {
             Err(_) => build_cmd("python")
                 .spawn()
                 .expect("neither python3 nor python is on PATH; install Python 3 to run this test"),
+        }
+    }
+
+    /// Wait deterministically for `child` to exit, polling `try_wait`
+    /// with a 2 s budget. Replaces fixed `tokio::time::sleep` guesses
+    /// (150 ms / 100 ms in earlier revisions of these tests) that left a
+    /// race window: on a loaded macOS GHA runner the Python interpreter's
+    /// startup + shutdown can exceed the budget, so the subsequent
+    /// `child.kill()` inside `diagnose_stdin_write_failure` lands during
+    /// interpreter teardown and steals the stderr that hadn't yet
+    /// reached the OS pipe. Polling until exit removes the guess.
+    async fn await_child_exit(child: &mut tokio::process::Child) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(_) => return,
+            }
         }
     }
 
@@ -1472,8 +1516,10 @@ mod tests {
         // just like a real claude-code init failure.
         let mut child = spawn_dying_child(Some("mock cli: auth profile invalid"));
 
-        // Give the child a moment to exit so its stdin pipe is closed.
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // Wait until the child has actually exited so its stdio is fully
+        // flushed and its stdin pipe is closed before we ask the
+        // diagnostic helper to read stderr.
+        await_child_exit(&mut child).await;
 
         let write_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Broken pipe");
         let diag = ClaudeCodeDriver::diagnose_stdin_write_failure(&mut child, &write_err).await;
@@ -1494,7 +1540,7 @@ mod tests {
     #[tokio::test]
     async fn diagnose_stdin_write_failure_falls_back_to_hint_when_silent() {
         let mut child = spawn_dying_child(None);
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        await_child_exit(&mut child).await;
 
         let write_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Broken pipe");
         let diag = ClaudeCodeDriver::diagnose_stdin_write_failure(&mut child, &write_err).await;
@@ -1868,6 +1914,72 @@ mod tests {
         assert!(SENSITIVE_ENV_EXACT.contains(&"GEMINI_API_KEY"));
         assert!(SENSITIVE_ENV_EXACT.contains(&"GROQ_API_KEY"));
         assert!(SENSITIVE_ENV_EXACT.contains(&"DEEPSEEK_API_KEY"));
+    }
+
+    #[test]
+    fn test_apply_env_filter_keeps_anthropic_auth_token() {
+        // Regression for #5006: the suffix-sweep used to strip
+        // ANTHROPIC_AUTH_TOKEN because it ends in _TOKEN and lacks the
+        // CLAUDE_ prefix. The ANTHROPIC_* exception keeps gateway / proxy
+        // credentials (ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL pattern)
+        // intact while still stripping other providers' secrets.
+        //
+        // SAFETY: unique env var names; the test removes each one before
+        // returning.
+        unsafe {
+            std::env::set_var("ANTHROPIC_AUTH_TOKEN", "keep-me-5006");
+            std::env::set_var("OPENAI_API_KEY", "strip-openai-5006");
+            std::env::set_var("GROQ_API_KEY", "strip-groq-5006");
+            std::env::set_var("GEMINI_API_KEY", "strip-gemini-5006");
+            std::env::set_var("LIBREFANG_TEST_5006_OTHER_TOKEN", "strip-suffix-5006");
+        }
+
+        let mut cmd = tokio::process::Command::new("echo");
+        ClaudeCodeDriver::apply_env_filter(&mut cmd);
+
+        // `env_remove` records `(key, None)` in the Command's env table.
+        // Inspect it to learn which keys the filter targeted for removal.
+        let removed: std::collections::HashSet<String> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| {
+                if v.is_none() {
+                    Some(k.to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            !removed.contains("ANTHROPIC_AUTH_TOKEN"),
+            "ANTHROPIC_AUTH_TOKEN must be preserved for gateway / proxy users (#5006)"
+        );
+        assert!(
+            removed.contains("OPENAI_API_KEY"),
+            "OPENAI_API_KEY must still be stripped"
+        );
+        assert!(
+            removed.contains("GROQ_API_KEY"),
+            "GROQ_API_KEY must still be stripped"
+        );
+        assert!(
+            removed.contains("GEMINI_API_KEY"),
+            "GEMINI_API_KEY must still be stripped"
+        );
+        assert!(
+            removed.contains("LIBREFANG_TEST_5006_OTHER_TOKEN"),
+            "Generic *_TOKEN env vars (no CLAUDE_/ANTHROPIC_ prefix) must still be stripped"
+        );
+
+        // SAFETY: matches the set_var calls above.
+        unsafe {
+            std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("GROQ_API_KEY");
+            std::env::remove_var("GEMINI_API_KEY");
+            std::env::remove_var("LIBREFANG_TEST_5006_OTHER_TOKEN");
+        }
     }
 
     #[test]

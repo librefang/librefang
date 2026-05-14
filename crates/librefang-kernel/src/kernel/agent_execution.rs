@@ -944,6 +944,7 @@ impl LibreFangKernel {
             parent_session_id: None,
             tool_results_config: Some(cfg.tool_results.clone()),
             compaction_config: Some(compaction_snapshot),
+            gateway_compression: Some(cfg.gateway_compression.clone()),
         };
 
         // Build a per-execution MCP pool that includes the agent workspace as

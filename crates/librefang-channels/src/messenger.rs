@@ -528,6 +528,15 @@ impl ChannelAdapter for MessengerAdapter {
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the
+    /// Messenger page identifier) so the bridge approval listener builds
+    /// the same `messenger:<account_id>` key the router stores in
+    /// `channel_defaults`, scoping ApprovalRequested delivery to the page
+    /// bound to the requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -843,5 +852,30 @@ mod tests {
 
         let msgs = parse_messenger_entry(&entry);
         assert_eq!(msgs.len(), 2);
+    }
+
+    #[test]
+    fn test_messenger_account_id_default_none() {
+        let adapter = MessengerAdapter::new(
+            "page-token".to_string(),
+            "verify".to_string(),
+            "secret".to_string(),
+            0,
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_messenger_account_id_returns_configured_value() {
+        // #5003: two Messenger pages must resolve under distinct
+        // `messenger:<account_id>` keys via the trait override.
+        let adapter = MessengerAdapter::new(
+            "page-token".to_string(),
+            "verify".to_string(),
+            "secret".to_string(),
+            0,
+        )
+        .with_account_id(Some("page-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("page-42"));
     }
 }

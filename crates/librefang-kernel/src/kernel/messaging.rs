@@ -41,6 +41,32 @@ impl LibreFangKernel {
             .await
     }
 
+    /// Send a message honouring a per-call `SessionMode` override.
+    ///
+    /// Used by workflow step execution (#4834) so a step targeting a registry
+    /// agent can opt-in to a fresh session (`SessionMode::New`) or insist on
+    /// the agent's persistent session (`SessionMode::Persistent`), overriding
+    /// the target agent's manifest default. Resolution precedence is enforced
+    /// inside `send_message_full`: per-call > manifest > kernel default.
+    pub async fn send_message_with_session_mode(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        session_mode_override: Option<librefang_types::agent::SessionMode>,
+    ) -> KernelResult<AgentLoopResult> {
+        self.send_message_full(
+            agent_id,
+            message,
+            self.kernel_handle(),
+            None,
+            None,
+            session_mode_override,
+            None,
+            None,
+        )
+        .await
+    }
+
     /// Send a multimodal message (text + images) to an agent and get a response.
     ///
     /// Used by channel bridges when a user sends a photo — the image is downloaded,
@@ -605,6 +631,9 @@ impl LibreFangKernel {
                 // compressor will never fire here. Leave at None so the
                 // loop falls back to compiled defaults.
                 compaction_config: None,
+                // Ephemeral /btw also starts empty — gateway pass would
+                // no-op (under threshold) so we skip it explicitly.
+                gateway_compression: None,
             },
         )
         .await
@@ -1358,6 +1387,7 @@ impl LibreFangKernel {
             // `send_message_streaming_with_sender_and_opts` once the
             // agent registry has been consulted — leave as None here.
             compaction_config: None,
+            gateway_compression: Some(self.config.load().gateway_compression.clone()),
         };
         self.send_message_streaming_with_sender_and_opts(
             effective_id,
@@ -1552,6 +1582,7 @@ impl LibreFangKernel {
             // forked agent_id is identical to the parent's at this
             // layer; allowed_tools is the only fork-specific override).
             compaction_config: None,
+            gateway_compression: Some(self.config.load().gateway_compression.clone()),
         };
         // INVARIANT: forks must use the canonical session so the parent turn's
         // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
@@ -1629,6 +1660,7 @@ impl LibreFangKernel {
             // #4976: resolved inside the `_with_opts` callee once the
             // registry has been consulted for this agent's manifest.
             compaction_config: None,
+            gateway_compression: Some(self.config.load().gateway_compression.clone()),
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,

@@ -123,6 +123,22 @@ pub struct CompressionEvent {
     pub used_fallback: bool,
 }
 
+/// Reset side-state that depends on the pre-compression message history
+/// surviving in the prompt (#4971).
+///
+/// Currently this clears the per-session `file_read` deduplication tracker:
+/// the tracker's stubs refer to "see above for full content", and once the
+/// compressor has summarised those bodies away there is nothing above for the
+/// model to look at. Call sites should invoke this immediately after
+/// `compress_if_needed_with_aux` reports a successful compression.
+///
+/// Kept as a thin module-level function rather than a method on
+/// [`ContextCompressor`] so that future side-state resets can plug in without
+/// requiring callers to hold a compressor instance (e.g. manual `/compact`).
+pub fn reset_post_compression_side_state(session_id: librefang_types::agent::SessionId) {
+    crate::file_read_tracker::reset_session(session_id);
+}
+
 /// Context compressor — wraps `compactor::compact_session` with automatic
 /// threshold detection and iterative refinement.
 #[derive(Debug, Clone)]
