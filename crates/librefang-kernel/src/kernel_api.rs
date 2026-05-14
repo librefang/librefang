@@ -591,6 +591,52 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         registry: librefang_wire::PeerRegistry,
     ) -> Result<(), librefang_wire::PeerRegistry>;
     fn set_self_handle(self: Arc<Self>);
+
+    // ====================================================================
+    // Async task tracker (#4983) — exposed on KernelApi so integration
+    // tests can drive the registry through the same trait object the
+    // dashboard and route handlers use, instead of needing the
+    // concrete `LibreFangKernel`.
+    // ====================================================================
+
+    /// Register a pending async task. Returns the typed
+    /// [`librefang_types::task::TaskHandle`] the spawning agent stashes
+    /// to correlate the eventual completion event.
+    fn register_async_task(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        kind: librefang_types::task::TaskKind,
+    ) -> librefang_types::task::TaskHandle;
+
+    /// Mark a registered async task as terminated with `status`. The
+    /// kernel removes the registry entry (delete-on-delivery) and
+    /// either injects an
+    /// [`librefang_types::tool::AgentLoopSignal::TaskCompleted`] mid-turn
+    /// or, if no agent loop is currently attached for the originating
+    /// session, spawns a fresh turn whose body is the rendered
+    /// completion text. Idempotent — a second call for the same id is
+    /// a no-op.
+    async fn complete_async_task(
+        &self,
+        task_id: librefang_types::task::TaskId,
+        status: librefang_types::task::TaskStatus,
+    ) -> KernelResult<bool>;
+
+    /// Test introspection: number of currently-registered async tasks.
+    fn pending_async_task_count(&self) -> usize;
+
+    /// Test introspection: borrow the per-(agent, session) injection
+    /// senders dashmap so tests can attach a synthetic receiver without
+    /// driving a full agent loop. Lives next to the async task tracker
+    /// surface because step-3 integration tests need it to assert
+    /// mid-turn delivery from the `complete_async_task` path.
+    fn injection_senders_ref(
+        &self,
+    ) -> &dashmap::DashMap<
+        (AgentId, SessionId),
+        tokio::sync::mpsc::Sender<librefang_types::tool::AgentLoopSignal>,
+    >;
 }
 
 #[async_trait]
@@ -1345,5 +1391,33 @@ impl KernelApi for LibreFangKernel {
     }
     fn set_self_handle(self: Arc<Self>) {
         LibreFangKernel::set_self_handle(&self);
+    }
+
+    // -- Async task tracker (#4983) --
+    fn register_async_task(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        kind: librefang_types::task::TaskKind,
+    ) -> librefang_types::task::TaskHandle {
+        LibreFangKernel::register_async_task(self, agent_id, session_id, kind)
+    }
+    async fn complete_async_task(
+        &self,
+        task_id: librefang_types::task::TaskId,
+        status: librefang_types::task::TaskStatus,
+    ) -> KernelResult<bool> {
+        LibreFangKernel::complete_async_task(self, task_id, status).await
+    }
+    fn pending_async_task_count(&self) -> usize {
+        LibreFangKernel::pending_async_task_count(self)
+    }
+    fn injection_senders_ref(
+        &self,
+    ) -> &dashmap::DashMap<
+        (AgentId, SessionId),
+        tokio::sync::mpsc::Sender<librefang_types::tool::AgentLoopSignal>,
+    > {
+        <Self as crate::EventSubsystemApi>::injection_senders_ref(self)
     }
 }

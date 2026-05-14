@@ -146,7 +146,15 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
         // when both pieces of caller context were supplied AND parse
         // successfully; otherwise spawn the workflow without tracking so
         // historical cron / trigger callers keep working unchanged.
-        let task_id = match (caller_agent_id, caller_session_id) {
+        //
+        // Step 3 additionally pulls the caller agent's `[async_tasks]`
+        // manifest block while we have the `AgentId` so the spawned
+        // task below can honour `default_timeout_secs` /
+        // `notify_on_timeout`. Cached here (rather than re-fetched in
+        // the spawned closure) because the agent registry lookup is a
+        // sync DashMap op and we want it to fail fast at registration
+        // time if the agent disappears mid-flight.
+        let (task_id, async_cfg) = match (caller_agent_id, caller_session_id) {
             (Some(aid), Some(sid)) => match (aid.parse::<AgentId>(), sid.parse::<SessionId>()) {
                 (Ok(agent_id), Ok(session_id)) => {
                     let handle = self.register_async_task(
@@ -154,7 +162,13 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
                         session_id,
                         TaskKind::Workflow { run_id },
                     );
-                    Some(handle.id)
+                    let cfg = self
+                        .agents
+                        .registry
+                        .get(agent_id)
+                        .map(|entry| entry.manifest.async_tasks.clone())
+                        .unwrap_or_default();
+                    (Some(handle.id), Some(cfg))
                 }
                 _ => {
                     tracing::debug!(
@@ -163,10 +177,10 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
                         run_id = %run_id,
                         "start_workflow_async_tracked: caller context failed to parse; skipping registry registration"
                     );
-                    None
+                    (None, None)
                 }
             },
-            _ => None,
+            _ => (None, None),
         };
 
         // Spawn execution in the background via self_handle (same pattern as
@@ -237,42 +251,83 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
                     .map_err(|e| format!("{e}"))
                 }
             };
+            // Step 3 (#4983): honour the caller's `[async_tasks]
+            // default_timeout_secs` so a workflow that hangs gets
+            // cancelled and surfaced to the agent as a Failed
+            // completion. None → run unbounded (step-1 design
+            // decision: timeout ownership is agent-side).
+            let timeout = async_cfg
+                .as_ref()
+                .and_then(|c| c.default_timeout_secs)
+                .map(std::time::Duration::from_secs);
+            let notify_on_timeout = async_cfg
+                .as_ref()
+                .map(|c| c.notify_on_timeout)
+                .unwrap_or(true);
+
             // Don't swallow the result — without a log the agent that
             // called workflow_start has no way to learn the run failed
             // except by polling get_workflow_run for the Failed state.
-            let exec_result = kernel_arc
+            let exec_fut = kernel_arc
                 .workflows
                 .engine
-                .execute_run(run_id, resolver, send_message)
-                .await;
+                .execute_run(run_id, resolver, send_message);
+            let exec_result: Result<Result<String, String>, ()> = match timeout {
+                Some(d) => match tokio::time::timeout(d, exec_fut).await {
+                    Ok(inner) => Ok(inner),
+                    Err(_elapsed) => Err(()),
+                },
+                None => Ok(exec_fut.await),
+            };
 
-            // Async task tracker delivery (#4983 step 2). Only emit a
+            // Async task tracker delivery (#4983 step 2/3). Only emit a
             // completion event if a registration happened above.
             if let Some(task_id) = task_id {
                 let terminal_status = match &exec_result {
-                    Ok(output) => TaskStatus::Completed(serde_json::json!({
+                    Ok(Ok(output)) => TaskStatus::Completed(serde_json::json!({
                         "run_id": run_id.0.to_string(),
                         "output": output,
                     })),
-                    Err(e) => TaskStatus::Failed(format!("workflow run failed: {e}")),
+                    Ok(Err(e)) => TaskStatus::Failed(format!("workflow run failed: {e}")),
+                    Err(()) => {
+                        let secs = timeout.map(|d| d.as_secs()).unwrap_or(0);
+                        TaskStatus::Failed(format!(
+                            "workflow run timed out after {secs}s (agent-side default_timeout_secs)"
+                        ))
+                    }
                 };
-                if let Err(err) = kernel_arc
-                    .complete_async_task(task_id, terminal_status)
-                    .await
-                {
-                    tracing::warn!(
-                        task_id = %task_id,
-                        run_id = %run_id,
-                        "Failed to inject TaskCompletionEvent: {err}"
-                    );
+
+                // `notify_on_timeout = false` suppresses ONLY the
+                // timeout-specific Failed event; success / non-timeout
+                // failures still surface as today. Step-3 design
+                // decision: operationally meaningful only for batch
+                // agents whose sessions are never read by a human.
+                let suppress = matches!(exec_result, Err(())) && !notify_on_timeout;
+                if !suppress {
+                    if let Err(err) = kernel_arc
+                        .complete_async_task(task_id, terminal_status)
+                        .await
+                    {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            run_id = %run_id,
+                            "Failed to inject TaskCompletionEvent: {err}"
+                        );
+                    }
                 }
             }
 
-            if let Err(e) = exec_result {
-                tracing::warn!(
+            match &exec_result {
+                Ok(Err(e)) => tracing::warn!(
                     run_id = %run_id,
                     "Async workflow execution failed: {e}"
-                );
+                ),
+                Err(()) => tracing::warn!(
+                    run_id = %run_id,
+                    "Async workflow execution timed out after {}s",
+                    timeout.map(|d| d.as_secs()).unwrap_or(0)
+                ),
+                Ok(Ok(_)) => {}
             }
         });
 

@@ -186,14 +186,15 @@ async fn complete_delegation_task_injects_signal_with_delegation_kind() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn complete_with_no_attached_receiver_still_removes_entry() {
+    // Boot WITHOUT calling `set_self_handle` — emulates a kernel
+    // mid-boot where the Arc has not been wrapped yet. The wake-idle
+    // path in step 3 needs `self_handle` to spawn a turn; when it is
+    // unset, the kernel returns `Ok(false)` (no turn spawned) and the
+    // entry is still removed (delete-on-delivery contract from step 1).
     let kernel = LibreFangKernel::boot_with_config(test_config("idle-cleanup")).unwrap();
     let agent_id = AgentId(Uuid::new_v4());
     let session_id = SessionId(Uuid::new_v4());
 
-    // Note: no `attach_injection_receiver` — simulates the idle path
-    // (no agent loop currently active for this session). Step 3 will
-    // wake the session in this case; step 2 just confirms cleanup is
-    // performed unconditionally.
     let handle = kernel.register_async_task(
         agent_id,
         session_id,
@@ -209,12 +210,53 @@ async fn complete_with_no_attached_receiver_still_removes_entry() {
         .expect("complete_async_task ok");
     assert!(
         !delivered,
-        "no live receiver attached → delivered should be false"
+        "self_handle unset → wake-idle cannot spawn a turn"
     );
 
     // Entry was still removed (delete-on-delivery contract).
     assert_eq!(kernel.pending_async_task_count(), 0);
     assert!(kernel.lookup_async_task(handle.id).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wake_idle_path_returns_true_when_self_handle_is_set() {
+    // With `set_self_handle` called (the runtime steady-state), the
+    // wake-idle path acquires the kernel Arc and spawns a `tokio::task`
+    // that drives a turn via `send_message_full`. The function itself
+    // returns `Ok(true)` regardless of the spawned turn's outcome —
+    // failure to actually drive the agent (e.g. the AgentId isn't
+    // registered) is logged but does not block the workflow that
+    // called `complete_async_task`. The agent-loop-side proof that
+    // the spawned turn lands properly lives in the `librefang-api`
+    // integration tests exercising the full `TestServer` path.
+    use std::sync::Arc;
+
+    let kernel =
+        Arc::new(LibreFangKernel::boot_with_config(test_config("idle-wake-spawn")).unwrap());
+    kernel.set_self_handle();
+
+    let agent_id = AgentId(Uuid::new_v4());
+    let session_id = SessionId(Uuid::new_v4());
+
+    let handle = kernel.register_async_task(
+        agent_id,
+        session_id,
+        TaskKind::Workflow {
+            run_id: WorkflowRunId(Uuid::new_v4()),
+        },
+    );
+
+    let delivered = kernel
+        .complete_async_task(handle.id, TaskStatus::Completed(json!({"output": "done"})))
+        .await
+        .expect("complete_async_task ok");
+    assert!(
+        delivered,
+        "wake-idle path with self_handle set spawns a turn and reports delivered=true"
+    );
+    // Registry entry still removed even though the spawned turn may
+    // fail downstream because the AgentId isn't registered.
+    assert_eq!(kernel.pending_async_task_count(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
