@@ -1143,13 +1143,19 @@ impl CompactionOverrides {
         &self,
         global: &crate::config::CompactionTomlConfig,
     ) -> crate::config::CompactionTomlConfig {
+        // Clamp ratio overrides into a sane window. Values outside [0.0, 1.0]
+        // either disable compaction (>1.0 → never triggers) or fire on every
+        // message (≤0.0). Either way the operator typed a typo, not a real
+        // policy — fall back to a clamped value rather than misbehaving.
+        let token_threshold_ratio = self
+            .token_threshold_ratio
+            .map(|r| r.clamp(0.0, 1.0))
+            .unwrap_or(global.token_threshold_ratio);
         crate::config::CompactionTomlConfig {
             threshold_messages: self.threshold_messages.unwrap_or(global.threshold_messages),
             keep_recent: self.keep_recent.unwrap_or(global.keep_recent),
             max_summary_tokens: self.max_summary_tokens.unwrap_or(global.max_summary_tokens),
-            token_threshold_ratio: self
-                .token_threshold_ratio
-                .unwrap_or(global.token_threshold_ratio),
+            token_threshold_ratio,
             max_chunk_chars: self.max_chunk_chars.unwrap_or(global.max_chunk_chars),
             max_retries: self.max_retries.unwrap_or(global.max_retries),
         }

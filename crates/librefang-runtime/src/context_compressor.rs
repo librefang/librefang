@@ -91,10 +91,15 @@ impl CompressionConfig {
     /// [`CompactionOverrides::resolve`].
     pub fn from_compaction_toml(toml: &librefang_types::config::CompactionTomlConfig) -> Self {
         let defaults = Self::default();
+        // `as u32` would silently truncate values > u32::MAX. Fall back to
+        // the compiled default rather than smuggling a wrapped value into
+        // the summariser budget.
+        let max_summary_tokens =
+            u32::try_from(toml.max_summary_tokens).unwrap_or(defaults.max_summary_tokens);
         Self {
             threshold_ratio: toml.token_threshold_ratio,
             keep_recent: toml.keep_recent,
-            max_summary_tokens: toml.max_summary_tokens as u32,
+            max_summary_tokens,
             protect_head: defaults.protect_head,
             max_iterations: defaults.max_iterations,
         }
