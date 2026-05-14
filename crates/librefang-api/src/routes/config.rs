@@ -2167,6 +2167,7 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         {"key": "parallel_tools", "struct_field": "parallel_tools"},
         {"key": "tool_results", "struct_field": "tool_results"},
         {"key": "compaction", "struct_field": "compaction"},
+        {"key": "gateway_compression", "struct_field": "gateway_compression"},
         {"key": "azure_openai", "struct_field": "azure_openai"},
         {"key": "proxy", "struct_field": "proxy"},
         // Tool-exec backend selection (local / docker / daytona / ssh).

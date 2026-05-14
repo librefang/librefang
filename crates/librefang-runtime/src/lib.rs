@@ -29,6 +29,7 @@ pub mod context_engine;
 pub mod context_overflow;
 pub use librefang_runtime_oauth::copilot_oauth;
 pub mod docker_sandbox;
+pub mod gateway_compression;
 pub use librefang_llm_drivers::drivers;
 pub mod embedding;
 pub mod file_read_tracker;
