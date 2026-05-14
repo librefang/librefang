@@ -63,7 +63,6 @@ import {
   useAgentChannels,
   useTools,
 } from "../lib/queries/agents";
-import { useSkills } from "../lib/queries/skills";
 import { useMcpServers } from "../lib/queries/mcp";
 import {
   useAgentTemplateToml,
