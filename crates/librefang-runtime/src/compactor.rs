@@ -79,6 +79,23 @@ impl CompactionConfig {
             ..Self::default()
         }
     }
+
+    /// Build a `CompactionConfig` by merging an optional per-agent
+    /// override on top of the kernel-global `CompactionTomlConfig`
+    /// (#4976). When `overrides` is `None` (or empty) this is identical
+    /// to [`Self::from_toml`].
+    ///
+    /// Resolution order: per-agent override > global TOML > compiled
+    /// defaults from `CompactionTomlConfig::default()`.
+    pub fn from_toml_with_overrides(
+        global: &librefang_types::config::CompactionTomlConfig,
+        overrides: Option<&librefang_types::agent::CompactionOverrides>,
+    ) -> Self {
+        match overrides {
+            Some(o) if !o.is_empty() => Self::from_toml(&o.resolve(global)),
+            _ => Self::from_toml(global),
+        }
+    }
 }
 
 /// Result of a compaction operation.
@@ -1819,5 +1836,57 @@ mod tests {
         }];
         let text = build_conversation_text(&messages, &config);
         assert!(text.contains(short_result));
+    }
+
+    // ----- #4976: per-agent compaction override resolution -----
+
+    #[test]
+    fn from_toml_with_overrides_none_matches_from_toml() {
+        let global = librefang_types::config::CompactionTomlConfig {
+            threshold_messages: 42,
+            keep_recent: 7,
+            max_summary_tokens: 2048,
+            token_threshold_ratio: 0.6,
+            max_chunk_chars: 90_000,
+            max_retries: 4,
+        };
+        let merged = CompactionConfig::from_toml_with_overrides(&global, None);
+        let baseline = CompactionConfig::from_toml(&global);
+        assert_eq!(merged.threshold, baseline.threshold);
+        assert_eq!(merged.keep_recent, baseline.keep_recent);
+        assert_eq!(merged.max_summary_tokens, baseline.max_summary_tokens);
+        assert_eq!(merged.max_chunk_chars, baseline.max_chunk_chars);
+        assert_eq!(merged.max_retries, baseline.max_retries);
+        assert!(
+            (merged.token_threshold_ratio - baseline.token_threshold_ratio).abs() < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn from_toml_with_overrides_applies_partial_override() {
+        let global = librefang_types::config::CompactionTomlConfig::default();
+        let overrides = librefang_types::agent::CompactionOverrides {
+            keep_recent: Some(25),
+            max_summary_tokens: Some(8192),
+            ..Default::default()
+        };
+        let merged = CompactionConfig::from_toml_with_overrides(&global, Some(&overrides));
+        assert_eq!(merged.keep_recent, 25);
+        assert_eq!(merged.max_summary_tokens, 8192);
+        // Falls through to global:
+        assert_eq!(merged.threshold, global.threshold_messages);
+        assert_eq!(merged.max_retries, global.max_retries);
+    }
+
+    #[test]
+    fn from_toml_with_overrides_empty_struct_is_passthrough() {
+        // Some(&overrides) where every field is None must behave like None.
+        let global = librefang_types::config::CompactionTomlConfig::default();
+        let overrides = librefang_types::agent::CompactionOverrides::default();
+        let merged = CompactionConfig::from_toml_with_overrides(&global, Some(&overrides));
+        let baseline = CompactionConfig::from_toml(&global);
+        assert_eq!(merged.threshold, baseline.threshold);
+        assert_eq!(merged.keep_recent, baseline.keep_recent);
+        assert_eq!(merged.max_summary_tokens, baseline.max_summary_tokens);
     }
 }

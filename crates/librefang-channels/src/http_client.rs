@@ -125,7 +125,10 @@ pub fn new_proxied_client(proxy_url: Option<&str>) -> Result<reqwest::Client, Ch
 ///
 /// Called by `SlackAdapter::start` (Socket Mode), `DiscordAdapter::start`
 /// (Gateway), and `MattermostAdapter::start` (WebSocket). Telegram is
-/// pure REST long-polling and does not call this.
+/// pure REST long-polling and does not call this. The `#[allow]` keeps it
+/// available when all three WS-using channel features happen to be off
+/// (the lib still compiles without forcing a `cfg(any(...))` here).
+#[allow(dead_code)]
 pub(crate) fn warn_ws_proxy_bypass(adapter: &str) {
     tracing::warn!(
         "{adapter}: proxy is configured but the long-lived WebSocket bypasses it; \
