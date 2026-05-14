@@ -42,7 +42,9 @@ impl Default for MarketplaceConfig {
     fn default() -> Self {
         Self {
             registry_url: "https://api.github.com".to_string(),
-            github_org: "librefang-skills".to_string(),
+            // BossFang fork: skills marketplace lives under @GQAdonis on GitHub.
+            // Callers that need a different org override via `MarketplaceConfig { github_org, .. }`.
+            github_org: "GQAdonis".to_string(),
         }
     }
 }
@@ -614,13 +616,13 @@ mod tests {
     fn test_default_config() {
         let config = MarketplaceConfig::default();
         assert!(config.registry_url.contains("github"));
-        assert_eq!(config.github_org, "librefang-skills");
+        assert_eq!(config.github_org, "GQAdonis");
     }
 
     #[test]
     fn test_client_creation() {
         let client = MarketplaceClient::new(MarketplaceConfig::default());
-        assert_eq!(client.config.github_org, "librefang-skills");
+        assert_eq!(client.config.github_org, "GQAdonis");
     }
 
     #[test]
@@ -643,7 +645,7 @@ mod tests {
             client.config.github_org
         );
 
-        assert!(url.contains("q=social%26media%20tools+org:librefang-skills"));
+        assert!(url.contains("q=social%26media%20tools+org:GQAdonis"));
         assert!(!url.contains("social&media tools"));
     }
 

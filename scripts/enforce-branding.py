@@ -3,13 +3,19 @@
 enforce-branding.py — Restore BossFang ember palette after upstream merges.
 
 Usage:
-    python3 scripts/enforce-branding.py
+    python3 scripts/enforce-branding.py            # apply replacements
+    python3 scripts/enforce-branding.py --check    # read-only audit, exit 1 if any upstream token remains
 
 What it does:
-  Scans every *.ts, *.tsx, *.css, *.html, and *.json file under
-  crates/librefang-api/dashboard/src/ and crates/librefang-api/static/ for
+  Scans every *.ts, *.tsx, *.css, *.html, *.json, and *.rs file under
+  crates/librefang-api/dashboard/src/, crates/librefang-api/static/,
+  crates/librefang-desktop/frontend/, and crates/librefang-desktop/src/ for
   upstream LibreFang sky-blue brand tokens and replaces them with BossFang
   ember equivalents. Safe to run multiple times (idempotent).
+
+  --check mode performs the same scan without writing — exits 0 if everything
+  is clean, exits 1 if any upstream token survives. Designed for the pre-push
+  hook so a forgotten merge can't ship.
 
 After running, review the diff with:
     git diff
@@ -48,8 +54,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCAN_DIRS = [
     REPO_ROOT / "crates/librefang-api/dashboard/src",
     REPO_ROOT / "crates/librefang-api/static",
+    REPO_ROOT / "crates/librefang-desktop/frontend",
+    REPO_ROOT / "crates/librefang-desktop/src",
 ]
-EXTENSIONS = {".ts", ".tsx", ".css", ".html", ".json"}
+EXTENSIONS = {".ts", ".tsx", ".css", ".html", ".json", ".rs"}
 
 # ── Replacement table ─────────────────────────────────────────────────────────
 #
@@ -107,6 +115,15 @@ def enforce_file(path: Path) -> bool:
     return True
 
 
+def audit_file(path: Path) -> list[str]:
+    """Read-only scan. Returns the upstream-token LHS strings found in *path*."""
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, PermissionError):
+        return []
+    return [old for old, _ in REPLACEMENTS if old in content]
+
+
 def scan_dir(root: Path) -> list[Path]:
     if not root.exists():
         return []
@@ -114,7 +131,8 @@ def scan_dir(root: Path) -> list[Path]:
 
 
 def main() -> int:
-    changed: list[Path] = []
+    check_mode = "--check" in sys.argv[1:]
+    changed_or_offending: list[tuple[Path, list[str]]] = []
 
     for scan_root in SCAN_DIRS:
         label = scan_root.relative_to(REPO_ROOT)
@@ -122,17 +140,37 @@ def main() -> int:
         if not files:
             print(f"[enforce-branding] {label}: no files found — skipping")
             continue
-        print(f"[enforce-branding] scanning {label} ({len(files)} files) …")
+        verb = "auditing" if check_mode else "scanning"
+        print(f"[enforce-branding] {verb} {label} ({len(files)} files) …")
         for f in files:
-            if enforce_file(f):
-                changed.append(f)
+            if check_mode:
+                hits = audit_file(f)
+                if hits:
+                    changed_or_offending.append((f, hits))
+            else:
+                if enforce_file(f):
+                    changed_or_offending.append((f, []))
 
-    if not changed:
-        print("[enforce-branding] ✓ all brand tokens already correct — nothing changed")
+    if not changed_or_offending:
+        if check_mode:
+            print("[enforce-branding] ✓ --check: no upstream tokens detected")
+        else:
+            print("[enforce-branding] ✓ all brand tokens already correct — nothing changed")
         return 0
 
-    print(f"\n[enforce-branding] ✓ {len(changed)} file(s) patched:")
-    for p in changed:
+    if check_mode:
+        print(f"\n[enforce-branding] ✗ --check: {len(changed_or_offending)} file(s) contain upstream tokens:")
+        for p, hits in changed_or_offending:
+            rel = p.relative_to(REPO_ROOT)
+            print(f"  {rel}")
+            for h in hits:
+                print(f"    found: {h!r}")
+        print("\nRun `python3 scripts/enforce-branding.py` (without --check) to fix automatically.")
+        print("Anything left after a fix run is a manual case (e.g. new SVG fang glyph).")
+        return 1
+
+    print(f"\n[enforce-branding] ✓ {len(changed_or_offending)} file(s) patched:")
+    for p, _ in changed_or_offending:
         print(f"  {p.relative_to(REPO_ROOT)}")
     print("\nReview with:  git diff")
     print("Commit with:  git add -p && git commit -m 'chore(dashboard): enforce BossFang brand tokens'")

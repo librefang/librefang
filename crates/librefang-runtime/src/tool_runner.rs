@@ -1271,6 +1271,96 @@ pub async fn execute_tool_raw(
                 }
             }
         },
+        "web_fetch_to_file" => {
+            // Taint scans on URL / headers / body mirror the `web_fetch`
+            // arm exactly — same TaintSink::net_fetch() sink, same outbound
+            // semantics. Writing to disk does not soften the outbound
+            // exfiltration risk because the URL itself still leaves the
+            // host (and the response is persisted, not just transient).
+            let Some(url) = input["url"].as_str() else {
+                return ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content: "Missing 'url' parameter".to_string(),
+                    is_error: true,
+                    ..Default::default()
+                };
+            };
+            if let Some(violation) = check_taint_net_fetch(url) {
+                return ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content: format!("Taint violation: {violation}"),
+                    is_error: true,
+                    ..Default::default()
+                };
+            }
+            if let Some(body_text) = input["body"].as_str() {
+                if let Some(violation) =
+                    check_taint_outbound_text(body_text, &TaintSink::net_fetch())
+                {
+                    return ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!("Taint violation: {violation}"),
+                        is_error: true,
+                        ..Default::default()
+                    };
+                }
+            }
+            if let Some(headers_map) = input.get("headers").and_then(|v| v.as_object()) {
+                for (name, value) in headers_map {
+                    if let Some(vs) = value.as_str() {
+                        if let Some(violation) =
+                            check_taint_outbound_header(name, vs, &TaintSink::net_fetch())
+                        {
+                            return ToolResult {
+                                tool_use_id: tool_use_id.to_string(),
+                                content: format!("Taint violation: {violation}"),
+                                is_error: true,
+                                ..Default::default()
+                            };
+                        }
+                    }
+                }
+            }
+
+            // dest_path pre-flight checks mirror the `file_write` arm:
+            // reject writes that land in a read-only named workspace, and
+            // reject absolute paths that escape every allowed prefix or
+            // contain `..` components.
+            if let (Some(k), Some(agent_id)) = (kernel, caller_agent_id) {
+                let raw = input["dest_path"].as_str().unwrap_or("");
+                if Path::new(raw).is_absolute() {
+                    let ro = k.readonly_workspace_prefixes(agent_id);
+                    if ro.iter().any(|prefix| Path::new(raw).starts_with(prefix)) {
+                        return ToolResult {
+                            tool_use_id: tool_use_id.to_string(),
+                            content: format!(
+                                "Write denied: '{}' is in a read-only named workspace",
+                                raw
+                            ),
+                            is_error: true,
+                            ..Default::default()
+                        };
+                    }
+                }
+            }
+            let writable = named_ws_prefixes_writable(*kernel, *caller_agent_id);
+            if let Some(violation) = check_absolute_path_inside_workspace(
+                input.get("dest_path").and_then(|v| v.as_str()),
+                *workspace_root,
+                &writable,
+            ) {
+                return ToolResult::error(tool_use_id.to_string(), violation);
+            }
+
+            let extra_refs: Vec<&Path> = writable.iter().map(|p| p.as_path()).collect();
+            crate::web_fetch_to_file::tool_web_fetch_to_file(
+                input,
+                *web_ctx,
+                *workspace_root,
+                &extra_refs,
+            )
+            .await
+        }
         "web_search" => match input["query"].as_str() {
             None => Err("Missing 'query' parameter".to_string()),
             Some(query) => {
@@ -1690,7 +1780,15 @@ pub async fn execute_tool_raw(
         "channel_send" => {
             let extra = named_ws_prefixes(*kernel, *caller_agent_id);
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
-            tool_channel_send(input, *kernel, *workspace_root, *sender_id, &extra_refs).await
+            tool_channel_send(
+                input,
+                *kernel,
+                *workspace_root,
+                *sender_id,
+                *caller_agent_id,
+                &extra_refs,
+            )
+            .await
         }
 
         // Persistent process tools
@@ -2331,6 +2429,27 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "body": { "type": "string", "description": "Request body for POST/PUT/PATCH" }
                 },
                 "required": ["url"]
+            }),
+        },
+        ToolDefinition {
+            name: "web_fetch_to_file".to_string(),
+            description: "Fetch a URL and stream the response body straight into a workspace file. \
+Same SSRF protection, DNS pinning, and redirect re-validation as web_fetch, but the body \
+never enters the agent context — only a short summary (path, byte count, sha256, content-type, \
+status) is returned. Use this when downloading documents, papers, or other artifacts for later \
+use instead of web_fetch + file_write (which round-trips the entire body through the model)."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "The URL to fetch (http/https only)" },
+                    "dest_path": { "type": "string", "description": "Workspace-relative or absolute path to write to. Absolute paths must stay inside the agent workspace or a read-write named workspace." },
+                    "method": { "type": "string", "enum": ["GET","POST","PUT","PATCH","DELETE"], "description": "HTTP method (default: GET)" },
+                    "headers": { "type": "object", "description": "Custom HTTP headers as key-value pairs" },
+                    "body": { "type": "string", "description": "Request body for POST/PUT/PATCH" },
+                    "max_bytes": { "type": "integer", "description": "Optional per-call cap; clamped down to the configured max_file_bytes" }
+                },
+                "required": ["url", "dest_path"]
             }),
         },
         ToolDefinition {
@@ -5485,11 +5604,92 @@ fn parse_poll_options(raw: Option<&serde_json::Value>) -> Result<Vec<String>, St
     Ok(out)
 }
 
+/// Mirror a successfully-sent `channel_send` message into the inbound-routing
+/// session of the channel-owning agent so it has context for the user's reply.
+///
+/// This is **best-effort**: any failure is logged at `warn!` level and does NOT
+/// propagate — the platform send already succeeded.
+///
+/// Decision summary (issue #4824):
+/// 1. Mirror unconditionally — even when caller == channel owner.
+/// 2. Role = `user` with a JSON envelope `{"mirror_from":"<agent>","body":"<text>"}` so
+///    the block is visible in prompt context without polluting the system role.
+///    JSON escaping prevents prompt-injection via crafted body content.
+/// 3. Mirror on partial-failure (platform delivery succeeded, ack lost).
+/// 4. Written directly to session storage; no adapter re-emit.
+async fn mirror_channel_send_to_session(
+    kh: &Arc<dyn KernelHandle>,
+    caller_agent_id: Option<&str>,
+    channel: &str,
+    recipient: &str,
+    body: &str,
+) {
+    use librefang_types::agent::SessionId;
+    use librefang_types::message::{Message, MessageContent, Role};
+
+    let owner_id = kh.resolve_channel_owner(channel, recipient);
+
+    let owner = match owner_id {
+        Some(id) => id,
+        None => {
+            // No channel-owning agent configured — nothing to mirror.
+            tracing::debug!(
+                channel,
+                recipient,
+                "channel_send mirror: no channel owner agent found, skipping"
+            );
+            return;
+        }
+    };
+
+    // session_id mirrors the inbound-routing path in messaging.rs:
+    // `SessionId::for_sender_scope(owner, channel, Some(recipient))`
+    let session_id = SessionId::for_sender_scope(owner, channel, Some(recipient));
+
+    // LOW: skip the mirror entirely when the caller is anonymous — an
+    // "unknown" sender carries no useful context and could mislead the agent.
+    let from = match caller_agent_id {
+        Some(id) => id,
+        None => {
+            tracing::debug!(
+                channel,
+                recipient,
+                "channel_send mirror: caller_agent_id is None, skipping mirror"
+            );
+            return;
+        }
+    };
+
+    let sent_at = chrono::Utc::now();
+
+    // Stable data contract (#4824): JSON envelope prevents prompt-injection
+    // via crafted body text (e.g. `]: <injected>` or embedded newlines).
+    // Both fields are JSON-string-escaped by serde_json::to_string.
+    let mirror_text = format!(
+        "{{\"mirror_from\":{},\"body\":{}}}",
+        serde_json::to_string(from).unwrap_or_else(|_| "\"unknown\"".to_string()),
+        serde_json::to_string(body).unwrap_or_else(|_| "\"\"".to_string()),
+    );
+
+    let msg = Message {
+        role: Role::User,
+        content: MessageContent::Text(mirror_text),
+        pinned: false,
+        timestamp: Some(sent_at),
+    };
+
+    // `append_to_session` uses `block_in_place` internally so it is safe
+    // to call directly from an async context. Mirror is best-effort by
+    // design (#4824 decision 3) — errors are logged inside the impl.
+    kh.append_to_session(session_id, owner, msg);
+}
+
 async fn tool_channel_send(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     workspace_root: Option<&Path>,
     sender_id: Option<&str>,
+    caller_agent_id: Option<&str>,
     additional_roots: &[&Path],
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
@@ -5530,12 +5730,17 @@ async fn tool_channel_send(
                 return Err(violation);
             }
         }
-        return kh
+        let result = kh
             .send_channel_media(
                 &channel, recipient, "image", url, caption, None, thread_id, account_id,
             )
             .await
             .map_err(|e| e.to_string());
+        if result.is_ok() {
+            let body = caption.unwrap_or(url);
+            mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, body).await;
+        }
+        return result;
     }
 
     if let Some(url) = file_url {
@@ -5546,12 +5751,17 @@ async fn tool_channel_send(
                 return Err(violation);
             }
         }
-        return kh
+        let result = kh
             .send_channel_media(
                 &channel, recipient, "file", url, caption, filename, thread_id, account_id,
             )
             .await
             .map_err(|e| e.to_string());
+        if result.is_ok() {
+            let body = caption.unwrap_or(url);
+            mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, body).await;
+        }
+        return result;
     }
 
     // Local file attachment: read from disk and send as FileData. Honor named
@@ -5609,7 +5819,7 @@ async fn tool_channel_send(
         // `Bytes::from(Vec<u8>)` is O(1) — it takes ownership of the
         // Vec's allocation without copying. Subsequent clones (retry,
         // metering wrappers, fan-out) become refcount bumps. See #3553.
-        return kh
+        let result = kh
             .send_channel_file_data(
                 &channel,
                 recipient,
@@ -5621,6 +5831,11 @@ async fn tool_channel_send(
             )
             .await
             .map_err(|e| e.to_string());
+        if result.is_ok() {
+            mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, &filename)
+                .await;
+        }
+        return result;
     }
 
     if let Some(poll_question) = input.get("poll_question").and_then(|v| v.as_str()) {
@@ -5692,6 +5907,9 @@ async fn tool_channel_send(
         .await
         .map_err(|e| e.to_string())?;
 
+        mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, poll_question)
+            .await;
+
         let mut result = format!("Poll sent to {recipient} on {channel}: {poll_question}");
         if is_quiz {
             result.push_str(" (quiz mode)");
@@ -5731,9 +5949,15 @@ async fn tool_channel_send(
         return Err(violation);
     }
 
-    kh.send_channel_message(&channel, recipient, &final_message, thread_id, account_id)
+    let result = kh
+        .send_channel_message(&channel, recipient, &final_message, thread_id, account_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    if result.is_ok() {
+        mirror_channel_send_to_session(kh, caller_agent_id, &channel, recipient, &final_message)
+            .await;
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -7901,7 +8125,7 @@ mod tests {
             "recipient": "@user",
             "message": "here is the api_key=sk-abcdefghijklmnop",
         });
-        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), &[])
+        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), None, &[])
             .await
             .expect_err("channel_send must reject tainted message");
         assert!(
@@ -7922,7 +8146,7 @@ mod tests {
             "image_url": "https://example.com/cat.png",
             "message": "see attached. token=sk-abcdefghijklmnop",
         });
-        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), &[])
+        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), None, &[])
             .await
             .expect_err("image caption must be sink-checked");
         assert!(
@@ -7943,7 +8167,7 @@ mod tests {
             "poll_question": "guess my api_key=sk-abcdefghijklmnop",
             "poll_options": ["yes", "no"],
         });
-        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), &[])
+        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), None, &[])
             .await
             .expect_err("poll question must be sink-checked");
         assert!(
@@ -7965,10 +8189,17 @@ mod tests {
             "message": "Hello from auto-reply!",
         });
         // This should NOT error with "Missing recipient" because sender_id is provided
-        // It will error with "Channel file data send not available" because the mock kernel
+        // It will error with "Channel send not available" because the mock kernel
         // doesn't implement channel_send, but that's expected
-        let result =
-            tool_channel_send(&input, Some(&kernel), None, Some("12345_telegram"), &[]).await;
+        let result = tool_channel_send(
+            &input,
+            Some(&kernel),
+            None,
+            Some("12345_telegram"),
+            None,
+            &[],
+        )
+        .await;
         // The error should NOT be about missing recipient
         let err_msg = result.unwrap_err();
         assert!(
@@ -7989,7 +8220,7 @@ mod tests {
             // recipient intentionally omitted
             "message": "Hello!",
         });
-        let err = tool_channel_send(&input, Some(&kernel), None, None, &[])
+        let err = tool_channel_send(&input, Some(&kernel), None, None, None, &[])
             .await
             .expect_err("channel_send must require recipient without sender_id");
         assert!(
@@ -7997,6 +8228,359 @@ mod tests {
             "Expected missing recipient error, got: {err}"
         );
     }
+
+    // ── channel_send mirror tests ────────────────────────────────────────────
+
+    /// A minimal kernel for mirror tests.
+    ///
+    /// - `send_channel_message` always succeeds (returns Ok).
+    /// - `resolve_channel_owner` returns the configured `owner_id`.
+    /// - `append_to_session` records calls into `appended`.
+    /// - `fail_append` makes `append_to_session` simulate a save failure (warn path).
+    struct MirrorKernel {
+        owner_id: Option<librefang_types::agent::AgentId>,
+        appended: Arc<std::sync::Mutex<Vec<librefang_types::message::Message>>>,
+        fail_append: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentControl for MirrorKernel {
+        async fn spawn_agent(
+            &self,
+            _manifest_toml: &str,
+            _parent_id: Option<&str>,
+        ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        async fn send_to_agent(
+            &self,
+            _agent_id: &str,
+            _message: &str,
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        fn list_agents(&self) -> Vec<AgentInfo> {
+            vec![]
+        }
+        fn kill_agent(
+            &self,
+            _agent_id: &str,
+        ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            vec![]
+        }
+    }
+    impl MemoryAccess for MirrorKernel {
+        fn memory_store(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _peer_id: Option<&str>,
+        ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        fn memory_recall(
+            &self,
+            _key: &str,
+            _peer_id: Option<&str>,
+        ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        fn memory_list(
+            &self,
+            _peer_id: Option<&str>,
+        ) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+    }
+    impl WikiAccess for MirrorKernel {}
+    #[async_trait::async_trait]
+    impl KnowledgeGraph for MirrorKernel {
+        async fn knowledge_add_entity(
+            &self,
+            _entity: &librefang_types::memory::Entity,
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        async fn knowledge_add_relation(
+            &self,
+            _relation: &librefang_types::memory::Relation,
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        async fn knowledge_query(
+            &self,
+            _pattern: librefang_types::memory::GraphPattern,
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError>
+        {
+            Ok(vec![])
+        }
+    }
+    #[async_trait::async_trait]
+    impl TaskQueue for MirrorKernel {
+        async fn task_post(
+            &self,
+            _title: &str,
+            _description: &str,
+            _assigned_to: Option<&str>,
+            _created_by: Option<&str>,
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        async fn task_claim(
+            &self,
+            _agent_id: &str,
+        ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+            Ok(None)
+        }
+        async fn task_complete(
+            &self,
+            _agent_id: &str,
+            _task_id: &str,
+            _result: &str,
+        ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
+        }
+        async fn task_list(
+            &self,
+            _status: Option<&str>,
+        ) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+            Ok(vec![])
+        }
+        async fn task_delete(
+            &self,
+            _task_id: &str,
+        ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+            Ok(false)
+        }
+        async fn task_retry(
+            &self,
+            _task_id: &str,
+        ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+            Ok(false)
+        }
+        async fn task_get(
+            &self,
+            _task_id: &str,
+        ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+            Ok(None)
+        }
+        async fn task_update_status(
+            &self,
+            _task_id: &str,
+            _new_status: &str,
+        ) -> Result<bool, librefang_kernel_handle::KernelOpError> {
+            Ok(false)
+        }
+    }
+    impl ApprovalGate for MirrorKernel {}
+    impl CronControl for MirrorKernel {}
+    impl HandsControl for MirrorKernel {}
+    impl A2ARegistry for MirrorKernel {}
+    impl PromptStore for MirrorKernel {}
+    impl WorkflowRunner for MirrorKernel {}
+    impl GoalControl for MirrorKernel {}
+    impl ToolPolicy for MirrorKernel {}
+    impl librefang_kernel_handle::CatalogQuery for MirrorKernel {}
+    impl ApiAuth for MirrorKernel {
+        fn auth_snapshot(&self) -> ApiAuthSnapshot {
+            ApiAuthSnapshot::default()
+        }
+    }
+    impl AcpFsBridge for MirrorKernel {}
+    impl AcpTerminalBridge for MirrorKernel {}
+
+    #[async_trait::async_trait]
+    impl EventBus for MirrorKernel {
+        async fn publish_event(
+            &self,
+            _event_type: &str,
+            _payload: serde_json::Value,
+        ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChannelSender for MirrorKernel {
+        async fn send_channel_message(
+            &self,
+            channel: &str,
+            recipient: &str,
+            _message: &str,
+            _thread_id: Option<&str>,
+            _account_id: Option<&str>,
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Ok(format!("sent to {recipient} on {channel}"))
+        }
+
+        fn resolve_channel_owner(
+            &self,
+            _channel: &str,
+            _chat_id: &str,
+        ) -> Option<librefang_types::agent::AgentId> {
+            self.owner_id
+        }
+    }
+
+    impl SessionWriter for MirrorKernel {
+        fn inject_attachment_blocks(
+            &self,
+            _agent_id: librefang_types::agent::AgentId,
+            _blocks: Vec<librefang_types::message::ContentBlock>,
+        ) {
+        }
+
+        fn append_to_session(
+            &self,
+            _session_id: librefang_types::agent::SessionId,
+            _agent_id: librefang_types::agent::AgentId,
+            message: librefang_types::message::Message,
+        ) {
+            if self.fail_append {
+                // Simulate a save failure — caller should not see this error.
+                tracing::warn!("MirrorKernel: simulated append_to_session failure");
+                return;
+            }
+            self.appended.lock().unwrap().push(message);
+        }
+    }
+
+    // `multi_thread` is required so that the `block_in_place` call inside
+    // `append_to_session` does not panic (block_in_place requires a
+    // multi-threaded runtime). This test exercises the mock-only path;
+    // the real block_in_place coverage lives in `channel_send_mirror_test.rs`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_channel_send_mirrors_to_channel_owner_session() {
+        use librefang_types::agent::AgentId;
+        use librefang_types::message::Role;
+
+        let owner = AgentId(uuid::Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap());
+        let appended = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(MirrorKernel {
+            owner_id: Some(owner),
+            appended: Arc::clone(&appended),
+            fail_append: false,
+        });
+
+        let input = serde_json::json!({
+            "channel": "telegram",
+            "recipient": "99999",
+            "message": "Hello from cron agent",
+        });
+
+        let result = tool_channel_send(
+            &input,
+            Some(&kernel),
+            None,
+            Some("99999"),
+            Some("caller-agent-id"),
+            &[],
+        )
+        .await;
+
+        assert!(result.is_ok(), "send should succeed: {:?}", result);
+
+        let msgs = appended.lock().unwrap();
+        assert_eq!(msgs.len(), 1, "exactly one message should be mirrored");
+        assert_eq!(
+            msgs[0].role,
+            Role::User,
+            "mirrored message must use user role"
+        );
+
+        let content = msgs[0].content.text_content();
+        assert_eq!(
+            content, r#"{"mirror_from":"caller-agent-id","body":"Hello from cron agent"}"#,
+            "mirror text must be a JSON envelope with mirror_from and body fields"
+        );
+    }
+
+    // `multi_thread` is required so that the `block_in_place` call inside
+    // `append_to_session` does not panic. This test exercises the mock-only
+    // path; the real block_in_place coverage lives in `channel_send_mirror_test.rs`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_channel_send_mirrors_when_caller_is_channel_owner() {
+        // Decision 1: mirror unconditionally, even when caller == owner.
+        use librefang_types::agent::AgentId;
+        use librefang_types::message::Role;
+
+        let owner = AgentId(uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap());
+        let appended = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(MirrorKernel {
+            owner_id: Some(owner),
+            appended: Arc::clone(&appended),
+            fail_append: false,
+        });
+
+        let input = serde_json::json!({
+            "channel": "telegram",
+            "recipient": "42",
+            "message": "Self-mirror test",
+        });
+
+        // caller_agent_id could be the same agent as the channel owner
+        let result = tool_channel_send(
+            &input,
+            Some(&kernel),
+            None,
+            Some("42"),
+            Some("same-agent"),
+            &[],
+        )
+        .await;
+
+        assert!(result.is_ok(), "send should succeed: {:?}", result);
+        let msgs = appended.lock().unwrap();
+        assert_eq!(msgs.len(), 1, "mirror must land even when caller == owner");
+        assert_eq!(msgs[0].role, Role::User);
+    }
+
+    // `multi_thread` is required so that the `block_in_place` call inside
+    // `append_to_session` does not panic. This test exercises the mock-only
+    // path; the real block_in_place coverage lives in `channel_send_mirror_test.rs`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_channel_send_succeeds_even_when_mirror_fails() {
+        // Decision 3: mirror failure must not fail the tool call.
+        let owner = librefang_types::agent::AgentId(
+            uuid::Uuid::parse_str("ffffffff-ffff-ffff-ffff-ffffffffffff").unwrap(),
+        );
+        let appended = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(MirrorKernel {
+            owner_id: Some(owner),
+            appended: Arc::clone(&appended),
+            fail_append: true, // simulates a save error
+        });
+
+        let input = serde_json::json!({
+            "channel": "telegram",
+            "recipient": "77",
+            "message": "Mirror failure test",
+        });
+
+        let result = tool_channel_send(
+            &input,
+            Some(&kernel),
+            None,
+            Some("77"),
+            Some("caller-id"),
+            &[],
+        )
+        .await;
+
+        // Platform send must still succeed even though append failed.
+        assert!(
+            result.is_ok(),
+            "tool call must succeed despite mirror failure"
+        );
+        // fail_append returns without pushing — confirm nothing was appended.
+        let msgs = appended.lock().unwrap();
+        assert!(msgs.is_empty(), "no message appended on simulated failure");
+    }
+
+    // ── end channel_send mirror tests ────────────────────────────────────────
 
     struct ApprovalKernel {
         approval_requests: Arc<AtomicUsize>,

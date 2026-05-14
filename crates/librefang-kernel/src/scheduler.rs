@@ -141,13 +141,21 @@ impl AgentScheduler {
     pub fn record_usage(&self, agent_id: AgentId, usage: &TokenUsage) {
         if let Some(mut tracker) = self.usage.get_mut(&agent_id) {
             tracker.reset_if_expired();
-            let total = usage.total();
-            tracker.total_tokens += total;
+            // Hourly absolute quota counts every token (cache hits included)
+            // because the operator-facing knob `max_llm_tokens_per_hour` is
+            // historically "raw tokens per hour" — keep that contract.
+            tracker.total_tokens += usage.total();
             tracker.input_tokens += usage.input_tokens;
             tracker.output_tokens += usage.output_tokens;
             tracker.llm_calls += 1;
-            // Record in the per-minute sliding window for burst detection
-            tracker.token_timestamps.push_back((Instant::now(), total));
+            // Per-minute sliding window for burst detection (#4943): use
+            // burst_tokens(), which excludes cache-read hits — they're
+            // 0.1x cost at the provider and shouldn't gate throughput.
+            // The deliberate asymmetry between hourly and burst windows
+            // is acceptable: hourly is a budget; burst is rate control.
+            tracker
+                .token_timestamps
+                .push_back((Instant::now(), usage.burst_tokens()));
         }
     }
 
@@ -326,10 +334,11 @@ impl AgentScheduler {
             tracker.output_tokens += usage.output_tokens;
             tracker.llm_calls += 1;
 
-            // Sliding-window for burst detection
+            // Sliding-window for burst detection (#4943): see record_usage
+            // — push burst_tokens() so cache-read hits don't gate throughput.
             tracker
                 .token_timestamps
-                .push_back((Instant::now(), actual_tokens));
+                .push_back((Instant::now(), usage.burst_tokens()));
         }
     }
 
@@ -500,6 +509,119 @@ mod tests {
             },
         );
         assert!(scheduler.check_quota(id).is_err());
+    }
+
+    /// `burst_tokens()` returns 0 for a turn that hit only the cache —
+    /// model did nothing new. Pins the lower-bound semantics so a future
+    /// refactor can't accidentally regress to counting cache hits.
+    #[test]
+    fn test_burst_tokens_pure_cache_hit_is_zero_new_work() {
+        let usage = TokenUsage {
+            input_tokens: 8000, // total, all cached
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 8000,
+        };
+        assert_eq!(usage.burst_tokens(), 0);
+    }
+
+    /// Saturation case — defense against a malformed provider response
+    /// where `cache_read > input_tokens`. The workspace convention
+    /// guarantees `cache_read` is a subset of `input_tokens` (drivers
+    /// normalize at the boundary), so this should never happen in
+    /// practice; the saturating_sub is the seatbelt.
+    #[test]
+    fn test_burst_tokens_saturates_when_cache_read_exceeds_input() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 8000, // > input_tokens — malformed
+        };
+        // 100.saturating_sub(8000) + 50 = 50. No panic, no wrap.
+        assert_eq!(usage.burst_tokens(), 50);
+    }
+
+    /// Mixed cache-read + cache-write in the same turn: cache_creation
+    /// tokens still count because they go through the model on the way
+    /// to the cache. Both OpenAI and (driver-normalized) Anthropic
+    /// shapes follow the same convention since #4958.
+    #[test]
+    fn test_burst_tokens_counts_cache_creation() {
+        let openai = TokenUsage {
+            input_tokens: 1200, // total, 200 cached
+            output_tokens: 100,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 200,
+        };
+        // 1200 - 200 + 100 = 1100
+        assert_eq!(openai.burst_tokens(), 1100);
+
+        // Anthropic post-driver-normalization: original new=100,
+        // cache_read=8000, cache_creation=1000 → input_tokens = 9100.
+        let anthropic_normalized = TokenUsage {
+            input_tokens: 9100, // 100 new + 8000 read + 1000 created
+            output_tokens: 50,
+            cache_creation_input_tokens: 1000,
+            cache_read_input_tokens: 8000,
+        };
+        // 9100 - 8000 + 50 = 1150 (new input + cache_creation + output —
+        // exactly the tokens that flowed through the model).
+        assert_eq!(anthropic_normalized.burst_tokens(), 1150);
+    }
+
+    /// Issue #4943: cache-read hits must not count toward the burst limit.
+    /// Without the fix, an agent with a large stable prompt that mostly
+    /// hits the prompt cache would trip the burst guard even though the
+    /// model is doing almost no new work.
+    #[test]
+    fn test_burst_limit_excludes_cache_read_tokens() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        // 1000 tokens/hour => burst cap = 200/min
+        let quota = ResourceQuota {
+            max_llm_tokens_per_hour: Some(1000),
+            max_tool_calls_per_minute: 0,
+            ..Default::default()
+        };
+        scheduler.register(id, quota);
+
+        // input_tokens=300 TOTAL with 250 of that being cached reads
+        // (workspace convention: cache_read is a subset of input_tokens).
+        // Under the old all-tokens accounting burst would be 350 (over the
+        // 200/min cap); with the fix burst_tokens = 300 - 250 + 50 = 100.
+        scheduler.record_usage(
+            id,
+            &TokenUsage {
+                input_tokens: 300,
+                output_tokens: 50,
+                cache_read_input_tokens: 250,
+                cache_creation_input_tokens: 0,
+            },
+        );
+        assert!(
+            scheduler.check_quota(id).is_ok(),
+            "cache-read hits should not gate burst throughput"
+        );
+
+        // Cache-creation tokens go through the model (they're inside
+        // input_tokens), so a turn dominated by cache writes still counts:
+        // input_tokens = 350 with cache_creation = 250 (so 100 of input
+        // is new). burst_tokens = 350 - 0 + 50 = 400, which puts the
+        // 60s window at 100 + 400 = 500, exceeding the 200 cap.
+        scheduler.record_usage(
+            id,
+            &TokenUsage {
+                input_tokens: 350,
+                output_tokens: 50,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 250,
+            },
+        );
+        assert!(
+            scheduler.check_quota(id).is_err(),
+            "cache-creation tokens should still count — they go through the model"
+        );
     }
 
     #[test]

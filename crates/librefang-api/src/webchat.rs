@@ -102,8 +102,9 @@ fn embedded_dashboard_available() -> bool {
 }
 
 /// BossFang fork: always serve the compile-time-embedded dashboard so the
-/// upstream `sync_dashboard` path can never overwrite our branded assets by
-/// downloading from `github.com/librefang/librefang`.
+/// `sync_dashboard` release-download path can never overwrite our branded
+/// assets at runtime. Even though the release URL has been repointed at
+/// `github.com/GQAdonis/librefang`, embedded-only is still the safer default.
 ///
 /// Default is **embedded-only** (returns `true`). Opt out by setting
 /// `LIBREFANG_DASHBOARD_EMBEDDED_ONLY=0` (or `false`, `no`, `off`) if you
@@ -375,7 +376,7 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
     }
 
     let url =
-        "https://github.com/librefang/librefang/releases/latest/download/dashboard-dist.tar.gz";
+        "https://github.com/GQAdonis/librefang/releases/latest/download/dashboard-dist.tar.gz";
     tracing::info!("Syncing dashboard assets from release...");
 
     // Use librefang-http so dashboard sync respects [proxy] config (#3577).

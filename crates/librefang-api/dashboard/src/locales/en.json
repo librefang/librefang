@@ -1300,6 +1300,7 @@
     "ctx_paste": "Paste",
     "ctx_select_all": "Select All",
     "ctx_auto_layout": "Auto Layout",
+    "ctx_delete_connection": "Delete Connection",
     "click_to_assign": "Click to assign agent",
     "saved": "Saved",
     "exported": "Exported",

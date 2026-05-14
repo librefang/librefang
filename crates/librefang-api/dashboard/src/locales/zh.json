@@ -1300,6 +1300,7 @@
     "ctx_paste": "粘贴",
     "ctx_select_all": "全选",
     "ctx_auto_layout": "自动排列",
+    "ctx_delete_connection": "删除连接",
     "click_to_assign": "点击绑定智能体",
     "saved": "已保存",
     "exported": "已导出",

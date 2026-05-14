@@ -41,10 +41,12 @@ struct ProviderCatalogFile {
 /// `~/.librefang/registry/providers/`.
 ///
 /// `registry_mirror` is forwarded to `registry_sync` (GitHub proxy prefix
-/// for CN / air-gapped users).
+/// for CN / air-gapped users). `base_url` overrides the default registry
+/// repository URL when non-empty.
 pub async fn sync_catalog_to(
     home_dir: &std::path::Path,
     registry_mirror: &str,
+    base_url: &str,
 ) -> Result<CatalogSyncResult, String> {
     let cache_meta_dir = home_dir.join("cache").join("catalog");
     std::fs::create_dir_all(&cache_meta_dir)
@@ -64,8 +66,9 @@ pub async fn sync_catalog_to(
     {
         let home = home_dir.to_path_buf();
         let mirror = registry_mirror.to_string();
+        let base = base_url.to_string();
         let ok = tokio::task::spawn_blocking(move || {
-            crate::registry_sync::refresh_registry_checkout(&home, 0, &mirror)
+            crate::registry_sync::refresh_registry_checkout(&home, 0, &mirror, &base)
         })
         .await
         .map_err(|e| format!("registry sync task failed: {e}"))?;

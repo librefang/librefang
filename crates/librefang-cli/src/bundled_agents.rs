@@ -11,5 +11,6 @@ pub fn sync_registry_agents(home_dir: &Path) {
         home_dir,
         librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
+        "",
     );
 }

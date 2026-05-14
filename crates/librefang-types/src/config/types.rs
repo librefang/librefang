@@ -755,6 +755,15 @@ pub struct WebFetchConfig {
     /// Cloud metadata endpoints (169.254.x.x, etc.) remain blocked unconditionally.
     #[serde(default)]
     pub ssrf_allowed_hosts: Vec<String>,
+    /// Maximum bytes a single `web_fetch_to_file` download may write to disk.
+    /// Caps response size before the body reaches the workspace; an agent-supplied
+    /// `max_bytes` parameter is further clamped down to this value, never up.
+    #[serde(default = "default_web_fetch_to_file_max_bytes")]
+    pub max_file_bytes: u64,
+}
+
+fn default_web_fetch_to_file_max_bytes() -> u64 {
+    50 * 1024 * 1024
 }
 
 impl Default for WebFetchConfig {
@@ -765,6 +774,7 @@ impl Default for WebFetchConfig {
             timeout_secs: 30,
             readability: true,
             ssrf_allowed_hosts: vec![],
+            max_file_bytes: default_web_fetch_to_file_max_bytes(),
         }
     }
 }
@@ -4636,6 +4646,10 @@ impl Default for AutoDreamConfig {
 /// #   registry_mirror = "https://ghproxy.cn"
 /// # turns "https://github.com/..." into "https://ghproxy.cn/https://github.com/..."
 /// registry_mirror = ""
+/// # Optional: full base URL of the registry repo (without trailing slash).
+/// # Replaces the built-in librefang/librefang-registry default entirely.
+/// # Empty = use upstream default.
+/// base_url = "https://github.com/GQAdonis/librefang-registry"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -4646,13 +4660,24 @@ pub struct RegistryConfig {
     pub cache_ttl_secs: u64,
     /// Mirror/proxy prefix for GitHub URLs. When non-empty, all outbound
     /// GitHub requests (tarball downloads, git clones, raw content fetches)
-    /// are prefixed with this URL. Useful for users in China Mainland where
+    /// are prefixed with this value. Useful for users in China Mainland where
     /// direct GitHub access is slow or blocked.
     ///
     /// Example: `"https://ghproxy.cn"` rewrites
     /// `https://github.com/...` → `https://ghproxy.cn/https://github.com/...`
     #[serde(default)]
     pub registry_mirror: String,
+    /// Full base URL of the registry repository (no trailing slash).
+    /// When non-empty, replaces the built-in upstream default
+    /// (`https://github.com/librefang/librefang-registry`). The tarball
+    /// URL is derived as `{base_url}/archive/refs/heads/main.tar.gz` and
+    /// the git clone URL as `{base_url}.git`. The tarball prefix
+    /// (`{repo-name}-main/`) is derived from the URL's last path segment.
+    ///
+    /// Empty string = use the upstream default (for fallback / emergency
+    /// rollback without recompiling).
+    #[serde(default)]
+    pub base_url: String,
 }
 
 fn default_registry_cache_ttl_secs() -> u64 {
@@ -4664,6 +4689,7 @@ impl Default for RegistryConfig {
         Self {
             cache_ttl_secs: default_registry_cache_ttl_secs(),
             registry_mirror: String::new(),
+            base_url: String::new(),
         }
     }
 }
