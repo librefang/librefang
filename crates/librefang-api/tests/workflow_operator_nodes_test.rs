@@ -1,5 +1,5 @@
 //! Integration tests for workflow operator-node step modes (#4980 step
-//! 1/N → step 2/N).
+//! 1/N → step 3/N).
 //!
 //! Five new `StepMode` variants total:
 //!
@@ -14,10 +14,17 @@
 //!   string-DSL alternative was rejected because it would have forced
 //!   a one-shot wire-format commitment incompatible with a future
 //!   richer expression language.
+//! * `Transform` — fully wired since step 3: Tera templates rendered
+//!   against the previous step's output (exposed as `prev` and, when
+//!   the output parses as JSON, `prev_json`) plus the workflow's
+//!   `vars` map. Syntax errors surface at manifest-load time via
+//!   `Workflow::validate`; render errors halt the run with a recorded
+//!   reason. Tera picked over `mlua` / `rhai` / a hand-rolled DSL
+//!   because it ships sandboxed by default and is the smallest
+//!   addition to the dependency tree.
 //! * `Approval` — no-op-with-warn; blocked on #4983 (async-task
 //!   tracker). The executor will wire there once the dependency lands.
-//! * `Transform` / `Branch` — no-op-with-warn; wired in step 3 and step
-//!   4 of the #4980 series respectively.
+//! * `Branch` — no-op-with-warn; wired in step 4 of the #4980 series.
 //!
 //! The tests run the workflow engine directly (no HTTP) via
 //! `kernel.workflow_engine().execute_run(...)` with a mock
@@ -424,21 +431,29 @@ async fn approval_step_is_noop_with_warn_and_completes() {
     assert_eq!(run.step_results[0].agent_name, "_operator:approval");
 }
 
+// ---------------------------------------------------------------------------
+// `Transform` — fully wired in #4980 step 3/N
+// ---------------------------------------------------------------------------
+
+/// Happy-path render: the Tera template references `prev` (the
+/// previous step's output) and a workflow-level variable. The
+/// rendered string becomes the run's `current_input` for downstream
+/// consumers and is recorded as the step's `output`.
 #[tokio::test(flavor = "multi_thread")]
-async fn transform_step_is_noop_with_warn_and_completes() {
+async fn transform_step_renders_tera_template_and_replaces_current_input() {
     let test = boot();
     let engine = test.state.kernel.workflow_engine();
     let workflow = workflow_with_op_step(
-        "transform-stub",
+        "transform-happy",
         StepMode::Transform {
-            code: "# {{title}}\n\n{{body}}".to_string(),
+            code: "# Report\n\n{{ prev }}".to_string(),
         },
     );
     let wf_id = workflow.id;
     engine.register(workflow).await;
 
     let run_id = engine
-        .create_run(wf_id, "in".to_string())
+        .create_run(wf_id, "body content".to_string())
         .await
         .expect("create_run");
     let result = engine
@@ -452,12 +467,109 @@ async fn transform_step_is_noop_with_warn_and_completes() {
             },
         )
         .await;
-    assert!(result.is_ok(), "Transform stub must succeed: {result:?}");
+    assert!(result.is_ok(), "Transform must succeed: {result:?}");
 
     let run = engine.get_run(run_id).await.expect("run exists");
     assert!(matches!(run.state, WorkflowRunState::Completed));
     assert_eq!(run.step_results.len(), 1);
-    assert_eq!(run.step_results[0].agent_name, "_operator:transform");
+    let sr = &run.step_results[0];
+    assert_eq!(sr.agent_name, "_operator:transform");
+    assert_eq!(sr.input_tokens, 0);
+    assert_eq!(sr.output_tokens, 0);
+    assert_eq!(sr.output, "# Report\n\nbody content");
+    // Run.output mirrors the rendered string (it's the final step's output).
+    assert_eq!(run.output.as_deref(), Some("# Report\n\nbody content"));
+}
+
+/// Missing-variable error: rendering a template that references an
+/// undefined Tera variable halts the run with the Tera error as the
+/// recorded reason (Tera includes line/column info), and the failing
+/// step still appears in `run.step_results` so the dashboard surfaces
+/// which transform blew up.
+#[tokio::test(flavor = "multi_thread")]
+async fn transform_step_missing_variable_halts_workflow_with_recorded_reason() {
+    let test = boot();
+    let engine = test.state.kernel.workflow_engine();
+    let workflow = workflow_with_op_step(
+        "transform-missing",
+        StepMode::Transform {
+            code: "hello {{ undefined_var }}".to_string(),
+        },
+    );
+    let wf_id = workflow.id;
+    engine.register(workflow).await;
+
+    let run_id = engine
+        .create_run(wf_id, "ignored".to_string())
+        .await
+        .expect("create_run");
+    let result = engine
+        .execute_run(
+            run_id,
+            panicking_agent_resolver,
+            |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
+                panic!("operator-node executor must not call send_message");
+                #[allow(unreachable_code)]
+                Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
+            },
+        )
+        .await;
+    let err = result.expect_err("Transform with missing variable must halt");
+    assert!(
+        err.contains("Transform step 'op_step' failed"),
+        "halt error must name the step; got: {err}"
+    );
+    assert!(
+        err.contains("transform render failed"),
+        "halt error must carry the wrapper; got: {err}"
+    );
+
+    let run = engine.get_run(run_id).await.expect("run exists");
+    assert!(
+        matches!(run.state, WorkflowRunState::Failed),
+        "run must be Failed, got {:?}",
+        run.state
+    );
+    assert_eq!(
+        run.step_results.len(),
+        1,
+        "the failing transform step must still appear in run history"
+    );
+    let sr = &run.step_results[0];
+    assert_eq!(sr.agent_name, "_operator:transform");
+    assert!(
+        sr.output.contains("transform render failed"),
+        "step_result.output must carry the Tera error; got: {}",
+        sr.output
+    );
+}
+
+/// `Workflow::validate()` catches Tera syntax errors at manifest-load
+/// time so operators never discover a typo at run time. We do not
+/// also call `register` — the kernel's `register` is fire-and-forget
+/// today (returns `WorkflowId`, not `Result`); the `validate` method
+/// is the load-time gate callers must invoke.
+#[test]
+fn transform_step_syntax_error_caught_by_workflow_validate_at_load_time() {
+    use librefang_kernel::workflow::Workflow;
+    let workflow: Workflow = workflow_with_op_step(
+        "transform-bad-syntax",
+        StepMode::Transform {
+            code: "hello {{ prev".to_string(), // unterminated expression
+        },
+    );
+    let errs = workflow.validate();
+    assert_eq!(
+        errs.len(),
+        1,
+        "expected exactly one validation error; got: {errs:?}"
+    );
+    let (step_name, reason) = &errs[0];
+    assert_eq!(step_name, "op_step");
+    assert!(
+        reason.contains("transform template parse failed"),
+        "expected parse-failed wrapper; got: {reason}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
