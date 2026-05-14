@@ -36,6 +36,7 @@ mod schedule;
 mod shell;
 mod shell_safety;
 mod skill;
+mod spill;
 mod system;
 mod taint;
 mod task;
@@ -84,6 +85,7 @@ use self::skill::{
     tool_skill_evolve_remove_file, tool_skill_evolve_rollback, tool_skill_evolve_update,
     tool_skill_evolve_write_file, tool_skill_read_file,
 };
+use self::spill::{resolve_spill_config, spill_or_passthrough};
 use self::system::{tool_location_get, tool_system_time};
 use self::taint::{
     check_taint_net_fetch, check_taint_outbound_header, check_taint_outbound_text,
@@ -2792,54 +2794,6 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             }),
         },
     ]
-}
-
-// ---------------------------------------------------------------------------
-// Web tools
-// ---------------------------------------------------------------------------
-
-/// Resolve `[tool_results]` spill threshold + per-artifact cap from raw
-/// `ToolExecContext` fields, falling back to compiled defaults when the
-/// caller passed `0` (test call sites that don't populate the ctx).
-fn resolve_spill_config(spill_threshold_bytes: u64, max_artifact_bytes: u64) -> (u64, u64) {
-    (
-        if spill_threshold_bytes == 0 {
-            16_384 // ToolResultsConfig::default().spill_threshold_bytes
-        } else {
-            spill_threshold_bytes
-        },
-        if max_artifact_bytes == 0 {
-            crate::artifact_store::DEFAULT_MAX_ARTIFACT_BYTES
-        } else {
-            max_artifact_bytes
-        },
-    )
-}
-
-/// Apply artifact spill to a tool-result string, returning a compact stub
-/// when the body exceeds `threshold` and the spill write succeeds.  Falls
-/// through to the original body when below the threshold or when the
-/// write fails (e.g. per-artifact cap exceeded, disk full).
-///
-/// Shared by `web_fetch` (primary + legacy) and `web_search` (#3347 5/N).
-fn spill_or_passthrough(
-    tool_name: &str,
-    body: String,
-    threshold: u64,
-    max_artifact: u64,
-) -> String {
-    let bytes = body.as_bytes();
-    if let Some(stub) = crate::artifact_store::maybe_spill(
-        tool_name,
-        bytes,
-        threshold,
-        max_artifact,
-        &crate::artifact_store::default_artifact_storage_dir(),
-    ) {
-        stub
-    } else {
-        body
-    }
 }
 
 // ---------------------------------------------------------------------------
