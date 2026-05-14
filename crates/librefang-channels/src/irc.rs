@@ -479,6 +479,15 @@ impl ChannelAdapter for IrcAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the IRC
+    /// network / nick identifier) so the bridge approval listener builds
+    /// the same `irc:<account_id>` key the router stores in
+    /// `channel_defaults`, scoping ApprovalRequested delivery to the network
+    /// bound to the requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -754,5 +763,34 @@ mod tests {
             err.to_string().to_lowercase().contains("not started"),
             "error should mention not-started state, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_irc_account_id_default_none() {
+        let adapter = IrcAdapter::new(
+            "irc.example.org".to_string(),
+            6697,
+            "nick".to_string(),
+            None,
+            vec![],
+            true,
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_irc_account_id_returns_configured_value() {
+        // #5003: two IRC networks must resolve under distinct
+        // `irc:<account_id>` keys via the trait override.
+        let adapter = IrcAdapter::new(
+            "irc.example.org".to_string(),
+            6697,
+            "nick".to_string(),
+            None,
+            vec![],
+            true,
+        )
+        .with_account_id(Some("libera-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("libera-42"));
     }
 }

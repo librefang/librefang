@@ -78,6 +78,34 @@ impl Default for CompressionConfig {
     }
 }
 
+impl CompressionConfig {
+    /// Build a `CompressionConfig` from a `CompactionTomlConfig` snapshot
+    /// (#4976). Fields shared with compaction (`keep_recent`,
+    /// `max_summary_tokens`, `token_threshold_ratio`) take their values
+    /// from the toml; compressor-specific knobs (`protect_head`,
+    /// `max_iterations`) keep the compiled defaults.
+    ///
+    /// Call sites are expected to feed in a config that has already
+    /// been merged with any per-agent
+    /// [`librefang_types::agent::CompactionOverrides`] — see
+    /// [`CompactionOverrides::resolve`].
+    pub fn from_compaction_toml(toml: &librefang_types::config::CompactionTomlConfig) -> Self {
+        let defaults = Self::default();
+        // `as u32` would silently truncate values > u32::MAX. Fall back to
+        // the compiled default rather than smuggling a wrapped value into
+        // the summariser budget.
+        let max_summary_tokens =
+            u32::try_from(toml.max_summary_tokens).unwrap_or(defaults.max_summary_tokens);
+        Self {
+            threshold_ratio: toml.token_threshold_ratio,
+            keep_recent: toml.keep_recent,
+            max_summary_tokens,
+            protect_head: defaults.protect_head,
+            max_iterations: defaults.max_iterations,
+        }
+    }
+}
+
 /// Metadata recorded for each compression pass.
 #[derive(Debug, Clone)]
 pub struct CompressionEvent {
@@ -93,6 +121,22 @@ pub struct CompressionEvent {
     pub iteration: u32,
     /// Whether the LLM summarisation was available (false = fallback text used).
     pub used_fallback: bool,
+}
+
+/// Reset side-state that depends on the pre-compression message history
+/// surviving in the prompt (#4971).
+///
+/// Currently this clears the per-session `file_read` deduplication tracker:
+/// the tracker's stubs refer to "see above for full content", and once the
+/// compressor has summarised those bodies away there is nothing above for the
+/// model to look at. Call sites should invoke this immediately after
+/// `compress_if_needed_with_aux` reports a successful compression.
+///
+/// Kept as a thin module-level function rather than a method on
+/// [`ContextCompressor`] so that future side-state resets can plug in without
+/// requiring callers to hold a compressor instance (e.g. manual `/compact`).
+pub fn reset_post_compression_side_state(session_id: librefang_types::agent::SessionId) {
+    crate::file_read_tracker::reset_session(session_id);
 }
 
 /// Context compressor — wraps `compactor::compact_session` with automatic
@@ -699,5 +743,43 @@ mod tests {
             "Should not compress when too few messages"
         );
         assert!(events.is_empty(), "Should have no compression events");
+    }
+
+    // ----- #4976: CompressionConfig from per-agent compaction snapshot -----
+
+    #[test]
+    fn compression_config_from_compaction_toml_takes_shared_fields() {
+        let toml = librefang_types::config::CompactionTomlConfig {
+            threshold_messages: 50,
+            keep_recent: 25,
+            max_summary_tokens: 8192,
+            token_threshold_ratio: 0.5,
+            max_chunk_chars: 90_000,
+            max_retries: 4,
+        };
+        let cfg = CompressionConfig::from_compaction_toml(&toml);
+        // Shared fields come from the toml:
+        assert_eq!(cfg.keep_recent, 25);
+        assert_eq!(cfg.max_summary_tokens, 8192);
+        assert!((cfg.threshold_ratio - 0.5).abs() < f64::EPSILON);
+        // Compressor-specific knobs retain defaults:
+        let defaults = CompressionConfig::default();
+        assert_eq!(cfg.protect_head, defaults.protect_head);
+        assert_eq!(cfg.max_iterations, defaults.max_iterations);
+    }
+
+    #[test]
+    fn compression_config_from_default_compaction_toml_matches_defaults_shape() {
+        // When the toml is itself the default, the produced config
+        // matches the compressor's default for shared fields.
+        let toml = librefang_types::config::CompactionTomlConfig::default();
+        let cfg = CompressionConfig::from_compaction_toml(&toml);
+        let defaults = CompressionConfig::default();
+        assert_eq!(cfg.keep_recent, defaults.keep_recent);
+        assert_eq!(cfg.max_summary_tokens, defaults.max_summary_tokens);
+        // The compaction toml default is 0.7 while the compressor's
+        // historical default is 0.80 — we deliberately follow the toml
+        // here so a user-set [compaction] block governs both paths.
+        assert!((cfg.threshold_ratio - toml.token_threshold_ratio).abs() < f64::EPSILON);
     }
 }

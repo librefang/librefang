@@ -962,6 +962,15 @@ impl ChannelAdapter for EmailAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the IMAP /
+    /// SMTP mailbox identifier) so the bridge approval listener builds the
+    /// same `email:<account_id>` key the router stores in `channel_defaults`,
+    /// scoping ApprovalRequested delivery to the mailbox bound to the
+    /// requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -1552,5 +1561,44 @@ mod tests {
             Some(std::path::Path::new("/etc/ca.pem"))
         );
         assert!(adapter.imap_tls.accept_invalid_certs);
+    }
+
+    #[test]
+    fn test_email_account_id_default_none() {
+        let adapter = EmailAdapter::new(
+            "imap.example.com".to_string(),
+            993,
+            "smtp.example.com".to_string(),
+            587,
+            "bot@example.com".to_string(),
+            "pass".to_string(),
+            "bot@example.com".to_string(),
+            "pass".to_string(),
+            30,
+            vec![],
+            vec![],
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_email_account_id_returns_configured_value() {
+        // #5003: two email mailboxes must resolve under distinct
+        // `email:<account_id>` keys via the trait override.
+        let adapter = EmailAdapter::new(
+            "imap.example.com".to_string(),
+            993,
+            "smtp.example.com".to_string(),
+            587,
+            "bot@example.com".to_string(),
+            "pass".to_string(),
+            "bot@example.com".to_string(),
+            "pass".to_string(),
+            30,
+            vec![],
+            vec![],
+        )
+        .with_account_id(Some("mailbox-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("mailbox-42"));
     }
 }

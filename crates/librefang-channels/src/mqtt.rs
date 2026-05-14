@@ -406,6 +406,18 @@ impl ChannelAdapter for MqttAdapter {
         info!("MQTT adapter stopped");
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` so the bridge approval
+    /// listener can build the same `mqtt:<account_id>` key the router stores
+    /// in `channel_defaults`, scoping ApprovalRequested delivery to the
+    /// broker bound to the requesting agent (#5003, follow-up to #4985 /
+    /// #4994). MqttAdapter is not currently registered in librefang-api's
+    /// boot path, so this is dormant — but adding it here keeps the trait
+    /// implementations symmetric and prevents the same regression class
+    /// from re-emerging the moment MQTT is wired up.
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -559,6 +571,25 @@ mod tests {
         let payload: &[u8] = &[0xFF, 0xFE, 0xFD];
         let msg = MqttAdapter::parse_payload("topic", payload, &None);
         assert!(msg.is_none());
+    }
+
+    #[test]
+    fn test_mqtt_account_id_default_none() {
+        let adapter = MqttAdapter::new(test_config());
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_mqtt_account_id_returns_configured_value() {
+        // #5003: two MQTT brokers in the same daemon must resolve under
+        // distinct `mqtt:<account_id>` keys; this override is what the
+        // bridge approval listener consults once MQTT is registered.
+        let cfg = MqttConfig {
+            account_id: Some("broker-42".to_string()),
+            ..test_config()
+        };
+        let adapter = MqttAdapter::new(cfg);
+        assert_eq!(adapter.account_id(), Some("broker-42"));
     }
 
     #[test]

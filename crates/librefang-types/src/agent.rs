@@ -1069,6 +1069,109 @@ pub struct AgentManifest {
     /// vector — see the struct doc for details.
     #[serde(default)]
     pub proactive_memory: crate::memory::ProactiveMemoryOverrides,
+    /// Per-agent override for the kernel-global `[compaction]` policy
+    /// (#4976). Each field of [`CompactionOverrides`] is an `Option`
+    /// that, when set, supersedes the matching field in
+    /// `KernelConfig.compaction` for this agent only. Default `None`
+    /// means inherit global for every field.
+    ///
+    /// Use case: a chat agent with short exchanges wants aggressive
+    /// pruning (low `keep_recent`), while a workflow orchestrator with
+    /// long multi-tool sessions wants high `keep_recent` and a larger
+    /// summary budget. The global config can no longer be one-size-
+    /// fits-all once both agents share a daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<CompactionOverrides>,
+}
+
+/// Per-agent override for the kernel-global `[compaction]` configuration
+/// (#4976). Mirrors the user-facing fields of
+/// [`crate::config::CompactionTomlConfig`] as `Option<_>` so a manifest
+/// can override individual knobs while inheriting the rest from
+/// `KernelConfig.compaction`.
+///
+/// Internal algorithmic knobs (`base_chunk_ratio`, `safety_margin`,
+/// `summarization_overhead_tokens`, …) live only on the runtime
+/// `CompactionConfig` and are intentionally not exposed here — they are
+/// implementation details of the summarisation algorithm, not policy.
+///
+/// Resolution order at compaction time:
+/// 1. agent.toml `[compaction]` field (this struct) — when `Some(_)`
+/// 2. config.toml `[compaction]` — global default
+/// 3. compiled-in defaults inside `CompactionTomlConfig::default()`
+///
+/// Example in `agent.toml` (all fields optional):
+/// ```toml
+/// [compaction]
+/// max_summary_tokens = 8192
+/// keep_recent = 20
+/// threshold_messages = 50
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct CompactionOverrides {
+    /// Override `threshold_messages` — message count that triggers compaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold_messages: Option<usize>,
+    /// Override `keep_recent` — recent messages preserved verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_recent: Option<usize>,
+    /// Override `max_summary_tokens` — token budget for the summary output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_summary_tokens: Option<usize>,
+    /// Override `token_threshold_ratio` — fraction of the model's
+    /// context window that triggers token-based compaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_threshold_ratio: Option<f64>,
+    /// Override `max_chunk_chars` — maximum chars per summarisation chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_chunk_chars: Option<usize>,
+    /// Override `max_retries` — max retry attempts for LLM summarisation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+}
+
+impl CompactionOverrides {
+    /// Merge this per-agent override on top of the kernel-global
+    /// `CompactionTomlConfig`. For each field, `Some(_)` on the override
+    /// wins; `None` falls through to the global value.
+    ///
+    /// Returns a fresh `CompactionTomlConfig` — the global is not mutated,
+    /// so different agents can produce different merged configs from the
+    /// same global snapshot.
+    pub fn resolve(
+        &self,
+        global: &crate::config::CompactionTomlConfig,
+    ) -> crate::config::CompactionTomlConfig {
+        // Clamp ratio overrides into a sane window. Values outside [0.0, 1.0]
+        // either disable compaction (>1.0 → never triggers) or fire on every
+        // message (≤0.0). Either way the operator typed a typo, not a real
+        // policy — fall back to a clamped value rather than misbehaving.
+        let token_threshold_ratio = self
+            .token_threshold_ratio
+            .map(|r| r.clamp(0.0, 1.0))
+            .unwrap_or(global.token_threshold_ratio);
+        crate::config::CompactionTomlConfig {
+            threshold_messages: self.threshold_messages.unwrap_or(global.threshold_messages),
+            keep_recent: self.keep_recent.unwrap_or(global.keep_recent),
+            max_summary_tokens: self.max_summary_tokens.unwrap_or(global.max_summary_tokens),
+            token_threshold_ratio,
+            max_chunk_chars: self.max_chunk_chars.unwrap_or(global.max_chunk_chars),
+            max_retries: self.max_retries.unwrap_or(global.max_retries),
+        }
+    }
+
+    /// True when no field is set — equivalent to `Default::default()`.
+    /// Call sites can use this to skip the resolve dance entirely for
+    /// the common "no override" case.
+    pub fn is_empty(&self) -> bool {
+        self.threshold_messages.is_none()
+            && self.keep_recent.is_none()
+            && self.max_summary_tokens.is_none()
+            && self.token_threshold_ratio.is_none()
+            && self.max_chunk_chars.is_none()
+            && self.max_retries.is_none()
+    }
 }
 
 /// Access mode for a named workspace.
@@ -1177,6 +1280,7 @@ impl Default for AgentManifest {
             tool_exec_backend: None,
             skill_workshop: SkillWorkshopConfig::default(),
             proactive_memory: crate::memory::ProactiveMemoryOverrides::default(),
+            compaction: None,
         }
     }
 }
@@ -2746,6 +2850,114 @@ model = "claude-3-haiku-20240307"
         assert!(
             !manifest.mcp_disabled,
             "mcp_disabled must be false when absent from TOML"
+        );
+    }
+
+    // ----- #4976: per-agent compaction overrides -----
+
+    #[test]
+    fn compaction_overrides_all_none_returns_global_unchanged() {
+        let global = crate::config::CompactionTomlConfig::default();
+        let overrides = CompactionOverrides::default();
+        let merged = overrides.resolve(&global);
+        assert_eq!(merged.threshold_messages, global.threshold_messages);
+        assert_eq!(merged.keep_recent, global.keep_recent);
+        assert_eq!(merged.max_summary_tokens, global.max_summary_tokens);
+        assert_eq!(merged.token_threshold_ratio, global.token_threshold_ratio);
+        assert_eq!(merged.max_chunk_chars, global.max_chunk_chars);
+        assert_eq!(merged.max_retries, global.max_retries);
+        assert!(overrides.is_empty());
+    }
+
+    #[test]
+    fn compaction_overrides_partial_only_overrides_set_fields() {
+        let global = crate::config::CompactionTomlConfig {
+            threshold_messages: 30,
+            keep_recent: 10,
+            max_summary_tokens: 1024,
+            token_threshold_ratio: 0.7,
+            max_chunk_chars: 80_000,
+            max_retries: 3,
+        };
+        let overrides = CompactionOverrides {
+            keep_recent: Some(20),
+            max_summary_tokens: Some(8192),
+            ..Default::default()
+        };
+        let merged = overrides.resolve(&global);
+        // Override wins:
+        assert_eq!(merged.keep_recent, 20);
+        assert_eq!(merged.max_summary_tokens, 8192);
+        // Falls through to global:
+        assert_eq!(merged.threshold_messages, 30);
+        assert_eq!(merged.token_threshold_ratio, 0.7);
+        assert_eq!(merged.max_chunk_chars, 80_000);
+        assert_eq!(merged.max_retries, 3);
+        assert!(!overrides.is_empty());
+    }
+
+    #[test]
+    fn compaction_overrides_all_some_overrides_every_field() {
+        let global = crate::config::CompactionTomlConfig::default();
+        let overrides = CompactionOverrides {
+            threshold_messages: Some(50),
+            keep_recent: Some(20),
+            max_summary_tokens: Some(8192),
+            token_threshold_ratio: Some(0.5),
+            max_chunk_chars: Some(120_000),
+            max_retries: Some(5),
+        };
+        let merged = overrides.resolve(&global);
+        assert_eq!(merged.threshold_messages, 50);
+        assert_eq!(merged.keep_recent, 20);
+        assert_eq!(merged.max_summary_tokens, 8192);
+        assert!((merged.token_threshold_ratio - 0.5).abs() < f64::EPSILON);
+        assert_eq!(merged.max_chunk_chars, 120_000);
+        assert_eq!(merged.max_retries, 5);
+    }
+
+    #[test]
+    fn compaction_overrides_toml_roundtrip_partial() {
+        // Issue #4976 example: partial overrides parse cleanly.
+        let toml_str = r#"
+name = "orchestrator"
+
+[model]
+provider = "anthropic"
+model = "claude-3-sonnet-20240229"
+
+[compaction]
+max_summary_tokens = 8192
+keep_recent = 20
+threshold_messages = 50
+"#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        let overrides = manifest
+            .compaction
+            .expect("compaction section must be parsed");
+        assert_eq!(overrides.max_summary_tokens, Some(8192));
+        assert_eq!(overrides.keep_recent, Some(20));
+        assert_eq!(overrides.threshold_messages, Some(50));
+        // Unset fields stay None — they fall through to global at resolve time.
+        assert_eq!(overrides.token_threshold_ratio, None);
+        assert_eq!(overrides.max_chunk_chars, None);
+        assert_eq!(overrides.max_retries, None);
+    }
+
+    #[test]
+    fn compaction_overrides_absent_from_toml_is_none() {
+        // No `[compaction]` section → field is None → resolve() inherits global.
+        let toml_str = r#"
+name = "chat-agent"
+
+[model]
+provider = "anthropic"
+model = "claude-3-haiku-20240307"
+"#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert!(
+            manifest.compaction.is_none(),
+            "missing [compaction] must deserialize to None, not Default::default()"
         );
     }
 }

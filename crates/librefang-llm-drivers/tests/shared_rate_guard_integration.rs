@@ -96,6 +96,7 @@ fn simple_request(model: &str) -> CompletionRequest {
         thinking: None,
         prompt_caching: false,
         cache_ttl: None,
+        prompt_cache_strategy: None,
         response_format: None,
         timeout_secs: None,
         extra_body: None,

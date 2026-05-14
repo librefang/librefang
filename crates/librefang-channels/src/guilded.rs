@@ -383,6 +383,15 @@ impl ChannelAdapter for GuildedAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Guilded
+    /// server / app identifier) so the bridge approval listener builds the
+    /// same `guilded:<account_id>` key the router stores in `channel_defaults`,
+    /// scoping ApprovalRequested delivery to the server bound to the
+    /// requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -499,5 +508,20 @@ mod tests {
     fn test_guilded_constants() {
         assert_eq!(MAX_MESSAGE_LEN, 4000);
         assert_eq!(GUILDED_WS_URL, "wss://www.guilded.gg/websocket/v1");
+    }
+
+    #[test]
+    fn test_guilded_account_id_default_none() {
+        let adapter = GuildedAdapter::new("token".to_string(), vec![]);
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_guilded_account_id_returns_configured_value() {
+        // #5003: two Guilded servers must resolve under distinct
+        // `guilded:<account_id>` keys via the trait override.
+        let adapter = GuildedAdapter::new("token".to_string(), vec![])
+            .with_account_id(Some("server-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("server-42"));
     }
 }

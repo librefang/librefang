@@ -2134,3 +2134,407 @@ async fn test_approval_listener_scopes_to_non_telegram_multibot_adapter() {
 
     manager.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// #5002 — binding-aware approval scoping
+// ---------------------------------------------------------------------------
+//
+// PR #4994 / #4985 closed the cross-agent broadcast leak by gating delivery
+// on `router.channel_default(<channel_key>)`. That works when an adapter has
+// a `default_agent` configured, but adapters that route purely via
+// `AgentBinding` (`default_agent = None` on the adapter, per-user / per-chat
+// agents via bindings) have no `channel_defaults` entry — so `channel_default`
+// returns `None` and the post-#4985 listener silently drops every approval
+// raised by the bound agent.
+//
+// The fix in #5002 falls back to `AgentRouter::bound_recipients_for_agent`
+// when `channel_default` does not cover the requesting agent: it walks the
+// binding list, picks every binding whose `agent` resolves to the requesting
+// agent on this adapter's `(channel_type, account_id)`, and delivers to each
+// binding's `peer_id`. Fan-out is across ALL such bindings (multi-chat
+// agents get approvals in every bound chat).
+//
+// Trait extension question: we deliberately did NOT add a method to
+// `ChannelAdapter` — the binding store lives on `AgentRouter`, which the
+// bridge already holds, and querying it directly keeps adapters
+// platform-implementation-only.
+
+/// #5002 happy path: an adapter with `default_agent = None` plus an
+/// `AgentBinding` targeting agent X on chat Z delivers approvals for X to Z.
+/// Pre-fix code returned `None` from `channel_default` and silently dropped.
+#[tokio::test]
+async fn test_approval_listener_falls_back_to_agent_binding_when_default_unset() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+
+    let agent_x = AgentId::new();
+    let agent_name = "binder-x";
+
+    // Router has NO channel_default for `telegram` — only an AgentBinding
+    // routing chat `chat-z` to `binder-x`. Reproduces the #5002 repro:
+    //   1. Telegram adapter with default_agent = None
+    //   2. AgentBinding maps chat-z → agent X
+    //   3. Agent X fires `require_approval`
+    //   4. Pre-fix: nothing arrives in chat-z.
+    let router = AgentRouter::new();
+    router.register_agent(agent_name.to_string(), agent_x);
+    router.load_bindings(&[librefang_types::config::AgentBinding {
+        agent: agent_name.to_string(),
+        match_rule: librefang_types::config::BindingMatchRule {
+            channel: Some("telegram".to_string()),
+            peer_id: Some("chat-z".to_string()),
+            ..Default::default()
+        },
+    }]);
+    let router = Arc::new(router);
+
+    // Adapter has no static `notification_recipients` — the binding is the
+    // only delivery target. Mirrors a Telegram bot config with empty
+    // `allowed_users` but per-user `AgentBinding` routing.
+    let adapter = NotifyingAdapter::new("telegram-binding-only", Vec::new());
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+    manager.start_approval_listener().await;
+
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(Event::new(
+            agent_x,
+            EventTarget::System,
+            EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                request_id: "5002aaaa11112222".to_string(),
+                agent_id: agent_x.0.to_string(),
+                tool_name: "shell_exec".to_string(),
+                description: "rm -rf /tmp/foo".to_string(),
+                risk_level: "high".to_string(),
+            }),
+        )))
+        .expect("broadcast send");
+
+    wait_until("approval delivered to bound chat", || {
+        !adapter_ref.get_sent().is_empty()
+    })
+    .await;
+
+    let sent = adapter_ref.get_sent();
+    assert_eq!(
+        sent.len(),
+        1,
+        "expected one notification to the bound chat, got: {sent:?}"
+    );
+    assert_eq!(
+        sent[0].0, "chat-z",
+        "approval should land in the binding's `peer_id`"
+    );
+    assert!(
+        sent[0].1.contains("5002aaaa"),
+        "notification body should include the approval id prefix, got: {}",
+        sent[0].1
+    );
+
+    manager.stop().await;
+}
+
+/// #5002 cross-agent guard: same setup as the happy-path test, but the
+/// approval is for a DIFFERENT agent (no binding covering it). The fix must
+/// NOT re-introduce the cross-agent broadcast #4985 closed — even though
+/// the adapter has `default_agent = None`, an approval for an unrelated
+/// agent must not be delivered.
+#[tokio::test]
+async fn test_approval_listener_binding_fallback_does_not_leak_cross_agent() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+
+    let agent_x = AgentId::new();
+    let agent_y = AgentId::new(); // not bound on this adapter
+
+    let router = AgentRouter::new();
+    router.register_agent("binder-x".to_string(), agent_x);
+    router.load_bindings(&[librefang_types::config::AgentBinding {
+        agent: "binder-x".to_string(),
+        match_rule: librefang_types::config::BindingMatchRule {
+            channel: Some("telegram".to_string()),
+            peer_id: Some("chat-z".to_string()),
+            ..Default::default()
+        },
+    }]);
+    let router = Arc::new(router);
+
+    let adapter = NotifyingAdapter::new("telegram-binding-only", Vec::new());
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+    manager.start_approval_listener().await;
+
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    // Approval for agent Y (which has NO binding on this adapter).
+    event_tx
+        .send(Arc::new(Event::new(
+            agent_y,
+            EventTarget::System,
+            EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                request_id: "5002bbbb33334444".to_string(),
+                agent_id: agent_y.0.to_string(),
+                tool_name: "shell_exec".to_string(),
+                description: "ls".to_string(),
+                risk_level: "low".to_string(),
+            }),
+        )))
+        .expect("broadcast send");
+
+    // 100ms is well above in-process dispatch latency — a regression that
+    // mistakenly broadcasts would already have hit `sent` by now.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        adapter_ref.get_sent().is_empty(),
+        "#5002 fan-out fallback must NOT re-leak cross-agent approvals (#4985 regression), got: {:?}",
+        adapter_ref.get_sent()
+    );
+
+    manager.stop().await;
+}
+
+/// #5002 multi-chat fan-out: an agent bound to two chats Z1 and Z2 on the
+/// same adapter receives the approval in BOTH. Picking one arbitrarily
+/// would be wrong (issue text agrees) — the operator deliberately created
+/// every binding, so every binding gets the notification.
+#[tokio::test]
+async fn test_approval_listener_fans_out_to_all_bound_chats() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+
+    let agent_x = AgentId::new();
+
+    let router = AgentRouter::new();
+    router.register_agent("binder-x".to_string(), agent_x);
+    router.load_bindings(&[
+        librefang_types::config::AgentBinding {
+            agent: "binder-x".to_string(),
+            match_rule: librefang_types::config::BindingMatchRule {
+                channel: Some("telegram".to_string()),
+                peer_id: Some("chat-z1".to_string()),
+                ..Default::default()
+            },
+        },
+        librefang_types::config::AgentBinding {
+            agent: "binder-x".to_string(),
+            match_rule: librefang_types::config::BindingMatchRule {
+                channel: Some("telegram".to_string()),
+                peer_id: Some("chat-z2".to_string()),
+                ..Default::default()
+            },
+        },
+    ]);
+    let router = Arc::new(router);
+
+    let adapter = NotifyingAdapter::new("telegram-binding-only", Vec::new());
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+    manager.start_approval_listener().await;
+
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(Event::new(
+            agent_x,
+            EventTarget::System,
+            EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                request_id: "5002cccc55556666".to_string(),
+                agent_id: agent_x.0.to_string(),
+                tool_name: "shell_exec".to_string(),
+                description: "rm -rf /tmp/foo".to_string(),
+                risk_level: "high".to_string(),
+            }),
+        )))
+        .expect("broadcast send");
+
+    wait_until("approval delivered to both bound chats", || {
+        adapter_ref.get_sent().len() >= 2
+    })
+    .await;
+
+    // Give the listener some slack to (incorrectly) deliver a 3rd copy
+    // before asserting exactly-2. A regression that double-sends would
+    // show up here.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let sent = adapter_ref.get_sent();
+    assert_eq!(
+        sent.len(),
+        2,
+        "expected fan-out to both bound chats, got: {sent:?}"
+    );
+    let mut destinations: Vec<&str> = sent.iter().map(|(to, _)| to.as_str()).collect();
+    destinations.sort();
+    assert_eq!(
+        destinations,
+        vec!["chat-z1", "chat-z2"],
+        "approval should fan out to every chat the requesting agent is bound to, got: {destinations:?}"
+    );
+
+    manager.stop().await;
+}
+
+/// #5002 unit-style coverage at the router boundary: `AgentBinding`s with
+/// no `peer_id` (e.g. catch-all "every telegram message goes to agent X")
+/// are NOT delivery targets — they have no chat to send to. The listener
+/// must skip them, otherwise the fan-out fallback would attempt to
+/// `send()` with an empty `platform_id`.
+#[tokio::test]
+async fn test_approval_listener_skips_binding_with_no_peer_id() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+
+    let agent_x = AgentId::new();
+
+    let router = AgentRouter::new();
+    router.register_agent("binder-x".to_string(), agent_x);
+    // Channel-only binding — covers every chat on `telegram`, but names
+    // no specific peer.
+    router.load_bindings(&[librefang_types::config::AgentBinding {
+        agent: "binder-x".to_string(),
+        match_rule: librefang_types::config::BindingMatchRule {
+            channel: Some("telegram".to_string()),
+            ..Default::default()
+        },
+    }]);
+    let router = Arc::new(router);
+
+    let adapter = NotifyingAdapter::new("telegram-binding-only", Vec::new());
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+    manager.start_approval_listener().await;
+
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(Event::new(
+            agent_x,
+            EventTarget::System,
+            EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                request_id: "5002dddd77778888".to_string(),
+                agent_id: agent_x.0.to_string(),
+                tool_name: "shell_exec".to_string(),
+                description: "ls".to_string(),
+                risk_level: "low".to_string(),
+            }),
+        )))
+        .expect("broadcast send");
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        adapter_ref.get_sent().is_empty(),
+        "binding without peer_id names no chat — listener must skip it rather than send to an empty platform_id, got: {:?}",
+        adapter_ref.get_sent()
+    );
+
+    manager.stop().await;
+}
+
+/// #5002 account_id scoping: a binding scoped to `(channel=telegram,
+/// account_id=bot-a)` must NOT fire approvals on a different bot
+/// (`bot-b`). Mirrors the #4985 multi-bot leak shape but at the binding
+/// layer rather than the `channel_default` layer.
+#[tokio::test]
+async fn test_approval_listener_binding_respects_account_id_scope() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+
+    let agent_x = AgentId::new();
+
+    let router = AgentRouter::new();
+    router.register_agent("binder-x".to_string(), agent_x);
+    router.load_bindings(&[librefang_types::config::AgentBinding {
+        agent: "binder-x".to_string(),
+        match_rule: librefang_types::config::BindingMatchRule {
+            channel: Some("telegram".to_string()),
+            account_id: Some("bot-a".to_string()),
+            peer_id: Some("chat-z".to_string()),
+            ..Default::default()
+        },
+    }]);
+    let router = Arc::new(router);
+
+    // Two Telegram bots, both with `default_agent = None`. Only bot-a has
+    // a binding to agent X.
+    let adapter_a = NotifyingAdapter::with_account("telegram-a", "bot-a", Vec::new());
+    let adapter_b = NotifyingAdapter::with_account("telegram-b", "bot-b", Vec::new());
+    let adapter_a_ref = adapter_a.clone();
+    let adapter_b_ref = adapter_b.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter_a.clone()).await.unwrap();
+    manager.start_adapter(adapter_b.clone()).await.unwrap();
+    manager.start_approval_listener().await;
+
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(Event::new(
+            agent_x,
+            EventTarget::System,
+            EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                request_id: "5002eeee9999aaaa".to_string(),
+                agent_id: agent_x.0.to_string(),
+                tool_name: "shell_exec".to_string(),
+                description: "rm".to_string(),
+                risk_level: "high".to_string(),
+            }),
+        )))
+        .expect("broadcast send");
+
+    wait_until("approval delivered to bot-a", || {
+        !adapter_a_ref.get_sent().is_empty()
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let sent_a = adapter_a_ref.get_sent();
+    let sent_b = adapter_b_ref.get_sent();
+    assert_eq!(
+        sent_a.len(),
+        1,
+        "bot-a binding should fire, got: {sent_a:?}"
+    );
+    assert_eq!(sent_a[0].0, "chat-z");
+    assert!(
+        sent_b.is_empty(),
+        "bot-b has no matching binding (account_id mismatch); approval must not leak there, got: {sent_b:?}"
+    );
+
+    manager.stop().await;
+}

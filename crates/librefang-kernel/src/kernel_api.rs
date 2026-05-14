@@ -47,7 +47,7 @@ use crate::auth::AuthManager;
 use crate::auto_dream::{AbortOutcome, AutoDreamStatus};
 use crate::config_reload::ReloadPlan;
 use crate::cron::CronScheduler;
-use crate::error::KernelResult;
+use crate::error::{KernelError, KernelResult};
 use crate::event_bus::EventBus;
 use crate::inbox::InboxStatus;
 use crate::kernel_handle::KernelHandle;
@@ -273,6 +273,31 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         message: &str,
         sender_context: Option<&librefang_channels::types::SenderContext>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult>;
+    /// Send a message to an agent with an optional per-call `session_mode` override.
+    ///
+    /// The default implementation delegates to [`KernelApi::send_message`] when
+    /// the override is `None`, so test mocks of `KernelApi` keep compiling
+    /// without manually implementing this method. When `Some(_)` is requested
+    /// the default refuses with `InvalidInput` rather than silently dropping
+    /// the override — silent fallback is the bug class this method exists to
+    /// prevent. Production impls (`LibreFangKernel`) override and honor the
+    /// per-step / per-trigger session_mode resolver.
+    async fn send_message_with_session_mode(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        session_mode_override: Option<librefang_types::agent::SessionMode>,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
+        if let Some(mode) = session_mode_override {
+            return Err(KernelError::LibreFang(
+                librefang_types::error::LibreFangError::InvalidInput(format!(
+                    "KernelApi::send_message_with_session_mode: this impl does not honor \
+                     session_mode_override={mode:?}; override the method on your KernelApi impl"
+                )),
+            ));
+        }
+        self.send_message(agent_id, message).await
+    }
 
     // ====================================================================
     // Hands
@@ -881,6 +906,14 @@ impl KernelApi for LibreFangKernel {
         sender_context: Option<&librefang_channels::types::SenderContext>,
     ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
         Self::send_message_ephemeral(self, agent_id, message, sender_context).await
+    }
+    async fn send_message_with_session_mode(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        session_mode_override: Option<librefang_types::agent::SessionMode>,
+    ) -> KernelResult<librefang_runtime::agent_loop::AgentLoopResult> {
+        Self::send_message_with_session_mode(self, agent_id, message, session_mode_override).await
     }
 
     // -- Hands --

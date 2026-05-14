@@ -1413,6 +1413,16 @@ impl ChannelAdapter for MatrixAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (operator-supplied
+    /// identifier — typically `<mxid>@<homeserver>` or a short tag) so the
+    /// bridge approval listener builds the same `matrix:<account_id>` key
+    /// the router stores in `channel_defaults`, scoping ApprovalRequested
+    /// delivery to the homeserver / mxid bound to the requesting agent
+    /// (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 /// Calculate exponential backoff capped at the given maximum.
@@ -1731,6 +1741,34 @@ mod tests {
             false,
         );
         assert_eq!(adapter.name(), "matrix");
+    }
+
+    #[test]
+    fn test_matrix_account_id_default_none() {
+        let adapter = MatrixAdapter::new(
+            "https://matrix.org".to_string(),
+            "@bot:matrix.org".to_string(),
+            "access_token".to_string(),
+            vec![],
+            false,
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_matrix_account_id_returns_configured_value() {
+        // #5003: a Matrix account identifier (operator-supplied — typically
+        // `<mxid>@<homeserver>` or a short tag) must surface via the trait
+        // method so the bridge can scope approvals to the right bot.
+        let adapter = MatrixAdapter::new(
+            "https://matrix.org".to_string(),
+            "@bot:matrix.org".to_string(),
+            "access_token".to_string(),
+            vec![],
+            false,
+        )
+        .with_account_id(Some("@bot:matrix.org".to_string()));
+        assert_eq!(adapter.account_id(), Some("@bot:matrix.org"));
     }
 
     #[test]

@@ -423,6 +423,15 @@ impl ChannelAdapter for DiscourseAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Discourse
+    /// forum / site identifier) so the bridge approval listener builds the
+    /// same `discourse:<account_id>` key the router stores in
+    /// `channel_defaults`, scoping ApprovalRequested delivery to the forum
+    /// bound to the requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -594,5 +603,30 @@ mod tests {
         let request = builder.build().unwrap();
         assert_eq!(request.headers().get("Api-Key").unwrap(), "my-api-key");
         assert_eq!(request.headers().get("Api-Username").unwrap(), "bot-user");
+    }
+
+    #[test]
+    fn test_discourse_account_id_default_none() {
+        let adapter = DiscourseAdapter::new(
+            "https://forum.example.com".to_string(),
+            "key".to_string(),
+            "bot".to_string(),
+            vec![],
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_discourse_account_id_returns_configured_value() {
+        // #5003: two Discourse forums must resolve under distinct
+        // `discourse:<account_id>` keys via the trait override.
+        let adapter = DiscourseAdapter::new(
+            "https://forum.example.com".to_string(),
+            "key".to_string(),
+            "bot".to_string(),
+            vec![],
+        )
+        .with_account_id(Some("forum-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("forum-42"));
     }
 }
