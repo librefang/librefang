@@ -4,10 +4,10 @@
   "tool": "claude-code",
   "started": "2026-05-14T00:00:00Z",
   "changes_total": 5,
-  "changes_completed": 1,
+  "changes_completed": 2,
   "changes_in_progress": 0,
   "changes_blocked": 0,
-  "changes_pending": 4,
+  "changes_pending": 3,
   "changes": [
     {
       "id": "m1-m2-cli-banner-install-paths-config-templates",
@@ -37,7 +37,31 @@
     {
       "id": "m3-install-script",
       "milestones": ["M3"],
-      "status": "PENDING"
+      "status": "DONE",
+      "started": "2026-05-14T00:00:00Z",
+      "started_by": "kbd-execute",
+      "completed": "2026-05-14T00:00:00Z",
+      "tool": "claude-code",
+      "scope": [
+        "web/public/install.sh — header comment + Usage URL repointed to raw.githubusercontent.com/GQAdonis/librefang/main/web/public/install.sh",
+        "web/public/install.sh:19 — REPO flip librefang/librefang → GQAdonis/librefang (the BossFang fork publishes here)",
+        "web/public/install.sh:24 — INSTALL_DIR additive alias: BOSSFANG_INSTALL_DIR primary, LIBREFANG_INSTALL_DIR fallback. Default ~/.librefang/bin path preserved per default-path policy.",
+        "web/public/install.sh — BOSSFANG_* alias for VERSION, AUTO_START, INSTALLER_SOURCE_ONLY env vars (additive, LIBREFANG_* still works)",
+        "web/public/install.sh — release tarball URL fixed: librefang-${PLATFORM}.tar.gz → bossfang-${PLATFORM}.tar.gz (matches actual release-cli.yml output; pre-existing 404 bug)",
+        "web/public/install.sh — extracted binary invocations all switched to ${INSTALL_DIR}/bossfang (the tarball packages a single `bossfang` binary)",
+        "web/public/install.sh:292 — added `ln -sf bossfang ${INSTALL_DIR}/librefang` symlink so existing user scripts invoking `librefang …` keep working",
+        "web/public/install.sh — banner, success messages, next-steps echoes flipped to BossFang",
+        "web/public/install.sh — removed Windows PowerShell hint pointing at unowned librefang.ai/install.ps1; now points at GitHub releases /latest only",
+        "web/public/install.sh — OLD_VERSION detection probes both `bossfang` and `librefang` for upgrade-version messaging",
+        "web/public/install.sh — fish PATH self-heal regex now matches bossfang|librefang|openfang (defensive against future Bash-export regressions for any name)",
+        "Uninstall hint `~/.librefang` paths preserved (default-path policy)"
+      ],
+      "verification": {
+        "bash_n": "PASS — bash -n web/public/install.sh clean",
+        "sh_n": "PASS — sh -n web/public/install.sh clean (POSIX)",
+        "shellcheck": "DEFERRED — shellcheck not installed locally; CI will run it",
+        "remaining_librefang_refs": "All intentional: GQAdonis/librefang URL, ~/.librefang/ default path, librefang-cli crate name in cargo install hints, librefang symlink + legacy binary detection"
+      }
     },
     {
       "id": "m4-docs-mdx-sweep",
@@ -58,7 +82,7 @@
   "goal_completion": {
     "M1_cli_banner_install_paths": "MET",
     "M2_init_config_templates": "MET",
-    "M3_install_script": "NOT_STARTED",
+    "M3_install_script": "MET",
     "M4_docs_mdx_sweep": "NOT_STARTED",
     "M5_ua_strings": "NOT_STARTED",
     "M6_dashboard_localstorage": "NOT_STARTED",

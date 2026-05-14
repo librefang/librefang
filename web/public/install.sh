@@ -1,19 +1,27 @@
 #!/bin/sh
-# LibreFang installer - works on Linux, macOS, WSL
-# Usage: curl -fsSL https://librefang.ai/install.sh | sh
+# BossFang installer - works on Linux, macOS, WSL
+# Usage: curl -fsSL https://raw.githubusercontent.com/GQAdonis/librefang/main/web/public/install.sh | sh
 #
-# Environment variables:
-#   LIBREFANG_INSTALL_DIR         custom install directory (default: ~/.librefang/bin)
-#   LIBREFANG_VERSION             install a specific version tag (default: latest)
-#   LIBREFANG_AUTO_START          auto-start daemon after install (default: 1)
+# Environment variables (BOSSFANG_* takes priority; LIBREFANG_* kept as
+# fallback for back-compat with existing operator scripts):
+#   BOSSFANG_INSTALL_DIR / LIBREFANG_INSTALL_DIR
+#                                 custom install directory (default: ~/.librefang/bin)
+#   BOSSFANG_VERSION / LIBREFANG_VERSION
+#                                 install a specific version tag (default: latest)
+#   BOSSFANG_AUTO_START / LIBREFANG_AUTO_START
+#                                 auto-start daemon after install (default: 1)
 #                                 accepts: 1/true/yes/on (others disable)
-#   LIBREFANG_INSTALLER_SOURCE_ONLY
+#   BOSSFANG_INSTALLER_SOURCE_ONLY / LIBREFANG_INSTALLER_SOURCE_ONLY
 #                                 test hook; do not auto-run install()
 
 set -eu
 
-REPO="librefang/librefang"
-INSTALL_DIR="${LIBREFANG_INSTALL_DIR:-$HOME/.librefang/bin}"
+REPO="GQAdonis/librefang"
+
+# Env-var resolution helpers: BOSSFANG_* wins; LIBREFANG_* is the legacy
+# fallback. POSIX-sh doesn't have parameter indirection so we expand
+# explicitly for each variable.
+INSTALL_DIR="${BOSSFANG_INSTALL_DIR:-${LIBREFANG_INSTALL_DIR:-$HOME/.librefang/bin}}"
 
 # Terminal colors — disabled when stdout is not a tty or NO_COLOR is set.
 # https://no-color.org/
@@ -58,10 +66,7 @@ detect_platform() {
             ;;
         mingw*|msys*|cygwin*)
             echo ""
-            echo "  For Windows, use PowerShell instead:"
-            echo "    irm https://librefang.ai/install.ps1 | iex"
-            echo ""
-            echo "  Or download the .msi installer from:"
+            echo "  For Windows, download the .msi installer from:"
             echo "    https://github.com/$REPO/releases/latest"
             echo ""
             echo "  Or install via cargo:"
@@ -153,7 +158,7 @@ choose_shell_rc() {
 }
 
 start_daemon_if_needed() {
-    START_OUTPUT=$("$INSTALL_DIR/librefang" start 2>&1) && START_EXIT=0 || START_EXIT=$?
+    START_OUTPUT=$("$INSTALL_DIR/bossfang" start 2>&1) && START_EXIT=0 || START_EXIT=$?
 
     if [ "$START_EXIT" -eq 0 ]; then
         return 0
@@ -175,11 +180,11 @@ install() {
     detect_platform
 
     echo ""
-    echo "  ${C_BOLD}LibreFang Installer${C_RESET}"
-    echo "  ==================="
+    echo "  ${C_BOLD}BossFang Installer${C_RESET}"
+    echo "  =================="
     echo ""
 
-    REQUESTED_VERSION="${LIBREFANG_VERSION:-}"
+    REQUESTED_VERSION="${BOSSFANG_VERSION:-${LIBREFANG_VERSION:-}}"
     if [ -n "$REQUESTED_VERSION" ]; then
         VERSION="$REQUESTED_VERSION"
         echo "  Using specified version: $VERSION"
@@ -195,20 +200,28 @@ install() {
         exit 1
     fi
 
-    URL="https://github.com/$REPO/releases/download/$VERSION/librefang-$PLATFORM.tar.gz"
+    URL="https://github.com/$REPO/releases/download/$VERSION/bossfang-$PLATFORM.tar.gz"
     CHECKSUM_URL="$URL.sha256"
 
-    # Detect previous version for upgrade messaging.
+    # Detect previous version for upgrade messaging. Prefer the new bossfang
+    # binary; fall back to the legacy librefang name for users upgrading from
+    # the pre-rebrand installs.
     OLD_VERSION=""
-    if [ -x "$INSTALL_DIR/librefang" ]; then
-        OLD_VERSION=$("$INSTALL_DIR/librefang" --version 2>/dev/null || true)
+    OLD_BIN=""
+    if [ -x "$INSTALL_DIR/bossfang" ]; then
+        OLD_BIN="$INSTALL_DIR/bossfang"
+    elif [ -x "$INSTALL_DIR/librefang" ]; then
+        OLD_BIN="$INSTALL_DIR/librefang"
+    fi
+    if [ -n "$OLD_BIN" ]; then
+        OLD_VERSION=$("$OLD_BIN" --version 2>/dev/null || true)
     fi
 
-    echo "  Installing LibreFang $VERSION for $PLATFORM..."
+    echo "  Installing BossFang $VERSION for $PLATFORM..."
     mkdir -p "$INSTALL_DIR"
 
     TMPDIR=$(mktemp -d)
-    ARCHIVE="$TMPDIR/librefang.tar.gz"
+    ARCHIVE="$TMPDIR/bossfang.tar.gz"
     CHECKSUM_FILE="$TMPDIR/checksum.sha256"
 
     cleanup() { rm -rf "$TMPDIR"; }
@@ -226,7 +239,7 @@ install() {
         if [ -n "${PLATFORM_FALLBACK:-}" ]; then
             echo "  ${C_YELLOW}Static (musl) binary not available, trying glibc build...${C_RESET}"
             PLATFORM="$PLATFORM_FALLBACK"
-            URL="https://github.com/$REPO/releases/download/$VERSION/librefang-$PLATFORM.tar.gz"
+            URL="https://github.com/$REPO/releases/download/$VERSION/bossfang-$PLATFORM.tar.gz"
             CHECKSUM_URL="$URL.sha256"
             if ! curl -fL $CURL_PROGRESS "$URL" -o "$ARCHIVE"; then
                 echo "  ${C_RED}Download failed.${C_RESET}"
@@ -268,20 +281,28 @@ install() {
     fi
 
     tar xzf "$ARCHIVE" -C "$INSTALL_DIR"
-    chmod +x "$INSTALL_DIR/librefang"
+    # The release tarball packages a single binary named `bossfang`.
+    chmod +x "$INSTALL_DIR/bossfang"
+
+    # Create a `librefang` symlink alongside the new `bossfang` binary so
+    # existing user scripts that invoke `librefang …` keep working. This
+    # mirrors the dual `[[bin]]` declaration in librefang-cli/Cargo.toml.
+    # `ln -sf` overwrites any prior librefang binary from a pre-rebrand
+    # install — that's the migration step.
+    ln -sf bossfang "$INSTALL_DIR/librefang"
 
     # Ad-hoc codesign on macOS (prevents SIGKILL on Apple Silicon).
     # Remove quarantine xattr before signing.
     if [ "$OS" = "darwin" ]; then
         if command_exists xattr; then
-            xattr -cr "$INSTALL_DIR/librefang" 2>/dev/null || true
+            xattr -cr "$INSTALL_DIR/bossfang" 2>/dev/null || true
         fi
         if command_exists codesign; then
-            if ! codesign --force --sign - "$INSTALL_DIR/librefang"; then
+            if ! codesign --force --sign - "$INSTALL_DIR/bossfang"; then
                 echo ""
                 echo "  ${C_YELLOW}Warning: ad-hoc code signing failed.${C_RESET}"
                 echo "  On Apple Silicon, the binary may be killed (SIGKILL) by Gatekeeper."
-                echo "  Try manually: xattr -cr $INSTALL_DIR/librefang && codesign --force --sign - $INSTALL_DIR/librefang"
+                echo "  Try manually: xattr -cr $INSTALL_DIR/bossfang && codesign --force --sign - $INSTALL_DIR/bossfang"
                 echo ""
             fi
         fi
@@ -301,7 +322,7 @@ install() {
                 # Self-heal: remove old Bash-style PATH exports from fish config.
                 if [ -f "$SHELL_RC" ]; then
                     TMP_FISH_RC=$(mktemp)
-                    grep -vE '^[[:space:]]*export[[:space:]]+PATH=.*(librefang|openfang)' "$SHELL_RC" > "$TMP_FISH_RC" || true
+                    grep -vE '^[[:space:]]*export[[:space:]]+PATH=.*(bossfang|librefang|openfang)' "$SHELL_RC" > "$TMP_FISH_RC" || true
                     if ! cmp -s "$SHELL_RC" "$TMP_FISH_RC" 2>/dev/null; then
                         cat "$TMP_FISH_RC" > "$SHELL_RC"
                         echo "  Removed incompatible Bash PATH export from $SHELL_RC"
@@ -332,21 +353,21 @@ install() {
         *) SESSION_NEEDS_PATH_REFRESH=1 ;;
     esac
 
-    if "$INSTALL_DIR/librefang" --version >/dev/null 2>&1; then
-        INSTALLED_VERSION=$("$INSTALL_DIR/librefang" --version 2>/dev/null || echo "$VERSION")
+    if "$INSTALL_DIR/bossfang" --version >/dev/null 2>&1; then
+        INSTALLED_VERSION=$("$INSTALL_DIR/bossfang" --version 2>/dev/null || echo "$VERSION")
         echo ""
         if [ -n "$OLD_VERSION" ] && [ "$OLD_VERSION" != "$INSTALLED_VERSION" ]; then
-            echo "  ${C_GREEN}LibreFang upgraded successfully!${C_RESET} ($OLD_VERSION -> ${C_BOLD}$INSTALLED_VERSION${C_RESET})"
+            echo "  ${C_GREEN}BossFang upgraded successfully!${C_RESET} ($OLD_VERSION -> ${C_BOLD}$INSTALLED_VERSION${C_RESET})"
         else
-            echo "  ${C_GREEN}LibreFang installed successfully!${C_RESET} (${C_BOLD}$INSTALLED_VERSION${C_RESET})"
+            echo "  ${C_GREEN}BossFang installed successfully!${C_RESET} (${C_BOLD}$INSTALLED_VERSION${C_RESET})"
         fi
     else
         echo ""
-        echo "  LibreFang binary installed to $INSTALL_DIR/librefang"
+        echo "  BossFang binary installed to $INSTALL_DIR/bossfang"
     fi
 
     # Auto-initialize (sync registry, generate config).
-    # When piped through `curl | sh`, stdin is not a TTY so librefang init
+    # When piped through `curl | sh`, stdin is not a TTY so `bossfang init`
     # cannot prompt for provider keys and silently falls back to defaults.
     # Only run init interactively when stdin is a real terminal.
     if [ -t 0 ]; then
@@ -355,16 +376,16 @@ install() {
         echo "  and configuration."
         echo ""
         echo "  Running setup wizard..."
-        "$INSTALL_DIR/librefang" init || true
+        "$INSTALL_DIR/bossfang" init || true
     fi
 
-    AUTO_START="${LIBREFANG_AUTO_START:-1}"
+    AUTO_START="${BOSSFANG_AUTO_START:-${LIBREFANG_AUTO_START:-1}}"
     if is_enabled "$AUTO_START"; then
-        # Register boot service so LibreFang starts on login/reboot.
+        # Register boot service so BossFang starts on login/reboot.
         # Suppress verbose output (systemd hints, ✔ lines) — only show
         # errors so the installer output stays clean.
         echo "  Registering boot service..."
-        SVC_OUTPUT=$("$INSTALL_DIR/librefang" service install 2>&1) || {
+        SVC_OUTPUT=$("$INSTALL_DIR/bossfang" service install 2>&1) || {
             echo "  ${C_YELLOW}Warning: boot service registration failed.${C_RESET}"
             if [ -n "$SVC_OUTPUT" ]; then
                 printf "%s\n" "$SVC_OUTPUT" | sed 's/^/    /'
@@ -376,7 +397,7 @@ install() {
             echo ""
             echo "  ${C_YELLOW}Warning: automatic daemon start failed.${C_RESET}"
             echo "  Start it manually with:"
-            echo "    $INSTALL_DIR/librefang start"
+            echo "    $INSTALL_DIR/bossfang start"
         }
     fi
 
@@ -395,8 +416,8 @@ install() {
         # Interactive --------------------------------------------------------
         echo ""
         echo "  Next steps:"
-        echo "    librefang chat       # start chatting"
-        echo "    librefang stop       # stop the daemon"
+        echo "    bossfang chat       # start chatting"
+        echo "    bossfang stop       # stop the daemon"
         echo ""
         echo "  Installed to: $INSTALL_DIR"
         if [ -n "$SHELL_RC" ]; then
@@ -438,8 +459,8 @@ install() {
         echo ""
         echo "  Next steps:"
         echo "    1. Refresh your PATH (see below)"
-        echo "    2. librefang init       # setup wizard"
-        echo "    3. librefang chat       # start chatting"
+        echo "    2. bossfang init       # setup wizard"
+        echo "    3. bossfang chat       # start chatting"
         echo ""
         echo "  Installed to: $INSTALL_DIR"
         if [ -n "$SHELL_RC" ]; then
@@ -451,7 +472,7 @@ install() {
         if [ "$SESSION_NEEDS_PATH_REFRESH" -eq 1 ]; then
             echo ""
             echo "  ========================================================"
-            echo "  ${C_BOLD}To use 'librefang', first refresh your PATH:${C_RESET}"
+            echo "  ${C_BOLD}To use 'bossfang', first refresh your PATH:${C_RESET}"
             echo ""
             case "$USER_SHELL" in
                 */fish|fish) echo "    fish_add_path \"$INSTALL_DIR\"" ;;
@@ -468,7 +489,9 @@ install() {
     fi
 }
 
-if [ "${LIBREFANG_INSTALLER_SOURCE_ONLY:-0}" = "1" ]; then
+# Test hook: when set, source the script for unit-testing helpers without
+# running install(). Supports both env-var names (BOSSFANG_* primary).
+if [ "${BOSSFANG_INSTALLER_SOURCE_ONLY:-${LIBREFANG_INSTALLER_SOURCE_ONLY:-0}}" = "1" ]; then
     return 0 2>/dev/null || exit 0
 fi
 

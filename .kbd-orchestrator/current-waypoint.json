@@ -1,18 +1,18 @@
 {
   "active_phase": "phase-1-rebrand-completion",
-  "active_change": "m3-install-script",
+  "active_change": "m4-docs-mdx-sweep",
   "last_updated": "2026-05-14T00:00:00Z",
   "last_updated_by": "kbd-execute",
   "backend": "native-tool",
   "backend_rationale": "No OpenSpec in this project. Single-tool (Claude Code) execution with progress.json bookkeeping. Hybrid not warranted at this scale.",
   "next_action": {
-    "command": "/kbd-execute m3-install-script",
-    "description": "Execute change m3-install-script (M3): web/public/install.sh user-facing echoes + add BOSSFANG_INSTALL_DIR env-var alias. Estimated 20 lines in 1 file."
+    "command": "/kbd-execute m4-docs-mdx-sweep",
+    "description": "Execute change m4-docs-mdx-sweep (M4): 120 .mdx files in docs/src/app/** flipped via an extended enforce-branding.py that skips fenced code blocks. Single-word prose-only edits — biggest churn of the phase."
   },
-  "phase_progress": "2/7 milestones done (M1, M2). Next: M3 install.sh.",
+  "phase_progress": "3/7 milestones done (M1, M2, M3). Next: M4 docs MDX sweep.",
   "last_completed": {
-    "change_id": "m1-m2-cli-banner-install-paths-config-templates",
-    "milestones": ["M1", "M2"],
+    "change_id": "m3-install-script",
+    "milestones": ["M3"],
     "completed_at": "2026-05-14T00:00:00Z"
   }
 }
