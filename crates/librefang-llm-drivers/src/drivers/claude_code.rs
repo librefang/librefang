@@ -404,6 +404,11 @@ impl ClaudeCodeDriver {
         // or ANTHROPIC_*. The ANTHROPIC_ exception covers gateway / proxy
         // credentials such as ANTHROPIC_AUTH_TOKEN, typically paired with
         // ANTHROPIC_BASE_URL for Bedrock-style routing.
+        //
+        // The prefix match is case-sensitive by design — Unix env var names
+        // are case-sensitive, and the exact-list above also matches verbatim.
+        // A user typing `anthropic_foo_token` would still hit the suffix
+        // strip below, which is the intended fail-safe.
         for (key, _) in std::env::vars() {
             if key.starts_with("CLAUDE_") || key.starts_with("ANTHROPIC_") {
                 continue;
