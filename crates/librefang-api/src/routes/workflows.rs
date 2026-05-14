@@ -109,7 +109,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
 }
 use crate::triggers::{Trigger, TriggerId, TriggerPatch, TriggerPattern};
 use crate::workflow::{
-    CancelRunError, ErrorMode, PauseRunError, StepAgent, StepMode, Workflow, WorkflowId,
+    BranchArm, CancelRunError, ErrorMode, PauseRunError, StepAgent, StepMode, Workflow, WorkflowId,
     WorkflowRun, WorkflowRunId, WorkflowRunState, WorkflowStep,
 };
 use axum::extract::{Path, Query, State};
@@ -210,6 +210,68 @@ fn parse_step_mode(val: &serde_json::Value, step: &serde_json::Value) -> StepMod
                     max_iterations,
                     until,
                 }
+            }
+            // Operator nodes (#4980). The flat-string forms read their
+            // configuration from sibling fields on the step object —
+            // mirrors the legacy `"conditional"` / `"loop"` shape, so
+            // the dashboard / TOML examples in the issue body can keep
+            // `mode = "wait"` with siblings `duration_secs = 5` etc.
+            "wait" => {
+                let duration_secs = step["duration_secs"].as_u64().unwrap_or_else(|| {
+                    warn!("wait step missing 'duration_secs' field, defaulting to 0");
+                    0
+                });
+                StepMode::Wait { duration_secs }
+            }
+            "gate" => {
+                let condition = step["condition"]
+                    .as_str()
+                    .unwrap_or_else(|| {
+                        warn!("gate step missing 'condition' field, defaulting to empty");
+                        ""
+                    })
+                    .to_string();
+                StepMode::Gate { condition }
+            }
+            "approval" => {
+                let recipients: Vec<String> = step["recipients"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let timeout_secs = step["timeout_secs"].as_u64();
+                StepMode::Approval {
+                    recipients,
+                    timeout_secs,
+                }
+            }
+            "transform" => {
+                let code = step["code"]
+                    .as_str()
+                    .unwrap_or_else(|| {
+                        warn!("transform step missing 'code' field, defaulting to empty");
+                        ""
+                    })
+                    .to_string();
+                StepMode::Transform { code }
+            }
+            "branch" => {
+                let arms: Vec<BranchArm> = step["arms"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| {
+                                let then = v["then"].as_str()?.to_string();
+                                let match_value = v.get("match_value").cloned()?;
+                                Some(BranchArm { match_value, then })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                StepMode::Branch { arms }
             }
             _ => StepMode::Sequential,
         };
