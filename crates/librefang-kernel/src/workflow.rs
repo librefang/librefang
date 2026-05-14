@@ -423,12 +423,24 @@ pub enum StepMode {
     /// exec is explicitly NOT considered.
     Transform { code: String },
     /// Operator node: conditional routing on the previous step's
-    /// output. Each `arm.match_value` is a `serde_json::Value` so a
-    /// downstream UI can render the choices as typed inputs (numbers,
-    /// strings, bools, enums) without losing fidelity; `arm.then` is
-    /// the name of the step to jump to. Executor is no-op-with-warn in
-    /// this PR — the jump semantics and the default-arm shape land
-    /// together in a follow-up (#4980).
+    /// output. Each `arm.match_value` is exact-matched against the
+    /// previous step's output (parsed as JSON when possible, raw
+    /// string otherwise); the first matching arm's `then` field is
+    /// the name of a *later* step to jump to. The dispatcher seeks
+    /// forward to that step and resumes sequential execution from
+    /// there. If no arm matches, the run halts with
+    /// `WorkflowRunState::Failed` and a reason naming the unmatched
+    /// output. If the named target step is missing or at-or-before
+    /// the current index, the run halts with a typed reason.
+    ///
+    /// Design decision (deferred from step 1, locked in step 4 of
+    /// #4980): exact equality on V1, matching the proposal in step
+    /// 1's PR body. Range / regex / in-set matchers can land as
+    /// additive `BranchArm` fields later (`match_range`, `match_regex`
+    /// with exactly-one-of validation) so the V1 shape does not paint
+    /// future evolution into a corner. Forward jumps only — backward
+    /// jumps would let an unbounded loop hide inside a Branch when
+    /// steps already have `Loop` semantics for that.
     Branch { arms: Vec<BranchArm> },
 }
 
@@ -3475,21 +3487,152 @@ impl WorkflowEngine {
                 }
 
                 StepMode::Branch { arms } => {
-                    warn!(
-                        step = i + 1,
-                        name = %step.name,
-                        arm_count = arms.len(),
-                        "Branch executor not yet implemented — refs #4980 (returning success)"
-                    );
-                    Self::record_operator_noop_step_result(
-                        &self.runs,
-                        run_id,
-                        step,
-                        "_operator:branch",
-                        &current_input,
-                        &mut variables,
-                        &mut all_outputs,
-                    );
+                    let start = std::time::Instant::now();
+                    // Resolve the value to match against. Parse as JSON
+                    // when possible — that lets numeric and structural
+                    // match values (`0.8`, `{"status":"ok"}`) compare
+                    // by JSON deep-equality rather than string form. A
+                    // non-JSON predecessor compares its raw output
+                    // against the string form of each arm's
+                    // `match_value`.
+                    let parsed_input: Option<serde_json::Value> =
+                        serde_json::from_str(&current_input).ok();
+                    let matched_arm_idx = arms.iter().position(|arm| match &parsed_input {
+                        Some(parsed) => parsed == &arm.match_value,
+                        None => {
+                            let rhs = match &arm.match_value {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            };
+                            current_input == rhs
+                        }
+                    });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+
+                    match matched_arm_idx {
+                        Some(arm_idx) => {
+                            let arm = &arms[arm_idx];
+                            // Resolve the target step name to its
+                            // index. The dispatcher only honours
+                            // FORWARD jumps — a backward jump would
+                            // let an unbounded loop hide inside a
+                            // Branch when `Loop` already exists for
+                            // that semantic.
+                            let target_idx = workflow.steps.iter().position(|s| s.name == arm.then);
+                            match target_idx {
+                                Some(t) if t > i => {
+                                    let output = current_input.clone();
+                                    let step_result = StepResult {
+                                        step_name: step.name.clone(),
+                                        agent_id: String::new(),
+                                        agent_name: "_operator:branch".to_string(),
+                                        prompt: format!(
+                                            "branch -> '{}' (arm {})",
+                                            arm.then, arm_idx
+                                        ),
+                                        output: output.clone(),
+                                        input_tokens: 0,
+                                        output_tokens: 0,
+                                        duration_ms,
+                                    };
+                                    if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                        r.step_results.push(step_result);
+                                    }
+                                    if let Some(ref var) = step.output_var {
+                                        variables.insert(var.clone(), output.clone());
+                                    }
+                                    all_outputs.push(output);
+                                    info!(
+                                        step = i + 1,
+                                        name = %step.name,
+                                        target = %arm.then,
+                                        target_idx = t,
+                                        duration_ms,
+                                        "Branch jumped to target step"
+                                    );
+                                    i = t;
+                                    continue;
+                                }
+                                Some(t) => {
+                                    let err = format!(
+                                        "Branch step '{}' target '{}' (index {}) is at or before current step (index {}) — backward jumps not allowed",
+                                        step.name, arm.then, t, i
+                                    );
+                                    warn!(error = %err, "Branch step blocked workflow");
+                                    if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                        if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                            r.state = WorkflowRunState::Failed;
+                                            r.error = Some(err.clone());
+                                            r.completed_at = Some(Utc::now());
+                                        }
+                                    }
+                                    return Err(err);
+                                }
+                                None => {
+                                    let err = format!(
+                                        "Branch step '{}' target step '{}' not found in workflow",
+                                        step.name, arm.then
+                                    );
+                                    warn!(error = %err, "Branch step blocked workflow");
+                                    if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                        if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                            r.state = WorkflowRunState::Failed;
+                                            r.error = Some(err.clone());
+                                            r.completed_at = Some(Utc::now());
+                                        }
+                                    }
+                                    return Err(err);
+                                }
+                            }
+                        }
+                        None => {
+                            // No arm matched. We could fall through
+                            // (treating Branch as a no-op when nothing
+                            // matches) but that hides operator
+                            // mistakes — they almost certainly meant
+                            // for *some* arm to match. Halt with a
+                            // typed reason; a future additive shape
+                            // (`default_then: Option<String>`) can
+                            // relax this when explicitly opted into.
+                            let reason = {
+                                // Truncate the unmatched input in the
+                                // error so a multi-MB previous output
+                                // does not blow up the error string.
+                                let mut short = current_input.clone();
+                                const MAX: usize = 200;
+                                if short.len() > MAX {
+                                    short.truncate(MAX);
+                                    short.push('…');
+                                }
+                                format!(
+                                    "Branch step '{}' had no matching arm for output: {}",
+                                    step.name, short
+                                )
+                            };
+                            warn!(reason = %reason, "Branch step blocked workflow");
+                            let step_result = StepResult {
+                                step_name: step.name.clone(),
+                                agent_id: String::new(),
+                                agent_name: "_operator:branch".to_string(),
+                                prompt: format!("branch (arms={})", arms.len()),
+                                output: reason.clone(),
+                                input_tokens: 0,
+                                output_tokens: 0,
+                                duration_ms,
+                            };
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                r.step_results.push(step_result);
+                            }
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                    r.state = WorkflowRunState::Failed;
+                                    r.error = Some(reason.clone());
+                                    r.completed_at = Some(Utc::now());
+                                }
+                            }
+                            return Err(reason);
+                        }
+                    }
                 }
             }
 
