@@ -1588,6 +1588,28 @@ fn machine_fingerprint() -> Vec<u8> {
 /// Windows: MachineGuid via `reg query HKLM\SOFTWARE\Microsoft\Cryptography`.
 ///          If the reg query fails, emit nothing — fingerprint relies on the
 ///          persisted random_id alone (same posture as Linux without machine-id).
+/// Pick the first candidate that we can resolve. Absolute paths must exist on
+/// disk; bare names are accepted (PATH lookup will be used). Falls back to the
+/// last candidate as a last resort. Required because launchd / Windows service
+/// contexts may run with a minimal PATH that excludes `/usr/sbin` or
+/// `C:\Windows\System32`, so a bare `Command::new("ioreg")` / `Command::new("reg")`
+/// silently returns ENOENT (see #5025).
+fn resolve_command(candidates: &[&'static str]) -> &'static str {
+    for &p in candidates {
+        let is_absolute = p.starts_with('/') || p.contains(":\\");
+        if is_absolute {
+            if std::path::Path::new(p).exists() {
+                return p;
+            }
+            // Doesn't exist — fall through to next candidate.
+            continue;
+        }
+        // Bare name: trust PATH; return immediately.
+        return p;
+    }
+    candidates.last().copied().unwrap_or("")
+}
+
 #[cfg(not(test))]
 fn collect_os_machine_id_material() -> Vec<u8> {
     let mut out = Vec::new();
@@ -1644,26 +1666,56 @@ fn collect_os_machine_id_material() -> Vec<u8> {
     // This UUID is stable across reboots and unique per physical machine.
     // We shell out rather than reading /private/var/db/SystemPolicyConfiguration/SystemPolicy
     // (root-only, binary blob, content unstable across macOS releases).
+    //
+    // `ioreg` lives at `/usr/sbin/ioreg`, which launchd's default minimal PATH
+    // (`/usr/local/bin:/usr/bin:/bin`) does NOT include. A bare
+    // `Command::new("ioreg")` therefore silently ENOENTs in the daemon
+    // context, producing a different fingerprint than the one that wrote the
+    // keyring and leaving the vault locked at startup (#5025). Resolve to an
+    // absolute path first; only fall back to PATH lookup if no candidate
+    // exists on disk.
     #[cfg(target_os = "macos")]
     {
-        if let Ok(output) = std::process::Command::new("ioreg")
+        let ioreg = resolve_command(&["/usr/sbin/ioreg", "/sbin/ioreg", "ioreg"]);
+        match std::process::Command::new(ioreg)
             .args(["-rd1", "-c", "IOPlatformExpertDevice"])
             .output()
         {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if line.contains("IOPlatformUUID") {
-                    // Line format: `  "IOPlatformUUID" = "GUID-HERE"`
-                    // Split on '"' and take the 4th token (index 3) as the UUID value.
-                    let parts: Vec<&str> = line.splitn(4, '"').collect();
-                    if let Some(raw) = parts.get(3) {
-                        let uuid = raw.trim_end_matches('"').trim();
-                        if !uuid.is_empty() {
-                            emit(b"macos-platform-uuid", uuid.as_bytes());
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut found = false;
+                for line in stdout.lines() {
+                    if line.contains("IOPlatformUUID") {
+                        // Line format: `  "IOPlatformUUID" = "GUID-HERE"`
+                        // Split on '"' and take the 4th token (index 3) as the UUID value.
+                        let parts: Vec<&str> = line.splitn(4, '"').collect();
+                        if let Some(raw) = parts.get(3) {
+                            let uuid = raw.trim_end_matches('"').trim();
+                            if !uuid.is_empty() {
+                                emit(b"macos-platform-uuid", uuid.as_bytes());
+                                found = true;
+                            }
                         }
+                        break;
                     }
-                    break;
                 }
+                if !found {
+                    warn!(
+                        binary = ioreg,
+                        "ioreg did not return an IOPlatformUUID — macOS fingerprint will rely on random_id alone; \
+                         this will produce a DIFFERENT wrap key from the one that wrote the keyring and the vault \
+                         will appear locked at startup (#5025)"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    binary = ioreg,
+                    error = %e,
+                    "failed to spawn ioreg — macOS fingerprint will rely on random_id alone; \
+                     this will produce a DIFFERENT wrap key from the one that wrote the keyring and the vault \
+                     will appear locked at startup. Ensure /usr/sbin/ioreg exists or that /usr/sbin is on PATH (#5025)"
+                );
             }
         }
     }
@@ -1673,9 +1725,14 @@ fn collect_os_machine_id_material() -> Vec<u8> {
     // Shell out to `reg query` — no external crate needed, and vault load
     // happens only once per daemon start so the overhead is acceptable.
     // Output format: "    MachineGuid    REG_SZ    <guid>"
+    //
+    // `reg.exe` lives at `C:\Windows\System32\reg.exe`. A service-account
+    // context with a stripped PATH would hit the same class of bug as the
+    // macOS launchd case (#5025), so we resolve to an absolute path first.
     #[cfg(target_os = "windows")]
     {
-        if let Ok(output) = std::process::Command::new("reg")
+        let reg_bin = resolve_command(&[r"C:\Windows\System32\reg.exe", "reg"]);
+        match std::process::Command::new(reg_bin)
             .args([
                 "query",
                 r"HKLM\SOFTWARE\Microsoft\Cryptography",
@@ -1684,21 +1741,40 @@ fn collect_os_machine_id_material() -> Vec<u8> {
             ])
             .output()
         {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if line.contains("MachineGuid") && line.contains("REG_SZ") {
-                    // The GUID is the last whitespace-delimited token.
-                    if let Some(guid) = line.split_whitespace().last() {
-                        if !guid.is_empty() {
-                            emit(b"windows-machine-guid", guid.as_bytes());
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut found = false;
+                for line in stdout.lines() {
+                    if line.contains("MachineGuid") && line.contains("REG_SZ") {
+                        // The GUID is the last whitespace-delimited token.
+                        if let Some(guid) = line.split_whitespace().last() {
+                            if !guid.is_empty() {
+                                emit(b"windows-machine-guid", guid.as_bytes());
+                                found = true;
+                            }
                         }
+                        break;
                     }
-                    break;
+                }
+                if !found {
+                    warn!(
+                        binary = reg_bin,
+                        "reg query did not return a MachineGuid — Windows fingerprint will rely on random_id alone; \
+                         this will produce a DIFFERENT wrap key from the one that wrote the keyring and the vault \
+                         will appear locked at startup (#5025)"
+                    );
                 }
             }
+            Err(e) => {
+                warn!(
+                    binary = reg_bin,
+                    error = %e,
+                    "failed to spawn reg.exe — Windows fingerprint will rely on random_id alone; \
+                     this will produce a DIFFERENT wrap key from the one that wrote the keyring and the vault \
+                     will appear locked at startup. Ensure C:\\Windows\\System32\\reg.exe exists or is on PATH (#5025)"
+                );
+            }
         }
-        // If reg query fails: emit nothing — fingerprint falls back to the
-        // persisted random_id alone, same posture as Linux without machine-id.
     }
 
     out
@@ -2866,5 +2942,68 @@ mod tests {
             std::env::remove_var(VAULT_KEY_ENV);
             std::env::remove_var(VAULT_NO_KEYRING_ENV);
         }
+    }
+
+    // ── resolve_command ─────────────────────────────────────────────────
+    //
+    // Regression suite for the launchd `ioreg` ENOENT bug (#5025). The
+    // helper must:
+    //   1. Pick an existing absolute path when one is present.
+    //   2. Skip absolute paths that do not exist.
+    //   3. Accept a bare command name as an implicit "trust PATH" fallback.
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_picks_first_existing_absolute() {
+        // /bin/sh exists on every supported Unix host (macOS, Linux). If a
+        // CI environment ever pares this down we'll learn about it via this
+        // test, which is exactly the visibility #5025 wished it had.
+        let pick = resolve_command(&[
+            "/this/path/definitely/does/not/exist",
+            "/bin/sh",
+            "fallback-bare-name",
+        ]);
+        assert_eq!(pick, "/bin/sh");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_skips_missing_absolutes() {
+        // Both absolutes are bogus — the bare-name fallback wins.
+        let pick = resolve_command(&["/nope/one", "/nope/two", "fallback-bare-name"]);
+        assert_eq!(pick, "fallback-bare-name");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_returns_last_when_all_absolutes_missing_and_no_bare() {
+        // Edge case: all candidates are absolute and none exist. The helper
+        // returns the last candidate so the caller still passes a non-empty
+        // command to `Command::new` and gets a proper Err back (which the
+        // updated `collect_os_machine_id_material` logs explicitly).
+        let pick = resolve_command(&["/nope/one", "/nope/two"]);
+        assert_eq!(pick, "/nope/two");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_command_skips_missing_windows_absolutes() {
+        // On Windows the absolute-path discriminator is the drive prefix
+        // `X:\`. cmd.exe is virtually always present in System32.
+        let pick = resolve_command(&[
+            r"C:\nope\does\not\exist.exe",
+            r"C:\Windows\System32\cmd.exe",
+            "fallback-bare-name",
+        ]);
+        assert_eq!(pick, r"C:\Windows\System32\cmd.exe");
+    }
+
+    #[test]
+    fn resolve_command_accepts_bare_name_without_filesystem_check() {
+        // The bare name is returned immediately — even if no such command
+        // exists on PATH, the caller's `Command::new` will surface the
+        // ENOENT (and the updated collector logs that path explicitly).
+        let pick = resolve_command(&["definitely-not-a-real-command-1234567890"]);
+        assert_eq!(pick, "definitely-not-a-real-command-1234567890");
     }
 }
