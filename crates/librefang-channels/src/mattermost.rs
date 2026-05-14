@@ -46,6 +46,11 @@ pub struct MattermostAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Bot's own user ID (populated after /api/v4/users/me).
     bot_user_id: Arc<RwLock<Option<String>>>,
+    /// True when `with_proxy(Some(_))` set a per-channel proxy on `client`.
+    /// Drives a one-shot WARN at `start()` because the Mattermost
+    /// WebSocket bypasses the proxy — see
+    /// `http_client::warn_ws_proxy_bypass` (#4795 follow-up).
+    proxy_configured: bool,
 }
 
 impl MattermostAdapter {
@@ -67,6 +72,7 @@ impl MattermostAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             bot_user_id: Arc::new(RwLock::new(None)),
+            proxy_configured: false,
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -80,6 +86,21 @@ impl MattermostAdapter {
         self.initial_backoff = Duration::from_secs(initial_backoff_secs);
         self.max_backoff = Duration::from_secs(max_backoff_secs);
         self
+    }
+
+    /// Route this adapter's REST client through `proxy_url` (#4795).
+    /// Affects REST API calls only — the Mattermost WebSocket is not
+    /// currently routed through the proxy. See
+    /// `TelegramAdapter::with_proxy` for the URL contract.
+    pub fn with_proxy(
+        mut self,
+        proxy_url: Option<&str>,
+    ) -> Result<Self, crate::http_client::ChannelProxyError> {
+        if proxy_url.is_some() {
+            self.client = crate::http_client::new_proxied_client(proxy_url)?;
+            self.proxy_configured = true;
+        }
+        Ok(self)
     }
 
     /// Validate the token by calling `GET /api/v4/users/me`.
@@ -262,6 +283,12 @@ impl ChannelAdapter for MattermostAdapter {
         Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
+        // Surface the per-channel proxy WS-bypass limitation in startup
+        // logs the first time we open the websocket (#4795 follow-up).
+        if self.proxy_configured {
+            crate::http_client::warn_ws_proxy_bypass("mattermost");
+        }
+
         // Validate token and get bot user ID
         let user_id = self.validate_token().await?;
         *self.bot_user_id.write().await = Some(user_id);
@@ -501,6 +528,16 @@ impl ChannelAdapter for MattermostAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the
+    /// Mattermost team ID or server URL identifier) so the bridge approval
+    /// listener builds the same `mattermost:<account_id>` key the router
+    /// stores in `channel_defaults`, scoping ApprovalRequested delivery to
+    /// the team bound to the requesting agent (#5003, follow-up to
+    /// #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -518,6 +555,53 @@ mod tests {
 
     fn make_adapter(server_url: String) -> MattermostAdapter {
         MattermostAdapter::new(server_url, "test-mm-token".to_string(), vec![])
+    }
+
+    // -------- per-channel proxy (#4795) -----------------------------------
+
+    #[test]
+    fn mattermost_with_proxy_accepts_valid_url() {
+        let _a = MattermostAdapter::new("https://mm".into(), "t".into(), vec![])
+            .with_proxy(Some("http://127.0.0.1:8080"))
+            .expect("valid http proxy URL must succeed");
+    }
+
+    #[test]
+    fn mattermost_with_proxy_rejects_garbage_url() {
+        // `expect_err` requires `T: Debug` and `MattermostAdapter` does
+        // not derive Debug (zeroized token, `Arc<RwLock<…>>`, …).
+        // Pattern match on the Result instead of forcing a Debug derive
+        // on the adapter just to make this single test compile.
+        let result = MattermostAdapter::new("https://mm".into(), "t".into(), vec![])
+            .with_proxy(Some("not a url"));
+        match result {
+            Err(crate::http_client::ChannelProxyError::InvalidUrl { .. }) => {}
+            Err(other) => panic!("expected InvalidUrl, got: {other:?}"),
+            Ok(_) => panic!("garbage proxy URL must fail at init"),
+        }
+    }
+
+    /// Setting a per-channel proxy flips the `proxy_configured` flag
+    /// that drives the one-shot WS-bypass WARN at `start()` (#4795
+    /// follow-up). Leaving it `None` must keep the flag false so a
+    /// vanilla startup stays log-clean.
+    #[test]
+    fn mattermost_with_proxy_some_sets_ws_bypass_warn_flag() {
+        let a = MattermostAdapter::new("https://mm".into(), "t".into(), vec![])
+            .with_proxy(Some("http://127.0.0.1:8080"))
+            .expect("valid proxy URL");
+        assert!(
+            a.proxy_configured,
+            "with_proxy(Some(_)) must set proxy_configured so start() emits the WS-bypass WARN"
+        );
+
+        let b = MattermostAdapter::new("https://mm".into(), "t".into(), vec![])
+            .with_proxy(None)
+            .expect("None proxy URL");
+        assert!(
+            !b.proxy_configured,
+            "with_proxy(None) must NOT set proxy_configured (no WARN on clean startup)"
+        );
     }
 
     fn dummy_user(channel_id: &str) -> ChannelUser {
@@ -600,6 +684,29 @@ mod tests {
         );
         assert_eq!(adapter.name(), "mattermost");
         assert_eq!(adapter.channel_type(), ChannelType::Mattermost);
+    }
+
+    #[test]
+    fn test_mattermost_account_id_default_none() {
+        let adapter = MattermostAdapter::new(
+            "https://mattermost.example.com".to_string(),
+            "test-token".to_string(),
+            vec![],
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_mattermost_account_id_returns_configured_value() {
+        // #5003: two Mattermost teams / servers must resolve under distinct
+        // `mattermost:<account_id>` keys via the trait override.
+        let adapter = MattermostAdapter::new(
+            "https://mattermost.example.com".to_string(),
+            "test-token".to_string(),
+            vec![],
+        )
+        .with_account_id(Some("team-acme".to_string()));
+        assert_eq!(adapter.account_id(), Some("team-acme"));
     }
 
     #[test]

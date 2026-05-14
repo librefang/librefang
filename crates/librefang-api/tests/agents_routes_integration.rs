@@ -448,6 +448,239 @@ async fn test_delete_agent_unknown_uuid_is_idempotent_200() {
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/agents — re-create an agent with a previously-used name (#4991)
+// ---------------------------------------------------------------------------
+
+/// Refs #4991: deleting an agent and immediately re-creating one with the
+/// same name used to fail with `500 Internal error: Invalid workspace path`.
+///
+/// Root cause: `spawn_agent_inner` rewrites `manifest.workspace` to the
+/// resolved absolute directory (`<workspaces>/agents/<name>`). The manifest
+/// is round-tripped to `agent.toml` on disk; subsequent re-creation feeds
+/// that absolute path back into `resolve_workspace_dir`, which blanket-
+/// rejected anything `is_absolute()` — even when it pointed inside the
+/// workspaces root the helper would have produced itself.
+///
+/// The fix accepts absolute paths under `workspaces_root` while still
+/// rejecting paths outside it (and any `..` / Windows-prefix traversal).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_spawn_agent_with_absolute_workspace_inside_root_succeeds() {
+    let h = boot(TEST_TOKEN).await;
+
+    // Compute the absolute workspace path the kernel itself would assign
+    // to an agent named "recreate-me". This mirrors what
+    // `persist_manifest_to_disk` writes back into `agent.toml` after a
+    // successful spawn — and what gets fed into a subsequent re-spawn.
+    let cfg = h.state.kernel.config_ref();
+    let abs_workspace = cfg.effective_agent_workspaces_dir().join("recreate-me");
+
+    let manifest_toml = format!(
+        r#"
+name = "recreate-me"
+description = "agent with absolute workspace path"
+workspace = "{}"
+
+[model]
+provider = "ollama"
+model = "test-model"
+"#,
+        // TOML basic-string escape: backslashes (Windows paths) must be
+        // doubled so the parser sees a literal path component.
+        abs_workspace.display().to_string().replace('\\', "\\\\"),
+    );
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/agents",
+            serde_json::json!({ "manifest_toml": manifest_toml }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "spawn with absolute workspace inside root must succeed; body={body:?}"
+    );
+    assert_eq!(body["name"], "recreate-me", "body={body:?}");
+}
+
+/// Refs #4991: the full delete-then-recreate flow the issue reporter hit.
+/// Spawn → confirmed DELETE → spawn again under the same name with the
+/// manifest the kernel persisted on the first spawn (i.e. carrying the
+/// resolved absolute workspace path). Without the fix the second spawn
+/// returns `500 spawn_failed / api-error-agent-error`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_recreate_agent_same_name_after_delete_succeeds() {
+    let h = boot(TEST_TOKEN).await;
+
+    // First spawn — let the kernel synthesize the absolute workspace dir,
+    // then read it back from the registry exactly as
+    // `persist_manifest_to_disk` would serialize it.
+    let id1 = spawn_named(&h.state, "recreated");
+    let resolved_workspace = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(id1)
+        .and_then(|e| e.manifest.workspace.clone())
+        .expect("spawn must have set manifest.workspace to an absolute path");
+    assert!(
+        resolved_workspace.is_absolute(),
+        "first spawn should resolve workspace to an absolute path; got {}",
+        resolved_workspace.display()
+    );
+
+    // Confirmed DELETE — purges canonical UUID, drops registry entry,
+    // but leaves the workspace directory on disk (kill_agent does NOT
+    // remove the workspace; the reporter's repro relies on this).
+    let (del_status, del_body) = send(
+        h.app.clone(),
+        delete_confirmed(&format!("/api/agents/{}", id1), Some(TEST_TOKEN)),
+    )
+    .await;
+    assert_eq!(
+        del_status,
+        StatusCode::OK,
+        "DELETE must succeed; body={del_body:?}"
+    );
+    assert_eq!(del_body["status"], "killed", "body={del_body:?}");
+
+    // Second spawn — same name, carrying the absolute workspace that the
+    // first spawn would have written back to agent.toml. This is exactly
+    // what the dashboard form (or template instantiation) replays.
+    let manifest_toml = format!(
+        r#"
+name = "recreated"
+workspace = "{}"
+
+[model]
+provider = "ollama"
+model = "test-model"
+"#,
+        resolved_workspace
+            .display()
+            .to_string()
+            .replace('\\', "\\\\"),
+    );
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/agents",
+            serde_json::json!({ "manifest_toml": manifest_toml }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "recreate after delete must succeed; got {status} body={body:?}"
+    );
+    assert_eq!(body["name"], "recreated", "body={body:?}");
+    // AgentId is a deterministic UUIDv5 derived from the agent name
+    // (`AgentId::new_for_name`), so the recreated agent intentionally
+    // shares its UUID with the deleted one. We only assert the response
+    // carries an agent_id at all — confirming the second spawn went
+    // through the full code path rather than returning a stale 200 from
+    // the idempotency cache.
+    let id2 = body["agent_id"]
+        .as_str()
+        .expect("recreate response must carry the new agent id");
+    assert_eq!(
+        id2,
+        id1.to_string(),
+        "AgentId is name-deterministic; recreated UUID must match the original"
+    );
+}
+
+/// Refs #4991: the security boundary the original blanket `is_absolute()`
+/// reject was protecting must stay closed. An absolute path pointing
+/// **outside** `workspaces_root` is still rejected.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_spawn_agent_with_absolute_workspace_outside_root_rejected() {
+    let h = boot(TEST_TOKEN).await;
+
+    // `/tmp/...` (or `C:\...` on Windows) is always outside the per-test
+    // tempdir workspaces root. Use a platform-appropriate absolute path
+    // so the test is meaningful on both Unix and Windows runners.
+    #[cfg(unix)]
+    let outside = "/tmp/librefang-4991-outside";
+    #[cfg(windows)]
+    let outside = "C:\\librefang-4991-outside";
+
+    let manifest_toml = format!(
+        r#"
+name = "escape-me"
+workspace = "{}"
+
+[model]
+provider = "ollama"
+model = "test-model"
+"#,
+        outside.replace('\\', "\\\\"),
+    );
+
+    let (status, _body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/agents",
+            serde_json::json!({ "manifest_toml": manifest_toml }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "absolute workspace outside the workspaces root must still be rejected"
+    );
+}
+
+/// Refs #4991: even when the absolute path's prefix matches `workspaces_root`,
+/// a `..` component anywhere in the path must still be rejected. Without this
+/// guard, `<workspaces_root>/x/../../escape` would syntactically `starts_with`
+/// the root yet resolve outside it once the OS canonicalizes the path.
+/// `has_unsafe_relative_components` runs *before* the `is_absolute()` branch
+/// in `resolve_workspace_dir`, so any `ParentDir` component fails closed
+/// regardless of which branch would otherwise accept the input.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_spawn_agent_with_absolute_workspace_dotdot_traversal_rejected() {
+    let h = boot(TEST_TOKEN).await;
+
+    // Build an absolute path that starts with the real workspaces root but
+    // contains a `..` segment further down. Without the unsafe-component
+    // check this would slip past the `starts_with(&root)` branch.
+    let cfg = h.state.kernel.config_ref();
+    let root = cfg.effective_agent_workspaces_dir();
+    let traversal = root.join("x").join("..").join("escape");
+
+    let manifest_toml = format!(
+        r#"
+name = "dotdot-escape"
+workspace = "{}"
+
+[model]
+provider = "ollama"
+model = "test-model"
+"#,
+        traversal.display().to_string().replace('\\', "\\\\"),
+    );
+
+    let (status, _body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/agents",
+            serde_json::json!({ "manifest_toml": manifest_toml }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "absolute workspace with `..` traversal must be rejected even when the prefix matches workspaces_root"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/agents/{id}/session — thinking blocks reach the dashboard
 // ---------------------------------------------------------------------------
 

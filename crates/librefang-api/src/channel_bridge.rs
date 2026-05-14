@@ -1158,11 +1158,15 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                         Some((entry.id, entry.name.clone(), inherit))
                     }
                 },
-                |agent_id, message| {
+                |agent_id, message, session_mode_override| {
                     let k = kernel.clone();
                     async move {
                         let result = k
-                            .send_message(agent_id, &message)
+                            .send_message_with_session_mode(
+                                agent_id,
+                                &message,
+                                session_mode_override,
+                            )
                             .await
                             .map_err(|e| format!("{e}"))?;
                         Ok((
@@ -2235,6 +2239,49 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     fn channels_download_max_bytes(&self) -> Option<u64> {
         Some(self.kernel.config_ref().channels.file_download_max_bytes)
     }
+
+    /// Auto-transcribe inbound channel audio (#4975).
+    ///
+    /// Honors the kernel `[media] audio_transcription` flag (default OFF) —
+    /// returns `Ok(None)` when disabled so the bridge falls back to the
+    /// raw-path block. When enabled, materializes a `MediaAttachment` over the
+    /// already-downloaded file and dispatches to `MediaEngine::transcribe_audio`.
+    /// Errors propagate as `Err(reason)` so the bridge can render a
+    /// `[Transcription failed: …]` note instead of dropping the message.
+    async fn transcribe_inbound_audio(
+        &self,
+        path: &std::path::Path,
+        mime_type: &str,
+    ) -> Result<Option<String>, String> {
+        // Default-OFF respect — exit immediately when the operator hasn't
+        // opted in. Cheap config snapshot, no allocations on the cold path.
+        if !self.kernel.config_ref().media.audio_transcription {
+            return Ok(None);
+        }
+
+        // Probe size + reject unsupported MIME bases at the validation
+        // layer (mirrors `/api/uploads` / `/media/transcribe` semantics).
+        // We use `tokio::fs` rather than blocking `std::fs` because this
+        // method is called from inside the channel dispatch task.
+        let size_bytes = match tokio::fs::metadata(path).await {
+            Ok(m) => m.len(),
+            Err(e) => return Err(format!("stat saved audio failed: {e}")),
+        };
+
+        let attachment = librefang_types::media::MediaAttachment {
+            media_type: librefang_types::media::MediaType::Audio,
+            mime_type: mime_type.to_string(),
+            source: librefang_types::media::MediaSource::FilePath {
+                path: path.to_string_lossy().into_owned(),
+            },
+            size_bytes,
+        };
+
+        match self.kernel.media().transcribe_audio(&attachment).await {
+            Ok(result) => Ok(Some(result.description)),
+            Err(reason) => Err(reason),
+        }
+    }
 }
 
 /// Parse a trigger pattern string from chat into a `TriggerPattern`.
@@ -2281,6 +2328,42 @@ fn read_token(env_var: &str, adapter_name: &str) -> Option<String> {
         }
         Err(_) => {
             warn!("{adapter_name} bot token env var '{env_var}' not set, skipping");
+            None
+        }
+    }
+}
+
+/// Apply a per-channel `proxy = "…"` override to an adapter that
+/// exposes a `with_proxy(Option<&str>) -> Result<Self, …>` builder
+/// (#4795). On `ChannelProxyError`, log the redacted URL with the
+/// reason and return `None` so the caller skips spawning that adapter
+/// — better than booting with the wrong proxy silently.
+///
+/// The closure shape keeps this generic across all four wired
+/// adapters (`Telegram`, `Discord`, `Slack`, `Mattermost`) without
+/// dragging a trait bound through `librefang-channels`.
+#[allow(dead_code)]
+fn apply_channel_proxy<A>(
+    adapter: A,
+    proxy: Option<&str>,
+    adapter_name: &str,
+    apply: impl FnOnce(A, Option<&str>) -> Result<A, librefang_channels::http_client::ChannelProxyError>,
+) -> Option<A> {
+    match apply(adapter, proxy) {
+        Ok(a) => Some(a),
+        Err(e) => {
+            // The raw error string already echoes the bad value
+            // verbatim; redact it for the channel-bridge log so we
+            // never put `user:pass@…` in operator logs even on the
+            // error path.
+            let redacted = proxy
+                .map(librefang_types::config::redact_proxy_url)
+                .unwrap_or_default();
+            warn!(
+                adapter = adapter_name,
+                proxy = redacted.as_str(),
+                "channel proxy override rejected: {e}; skipping adapter"
+            );
             None
         }
     }
@@ -2611,24 +2694,32 @@ pub async fn start_channel_bridge_with_config(
     for tg_config in config.telegram.iter() {
         if let Some(token) = read_token(&tg_config.bot_token_env, "Telegram") {
             let poll_interval = Duration::from_secs(tg_config.poll_interval_secs);
+            let base = TelegramAdapter::new(
+                token,
+                tg_config.allowed_users.clone(),
+                poll_interval,
+                tg_config.api_url.clone(),
+            );
+            let Some(proxied) =
+                apply_channel_proxy(base, tg_config.proxy.as_deref(), "Telegram", |a, p| {
+                    a.with_proxy(p)
+                })
+            else {
+                continue;
+            };
             let adapter = Arc::new(
-                TelegramAdapter::new(
-                    token,
-                    tg_config.allowed_users.clone(),
-                    poll_interval,
-                    tg_config.api_url.clone(),
-                )
-                .with_account_id(tg_config.account_id.clone())
-                .with_thread_routes(tg_config.thread_routes.clone())
-                .with_backoff(
-                    tg_config.initial_backoff_secs,
-                    tg_config.max_backoff_secs,
-                    tg_config.long_poll_timeout_secs,
-                )
-                .with_clear_done_reaction(tg_config.overrides.clear_done_reaction)
-                .with_max_upload_bytes(
-                    usize::try_from(config.file_upload_max_bytes).unwrap_or(usize::MAX),
-                ),
+                proxied
+                    .with_account_id(tg_config.account_id.clone())
+                    .with_thread_routes(tg_config.thread_routes.clone())
+                    .with_backoff(
+                        tg_config.initial_backoff_secs,
+                        tg_config.max_backoff_secs,
+                        tg_config.long_poll_timeout_secs,
+                    )
+                    .with_clear_done_reaction(tg_config.overrides.clear_done_reaction)
+                    .with_max_upload_bytes(
+                        usize::try_from(config.file_upload_max_bytes).unwrap_or(usize::MAX),
+                    ),
             );
             adapters.push((
                 adapter,
@@ -2642,17 +2733,25 @@ pub async fn start_channel_bridge_with_config(
     #[cfg(feature = "channel-discord")]
     for dc_config in config.discord.iter() {
         if let Some(token) = read_token(&dc_config.bot_token_env, "Discord") {
+            let base = DiscordAdapter::new(
+                token,
+                dc_config.allowed_guilds.clone(),
+                dc_config.allowed_users.clone(),
+                dc_config.ignore_bots,
+                dc_config.mention_patterns.clone(),
+                dc_config.intents,
+            );
+            let Some(proxied) =
+                apply_channel_proxy(base, dc_config.proxy.as_deref(), "Discord", |a, p| {
+                    a.with_proxy(p)
+                })
+            else {
+                continue;
+            };
             let adapter = Arc::new(
-                DiscordAdapter::new(
-                    token,
-                    dc_config.allowed_guilds.clone(),
-                    dc_config.allowed_users.clone(),
-                    dc_config.ignore_bots,
-                    dc_config.mention_patterns.clone(),
-                    dc_config.intents,
-                )
-                .with_account_id(dc_config.account_id.clone())
-                .with_backoff(dc_config.initial_backoff_secs, dc_config.max_backoff_secs),
+                proxied
+                    .with_account_id(dc_config.account_id.clone())
+                    .with_backoff(dc_config.initial_backoff_secs, dc_config.max_backoff_secs),
             );
             adapters.push((
                 adapter,
@@ -2667,8 +2766,17 @@ pub async fn start_channel_bridge_with_config(
     for sl_config in config.slack.iter() {
         if let Some(app_token) = read_token(&sl_config.app_token_env, "Slack (app)") {
             if let Some(bot_token) = read_token(&sl_config.bot_token_env, "Slack (bot)") {
+                let base =
+                    SlackAdapter::new(app_token, bot_token, sl_config.allowed_channels.clone());
+                let Some(proxied) =
+                    apply_channel_proxy(base, sl_config.proxy.as_deref(), "Slack", |a, p| {
+                        a.with_proxy(p)
+                    })
+                else {
+                    continue;
+                };
                 let adapter = Arc::new(
-                    SlackAdapter::new(app_token, bot_token, sl_config.allowed_channels.clone())
+                    proxied
                         .with_account_id(sl_config.account_id.clone())
                         .with_force_flat_replies(sl_config.force_flat_replies.unwrap_or(false))
                         .with_unfurl_links(sl_config.unfurl_links)
@@ -2872,14 +2980,22 @@ pub async fn start_channel_bridge_with_config(
     #[cfg(feature = "channel-mattermost")]
     for mm_config in config.mattermost.iter() {
         if let Some(token) = read_token(&mm_config.token_env, "Mattermost") {
+            let base = MattermostAdapter::new(
+                mm_config.server_url.clone(),
+                token,
+                mm_config.allowed_channels.clone(),
+            );
+            let Some(proxied) =
+                apply_channel_proxy(base, mm_config.proxy.as_deref(), "Mattermost", |a, p| {
+                    a.with_proxy(p)
+                })
+            else {
+                continue;
+            };
             let adapter = Arc::new(
-                MattermostAdapter::new(
-                    mm_config.server_url.clone(),
-                    token,
-                    mm_config.allowed_channels.clone(),
-                )
-                .with_account_id(mm_config.account_id.clone())
-                .with_backoff(mm_config.initial_backoff_secs, mm_config.max_backoff_secs),
+                proxied
+                    .with_account_id(mm_config.account_id.clone())
+                    .with_backoff(mm_config.initial_backoff_secs, mm_config.max_backoff_secs),
             );
             adapters.push((
                 adapter,

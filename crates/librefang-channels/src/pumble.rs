@@ -377,6 +377,16 @@ impl ChannelAdapter for PumbleAdapter {
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Pumble
+    /// workspace / bot identifier) so the bridge approval listener builds
+    /// the same `pumble:<account_id>` key the router stores in
+    /// `channel_defaults`, scoping ApprovalRequested delivery to the
+    /// workspace bound to the requesting agent (#5003, follow-up to
+    /// #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -581,5 +591,20 @@ mod tests {
 
         let msg = parse_pumble_event(&event, "BOT001").unwrap();
         assert_eq!(msg.thread_id.as_deref(), Some("ts1"));
+    }
+
+    #[test]
+    fn test_pumble_account_id_default_none() {
+        let adapter = PumbleAdapter::new("token".to_string(), 0);
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_pumble_account_id_returns_configured_value() {
+        // #5003: two Pumble workspaces must resolve under distinct
+        // `pumble:<account_id>` keys via the trait override.
+        let adapter = PumbleAdapter::new("token".to_string(), 0)
+            .with_account_id(Some("workspace-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("workspace-42"));
     }
 }

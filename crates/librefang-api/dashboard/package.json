@@ -29,22 +29,22 @@
   },
   "dependencies": {
     "@tanstack/history": "^1.161.6",
-    "@tanstack/react-query": "^5.100.9",
+    "@tanstack/react-query": "^5.100.10",
     "@tanstack/react-router": "^1.169.2",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",
     "@xterm/xterm": "^6.0.0",
     "@xyflow/react": "^12.10.2",
     "cmdk": "^1.1.1",
-    "i18next": "^26.0.9",
+    "i18next": "^26.1.0",
     "i18next-browser-languagedetector": "^8.2.1",
-    "katex": "^0.16.45",
+    "katex": "^0.16.46",
     "lucide-react": "^1.14.0",
     "motion": "^12.38.0",
     "qrcode": "^1.5.4",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
-    "react-i18next": "^17.0.6",
+    "react-i18next": "^17.0.7",
     "react-markdown": "^10.1.0",
     "recharts": "^3.8.1",
     "rehype-katex": "^7.0.1",
@@ -54,8 +54,8 @@
     "zustand": "^5.0.13"
   },
   "devDependencies": {
-    "@playwright/test": "^1.59.1",
-    "@tailwindcss/vite": "^4.2.4",
+    "@playwright/test": "^1.60.0",
+    "@tailwindcss/vite": "^4.3.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
@@ -65,9 +65,9 @@
     "@vitejs/plugin-react": "^6.0.1",
     "jsdom": "^29.1.1",
     "openapi-typescript": "^7.13.0",
-    "tailwindcss": "^4.2.4",
+    "tailwindcss": "^4.3.0",
     "typescript": "^5.9.2",
-    "vite": "^8.0.10",
-    "vitest": "^4.1.5"
+    "vite": "^8.0.12",
+    "vitest": "^4.1.6"
   }
 }

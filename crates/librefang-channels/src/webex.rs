@@ -505,6 +505,15 @@ impl ChannelAdapter for WebexAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Webex
+    /// org / bot identifier) so the bridge approval listener builds the
+    /// same `webex:<account_id>` key the router stores in `channel_defaults`,
+    /// scoping ApprovalRequested delivery to the org bound to the
+    /// requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -617,5 +626,20 @@ mod tests {
             err.to_string().contains("401"),
             "error should mention status code, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_webex_account_id_default_none() {
+        let adapter = WebexAdapter::new("token".to_string(), vec![]);
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_webex_account_id_returns_configured_value() {
+        // #5003: two Webex bots must resolve under distinct
+        // `webex:<account_id>` keys via the trait override.
+        let adapter = WebexAdapter::new("token".to_string(), vec![])
+            .with_account_id(Some("org-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("org-42"));
     }
 }

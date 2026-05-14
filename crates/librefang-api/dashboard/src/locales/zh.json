@@ -1500,6 +1500,7 @@
     "run_history": "运行历史",
     "prompt_sent": "发送的提示词：",
     "output": "输出：",
+    "generated_images": "生成的图片：",
     "loading_details": "正在加载详情…"
   },
   "scheduler": {

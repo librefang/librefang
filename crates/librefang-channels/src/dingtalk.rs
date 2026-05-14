@@ -847,6 +847,15 @@ impl ChannelAdapter for DingTalkAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the DingTalk
+    /// corp / robot identifier) so the bridge approval listener builds the
+    /// same `dingtalk:<account_id>` key the router stores in
+    /// `channel_defaults`, scoping ApprovalRequested delivery to the bot
+    /// bound to the requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -1247,5 +1256,20 @@ mod tests {
             librefang_user: Some(String::new()),
         };
         assert!(DingTalkAdapter::stream_reply_url(&user_empty_webhook).is_none());
+    }
+
+    #[test]
+    fn test_dingtalk_account_id_default_none() {
+        let adapter = DingTalkAdapter::new("token".to_string(), "secret".to_string(), 0);
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_dingtalk_account_id_returns_configured_value() {
+        // #5003: two DingTalk robots / corps must resolve under distinct
+        // `dingtalk:<account_id>` keys via the trait override.
+        let adapter = DingTalkAdapter::new("token".to_string(), "secret".to_string(), 0)
+            .with_account_id(Some("robot-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("robot-42"));
     }
 }

@@ -497,6 +497,16 @@ impl ChannelAdapter for GoogleChatAdapter {
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Google
+    /// Workspace / project identifier) so the bridge approval listener
+    /// builds the same `google_chat:<account_id>` key the router stores in
+    /// `channel_defaults`, scoping ApprovalRequested delivery to the
+    /// workspace bound to the requesting agent (#5003, follow-up to
+    /// #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -781,5 +791,28 @@ mod tests {
             err.contains("Failed to parse RSA private key"),
             "Expected RSA parse error (URI should be allowed), got: {err}"
         );
+    }
+
+    #[test]
+    fn test_google_chat_account_id_default_none() {
+        let adapter = GoogleChatAdapter::new(
+            r#"{"access_token":"test-token","project_id":"test"}"#.to_string(),
+            vec![],
+            0,
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_google_chat_account_id_returns_configured_value() {
+        // #5003: two Google Workspace projects must resolve under distinct
+        // `google_chat:<account_id>` keys via the trait override.
+        let adapter = GoogleChatAdapter::new(
+            r#"{"access_token":"test-token","project_id":"test"}"#.to_string(),
+            vec![],
+            0,
+        )
+        .with_account_id(Some("workspace-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("workspace-42"));
     }
 }

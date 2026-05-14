@@ -616,7 +616,9 @@ async fn list_workflows_success_rate_excludes_cancelled() {
             .execute_run(
                 run_id,
                 |_agent| Some((AgentId::new(), "mock".to_string(), false)),
-                |_id: AgentId, _msg: String| async move { Ok(("done".to_string(), 0u64, 0u64)) },
+                |_id: AgentId, _msg: String, _sm: Option<librefang_types::agent::SessionMode>| async move {
+                    Ok(("done".to_string(), 0u64, 0u64))
+                },
             )
             .await
             .expect("execute_run must complete successfully");

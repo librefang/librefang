@@ -674,6 +674,16 @@ impl LibreFangKernel {
                 "prompt_caching".to_string(),
                 serde_json::Value::Bool(cfg.prompt_caching),
             );
+            // Pass the prompt-cache strategy (#4970) as a string —
+            // the agent loop parses it back into a `PromptCacheStrategy`.
+            manifest.metadata.insert(
+                "prompt_cache_strategy".to_string(),
+                serde_json::Value::String(cfg.prompt_cache.strategy.to_string()),
+            );
+            manifest.metadata.insert(
+                "prompt_cache_ttl_hint_secs".to_string(),
+                serde_json::Value::from(cfg.prompt_cache.cache_ttl_hint_secs),
+            );
 
             // Pass privacy config to the agent loop via metadata.
             if let Ok(privacy_json) = serde_json::to_value(&cfg.privacy) {
@@ -717,6 +727,7 @@ impl LibreFangKernel {
                 thinking: None,
                 prompt_caching: false,
                 cache_ttl: None,
+                prompt_cache_strategy: None,
                 response_format: None,
                 timeout_secs: None,
                 extra_body: None,
@@ -925,6 +936,14 @@ impl LibreFangKernel {
         self.agents
             .session_interrupts
             .insert((agent_id, effective_session_id), session_interrupt.clone());
+        // #4976: merge per-agent [compaction] overrides on top of the
+        // kernel-global config so the in-loop ContextCompressor honours
+        // this agent's keep_recent / max_summary_tokens /
+        // token_threshold_ratio.
+        let compaction_snapshot = match manifest.compaction.as_ref() {
+            Some(o) if !o.is_empty() => o.resolve(&cfg.compaction),
+            _ => cfg.compaction.clone(),
+        };
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: false,
             incognito,
@@ -935,6 +954,8 @@ impl LibreFangKernel {
             aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: None,
             tool_results_config: Some(cfg.tool_results.clone()),
+            compaction_config: Some(compaction_snapshot),
+            gateway_compression: Some(cfg.gateway_compression.clone()),
         };
 
         // Build a per-execution MCP pool that includes the agent workspace as

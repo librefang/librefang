@@ -24,9 +24,12 @@ use tracing::{debug, info, warn};
 /// to prevent leaking API keys from other providers. We keep the full env
 /// intact (so Node.js, NVM, SSL, proxies, etc. all work) and only remove
 /// secrets that belong to other LLM providers.
+///
+/// Note: ANTHROPIC_API_KEY is intentionally absent — the Claude Code CLI
+/// is Anthropic's own tool and requires its own key to authenticate API
+/// calls (OAuth alone is insufficient in -p/--print mode).
 const SENSITIVE_ENV_EXACT: &[&str] = &[
     "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     "GROQ_API_KEY",
@@ -49,7 +52,9 @@ const SENSITIVE_ENV_EXACT: &[&str] = &[
 ];
 
 /// Suffixes that indicate a secret — remove any env var ending with these
-/// unless it starts with `CLAUDE_`.
+/// unless it starts with `CLAUDE_` or `ANTHROPIC_` (our own provider's
+/// credentials, including gateway / proxy variants like
+/// `ANTHROPIC_AUTH_TOKEN`).
 const SENSITIVE_SUFFIXES: &[&str] = &["_SECRET", "_TOKEN", "_PASSWORD"];
 
 /// Default subprocess timeout in seconds (5 minutes).
@@ -396,8 +401,16 @@ impl ClaudeCodeDriver {
             cmd.env_remove(key);
         }
         // Remove any env var with a sensitive suffix, unless it's CLAUDE_*
+        // or ANTHROPIC_*. The ANTHROPIC_ exception covers gateway / proxy
+        // credentials such as ANTHROPIC_AUTH_TOKEN, typically paired with
+        // ANTHROPIC_BASE_URL for Bedrock-style routing.
+        //
+        // The prefix match is case-sensitive by design — Unix env var names
+        // are case-sensitive, and the exact-list above also matches verbatim.
+        // A user typing `anthropic_foo_token` would still hit the suffix
+        // strip below, which is the intended fail-safe.
         for (key, _) in std::env::vars() {
-            if key.starts_with("CLAUDE_") {
+            if key.starts_with("CLAUDE_") || key.starts_with("ANTHROPIC_") {
                 continue;
             }
             let upper = key.to_uppercase();
@@ -454,6 +467,60 @@ impl ClaudeCodeDriver {
         // tool-name convention for MCP-sourced tools is `mcp__<server>__<tool>`,
         // and passing just the server prefix permits all of them.
         args.push("mcp__librefang".to_string());
+    }
+
+    /// On stdin write failure (typically EPIPE because the CLI exited
+    /// during its own init) drain the CLI's stderr for up to 2 s and
+    /// fold the captured snippet into the surfaced error message.
+    /// Without this the caller sees only `Broken pipe` and has no clue
+    /// why the CLI quit — invalid auth profile, missing/unreadable cwd,
+    /// bad `--mcp-config`, etc. Kills the child as a side effect.
+    async fn diagnose_stdin_write_failure(
+        child: &mut tokio::process::Child,
+        write_err: &std::io::Error,
+    ) -> String {
+        use tokio::io::AsyncReadExt;
+        const STDERR_CAP: usize = 4096;
+        const STDERR_WAIT: std::time::Duration = std::time::Duration::from_millis(2000);
+
+        let stderr_pipe = child.stderr.take();
+        // Best-effort kill: the child is almost certainly already dead
+        // (that's why the pipe broke), but never leak a stuck process.
+        let _ = child.kill().await;
+
+        let stderr_snippet = if let Some(mut err) = stderr_pipe {
+            let mut buf: Vec<u8> = Vec::with_capacity(STDERR_CAP);
+            let _ = tokio::time::timeout(STDERR_WAIT, async {
+                let mut chunk = [0u8; 1024];
+                while buf.len() < STDERR_CAP {
+                    match err.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let take = (STDERR_CAP - buf.len()).min(n);
+                            buf.extend_from_slice(&chunk[..take]);
+                        }
+                    }
+                }
+            })
+            .await;
+            String::from_utf8_lossy(&buf).trim().to_string()
+        } else {
+            String::new()
+        };
+
+        if stderr_snippet.is_empty() {
+            format!(
+                "Failed to write prompt to Claude Code CLI stdin: {write_err}. \
+                 The CLI exited before reading stdin (no stderr captured). \
+                 Common causes: invalid auth profile (run `claude /status` to verify), \
+                 missing or unreadable workspace cwd, invalid `--mcp-config` path."
+            )
+        } else {
+            format!(
+                "Failed to write prompt to Claude Code CLI stdin: {write_err}. \
+                 The CLI exited before reading stdin. Captured stderr: {stderr_snippet}"
+            )
+        }
     }
 }
 
@@ -672,11 +739,9 @@ impl LlmDriver for ClaudeCodeDriver {
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             if let Err(e) = stdin.write_all(prepared.text.as_bytes()).await {
+                let diag = Self::diagnose_stdin_write_failure(&mut child, &e).await;
                 prepared.cleanup();
-                let _ = child.kill().await;
-                return Err(LlmError::Http(format!(
-                    "Failed to write prompt to Claude Code CLI stdin: {e}"
-                )));
+                return Err(LlmError::Http(diag));
             }
             // Drop closes stdin; CLI proceeds with the full prompt.
             drop(stdin);
@@ -946,11 +1011,9 @@ impl LlmDriver for ClaudeCodeDriver {
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             if let Err(e) = stdin.write_all(prepared.text.as_bytes()).await {
+                let diag = Self::diagnose_stdin_write_failure(&mut child, &e).await;
                 prepared.cleanup();
-                let _ = child.kill().await;
-                return Err(LlmError::Http(format!(
-                    "Failed to write prompt to Claude Code CLI stdin: {e}"
-                )));
+                return Err(LlmError::Http(diag));
             }
             drop(stdin);
         }
@@ -1365,6 +1428,133 @@ fn home_dir() -> Option<std::path::PathBuf> {
 mod tests {
     use super::*;
 
+    /// Spawn a tiny cross-platform child process for the
+    /// `diagnose_stdin_write_failure` tests. POSIX runners can rely on
+    /// `/bin/sh`, but the Windows CI runner does not ship a POSIX shell on
+    /// PATH that round-trips stderr from a single-quoted echo back through
+    /// tokio's piped handle reliably (the test would observe an empty
+    /// stderr capture and trip the "no stderr captured" fallback branch
+    /// instead of the captured-stderr branch). Python 3 is preinstalled
+    /// on every GitHub Actions runner the project supports, so we use a
+    /// single-line `python -c` payload that exits immediately, optionally
+    /// writing a known string to stderr first. This keeps the failure
+    /// mode under test — child dies before reading stdin → caller sees
+    /// `BrokenPipe` on write — identical across all platforms.
+    fn spawn_dying_child(stderr_payload: Option<&str>) -> tokio::process::Child {
+        let script = match stderr_payload {
+            Some(msg) => {
+                // Explicit `flush()` before `sys.exit` because Python's
+                // text-IO layer over stderr is line-buffered: a no-newline
+                // payload sits in the wrapper buffer until interpreter
+                // shutdown flushes it. On loaded macOS GHA runners the
+                // diagnostic helper's `child.kill()` (SIGKILL) has been
+                // observed to land before that shutdown flush completes,
+                // dropping the payload before the OS pipe sees it and
+                // tripping the silent-fallback branch under test.
+                // `{msg:?}` writes the payload as a Rust-debug quoted
+                // string, which is also a valid Python string literal for
+                // the ASCII payloads these tests use.
+                format!("import sys; sys.stderr.write({msg:?}); sys.stderr.flush(); sys.exit(7)")
+            }
+            None => "import sys; sys.exit(0)".to_string(),
+        };
+        // Try `python3` first (canonical on Linux/macOS), fall back to
+        // `python` (the launcher name on the Windows GitHub runners).
+        // Either binary on PATH satisfies the test; spawning a known-good
+        // child avoids the brittle Git-Bash-on-Windows `sh` path that
+        // silently dropped piped stderr on the Test / Windows lane.
+        let build_cmd = |exe: &str| -> tokio::process::Command {
+            let mut cmd = tokio::process::Command::new(exe);
+            // `-u` forces Python's stdio binary layer unbuffered, defence
+            // in depth alongside the explicit flush in the script body.
+            cmd.arg("-u").arg("-c").arg(&script);
+            cmd.stdin(std::process::Stdio::piped());
+            cmd.stdout(std::process::Stdio::piped());
+            cmd.stderr(std::process::Stdio::piped());
+            cmd
+        };
+        match build_cmd("python3").spawn() {
+            Ok(child) => child,
+            Err(_) => build_cmd("python")
+                .spawn()
+                .expect("neither python3 nor python is on PATH; install Python 3 to run this test"),
+        }
+    }
+
+    /// Wait deterministically for `child` to exit, polling `try_wait`
+    /// with a 2 s budget. Replaces fixed `tokio::time::sleep` guesses
+    /// (150 ms / 100 ms in earlier revisions of these tests) that left a
+    /// race window: on a loaded macOS GHA runner the Python interpreter's
+    /// startup + shutdown can exceed the budget, so the subsequent
+    /// `child.kill()` inside `diagnose_stdin_write_failure` lands during
+    /// interpreter teardown and steals the stderr that hadn't yet
+    /// reached the OS pipe. Polling until exit removes the guess.
+    async fn await_child_exit(child: &mut tokio::process::Child) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// Pin: when stdin write fails (child exits during init), the error
+    /// surface must include any stderr the CLI emitted before death.
+    /// Without this the operator gets a bare "Broken pipe" with no clue
+    /// whether to re-auth, fix the workspace, or rebuild the binary.
+    #[tokio::test]
+    async fn diagnose_stdin_write_failure_includes_child_stderr() {
+        // Child prints a recognisable error to stderr and immediately
+        // exits without ever reading stdin → next stdin write will EPIPE
+        // just like a real claude-code init failure.
+        let mut child = spawn_dying_child(Some("mock cli: auth profile invalid"));
+
+        // Wait until the child has actually exited so its stdio is fully
+        // flushed and its stdin pipe is closed before we ask the
+        // diagnostic helper to read stderr.
+        await_child_exit(&mut child).await;
+
+        let write_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Broken pipe");
+        let diag = ClaudeCodeDriver::diagnose_stdin_write_failure(&mut child, &write_err).await;
+
+        assert!(
+            diag.contains("Failed to write prompt to Claude Code CLI stdin"),
+            "diag must keep the original failure header, got: {diag}"
+        );
+        assert!(
+            diag.contains("mock cli: auth profile invalid"),
+            "diag must include captured stderr from the dying child, got: {diag}"
+        );
+    }
+
+    /// When the child produces no stderr at all, the diagnostic must
+    /// still be actionable — fall back to a hint pointing at the common
+    /// auth/cwd/MCP causes rather than just leaking the io::Error.
+    #[tokio::test]
+    async fn diagnose_stdin_write_failure_falls_back_to_hint_when_silent() {
+        let mut child = spawn_dying_child(None);
+        await_child_exit(&mut child).await;
+
+        let write_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Broken pipe");
+        let diag = ClaudeCodeDriver::diagnose_stdin_write_failure(&mut child, &write_err).await;
+
+        assert!(
+            diag.contains("Common causes"),
+            "silent-child diag must surface the hint block, got: {diag}"
+        );
+        assert!(
+            diag.contains("claude /status"),
+            "hint must mention the auth check command, got: {diag}"
+        );
+    }
+
     #[test]
     fn test_build_prompt_simple() {
         use librefang_types::message::{Message, MessageContent};
@@ -1384,6 +1574,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1432,6 +1623,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1497,6 +1689,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1578,6 +1771,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1721,10 +1915,75 @@ mod tests {
     fn test_sensitive_env_list_coverage() {
         // Ensure all major provider keys are in the strip list
         assert!(SENSITIVE_ENV_EXACT.contains(&"OPENAI_API_KEY"));
-        assert!(SENSITIVE_ENV_EXACT.contains(&"ANTHROPIC_API_KEY"));
         assert!(SENSITIVE_ENV_EXACT.contains(&"GEMINI_API_KEY"));
         assert!(SENSITIVE_ENV_EXACT.contains(&"GROQ_API_KEY"));
         assert!(SENSITIVE_ENV_EXACT.contains(&"DEEPSEEK_API_KEY"));
+    }
+
+    #[test]
+    fn test_apply_env_filter_keeps_anthropic_auth_token() {
+        // Regression for #5006: the suffix-sweep used to strip
+        // ANTHROPIC_AUTH_TOKEN because it ends in _TOKEN and lacks the
+        // CLAUDE_ prefix. The ANTHROPIC_* exception keeps gateway / proxy
+        // credentials (ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL pattern)
+        // intact while still stripping other providers' secrets.
+        //
+        // SAFETY: unique env var names; the test removes each one before
+        // returning.
+        unsafe {
+            std::env::set_var("ANTHROPIC_AUTH_TOKEN", "keep-me-5006");
+            std::env::set_var("OPENAI_API_KEY", "strip-openai-5006");
+            std::env::set_var("GROQ_API_KEY", "strip-groq-5006");
+            std::env::set_var("GEMINI_API_KEY", "strip-gemini-5006");
+            std::env::set_var("LIBREFANG_TEST_5006_OTHER_TOKEN", "strip-suffix-5006");
+        }
+
+        let mut cmd = tokio::process::Command::new("echo");
+        ClaudeCodeDriver::apply_env_filter(&mut cmd);
+
+        // `env_remove` records `(key, None)` in the Command's env table.
+        // Inspect it to learn which keys the filter targeted for removal.
+        let removed: std::collections::HashSet<String> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| {
+                if v.is_none() {
+                    Some(k.to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            !removed.contains("ANTHROPIC_AUTH_TOKEN"),
+            "ANTHROPIC_AUTH_TOKEN must be preserved for gateway / proxy users (#5006)"
+        );
+        assert!(
+            removed.contains("OPENAI_API_KEY"),
+            "OPENAI_API_KEY must still be stripped"
+        );
+        assert!(
+            removed.contains("GROQ_API_KEY"),
+            "GROQ_API_KEY must still be stripped"
+        );
+        assert!(
+            removed.contains("GEMINI_API_KEY"),
+            "GEMINI_API_KEY must still be stripped"
+        );
+        assert!(
+            removed.contains("LIBREFANG_TEST_5006_OTHER_TOKEN"),
+            "Generic *_TOKEN env vars (no CLAUDE_/ANTHROPIC_ prefix) must still be stripped"
+        );
+
+        // SAFETY: matches the set_var calls above.
+        unsafe {
+            std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("GROQ_API_KEY");
+            std::env::remove_var("GEMINI_API_KEY");
+            std::env::remove_var("LIBREFANG_TEST_5006_OTHER_TOKEN");
+        }
     }
 
     #[test]
@@ -1805,6 +2064,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1862,6 +2122,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,

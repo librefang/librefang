@@ -614,6 +614,16 @@ impl ChannelAdapter for WhatsAppAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the
+    /// WhatsApp Business phone-number / WABA identifier) so the bridge
+    /// approval listener builds the same `whatsapp:<account_id>` key the
+    /// router stores in `channel_defaults`, scoping ApprovalRequested
+    /// delivery to the phone number bound to the requesting agent
+    /// (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -877,5 +887,32 @@ mod tests {
             )
             .await
             .expect("whatsapp gateway send must succeed against mock");
+    }
+
+    #[test]
+    fn test_whatsapp_account_id_default_none() {
+        let adapter = WhatsAppAdapter::new(
+            "phone-id".to_string(),
+            "token".to_string(),
+            "verify".to_string(),
+            0,
+            vec![],
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_whatsapp_account_id_returns_configured_value() {
+        // #5003: two WhatsApp Business phone numbers must resolve under
+        // distinct `whatsapp:<account_id>` keys via the trait override.
+        let adapter = WhatsAppAdapter::new(
+            "phone-id".to_string(),
+            "token".to_string(),
+            "verify".to_string(),
+            0,
+            vec![],
+        )
+        .with_account_id(Some("waba-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("waba-42"));
     }
 }
