@@ -1594,6 +1594,13 @@ fn machine_fingerprint() -> Vec<u8> {
 /// contexts may run with a minimal PATH that excludes `/usr/sbin` or
 /// `C:\Windows\System32`, so a bare `Command::new("ioreg")` / `Command::new("reg")`
 /// silently returns ENOENT (see #5025).
+///
+/// On Linux the lib build has no production callers (both call sites are
+/// gated to `target_os = "macos"` / `target_os = "windows"`), so the
+/// `--deny=warnings` CI lane flags this as dead code. The unit tests
+/// (cfg(test)) cover all platforms, but the lib-only metadata build that
+/// `cargo llvm-cov` performs first does not include them.
+#[allow(dead_code)]
 fn resolve_command(candidates: &[&'static str]) -> &'static str {
     for &p in candidates {
         let is_absolute = p.starts_with('/') || p.contains(":\\");
