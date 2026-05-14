@@ -1,0 +1,18 @@
+{
+  "active_phase": "phase-1-rebrand-completion",
+  "active_change": "m3-install-script",
+  "last_updated": "2026-05-14T00:00:00Z",
+  "last_updated_by": "kbd-execute",
+  "backend": "native-tool",
+  "backend_rationale": "No OpenSpec in this project. Single-tool (Claude Code) execution with progress.json bookkeeping. Hybrid not warranted at this scale.",
+  "next_action": {
+    "command": "/kbd-execute m3-install-script",
+    "description": "Execute change m3-install-script (M3): web/public/install.sh user-facing echoes + add BOSSFANG_INSTALL_DIR env-var alias. Estimated 20 lines in 1 file."
+  },
+  "phase_progress": "2/7 milestones done (M1, M2). Next: M3 install.sh.",
+  "last_completed": {
+    "change_id": "m1-m2-cli-banner-install-paths-config-templates",
+    "milestones": ["M1", "M2"],
+    "completed_at": "2026-05-14T00:00:00Z"
+  }
+}

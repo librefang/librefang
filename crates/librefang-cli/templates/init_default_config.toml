@@ -1,6 +1,6 @@
 # ══════════════════════════════════════════════════════════════
-# LibreFang Agent OS — Configuration
-# Docs: https://docs.librefang.ai/configuration
+# BossFang Agent OS — Configuration
+# Docs: https://github.com/GQAdonis/librefang
 # ══════════════════════════════════════════════════════════════
 
 # ── Server ────────────────────────────────────────────────────
@@ -9,7 +9,7 @@
 # or define `[[users]]` with `api_key_hash`), THEN change `api_listen` to a
 # non-loopback address. The daemon refuses to start on a non-loopback bind
 # without configured auth — set `LIBREFANG_ALLOW_NO_AUTH=1` to override (not
-# recommended; see https://docs.librefang.ai/security/network).
+# recommended).
 api_listen = "127.0.0.1:4545"
 log_level = "info"             # trace | debug | info | warn | error
 mode = "default"               # stable | default | dev
@@ -18,7 +18,7 @@ update_channel = "stable"      # stable | beta | rc
 # ── Dashboard Login ───────────────────────────────────────────
 # ⚠️  Change the default password after first login!
 # Secure storage options:
-#   1. Vault:   librefang vault set dashboard_password
+#   1. Vault:   bossfang vault set dashboard_password
 #               dashboard_pass = "vault:dashboard_password"
 #   2. Env var: LIBREFANG_DASHBOARD_PASS=your-secret
 dashboard_user = "librefang"
@@ -223,22 +223,22 @@ debounce_ms = 500
 # shared_secret = ""           # Required for P2P auth
 
 # ── Editor Integration (ACP) ─────────────────────────────────
-# LibreFang exposes an Agent Client Protocol (ACP) server so editors
-# like Zed, VS Code, and JetBrains can embed a LibreFang agent
-# natively. Editors spawn `librefang acp` as a child process.
+# BossFang exposes an Agent Client Protocol (ACP) server so editors
+# like Zed, VS Code, and JetBrains can embed a BossFang agent
+# natively. Editors spawn `bossfang acp` as a child process.
 #
-# Two modes auto-select based on whether `librefang start` is running:
+# Two modes auto-select based on whether `bossfang start` is running:
 #   * In-process — fresh kernel per invocation, suitable for one-off use.
 #   * Daemon-attached (Unix) — proxies stdio to ~/.librefang/acp.sock,
 #     so multiple editor tabs share one kernel + agent state.
 #
 # No config keys are required. To configure your editor, see:
-#   https://librefang.com/integrations/acp
+#   https://github.com/GQAdonis/librefang
 #
 # Zed (`~/.config/zed/settings.json`):
 #   "agent_servers": {
-#     "librefang": {
-#       "command": "librefang",
+#     "bossfang": {
+#       "command": "bossfang",
 #       "args": ["acp"]
 #     }
 #   }

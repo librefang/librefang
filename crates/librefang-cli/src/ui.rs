@@ -42,12 +42,12 @@ pub fn error(msg: &str) {
 // New themed output helpers
 // ---------------------------------------------------------------------------
 
-/// Brand banner: ">> LibreFang Agent OS"
+/// Brand banner: ">> BossFang Agent OS"
 pub fn banner() {
     println!(
         "  {} {}",
         ">>".bright_cyan().bold(),
-        "LibreFang Agent OS".bold()
+        "BossFang Agent OS".bold()
     );
     println!("     {}", "The open-source agent operating system".dimmed());
 }

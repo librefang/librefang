@@ -5351,7 +5351,6 @@ fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> 
     let agent_count = kernel.agent_registry_ref().count();
     let cfg = kernel.config_ref();
 
-
     if json {
         println!(
             "{}",

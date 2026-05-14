@@ -1,0 +1,48 @@
+{
+  "name": "librefang",
+  "display_name": "LibreFang (BossFang fork)",
+  "repository": "https://github.com/GQAdonis/librefang",
+  "upstream": "https://github.com/librefang/librefang",
+  "stack": {
+    "primary_language": "rust",
+    "rust_edition": "2021",
+    "build_system": "cargo",
+    "frontend": "react-19+vite-8+typescript",
+    "desktop": "tauri-2",
+    "storage": "surrealdb-3.0.5",
+    "memory_substrate": "surreal-memory"
+  },
+  "constraints": {
+    "three_layer_rebrand": {
+      "internal": "never rename — Cargo crate names, Rust modules, function names, Python SDK module names, workspace member paths, test fixture filenames",
+      "boundary": "additive aliases only — BOSSFANG_* primary + LIBREFANG_* fallback, default values stay LibreFang-flavoured",
+      "surface": "full rename OK — CLI banners, product name, install scripts, README/docs body, content-type vendor prefix, release artifact names, dashboard chrome"
+    },
+    "edits_blocked_in_main_worktree": true,
+    "cargo_build_blocked_in_main_worktree": true,
+    "use_worktree_pattern": "git worktree add /tmp/librefang-<feature> -b <branch> origin/main",
+    "no_ai_attribution_in_commits": true,
+    "ci_wait_budget_minutes": 5
+  },
+  "default_branch": "main",
+  "owned_domains": [
+    "github.com/GQAdonis/librefang",
+    "github.com/GQAdonis/librefang-registry"
+  ],
+  "upstream_domains_not_to_claim": [
+    "librefang.ai",
+    "docs.librefang.ai",
+    "stats.librefang.ai",
+    "librefang.com",
+    "bossfang.ai"
+  ],
+  "verification": {
+    "compile": "cargo check --workspace --lib",
+    "compile_exclusives": "cargo check -p librefang-storage -p librefang-uar-spec -p librefang-memory",
+    "test_unit_fast": "cargo nextest run --workspace -E 'kind(lib) | kind(bin)' --no-fail-fast",
+    "test_scoped_pattern": "cargo test -p <crate> --test <test>",
+    "brand_audit": "python3 scripts/enforce-branding.py --check"
+  },
+  "initialized": "2026-05-14",
+  "initialized_via": "kbd-execute bootstrap (informal init triggered from /kbd-execute when .kbd-orchestrator/ was absent)"
+}

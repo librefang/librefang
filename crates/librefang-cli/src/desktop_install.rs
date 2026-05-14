@@ -9,7 +9,22 @@ use std::path::{Path, PathBuf};
 use crate::ui;
 
 /// GitHub repository for release assets.
-const GITHUB_REPO: &str = "librefang/librefang";
+///
+/// BossFang fork: desktop bundles are published to GQAdonis/librefang releases
+/// (matches the Tauri updater endpoint in tauri.desktop.conf.json).
+const GITHUB_REPO: &str = "GQAdonis/librefang";
+
+// ── Product naming (read-old/write-new shim) ─────────────────────────────────
+//
+// BossFang builds (Tauri `productName: "BossFang"`) produce `BossFang.app`
+// (macOS), `BossFang.exe` (Windows), and BossFang AppImages. Existing
+// installs predating the rebrand are at the legacy LibreFang paths. The
+// installer detects either, writes only the new name, and auto-migrates
+// where it's safe (macOS bundle rename, Linux AppImage rename — never
+// touches Windows registry-backed installs).
+
+/// Current product name for new installs.
+const PRODUCT_NAME: &str = "BossFang";
 
 // ── Discovery ────────────────────────────────────────────────────────────────
 
@@ -78,7 +93,7 @@ pub fn launch(path: &Path) {
 /// Prompt user to download and install the desktop app.
 /// Returns the installed binary path on success, `None` if cancelled or failed.
 pub fn prompt_and_install() -> Option<PathBuf> {
-    ui::hint("LibreFang Desktop is not installed.");
+    ui::hint(&format!("{PRODUCT_NAME} Desktop is not installed."));
 
     let answer = crate::prompt_input("  Download and install it now? [Y/n] ");
     if !answer.is_empty()
@@ -86,8 +101,7 @@ pub fn prompt_and_install() -> Option<PathBuf> {
         && !answer.eq_ignore_ascii_case("yes")
     {
         ui::hint("Skipped. You can install it later:");
-        ui::hint("  brew install --cask librefang   (macOS)");
-        ui::hint("  Or download from https://github.com/librefang/librefang/releases");
+        ui::hint("  Download from https://github.com/GQAdonis/librefang/releases");
         return None;
     }
 
@@ -103,7 +117,7 @@ fn download_and_install() -> Option<PathBuf> {
         Some(s) => s,
         None => {
             ui::error("Unsupported platform for automatic desktop install.");
-            ui::hint("Download manually: https://github.com/librefang/librefang/releases");
+            ui::hint("Download manually: https://github.com/GQAdonis/librefang/releases");
             return None;
         }
     };
@@ -114,7 +128,7 @@ fn download_and_install() -> Option<PathBuf> {
     let resp = match client
         .get(&api_url)
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "librefang-cli")
+        .header("User-Agent", "bossfang-cli")
         .send()
     {
         Ok(r) => r,
@@ -153,7 +167,7 @@ fn download_and_install() -> Option<PathBuf> {
     ui::kv("Asset", &format!("{file_name}{size_display}"));
     ui::step("Downloading...");
 
-    let tmp_dir = std::env::temp_dir().join("librefang-desktop-install");
+    let tmp_dir = std::env::temp_dir().join("bossfang-desktop-install");
     let _ = std::fs::create_dir_all(&tmp_dir);
     let tmp_file = tmp_dir.join(file_name);
 
@@ -173,7 +187,7 @@ fn download_and_install() -> Option<PathBuf> {
 
     match result {
         Ok(installed_path) => {
-            ui::success("LibreFang Desktop installed successfully.");
+            ui::success(&format!("{PRODUCT_NAME} Desktop installed successfully."));
             Some(installed_path)
         }
         Err(e) => {
@@ -188,7 +202,7 @@ fn download_file(url: &str, dest: &Path) -> Result<(), String> {
     let client = crate::http_client::new_client();
     let mut resp = client
         .get(url)
-        .header("User-Agent", "librefang-cli")
+        .header("User-Agent", "bossfang-cli")
         .send()
         .map_err(|e| format!("HTTP request failed: {e}"))?;
 
@@ -240,21 +254,66 @@ fn platform_asset_suffix() -> Option<&'static str> {
 }
 
 /// Return the platform-specific binary path if already installed.
+///
+/// Checks the BossFang location first, then auto-migrates a legacy LibreFang
+/// install where it's safe (macOS bundle rename, Linux AppImage rename).
+/// Windows installs are not auto-migrated — NSIS registry entries point at
+/// the old location and a silent rename would orphan them.
 fn platform_install_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        let app_binary = PathBuf::from("/Applications/LibreFang.app/Contents/MacOS/LibreFang");
-        if app_binary.exists() {
-            return Some(app_binary);
+        // 1. New BossFang install.
+        let bossfang = PathBuf::from("/Applications/BossFang.app/Contents/MacOS/BossFang");
+        if bossfang.exists() {
+            return Some(bossfang);
+        }
+        // 2. Mid-migration: bundle is renamed but inner binary kept legacy name
+        //    (happens when this code auto-renamed the bundle but the binary
+        //    inside it was from a legacy Tauri build that wrote
+        //    Contents/MacOS/LibreFang). The Info.plist CFBundleExecutable
+        //    points at "LibreFang" in that case and the .app still launches
+        //    correctly.
+        let bossfang_legacy_inner =
+            PathBuf::from("/Applications/BossFang.app/Contents/MacOS/LibreFang");
+        if bossfang_legacy_inner.exists() {
+            return Some(bossfang_legacy_inner);
+        }
+        // 3. Legacy LibreFang install — try to auto-migrate by renaming the
+        //    bundle. If rename fails (permissions, in use), fall back to
+        //    returning the legacy path so the launcher still works.
+        let legacy_app = PathBuf::from("/Applications/LibreFang.app");
+        if legacy_app.exists() {
+            if migrate_legacy_macos_app(&legacy_app).is_ok() {
+                let migrated = PathBuf::from("/Applications/BossFang.app/Contents/MacOS/LibreFang");
+                if migrated.exists() {
+                    return Some(migrated);
+                }
+            }
+            // Migration failed or post-migration binary missing — return
+            // the legacy path as-is.
+            let legacy_bin = legacy_app.join("Contents/MacOS/LibreFang");
+            if legacy_bin.exists() {
+                return Some(legacy_bin);
+            }
         }
     }
 
     #[cfg(target_os = "windows")]
     {
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            let p = PathBuf::from(local).join("LibreFang").join("LibreFang.exe");
-            if p.exists() {
-                return Some(p);
+            let base = PathBuf::from(&local);
+            // 1. New BossFang install (NSIS uses Tauri productName).
+            let bossfang = base.join("BossFang").join("BossFang.exe");
+            if bossfang.exists() {
+                return Some(bossfang);
+            }
+            // 2. Legacy LibreFang install — Windows registry references the
+            //    old path. Detect but don't rename; next NSIS install creates
+            //    the new entry and the old can be cleaned up via Add/Remove
+            //    Programs.
+            let legacy = base.join("LibreFang").join("LibreFang.exe");
+            if legacy.exists() {
+                return Some(legacy);
             }
         }
     }
@@ -269,8 +328,35 @@ fn platform_install_path() -> Option<PathBuf> {
     None
 }
 
+/// Auto-migrate a legacy `/Applications/LibreFang.app` install to the new
+/// `/Applications/BossFang.app` name.
+///
+/// Returns `Ok(())` if the rename succeeded or the target already exists;
+/// `Err` otherwise (typically permissions or a busy bundle). Callers must
+/// fall back gracefully when migration fails.
+#[cfg_attr(not(test), cfg(target_os = "macos"))]
+#[allow(dead_code)]
+fn migrate_legacy_macos_app(legacy_app: &Path) -> Result<(), String> {
+    let new_app = PathBuf::from("/Applications/BossFang.app");
+    if new_app.exists() {
+        // Both exist — the legacy install is now redundant. Leave it alone
+        // rather than silently deleting; the user can remove it manually.
+        return Ok(());
+    }
+    std::fs::rename(legacy_app, &new_app).map_err(|e| {
+        format!(
+            "Failed to rename {} → {}: {e}",
+            legacy_app.display(),
+            new_app.display()
+        )
+    })
+}
+
 /// Linux variant of [`platform_install_path`] parameterised on the home
 /// directory so it can be exercised under a tempdir in tests.
+///
+/// Checks BossFang.AppImage first; auto-renames a legacy LibreFang.AppImage
+/// in place (a plain file rename on Linux — no registry entries to update).
 #[cfg_attr(not(test), cfg(target_os = "linux"))]
 #[allow(dead_code)]
 fn linux_install_path_in(home: &Path) -> Option<PathBuf> {
@@ -278,9 +364,21 @@ fn linux_install_path_in(home: &Path) -> Option<PathBuf> {
     if local_bin.exists() {
         return Some(local_bin);
     }
-    let appimage = home.join("Applications/LibreFang.AppImage");
-    if appimage.exists() {
-        return Some(appimage);
+    // New BossFang AppImage.
+    let bossfang_appimage = home.join("Applications/BossFang.AppImage");
+    if bossfang_appimage.exists() {
+        return Some(bossfang_appimage);
+    }
+    // Legacy LibreFang AppImage — auto-migrate (plain file rename is safe).
+    let legacy_appimage = home.join("Applications/LibreFang.AppImage");
+    if legacy_appimage.exists() {
+        if std::fs::rename(&legacy_appimage, &bossfang_appimage).is_ok()
+            && bossfang_appimage.exists()
+        {
+            return Some(bossfang_appimage);
+        }
+        // Rename failed — return legacy path as-is.
+        return Some(legacy_appimage);
     }
     None
 }
@@ -310,10 +408,12 @@ fn install_platform(downloaded: &Path) -> Result<PathBuf, String> {
 fn install_macos_dmg(dmg_path: &Path) -> Result<PathBuf, String> {
     use std::process::Command;
 
+    const MOUNT_POINT: &str = "/tmp/bossfang-dmg-mount";
+
     // Mount the DMG
     let output = Command::new("hdiutil")
         .args(["attach", "-nobrowse", "-readonly", "-mountpoint"])
-        .arg("/tmp/librefang-dmg-mount")
+        .arg(MOUNT_POINT)
         .arg(dmg_path)
         .output()
         .map_err(|e| format!("hdiutil attach failed: {e}"))?;
@@ -325,34 +425,48 @@ fn install_macos_dmg(dmg_path: &Path) -> Result<PathBuf, String> {
         ));
     }
 
-    let mount_point = Path::new("/tmp/librefang-dmg-mount");
-    let app_src = mount_point.join("LibreFang.app");
+    let mount_point = Path::new(MOUNT_POINT);
+    // BossFang Tauri builds produce BossFang.app. Older / legacy DMGs may
+    // still contain LibreFang.app — accept either.
+    let (app_src, src_app_name) = {
+        let bossfang_src = mount_point.join("BossFang.app");
+        if bossfang_src.exists() {
+            (bossfang_src, "BossFang.app")
+        } else {
+            let legacy_src = mount_point.join("LibreFang.app");
+            if legacy_src.exists() {
+                (legacy_src, "LibreFang.app")
+            } else {
+                let _ = Command::new("hdiutil")
+                    .args(["detach", MOUNT_POINT, "-quiet"])
+                    .status();
+                return Err("Neither BossFang.app nor LibreFang.app found in DMG".into());
+            }
+        }
+    };
 
-    if !app_src.exists() {
-        let _ = Command::new("hdiutil")
-            .args(["detach", "/tmp/librefang-dmg-mount", "-quiet"])
-            .status();
-        return Err("LibreFang.app not found in DMG".into());
-    }
+    // Always install as BossFang.app, regardless of the source name inside
+    // the DMG. The Info.plist CFBundleExecutable inside the .app handles
+    // the inner binary name, so renaming only the outer bundle is safe.
+    let dest = PathBuf::from("/Applications/BossFang.app");
 
-    // Remove old installation if present
-    let dest = Path::new("/Applications/LibreFang.app");
+    // Remove old BossFang installation if present
     if dest.exists() {
-        std::fs::remove_dir_all(dest)
+        std::fs::remove_dir_all(&dest)
             .map_err(|e| format!("Failed to remove old installation: {e}"))?;
     }
 
-    // Copy .app bundle to /Applications
+    // Copy .app bundle to /Applications under the new name
     let cp = Command::new("cp")
         .args(["-R"])
         .arg(&app_src)
-        .arg("/Applications/")
+        .arg(&dest)
         .output()
         .map_err(|e| format!("cp failed: {e}"))?;
 
     // Always detach
     let _ = Command::new("hdiutil")
-        .args(["detach", "/tmp/librefang-dmg-mount", "-quiet"])
+        .args(["detach", MOUNT_POINT, "-quiet"])
         .status();
 
     if !cp.status.success() {
@@ -364,11 +478,26 @@ fn install_macos_dmg(dmg_path: &Path) -> Result<PathBuf, String> {
 
     // Clear quarantine attribute so the app launches without Gatekeeper dialog
     let _ = Command::new("xattr")
-        .args(["-rd", "com.apple.quarantine", "/Applications/LibreFang.app"])
+        .args(["-rd", "com.apple.quarantine"])
+        .arg(&dest)
         .status();
 
-    Ok(PathBuf::from(
-        "/Applications/LibreFang.app/Contents/MacOS/LibreFang",
+    // The binary inside the bundle keeps whatever name `tauri build` produced
+    // (BossFang for fresh builds, LibreFang for legacy DMGs). Probe both so
+    // we return a real path to the launcher.
+    let bossfang_inner = dest.join("Contents/MacOS/BossFang");
+    if bossfang_inner.exists() {
+        return Ok(bossfang_inner);
+    }
+    let legacy_inner = dest.join("Contents/MacOS/LibreFang");
+    if legacy_inner.exists() {
+        return Ok(legacy_inner);
+    }
+    // Source had one of the two names but neither survived the copy — surface
+    // the error so the caller can clean up.
+    Err(format!(
+        "Installed {src_app_name} → {} but no executable found in Contents/MacOS",
+        dest.display()
     ))
 }
 
@@ -388,17 +517,22 @@ fn install_windows(installer_path: &Path) -> Result<PathBuf, String> {
         return Err(format!("Installer exited with: {status}"));
     }
 
-    // NSIS installs to %LOCALAPPDATA%\LibreFang\
+    // NSIS installs to %LOCALAPPDATA%\<productName>\. The Tauri productName
+    // is "BossFang"; legacy NSIS bundles wrote to %LOCALAPPDATA%\LibreFang\.
+    // Probe both (BossFang first) so older installs can still launch until
+    // their next install pass.
     let local =
         std::env::var("LOCALAPPDATA").map_err(|_| "Cannot determine %LOCALAPPDATA%".to_string())?;
-    let bin = PathBuf::from(local).join("LibreFang").join("LibreFang.exe");
-
-    if bin.exists() {
-        Ok(bin)
-    } else {
-        // Fallback: check the standard desktop binary name next to CLI
-        Err("Installer completed but binary not found at expected location".into())
+    let base = PathBuf::from(local);
+    let bossfang_bin = base.join("BossFang").join("BossFang.exe");
+    if bossfang_bin.exists() {
+        return Ok(bossfang_bin);
     }
+    let legacy_bin = base.join("LibreFang").join("LibreFang.exe");
+    if legacy_bin.exists() {
+        return Ok(legacy_bin);
+    }
+    Err("Installer completed but binary not found at expected location".into())
 }
 
 #[cfg(target_os = "linux")]
@@ -570,15 +704,52 @@ mod tests {
     }
 
     #[test]
-    fn linux_install_path_in_falls_back_to_appimage() {
+    fn linux_install_path_in_prefers_bossfang_appimage_over_legacy() {
+        // Migration coverage: when both names exist, BossFang wins. Legacy
+        // is left alone (operator's responsibility to clean up).
         let tmp = TempDir::new().expect("tempdir");
         let app_dir = tmp.path().join("Applications");
         std::fs::create_dir_all(&app_dir).unwrap();
-        let appimage = app_dir.join("LibreFang.AppImage");
-        std::fs::write(&appimage, b"AI\x02").unwrap();
+        let legacy = app_dir.join("LibreFang.AppImage");
+        let bossfang = app_dir.join("BossFang.AppImage");
+        std::fs::write(&legacy, b"LEGACY").unwrap();
+        std::fs::write(&bossfang, b"BOSSFANG").unwrap();
 
         let found = linux_install_path_in(tmp.path()).expect("should find AppImage");
-        assert_eq!(found, appimage);
+        assert_eq!(found, bossfang);
+        // Legacy left in place — caller decides whether to clean up.
+        assert!(
+            legacy.exists(),
+            "legacy AppImage must not be silently removed when BossFang already exists"
+        );
+    }
+
+    #[test]
+    fn linux_install_path_in_auto_migrates_legacy_appimage_in_place() {
+        // The load-bearing migration test: a fresh shim should rename
+        // LibreFang.AppImage → BossFang.AppImage and return the new path.
+        let tmp = TempDir::new().expect("tempdir");
+        let app_dir = tmp.path().join("Applications");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        let legacy = app_dir.join("LibreFang.AppImage");
+        let bossfang = app_dir.join("BossFang.AppImage");
+        std::fs::write(&legacy, b"AI\x02LEGACY-PAYLOAD").unwrap();
+
+        let found = linux_install_path_in(tmp.path()).expect("should find AppImage");
+        assert_eq!(found, bossfang, "auto-migration should return the new path");
+        assert!(
+            bossfang.exists(),
+            "BossFang.AppImage must exist after migration"
+        );
+        assert!(
+            !legacy.exists(),
+            "LibreFang.AppImage must be renamed (not copied)"
+        );
+
+        // Payload preserved through the rename.
+        let payload = std::fs::read(&bossfang).unwrap();
+        assert_eq!(payload, b"AI\x02LEGACY-PAYLOAD");
+        // Must not escape tempdir.
         assert!(found.starts_with(tmp.path()));
     }
 

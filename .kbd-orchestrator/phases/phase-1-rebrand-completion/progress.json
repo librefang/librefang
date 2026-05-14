@@ -1,0 +1,67 @@
+{
+  "phase": "phase-1-rebrand-completion",
+  "backend": "native-tool",
+  "tool": "claude-code",
+  "started": "2026-05-14T00:00:00Z",
+  "changes_total": 5,
+  "changes_completed": 1,
+  "changes_in_progress": 0,
+  "changes_blocked": 0,
+  "changes_pending": 4,
+  "changes": [
+    {
+      "id": "m1-m2-cli-banner-install-paths-config-templates",
+      "milestones": ["M1", "M2"],
+      "status": "DONE",
+      "started": "2026-05-14T00:00:00Z",
+      "started_by": "kbd-execute",
+      "completed": "2026-05-14T00:00:00Z",
+      "tool": "claude-code",
+      "scope": [
+        "crates/librefang-cli/src/ui.rs — banner LibreFang → BossFang",
+        "crates/librefang-cli/src/desktop_install.rs — GITHUB_REPO flip to GQAdonis/librefang, PRODUCT_NAME constant, BossFang.app/BossFang.exe/BossFang.AppImage as primary with LibreFang.* fallback, auto-migration on macOS bundle + Linux AppImage, UA header bossfang-cli, tmp dir bossfang-desktop-install",
+        "crates/librefang-cli/src/desktop_install.rs — added 2 new tests (prefers_bossfang_appimage_over_legacy, auto_migrates_legacy_appimage_in_place)",
+        "crates/librefang-cli/templates/init_default_config.toml — header comment, ACP section comments, dashboard vault example command flipped to BossFang. Default dashboard_user/dashboard_pass values preserved per default-migration policy. ~/.librefang/ paths preserved per default-path policy.",
+        "crates/librefang-cli/templates/init_wizard_config.toml — header comment + docs URL repointed to GQAdonis/librefang",
+        "crates/librefang-cli/src/tui/screens/wizard.rs:471 — generated-config header comment flipped"
+      ],
+      "verification": {
+        "cargo_check": "PASS — cargo check -p librefang-cli --bins clean",
+        "cargo_clippy": "PASS — cargo clippy -p librefang-cli --bins -- -D warnings clean",
+        "cargo_test": "PASS — cargo test -p librefang-cli --bins (217 passed, 0 failed)",
+        "desktop_install_scoped": "PASS — 12 desktop_install tests including the 2 new migration tests",
+        "cargo_fmt": "PASS — cargo fmt -p librefang-cli --check clean",
+        "brand_enforcement": "PASS — python3 scripts/enforce-branding.py --check 0 hits"
+      }
+    },
+    {
+      "id": "m3-install-script",
+      "milestones": ["M3"],
+      "status": "PENDING"
+    },
+    {
+      "id": "m4-docs-mdx-sweep",
+      "milestones": ["M4"],
+      "status": "PENDING"
+    },
+    {
+      "id": "m5-m7-ua-strings-env-aliases",
+      "milestones": ["M5", "M7"],
+      "status": "PENDING"
+    },
+    {
+      "id": "m6-dashboard-localstorage-shim",
+      "milestones": ["M6"],
+      "status": "PENDING"
+    }
+  ],
+  "goal_completion": {
+    "M1_cli_banner_install_paths": "MET",
+    "M2_init_config_templates": "MET",
+    "M3_install_script": "NOT_STARTED",
+    "M4_docs_mdx_sweep": "NOT_STARTED",
+    "M5_ua_strings": "NOT_STARTED",
+    "M6_dashboard_localstorage": "NOT_STARTED",
+    "M7_env_aliases": "NOT_STARTED"
+  }
+}

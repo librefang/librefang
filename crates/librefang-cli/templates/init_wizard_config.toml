@@ -1,5 +1,5 @@
-# LibreFang Agent OS configuration
-# See https://github.com/librefang/librefang for documentation
+# BossFang Agent OS configuration
+# See https://github.com/GQAdonis/librefang for documentation
 
 api_listen = "0.0.0.0:4545"
 
