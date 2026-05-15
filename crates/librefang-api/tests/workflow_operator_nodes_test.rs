@@ -44,7 +44,7 @@
 
 use librefang_kernel::workflow::{
     BranchArm, ErrorMode, GateCondition, GateOp, StepAgent, StepMode, Workflow, WorkflowId,
-    WorkflowRunState, WorkflowStep,
+    WorkflowRunState, WorkflowStep, MAX_TRANSFORM_OUTPUT_BYTES, MAX_WAIT_SECS,
 };
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use librefang_types::agent::{AgentId, SessionMode};
@@ -550,6 +550,95 @@ async fn transform_step_missing_variable_halts_workflow_with_recorded_reason() {
         "step_result.output must carry the Tera error; got: {}",
         sr.output
     );
+}
+
+/// A Transform template that expands beyond `MAX_TRANSFORM_OUTPUT_BYTES`
+/// halts the run with a typed error instead of silently propagating a
+/// huge payload into `current_input` and the persisted step_result.
+#[tokio::test(flavor = "multi_thread")]
+async fn transform_step_oversize_output_halts_workflow_with_recorded_reason() {
+    let test = boot();
+    let engine = test.state.kernel.workflow_engine();
+    // Tera's `range()` builtin is enabled by default; this template
+    // renders roughly 2 * MAX_TRANSFORM_OUTPUT_BYTES bytes — guaranteed
+    // to trip the cap.
+    let code = format!(
+        "{{% for i in range(end={}) %}}xx{{% endfor %}}",
+        MAX_TRANSFORM_OUTPUT_BYTES
+    );
+    let workflow = workflow_with_op_step("transform-huge", StepMode::Transform { code });
+    let wf_id = workflow.id;
+    engine.register(workflow).await;
+    let run_id = engine
+        .create_run(wf_id, "ignored".to_string())
+        .await
+        .expect("create_run");
+    let result = engine
+        .execute_run(
+            run_id,
+            panicking_agent_resolver,
+            |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
+                panic!("operator-node executor must not call send_message");
+                #[allow(unreachable_code)]
+                Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
+            },
+        )
+        .await;
+    let err = result.expect_err("oversize transform must halt");
+    assert!(
+        err.contains("rendered") && err.contains("cap"),
+        "halt error must name the cap; got: {err}"
+    );
+    let run = engine.get_run(run_id).await.expect("run exists");
+    assert!(matches!(run.state, WorkflowRunState::Failed));
+}
+
+/// A Wait step whose `duration_secs` exceeds `MAX_WAIT_SECS` is
+/// rejected before the sleep starts. The executor-level guard is the
+/// last line of defence for persisted-pre-cap workflows reloaded after
+/// an upgrade; route-level validation rejects the same shape on
+/// register / update, but here we drive the engine directly.
+#[tokio::test(flavor = "multi_thread")]
+async fn wait_step_over_cap_halts_before_sleep() {
+    let test = boot();
+    let engine = test.state.kernel.workflow_engine();
+    let workflow = workflow_with_op_step(
+        "wait-huge",
+        StepMode::Wait {
+            duration_secs: MAX_WAIT_SECS + 1,
+        },
+    );
+    let wf_id = workflow.id;
+    engine.register(workflow).await;
+    let run_id = engine
+        .create_run(wf_id, "ignored".to_string())
+        .await
+        .expect("create_run");
+    let start = std::time::Instant::now();
+    let result = engine
+        .execute_run(
+            run_id,
+            panicking_agent_resolver,
+            |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
+                panic!("operator-node executor must not call send_message");
+                #[allow(unreachable_code)]
+                Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
+            },
+        )
+        .await;
+    let elapsed = start.elapsed();
+    let err = result.expect_err("over-cap Wait must halt");
+    assert!(
+        err.contains("exceeds cap"),
+        "halt error must name the cap; got: {err}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "guard must reject before any sleep; got {:?}",
+        elapsed
+    );
+    let run = engine.get_run(run_id).await.expect("run exists");
+    assert!(matches!(run.state, WorkflowRunState::Failed));
 }
 
 /// `Workflow::validate()` catches Tera syntax errors at manifest-load

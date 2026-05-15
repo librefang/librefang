@@ -566,6 +566,23 @@ impl std::fmt::Display for GateOp {
 /// (operator-node, not hot-path) and `one_off` keeps the runner
 /// stateless — no per-engine template registry to keep coherent
 /// across hot reloads, no shared mutable state to lock around.
+///
+/// Hard upper bound on Wait `duration_secs` so a manifest typo
+/// (`duration_secs: 99999999999`) cannot park a run for ~30 years until
+/// `Instant::now() + dur` saturates inside `tokio::time::sleep`. Seven
+/// days matches the longest reasonable wait the dashboard surfaces and
+/// is well under the `Duration` saturation threshold on every platform.
+pub const MAX_WAIT_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Hard cap on Transform-rendered output size. Without this a Tera
+/// template like `{% for i in range(end=10000000) %}x{% endfor %}` can
+/// expand to tens of MiB and pollute `current_input` (consumed by every
+/// downstream `{{input}}` agent step) and the persisted
+/// `step_result.output`. 1 MiB matches the workflow file size cap
+/// (`MAX_WORKFLOW_FILE_SIZE`) so the in-memory and on-disk budgets stay
+/// consistent.
+pub const MAX_TRANSFORM_OUTPUT_BYTES: usize = 1024 * 1024;
+
 pub fn render_transform_template(
     template: &str,
     prev: &str,
@@ -3256,6 +3273,27 @@ impl WorkflowEngine {
                 // Branch jump semantics) are still open. See #4980.
                 StepMode::Wait { duration_secs } => {
                     let start = std::time::Instant::now();
+                    // Reject the step before we sleep when the manifest
+                    // requested longer than the documented cap. The
+                    // validator already rejects this on workflow
+                    // registration, but defensive double-checking here
+                    // covers persisted-pre-cap workflows reloaded after
+                    // an upgrade.
+                    if *duration_secs > MAX_WAIT_SECS {
+                        let err = format!(
+                            "Wait step '{}' duration_secs={duration_secs} exceeds cap {MAX_WAIT_SECS}",
+                            step.name
+                        );
+                        warn!(error = %err, "Wait step rejected by cap");
+                        if let Some(mut r) = self.runs.get_mut(&run_id) {
+                            if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                r.state = WorkflowRunState::Failed;
+                                r.error = Some(err.clone());
+                                r.completed_at = Some(Utc::now());
+                            }
+                        }
+                        return Err(err);
+                    }
                     let dur = std::time::Duration::from_secs(*duration_secs);
                     let notify = self.cancel_notify.get(&run_id).map(|n| Arc::clone(&*n));
 
@@ -3446,6 +3484,36 @@ impl WorkflowEngine {
 
                     match result {
                         Ok(rendered) => {
+                            // Cap the rendered payload size: a template
+                            // like `{% for i in range(end=1e7) %}x{% endfor %}`
+                            // expands to tens of MiB, which pollutes
+                            // `current_input` (read by every downstream
+                            // `{{input}}` agent step) and the persisted
+                            // `step_result.output`. Halt with a typed
+                            // reason rather than silently propagating a
+                            // huge blob.
+                            if rendered.len() > MAX_TRANSFORM_OUTPUT_BYTES {
+                                let err = format!(
+                                    "Transform step '{}' rendered {} bytes (cap {MAX_TRANSFORM_OUTPUT_BYTES})",
+                                    step.name,
+                                    rendered.len()
+                                );
+                                warn!(
+                                    step = i + 1,
+                                    name = %step.name,
+                                    rendered_bytes = rendered.len(),
+                                    cap = MAX_TRANSFORM_OUTPUT_BYTES,
+                                    "Transform step exceeded output cap"
+                                );
+                                if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                    if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                        r.state = WorkflowRunState::Failed;
+                                        r.error = Some(err.clone());
+                                        r.completed_at = Some(Utc::now());
+                                    }
+                                }
+                                return Err(err);
+                            }
                             let step_result = StepResult {
                                 step_name: step.name.clone(),
                                 agent_id: String::new(),
@@ -4465,10 +4533,63 @@ impl Workflow {
     pub fn validate(&self) -> Vec<(String, String)> {
         let mut errs = Vec::new();
         for step in &self.steps {
-            if let StepMode::Transform { code } = &step.mode {
-                if let Err(reason) = validate_transform_template(code) {
-                    errs.push((step.name.clone(), reason));
+            match &step.mode {
+                StepMode::Transform { code } => {
+                    if code.is_empty() {
+                        errs.push((
+                            step.name.clone(),
+                            "transform.code is empty — likely missing from the manifest"
+                                .to_string(),
+                        ));
+                    } else if let Err(reason) = validate_transform_template(code) {
+                        errs.push((step.name.clone(), reason));
+                    }
                 }
+                StepMode::Wait { duration_secs } => {
+                    // `duration_secs = 0` is the parser's warn-and-default
+                    // for a missing field; a real zero-wait would also be
+                    // a no-op step, so rejecting both is the same fix.
+                    if *duration_secs == 0 {
+                        errs.push((
+                            step.name.clone(),
+                            "wait.duration_secs is 0 — likely missing from the manifest"
+                                .to_string(),
+                        ));
+                    } else if *duration_secs > MAX_WAIT_SECS {
+                        errs.push((
+                            step.name.clone(),
+                            format!(
+                                "wait.duration_secs={duration_secs} exceeds cap {MAX_WAIT_SECS}"
+                            ),
+                        ));
+                    }
+                }
+                StepMode::Gate { condition } => {
+                    // Catch the parser's fail-closed sentinel
+                    // (Eq=null with no field) so the operator sees the
+                    // misconfiguration at register time rather than a
+                    // mysterious "gate fails closed" mid-run.
+                    if condition.field.is_none()
+                        && matches!(condition.op, GateOp::Eq)
+                        && matches!(condition.value, serde_json::Value::Null)
+                    {
+                        errs.push((
+                            step.name.clone(),
+                            "gate.condition matches the parser's fail-closed default \
+                             (op=eq, value=null, no field) — likely missing or malformed"
+                                .to_string(),
+                        ));
+                    }
+                }
+                StepMode::Branch { arms } => {
+                    if arms.is_empty() {
+                        errs.push((
+                            step.name.clone(),
+                            "branch.arms is empty — likely missing from the manifest".to_string(),
+                        ));
+                    }
+                }
+                _ => {}
             }
         }
         errs
@@ -5829,6 +5950,122 @@ mod tests {
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].0, "bad-transform");
         assert!(errs[0].1.contains("transform template parse failed"));
+    }
+
+    /// Build a single-step workflow whose only step uses `mode`.
+    /// Used by the new operator-node `validate()` cases below.
+    fn workflow_with_single_op_step(name: &str, mode: StepMode) -> Workflow {
+        Workflow {
+            id: WorkflowId::new(),
+            name: name.to_string(),
+            description: "validate test".to_string(),
+            steps: vec![WorkflowStep {
+                name: "op".to_string(),
+                agent: StepAgent::ByName {
+                    name: "_op".to_string(),
+                },
+                prompt_template: "{{input}}".to_string(),
+                mode,
+                timeout_secs: 30,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+                session_mode: None,
+            }],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+        }
+    }
+
+    #[test]
+    fn workflow_validate_rejects_empty_transform_code() {
+        let wf = workflow_with_single_op_step(
+            "empty-transform",
+            StepMode::Transform {
+                code: String::new(),
+            },
+        );
+        let errs = wf.validate();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].1.contains("transform.code is empty"), "{errs:?}");
+    }
+
+    #[test]
+    fn workflow_validate_rejects_zero_wait_duration() {
+        let wf = workflow_with_single_op_step("zero-wait", StepMode::Wait { duration_secs: 0 });
+        let errs = wf.validate();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].1.contains("wait.duration_secs is 0"), "{errs:?}");
+    }
+
+    #[test]
+    fn workflow_validate_rejects_wait_duration_above_cap() {
+        let wf = workflow_with_single_op_step(
+            "huge-wait",
+            StepMode::Wait {
+                duration_secs: MAX_WAIT_SECS + 1,
+            },
+        );
+        let errs = wf.validate();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].1.contains("exceeds cap"), "{errs:?}");
+    }
+
+    #[test]
+    fn workflow_validate_accepts_wait_duration_at_cap() {
+        let wf = workflow_with_single_op_step(
+            "max-wait",
+            StepMode::Wait {
+                duration_secs: MAX_WAIT_SECS,
+            },
+        );
+        assert!(wf.validate().is_empty(), "MAX_WAIT_SECS itself must pass");
+    }
+
+    #[test]
+    fn workflow_validate_rejects_gate_fail_closed_sentinel() {
+        // Exactly the shape `parse_step_mode` produces when the manifest
+        // is missing or malformed: op=Eq, value=Null, no field.
+        let wf = workflow_with_single_op_step(
+            "default-gate",
+            StepMode::Gate {
+                condition: GateCondition {
+                    field: None,
+                    op: GateOp::Eq,
+                    value: serde_json::Value::Null,
+                },
+            },
+        );
+        let errs = wf.validate();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].1.contains("fail-closed default"), "{errs:?}");
+    }
+
+    #[test]
+    fn workflow_validate_accepts_real_gate_against_null() {
+        // A gate that explicitly checks "/field == null" is a legitimate
+        // configuration — only the no-field sentinel should be rejected.
+        let wf = workflow_with_single_op_step(
+            "field-eq-null",
+            StepMode::Gate {
+                condition: GateCondition {
+                    field: Some("/status".to_string()),
+                    op: GateOp::Eq,
+                    value: serde_json::Value::Null,
+                },
+            },
+        );
+        assert!(wf.validate().is_empty(), "{:?}", wf.validate());
+    }
+
+    #[test]
+    fn workflow_validate_rejects_empty_branch_arms() {
+        let wf = workflow_with_single_op_step("empty-branch", StepMode::Branch { arms: vec![] });
+        let errs = wf.validate();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].1.contains("branch.arms is empty"), "{errs:?}");
     }
 
     #[tokio::test]

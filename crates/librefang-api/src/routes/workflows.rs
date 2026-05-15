@@ -524,6 +524,22 @@ pub async fn create_workflow(
         total_timeout_secs,
     };
 
+    // Pre-flight validation: reject manifests with empty Transform code,
+    // unparseable Tera templates, zero / over-cap Wait durations, the
+    // Gate parser's fail-closed sentinel, and empty Branch arms. Without
+    // this, operators only discovered the typo when a real run reached
+    // the bad step.
+    let validation_errs = workflow.validate();
+    if !validation_errs.is_empty() {
+        let detail = validation_errs
+            .iter()
+            .map(|(step, reason)| format!("step '{step}': {reason}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return ApiErrorResponse::bad_request(format!("invalid workflow: {detail}"))
+            .into_json_tuple();
+    }
+
     let id = state.kernel.register_workflow(workflow).await;
     (
         StatusCode::CREATED,
@@ -813,6 +829,20 @@ pub async fn update_workflow(
         layout,
         total_timeout_secs,
     };
+
+    // Same pre-flight validation as `create_workflow` — a PATCH that
+    // introduces a bad Transform template / empty Branch arms / etc.
+    // must fail at the route boundary, not silently at run time.
+    let validation_errs = updated.validate();
+    if !validation_errs.is_empty() {
+        let detail = validation_errs
+            .iter()
+            .map(|(step, reason)| format!("step '{step}': {reason}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return ApiErrorResponse::bad_request(format!("invalid workflow: {detail}"))
+            .into_json_tuple();
+    }
 
     if !state
         .kernel
@@ -3046,6 +3076,23 @@ pub async fn instantiate_template(
             return ApiErrorResponse::bad_request(e).into_json_tuple();
         }
     };
+
+    // Same pre-flight validation as the direct /workflows endpoints —
+    // an instantiated template can produce a workflow whose Transform
+    // code / Wait duration / etc. is invalid (template-author error),
+    // surface that here rather than at run time.
+    let validation_errs = workflow.validate();
+    if !validation_errs.is_empty() {
+        let detail = validation_errs
+            .iter()
+            .map(|(step, reason)| format!("step '{step}': {reason}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return ApiErrorResponse::bad_request(format!(
+            "template '{id}' instantiated to an invalid workflow: {detail}"
+        ))
+        .into_json_tuple();
+    }
 
     let workflow_id = state.kernel.register_workflow(workflow).await;
     (
