@@ -4,6 +4,7 @@
 //! periodically fold stale tool results to keep the context window viable.
 
 use super::message::sanitize_for_memory;
+use super::prompt::{remember_interaction_best_effort, reply_directives_from_parsed};
 use super::text_recovery::{looks_like_hallucinated_action, user_message_has_action_intent};
 use super::*;
 
