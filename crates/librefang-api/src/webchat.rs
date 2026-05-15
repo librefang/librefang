@@ -9,7 +9,8 @@
 //!
 //! ## Opt-out: embedded-only mode
 //!
-//! Setting `LIBREFANG_DASHBOARD_EMBEDDED_ONLY=1` pins the resolver to the
+//! Setting `BOSSFANG_DASHBOARD_EMBEDDED_ONLY=1` (preferred) or
+//! `LIBREFANG_DASHBOARD_EMBEDDED_ONLY=1` (legacy alias) pins the resolver to the
 //! compile-time-embedded assets and short-circuits [`sync_dashboard`]. This is
 //! the right setting when you want the dashboard served by the daemon to
 //! exactly match the binary you built, e.g.:
@@ -95,7 +96,11 @@ const DASHBOARD_SYNC_ERROR_FILE: &str = ".sync-error";
 /// Environment variable that, when set to a truthy value, forces the dashboard
 /// resolver to serve the compile-time-embedded assets and skips the release
 /// sync entirely. See the module-level docs for details.
+///
+/// `BOSSFANG_DASHBOARD_EMBEDDED_ONLY` is the preferred name; the legacy
+/// `LIBREFANG_DASHBOARD_EMBEDDED_ONLY` is accepted as a fallback.
 const EMBEDDED_ONLY_ENV: &str = "LIBREFANG_DASHBOARD_EMBEDDED_ONLY";
+const EMBEDDED_ONLY_ENV_BOSSFANG: &str = "BOSSFANG_DASHBOARD_EMBEDDED_ONLY";
 
 fn embedded_dashboard_available() -> bool {
     REACT_DIST.get_file("index.html").is_some()
@@ -107,11 +112,15 @@ fn embedded_dashboard_available() -> bool {
 /// `github.com/GQAdonis/librefang`, embedded-only is still the safer default.
 ///
 /// Default is **embedded-only** (returns `true`). Opt out by setting
-/// `LIBREFANG_DASHBOARD_EMBEDDED_ONLY=0` (or `false`, `no`, `off`) if you
+/// `BOSSFANG_DASHBOARD_EMBEDDED_ONLY=0` (or `false`, `no`, `off`) if you
 /// explicitly want the runtime-dir override for local dev.
+/// The legacy `LIBREFANG_DASHBOARD_EMBEDDED_ONLY` is also accepted.
 fn embedded_only_mode() -> bool {
     // BossFang default: embedded-only=true unless explicitly opted out.
-    match std::env::var(EMBEDDED_ONLY_ENV).ok().as_deref() {
+    // Check BOSSFANG_* first, fall back to LIBREFANG_* for back-compat.
+    let val = std::env::var(EMBEDDED_ONLY_ENV_BOSSFANG)
+        .or_else(|_| std::env::var(EMBEDDED_ONLY_ENV));
+    match val.ok().as_deref() {
         Some(v) => {
             let n = v.trim().to_ascii_lowercase();
             // A falsy value opts OUT of embedded-only (i.e. allows runtime dir).
@@ -351,12 +360,14 @@ fn content_type_for(path: &str) -> &'static str {
 /// Downloads the dashboard-dist branch tarball and extracts it.
 /// Called during daemon startup (non-blocking).
 ///
-/// Short-circuits when [`EMBEDDED_ONLY_ENV`] is truthy so local builds and
-/// frozen deployments aren't silently replaced by the release artifact.
+/// Short-circuits when [`EMBEDDED_ONLY_ENV_BOSSFANG`] or [`EMBEDDED_ONLY_ENV`]
+/// is truthy so local builds and frozen deployments aren't silently replaced
+/// by the release artifact.
 pub async fn sync_dashboard(home_dir: &std::path::Path) {
     if embedded_only_mode() {
         tracing::info!(
-            "{EMBEDDED_ONLY_ENV} is set; skipping dashboard sync and serving embedded assets only"
+            "{EMBEDDED_ONLY_ENV_BOSSFANG} / {EMBEDDED_ONLY_ENV} is set; \
+             skipping dashboard sync and serving embedded assets only"
         );
         return;
     }

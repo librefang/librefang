@@ -188,29 +188,35 @@ fn write_pubkey_cache_safely(path: &std::path::Path, value: &str) -> std::io::Re
 }
 
 /// Resolve the registry pubkey using the layered chain:
-///   1. `LIBREFANG_REGISTRY_PUBKEY` env var override (always wins — covers
-///      self-hosted forks and operator-driven rotation).
+///   1. `BOSSFANG_REGISTRY_PUBKEY` (preferred) or `LIBREFANG_REGISTRY_PUBKEY`
+///      (legacy fallback) env var override (always wins — covers self-hosted
+///      forks and operator-driven rotation).
 ///   2. [`EMBEDDED_REGISTRY_PUBKEYS`] compiled-in constant (the **primary
 ///      trust root** for the official `librefang/librefang-registry`
 ///      registry — no network call, no MITM surface).
 ///   3. `~/.librefang/registry.pub` TOFU cache + HTTP fetch from
-///      `LIBREFANG_REGISTRY_PUBKEY_URL` — only consulted when the env var
-///      override and the embedded key are both unavailable, i.e. a
-///      self-hosted fork that didn't ship a custom binary. The HTTP path
-///      is **opt-in via env var only** for that reason: the official
-///      registry never reaches it.
+///      `BOSSFANG_REGISTRY_PUBKEY_URL` / `LIBREFANG_REGISTRY_PUBKEY_URL` —
+///      only consulted when the env var override and the embedded key are
+///      both unavailable, i.e. a self-hosted fork that didn't ship a custom
+///      binary. The HTTP path is **opt-in via env var only** for that reason:
+///      the official registry never reaches it.
 ///
 /// Returns `Err` only when all sources are unavailable or invalid; callers
 /// may then choose to hard-fail (index verification) or fall back to
 /// weaker integrity checks (archive install with verified SHA-256).
 async fn resolve_registry_pubkey(client: &reqwest::Client) -> Result<String, String> {
-    if let Ok(env_key) = std::env::var("LIBREFANG_REGISTRY_PUBKEY") {
+    if let Ok(env_key) = std::env::var("BOSSFANG_REGISTRY_PUBKEY")
+        .or_else(|_| std::env::var("LIBREFANG_REGISTRY_PUBKEY"))
+    {
         let trimmed = env_key.trim().to_string();
         if !trimmed.is_empty() {
             if is_valid_registry_pubkey_b64(&trimmed) {
                 return Ok(trimmed);
             }
-            warn!("LIBREFANG_REGISTRY_PUBKEY is set but is not a valid 32-byte Ed25519 key");
+            warn!(
+                "BOSSFANG_REGISTRY_PUBKEY / LIBREFANG_REGISTRY_PUBKEY is set but is not a \
+                 valid 32-byte Ed25519 key"
+            );
         }
     }
 
@@ -258,7 +264,8 @@ async fn resolve_registry_pubkey(client: &reqwest::Client) -> Result<String, Str
         );
     }
 
-    let url = std::env::var("LIBREFANG_REGISTRY_PUBKEY_URL")
+    let url = std::env::var("BOSSFANG_REGISTRY_PUBKEY_URL")
+        .or_else(|_| std::env::var("LIBREFANG_REGISTRY_PUBKEY_URL"))
         .unwrap_or_else(|_| OFFICIAL_PUBKEY_URL.to_string());
     let resp = client
         .get(&url)
@@ -562,9 +569,10 @@ pub async fn fetch_verified_index(
         let pubkey = resolve_registry_pubkey(client).await.map_err(|e| {
             format!(
                 "Plugin registry public key unavailable — refusing to fetch registry index. {e} \
-                 Configure LIBREFANG_REGISTRY_PUBKEY (base64), point \
-                 LIBREFANG_REGISTRY_PUBKEY_URL at a reachable endpoint, or set \
-                 LIBREFANG_REGISTRY_VERIFY=0 to disable verification (development use only)."
+                 Configure BOSSFANG_REGISTRY_PUBKEY (or LIBREFANG_REGISTRY_PUBKEY) as base64, \
+                 point BOSSFANG_REGISTRY_PUBKEY_URL (or LIBREFANG_REGISTRY_PUBKEY_URL) at a \
+                 reachable endpoint, or set LIBREFANG_REGISTRY_VERIFY=0 to disable verification \
+                 (development use only)."
             )
         })?;
 

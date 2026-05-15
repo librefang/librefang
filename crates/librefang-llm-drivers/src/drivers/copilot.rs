@@ -87,7 +87,7 @@ pub async fn exchange_copilot_token(github_token: &str) -> Result<CachedToken, S
         .get(COPILOT_TOKEN_URL)
         .header("Authorization", format!("token {github_token}"))
         .header("Accept", "application/json")
-        .header("User-Agent", "LibreFang/1.0")
+        .header("User-Agent", "BossFang/1.0")
         .send()
         .await
         .map_err(|e| format!("Copilot token exchange failed: {e}"))?;
