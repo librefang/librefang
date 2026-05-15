@@ -269,14 +269,19 @@ impl LlmDriver for FallbackChain {
             }
         }
 
-        // Every entry refused or was pre-skipped. When the store gave us
-        // enough information to enumerate the chain we surface the typed
-        // `AllProvidersExhausted` variant — callers can react to "chain
-        // is dry" without parsing a generic Api message string (#4807).
-        // We always emit the typed variant when at least one slot was
-        // pre-skipped from the store; otherwise we surface the last
-        // underlying provider error (legacy callers downcast on it).
-        if !skip_reasons.is_empty() && last_error.is_none() {
+        // Every entry refused or was pre-skipped. When an exhaustion
+        // store is attached we synthesize the typed
+        // `AllProvidersExhausted` variant unconditionally so callers
+        // can react to "chain is dry" without parsing a generic Api
+        // message (#4807). The most recent underlying provider error
+        // (if any slot was actually attempted) rides along on the
+        // `cause` field, which `thiserror`'s `#[source]` attribute
+        // exposes through `std::error::Error::source` — preserving the
+        // upstream chain per the trait-crate's source-chain rule
+        // (#3745). Legacy callers that did not opt into the store keep
+        // the historical `Api { message, ... }` error so any downcast
+        // they perform continues to match.
+        if self.exhaustion_store.is_some() {
             return Err(LlmError::AllProvidersExhausted {
                 details: skip_reasons
                     .into_iter()
@@ -285,6 +290,7 @@ impl LlmDriver for FallbackChain {
                         reason,
                     })
                     .collect(),
+                cause: last_error.map(Box::new),
             });
         }
 
@@ -425,7 +431,13 @@ impl LlmDriver for FallbackChain {
             }
         }
 
-        if !skip_reasons.is_empty() && last_error.is_none() {
+        // Streaming path mirrors the non-streaming policy above (#4807,
+        // #3745): with a store attached, synthesize the typed variant
+        // unconditionally and carry the last underlying error on
+        // `cause` so the source chain survives; without a store, fall
+        // back to the historical `Api { message, ... }` for legacy
+        // downcasters.
+        if self.exhaustion_store.is_some() {
             return Err(LlmError::AllProvidersExhausted {
                 details: skip_reasons
                     .into_iter()
@@ -434,6 +446,7 @@ impl LlmDriver for FallbackChain {
                         reason,
                     })
                     .collect(),
+                cause: last_error.map(Box::new),
             });
         }
 
@@ -1175,16 +1188,78 @@ mod tests {
 
         let err = chain.complete(test_request()).await.unwrap_err();
         match err {
-            LlmError::AllProvidersExhausted { details } => {
+            LlmError::AllProvidersExhausted { details, cause } => {
                 assert_eq!(details.len(), 2);
                 // Sorted by provider_id — p1 then p2.
                 assert_eq!(details[0].provider_id, "p1");
                 assert_eq!(details[0].reason, ExhaustionReason::RateLimited);
                 assert_eq!(details[1].provider_id, "p2");
                 assert_eq!(details[1].reason, ExhaustionReason::QuotaExceeded);
+                // Every slot was pre-skipped before any upstream call —
+                // there is no underlying provider error to ride along.
+                assert!(
+                    cause.is_none(),
+                    "all-pre-skipped path must not synthesize a fake cause, got {cause:?}"
+                );
             }
             other => panic!("expected AllProvidersExhausted, got {other:?}"),
         }
+    }
+
+    // #4807 / #3745 — When at least one slot was attempted and failed
+    // before the chain ran dry, the typed `AllProvidersExhausted`
+    // variant must (a) still fire (was previously unreachable in this
+    // case — review blocking #5) and (b) preserve the upstream
+    // provider error via `Error::source()` so the source chain rule
+    // from `librefang-llm-driver/AGENTS.md` is honoured.
+    #[tokio::test]
+    async fn mixed_attempt_and_skip_yields_typed_variant_with_source_chain() {
+        let store = ProviderExhaustionStore::new();
+        // p1 is pre-marked exhausted; p2 is fresh but its driver fails
+        // with a credit-exhausted error, which the chain marks against
+        // the store and treats as a skip-to-next.
+        let until = Instant::now() + Duration::from_secs(60);
+        store.mark_exhausted("p1", ExhaustionReason::RateLimited, Some(until));
+
+        let chain = FallbackChain::new(vec![
+            entry(Arc::new(OkDriver("should-not-reach")), "p1"),
+            entry(Arc::new(CreditExhaustedDriver), "p2"),
+        ])
+        .with_exhaustion_store(store);
+
+        let err = chain.complete(test_request()).await.unwrap_err();
+        match &err {
+            LlmError::AllProvidersExhausted { details, cause } => {
+                assert_eq!(details.len(), 2);
+                assert_eq!(details[0].provider_id, "p1");
+                assert_eq!(details[0].reason, ExhaustionReason::RateLimited);
+                assert_eq!(details[1].provider_id, "p2");
+                assert_eq!(details[1].reason, ExhaustionReason::QuotaExceeded);
+                // The last underlying provider error rode along on `cause`.
+                let inner = cause
+                    .as_deref()
+                    .expect("attempted slot must contribute a cause");
+                match inner {
+                    LlmError::Api { status, .. } => assert_eq!(*status, 402),
+                    other => panic!("expected wrapped Api(402), got {other:?}"),
+                }
+            }
+            other => panic!("expected AllProvidersExhausted, got {other:?}"),
+        }
+        // `thiserror`'s `#[source]` exposes `cause` through the
+        // standard `Error::source` walker — assert the chain is intact
+        // (#3745 rule). The wrapped error is `Box<LlmError>`, so the
+        // top-level `source()` returns `&Box<LlmError>` as `&dyn Error`;
+        // walking one more level (the Box's own `source`) lands on the
+        // inner `LlmError` (which is what we actually care about). Both
+        // levels must report the upstream Api(402) status — the Box's
+        // Display delegates to the inner error.
+        let src = std::error::Error::source(&err)
+            .expect("AllProvidersExhausted with a wrapped cause must expose source()");
+        assert!(
+            src.to_string().contains("API error (402)"),
+            "source Display should surface upstream Api(402), got {src}"
+        );
     }
 
     #[tokio::test]
