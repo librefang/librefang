@@ -150,6 +150,54 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(eb.audit_prose_in_mdx(text), [])
 
 
+class DashboardProseTests(unittest.TestCase):
+    """Tests for the Pass 3 dashboard prose scope (M8 of rebrand-cleanup).
+
+    Dashboard .ts/.tsx files use replace_prose_in_tsx() — no fence/inline-code
+    awareness needed (TypeScript has no Markdown syntax).
+    """
+
+    def test_dashboard_jsx_string_literal_flipped(self) -> None:
+        # JSX-embedded string like the skillHubs.ts registry description.
+        before = '      "Official LibreFang registry — curated hands, agents, MCP, providers, plugins.",\n'
+        after  = '      "Official BossFang registry — curated hands, agents, MCP, providers, plugins.",\n'
+        self.assertEqual(eb.replace_prose_in_tsx(before), after)
+
+    def test_dashboard_jsx_comment_flipped(self) -> None:
+        # Inline TS/TSX comment like SkillsPage.tsx line 1578.
+        before = "  // FangHub is the LibreFang first-party registry — local cache, cheap\n"
+        after  = "  // FangHub is the BossFang first-party registry — local cache, cheap\n"
+        self.assertEqual(eb.replace_prose_in_tsx(before), after)
+
+    def test_dashboard_multi_occurrence_per_line(self) -> None:
+        # Multiple occurrences on one line all get replaced.
+        before = 'const msg = "LibreFang mobile: open LibreFang and scan";\n'
+        after  = 'const msg = "BossFang mobile: open BossFang and scan";\n'
+        self.assertEqual(eb.replace_prose_in_tsx(before), after)
+
+    def test_dashboard_preserves_layer_internal_in_tsx(self) -> None:
+        # LibreFangError / LibreFangKernel in TS source must not be touched.
+        before = "import type { LibreFangError } from '../types/LibreFangConfig';\n"
+        self.assertEqual(eb.replace_prose_in_tsx(before), before)
+
+    def test_dashboard_audit_detects_prose_hit(self) -> None:
+        # audit_prose_in_tsx (called via audit_prose_file for .tsx) finds bare LibreFang.
+        tsx_content = 'const label = "LibreFang role";\n'
+        hits = eb.audit_prose_in_tsx(tsx_content)
+        self.assertEqual(hits, ["LibreFang"])
+
+    def test_dashboard_audit_silent_on_layer_internal(self) -> None:
+        # Layer Internal symbols in TSX must not trigger the audit.
+        tsx_content = "// uses LibreFangKernel underneath\n"
+        self.assertEqual(eb.audit_prose_in_tsx(tsx_content), [])
+
+    def test_dashboard_idempotent(self) -> None:
+        once  = eb.replace_prose_in_tsx('const x = "LibreFang mobile app";\n')
+        twice = eb.replace_prose_in_tsx(once)
+        self.assertEqual(once, twice)
+        self.assertEqual(once, 'const x = "BossFang mobile app";\n')
+
+
 class FileLevelTests(unittest.TestCase):
     def test_enforce_color_file_does_not_touch_docs_prose(self) -> None:
         # Use a tempdir to confirm the color pass does NOT scan docs/.

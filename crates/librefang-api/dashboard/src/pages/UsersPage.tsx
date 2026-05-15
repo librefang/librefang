@@ -184,7 +184,7 @@ export function UsersPage() {
         }
         helpText={t(
           "users.help",
-          "Each row maps a platform identity (Telegram / Discord / Slack / email) to a LibreFang role. Admin-only — endpoints live behind authenticated middleware.",
+          "Each row maps a platform identity (Telegram / Discord / Slack / email) to a BossFang role. Admin-only — endpoints live behind authenticated middleware.",
         )}
       />
 
@@ -1180,7 +1180,7 @@ function IdentityWizardModal({
                   <p className="text-text-dim">
                     {t(
                       "users.wizard_unverified_body",
-                      "LibreFang does not yet ping the platform to confirm this id belongs to {{user}}. Anyone with Owner rights can bind any id to any user row, which silently retargets future RBAC and rate-limit decisions. Verify the platform_id with the user out-of-band before saving.",
+                      "BossFang does not yet ping the platform to confirm this id belongs to {{user}}. Anyone with Owner rights can bind any id to any user row, which silently retargets future RBAC and rate-limit decisions. Verify the platform_id with the user out-of-band before saving.",
                       { user: user.name },
                     )}
                   </p>

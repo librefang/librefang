@@ -36,7 +36,7 @@ vi.mock("react-i18next", async () => {
   const translations: Record<string, string> = {
     "mobile_pairing.title": "Mobile Pairing",
     "mobile_pairing.subtitle":
-      "Open the LibreFang mobile app and tap <strong>Scan QR</strong> to connect to this daemon.",
+      "Open the BossFang mobile app and tap <strong>Scan QR</strong> to connect to this daemon.",
     "mobile_pairing.expired_message":
       "QR code expired — refresh to get a new one.",
     "mobile_pairing.refresh": "Refresh",

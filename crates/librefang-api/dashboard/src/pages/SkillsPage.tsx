@@ -1575,7 +1575,7 @@ export function SkillsPage() {
   });
   const activeSkillhubQuery = keyword ? skillhubSearchQuery : skillhubBrowseQuery;
 
-  // FangHub is the LibreFang first-party registry — local cache, cheap
+  // FangHub is the BossFang first-party registry — local cache, cheap
   // enough to keep enabled whenever browsing, regardless of hub filter.
   const fanghubQuery = useQuery({
     ...skillQueries.fanghubList(),

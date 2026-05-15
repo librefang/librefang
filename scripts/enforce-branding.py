@@ -7,7 +7,7 @@ Usage:
     python3 scripts/enforce-branding.py --check    # read-only audit, exit 1 if any upstream token remains
 
 What it does:
-  Two scopes, two replacement passes:
+  Three scopes, three replacement passes:
 
   1. Color-token pass (dashboard / desktop frontend)
      Scans *.ts, *.tsx, *.css, *.html, *.json, *.rs under
@@ -24,6 +24,14 @@ What it does:
      librefang_runtime) stay intact. Layer Internal struct names are
      preserved automatically via word-boundary regex: \bLibreFang\b
      does not match the K in LibreFangKernel.
+
+  3. Dashboard prose pass (application source in crates/librefang-api/dashboard/src/)
+     Scans *.ts, *.tsx under crates/librefang-api/dashboard/src/ for
+     the product name "LibreFang" in user-visible strings, JSX text nodes,
+     and code comments. No fence/inline-code awareness is needed — TypeScript
+     and TSX files contain no Markdown syntax. Layer Internal struct names
+     (LibreFangKernel, LibreFangError, etc.) are preserved by the same
+     word-boundary regex \bLibreFang\b used in the docs prose pass.
 
   Both modes are safe to run multiple times (idempotent).
 
@@ -86,6 +94,14 @@ PROSE_SCAN_DIRS = [
     REPO_ROOT / "docs/src/components",
 ]
 PROSE_EXTENSIONS = {".mdx", ".ts", ".tsx"}
+
+# Dashboard prose pass: application source files in the dashboard SPA.
+# (M8 of the rebrand-cleanup roadmap — catches user-visible strings and
+# comments in JSX/TS that the color-token pass does not cover.)
+DASHBOARD_PROSE_SCAN_DIRS = [
+    REPO_ROOT / "crates/librefang-api/dashboard/src",
+]
+DASHBOARD_PROSE_EXTENSIONS = {".ts", ".tsx"}
 
 # ── Color replacement table ───────────────────────────────────────────────────
 #
@@ -325,6 +341,24 @@ def main() -> int:
             continue
         verb = "auditing" if check_mode else "scanning"
         print(f"[enforce-branding] {verb} {label} (docs prose, {len(files)} files) …")
+        for f in files:
+            if check_mode:
+                hits = audit_prose_file(f)
+                if hits:
+                    offending.append((f, hits))
+            else:
+                if enforce_prose_file(f):
+                    changed.append(f)
+
+    # ── Pass 3: dashboard prose ───────────────────────────────────────────────
+    for scan_root in DASHBOARD_PROSE_SCAN_DIRS:
+        label = scan_root.relative_to(REPO_ROOT)
+        files = scan_dir(scan_root, DASHBOARD_PROSE_EXTENSIONS)
+        if not files:
+            print(f"[enforce-branding] {label}: no files found — skipping")
+            continue
+        verb = "auditing" if check_mode else "scanning"
+        print(f"[enforce-branding] {verb} {label} (dashboard prose, {len(files)} files) …")
         for f in files:
             if check_mode:
                 hits = audit_prose_file(f)

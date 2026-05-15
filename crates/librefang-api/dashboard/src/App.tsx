@@ -54,8 +54,6 @@ import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, da
 import { NotificationCenter } from "./components/NotificationCenter";
 import { OfflineBanner } from "./components/OfflineBanner";
 
-const USER_AVATAR_STYLE = { background: "linear-gradient(135deg,#FF6A3D,#E04E28)" } as const;
-const BRAND_MARK_STYLE = { background: "linear-gradient(135deg,#FF6A3D,#FF6A3D)" } as const;
 // Tailwind v4: `before:` requires explicit `content-['']` for the pseudo
 // element to render at all.
 const NAV_ACTIVE_CLASS = "bg-brand/10 text-brand font-medium before:content-[''] before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-[2px] before:rounded-full before:bg-brand before:shadow-[0_0_8px_var(--color-brand)]";

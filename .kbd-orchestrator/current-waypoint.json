@@ -2,17 +2,18 @@
   "active_phase": "phase-2-rebrand-cleanup",
   "active_change": null,
   "last_updated": "2026-05-15T00:00:00Z",
-  "last_updated_by": "kbd-plan",
+  "last_updated_by": "kbd-execute",
   "backend": "native-tool",
   "backend_rationale": "No OpenSpec in this project. Single-tool (Claude Code) execution with progress.json bookkeeping. Hybrid not warranted at this scale.",
   "next_action": {
-    "command": "/kbd-execute m8-m11-dashboard-prose-cleanup",
-    "description": "Plan complete. Execute change 1 of 3: extend enforce-branding.py to dashboard .ts/.tsx prose scope, run it to auto-flip 5 LibreFang strings, remove USER_AVATAR_STYLE + BRAND_MARK_STYLE from App.tsx. Verify: pnpm test + pnpm typecheck."
+    "command": "/kbd-execute m9b-config-defaults-doc-sweep",
+    "description": "M8+M11 DONE (PR #18). Execute change 2 of 3: change default_name() to 'BossFang Agent OS' and totp_issuer default to 'BossFang' in crates/librefang-types/src/config/types.rs, then sweep ~20 MDX doc files (EN + ZH) for fenced code block examples and backtick table spans. Verify: cargo check -p librefang-types."
   },
-  "phase_progress": "Phase 2 PLANNED. 3 changes pending. Start with /kbd-execute m8-m11-dashboard-prose-cleanup.",
+  "phase_progress": "Phase 2: 1/3 changes DONE (M8+M11). Advance to /kbd-execute m9b-config-defaults-doc-sweep.",
   "last_completed": {
-    "change_id": "m6-dashboard-localstorage-shim",
-    "milestones": ["M6"],
-    "completed_at": "2026-05-14T00:00:00Z"
+    "change_id": "m8-m11-dashboard-prose-cleanup",
+    "milestones": ["M8", "M11"],
+    "completed_at": "2026-05-15T00:00:00Z",
+    "pr": "https://github.com/GQAdonis/librefang/pull/18"
   }
 }

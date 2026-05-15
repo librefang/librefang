@@ -42,7 +42,7 @@ export const SKILL_HUBS: readonly SkillHub[] = [
     color: "#FF6A3D",
     domain: "fanghub.librefang.ai",
     desc:
-      "Official LibreFang registry — curated hands, agents, MCP, providers, plugins.",
+      "Official BossFang registry — curated hands, agents, MCP, providers, plugins.",
     cli: (slug) => `librefang skill install ${slug}`,
   },
   {

@@ -8,24 +8,38 @@
   "plan_complete": true,
   "plan_completed_at": "2026-05-15T00:00:00Z",
   "changes_total": 3,
-  "changes_completed": 0,
+  "changes_completed": 1,
   "changes_in_progress": 0,
   "changes_blocked": 0,
-  "changes_pending": 3,
+  "changes_pending": 2,
   "changes": [
     {
       "id": "m8-m11-dashboard-prose-cleanup",
       "milestones": ["M8", "M11"],
-      "status": "PENDING",
+      "status": "DONE",
+      "started": "2026-05-15T00:00:00Z",
+      "started_by": "kbd-execute",
+      "completed": "2026-05-15T00:00:00Z",
+      "tool": "claude-code",
       "scope": [
-        "scripts/enforce-branding.py — extend prose scan to crates/librefang-api/dashboard/src/ (.ts/.tsx files)",
-        "scripts/test_enforce_branding.py — add >=4 tests for dashboard scope",
+        "scripts/enforce-branding.py — added DASHBOARD_PROSE_SCAN_DIRS + Pass 3 (dashboard prose scope, .ts/.tsx in crates/librefang-api/dashboard/src/)",
+        "scripts/test_enforce_branding.py — 7 new DashboardProseTests; total 22/22 PASS",
         "crates/librefang-api/dashboard/src/lib/skillHubs.ts:45 — LibreFang registry → BossFang registry",
-        "crates/librefang-api/dashboard/src/pages/UsersPage.tsx:187,1183 — 2 LibreFang prose flips",
-        "crates/librefang-api/dashboard/src/pages/SkillsPage.tsx:1578 — comment LibreFang → BossFang",
+        "crates/librefang-api/dashboard/src/pages/UsersPage.tsx:187 — LibreFang role → BossFang role",
+        "crates/librefang-api/dashboard/src/pages/UsersPage.tsx:1183 — LibreFang does not yet ping → BossFang",
+        "crates/librefang-api/dashboard/src/pages/SkillsPage.tsx:1578 — comment LibreFang first-party → BossFang",
         "crates/librefang-api/dashboard/src/pages/MobilePairingPage.test.tsx:39 — LibreFang mobile app → BossFang",
-        "crates/librefang-api/dashboard/src/App.tsx:57-58 — remove USER_AVATAR_STYLE and BRAND_MARK_STYLE (TS6133)"
-      ]
+        "crates/librefang-api/dashboard/src/App.tsx:57-58 — removed USER_AVATAR_STYLE + BRAND_MARK_STYLE (TS6133 M11)",
+        "docs/src/app/agent/auto-evolution/page.mdx — prose LibreFang → BossFang (also on upstream PR #16)",
+        "docs/src/app/zh/agent/auto-evolution/page.mdx — same (ZH locale)"
+      ],
+      "verification": {
+        "enforce_branding_tests": "PASS — 22/22 (7 new DashboardProseTests)",
+        "enforce_branding_check": "PASS — exit 0, all 3 passes (color + docs prose + dashboard prose)",
+        "pnpm_test": "PASS — 635/635 tests, 67 test files",
+        "pnpm_typecheck": "PASS — exit 0 (TS6133 cleared for USER_AVATAR_STYLE + BRAND_MARK_STYLE)"
+      },
+      "pr": "https://github.com/GQAdonis/librefang/pull/18"
     },
     {
       "id": "m9b-config-defaults-doc-sweep",
@@ -49,7 +63,7 @@
       "milestones": ["M10"],
       "status": "PENDING",
       "scope": [
-        "crates/librefang-api/dashboard/src/api.ts — add 4x TODO(drop-legacy-key) comments at API_KEY_LEGACY sites",
+        "crates/librefang-api/dashboard/src/api.ts — 4x TODO(drop-legacy-key) comments at API_KEY_LEGACY sites",
         "CHANGELOG.md — add v2026.8.x removal notice to [Unreleased] Upcoming Breaking Changes"
       ]
     }
@@ -60,9 +74,9 @@
     "shellcheck-pre-push-hook": "DEFERRED"
   },
   "goal_completion": {
-    "M8_dashboard_jsx_prose": "PENDING",
+    "M8_dashboard_jsx_prose": "MET",
     "M9b_config_defaults_doc_sweep": "PENDING",
     "M10_legacy_key_removal_planning": "PENDING",
-    "M11_app_tsx_ts6133": "PENDING"
+    "M11_app_tsx_ts6133": "MET"
   }
 }
