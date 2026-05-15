@@ -366,7 +366,7 @@ Existing values for `CARGO_BUILD_JOBS` / `RUST_MIN_STACK` are preserved
 - **Formatting**: Use `rustfmt` with default settings. Run `cargo fmt --all` before every commit.
 - **Linting**: `cargo clippy --workspace -- -D warnings` must pass with zero warnings.
 - **Documentation**: All public types and functions must have doc comments (`///`).
-- **Error Handling**: Use `thiserror` for error types. Avoid `unwrap()` in library code; prefer `?` propagation.
+- **Error Handling**: Use `thiserror` for error types. Avoid `unwrap()` in library code; prefer `?` propagation. The full contract — which crate uses `LibreFangError` vs a crate-local enum, where `anyhow` is permitted, how trait boundaries surface typed errors — is in [`docs/architecture/error-contracts.md`](docs/architecture/error-contracts.md).
 - **Naming**:
   - Types: `PascalCase` (e.g., `LibreFangKernel`, `AgentManifest`)
   - Functions/methods: `snake_case`
