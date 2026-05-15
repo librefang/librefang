@@ -5,37 +5,64 @@
   "started": "2026-05-15T00:00:00Z",
   "assessment_complete": true,
   "assessment_completed_at": "2026-05-15T00:00:00Z",
-  "plan_complete": false,
-  "changes_total": 0,
+  "plan_complete": true,
+  "plan_completed_at": "2026-05-15T00:00:00Z",
+  "changes_total": 3,
   "changes_completed": 0,
   "changes_in_progress": 0,
   "changes_blocked": 0,
-  "changes_pending": 0,
-  "changes": [],
+  "changes_pending": 3,
+  "changes": [
+    {
+      "id": "m8-m11-dashboard-prose-cleanup",
+      "milestones": ["M8", "M11"],
+      "status": "PENDING",
+      "scope": [
+        "scripts/enforce-branding.py — extend prose scan to crates/librefang-api/dashboard/src/ (.ts/.tsx files)",
+        "scripts/test_enforce_branding.py — add >=4 tests for dashboard scope",
+        "crates/librefang-api/dashboard/src/lib/skillHubs.ts:45 — LibreFang registry → BossFang registry",
+        "crates/librefang-api/dashboard/src/pages/UsersPage.tsx:187,1183 — 2 LibreFang prose flips",
+        "crates/librefang-api/dashboard/src/pages/SkillsPage.tsx:1578 — comment LibreFang → BossFang",
+        "crates/librefang-api/dashboard/src/pages/MobilePairingPage.test.tsx:39 — LibreFang mobile app → BossFang",
+        "crates/librefang-api/dashboard/src/App.tsx:57-58 — remove USER_AVATAR_STYLE and BRAND_MARK_STYLE (TS6133)"
+      ]
+    },
+    {
+      "id": "m9b-config-defaults-doc-sweep",
+      "milestones": ["M9b"],
+      "status": "PENDING",
+      "scope": [
+        "crates/librefang-types/src/config/types.rs — default_name() → 'BossFang Agent OS'",
+        "crates/librefang-types/src/config/types.rs — totp_issuer default → 'BossFang'",
+        "docs/src/app/configuration/features/page.mdx — 4 sites (TOML fence + table spans)",
+        "docs/src/app/configuration/page.mdx — 3 sites (TOML fences + table span)",
+        "docs/src/app/security/approvals/page.mdx — 1 TOML fence",
+        "docs/src/app/integrations/desktop/page.mdx — 2 sites (prose bold + table span)",
+        "docs/src/app/integrations/cli/commands/page.mdx — 1 prose (Windows registry name)",
+        "docs/src/app/integrations/acp/page.mdx — 1 JSON fence",
+        "docs/src/app/integrations/api/communication/page.mdx — 1 JSON fence",
+        "ZH mirrors: zh/configuration/features, zh/configuration, zh/security/approvals, zh/integrations/desktop, zh/integrations/api/communication"
+      ]
+    },
+    {
+      "id": "m10-legacy-key-removal-planning",
+      "milestones": ["M10"],
+      "status": "PENDING",
+      "scope": [
+        "crates/librefang-api/dashboard/src/api.ts — add 4x TODO(drop-legacy-key) comments at API_KEY_LEGACY sites",
+        "CHANGELOG.md — add v2026.8.x removal notice to [Unreleased] Upcoming Breaking Changes"
+      ]
+    }
+  ],
+  "decisions_recorded": {
+    "m9b-code-default-change": "YES — change code defaults to BossFang values",
+    "enforce-branding-dashboard-scope": "YES — extend prose scan to dashboard .ts/.tsx",
+    "shellcheck-pre-push-hook": "DEFERRED"
+  },
   "goal_completion": {
     "M8_dashboard_jsx_prose": "PENDING",
-    "M9b_config_defaults_doc_sweep": "PENDING — awaiting human decision on code default change",
+    "M9b_config_defaults_doc_sweep": "PENDING",
     "M10_legacy_key_removal_planning": "PENDING",
     "M11_app_tsx_ts6133": "PENDING"
-  },
-  "pending_decisions": [
-    {
-      "id": "m9b-code-default-change",
-      "question": "Should default_name() be changed from 'LibreFang Agent OS' to 'BossFang Agent OS' and default_totp_issuer() from 'LibreFang' to 'BossFang'?",
-      "options": ["YES — change code defaults (recommended)", "NO — leave code defaults, add prose note in docs"],
-      "blocking": "M9b"
-    },
-    {
-      "id": "enforce-branding-dashboard-scope",
-      "question": "Should enforce-branding.py prose scope be extended to crates/librefang-api/dashboard/src/?",
-      "options": ["YES — extend scope", "NO — keep dashboard coverage limited to color tokens"],
-      "blocking": null
-    },
-    {
-      "id": "shellcheck-pre-push-hook",
-      "question": "Should shellcheck web/public/install.sh be added to scripts/hooks/pre-push?",
-      "options": ["YES — add to pre-push hook", "NO — remain CI-only"],
-      "blocking": null
-    }
-  ]
+  }
 }

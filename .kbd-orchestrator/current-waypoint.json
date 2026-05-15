@@ -2,22 +2,17 @@
   "active_phase": "phase-2-rebrand-cleanup",
   "active_change": null,
   "last_updated": "2026-05-15T00:00:00Z",
-  "last_updated_by": "kbd-assess",
+  "last_updated_by": "kbd-plan",
   "backend": "native-tool",
   "backend_rationale": "No OpenSpec in this project. Single-tool (Claude Code) execution with progress.json bookkeeping. Hybrid not warranted at this scale.",
   "next_action": {
-    "command": "/kbd-plan phase-2-rebrand-cleanup",
-    "description": "Assessment complete. Three pending decisions must be resolved before /kbd-plan finalizes the change inventory: (1) M9b code default change — YES recommended, (2) enforce-branding.py dashboard prose scope extension, (3) shellcheck pre-push hook. Review assessment.md and answer the three questions, then run /kbd-plan."
+    "command": "/kbd-execute m8-m11-dashboard-prose-cleanup",
+    "description": "Plan complete. Execute change 1 of 3: extend enforce-branding.py to dashboard .ts/.tsx prose scope, run it to auto-flip 5 LibreFang strings, remove USER_AVATAR_STYLE + BRAND_MARK_STYLE from App.tsx. Verify: pnpm test + pnpm typecheck."
   },
-  "phase_progress": "Phase 2 ASSESSED. Pending 3 human decisions. Advance to /kbd-plan after decisions are recorded.",
+  "phase_progress": "Phase 2 PLANNED. 3 changes pending. Start with /kbd-execute m8-m11-dashboard-prose-cleanup.",
   "last_completed": {
     "change_id": "m6-dashboard-localstorage-shim",
     "milestones": ["M6"],
     "completed_at": "2026-05-14T00:00:00Z"
-  },
-  "pending_decisions": [
-    "m9b-code-default-change",
-    "enforce-branding-dashboard-scope",
-    "shellcheck-pre-push-hook"
-  ]
+  }
 }
