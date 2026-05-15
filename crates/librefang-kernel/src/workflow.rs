@@ -4295,48 +4295,53 @@ impl WorkflowEngine {
                 // the agent-shaped branch below, which would surface
                 // them as broken-agent steps even though they execute
                 // correctly.
-                StepMode::Wait { duration_secs } => {
+                StepMode::Wait { duration_secs: _ } => {
+                    // Pass-through operator: `current_input` flows
+                    // through unchanged at run time, so downstream
+                    // previews must see the same value (post-Transform
+                    // if a Transform preceded). Use the expanded
+                    // `prompt_template` so the dashboard's
+                    // `resolved_prompt` column reflects what `{{input}}`
+                    // resolves to here. Validate rejects non-default
+                    // `prompt_template` on Wait, so in production this
+                    // is `""` or `current_input`; the test path that
+                    // bypasses validate via `engine.register` exercises
+                    // the general case. The operator kind + duration is
+                    // already on the row via `agent_name` and on the
+                    // step's `mode` field, so no info is lost.
                     preview.push(DryRunStep {
                         step_name: step.name.clone(),
                         agent_name: Some("_operator:wait".to_string()),
                         agent_found: true,
-                        resolved_prompt: format!("wait {duration_secs}s"),
+                        resolved_prompt: raw_prompt,
                         skipped: false,
                         skip_reason: None,
                     });
-                    // `current_input` flows through unchanged at run
-                    // time; mirror that so later steps' previews see
-                    // the same placeholder they would have seen
-                    // without the Wait.
                 }
-                StepMode::Gate { condition } => {
-                    let trace =
-                        serde_json::to_string(condition).unwrap_or_else(|_| "<gate>".to_string());
+                StepMode::Gate { .. } => {
+                    // Pass-through on gate-open at run time; same
+                    // contract as Wait — surface the expanded
+                    // `prompt_template` so downstream-step `{{input}}`
+                    // previews remain meaningful through a preceding
+                    // Transform. Condition is on `step.mode` for any
+                    // caller that needs it.
                     preview.push(DryRunStep {
                         step_name: step.name.clone(),
                         agent_name: Some("_operator:gate".to_string()),
                         agent_found: true,
-                        resolved_prompt: format!("gate: {trace}"),
+                        resolved_prompt: raw_prompt,
                         skipped: false,
                         skip_reason: None,
                     });
                 }
-                StepMode::Approval {
-                    recipients,
-                    timeout_secs,
-                } => {
-                    let recipients_repr = recipients.join(", ");
-                    let timeout_repr = match timeout_secs {
-                        Some(t) => format!("{t}s"),
-                        None => "unbounded".to_string(),
-                    };
+                StepMode::Approval { .. } => {
+                    // Pass-through on approve at run time. Recipients
+                    // and timeout are on `step.mode`.
                     preview.push(DryRunStep {
                         step_name: step.name.clone(),
                         agent_name: Some("_operator:approval".to_string()),
                         agent_found: true,
-                        resolved_prompt: format!(
-                            "approval (recipients: [{recipients_repr}], timeout: {timeout_repr})"
-                        ),
+                        resolved_prompt: raw_prompt,
                         skipped: false,
                         skip_reason: None,
                     });
@@ -4404,12 +4409,16 @@ impl WorkflowEngine {
                         }
                     }
                 }
-                StepMode::Branch { arms } => {
+                StepMode::Branch { .. } => {
+                    // Pass-through at run time (Branch jumps based on
+                    // current_input without rewriting it). Surface the
+                    // expanded `prompt_template`; arm list is on
+                    // `step.mode` for callers that need it.
                     preview.push(DryRunStep {
                         step_name: step.name.clone(),
                         agent_name: Some("_operator:branch".to_string()),
                         agent_found: true,
-                        resolved_prompt: format!("branch (arms={})", arms.len()),
+                        resolved_prompt: raw_prompt,
                         skipped: false,
                         skip_reason: None,
                     });
