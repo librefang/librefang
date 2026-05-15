@@ -35,7 +35,7 @@ access_token_env = "LINE_ACCESS_TOKEN"
 default_agent = "assistant"
 ```
 
-5. In the LINE Developers Console, set the webhook URL to your LibreFang instance (e.g., `https://your-domain.com:4545/channels/line/webhook`).
+5. In the LINE Developers Console, set the webhook URL to your BossFang instance (e.g., `https://your-domain.com:4545/channels/line/webhook`).
 6. Restart the daemon.
 
 ### How It Works
@@ -395,7 +395,7 @@ The XMPP adapter connects to the XMPP server using the specified JID and passwor
 
 ### Prerequisites
 
-- An MQTT broker (e.g., Mosquitto, HiveMQ, EMQX) accessible from the LibreFang host (see [MQTT specification](https://mqtt.org))
+- An MQTT broker (e.g., Mosquitto, HiveMQ, EMQX) accessible from the BossFang host (see [MQTT specification](https://mqtt.org))
 - Requires the `all-channels` feature flag at compile time
 
 ### Setup
@@ -559,7 +559,7 @@ The Nextcloud Talk adapter polls the Nextcloud Talk REST API for new messages in
 
 ### Prerequisites
 
-- A Mumble server (Murmur) accessible from the LibreFang host (see [Mumble protocol documentation](https://wiki.mumble.info/wiki/Protocol))
+- A Mumble server (Murmur) accessible from the BossFang host (see [Mumble protocol documentation](https://wiki.mumble.info/wiki/Protocol))
 
 ### Setup
 

@@ -1,12 +1,12 @@
-# LibreFang CLI Reference
+# BossFang CLI Reference
 
 > **Sub-pages:** [Command Reference](/integrations/cli/commands) | [Examples & Guides](/integrations/cli/examples)
 
-Complete command-line reference for `librefang`, the CLI tool for the LibreFang Agent OS.
+Complete command-line reference for `librefang`, the CLI tool for the BossFang Agent OS.
 
 ## Overview
 
-The `librefang` binary is the primary interface for managing the LibreFang Agent OS. It supports two modes of operation:
+The `librefang` binary is the primary interface for managing the BossFang Agent OS. It supports two modes of operation:
 
 - **Daemon mode** -- When a daemon is running (`librefang start`), CLI commands communicate with it over HTTP. This is the recommended mode for production use.
 - **In-process mode** -- When no daemon is detected, commands that support it will boot an ephemeral in-process kernel. Agents spawned in this mode are not persisted and will be lost when the process exits.
@@ -89,7 +89,7 @@ Press `Ctrl+C` to exit. A second `Ctrl+C` force-exits the process.
 
 ### librefang init
 
-Initialize the LibreFang workspace. Creates `~/.librefang/` with subdirectories (`data/`, `workspaces/agents/`) and a default `config.toml`.
+Initialize the BossFang workspace. Creates `~/.librefang/` with subdirectories (`data/`, `workspaces/agents/`) and a default `config.toml`.
 
 ```
 librefang init [--quick]
@@ -122,7 +122,7 @@ librefang init --quick
 
 ### librefang start
 
-Start the LibreFang daemon (kernel + API server).
+Start the BossFang daemon (kernel + API server).
 
 ```
 librefang start [--config <PATH>]
@@ -133,7 +133,7 @@ librefang start [--config <PATH>]
 **Behavior:**
 
 - Checks if a daemon is already running; exits with an error if so.
-- Boots the LibreFang kernel (loads config, initializes SQLite database, loads agents, connects MCP servers, starts background tasks).
+- Boots the BossFang kernel (loads config, initializes SQLite database, loads agents, connects MCP servers, starts background tasks).
 - Starts the HTTP API server on the address specified in `config.toml` (default: `127.0.0.1:4545`).
 - Writes `daemon.json` to `~/.librefang/` so other CLI commands can discover the running daemon.
 - Blocks until interrupted with `Ctrl+C`.
@@ -201,7 +201,7 @@ librefang status --json | jq '.agent_count'
 
 ### librefang doctor
 
-Run diagnostic checks on the LibreFang installation.
+Run diagnostic checks on the BossFang installation.
 
 ```
 librefang doctor [--json] [--repair]
@@ -216,7 +216,7 @@ librefang doctor [--json] [--repair]
 
 **Checks performed:**
 
-1. **LibreFang directory** -- `~/.librefang/` exists
+1. **BossFang directory** -- `~/.librefang/` exists
 2. **.env file** -- exists and has correct permissions (0600 on Unix)
 3. **Config TOML syntax** -- `config.toml` parses without errors
 4. **Daemon status** -- whether a daemon is running
@@ -260,7 +260,7 @@ librefang update [--check] [--version <TAG>] [--channel <CHANNEL>]
 
 **Update channels:**
 
-LibreFang supports Apple-style update channels. Set a persistent default in `config.toml`:
+BossFang supports Apple-style update channels. Set a persistent default in `config.toml`:
 
 ```toml
 update_channel = "stable"   # stable | beta | rc
@@ -405,7 +405,7 @@ librefang doctor --repair  # Cleans up stale daemon.json from crashes
 
 ## Environment File
 
-LibreFang loads `~/.librefang/.env` into the process environment on every CLI invocation. System environment variables take priority over `.env` values.
+BossFang loads `~/.librefang/.env` into the process environment on every CLI invocation. System environment variables take priority over `.env` values.
 
 The `.env` file stores API keys and secrets:
 

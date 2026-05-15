@@ -1,6 +1,6 @@
 # 技能开发
 
-技能是可插拔的工具包，用于扩展 LibreFang 中 Agent 的能力。一个技能将一个或多个工具及其实现打包在一起，让 Agent 能够完成内置工具无法覆盖的任务。本指南涵盖技能创建、清单格式、Python 和 WASM 运行时、发布到 FangHub 以及 CLI 管理。
+技能是可插拔的工具包，用于扩展 BossFang 中 Agent 的能力。一个技能将一个或多个工具及其实现打包在一起，让 Agent 能够完成内置工具无法覆盖的任务。本指南涵盖技能创建、清单格式、Python 和 WASM 运行时、发布到 FangHub 以及 CLI 管理。
 
 ## 目录
 
@@ -40,7 +40,7 @@
 
 ### 60 个内置技能
 
-LibreFang 提供 60 个专家知识技能，可从仪表盘安装：
+BossFang 提供 60 个专家知识技能，可从仪表盘安装：
 
 | 类别 | 技能 |
 |----------|--------|
@@ -168,7 +168,7 @@ capabilities = ["NetConnect(*)"]
 
 ## 技能配置变量
 
-技能可以在 `skill.toml` 中声明配置变量。Agent 启动时，LibreFang 会从用户的 `~/.librefang/config.toml` 中解析每个变量，并把解析得到的值注入到 Agent 的系统提示词中，让技能无需在代码里硬编码密钥或环境相关取值即可使用。
+技能可以在 `skill.toml` 中声明配置变量。Agent 启动时，BossFang 会从用户的 `~/.librefang/config.toml` 中解析每个变量，并把解析得到的值注入到 Agent 的系统提示词中，让技能无需在代码里硬编码密钥或环境相关取值即可使用。
 
 ### 在 `skill.toml` 中声明变量
 
@@ -227,7 +227,7 @@ Python 技能是最容易编写的。它们以子进程方式运行，通过 std
 
 ### 协议
 
-1. LibreFang 向脚本的 stdin 发送一个 JSON 载荷：
+1. BossFang 向脚本的 stdin 发送一个 JSON 载荷：
 
 ```json
 {
@@ -315,7 +315,7 @@ if __name__ == "__main__":
     main()
 ```
 
-### 使用 LibreFang Python SDK
+### 使用 BossFang Python SDK
 
 对于更高级的技能，可以使用 Python SDK（`sdk/python/librefang_sdk.py`）：
 
@@ -478,7 +478,7 @@ librefang skill remove web-summarizer
 
 ## 发布到 FangHub
 
-FangHub 是 LibreFang 的社区技能市场。
+FangHub 是 BossFang 的社区技能市场。
 
 ### 准备技能
 
@@ -595,7 +595,7 @@ memory_write = ["self.*"]
 
 ## OpenClaw 兼容性
 
-LibreFang 可以安装和运行 OpenClaw 格式的技能。技能安装器会自动检测 OpenClaw 技能（通过查找 `package.json` + `index.ts`/`index.js`）并进行转换。
+BossFang 可以安装和运行 OpenClaw 格式的技能。技能安装器会自动检测 OpenClaw 技能（通过查找 `package.json` + `index.ts`/`index.js`）并进行转换。
 
 ### 自动转换
 
@@ -603,12 +603,12 @@ LibreFang 可以安装和运行 OpenClaw 格式的技能。技能安装器会自
 librefang skill install /path/to/openclaw-skill
 ```
 
-如果目录包含 OpenClaw 风格的技能（Node.js 包），LibreFang 会：
+如果目录包含 OpenClaw 风格的技能（Node.js 包），BossFang 会：
 
 1. 检测 OpenClaw 格式。
 2. 从 `package.json` 生成 `skill.toml` 清单。
-3. 将工具名称映射为 LibreFang 约定。
-4. 将技能复制到 LibreFang 技能目录。
+3. 将工具名称映射为 BossFang 约定。
+4. 将技能复制到 BossFang 技能目录。
 
 ### 手动转换
 

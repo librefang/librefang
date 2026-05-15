@@ -1,6 +1,6 @@
 # 事件 Hook 系统
 
-生命周期 hook 让外部脚本无需修改 agent 代码即可响应 agent 和会话事件。当事件触发时，LibreFang 启动配置的可执行文件，通过环境变量传递结构化数据，然后继续运行——无论 hook 是否正常退出。
+生命周期 hook 让外部脚本无需修改 agent 代码即可响应 agent 和会话事件。当事件触发时，BossFang 启动配置的可执行文件，通过环境变量传递结构化数据，然后继续运行——无论 hook 是否正常退出。
 
 ## 目录
 - [目录结构](#directory-layout)
@@ -65,7 +65,7 @@ command: ./run.sh
 | `session:start` | 在 daemon 生命周期中首次创建或恢复会话 |
 | `session:end` | 会话被显式关闭 |
 | `session:reset` | 会话因自动重置策略或手动 API 调用而被清空 |
-| `gateway:startup` | LibreFang daemon 完成启动序列 |
+| `gateway:startup` | BossFang daemon 完成启动序列 |
 
 通配符模式：
 | 模式 | 匹配范围 |
@@ -137,7 +137,7 @@ command: ./run.sh
 ### `gateway:startup`
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `version` | string | LibreFang daemon 版本 |
+| `version` | string | BossFang daemon 版本 |
 | `started_at` | string (ISO 8601) | 启动完成的 UTC 时间戳 |
 
 ### `transform_tool_result`

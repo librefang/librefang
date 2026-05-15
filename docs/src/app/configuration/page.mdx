@@ -1,6 +1,6 @@
-# LibreFang Configuration Reference
+# BossFang Configuration Reference
 
-Complete reference for `config.toml`, covering every configurable field in the LibreFang Agent OS.
+Complete reference for `config.toml`, covering every configurable field in the BossFang Agent OS.
 
 ---
 
@@ -66,7 +66,7 @@ Complete reference for `config.toml`, covering every configurable field in the L
 
 ## Overview
 
-LibreFang reads its configuration from a single TOML file:
+BossFang reads its configuration from a single TOML file:
 
 ```
 ~/.librefang/config.toml
@@ -85,7 +85,7 @@ On Windows, `~` resolves to `C:\Users\<username>`. If the home directory cannot 
 
 ## Config Include Mechanism
 
-LibreFang supports splitting configuration across multiple files using the `include` field. This enables modular configs (e.g., separate files for channels, MCP servers, or environment-specific overrides).
+BossFang supports splitting configuration across multiple files using the `include` field. This enables modular configs (e.g., separate files for channels, MCP servers, or environment-specific overrides).
 
 ```toml
 # ~/.librefang/config.toml
@@ -107,7 +107,7 @@ This mechanism is useful for keeping secrets in a separate file with stricter fi
 
 ## Minimal Configuration
 
-The simplest working configuration only needs an LLM provider API key set as an environment variable. With no config file at all, LibreFang boots with Anthropic as the default provider:
+The simplest working configuration only needs an LLM provider API key set as an environment variable. With no config file at all, BossFang boots with Anthropic as the default provider:
 
 ```toml
 # ~/.librefang/config.toml
@@ -492,7 +492,7 @@ These fields sit at the root of `config.toml` (not inside any `[section]`).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `home_dir` | path | `~/.librefang` | LibreFang home directory. Stores config, agents, skills. |
+| `home_dir` | path | `~/.librefang` | BossFang home directory. Stores config, agents, skills. |
 | `data_dir` | path | `~/.librefang/data` | Directory for SQLite databases and persistent data. |
 | `log_level` | string | `"info"` | Log verbosity. One of: `trace`, `debug`, `info`, `warn`, `error`. |
 | `api_listen` | string | `"127.0.0.1:4545"` | Bind address for the HTTP/WebSocket/SSE API server. Alias: `listen_addr`. |
@@ -608,7 +608,7 @@ Per-agent opt-in can be toggled at runtime via `PUT /api/auto-dream/agents/{id}/
 
 ### `[network]`
 
-Configures the OFP (LibreFang Protocol) peer-to-peer networking layer. Authentication has two layers: a `shared_secret` HMAC admission gate plus per-node Ed25519 identity with TOFU pinning (#3873). The Ed25519 keypair and trust pins live in `<data_dir>/peer_keypair.json` and `<data_dir>/trusted_peers.json`.
+Configures the OFP (BossFang Protocol) peer-to-peer networking layer. Authentication has two layers: a `shared_secret` HMAC admission gate plus per-node Ed25519 identity with TOFU pinning (#3873). The Ed25519 keypair and trust pins live in `<data_dir>/peer_keypair.json` and `<data_dir>/trusted_peers.json`.
 
 ```toml
 [network]
@@ -1658,7 +1658,7 @@ method = "post"
 
 ### `[a2a]`
 
-Agent-to-Agent protocol configuration, enabling inter-agent communication across LibreFang instances.
+Agent-to-Agent protocol configuration, enabling inter-agent communication across BossFang instances.
 
 ```toml
 [a2a]
@@ -2263,7 +2263,7 @@ roles = ["premium"]
 
 ### `[pairing]`
 
-Configures device pairing for the LibreFang mobile companion app and push notifications.
+Configures device pairing for the BossFang mobile companion app and push notifications.
 
 ```toml
 [pairing]
@@ -2811,7 +2811,7 @@ plugin_registries = ["acme-corp/librefang-plugins"]
 
 ### `[prompt_intelligence]`
 
-Configures prompt versioning and A/B experiment support. When enabled, LibreFang automatically tracks prompt version history and supports running A/B experiments to compare prompt variants. See the [Prompt Intelligence guide](/agent/prompt-intelligence) for full documentation.
+Configures prompt versioning and A/B experiment support. When enabled, BossFang automatically tracks prompt version history and supports running A/B experiments to compare prompt variants. See the [Prompt Intelligence guide](/agent/prompt-intelligence) for full documentation.
 
 ```toml
 [prompt_intelligence]

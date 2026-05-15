@@ -1,6 +1,6 @@
 # MCP 和 A2A 协议
 
-LibreFang 支持 MCP (Model Context Protocol) 和 A2A (Agent to Agent) 协议。
+BossFang 支持 MCP (Model Context Protocol) 和 A2A (Agent to Agent) 协议。
 
 <Note>
 **协议对比**:
@@ -51,7 +51,7 @@ mcp_{server}_{tool}
 
 ### 内置 MCP 服务器
 
-LibreFang 包含内置 MCP 服务器：
+BossFang 包含内置 MCP 服务器：
 
 | 服务器 | 工具 |
 |--------|------|
@@ -121,7 +121,7 @@ skip_rules = ["AuthorizationLiteral"]   # 允许 GitHub MCP 转发 bearer token
 
 ## A2A (Agent to Agent)
 
-A2A 协议支持 LibreFang agents 之间的通信。
+A2A 协议支持 BossFang agents 之间的通信。
 
 ### 概述
 
@@ -154,7 +154,7 @@ A2A 协议支持 LibreFang agents 之间的通信。
 
 ### 客户端端点（向外部 A2A Agent 发送任务）
 
-这些端点用于让 LibreFang 作为客户端，主动向外部 A2A agent 委派任务：
+这些端点用于让 BossFang 作为客户端，主动向外部 A2A agent 委派任务：
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
@@ -165,7 +165,7 @@ A2A 协议支持 LibreFang agents 之间的通信。
 
 ### 服务端端点（接受外部任务）
 
-这些端点由 LibreFang 对外暴露，供其他 A2A agent 向本实例发送任务：
+这些端点由 BossFang 对外暴露，供其他 A2A agent 向本实例发送任务：
 
 | 端点 | 方法 | 说明 |
 |------|------|------|

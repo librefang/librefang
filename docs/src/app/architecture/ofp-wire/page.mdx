@@ -3,7 +3,7 @@
 > **Status:** documented limitation. Tracked: closed [#3874](https://github.com/librefang/librefang/issues/3874), closed [#4001](https://github.com/librefang/librefang/pull/4001).
 > **Crate:** `librefang-wire`.
 
-The LibreFang Wire Protocol (OFP) is the protocol two LibreFang kernels
+The BossFang Wire Protocol (OFP) is the protocol two BossFang kernels
 speak when one calls an agent on the other (federation). This page
 documents how OFP handles transport security: what it guarantees on its
 own, what it deliberately does **not**, why, and how to deploy OFP across
@@ -109,7 +109,7 @@ Pick the row that matches your network topology:
 The simplest setup for two-host federation:
 
 1. Stand up a WireGuard tunnel between the two hosts (one peer per host).
-2. Configure each LibreFang kernel to bind OFP on the WireGuard interface
+2. Configure each BossFang kernel to bind OFP on the WireGuard interface
    IP, not the public interface.
 3. Configure each kernel's peer list to dial the *other* host's WireGuard
    IP.

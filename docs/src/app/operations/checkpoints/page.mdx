@@ -1,6 +1,6 @@
 # Checkpoint Manager
 
-Before every `file_write` or `apply_patch` tool call, LibreFang automatically snapshots the
+Before every `file_write` or `apply_patch` tool call, BossFang automatically snapshots the
 affected working directory into a lightweight shadow Git repository. If an agent run goes
 wrong, you can inspect the full file history and restore any previous state without
 interrupting ongoing work in other sessions.
@@ -28,7 +28,7 @@ interrupting ongoing work in other sessions.
 ```
 
 Each working directory gets its own isolated shadow Git repository. The shadow repo tracks
-only the files that LibreFang has written — it does not mirror the entire project tree on
+only the files that BossFang has written — it does not mirror the entire project tree on
 every snapshot.
 
 ---
@@ -111,7 +111,7 @@ A dedicated `librefang checkpoints restore` CLI subcommand is planned for a futu
 
 ## Exclusions and Size Limits
 
-LibreFang skips snapshotting under two conditions:
+BossFang skips snapshotting under two conditions:
 
 **Hard exclusions** — directories that are always skipped regardless of configuration:
 
@@ -125,12 +125,12 @@ LibreFang skips snapshotting under two conditions:
 | `dist/`, `build/` | Common compiled output directories |
 
 **File size limit** — individual files larger than **50 KB** are not committed to the shadow
-repo. LibreFang logs a `DEBUG` entry when a file is skipped for this reason. The `file_write`
+repo. BossFang logs a `DEBUG` entry when a file is skipped for this reason. The `file_write`
 tool still completes normally; only the snapshot omits the oversized file.
 
 Custom exclusion rules (`.librefangignore`) are not supported in the current release.
 To exclude additional paths, avoid placing generated or binary files inside the working
-directory that LibreFang operates on.
+directory that BossFang operates on.
 
 ---
 

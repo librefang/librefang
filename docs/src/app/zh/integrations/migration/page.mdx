@@ -1,12 +1,12 @@
 # 迁移指南
 
-从其他系统迁移到 LibreFang。
+从其他系统迁移到 BossFang。
 
 ---
 
 ## 概述
 
-LibreFang 提供以下迁移支持：
+BossFang 提供以下迁移支持：
 
 - **OpenFang** - 通过 `librefang-migrate` crate 自动迁移（`librefang migrate --from openfang`）
 - **OpenClaw** - 通过 `librefang-migrate` crate 自动迁移（`librefang migrate --from openclaw`）
@@ -17,7 +17,7 @@ LibreFang 提供以下迁移支持：
 
 ## 从 OpenFang 迁移
 
-OpenFang 和 LibreFang 共享相同的目录结构和配置格式（LibreFang 是 OpenFang 的社区分支）。迁移过程是将 `~/.openfang` 递归复制到 `~/.librefang`，同时自动重写 `.toml` 和 `.env` 文件中的引用。
+OpenFang 和 BossFang 共享相同的目录结构和配置格式（BossFang 是 OpenFang 的社区分支）。迁移过程是将 `~/.openfang` 递归复制到 `~/.librefang`，同时自动重写 `.toml` 和 `.env` 文件中的引用。
 
 ### 自动迁移
 
@@ -94,11 +94,11 @@ librefang migrate --from openclaw --import
 ## 从 LangChain 迁移
 
 > **注意**: LangChain 迁移是**手动过程**，没有自动化工具支持。
-> 以下指南展示如何手动将 LangChain 配置转换为 LibreFang 格式。
+> 以下指南展示如何手动将 LangChain 配置转换为 BossFang 格式。
 
 ### Agent 配置转换
 
-将 LangChain agent 配置转换为 LibreFang 格式：
+将 LangChain agent 配置转换为 BossFang 格式：
 
 ```python
 # LangChain 配置
@@ -124,7 +124,7 @@ memory_write = ["self.*"]
 
 ### 工具映射
 
-| LangChain 工具 | LibreFang 工具 |
+| LangChain 工具 | BossFang 工具 |
 |---------------|----------------|
 | `serpapi` | `web_search` |
 | `python_repl` | `python` |
@@ -155,7 +155,7 @@ result = agent.run("What is the capital of France?")
 ## 从 AutoGPT 迁移
 
 > **注意**: AutoGPT 迁移是**手动过程**，没有自动化工具支持。
-> 以下指南展示如何手动将 AutoGPT 配置转换为 LibreFang 格式。
+> 以下指南展示如何手动将 AutoGPT 配置转换为 BossFang 格式。
 
 ### 配置转换
 
@@ -169,7 +169,7 @@ result = agent.run("What is the capital of France?")
 }
 ```
 
-转换为 LibreFang：
+转换为 BossFang：
 
 ```toml
 # LibreFang agent.toml
@@ -197,7 +197,7 @@ tasks:
     result: "Summary ready"
 ```
 
-转换为 LibreFang 工作流：
+转换为 BossFang 工作流：
 
 ```json
 {

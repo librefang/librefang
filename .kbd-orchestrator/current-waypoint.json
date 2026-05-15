@@ -1,18 +1,18 @@
 {
   "active_phase": "phase-1-rebrand-completion",
-  "active_change": "m4-docs-mdx-sweep",
+  "active_change": "m6-dashboard-localstorage-shim",
   "last_updated": "2026-05-14T00:00:00Z",
   "last_updated_by": "kbd-execute",
   "backend": "native-tool",
   "backend_rationale": "No OpenSpec in this project. Single-tool (Claude Code) execution with progress.json bookkeeping. Hybrid not warranted at this scale.",
   "next_action": {
-    "command": "/kbd-execute m4-docs-mdx-sweep",
-    "description": "Execute change m4-docs-mdx-sweep (M4): 120 .mdx files in docs/src/app/** flipped via an extended enforce-branding.py that skips fenced code blocks. Single-word prose-only edits — biggest churn of the phase."
+    "command": "/kbd-execute m6-dashboard-localstorage-shim",
+    "description": "Execute change m6-dashboard-localstorage-shim (M6): read-old/write-new localStorage shim in crates/librefang-api/dashboard/src/api.ts — getApiKey() reads bossfang-api-key first, falls back to librefang-api-key and promotes on hit; setApiKey() writes only bossfang-api-key and removes librefang-api-key. 4 call sites (lines ~1019, ~1020, ~3339, ~3340, ~3347, ~3348)."
   },
-  "phase_progress": "3/7 milestones done (M1, M2, M3). Next: M4 docs MDX sweep.",
+  "phase_progress": "6/7 milestones done (M1, M2, M3, M4, M5, M7). Next: M6 (dashboard localStorage shim).",
   "last_completed": {
-    "change_id": "m3-install-script",
-    "milestones": ["M3"],
+    "change_id": "m5-m7-ua-strings-env-aliases",
+    "milestones": ["M5", "M7"],
     "completed_at": "2026-05-14T00:00:00Z"
   }
 }

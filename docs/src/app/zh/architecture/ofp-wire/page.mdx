@@ -3,7 +3,7 @@
 > **状态：** 文档化的限制（documented limitation）。已关闭 [#3874](https://github.com/librefang/librefang/issues/3874)、[#4001](https://github.com/librefang/librefang/pull/4001)。
 > **Crate：** `librefang-wire`。
 
-LibreFang 线路协议（OFP）是两台 LibreFang 内核之间互相调用对方 Agent
+BossFang 线路协议（OFP）是两台 BossFang 内核之间互相调用对方 Agent
 （即"联邦"）所使用的协议。本页说明 OFP 在传输安全上的取舍：自身保证
 什么、刻意**不**保证什么、原因为何，以及跨网络部署 OFP 时如何安全
 落地。
@@ -82,7 +82,7 @@ HMAC 帧机制已经挡住了大家最在意的那些攻击。剩下的是保密
 两台主机做联邦的最简洁形态：
 
 1. 在两台主机间拉起一条 WireGuard 隧道（每台一个 peer）。
-2. 配置每台 LibreFang 内核把 OFP 绑在 WireGuard 接口的 IP 上，**不要**
+2. 配置每台 BossFang 内核把 OFP 绑在 WireGuard 接口的 IP 上，**不要**
    绑在公网接口。
 3. 配置每台内核的 peer 列表去拨**对方**的 WireGuard IP。
 4. 公网攻击者只能看到加密的 WireGuard 报文；明文 OFP 帧不会离开隧道。

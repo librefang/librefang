@@ -1,6 +1,6 @@
 # Built-in Tool Reference
 
-LibreFang ships with a wide built-in tool catalog beyond the file / shell / web tools that show up in standard agent templates. This page covers the families that historically lived only in source code — browser automation, subprocess lifecycle, runtime scheduling, knowledge graphs, media, and inter-agent messaging.
+BossFang ships with a wide built-in tool catalog beyond the file / shell / web tools that show up in standard agent templates. This page covers the families that historically lived only in source code — browser automation, subprocess lifecycle, runtime scheduling, knowledge graphs, media, and inter-agent messaging.
 
 Per-agent capability grants control which families an agent can actually call. Use `agent.toml` `[capabilities]` (or the `librefang agent grant` CLI) to opt agents into the tool families below.
 
@@ -19,7 +19,7 @@ Lazy loading is opt-in per agent via `lazy_tools = true` in the manifest. Disabl
 
 ## Inter-Agent Messaging (A2A)
 
-Agents in different LibreFang instances can discover and message each other over the A2A protocol.
+Agents in different BossFang instances can discover and message each other over the A2A protocol.
 
 | Tool | Arguments | Purpose |
 |---|---|---|
@@ -32,7 +32,7 @@ Agents in different LibreFang instances can discover and message each other over
 
 ## Same-Daemon Inter-Agent Tools
 
-For talking to other agents **inside the same LibreFang daemon** (no A2A protocol overhead) — spawn, list, find, kill, and send messages directly.
+For talking to other agents **inside the same BossFang daemon** (no A2A protocol overhead) — spawn, list, find, kill, and send messages directly.
 
 | Tool | Arguments | Purpose |
 |---|---|---|

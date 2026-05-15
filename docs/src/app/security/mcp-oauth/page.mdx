@@ -1,13 +1,13 @@
 # MCP OAuth Host Pinning
 
-When LibreFang completes an OAuth flow against an MCP server, the URL it sends the
+When BossFang completes an OAuth flow against an MCP server, the URL it sends the
 authorization code to is taken from the server's discovery metadata
 (`/.well-known/oauth-authorization-server`). That metadata is attacker-influenced
 data: a tampered or maliciously-served document could redirect the token exchange
 to a host the operator never authorized against, leaking the auth code or the
 eventual access token.
 
-LibreFang pins the token-exchange target against the host the operator typed in
+BossFang pins the token-exchange target against the host the operator typed in
 `config.toml`. The pin admits two acceptance shapes; everything else is refused
 and the auth flow fails with a security error visible in the daemon log.
 

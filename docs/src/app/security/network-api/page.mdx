@@ -110,7 +110,7 @@ http://example.com              ->  example.com:80
 
 **Source:** `librefang-wire/src/peer.rs`
 
-The LibreFang Wire Protocol (OFP) authenticates every TCP connection in
+The BossFang Wire Protocol (OFP) authenticates every TCP connection in
 two layers:
 
 1. **HMAC admission** (`shared_secret`) — coarse cluster-password gate.
@@ -276,7 +276,7 @@ pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Bo
 
 **Source:** `librefang-api/src/rate_limiter.rs`
 
-LibreFang uses the Generic Cell Rate Algorithm (GCRA) for cost-aware API
+BossFang uses the Generic Cell Rate Algorithm (GCRA) for cost-aware API
 rate limiting via the `governor` crate.
 
 ### Algorithm
@@ -365,7 +365,7 @@ entry cleanup.
 
 **Source:** `librefang-api/src/routes.rs`
 
-LibreFang provides two health endpoints with different information levels.
+BossFang provides two health endpoints with different information levels.
 
 ### Public Endpoint: `GET /api/health`
 
@@ -423,7 +423,7 @@ if api_key.is_empty() {
 
 ## Dashboard Authentication
 
-LibreFang supports optional username/password authentication for the web dashboard.
+BossFang supports optional username/password authentication for the web dashboard.
 
 ### Configuration
 

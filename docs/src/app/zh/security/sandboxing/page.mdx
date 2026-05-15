@@ -16,7 +16,7 @@
 
 **源码：** `librefang-types/src/capability.rs`
 
-LibreFang 采用基于能力的安全模型。Agent 只能执行被明确授权的操作。
+BossFang 采用基于能力的安全模型。Agent 只能执行被明确授权的操作。
 能力在 Agent 创建后不可变，并在内核层面强制执行。
 
 ### 能力变体
@@ -366,7 +366,7 @@ pub fn validate_executable_path(path: &str) -> Result<(), String> {
 
 **源码：** `librefang-runtime/src/dangerous_commands.rs`
 
-在执行任何 shell 命令之前，LibreFang 会将命令字符串与 **39 个正则表达式规则**进行匹配，这些规则涵盖 11 类危险操作。此检测在能力检查和污点检查的基础上提供额外的语义安全层。
+在执行任何 shell 命令之前，BossFang 会将命令字符串与 **39 个正则表达式规则**进行匹配，这些规则涵盖 11 类危险操作。此检测在能力检查和污点检查的基础上提供额外的语义安全层。
 
 ### 危险操作分类
 

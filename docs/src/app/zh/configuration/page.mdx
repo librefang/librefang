@@ -1,6 +1,6 @@
-# LibreFang 配置参考
+# BossFang 配置参考
 
-`config.toml` 的完整参考文档，涵盖 LibreFang Agent OS 中每一个可配置字段。
+`config.toml` 的完整参考文档，涵盖 BossFang Agent OS 中每一个可配置字段。
 
 ---
 
@@ -65,7 +65,7 @@
 
 ## 概述
 
-LibreFang 从以下 TOML 文件读取配置：
+BossFang 从以下 TOML 文件读取配置：
 
 ```
 ~/.librefang/config.toml
@@ -84,7 +84,7 @@ LibreFang 从以下 TOML 文件读取配置：
 
 ## 配置文件包含机制
 
-LibreFang 支持通过 `include` 字段将配置拆分到多个文件中。这使得可以实现模块化配置（例如将通道配置、MCP 服务器配置或特定环境的覆盖配置分开存放）。
+BossFang 支持通过 `include` 字段将配置拆分到多个文件中。这使得可以实现模块化配置（例如将通道配置、MCP 服务器配置或特定环境的覆盖配置分开存放）。
 
 ```toml
 # ~/.librefang/config.toml
@@ -106,7 +106,7 @@ include = ["channels.toml", "mcp.toml", "overrides/prod.toml"]
 
 ## 最小配置
 
-最简单的可用配置只需将 LLM 提供商的 API Key 设置为环境变量。如果没有配置文件，LibreFang 将以 Anthropic 作为默认提供商启动：
+最简单的可用配置只需将 LLM 提供商的 API Key 设置为环境变量。如果没有配置文件，BossFang 将以 Anthropic 作为默认提供商启动：
 
 ```toml
 # ~/.librefang/config.toml
@@ -491,7 +491,7 @@ plugin_registries = []
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `home_dir` | path | `~/.librefang` | LibreFang 主目录，存储配置、Agent、技能等。 |
+| `home_dir` | path | `~/.librefang` | BossFang 主目录，存储配置、Agent、技能等。 |
 | `data_dir` | path | `~/.librefang/data` | SQLite 数据库和持久化数据的目录。 |
 | `log_level` | string | `"info"` | 日志级别。可选值：`trace`、`debug`、`info`、`warn`、`error`。 |
 | `api_listen` | string | `"127.0.0.1:4545"` | HTTP/WebSocket/SSE API 服务器的绑定地址。别名：`listen_addr`。 |
@@ -607,7 +607,7 @@ timeout_secs = 600
 
 ### `[network]`
 
-配置 OFP（LibreFang 协议）点对点网络层，使用 HMAC-SHA256 双向认证。
+配置 OFP（BossFang 协议）点对点网络层，使用 HMAC-SHA256 双向认证。
 
 ```toml
 [network]
@@ -1653,7 +1653,7 @@ method = "post"
 
 ### `[a2a]`
 
-Agent 间协议（A2A）配置，实现跨 LibreFang 实例的 Agent 间通信。
+Agent 间协议（A2A）配置，实现跨 BossFang 实例的 Agent 间通信。
 
 ```toml
 [a2a]
@@ -2258,7 +2258,7 @@ roles = ["premium"]
 
 ### `[pairing]`
 
-配置 LibreFang 移动端伴侣应用的设备配对和推送通知。
+配置 BossFang 移动端伴侣应用的设备配对和推送通知。
 
 ```toml
 [pairing]
@@ -2806,7 +2806,7 @@ plugin_registries = ["acme-corp/librefang-plugins"]
 
 ### `[prompt_intelligence]`
 
-配置 Prompt 版本管理和 A/B 实验功能。启用后，LibreFang 自动追踪 prompt 版本历史，支持运行 A/B 实验对比不同 prompt 变体。详细文档见 [Prompt 智能指南](/zh/agent/prompt-intelligence)。
+配置 Prompt 版本管理和 A/B 实验功能。启用后，BossFang 自动追踪 prompt 版本历史，支持运行 A/B 实验对比不同 prompt 变体。详细文档见 [Prompt 智能指南](/zh/agent/prompt-intelligence)。
 
 ```toml
 [prompt_intelligence]

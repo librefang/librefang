@@ -1,6 +1,6 @@
-# Getting Started with LibreFang
+# Getting Started with BossFang
 
-This guide walks you through installing LibreFang, configuring your first LLM provider, spawning an agent, and chatting with it.
+This guide walks you through installing BossFang, configuring your first LLM provider, spawning an agent, and chatting with it.
 
 Project website: [https://librefang.ai/](https://librefang.ai/)
 
@@ -135,7 +135,7 @@ librefang --version
 
 ### SDK
 
-SDKs for integrating LibreFang API into your applications.
+SDKs for integrating BossFang API into your applications.
 
 **JavaScript / TypeScript**
 
@@ -268,7 +268,7 @@ See [Architecture - User Data Directory](/architecture#user-data-directory) for 
 
 ### Set Up an API Key
 
-LibreFang needs at least one LLM provider API key. Set it as an environment variable:
+BossFang needs at least one LLM provider API key. Set it as an environment variable:
 
 ```bash
 # Anthropic (Claude)
@@ -283,7 +283,7 @@ export GROQ_API_KEY=gsk_...
 
 Add the export to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.) to persist it.
 
-LibreFang supports three layers of key storage (highest priority first):
+BossFang supports three layers of key storage (highest priority first):
 
 | Layer | File | How to set | Notes |
 |-------|------|-----------|-------|
@@ -323,7 +323,7 @@ This checks that your config exists, API keys are set, and the toolchain is avai
 
 ### Using a Built-in Template
 
-LibreFang provides 32 agent templates from the [registry](https://github.com/librefang/librefang-registry/tree/main/agents) (assistant pre-installed, others available from dashboard). Spawn the assistant agent:
+BossFang provides 32 agent templates from the [registry](https://github.com/librefang/librefang-registry/tree/main/agents) (assistant pre-installed, others available from dashboard). Spawn the assistant agent:
 
 ```bash
 librefang agent spawn agents/hello-world/agent.toml
@@ -489,7 +489,7 @@ The embedded WebChat UI allows you to:
 
 ## Next Steps
 
-Now that you have LibreFang running:
+Now that you have BossFang running:
 
 - **Explore agent templates**: Browse the `agents/` directory for pre-built agents (coder, researcher, writer, ops, analyst, security-auditor, and more).
 - **Create custom agents**: Write your own `agent.toml` manifests. See the [Architecture guide](architecture.md) for details on capabilities and scheduling.

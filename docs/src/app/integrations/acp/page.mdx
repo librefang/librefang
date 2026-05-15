@@ -1,6 +1,6 @@
 # Agent Client Protocol (ACP)
 
-LibreFang ships an [Agent Client Protocol](https://agentclientprotocol.com/) adapter so editors like Zed, VS Code, and JetBrains can embed a LibreFang agent natively. The editor renders approval modals, streams prompt deltas, and routes file references through its own UI rather than the LibreFang dashboard.
+BossFang ships an [Agent Client Protocol](https://agentclientprotocol.com/) adapter so editors like Zed, VS Code, and JetBrains can embed a BossFang agent natively. The editor renders approval modals, streams prompt deltas, and routes file references through its own UI rather than the BossFang dashboard.
 
 <Note>
 ACP is a JSON-RPC 2.0 protocol over a duplex byte stream — typically the agent process's stdio. Editor and agent ship state changes (prompt chunks, tool calls, permission requests) as `session/update` notifications, with bidirectional request/response for permission decisions.
@@ -10,7 +10,7 @@ ACP is a JSON-RPC 2.0 protocol over a duplex byte stream — typically the agent
 
 ## How to use it
 
-LibreFang exposes the ACP server as a CLI subcommand:
+BossFang exposes the ACP server as a CLI subcommand:
 
 ```bash
 librefang acp
@@ -33,7 +33,7 @@ Both human-readable names and UUIDs are accepted. A typo surfaces as `agent not 
 
 ## Two execution modes
 
-LibreFang automatically selects between **in-process** and **daemon-attached** depending on whether a daemon is already running on the machine.
+BossFang automatically selects between **in-process** and **daemon-attached** depending on whether a daemon is already running on the machine.
 
 ### In-process
 
@@ -73,7 +73,7 @@ Daemon-attached mode is **Unix-only** for now (Linux, macOS). Windows requires n
 
 ### Zed
 
-Zed exposes ACP-compatible agents through its `agent_servers` configuration. Add LibreFang as an external agent in `~/.config/zed/settings.json`:
+Zed exposes ACP-compatible agents through its `agent_servers` configuration. Add BossFang as an external agent in `~/.config/zed/settings.json`:
 
 ```json
 {
@@ -118,8 +118,8 @@ The adapter implements the ACP methods most editors actually use:
 | Method | Direction | Notes |
 |---|---|---|
 | `initialize` | client → agent | Declares `AgentCapabilities` (load_session, session list/resume/close) and `PromptCapabilities` (image/audio/embedded all `false` for now). |
-| `session/new` | client → agent | Mints a fresh ACP `SessionId`, allocates a backing LibreFang session. |
-| `session/load` | client → agent | Maps an existing ACP `SessionId` onto a fresh LibreFang session. History replay across daemon restarts is a follow-up. |
+| `session/new` | client → agent | Mints a fresh ACP `SessionId`, allocates a backing BossFang session. |
+| `session/load` | client → agent | Maps an existing ACP `SessionId` onto a fresh BossFang session. History replay across daemon restarts is a follow-up. |
 | `session/list` | client → agent | Lists active ACP sessions; supports `cwd` filtering. |
 | `session/resume` | client → agent | Same shape as `load` until full history replay lands. |
 | `session/close` | client → agent | Drops the session-store entry. |
@@ -131,7 +131,7 @@ The adapter implements the ACP methods most editors actually use:
 
 When a tool needs approval (any deferred-path tool the agent calls), the kernel's `ApprovalManager` broadcasts an `ApprovalEvent::Created`. The ACP permission bridge:
 
-1. Filters by the LibreFang `SessionId` it owns.
+1. Filters by the BossFang `SessionId` it owns.
 2. Sends `session/request_permission` with the tool name, action summary, and four options: `Allow once`, `Allow always`, `Deny`, `Deny always`.
 3. Awaits the editor's response with a 60-second timeout (timed-out approvals default to denied).
 4. Persists `_always` decisions through `AcpKernel::remember_decision` so the next `(agent, tool_name)` invocation short-circuits.
@@ -149,7 +149,7 @@ The audit log records `decided_by = "acp"` so operators can distinguish editor-s
 - `terminal/{create,output,wait_for_exit,kill,release}` agent → client requests. `shell_exec` runs the command's PTY in the editor's terminal panel when an `AcpTerminalClient` is registered.
 - Editor-declared `cwd`: `terminal/create` is dispatched without an explicit `cwd` so the editor uses the `cwd` it declared at `session/new` time (the user's project root).
 - Windows named pipes: daemon-attached mode works on Windows via `\\.\pipe\librefang-acp` in addition to the Unix UDS at `~/.librefang/acp.sock`.
-- `session/load` / `session/resume` honour the supplied ACP session id by deriving the LibreFang `SessionId` deterministically (`Uuid::new_v5` keyed on the ACP id), so a reconnecting editor rejoins the same kernel-side session and picks up its persisted history without an explicit replay step.
+- `session/load` / `session/resume` honour the supplied ACP session id by deriving the BossFang `SessionId` deterministically (`Uuid::new_v5` keyed on the ACP id), so a reconnecting editor rejoins the same kernel-side session and picks up its persisted history without an explicit replay step.
 - Multimodal content blocks (image / audio / embedded resource) are declared as unsupported in `PromptCapabilities`; if a defensive editor still sends them, the adapter emits a visible `session/update` message chunk telling the user the attachment was dropped.
 
 **Follow-up issues** (not yet shipped):

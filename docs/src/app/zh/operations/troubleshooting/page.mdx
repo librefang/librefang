@@ -1,6 +1,6 @@
 # 故障排除与常见问题
 
-LibreFang 常见问题、诊断方法及常见问题解答。
+BossFang 常见问题、诊断方法及常见问题解答。
 
 ## 目录
 
@@ -71,7 +71,7 @@ curl http://127.0.0.1:4545/api/health/detail  # Requires auth
 
 ### 查看日志
 
-LibreFang 使用 `tracing` 进行结构化日志记录。通过环境变量设置日志级别：
+BossFang 使用 `tracing` 进行结构化日志记录。通过环境变量设置日志级别：
 
 ```bash
 RUST_LOG=info librefang start          # Default
@@ -306,7 +306,7 @@ RUST_LOG=librefang_channels=debug librefang start
 
 **原因**：Agent 使用相同参数反复调用同一工具。
 
-**自动保护机制**：LibreFang 内置了循环守卫：
+**自动保护机制**：BossFang 内置了循环守卫：
 - 相同工具调用达 3 次时**警告**
 - 相同工具调用达 5 次时**阻止**
 - 总阻止次数达 30 次时触发**熔断器**（停止 Agent）
@@ -366,7 +366,7 @@ tools = ["file_read", "web_fetch", "shell_exec"]  # Must list each tool
 
 ### Context engine 插件静默失效
 
-**原因**：通常是插件声明的 runtime 在这台机器上没装。hook 会以 `LauncherNotFound` 失败，LibreFang 打一条 warning 日志，回退到默认 context engine —— 所以不会崩、表面上没变化、但召回的 memories 永远不回来。
+**原因**：通常是插件声明的 runtime 在这台机器上没装。hook 会以 `LauncherNotFound` 失败，BossFang 打一条 warning 日志，回退到默认 context engine —— 所以不会崩、表面上没变化、但召回的 memories 永远不回来。
 
 **诊断**：调 doctor 端点。
 
@@ -388,13 +388,13 @@ Docker 环境里大部分 runtime 没预装 —— 参考 [Configuration → Plu
 **检查**：
 1. 手动测 hook：`echo '{"type":"ingest","agent_id":"t","message":"hi","peer_id":null}' | python3 hooks/ingest.py` —— 应该打一行然后退出。
 2. 如果 hang 住，脚本在读 stdin 以外的东西。
-3. 看 LibreFang 日志里提到你 hook 的 `Timeout` 条目。
+3. 看 BossFang 日志里提到你 hook 的 `Timeout` 条目。
 
 ### Hook 跑了但 memories 没出来
 
 **原因**：输出不是合法 JSON，或者 stdout 最后一行不是 JSON 响应。
 
-LibreFang 从 stdout 最后一行往前扫，取第一个能 parse 的 JSON 行。在 JSON **前面**打的 debug log 不影响；**后面**打的也不影响；但如果最后一行是 `done.` 或者 traceback 之类的东西，响应就丢了。
+BossFang 从 stdout 最后一行往前扫，取第一个能 parse 的 JSON 行。在 JSON **前面**打的 debug log 不影响；**后面**打的也不影响；但如果最后一行是 `done.` 或者 traceback 之类的东西，响应就丢了。
 
 **检查**：本地把 stdout 通过 `tail -n1` 过一遍，确认最后一行是合法的 `{"type": "ingest_result", ...}` 对象。
 
@@ -415,7 +415,7 @@ ingest = "~/.librefang/scripts/my_ingest.py"
 runtime = "python"
 ```
 
-改完配置重启 LibreFang。
+改完配置重启 BossFang。
 
 ---
 
@@ -543,7 +543,7 @@ api_key_env = "GROQ_API_KEY"
 2. 设置所需的环境变量（令牌、密钥等）
 3. 重启守护进程
 
-### 如何更新 LibreFang？
+### 如何更新 BossFang？
 
 ```bash
 # From source
@@ -575,7 +575,7 @@ rm -rf ~/.librefang
 librefang init  # Start fresh
 ```
 
-### 可以在没有网络连接的情况下运行 LibreFang 吗？
+### 可以在没有网络连接的情况下运行 BossFang 吗？
 
 可以，前提是使用本地 LLM 提供商：
 - **Ollama**：`ollama serve` + `ollama pull llama3.2`
@@ -589,9 +589,9 @@ provider = "ollama"
 model = "llama3.2"
 ```
 
-### LibreFang 和 OpenClaw 有什么区别？
+### BossFang 和 OpenClaw 有什么区别？
 
-| 维度 | LibreFang | OpenClaw |
+| 维度 | BossFang | OpenClaw |
 |--------|----------|----------|
 | 编程语言 | Rust | Python |
 | 通道数 | 40 | 38 |
@@ -601,9 +601,9 @@ model = "llama3.2"
 | 二进制大小 | ~30 MB | ~200 MB |
 | 启动时间 | `<200 ms` | `~3 s` |
 
-LibreFang 可以导入 OpenFang 配置：`librefang migrate --from openfang`
+BossFang 可以导入 OpenFang 配置：`librefang migrate --from openfang`
 
-LibreFang 也可以导入 OpenClaw 配置：`librefang migrate --from openclaw`
+BossFang 也可以导入 OpenClaw 配置：`librefang migrate --from openclaw`
 
 ### 如何报告 Bug 或提交功能请求？
 
@@ -627,7 +627,7 @@ LibreFang 也可以导入 OpenClaw 配置：`librefang migrate --from openclaw`
 RUST_LOG=librefang_runtime=debug,librefang_channels=info librefang start
 ```
 
-### 可以将 LibreFang 作为库使用吗？
+### 可以将 BossFang 作为库使用吗？
 
 可以。每个 crate 都可以独立使用：
 ```toml

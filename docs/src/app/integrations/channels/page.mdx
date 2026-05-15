@@ -1,6 +1,6 @@
 # Channel Adapters
 
-LibreFang connects to messaging platforms through **45 channel adapters**, allowing users to interact with their agents across every major communication platform. Adapters span consumer messaging, enterprise collaboration, social media, community platforms, privacy-focused protocols, generic webhooks, and extensible sidecar processes.
+BossFang connects to messaging platforms through **45 channel adapters**, allowing users to interact with their agents across every major communication platform. Adapters span consumer messaging, enterprise collaboration, social media, community platforms, privacy-focused protocols, generic webhooks, and extensible sidecar processes.
 
 All adapters share a common foundation: graceful shutdown via `watch::channel`, exponential backoff on connection failures, `Zeroizing<String>` for secrets, automatic message splitting for platform limits, per-channel model/prompt overrides, DM/group policy enforcement, per-user rate limiting, and output formatting (Markdown, TelegramHTML, SlackMrkdwn, PlainText).
 
@@ -71,7 +71,7 @@ default_agent = "home-assistant"
 
 ### Common Fields
 
-- `bot_token_env` / `token_env` -- The environment variable holding the bot/access token. LibreFang reads the token from this env var at startup. All secrets are stored as `Zeroizing<String>` and wiped from memory on drop.
+- `bot_token_env` / `token_env` -- The environment variable holding the bot/access token. BossFang reads the token from this env var at startup. All secrets are stored as `Zeroizing<String>` and wiped from memory on drop.
 - `default_agent` -- The agent name (or ID) that receives messages when no specific routing applies.
 - `allowed_users` -- Optional list of platform user IDs allowed to interact. Empty means allow all. For Telegram specifically, entries can be numeric user IDs (`"123456789"`), usernames (`"alice"`), or usernames prefixed with `@` (`"@alice"`); matching is case-insensitive.
 - `overrides` -- Optional per-channel behavior overrides (see [Channel Overrides](#channel-overrides) below).

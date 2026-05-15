@@ -241,7 +241,7 @@ When `pinned_model` is set on an agent manifest, that agent always uses the spec
 
 ## Model Routing
 
-LibreFang can automatically select the cheapest model capable of handling each query. This is configured per-agent via `ModelRoutingConfig`.
+BossFang can automatically select the cheapest model capable of handling each query. This is configured per-agent via `ModelRoutingConfig`.
 
 ### How It Works
 
@@ -289,7 +289,7 @@ The router also integrates with the model catalog:
 
 ## Cost Tracking
 
-LibreFang tracks the cost of every LLM call and can enforce per-agent spending quotas.
+BossFang tracks the cost of every LLM call and can enforce per-agent spending quotas.
 
 ### Per-Response Cost Estimation
 
@@ -618,13 +618,13 @@ Quick reference for all provider environment variables:
 
 **Source:** `librefang-llm-drivers/src/drivers/fallback_chain.rs`
 
-A `FallbackChain` lets you configure an ordered list of LLM providers that LibreFang
+A `FallbackChain` lets you configure an ordered list of LLM providers that BossFang
 tries in sequence. When a provider fails, the runtime classifies the failure and decides
 whether to advance to the next provider or surface the error immediately.
 
 ### Failover Reasons
 
-LibreFang classifies each failure before deciding whether to fall forward:
+BossFang classifies each failure before deciding whether to fall forward:
 
 | `FailoverReason` | Description | Falls over? |
 |---|---|---|
@@ -657,7 +657,7 @@ base_url = "http://localhost:11434/v1"
 model = "llama3.1:8b"
 ```
 
-LibreFang works through the list in order. If all providers fail for eligible reasons,
+BossFang works through the list in order. If all providers fail for eligible reasons,
 the final error from the last provider is returned to the caller.
 
 ### Interaction with Credential Pool
@@ -733,13 +733,13 @@ tracking is available through the budget ledger (`/api/providers/{name}/usage`).
 
 **Source:** `librefang-llm-drivers/src/rate_limit_tracker.rs`
 
-After every LLM API response, LibreFang parses the provider's rate-limit headers into a
+After every LLM API response, BossFang parses the provider's rate-limit headers into a
 `RateLimitSnapshot`. This snapshot is used by the credential pool to detect exhaustion
 and is surfaced in the dashboard and CLI for operator visibility.
 
 ### Parsed Headers
 
-LibreFang recognizes **21 header variants** across major providers:
+BossFang recognizes **21 header variants** across major providers:
 
 | Header | Meaning |
 |---|---|

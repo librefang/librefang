@@ -90,7 +90,7 @@ curl -X POST http://127.0.0.1:4545/api/agents/{agent_id}/sessions/{session_id}/r
 
 ## 重置记录
 
-每次重置（自动或手动）后，LibreFang 会在会话元数据中记录原因。`reset_reason` 字段会在 `session:reset` 事件钩子载荷以及会话详情 API 响应中暴露。
+每次重置（自动或手动）后，BossFang 会在会话元数据中记录原因。`reset_reason` 字段会在 `session:reset` 事件钩子载荷以及会话详情 API 响应中暴露。
 
 | `reset_reason` 值 | 触发条件 |
 |---|---|

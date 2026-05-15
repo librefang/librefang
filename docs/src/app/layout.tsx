@@ -8,8 +8,8 @@ import "@/styles/tailwind.css";
 
 export const metadata: Metadata = {
 	title: {
-		template: "%s - LibreFang Docs",
-		default: "LibreFang Docs",
+		template: "%s - BossFang Docs",
+		default: "BossFang Docs",
 	},
 	other: {
 		"script-src": "https://librefang-counter.suzukaze-haduki.workers.dev",

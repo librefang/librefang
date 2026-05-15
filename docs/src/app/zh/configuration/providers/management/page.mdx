@@ -241,7 +241,7 @@ pinned_model = "claude-sonnet-4-20250514"  # 永不自动路由
 
 ## 模型路由
 
-LibreFang 可以自动为每个查询选择能够处理该查询的最便宜模型。这通过 `ModelRoutingConfig` 在逐 Agent 级别配置。
+BossFang 可以自动为每个查询选择能够处理该查询的最便宜模型。这通过 `ModelRoutingConfig` 在逐 Agent 级别配置。
 
 ### 工作原理
 
@@ -289,7 +289,7 @@ complex_threshold = 500
 
 ## 成本追踪
 
-LibreFang 追踪每次 LLM 调用的成本，并可以强制执行逐 Agent 的消费配额。
+BossFang 追踪每次 LLM 调用的成本，并可以强制执行逐 Agent 的消费配额。
 
 ### 每次响应的成本估算
 
@@ -622,7 +622,7 @@ LLM Providers (49):
 
 ### 故障转移原因
 
-LibreFang 在决定是否向前切换之前，会对每次失败进行分类：
+BossFang 在决定是否向前切换之前，会对每次失败进行分类：
 
 | `FailoverReason` | 说明 | 是否转移？ |
 |---|---|---|
@@ -654,7 +654,7 @@ base_url = "http://localhost:11434/v1"
 model = "llama3.1:8b"
 ```
 
-LibreFang 按顺序尝试列表中的每个 provider。若所有 provider 均因可转移原因失败，则返回最后一个 provider 的错误。
+BossFang 按顺序尝试列表中的每个 provider。若所有 provider 均因可转移原因失败，则返回最后一个 provider 的错误。
 
 ### 与 Credential Pool 的交互
 
@@ -718,11 +718,11 @@ key = "sk-ant-key-3"
 
 **源码：** `librefang-llm-drivers/src/rate_limit_tracker.rs`
 
-每次 LLM API 响应后，LibreFang 将 provider 的速率限制响应头解析为 `RateLimitSnapshot`。该快照供 Credential Pool 检测耗尽状态，并在控制台和 CLI 中展示给运维人员。
+每次 LLM API 响应后，BossFang 将 provider 的速率限制响应头解析为 `RateLimitSnapshot`。该快照供 Credential Pool 检测耗尽状态，并在控制台和 CLI 中展示给运维人员。
 
 ### 解析的响应头
 
-LibreFang 识别主流 provider 的 **21 种响应头变体**：
+BossFang 识别主流 provider 的 **21 种响应头变体**：
 
 | 响应头 | 含义 |
 |---|---|

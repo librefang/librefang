@@ -1,10 +1,10 @@
-# LibreFang Desktop App
+# BossFang Desktop App
 
-The LibreFang Desktop App is a native desktop wrapper built with [Tauri 2.0](https://v2.tauri.app/) that packages the entire LibreFang Agent OS into a single, installable application. Instead of running a CLI daemon and opening a browser, users get a native window with system tray integration, OS notifications, and single-instance enforcement -- all powered by the same kernel and API server that the headless deployment uses.
+The BossFang Desktop App is a native desktop wrapper built with [Tauri 2.0](https://v2.tauri.app/) that packages the entire BossFang Agent OS into a single, installable application. Instead of running a CLI daemon and opening a browser, users get a native window with system tray integration, OS notifications, and single-instance enforcement -- all powered by the same kernel and API server that the headless deployment uses.
 
 **Crate:** `librefang-desktop`
 **Identifier:** `ai.librefang.desktop`
-**Product name:** LibreFang
+**Product name:** BossFang
 
 ---
 
@@ -104,15 +104,15 @@ The system tray (defined in `src/tray.rs`) provides quick access without bringin
 | **Launch at Login** | Checkbox — toggles OS-level auto-start via `tauri-plugin-autostart` |
 | **Check for Updates...** | Checks for updates, downloads, installs, and restarts if available. Shows notifications for progress/success/failure |
 | **Open Config Directory** | Opens `~/.librefang/` in the OS file manager |
-| **Quit LibreFang** | Logs the quit event and calls `app.exit(0)` |
+| **Quit BossFang** | Logs the quit event and calls `app.exit(0)` |
 
-The tray tooltip reads **"LibreFang Agent OS"**.
+The tray tooltip reads **"BossFang Agent OS"**.
 
 **Left-click on tray icon** shows the main window (same as "Show Window" menu item). This is implemented via `on_tray_icon_event` listening for `MouseButton::Left` with `MouseButtonState::Up`.
 
 ### Single-Instance Enforcement
 
-On desktop platforms, `tauri-plugin-single-instance` prevents multiple copies of LibreFang from running simultaneously. When a second instance attempts to launch, the existing instance's main window is shown, unminimized, and focused:
+On desktop platforms, `tauri-plugin-single-instance` prevents multiple copies of BossFang from running simultaneously. When a second instance attempts to launch, the existing instance's main window is shown, unminimized, and focused:
 
 ```rust
 #[cfg(desktop)]
@@ -143,7 +143,7 @@ Closing the window does not quit the application. Instead, the window is hidden 
 })
 ```
 
-To actually quit, use the **"Quit LibreFang"** option in the system tray menu.
+To actually quit, use the **"Quit BossFang"** option in the system tray menu.
 
 ### Native OS Notifications
 
@@ -206,7 +206,7 @@ Opens a native file picker for skill files (`.md`, `.toml`, `.py`, `.js`, `.wasm
 
 ### `get_autostart` / `set_autostart`
 
-Check or toggle whether LibreFang launches at OS login. Uses `tauri-plugin-autostart` (launchd on macOS, registry on Windows, systemd on Linux).
+Check or toggle whether BossFang launches at OS login. Uses `tauri-plugin-autostart` (launchd on macOS, registry on Windows, systemd on Linux).
 
 ### `check_for_updates`
 
@@ -436,7 +436,7 @@ crates/librefang-desktop/
 |----------|--------|
 | `RUST_LOG` | Controls tracing verbosity. Defaults to `librefang=info,tauri=info` if unset. |
 
-All other LibreFang environment variables (API keys, configuration) apply as normal since the desktop app boots the same kernel as the headless daemon.
+All other BossFang environment variables (API keys, configuration) apply as normal since the desktop app boots the same kernel as the headless daemon.
 
 
 

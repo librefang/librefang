@@ -4,7 +4,7 @@ Endpoints for memory systems, skills marketplace, ClawHub, hands automation, ext
 
 ## Memory Endpoints
 
-LibreFang provides two memory systems: a simple key-value store per agent and a proactive semantic memory system (mem0-style) with relationship graphs and decay.
+BossFang provides two memory systems: a simple key-value store per agent and a proactive semantic memory system (mem0-style) with relationship graphs and decay.
 
 ### GET /api/memory/agents/&lbrace;id&rbrace;/kv
 
@@ -401,7 +401,7 @@ Get the raw source code of a ClawHub skill.
 
 ### POST /api/clawhub/install
 
-Install a skill from ClawHub. Downloads, verifies SHA256 checksum, scans for prompt injection, and converts SKILL.md format to LibreFang skill.toml automatically.
+Install a skill from ClawHub. Downloads, verifies SHA256 checksum, scans for prompt injection, and converts SKILL.md format to BossFang skill.toml automatically.
 
 **Request Body**:
 
@@ -548,7 +548,7 @@ Install runtime dependencies for a plugin (e.g., Python packages, Node modules).
 
 ## Media Generation Endpoints
 
-Provider-agnostic media generation — image, text-to-speech, video, and music. LibreFang auto-detects the first configured provider for each capability, or you can specify a provider explicitly via the `provider` field.
+Provider-agnostic media generation — image, text-to-speech, video, and music. BossFang auto-detects the first configured provider for each capability, or you can specify a provider explicitly via the `provider` field.
 
 Supported providers: **OpenAI** (image, TTS), **MiniMax** (image, TTS, video, music).
 

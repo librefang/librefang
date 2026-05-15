@@ -1,6 +1,6 @@
 # LLM Providers
 
-LibreFang ships with a comprehensive model catalog covering **3 native LLM drivers**, **49 providers**, **230+ builtin models**, and **23 aliases**. Every provider uses one of three battle-tested drivers: the native **Anthropic** driver, the native **Gemini** driver, or the universal **OpenAI-compatible** driver.
+BossFang ships with a comprehensive model catalog covering **3 native LLM drivers**, **49 providers**, **230+ builtin models**, and **23 aliases**. Every provider uses one of three battle-tested drivers: the native **Anthropic** driver, the native **Gemini** driver, or the universal **OpenAI-compatible** driver.
 
 This section is split into focused pages so you can jump straight to hosted APIs, local runtimes, platform integrations, developer-tool backends, or provider operations. The model catalog also supports **dynamic loading**: official provider definitions are pre-installed to `~/.librefang/providers/`, and any custom `*.toml` files you add there are merged into the catalog at boot.
 
@@ -18,7 +18,7 @@ This section is split into focused pages so you can jump straight to hosted APIs
 
 ## Capability Matrix
 
-A quick glance at which providers support which capabilities. ✓ = wired in the driver, ○ = partial / model-dependent, ✗ = not available via this provider in LibreFang. Embeddings shown here are inference-time embeddings, not the local Ollama auto-detect ladder.
+A quick glance at which providers support which capabilities. ✓ = wired in the driver, ○ = partial / model-dependent, ✗ = not available via this provider in BossFang. Embeddings shown here are inference-time embeddings, not the local Ollama auto-detect ladder.
 
 | Provider | Vision | Tools | Embeddings | File Upload | Prompt Cache | Image Gen | Audio |
 |---|---|---|---|---|---|---|---|
@@ -74,7 +74,7 @@ export ANTHROPIC_API_KEY="your-key"
 export OPENAI_API_KEY="your-key"
 ```
 
-LibreFang auto-detects which providers have API keys configured at boot. Any model whose provider is authenticated becomes immediately available. Local providers (Ollama, vLLM, LM Studio) require no key at all.
+BossFang auto-detects which providers have API keys configured at boot. Any model whose provider is authenticated becomes immediately available. Local providers (Ollama, vLLM, LM Studio) require no key at all.
 
 For Gemini specifically, either `GEMINI_API_KEY` or `GOOGLE_API_KEY` will work.
 
@@ -85,5 +85,5 @@ For Gemini specifically, either `GEMINI_API_KEY` or `GOOGLE_API_KEY` will work.
 - Use [Hosted APIs](/configuration/providers/hosted) when you want a standard cloud LLM API with an API key.
 - Use [Local & Self-Hosted](/configuration/providers/local) when models run on your machine or on your own inference server.
 - Use [Platforms & Managed Endpoints](/configuration/providers/platforms) when the model sits behind a cloud platform, enterprise integration, or regional gateway.
-- Use [Developer Tools](/configuration/providers/tools) when LibreFang is talking to a local coding assistant runtime or CLI wrapper instead of a normal model endpoint.
+- Use [Developer Tools](/configuration/providers/tools) when BossFang is talking to a local coding assistant runtime or CLI wrapper instead of a normal model endpoint.
 - Use [Provider Management](/configuration/providers/management) for catalog behavior, aliases, routing, spend controls, and REST/channel introspection.

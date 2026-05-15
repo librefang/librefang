@@ -42,7 +42,7 @@ my-recall-plugin/
     └── merge_subagent.py     # 已生成模板 —— 子 agent 完成后调用
 ```
 
-LibreFang 加载 manifest，把声明的 hook 脚本挂到 context engine 上，在预定义的生命周期点作为子进程执行。每次调用都是一个全新的子进程：stdin 进一个 JSON 对象，stdout 出一个 JSON 对象。
+BossFang 加载 manifest，把声明的 hook 脚本挂到 context engine 上，在预定义的生命周期点作为子进程执行。每次调用都是一个全新的子进程：stdin 进一个 JSON 对象，stdout 出一个 JSON 对象。
 
 插件默认沙箱化 —— 环境变量被洗成最小集合，工作目录受控，超时时间可配置（默认 30 秒）。`bootstrap` hook 获得 **2 倍**超时，因为它只运行一次，可能需要较长时间连接外部服务（如向量库）。
 
@@ -334,7 +334,7 @@ fn transform(&self, ctx: &HookContext) -> Result<Option<String>, String>
 
 ### 错误
 
-以非 0 退出码结束，并把错误写到 stderr。LibreFang 会把 stderr 以 `warn` 级别记日志，然后回退到默认 context engine 的结果，当前这一轮继续。
+以非 0 退出码结束，并把错误写到 stderr。BossFang 会把 stderr 以 `warn` 级别记日志，然后回退到默认 context engine 的结果，当前这一轮继续。
 
 ---
 
@@ -414,7 +414,7 @@ qdrant_url = os.environ["QDRANT_URL"]
 api_key    = os.environ.get("QDRANT_API_KEY", "")
 ```
 
-**优先级顺序**（从低到高）：LibreFang 的基础集（`LIBREFANG_AGENT_ID`、`PATH`、`HOME`、runtime 透传变量）→ `[env]` 中的声明 → agent `allowed_env_vars` 里列出的变量（最终生效）。
+**优先级顺序**（从低到高）：BossFang 的基础集（`LIBREFANG_AGENT_ID`、`PATH`、`HOME`、runtime 透传变量）→ `[env]` 中的声明 → agent `allowed_env_vars` 里列出的变量（最终生效）。
 
 ---
 
@@ -550,7 +550,7 @@ after_turn = "~/.librefang/plugins/prefs/hooks/after_turn.py"
 runtime = "python"
 ```
 
-### 5. 重启 LibreFang
+### 5. 重启 BossFang
 
 ```bash
 librefang start
@@ -682,7 +682,7 @@ curl http://127.0.0.1:4545/api/context-engine/metrics
 
 ## 本地测试
 
-每个 hook 本质就是一个读 stdin 写 stdout 的脚本 —— 不用启动 LibreFang 就能测：
+每个 hook 本质就是一个读 stdin 写 stdout 的脚本 —— 不用启动 BossFang 就能测：
 
 ```bash
 echo '{"type":"ingest","agent_id":"test","message":"hello","peer_id":"u1"}' \
@@ -734,9 +734,9 @@ curl http://127.0.0.1:4545/api/plugins/doctor
 - **空输出**：脚本 0 退出但没输出任何东西会返回 `EmptyOutput`，用默认结果。
 - **JSON 格式错**：runtime 从 stdout 最后一行往前扫，取第一个能 parse 的。都 parse 不了的话，把最后一行包成 `{ "text": "..." }` 兜底。
 - **路径穿越**：脚本路径里不能带 `..` 组件 —— 每次调用都会检查，不只是加载时。
-- **环境变量洗白**：子进程启动前所有继承的环境变量会被 `env_clear` 清空。LibreFang 然后设置 `LIBREFANG_AGENT_ID`、`LIBREFANG_MESSAGE`、`LIBREFANG_RUNTIME`，从父进程透传 `PATH` 和 `HOME`，加上 runtime 自己的透传集合（Python 的 `PYTHONPATH`/`VIRTUAL_ENV`、Ruby 的 `GEM_HOME`/`GEM_PATH` 等 —— 见 `runtime_passthrough_vars`），最后透传 agent 的 `allowed_env_vars` 里列出的变量。你的 hook 可以从环境变量读 `LIBREFANG_AGENT_ID` / `LIBREFANG_MESSAGE`，这是解析 stdin JSON 之外的另一种方式。
+- **环境变量洗白**：子进程启动前所有继承的环境变量会被 `env_clear` 清空。BossFang 然后设置 `LIBREFANG_AGENT_ID`、`LIBREFANG_MESSAGE`、`LIBREFANG_RUNTIME`，从父进程透传 `PATH` 和 `HOME`，加上 runtime 自己的透传集合（Python 的 `PYTHONPATH`/`VIRTUAL_ENV`、Ruby 的 `GEM_HOME`/`GEM_PATH` 等 —— 见 `runtime_passthrough_vars`），最后透传 agent 的 `allowed_env_vars` 里列出的变量。你的 hook 可以从环境变量读 `LIBREFANG_AGENT_ID` / `LIBREFANG_MESSAGE`，这是解析 stdin JSON 之外的另一种方式。
 
-Hook 的 stderr 会被捕获后打印到 LibreFang 自己的日志里 —— 想打 debug log 直接往 stderr 写就行。每行 stderr 都会**实时**通过 tracing 转发出来（target 为 `plugin_stderr`，Python 工具是 `python_stderr`），所以长时间运行的 hook 可以把进度流到 `journalctl` / `docker logs`，不用等到退出才一口气吐出。用 `RUST_LOG=plugin_stderr=info`(或 `python_stderr=info`) 过滤。
+Hook 的 stderr 会被捕获后打印到 BossFang 自己的日志里 —— 想打 debug log 直接往 stderr 写就行。每行 stderr 都会**实时**通过 tracing 转发出来（target 为 `plugin_stderr`，Python 工具是 `python_stderr`），所以长时间运行的 hook 可以把进度流到 `journalctl` / `docker logs`，不用等到退出才一口气吐出。用 `RUST_LOG=plugin_stderr=info`(或 `python_stderr=info`) 过滤。
 
 hook 退出后，完整的 stderr **还会再以一条 `debug!` 级别的汇总日志发出来**，原本依赖 `"hook stderr:"` 这个串做抓取的工具不会失效。两个通道相互独立 —— 同时开启的话，每行先实时出现一次、退出后又在汇总里出现一次。
 

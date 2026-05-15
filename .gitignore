@@ -103,3 +103,7 @@ result
 
 # graphify knowledge-graph output (local-only, regenerable).
 graphify-out/
+
+# Python bytecode caches (scripts/test_enforce_branding.py et al.)
+__pycache__/
+*.pyc

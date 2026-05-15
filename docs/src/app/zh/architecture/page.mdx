@@ -1,6 +1,6 @@
-# LibreFang 架构
+# BossFang 架构
 
-本文档描述 LibreFang 的内部架构——用 Rust 编写的开源 Agent 操作系统。内容涵盖 crate 结构、内核启动序列、Agent 生命周期、内存子系统、LLM 驱动抽象、基于能力的安全模型、OFP Wire 协议、安全加固体系、通道与技能系统，以及 Agent 稳定性子系统。
+本文档描述 BossFang 的内部架构——用 Rust 编写的开源 Agent 操作系统。内容涵盖 crate 结构、内核启动序列、Agent 生命周期、内存子系统、LLM 驱动抽象、基于能力的安全模型、OFP Wire 协议、安全加固体系、通道与技能系统，以及 Agent 稳定性子系统。
 
 ## 目录
 
@@ -176,7 +176,7 @@ librefang/
 
 ## Crate 结构
 
-LibreFang 组织为 Cargo 工作空间，包含 15 个 crates（14 个代码 crates + xtask）。依赖关系自上而下流动（底层 crate 不依赖上层）。
+BossFang 组织为 Cargo 工作空间，包含 15 个 crates（14 个代码 crates + xtask）。依赖关系自上而下流动（底层 crate 不依赖上层）。
 
 ```
 librefang-cli            CLI 接口、守护进程自动检测、MCP 服务器
@@ -205,13 +205,13 @@ librefang-types          共享类型: Agent、Capability、Event、Memory、Mes
 
 | Crate | 说明 |
 |-------|------|
-| **librefang-types** | 所有 crate 共用的核心类型定义。定义 `AgentManifest`、`AgentId`、`Capability`、`Event`、`ToolDefinition`、`KernelConfig`、`LibreFangError`、污点追踪（`TaintLabel`、`TaintSet`）、Ed25519 清单签名、模型目录类型（`ModelCatalogEntry`、`ProviderInfo`、`ModelTier`）、工具兼容性映射（21 个 OpenClaw 到 LibreFang 的映射）、MCP/A2A 配置类型和 Web 配置类型。所有配置结构体使用 `#[serde(default)]` 以实现向前兼容的 TOML 解析。 |
+| **librefang-types** | 所有 crate 共用的核心类型定义。定义 `AgentManifest`、`AgentId`、`Capability`、`Event`、`ToolDefinition`、`KernelConfig`、`LibreFangError`、污点追踪（`TaintLabel`、`TaintSet`）、Ed25519 清单签名、模型目录类型（`ModelCatalogEntry`、`ProviderInfo`、`ModelTier`）、工具兼容性映射（21 个 OpenClaw 到 BossFang 的映射）、MCP/A2A 配置类型和 Web 配置类型。所有配置结构体使用 `#[serde(default)]` 以实现向前兼容的 TOML 解析。 |
 | **librefang-memory** | 基于 SQLite 的内存子系统（schema v5）。使用 `Arc<Mutex<Connection>>` 配合 `spawn_blocking` 实现异步桥接。提供结构化 KV 存储、基于向量嵌入的语义搜索、知识图谱（实体和关系）、会话管理、任务板、使用事件持久化（`usage_events` 表、`UsageStore`），以及跨通道记忆的规范会话。五个 schema 版本：V1 核心、V2 协作、V3 嵌入、V4 使用、V5 规范会话。 |
 | **librefang-runtime** | Agent 执行引擎。包含 Agent 循环（`run_agent_loop`、`run_agent_loop_streaming`）、3 个原生 LLM 驱动（Anthropic、Gemini、OpenAI 兼容，覆盖 49 个提供商）、60 个内置工具、WASM 沙箱（Wasmtime 双燃料+epoch 计量）、MCP 客户端/服务器（JSON-RPC 2.0 over stdio/SSE）、A2A 协议（AgentCard、任务管理）、Web 搜索引擎（4 个提供商：Tavily/Brave/Perplexity/DuckDuckGo）、带 SSRF 保护的 Web 抓取、循环守卫（基于 SHA256 的工具循环检测）、会话修复（历史验证）、LLM 会话压缩器（块感知）、Merkle 哈希链审计追踪、嵌入驱动、浏览器自动化（Playwright，`browser.rs`）、Docker 沙箱执行（`docker_sandbox.rs`）、图像生成（`image_gen.rs`）、文本转语音（`tts.rs`）、插件管理器（`plugin_manager.rs`）、上下文引擎（`context_engine.rs`）、主动记忆（`proactive_memory.rs`）和进程管理器（`process_manager.rs`）。定义了 `KernelHandle` trait，使 Agent 间工具调用不产生循环 crate 依赖。 |
 | **librefang-kernel** | 中央协调器。`LibreFangKernel` 组装所有子系统：`AgentRegistry`、`AgentScheduler`、`CapabilityManager`、`EventBus`、`Supervisor`、`WorkflowEngine`、`TriggerEngine`、`BackgroundExecutor`、`WasmSandbox`、`ModelCatalog`、`MeteringEngine`、`ModelRouter`、`AuthManager`（RBAC）、`HeartbeatMonitor`、`SetupWizard`、`SkillRegistry`、MCP 连接和 `WebToolsContext`。实现 `KernelHandle` 以支持 Agent 间操作。处理 Agent 创建/终止、消息分发、工作流执行、触发器评估、能力继承验证和优雅关闭（带状态持久化）。 |
 | **librefang-api** | 基于 Axum 0.8 的 HTTP API 服务器，提供 230+ 个端点。路由涵盖 agents、workflows、triggers、memory、channels、templates、models、providers、skills、ClawHub、MCP、health、status、version 和 shutdown。WebSocket 处理器用于实时 Agent 聊天和流式输出。SSE 端点用于流式响应。OpenAI 兼容端点（`POST /v1/chat/completions`、`GET /v1/models`）。A2A 端点（`/.well-known/agent.json`、`/a2a/*`）。中间件：Bearer token 认证、请求 ID 注入、结构化请求日志、GCRA 速率限制器（感知成本）、安全头（CSP、X-Frame-Options 等）、健康端点信息脱敏。提供两个仪表板 UI：传统的 Alpine.js SPA（`static/index_body.html`）和现代 React 仪表板（`static/react/`，基于 Vite + React + TanStack Router/Query 构建）。两个仪表板共存，共享同一套 REST/WS API。 |
 | **librefang-channels** | 通道桥接层，包含 44 个适配器。每个适配器实现 `ChannelAdapter` trait。包括：Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Webhook、MQTT、Sidecar、Teams、Mattermost、IRC、Google Chat、Twitch、Rocket.Chat、Zulip、XMPP、LINE、Viber、Messenger、Reddit、Mastodon、Bluesky、Feishu、Revolt、Nextcloud、Guilded、Keybase、Threema、Nostr、Webex、Pumble、Flock、Twist、Mumble、DingTalk、QQ、WeCom（企业微信）、Discourse、Gitter、Ntfy、Gotify、LinkedIn。功能特性：`AgentRouter` 消息路由、`BridgeManager` 生命周期协调、`ChannelRateLimiter`（基于 DashMap 的每用户追踪）、`formatter.rs`（Markdown 转 TelegramHTML/SlackMrkdwn/PlainText）、`ChannelOverrides`（模型/系统提示/私聊策略/群聊策略/速率限制/消息线程/输出格式）、私聊/群聊策略执行、sidecar_channels 辅助通道接入机制。 |
-| **librefang-wire** | LibreFang 协议 (OFP)，用于 Agent 间点对点通信。TCP 上的 JSON 帧消息，HMAC-SHA256 双向认证（nonce + 通过 `subtle` crate 实现常数时间验证）。`PeerNode` 监听连接并管理节点。`PeerRegistry` 跟踪已知远程节点及其 Agent。 |
+| **librefang-wire** | BossFang 协议 (OFP)，用于 Agent 间点对点通信。TCP 上的 JSON 帧消息，HMAC-SHA256 双向认证（nonce + 通过 `subtle` crate 实现常数时间验证）。`PeerNode` 监听连接并管理节点。`PeerRegistry` 跟踪已知远程节点及其 Agent。 |
 | **librefang-cli** | 基于 Clap 的 CLI。支持所有命令：`init`、`start`、`status`、`doctor`、`agent spawn/list/chat/kill`、`workflow list/create/run`、`trigger list/create/delete`、`migrate`、`skill install/list/remove/search/create`、`channel list/setup/test/enable/disable`、`config show/edit`、`chat`、`mcp`。守护进程自动检测：检查 `~/.librefang/daemon.json` 并发送健康探测；当守护进程运行时使用 HTTP 通信，否则回退到进程内启动内核。内置 MCP 服务器模式。 |
 | **librefang-desktop** | Tauri 2.0 原生桌面应用。在进程内启动内核，后台线程运行 axum 服务器，WebView 指向 `http://127.0.0.1:{随机端口}`。功能特性：系统托盘（显示/浏览器/状态/退出）、单实例强制、桌面通知、关闭时隐藏到托盘。IPC 命令：`get_port`、`get_status`。通过 `#[cfg(desktop)]` 守卫实现移动端就绪。 |
 | **librefang-migrate** | 迁移引擎。支持 OpenClaw（`~/.openclaw/`）。将 YAML 配置转换为 TOML，映射工具名称，映射提供商名称，导入 Agent 清单，复制内存文件，转换通道配置。生成包含已导入项、已跳过项和警告的 `MigrationReport`。 |
@@ -693,7 +693,7 @@ CapabilityManager.check(agent_id, ToolInvoke("file_read"))
 
 ## 安全加固
 
-LibreFang 实现了 16 个安全系统，分为关键修复和先进防御两类：
+BossFang 实现了 16 个安全系统，分为关键修复和先进防御两类：
 
 ### 路径遍历防护
 
@@ -835,10 +835,10 @@ Wire 协议认证在握手双方使用 `hmac_sign(secret, nonce + node_id)`。No
 
 ### 生态桥接
 
-- **FangHub**：LibreFang 原生市场（`FangHubClient`）。
+- **FangHub**：BossFang 原生市场（`FangHubClient`）。
 - **ClawHub**：跨生态兼容性（`ClawHubClient` 连接 clawhub.ai）。
 - **SKILL.md 解析器**：自动将 OpenClaw SKILL.md 格式（YAML frontmatter + Markdown 正文）转换为 `skill.toml`。
-- **工具兼容**：`tool_compat.rs` 中的 21 个 OpenClaw 到 LibreFang 工具名称映射。
+- **工具兼容**：`tool_compat.rs` 中的 21 个 OpenClaw 到 BossFang 工具名称映射。
 
 ---
 
@@ -911,10 +911,10 @@ Hands 通过四个内置工具在运行时管理：
 
 ### Model Context Protocol (MCP)
 
-LibreFang 同时实现了 MCP 客户端和服务器：
+BossFang 同时实现了 MCP 客户端和服务器：
 
 - **MCP 客户端**（`mcp.rs`）：JSON-RPC 2.0 over stdio 或 SSE 传输。连接外部 MCP 服务器。工具命名为 `mcp_{server}_{tool}` 以防止冲突。在 `start_background_agents()` 中后台连接。
-- **MCP 服务器**（`mcp_server.rs`）：通过 MCP 协议暴露 LibreFang 的 60 个内置工具。使外部工具可以将 LibreFang 作为工具提供者使用。
+- **MCP 服务器**（`mcp_server.rs`）：通过 MCP 协议暴露 BossFang 的 60 个内置工具。使外部工具可以将 BossFang 作为工具提供者使用。
 - **配置**：`KernelConfig.mcp_servers`（`McpServerConfigEntry` 的 Vec，包含 name、command、args、env、transport）。
 - **API**：`/api/mcp/servers` 返回已配置和已连接的服务器及其工具列表。
 
@@ -931,7 +931,7 @@ Google 的 A2A 协议，用于跨系统 Agent 通信：
 
 ## Wire 协议 (OFP)
 
-LibreFang 协议 (OFP) 实现跨机器的 Agent 间点对点通信。
+BossFang 协议 (OFP) 实现跨机器的 Agent 间点对点通信。
 
 ### 架构
 
@@ -1013,7 +1013,7 @@ OFP 操作需要相应能力：
 
 ## 桌面应用
 
-桌面应用（`librefang-desktop`）将完整的 LibreFang 技术栈包装在原生 Tauri 2.0 应用中。
+桌面应用（`librefang-desktop`）将完整的 BossFang 技术栈包装在原生 Tauri 2.0 应用中。
 
 ### 架构
 

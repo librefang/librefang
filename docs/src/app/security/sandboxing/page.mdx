@@ -1,6 +1,6 @@
 # Security Model & Sandboxing
 
-This page covers the runtime controls that constrain what agents can do and how untrusted execution is contained inside LibreFang.
+This page covers the runtime controls that constrain what agents can do and how untrusted execution is contained inside BossFang.
 
 ## Included Topics
 
@@ -16,7 +16,7 @@ This page covers the runtime controls that constrain what agents can do and how 
 
 **Source:** `librefang-types/src/capability.rs`
 
-LibreFang uses capability-based security.  An agent can only perform actions
+BossFang uses capability-based security.  An agent can only perform actions
 it has been explicitly granted permission to do.  Capabilities are immutable
 after agent creation and are enforced at the kernel level.
 
@@ -372,7 +372,7 @@ process, preventing shell injection via metacharacters like `;`, `|`, `&&`.
 
 **Source:** `librefang-runtime/src/dangerous_commands.rs`
 
-Before any shell command is executed, LibreFang scans the command string
+Before any shell command is executed, BossFang scans the command string
 against **39 regular-expression patterns** grouped into 11 categories of
 dangerous operations.  This adds a semantic safety layer on top of the
 capability and taint checks.

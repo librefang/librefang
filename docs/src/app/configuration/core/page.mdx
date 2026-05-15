@@ -1,6 +1,6 @@
 # Core Configuration Reference
 
-Core configuration sections for LibreFang: top-level fields, default model, memory, networking, web search, media processing, and link understanding.
+Core configuration sections for BossFang: top-level fields, default model, memory, networking, web search, media processing, and link understanding.
 
 ---
 
@@ -10,7 +10,7 @@ These fields sit at the root of `config.toml` (not inside any `[section]`).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `home_dir` | path | `~/.librefang` | LibreFang home directory. Stores config, agents, skills. |
+| `home_dir` | path | `~/.librefang` | BossFang home directory. Stores config, agents, skills. |
 | `data_dir` | path | `~/.librefang/data` | Directory for SQLite databases and persistent data. |
 | `log_level` | string | `"info"` | Log verbosity. One of: `trace`, `debug`, `info`, `warn`, `error`. |
 | `api_listen` | string | `"127.0.0.1:4545"` | Bind address for the HTTP/WebSocket/SSE API server. Alias: `listen_addr`. |
@@ -147,7 +147,7 @@ The status endpoint returns the resolved `effective_min_hours` / `effective_min_
 
 ### `[network]`
 
-Configures the OFP (LibreFang Protocol) peer-to-peer networking layer. Authentication has two layers: a `shared_secret` HMAC admission gate plus per-node Ed25519 identity with TOFU pinning (#3873). The Ed25519 keypair and trust pins live in `<data_dir>/peer_keypair.json` and `<data_dir>/trusted_peers.json`.
+Configures the OFP (BossFang Protocol) peer-to-peer networking layer. Authentication has two layers: a `shared_secret` HMAC admission gate plus per-node Ed25519 identity with TOFU pinning (#3873). The Ed25519 keypair and trust pins live in `<data_dir>/peer_keypair.json` and `<data_dir>/trusted_peers.json`.
 
 ```toml
 [network]
@@ -261,7 +261,7 @@ model = "sonar"
 
 #### `[web.searxng]`
 
-Self-hosted SearXNG provider. Disabled by default — set `url` to opt in. No API key is required; LibreFang talks to the instance over the public `/search?format=json` endpoint and discovers categories via `/config`.
+Self-hosted SearXNG provider. Disabled by default — set `url` to opt in. No API key is required; BossFang talks to the instance over the public `/search?format=json` endpoint and discovers categories via `/config`.
 
 ```toml
 [web.searxng]
@@ -386,7 +386,7 @@ mcp_readonly_allowlist = ["mcp__github__list_issues", "mcp__notion__query_databa
 
 ### `max_history_messages`
 
-LibreFang trims an agent's stored conversation history at every turn so it does not grow without bound. The cap controls how many messages survive each trim. The mechanism cuts only at safe turn boundaries (never inside a `tool_use`/`tool_result` pair), so the surviving slice is always well-formed for strict providers like Gemini.
+BossFang trims an agent's stored conversation history at every turn so it does not grow without bound. The cap controls how many messages survive each trim. The mechanism cuts only at safe turn boundaries (never inside a `tool_use`/`tool_result` pair), so the surviving slice is always well-formed for strict providers like Gemini.
 
 The cap is configurable at two levels — a top-level field in `config.toml` (operator-wide override) and a top-level field in `agent.toml` (per-agent override). Both are optional.
 
@@ -446,7 +446,7 @@ Per-model overrides are also possible at the agent level via `agent.toml: model.
 
 ### `[browser]`
 
-Browser tool configuration. By default LibreFang launches a local Chromium instance. Set `cdp_endpoint` to attach to an already-running browser (Browserless, headful Chrome with `--remote-debugging-port`, etc.) instead.
+Browser tool configuration. By default BossFang launches a local Chromium instance. Set `cdp_endpoint` to attach to an already-running browser (Browserless, headful Chrome with `--remote-debugging-port`, etc.) instead.
 
 ```toml
 [browser]
@@ -699,7 +699,7 @@ trusted_manifest_signers   = []
 
 ### Dashboard authentication (top-level)
 
-Reach the dashboard from a non-loopback address? Set a username/password and LibreFang will hash the password to Argon2id automatically on first boot.
+Reach the dashboard from a non-loopback address? Set a username/password and BossFang will hash the password to Argon2id automatically on first boot.
 
 ```toml
 [kernel]
@@ -961,6 +961,6 @@ shell_allowlist = ["git", "cargo", "npm"]
 | `[auto_reply]` | Background engine that auto-responds to certain inbound patterns without going through a full agent turn. | Off by default — opt in for high-volume support channels. |
 | `[broadcast]` | Multi-recipient message fan-out (vs unicast). | Enable when agents need to push to ≥10 channels at once. |
 | `[canvas]` | A2UI tool that renders agent-authored HTML in the dashboard. Off by default for safety. | Enable + audit `allowed_tags` before turning on. |
-| `[a2a]` | A2A protocol listen path + accepted-issuer allowlist for cross-instance auth. | Set when federating multiple LibreFang instances. |
+| `[a2a]` | A2A protocol listen path + accepted-issuer allowlist for cross-instance auth. | Set when federating multiple BossFang instances. |
 | `[pairing]` | Device pairing TTL and master toggle. | Disable in single-user setups. |
 | `[exec_policy]` | Global default shell/exec allowlist; per-agent `[exec_policy]` in `agent.toml` overrides this for that agent only. | Lock down the daemon's default; selectively grant trusted agents broader access. |

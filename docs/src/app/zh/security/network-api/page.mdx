@@ -109,7 +109,7 @@ http://example.com              ->  example.com:80
 
 **源码：** `librefang-wire/src/peer.rs`
 
-LibreFang 线路协议（OFP）在 TCP 连接上使用基于 HMAC-SHA256 的 nonce
+BossFang 线路协议（OFP）在 TCP 连接上使用基于 HMAC-SHA256 的 nonce
 双向认证。
 
 ### 预共享密钥要求
@@ -231,7 +231,7 @@ pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Bo
 
 **源码：** `librefang-api/src/rate_limiter.rs`
 
-LibreFang 通过 `governor` crate 使用通用信元速率算法（GCRA）实现
+BossFang 通过 `governor` crate 使用通用信元速率算法（GCRA）实现
 成本感知的 API 速率限制。
 
 ### 算法
@@ -319,7 +319,7 @@ pub type KeyedRateLimiter = RateLimiter<IpAddr, DashMapStateStore<IpAddr>, Defau
 
 **源码：** `librefang-api/src/routes.rs`
 
-LibreFang 提供两个信息级别不同的健康端点。
+BossFang 提供两个信息级别不同的健康端点。
 
 ### 公开端点：`GET /api/health`
 
@@ -376,7 +376,7 @@ if api_key.is_empty() {
 
 ## Dashboard 认证
 
-LibreFang 支持为 Web Dashboard 配置可选的用户名/密码认证。
+BossFang 支持为 Web Dashboard 配置可选的用户名/密码认证。
 
 ### 配置
 

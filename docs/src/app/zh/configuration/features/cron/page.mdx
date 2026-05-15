@@ -1,6 +1,6 @@
 # Cron 调度器
 
-定时 cron 任务是 LibreFang 按时钟跑 agent 回合的方式。每个任务挂在某个 agent 上，按固定 interval / 一次性未来时间戳 / 5 字段 cron 表达式触发。本页文档化让调度器从"发完就不管，响应只发一个 channel"变成可控管道的三个特性：
+定时 cron 任务是 BossFang 按时钟跑 agent 回合的方式。每个任务挂在某个 agent 上，按固定 interval / 一次性未来时间戳 / 5 字段 cron 表达式触发。本页文档化让调度器从"发完就不管，响应只发一个 channel"变成可控管道的三个特性：
 
 - **多目标分发** — 一次触发扇出到多个 channel / webhook / 文件 / email 收件人，每个目标失败隔离。
 - **Pre-script** — LLM 回合前跑一段确定性命令，把 stdout 注入 prompt 当额外上下文。

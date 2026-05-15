@@ -1,6 +1,6 @@
 # 开发工具提供商
 
-本页覆盖通过本地助手工具链或 CLI 运行时接入的提供商，而不是标准的远程 LLM API。当 LibreFang 需要复用现有编码助手或终端助手栈时，主要看这里。
+本页覆盖通过本地助手工具链或 CLI 运行时接入的提供商，而不是标准的远程 LLM API。当 BossFang 需要复用现有编码助手或终端助手栈时，主要看这里。
 
 ## 包含的提供商
 
@@ -16,7 +16,7 @@
 
 ## CLI 登录作为一等默认 provider
 
-当你没设 provider API key 但**有**可用的 CLI 登录（`claude` / `codex` / `gemini` / `qwen` 在 `PATH` 上且已认证），LibreFang 会把 CLI provider 选成新 agent 的默认模型。检测在启动时跑，刷新 provider 可用性时也会重测。
+当你没设 provider API key 但**有**可用的 CLI 登录（`claude` / `codex` / `gemini` / `qwen` 在 `PATH` 上且已认证），BossFang 会把 CLI provider 选成新 agent 的默认模型。检测在启动时跑，刷新 provider 可用性时也会重测。
 
 检测优先级（从前到后，先匹配先用）：
 
@@ -142,9 +142,9 @@ model = "kimi-coder"
 **设置：**
 1. 安装 Aider：`pip install aider-install && aider-install`
 2. 通过 Aider 自身的环境变量配置 LLM 提供商（如 `OPENAI_API_KEY`）
-3. 无需额外的 LibreFang 配置
+3. 无需额外的 BossFang 配置
 
-**说明：** CLI Provider — LibreFang 以子进程方式以非交互模式（`--message`）调用 `aider` 二进制文件。Aider 通过标准环境变量（`OPENAI_API_KEY`、`ANTHROPIC_API_KEY` 等）自行处理 LLM 提供商认证。自动启用 `--yes-always`、`--no-auto-commits` 和 `--no-git` 标志。可使用 `AIDER_CLI_PATH` 覆盖二进制文件路径。
+**说明：** CLI Provider — BossFang 以子进程方式以非交互模式（`--message`）调用 `aider` 二进制文件。Aider 通过标准环境变量（`OPENAI_API_KEY`、`ANTHROPIC_API_KEY` 等）自行处理 LLM 提供商认证。自动启用 `--yes-always`、`--no-auto-commits` 和 `--no-git` 标志。可使用 `AIDER_CLI_PATH` 覆盖二进制文件路径。
 
 ---
 
@@ -163,9 +163,9 @@ model = "kimi-coder"
 **设置：**
 1. 安装 Claude Code：`npm install -g @anthropic-ai/claude-code`
 2. 认证：`claude auth login`
-3. 无需额外的 LibreFang 配置
+3. 无需额外的 BossFang 配置
 
-**说明：** CLI Provider — LibreFang 以子进程方式以打印模式（`-p`）调用 `claude` 二进制文件。驱动会从子进程环境中移除其他提供商的 API 密钥以防泄露。活跃的子进程 PID 会被追踪，消息超时（默认 5 分钟）可防止挂起的进程阻塞 Agent。支持通过 base64 编码图片进行视觉输入。
+**说明：** CLI Provider — BossFang 以子进程方式以打印模式（`-p`）调用 `claude` 二进制文件。驱动会从子进程环境中移除其他提供商的 API 密钥以防泄露。活跃的子进程 PID 会被追踪，消息超时（默认 5 分钟）可防止挂起的进程阻塞 Agent。支持通过 base64 编码图片进行视觉输入。
 
 ---
 
@@ -184,9 +184,9 @@ model = "kimi-coder"
 **设置：**
 1. 安装 Codex CLI：`npm install -g @openai/codex`
 2. `export OPENAI_API_KEY="sk-..."`
-3. 无需额外的 LibreFang 配置
+3. 无需额外的 BossFang 配置
 
-**说明：** CLI Provider — LibreFang 以子进程方式以安静模式（`-q`）调用 `codex` 二进制文件。驱动会从子进程环境中移除其他提供商的 API 密钥（仅保留 `OPENAI_API_KEY` 和 `CODEX_*` 变量）。这使得安装了 Codex CLI 的用户无需额外配置即可将其作为 LLM 提供商使用。
+**说明：** CLI Provider — BossFang 以子进程方式以安静模式（`-q`）调用 `codex` 二进制文件。驱动会从子进程环境中移除其他提供商的 API 密钥（仅保留 `OPENAI_API_KEY` 和 `CODEX_*` 变量）。这使得安装了 Codex CLI 的用户无需额外配置即可将其作为 LLM 提供商使用。
 
 ---
 
@@ -205,9 +205,9 @@ model = "kimi-coder"
 **设置：**
 1. 安装 Gemini CLI：`npm install -g @google/gemini-cli`
 2. 认证：`gemini auth login`
-3. 无需额外的 LibreFang 配置
+3. 无需额外的 BossFang 配置
 
-**说明：** CLI Provider — LibreFang 以子进程方式以打印模式（`-p`）调用 `gemini` 二进制文件。驱动会保留 `GEMINI_*` 和 `GOOGLE_*` 环境变量，同时移除其他提供商的密钥。使用 Google OAuth 认证时无需单独配置 API 密钥。
+**说明：** CLI Provider — BossFang 以子进程方式以打印模式（`-p`）调用 `gemini` 二进制文件。驱动会保留 `GEMINI_*` 和 `GOOGLE_*` 环境变量，同时移除其他提供商的密钥。使用 Google OAuth 认证时无需单独配置 API 密钥。
 
 ---
 
@@ -226,6 +226,6 @@ model = "kimi-coder"
 **设置：**
 1. 安装 Qwen Code：`npm install -g @alibaba/qwen-code`
 2. 认证：`qwen auth login`
-3. 无需额外的 LibreFang 配置
+3. 无需额外的 BossFang 配置
 
-**说明：** CLI Provider — LibreFang 以子进程方式以打印模式（`-p`）调用 `qwen` 二进制文件。驱动会保留 `QWEN_*` 环境变量，同时移除其他提供商的密钥。支持来自 Qwen Code CLI 的流式 JSON 输出。使用通义千问 OAuth 认证时无需单独配置 API 密钥。
+**说明：** CLI Provider — BossFang 以子进程方式以打印模式（`-p`）调用 `qwen` 二进制文件。驱动会保留 `QWEN_*` 环境变量，同时移除其他提供商的密钥。支持来自 Qwen Code CLI 的流式 JSON 输出。使用通义千问 OAuth 认证时无需单独配置 API 密钥。

@@ -1,6 +1,6 @@
 # Local & Self-Hosted Providers
 
-This page covers providers that run on your machine, inside your network, or behind a self-hosted inference endpoint that LibreFang can reach directly.
+This page covers providers that run on your machine, inside your network, or behind a self-hosted inference endpoint that BossFang can reach directly.
 
 ## Included Providers
 
@@ -34,7 +34,7 @@ This page covers providers that run on your machine, inside your network, or beh
 3. Start the server: `ollama serve`
 4. No env var needed -- Ollama is always available
 
-**Notes:** LibreFang auto-discovers models from a running Ollama instance and merges them into the catalog with `Local` tier and zero cost. Any model you pull becomes usable immediately.
+**Notes:** BossFang auto-discovers models from a running Ollama instance and merges them into the catalog with `Local` tier and zero cost. Any model you pull becomes usable immediately.
 
 ---
 
@@ -87,7 +87,7 @@ This page covers providers that run on your machine, inside your network, or beh
 
 ## Embedding auto-detection
 
-When the embeddings driver is set to `provider = "auto"`, LibreFang walks a priority list to pick the first reachable embeddings backend. Cloud API keys win first; local servers come after. The current order (verified against `librefang-runtime::embedding::detect_embedding_provider`):
+When the embeddings driver is set to `provider = "auto"`, BossFang walks a priority list to pick the first reachable embeddings backend. Cloud API keys win first; local servers come after. The current order (verified against `librefang-runtime::embedding::detect_embedding_provider`):
 
 1. `OPENAI_API_KEY` → `"openai"`
 2. `OPENROUTER_API_KEY` → `"openrouter"`
@@ -107,7 +107,7 @@ Setting any of `OLLAMA_HOST` / `VLLM_BASE_URL` / `LMSTUDIO_BASE_URL` to a reacha
 
 ## Capability detection (Ollama metadata pipeline)
 
-For Ollama, LibreFang probes `/api/tags` at startup and on the periodic provider refresh, then derives each model's capabilities from the metadata it returns:
+For Ollama, BossFang probes `/api/tags` at startup and on the periodic provider refresh, then derives each model's capabilities from the metadata it returns:
 
 | Capability | How it's inferred |
 |---|---|

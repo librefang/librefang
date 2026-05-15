@@ -1,8 +1,8 @@
-# LibreFang 安全架构
+# BossFang 安全架构
 
 > **安全联系方式：** 请通过 GitHub 私密漏洞报告功能提交：`https://github.com/librefang/librefang/security/advisories/new`。
 
-本文档为 LibreFang Agent 操作系统中的每个安全子系统提供完整的技术参考。
+本文档为 BossFang Agent 操作系统中的每个安全子系统提供完整的技术参考。
 所有结构体名称、函数签名、常量值和算法描述均直接来源于源代码。
 
 ---
@@ -35,7 +35,7 @@
 
 ## 1. 安全概述
 
-LibreFang 采用**纵深防御**安全策略。系统不依赖任何单一机制作为唯一
+BossFang 采用**纵深防御**安全策略。系统不依赖任何单一机制作为唯一
 保护手段，而是由 16 个独立的安全子系统形成相互重叠的防护层，确保任何
 单层失效都能被其他层捕获。
 
@@ -65,7 +65,7 @@ LibreFang 采用**纵深防御**安全策略。系统不依赖任何单一机制
 
 **源码：** `librefang-types/src/capability.rs`
 
-LibreFang 采用基于能力的安全模型。Agent 只能执行被明确授权的操作。
+BossFang 采用基于能力的安全模型。Agent 只能执行被明确授权的操作。
 能力在 Agent 创建后不可变，并在内核层面强制执行。
 
 ### 2.1 能力变体
@@ -379,7 +379,7 @@ pub fn verify_integrity(&self) -> Result<(), String> {
 
 **源码：** `librefang-types/src/taint.rs`
 
-LibreFang 实现了基于格的污点传播模型，防止被污染的值在未经显式解密的
+BossFang 实现了基于格的污点传播模型，防止被污染的值在未经显式解密的
 情况下流入敏感汇聚点。此机制可防范提示注入、数据外泄和混淆代理攻击。
 
 ### 5.1 污点标签
@@ -675,7 +675,7 @@ ssrf_allowed_hosts = [
 
 **源码：** 所有 LLM 驱动模块、通道适配器和网络搜索模块。
 
-LibreFang 在所有持有密钥材料的字段上使用 `zeroize` crate 提供的
+BossFang 在所有持有密钥材料的字段上使用 `zeroize` crate 提供的
 `Zeroizing<String>`。当值被销毁时，其内存会被零覆盖，防止密钥在
 内存中残留。
 
@@ -741,7 +741,7 @@ fn resolve_api_key(env_var: &str) -> Option<Zeroizing<String>> {
 
 **源码：** `librefang-wire/src/peer.rs`
 
-LibreFang 线路协议（OFP）在 TCP 连接上使用基于 HMAC-SHA256 的 nonce
+BossFang 线路协议（OFP）在 TCP 连接上使用基于 HMAC-SHA256 的 nonce
 双向认证。
 
 ### 9.1 预共享密钥要求
@@ -871,7 +871,7 @@ pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Bo
 
 **源码：** `librefang-api/src/rate_limiter.rs`
 
-LibreFang 通过 `governor` crate 使用通用信元速率算法（GCRA）实现
+BossFang 通过 `governor` crate 使用通用信元速率算法（GCRA）实现
 成本感知的 API 速率限制。
 
 ### 11.1 算法
@@ -1317,7 +1317,7 @@ fn merge_content(dst: &mut MessageContent, src: MessageContent) {
 
 **源码：** `librefang-api/src/routes.rs`
 
-LibreFang 提供两个信息级别不同的健康端点。
+BossFang 提供两个信息级别不同的健康端点。
 
 ### 17.1 公开端点：`GET /api/health`
 
@@ -1374,7 +1374,7 @@ if api_key.is_empty() {
 
 ## 18. Dashboard 认证
 
-LibreFang 支持为 Web Dashboard 配置可选的用户名/密码认证。
+BossFang 支持为 Web Dashboard 配置可选的用户名/密码认证。
 
 ### 18.1 配置
 
