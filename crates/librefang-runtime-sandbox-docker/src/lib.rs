@@ -66,7 +66,7 @@ fn validate_command(command: &str) -> Result<(), String> {
     if command.is_empty() {
         return Err("Command cannot be empty".into());
     }
-    if let Some(reason) = crate::subprocess_sandbox::contains_shell_metacharacters(command) {
+    if let Some(reason) = self::helpers::contains_shell_metacharacters(command) {
         return Err(format!(
             "Command blocked: contains {reason} — potential injection"
         ));
@@ -100,7 +100,7 @@ pub async fn create_sandbox(
     let container_name = sanitize_container_name(&format!(
         "{}-{}",
         config.container_prefix,
-        crate::str_utils::safe_truncate_str(agent_id, 8)
+        self::helpers::safe_truncate_str(agent_id, 8)
     ))?;
 
     let mut cmd = tokio::process::Command::new("docker");
@@ -204,13 +204,13 @@ pub async fn exec_in_sandbox(
     // Truncate large outputs (char-boundary safe to avoid UTF-8 panics)
     let max_output = 50_000;
     let stdout = if stdout.len() > max_output {
-        let safe_end = crate::str_utils::safe_truncate_str(&stdout, max_output);
+        let safe_end = self::helpers::safe_truncate_str(&stdout, max_output);
         format!("{}... [truncated, {} total bytes]", safe_end, stdout.len())
     } else {
         stdout
     };
     let stderr = if stderr.len() > max_output {
-        let safe_end = crate::str_utils::safe_truncate_str(&stderr, max_output);
+        let safe_end = self::helpers::safe_truncate_str(&stderr, max_output);
         format!("{}... [truncated, {} total bytes]", safe_end, stderr.len())
     } else {
         stderr
@@ -665,5 +665,101 @@ mod tests {
             ..Default::default()
         };
         assert_ne!(config_hash(&c1), config_hash(&c2));
+    }
+}
+
+/// Tiny self-contained helpers inlined from `librefang-runtime::subprocess_sandbox`
+/// and `librefang-runtime::str_utils` so this crate has no cyclic dep back into
+/// the parent runtime crate. The originals stay in their home modules; this is
+/// a duplicate-by-design copy bounded to ~60 LOC of pure-string logic.
+mod helpers {
+    /// UTF-8-safe truncate (mirrors `librefang_runtime::str_utils::safe_truncate_str`).
+    #[inline]
+    pub(super) fn safe_truncate_str(s: &str, max_bytes: usize) -> &str {
+        if s.len() <= max_bytes {
+            return s;
+        }
+        let mut end = max_bytes;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
+    }
+
+    /// Shell-metacharacter denylist (mirrors
+    /// `librefang_runtime::subprocess_sandbox::contains_shell_metacharacters`).
+    pub(super) fn contains_shell_metacharacters(command: &str) -> Option<String> {
+        if command.contains('\n') || command.contains('\r') {
+            return Some("embedded newline".to_string());
+        }
+        if command.contains('\0') {
+            return Some("null byte".to_string());
+        }
+        let unquoted = strip_quoted_regions(command);
+        if unquoted.contains('`') {
+            return Some("backtick command substitution".to_string());
+        }
+        if unquoted.contains("$(") {
+            return Some("$() command substitution".to_string());
+        }
+        if unquoted.contains("${") {
+            return Some("${} variable expansion".to_string());
+        }
+        if unquoted.contains(';') {
+            return Some("semicolon command chaining".to_string());
+        }
+        if unquoted.contains('|') {
+            return Some("pipe operator".to_string());
+        }
+        if unquoted.contains('>') || unquoted.contains('<') {
+            return Some("I/O redirection".to_string());
+        }
+        if unquoted.contains('{') || unquoted.contains('}') {
+            return Some("brace expansion".to_string());
+        }
+        if unquoted.contains('&') {
+            return Some("ampersand operator".to_string());
+        }
+        None
+    }
+
+    fn strip_quoted_regions(command: &str) -> String {
+        let mut result = String::with_capacity(command.len());
+        let chars: Vec<char> = command.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
+        while i < len {
+            match chars[i] {
+                '\'' => {
+                    i += 1;
+                    while i < len && chars[i] != '\'' {
+                        i += 1;
+                    }
+                    if i < len {
+                        i += 1;
+                    }
+                    result.push(' ');
+                }
+                '"' => {
+                    i += 1;
+                    while i < len && chars[i] != '"' {
+                        if chars[i] == '\\' && i + 1 < len {
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    if i < len {
+                        i += 1;
+                    }
+                    result.push(' ');
+                }
+                c => {
+                    result.push(c);
+                    i += 1;
+                }
+            }
+        }
+        result
     }
 }

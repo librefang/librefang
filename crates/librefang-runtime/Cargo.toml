@@ -11,6 +11,7 @@ librefang-types = { path = "../librefang-types" }
 librefang-http = { path = "../librefang-http" }
 librefang-kernel-handle = { path = "../librefang-kernel-handle" }
 librefang-runtime-audit = { path = "../librefang-runtime-audit" }
+librefang-runtime-sandbox-docker = { path = "../librefang-runtime-sandbox-docker", optional = true }
 librefang-runtime-mcp = { path = "../librefang-runtime-mcp" }
 librefang-llm-drivers = { path = "../librefang-llm-drivers" }
 librefang-llm-driver = { path = "../librefang-llm-driver" }
@@ -96,7 +97,7 @@ daytona-backend = []
 # whole subsystems for size/security.
 media = []
 browser = []
-docker-sandbox = []
+docker-sandbox = ["dep:librefang-runtime-sandbox-docker"]
 
 
 [lints]

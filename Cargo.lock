@@ -4772,6 +4772,7 @@ dependencies = [
  "librefang-memory",
  "librefang-runtime-audit",
  "librefang-runtime-mcp",
+ "librefang-runtime-sandbox-docker",
  "librefang-skills",
  "librefang-types",
  "metrics",
@@ -4851,6 +4852,18 @@ dependencies = [
  "tracing",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "librefang-runtime-sandbox-docker"
+version = "2026.5.12-beta.11"
+dependencies = [
+ "chrono",
+ "dashmap",
+ "librefang-types",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

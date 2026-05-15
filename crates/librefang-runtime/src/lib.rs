@@ -33,7 +33,7 @@ pub mod context_overflow;
 pub mod copilot_oauth;
 pub mod dangerous_command;
 #[cfg(feature = "docker-sandbox")]
-pub mod docker_sandbox;
+pub use librefang_runtime_sandbox_docker as docker_sandbox;
 #[cfg(not(feature = "docker-sandbox"))]
 #[path = "docker_sandbox_stub.rs"]
 pub mod docker_sandbox;

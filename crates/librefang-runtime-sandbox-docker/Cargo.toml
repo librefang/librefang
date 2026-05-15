@@ -1,0 +1,17 @@
+[package]
+name = "librefang-runtime-sandbox-docker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Docker sandbox for tool exec (refs #3710 Phase 1)"
+
+[dependencies]
+librefang-types = { path = "../librefang-types" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+
+[lints]
+workspace = true
