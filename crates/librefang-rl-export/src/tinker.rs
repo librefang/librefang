@@ -50,7 +50,8 @@ use crate::{
 /// SDK falls back to when `TINKER_BASE_URL` is unset
 /// (<https://github.com/thinking-machines-lab/tinker/blob/main/src/tinker/_client.py>).
 /// Tests override via `export_to_tinker_with_base`.
-const DEFAULT_TINKER_BASE: &str = "https://tinker.thinkingmachines.dev/services/tinker-prod";
+pub(crate) const DEFAULT_TINKER_BASE: &str =
+    "https://tinker.thinkingmachines.dev/services/tinker-prod";
 
 /// SDK-version string we report to Tinker on every call. Tinker accepts
 /// arbitrary version strings (the SDK uses its own crate version); we
@@ -144,37 +145,53 @@ pub(crate) async fn export_to_tinker_with_base(
             "Tinker project is empty".to_string(),
         ));
     }
+    // SSRF validation runs in `crate::export` before dispatch so the
+    // in-crate wiremock tests can point `*_with_base` at a loopback
+    // mock. Production callers never bypass that gate.
+    // Scrub `toolset_metadata` before it leaves the process. Tinker
+    // pins the value to the session's `user_metadata` (visible on
+    // Tinker's session inspection surface), so a stray credential in
+    // a tool result would otherwise leak.
+    let scrubbed_metadata = export
+        .toolset_metadata
+        .as_ref()
+        .map(crate::redact::redact_metadata);
 
     let client = librefang_http::proxied_client();
 
-    // Step 1: register the session on Tinker.
+    // Step 1: register the session on Tinker. Sort tags for byte-
+    // identical wire output (refs #3298 prompt-cache determinism).
     let create_url = format!("{}/api/v1/create_session", base.trim_end_matches('/'));
+    let mut tags = vec!["librefang-rollout", project];
+    tags.sort();
     let create_body = CreateSessionRequest {
-        tags: vec!["librefang-rollout", project],
-        user_metadata: export.toolset_metadata.as_ref(),
+        tags,
+        user_metadata: scrubbed_metadata.as_ref(),
         sdk_version: LIBREFANG_SDK_VERSION,
         project_id: Some(project),
         request_type: "create_session",
     };
 
-    let create_resp = client
-        .post(&create_url)
-        .header("x-api-key", api_key)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .json(&create_body)
-        .send()
+    let create_json: CreateSessionResponse =
+        crate::retry::retry_upload("tinker.create_session", || {
+            let req = client
+                .post(&create_url)
+                .header("x-api-key", api_key)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .json(&create_body);
+            async move {
+                let resp = req.send().await?;
+                let status = resp.status();
+                if !status.is_success() {
+                    let body = read_body_truncated(resp).await;
+                    return Err(classify_status(status.as_u16(), body));
+                }
+                resp.json::<CreateSessionResponse>()
+                    .await
+                    .map_err(|e| classify_response_decode_error(e, "create-session JSON"))
+            }
+        })
         .await?;
-
-    let create_status = create_resp.status();
-    if !create_status.is_success() {
-        let body = read_body_truncated(create_resp).await;
-        return Err(classify_status(create_status.as_u16(), body));
-    }
-
-    let create_json: CreateSessionResponse = create_resp
-        .json()
-        .await
-        .map_err(|e| classify_response_decode_error(e, "create-session JSON"))?;
 
     // Step 2: submit the trajectory as a single GenericEvent under the
     // newly created session. Tinker's telemetry endpoint accepts arbitrary
@@ -192,6 +209,11 @@ pub(crate) async fn export_to_tinker_with_base(
         "started_at": export.started_at.to_rfc3339(),
         "finished_at": export.finished_at.to_rfc3339(),
     });
+    // `event_session_index: 0` is correct here because `export_to_tinker`
+    // creates a fresh session every call — the event is always "the
+    // first event in this session". Reusing a session externally is
+    // not supported by this exporter; callers re-use Tinker-side
+    // sessions through Tinker's SDK directly, not via re-export.
     let event = GenericEvent {
         event: "generic",
         event_id: export.run_id.clone(),
@@ -210,19 +232,23 @@ pub(crate) async fn export_to_tinker_with_base(
     };
 
     let upload_url = format!("{}/api/v1/telemetry", base.trim_end_matches('/'));
-    let upload_resp = client
-        .post(&upload_url)
-        .header("x-api-key", api_key)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .json(&telemetry_body)
-        .send()
-        .await?;
-
-    let upload_status = upload_resp.status();
-    if !upload_status.is_success() {
-        let body = read_body_truncated(upload_resp).await;
-        return Err(classify_status(upload_status.as_u16(), body));
-    }
+    crate::retry::retry_upload("tinker.telemetry", || {
+        let req = client
+            .post(&upload_url)
+            .header("x-api-key", api_key)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .json(&telemetry_body);
+        async move {
+            let resp = req.send().await?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = read_body_truncated(resp).await;
+                return Err(classify_status(status.as_u16(), body));
+            }
+            Ok(())
+        }
+    })
+    .await?;
 
     // Tinker has no run-URL concept; the closest browser-loadable handle
     // is the session id itself. Surface a stable session URL pattern so
@@ -234,6 +260,12 @@ pub(crate) async fn export_to_tinker_with_base(
         "{}/api/v1/get_session/{}",
         base.trim_end_matches('/'),
         urlencoding::encode(&create_json.session_id),
+    );
+
+    tracing::info!(
+        target_run_url = %target_run_url,
+        bytes_uploaded = bytes_len,
+        "rl-export: tinker upload complete",
     );
 
     Ok(ExportReceipt {

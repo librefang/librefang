@@ -16,6 +16,12 @@ use thiserror::Error;
 /// connect, read timeout, TLS, …). Surface the inner message verbatim;
 /// upstream-specific 4xx bodies use `UpstreamRejected` instead so the
 /// status code stays inspectable.
+///
+/// `#[non_exhaustive]` so future variants (e.g. a structured
+/// `RateLimited { retry_after }`) can land non-breaking — matches the
+/// stance on `ExportTarget` and reserves room for the next obvious
+/// addition.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum ExportError {
     /// Transport-level failure talking to the upstream — DNS, TCP/TLS,
@@ -57,6 +63,21 @@ pub enum ExportError {
     /// change; no retry will help.
     #[error("invalid export configuration: {0}")]
     InvalidConfig(String),
+
+    /// Atropos-specific: the local trainer process has not finished
+    /// booting (`register-env` returned 200 with the sentinel body
+    /// `{"status": "wait for trainer to start"}` and no `env_id`).
+    /// Caller should poll with backoff until the trainer is ready.
+    /// Distinct variant rather than a synthetic 503 so callers can
+    /// branch on the condition without parsing the body, and so the
+    /// synthesised status doesn't collide with a real 503 from the
+    /// upstream (refs PR review nit).
+    #[error("atropos trainer not ready: {status_label}")]
+    TrainerNotReady {
+        /// Status string echoed from the Atropos `register-env` 200-as-
+        /// busy sentinel body (typically `"wait for trainer to start"`).
+        status_label: String,
+    },
 }
 
 impl From<reqwest::Error> for ExportError {

@@ -31,7 +31,7 @@ use crate::{
 };
 
 /// Default W&B API base URL. Tests override via `export_to_wandb_with_base`.
-const DEFAULT_WANDB_BASE: &str = "https://api.wandb.ai";
+pub(crate) const DEFAULT_WANDB_BASE: &str = "https://api.wandb.ai";
 
 /// Wire shape of the W&B "create run" request body. Field names match
 /// the REST documentation; optional fields are omitted via
@@ -39,8 +39,7 @@ const DEFAULT_WANDB_BASE: &str = "https://api.wandb.ai";
 #[derive(Debug, Serialize)]
 struct CreateRunRequest<'a> {
     project: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    entity: Option<&'a str>,
+    entity: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     run_id: Option<&'a str>,
     /// ISO-8601 RFC3339 start time for the run window.
@@ -66,7 +65,7 @@ struct CreateRunResponse {
 /// in here.
 pub(crate) async fn export_to_wandb(
     project: &str,
-    entity: Option<&str>,
+    entity: &str,
     run_id_hint: Option<&str>,
     api_key: &str,
     export: RlTrajectoryExport,
@@ -89,7 +88,7 @@ pub(crate) async fn export_to_wandb(
 pub(crate) async fn export_to_wandb_with_base(
     base: &str,
     project: &str,
-    entity: Option<&str>,
+    entity: &str,
     run_id_hint: Option<&str>,
     api_key: &str,
     export: RlTrajectoryExport,
@@ -104,46 +103,68 @@ pub(crate) async fn export_to_wandb_with_base(
             "W&B project is empty".to_string(),
         ));
     }
+    if entity.is_empty() {
+        return Err(ExportError::InvalidConfig(
+            "W&B entity is empty (the previous 'default' fallback was \
+             a guess that would silently land the run under a wrong-named \
+             bucket; callers must look up the entity out of band)"
+                .to_string(),
+        ));
+    }
+    // SSRF validation is gated on `crate::export` (the public dispatch
+    // entry point) rather than here, so the in-crate `wiremock` tests
+    // can point `*_with_base` at a `127.0.0.1` mock without tripping
+    // the public-mode allowlist. Production callers never bypass the
+    // gate — they go through `crate::export`, which always validates
+    // first.
+    // Scrub `toolset_metadata` before it leaves the process. W&B
+    // forwards `metadata` to the run page verbatim, so a tool result
+    // containing a stray credential would otherwise land in a
+    // third-party UI.
+    let scrubbed_metadata = export
+        .toolset_metadata
+        .as_ref()
+        .map(crate::redact::redact_metadata);
 
     let client = librefang_http::proxied_client();
     let auth_header = build_basic_auth(api_key);
 
-    // Step 1: create / register the run.
+    // Step 1: create / register the run. Wrapped in retry so transient
+    // 5xx / 429 / connect failures don't drop a finished rollout.
     let create_url = format!("{}/api/runs", base.trim_end_matches('/'));
-    let create_body = CreateRunRequest {
-        project,
-        entity,
-        run_id: run_id_hint.or(Some(export.run_id.as_str())),
-        started_at: export.started_at.to_rfc3339(),
-        finished_at: export.finished_at.to_rfc3339(),
-        metadata: export.toolset_metadata.as_ref(),
-    };
+    let started_at = export.started_at.to_rfc3339();
+    let finished_at = export.finished_at.to_rfc3339();
+    let run_id_for_hint = run_id_hint
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| export.run_id.clone());
 
-    let create_resp = client
-        .post(&create_url)
-        .header(reqwest::header::AUTHORIZATION, &auth_header)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .json(&create_body)
-        .send()
-        .await?;
-
-    let create_status = create_resp.status();
-    if !create_status.is_success() {
-        let body = read_body_truncated(create_resp).await;
-        return Err(classify_status(create_status.as_u16(), body));
-    }
-
-    let create_json: CreateRunResponse = create_resp
-        .json()
-        .await
-        .map_err(|e| classify_response_decode_error(e, "create-run JSON"))?;
-
-    // The entity used for the upload path: prefer the caller-supplied
-    // value; fall back to a literal "default" placeholder for the upload
-    // URL when entity is unset (matches W&B's "personal entity" convention
-    // for keyless single-user accounts — the server resolves it from the
-    // API key). Tests assert the prefer-explicit path.
-    let upload_entity = entity.unwrap_or("default");
+    let create_json: CreateRunResponse = crate::retry::retry_upload("wandb.create_run", || {
+        let create_body = CreateRunRequest {
+            project,
+            entity,
+            run_id: Some(run_id_for_hint.as_str()),
+            started_at: started_at.clone(),
+            finished_at: finished_at.clone(),
+            metadata: scrubbed_metadata.as_ref(),
+        };
+        let req = client
+            .post(&create_url)
+            .header(reqwest::header::AUTHORIZATION, &auth_header)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .json(&create_body);
+        async move {
+            let resp = req.send().await?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = read_body_truncated(resp).await;
+                return Err(classify_status(status.as_u16(), body));
+            }
+            resp.json::<CreateRunResponse>()
+                .await
+                .map_err(|e| classify_response_decode_error(e, "create-run JSON"))
+        }
+    })
+    .await?;
 
     // Step 2: upload the trajectory bytes as a file artefact under the
     // newly created run. Each path segment is percent-encoded — entity,
@@ -153,25 +174,36 @@ pub(crate) async fn export_to_wandb_with_base(
     let upload_url = format!(
         "{}/files/{}/{}/{}",
         base.trim_end_matches('/'),
-        urlencoding::encode(upload_entity),
+        urlencoding::encode(entity),
         urlencoding::encode(project),
         urlencoding::encode(&create_json.run_id),
     );
     let bytes_len = export.trajectory_bytes.len() as u64;
+    let trajectory_bytes = export.trajectory_bytes;
 
-    let upload_resp = client
-        .post(&upload_url)
-        .header(reqwest::header::AUTHORIZATION, &auth_header)
-        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-        .body(export.trajectory_bytes)
-        .send()
-        .await?;
+    crate::retry::retry_upload("wandb.upload_file", || {
+        let req = client
+            .post(&upload_url)
+            .header(reqwest::header::AUTHORIZATION, &auth_header)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(trajectory_bytes.clone());
+        async move {
+            let resp = req.send().await?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = read_body_truncated(resp).await;
+                return Err(classify_status(status.as_u16(), body));
+            }
+            Ok(())
+        }
+    })
+    .await?;
 
-    let upload_status = upload_resp.status();
-    if !upload_status.is_success() {
-        let body = read_body_truncated(upload_resp).await;
-        return Err(classify_status(upload_status.as_u16(), body));
-    }
+    tracing::info!(
+        target_run_url = %create_json.url,
+        bytes_uploaded = bytes_len,
+        "rl-export: wandb upload complete",
+    );
 
     Ok(ExportReceipt {
         target_run_url: create_json.url,
@@ -247,7 +279,7 @@ mod tests {
         let receipt = export_to_wandb_with_base(
             &server.uri(),
             "rl-proj",
-            Some("acme"),
+            "acme",
             Some("client-hinted-run-id"),
             "test-key",
             sample_export("client-hinted-run-id"),
@@ -267,37 +299,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn export_falls_back_to_default_entity_when_unset() {
-        // Without an entity, the upload path uses the "default" placeholder
-        // and W&B's server resolves the personal entity from the API key.
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/api/runs"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "run_id": "rid",
-                "url": "https://wandb.ai/personal/rl-proj/runs/rid",
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/files/default/rl-proj/rid"))
-            .respond_with(ResponseTemplate::new(200))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let receipt = export_to_wandb_with_base(
-            &server.uri(),
+    async fn export_rejects_empty_entity_before_any_http() {
+        // The previous code fell back to a literal "default" string for
+        // a missing entity, which was a guess. Empty / unset entity now
+        // fails with `InvalidConfig` so the operator must supply a real
+        // value rather than silently landing the run in the wrong bucket.
+        let err = export_to_wandb_with_base(
+            "http://will.not.be.contacted.invalid",
             "rl-proj",
-            None,
+            "",
             None,
             "key",
             sample_export("rid"),
         )
         .await
-        .expect("export must succeed with no entity");
-        assert_eq!(receipt.bytes_uploaded, 23);
+        .expect_err("empty entity must be rejected up front");
+        assert!(matches!(err, ExportError::InvalidConfig(_)), "got {err:?}");
     }
 
     #[tokio::test]
@@ -313,7 +330,7 @@ mod tests {
         let err = export_to_wandb_with_base(
             &server.uri(),
             "rl-proj",
-            Some("acme"),
+            "acme",
             None,
             "bogus-key",
             sample_export("rid"),
@@ -336,7 +353,7 @@ mod tests {
         let err = export_to_wandb_with_base(
             &server.uri(),
             "missing-proj",
-            Some("acme"),
+            "acme",
             None,
             "k",
             sample_export("rid"),
@@ -359,7 +376,7 @@ mod tests {
         let err = export_to_wandb_with_base(
             "http://will.not.be.contacted.invalid",
             "rl-proj",
-            Some("acme"),
+            "acme",
             None,
             "",
             sample_export("rid"),
@@ -397,7 +414,7 @@ mod tests {
         let err = export_to_wandb_with_base(
             &server.uri(),
             "rl-proj",
-            Some("acme"),
+            "acme",
             None,
             "key",
             sample_export("rid"),
@@ -450,7 +467,7 @@ mod tests {
         let receipt = export_to_wandb_with_base(
             &server.uri(),
             "rl proj",
-            Some("acme/team"),
+            "acme/team",
             None,
             "k",
             sample_export("rid"),
@@ -458,5 +475,69 @@ mod tests {
         .await
         .expect("export must succeed with encoded path");
         assert_eq!(receipt.bytes_uploaded, 23);
+    }
+
+    /// Credential-shaped strings in `toolset_metadata` must be scrubbed
+    /// before the metadata blob ships to W&B as the run's `metadata`
+    /// field. This pins the redaction wiring end-to-end: the mock
+    /// asserts the request body does NOT contain the literal credential
+    /// and DOES contain the redaction placeholder, proving the scrub
+    /// fires upstream of the network boundary.
+    #[tokio::test]
+    async fn toolset_metadata_is_redacted_before_upload() {
+        use wiremock::matchers::body_string_contains;
+        let server = MockServer::start().await;
+
+        // The mock REJECTS any request body containing the credential
+        // literal — if the redactor failed open, this 599 surfaces as
+        // an `UpstreamRejected`, the test fails, and the engineer sees
+        // the credential leak in the diagnostic. Conversely, the mock
+        // succeeds only when the placeholder `<REDACTED:CREDENTIAL>`
+        // is present.
+        Mock::given(method("POST"))
+            .and(path("/api/runs"))
+            .and(body_string_contains("sk-live-DO_NOT_LEAK"))
+            .respond_with(ResponseTemplate::new(599).set_body_string("FAIL: credential leaked"))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/runs"))
+            .and(body_string_contains("<REDACTED:CREDENTIAL>"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "run_id": "scrubbed-run",
+                "url": "https://wandb.ai/acme/rl-proj/runs/scrubbed-run",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/files/acme/rl-proj/scrubbed-run"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let payload = RlTrajectoryExport {
+            run_id: "rid".to_string(),
+            trajectory_bytes: b"bytes".to_vec(),
+            toolset_metadata: Some(serde_json::json!({
+                "tool_result": {
+                    "stdout": "API_KEY=sk-live-DO_NOT_LEAK_1234567890",
+                }
+            })),
+            started_at: Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap(),
+            finished_at: Utc.with_ymd_and_hms(2026, 5, 14, 10, 42, 0).unwrap(),
+        };
+
+        let receipt =
+            export_to_wandb_with_base(&server.uri(), "rl-proj", "acme", None, "k", payload)
+                .await
+                .expect("export must succeed (and credential must be redacted)");
+        assert_eq!(
+            receipt.target_run_url,
+            "https://wandb.ai/acme/rl-proj/runs/scrubbed-run"
+        );
     }
 }

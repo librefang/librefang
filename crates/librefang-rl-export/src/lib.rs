@@ -43,6 +43,9 @@
 
 mod atropos;
 pub mod error;
+mod redact;
+mod retry;
+mod ssrf;
 mod tinker;
 mod wandb;
 
@@ -55,13 +58,25 @@ use chrono::{DateTime, Utc};
 /// This enum is `#[non_exhaustive]` so additional variants can land
 /// without breaking callers.
 ///
-/// `Debug` is hand-implemented (not derived) so that `api_key` fields
-/// never appear in logs / panics / tracing spans verbatim. Adding a new
-/// variant with secret material requires updating the `Debug` impl —
-/// the in-crate `match` is exhaustive on purpose to force that
-/// awareness.
+/// # Secret handling: `*_env` indirection
+///
+/// API keys MUST NOT be inlined into this enum. Each secret-bearing
+/// variant carries an `api_key_env: String` field holding the **name**
+/// of the environment variable that holds the secret; the exporter
+/// reads the env var with `std::env::var` at upload time and fails
+/// closed with [`ExportError::InvalidConfig`] if the variable is unset
+/// or empty. This matches the rest of the workspace's
+/// `client_secret_env` / `api_key_env` convention (see
+/// `librefang-types::config::types::BraveSearchConfig` etc.) and keeps
+/// secrets out of `config.toml`, history snapshots, and process dumps.
+///
+/// `Debug` is derived (the public fields are env-var names — not the
+/// secret values — so plain `Debug` is safe). Adding a new variant
+/// that holds the secret material itself (rather than the env-var
+/// name) is a *regression*; route through the `_env` indirection
+/// instead.
 #[non_exhaustive]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum ExportTarget {
     /// Export to Weights & Biases (<https://wandb.ai>). The W&B REST
     /// surface accepts run metadata + arbitrary file artefacts; we
@@ -71,17 +86,25 @@ pub enum ExportTarget {
         /// W&B project name. Required by the W&B REST surface. The
         /// project must already exist; we do not auto-create.
         project: String,
-        /// W&B entity (team or username). When `None`, W&B resolves
-        /// the personal entity from the API key on the server side.
-        entity: Option<String>,
+        /// W&B entity (team or username). Required — W&B's "personal
+        /// entity" resolution via the API key is undocumented and
+        /// upload requests need an explicit entity in the URL path
+        /// (the previous `"default"` fallback was a guess that would
+        /// silently land the run under a wrong-named bucket). Callers
+        /// who want the personal entity must look it up out of band
+        /// and pass it here.
+        entity: String,
         /// Optional client-supplied run id hint. W&B accepts the hint
         /// when creating the run; the server-assigned id is what
-        /// ends up in the [`ExportReceipt`].
+        /// ends up in the [`ExportReceipt`]. When `None`,
+        /// [`RlTrajectoryExport::run_id`] is forwarded as the hint.
         run_id: Option<String>,
-        /// W&B API key. Sent as the password half of HTTP Basic
-        /// auth with the literal user `api`. See
-        /// <https://docs.wandb.ai/ref/api/rest/>.
-        api_key: String,
+        /// Name of the environment variable holding the W&B API key.
+        /// Resolved with `std::env::var` at upload time and sent as
+        /// the password half of HTTP Basic auth with the literal user
+        /// `api`. See <https://docs.wandb.ai/ref/api/rest/>. Missing /
+        /// empty env var fails closed with `InvalidConfig`.
+        api_key_env: String,
     },
     /// Export to Tinker (<https://thinkingmachines.ai/tinker/>).
     ///
@@ -92,12 +115,15 @@ pub enum ExportTarget {
     /// see the module-level docs in `tinker.rs` for the assumption
     /// flagged for maintainer sign-off and the SDK source links.
     Tinker {
-        /// Tinker API key. Sent as the `X-API-Key` header verbatim.
-        /// Tinker's own SDK requires the `tml-` prefix; this crate
-        /// forwards the key as-is and lets the upstream enforce the
-        /// prefix (so JWT-style credentials surfaced by
-        /// `TINKER_CREDENTIAL_CMD` still flow through).
-        api_key: String,
+        /// Name of the environment variable holding the Tinker API
+        /// key. Resolved with `std::env::var` at upload time and sent
+        /// as the `X-API-Key` header verbatim. Tinker's own SDK
+        /// requires the `tml-` prefix; this crate forwards the key
+        /// as-is and lets the upstream enforce the prefix (so
+        /// JWT-style credentials surfaced by `TINKER_CREDENTIAL_CMD`
+        /// still flow through). Missing / empty env var fails closed
+        /// with `InvalidConfig`.
+        api_key_env: String,
         /// Project identifier sent as `project_id` on the create-session
         /// call and also surfaced as a session tag. Required.
         project: String,
@@ -105,7 +131,8 @@ pub enum ExportTarget {
         /// `None` the crate uses Tinker's documented prod default
         /// (`https://tinker.thinkingmachines.dev/services/tinker-prod`).
         /// Operators on a self-hosted control plane set this; tests
-        /// point it at a `wiremock::MockServer`.
+        /// point it at a `wiremock::MockServer`. SSRF-validated:
+        /// loopback / private / link-local destinations are rejected.
         base_url: Option<String>,
     },
     /// Export to Atropos (<https://github.com/NousResearch/atropos>),
@@ -113,10 +140,18 @@ pub enum ExportTarget {
     ///
     /// Unlike W&B / Tinker, Atropos is **not a cloud-hosted service**:
     /// the API server is a local process the operator runs as part of
-    /// their training stack (default `http://localhost:8000`). There
-    /// is no authentication. This variant maps the rollout onto
-    /// Atropos's `register-env` / `scored_data` pair; see the module
-    /// docs in `atropos.rs` for the trainer-must-be-running assumption.
+    /// their training stack. There is no authentication. This variant
+    /// maps the rollout onto Atropos's `register-env` / `scored_data`
+    /// pair; see the module docs in `atropos.rs` for the
+    /// trainer-must-be-running assumption.
+    ///
+    /// **Atropos is the one exporter that talks to loopback / private
+    /// addresses by design** (the trainer is a local FastAPI service).
+    /// `base_url` MUST be a loopback (`127.0.0.0/8`, `::1`) or
+    /// RFC-1918 private destination; the SSRF guard rejects anything
+    /// public, and an unset `base_url` is rejected outright (no
+    /// implicit `localhost:8000` default) so operators make the
+    /// decision explicitly.
     ///
     /// `RlTrajectoryExport.trajectory_bytes` MUST already be valid
     /// `ScoredData` JSON (`tokens` / `masks` / `scores` / …); the
@@ -126,51 +161,21 @@ pub enum ExportTarget {
         /// Atropos appends an index (`<name>_<n>`) and returns the
         /// resolved name in the receipt. Required.
         project: String,
-        /// Optional override for the Atropos `run-api` base URL. When
-        /// `None` the crate uses `http://localhost:8000` (the
-        /// Atropos `run-api` default). Operators running the trainer
-        /// on a different host or port set this; tests point it at a
-        /// `wiremock::MockServer`.
-        base_url: Option<String>,
+        /// Atropos `run-api` base URL. Required and SSRF-validated
+        /// against the loopback / RFC-1918 allowlist for the Atropos
+        /// variant. There is intentionally **no implicit default** —
+        /// the prior `http://localhost:8000` was a guess that violated
+        /// the workspace SSRF policy. Operators set it explicitly to
+        /// the local trainer; tests point at a `wiremock::MockServer`.
+        base_url: String,
+        /// Maximum token length to report on `RegisterEnv`. `None`
+        /// uses the conservative default `32_768`.
+        max_token_length: Option<u32>,
+        /// Group size to report on `RegisterEnv`. `None` uses `1`.
+        group_size: Option<u32>,
+        /// Weight to report on `RegisterEnv`. `None` uses `1.0`.
+        weight: Option<f32>,
     },
-}
-
-impl std::fmt::Debug for ExportTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Each variant intentionally renders `api_key` as a fixed
-        // placeholder. The `match` is exhaustive (no wildcard arm) so
-        // a future secret-bearing variant fails to compile until its
-        // arm is added — which is the safety property we want.
-        match self {
-            Self::WandB {
-                project,
-                entity,
-                run_id,
-                api_key: _,
-            } => f
-                .debug_struct("WandB")
-                .field("project", project)
-                .field("entity", entity)
-                .field("run_id", run_id)
-                .field("api_key", &"<redacted>")
-                .finish(),
-            Self::Tinker {
-                api_key: _,
-                project,
-                base_url,
-            } => f
-                .debug_struct("Tinker")
-                .field("api_key", &"<redacted>")
-                .field("project", project)
-                .field("base_url", base_url)
-                .finish(),
-            Self::Atropos { project, base_url } => f
-                .debug_struct("Atropos")
-                .field("project", project)
-                .field("base_url", base_url)
-                .finish(),
-        }
-    }
 }
 
 /// A single RL rollout trajectory ready to be exported.
@@ -250,32 +255,85 @@ pub struct ExportReceipt {
 ///   the body did not match the expected shape.
 pub async fn export(
     target: ExportTarget,
-    export: RlTrajectoryExport,
+    payload: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
     match target {
         ExportTarget::WandB {
             project,
             entity,
             run_id,
-            api_key,
+            api_key_env,
         } => {
-            wandb::export_to_wandb(
+            let api_key = resolve_env_secret(&api_key_env, "W&B api_key_env")?;
+            // SSRF gate: the public dispatch always validates the
+            // outbound base URL before any I/O. W&B is a cloud service —
+            // loopback / private / link-local destinations are rejected.
+            ssrf::validate_egress_url(wandb::DEFAULT_WANDB_BASE, ssrf::EgressMode::Public)?;
+            wandb::export_to_wandb(&project, &entity, run_id.as_deref(), &api_key, payload).await
+        }
+        ExportTarget::Tinker {
+            api_key_env,
+            project,
+            base_url,
+        } => {
+            let api_key = resolve_env_secret(&api_key_env, "Tinker api_key_env")?;
+            // SSRF gate. Tinker is a public cloud service even when an
+            // operator overrides `base_url` for a self-hosted control
+            // plane (still a public DNS name); loopback / private /
+            // link-local destinations are rejected.
+            let base = base_url.as_deref().unwrap_or(tinker::DEFAULT_TINKER_BASE);
+            ssrf::validate_egress_url(base, ssrf::EgressMode::Public)?;
+            tinker::export_to_tinker(&project, &api_key, base_url.as_deref(), payload).await
+        }
+        ExportTarget::Atropos {
+            project,
+            base_url,
+            max_token_length,
+            group_size,
+            weight,
+        } => {
+            // SSRF gate. Atropos is a local-only microservice — only
+            // loopback / RFC-1918 destinations are accepted; public
+            // destinations and link-local / IMDS are rejected.
+            ssrf::validate_egress_url(&base_url, ssrf::EgressMode::LoopbackOrPrivate)?;
+            atropos::export_to_atropos(
                 &project,
-                entity.as_deref(),
-                run_id.as_deref(),
-                &api_key,
-                export,
+                &base_url,
+                atropos::AtroposTuning {
+                    max_token_length,
+                    group_size,
+                    weight,
+                },
+                payload,
             )
             .await
         }
-        ExportTarget::Tinker {
-            api_key,
-            project,
-            base_url,
-        } => tinker::export_to_tinker(&project, &api_key, base_url.as_deref(), export).await,
-        ExportTarget::Atropos { project, base_url } => {
-            atropos::export_to_atropos(&project, base_url.as_deref(), export).await
-        }
+    }
+}
+
+/// Resolve an `*_env` indirection: read the named environment variable
+/// and return its value. Empty / unset env vars surface as
+/// [`ExportError::InvalidConfig`] so the operator sees the failure at
+/// the call site rather than as a downstream 401.
+///
+/// `field_label` identifies the caller-side config field name (e.g.
+/// `"W&B api_key_env"`) and is woven into the error so the operator
+/// can locate the offending entry in `config.toml`. The actual env-var
+/// name is also echoed — it's not a secret, only its value is.
+pub(crate) fn resolve_env_secret(env_var: &str, field_label: &str) -> Result<String, ExportError> {
+    if env_var.is_empty() {
+        return Err(ExportError::InvalidConfig(format!(
+            "{field_label} is empty (expected the NAME of an environment variable holding the secret, not the secret itself)"
+        )));
+    }
+    match std::env::var(env_var) {
+        Ok(v) if !v.is_empty() => Ok(v),
+        Ok(_) => Err(ExportError::InvalidConfig(format!(
+            "{field_label} points at env var '{env_var}', which is set but empty"
+        ))),
+        Err(_) => Err(ExportError::InvalidConfig(format!(
+            "{field_label} points at env var '{env_var}', which is not set"
+        ))),
     }
 }
 
@@ -283,43 +341,92 @@ pub async fn export(
 mod tests {
     use super::*;
 
-    /// The hand-written `Debug` impl must redact api_key fields across
-    /// every secret-bearing variant. Asserting against the literal key
-    /// guards the property: even a misplaced field-list reordering
-    /// during a future refactor will fail this test.
+    /// `*_env` indirection: an empty env-var name fails fast with
+    /// `InvalidConfig` (no env probe) so a caller that accidentally
+    /// stored the literal secret in the `*_env` field — or left it
+    /// unset entirely — sees the misconfiguration immediately, not as
+    /// a downstream 401.
     #[test]
-    fn debug_redacts_api_key_for_secret_bearing_variants() {
-        let secret = "sk-live-DO-NOT-LEAK-12345";
+    fn resolve_env_secret_rejects_empty_var_name() {
+        let err = resolve_env_secret("", "test").expect_err("empty env var name must be rejected");
+        assert!(matches!(err, ExportError::InvalidConfig(_)), "got {err:?}");
+    }
 
-        let wandb = ExportTarget::WandB {
-            project: "rl-proj".to_string(),
-            entity: Some("acme".to_string()),
-            run_id: Some("run-1".to_string()),
-            api_key: secret.to_string(),
-        };
-        let rendered = format!("{wandb:?}");
-        assert!(
-            !rendered.contains(secret),
-            "Debug must not include api_key plaintext: {rendered}"
-        );
-        assert!(
-            rendered.contains("<redacted>"),
-            "Debug must render placeholder: {rendered}"
-        );
+    /// `*_env` indirection: an unset env var surfaces as
+    /// `InvalidConfig` mentioning the variable name (the *name* is
+    /// not a secret — the operator needs to see which var was missing).
+    #[test]
+    fn resolve_env_secret_rejects_unset_var() {
+        // Pick a deliberately-bogus var name we are confident is unset.
+        let var = "LIBREFANG_RL_EXPORT_TEST_DEFINITELY_UNSET_42";
+        std::env::remove_var(var);
+        let err = resolve_env_secret(var, "test").expect_err("unset env var must be rejected");
+        match err {
+            ExportError::InvalidConfig(msg) => {
+                assert!(msg.contains(var), "error must mention env var name: {msg}");
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+    }
 
-        let tinker = ExportTarget::Tinker {
-            api_key: secret.to_string(),
-            project: "rl-proj".to_string(),
-            base_url: None,
+    /// SSRF gate: routing a Tinker export at the cloud metadata IP
+    /// (169.254.169.254) MUST be rejected with `InvalidConfig` rather
+    /// than completing a successful upload. Pins the egress allowlist
+    /// against an operator who passes a tenant-controlled string into
+    /// `ExportTarget::Tinker.base_url`.
+    #[tokio::test]
+    async fn export_rejects_tinker_base_url_at_imds() {
+        let var = "LIBREFANG_RL_EXPORT_TEST_IMDS_KEY";
+        std::env::set_var(var, "tml-fake");
+        let payload = RlTrajectoryExport {
+            run_id: "rid".to_string(),
+            trajectory_bytes: b"bytes".to_vec(),
+            toolset_metadata: None,
+            started_at: chrono::Utc::now(),
+            finished_at: chrono::Utc::now(),
         };
-        let rendered = format!("{tinker:?}");
-        assert!(
-            !rendered.contains(secret),
-            "Debug must not include api_key plaintext: {rendered}"
-        );
-        assert!(
-            rendered.contains("<redacted>"),
-            "Debug must render placeholder: {rendered}"
-        );
+        let target = ExportTarget::Tinker {
+            api_key_env: var.to_string(),
+            project: "p".to_string(),
+            base_url: Some("http://169.254.169.254/latest/meta-data/".to_string()),
+        };
+        let err = export(target, payload)
+            .await
+            .expect_err("IMDS base URL must be rejected");
+        std::env::remove_var(var);
+        match err {
+            ExportError::InvalidConfig(msg) => {
+                assert!(
+                    msg.contains("169.254") || msg.to_lowercase().contains("block"),
+                    "error must mention the blocked host: {msg}"
+                );
+            }
+            other => panic!("expected InvalidConfig (SSRF), got {other:?}"),
+        }
+    }
+
+    /// SSRF gate: routing an Atropos export at a public IP MUST be
+    /// rejected. Atropos has no auth — exposing the producer to the
+    /// public internet is the wrong shape entirely.
+    #[tokio::test]
+    async fn export_rejects_atropos_public_base_url() {
+        let payload = RlTrajectoryExport {
+            run_id: "rid".to_string(),
+            trajectory_bytes: b"bytes".to_vec(),
+            toolset_metadata: None,
+            started_at: chrono::Utc::now(),
+            finished_at: chrono::Utc::now(),
+        };
+        let target = ExportTarget::Atropos {
+            project: "p".to_string(),
+            base_url: "https://attacker.example.com/".to_string(),
+            max_token_length: None,
+            group_size: None,
+            weight: None,
+        };
+        let err = export(target, payload)
+            .await
+            .expect_err("public base URL on Atropos must be rejected");
+        assert!(matches!(err, ExportError::InvalidConfig(_)), "got {err:?}");
     }
 }

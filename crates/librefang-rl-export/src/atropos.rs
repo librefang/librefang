@@ -56,11 +56,16 @@ use crate::{
     ExportReceipt, RlTrajectoryExport,
 };
 
-/// Default Atropos REST base URL. Matches the Atropos `run-api` default
-/// documented in the project's README (the server binds to
-/// `http://localhost:8000` unless overridden by CLI flags). Tests
-/// override via `export_to_atropos_with_base`.
-const DEFAULT_ATROPOS_BASE: &str = "http://localhost:8000";
+/// Optional caller overrides for the `RegisterEnv` tuning knobs. `None`
+/// per field uses the conservative default. Threaded through
+/// `ExportTarget::Atropos` so operators don't have to fork the crate
+/// to retune (refs PR review nit on hard-coded constants).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct AtroposTuning {
+    pub max_token_length: Option<u32>,
+    pub group_size: Option<u32>,
+    pub weight: Option<f32>,
+}
 
 /// Wire shape of the Atropos `RegisterEnv` request body. Mirrors the
 /// `RegisterEnv` Pydantic model in
@@ -111,11 +116,11 @@ const DEFAULT_WEIGHT: f32 = 1.0;
 /// calls in here.
 pub(crate) async fn export_to_atropos(
     project: &str,
-    base_url_override: Option<&str>,
+    base: &str,
+    tuning: AtroposTuning,
     export: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
-    let base = base_url_override.unwrap_or(DEFAULT_ATROPOS_BASE);
-    export_to_atropos_with_base(base, project, export).await
+    export_to_atropos_with_base(base, project, tuning, export).await
 }
 
 /// Same as `export_to_atropos` but with a caller-supplied base URL.
@@ -125,6 +130,7 @@ pub(crate) async fn export_to_atropos(
 pub(crate) async fn export_to_atropos_with_base(
     base: &str,
     project: &str,
+    tuning: AtroposTuning,
     export: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
     if project.is_empty() {
@@ -132,56 +138,70 @@ pub(crate) async fn export_to_atropos_with_base(
             "Atropos project (desired_name) is empty".to_string(),
         ));
     }
+    if base.is_empty() {
+        return Err(ExportError::InvalidConfig(
+            "Atropos base_url is empty (no implicit default — the prior \
+             'http://localhost:8000' was a guess; operators must set it \
+             explicitly to the local trainer URL)"
+                .to_string(),
+        ));
+    }
     if export.trajectory_bytes.is_empty() {
         return Err(ExportError::InvalidConfig(
             "Atropos export trajectory_bytes is empty".to_string(),
         ));
     }
+    // SSRF validation runs in `crate::export` before dispatch so the
+    // in-crate wiremock tests can point `*_with_base` at a loopback
+    // mock. Production callers never bypass that gate.
+
+    let max_token_length = tuning.max_token_length.unwrap_or(DEFAULT_MAX_TOKEN_LENGTH);
+    let group_size = tuning.group_size.unwrap_or(DEFAULT_GROUP_SIZE);
+    let weight = tuning.weight.unwrap_or(DEFAULT_WEIGHT);
 
     let client = librefang_http::proxied_client();
 
     // Step 1: register this producer with the running Atropos trainer.
     let register_url = format!("{}/register-env", base.trim_end_matches('/'));
     let register_body = RegisterEnvRequest {
-        max_token_length: DEFAULT_MAX_TOKEN_LENGTH,
+        max_token_length,
         desired_name: project,
-        weight: DEFAULT_WEIGHT,
-        group_size: DEFAULT_GROUP_SIZE,
+        weight,
+        group_size,
         min_batch_allocation: None,
     };
 
-    let register_resp = client
-        .post(&register_url)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .json(&register_body)
-        .send()
+    let register_json: RegisterEnvResponse =
+        crate::retry::retry_upload("atropos.register_env", || {
+            let req = client
+                .post(&register_url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .json(&register_body);
+            async move {
+                let resp = req.send().await?;
+                let status = resp.status();
+                if !status.is_success() {
+                    let body = read_body_truncated(resp).await;
+                    return Err(classify_status(status.as_u16(), body));
+                }
+                resp.json::<RegisterEnvResponse>()
+                    .await
+                    .map_err(|e| classify_response_decode_error(e, "register-env JSON"))
+            }
+        })
         .await?;
 
-    let register_status = register_resp.status();
-    if !register_status.is_success() {
-        let body = read_body_truncated(register_resp).await;
-        return Err(classify_status(register_status.as_u16(), body));
-    }
-
-    let register_json: RegisterEnvResponse = register_resp
-        .json()
-        .await
-        .map_err(|e| classify_response_decode_error(e, "register-env JSON"))?;
-
     // Atropos returns 200 with `{"status": "wait for trainer to start"}`
-    // and no env_id when the trainer side hasn't booted yet. Convert
-    // that overloaded 200-as-busy into a synthetic 503 UpstreamRejected
-    // so the caller has a clear retry-after-trainer-up signal.
+    // and no env_id when the trainer side hasn't booted yet. Surface
+    // a dedicated `TrainerNotReady` variant so callers can branch on
+    // the condition (poll & retry) without parsing the body.
     let env_id = match register_json.env_id {
         Some(id) => id,
         None => {
             let status_label = register_json
                 .status
                 .unwrap_or_else(|| "unknown".to_string());
-            return Err(ExportError::UpstreamRejected {
-                status: 503,
-                body: format!("atropos trainer not ready: {status_label}"),
-            });
+            return Err(ExportError::TrainerNotReady { status_label });
         }
     };
 
@@ -191,18 +211,23 @@ pub(crate) async fn export_to_atropos_with_base(
     // UpstreamRejected{422, body}.
     let bytes_len = export.trajectory_bytes.len() as u64;
     let upload_url = format!("{}/scored_data", base.trim_end_matches('/'));
-    let upload_resp = client
-        .post(&upload_url)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(export.trajectory_bytes)
-        .send()
-        .await?;
-
-    let upload_status = upload_resp.status();
-    if !upload_status.is_success() {
-        let body = read_body_truncated(upload_resp).await;
-        return Err(classify_status(upload_status.as_u16(), body));
-    }
+    let trajectory_bytes = export.trajectory_bytes;
+    crate::retry::retry_upload("atropos.scored_data", || {
+        let req = client
+            .post(&upload_url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(trajectory_bytes.clone());
+        async move {
+            let resp = req.send().await?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = read_body_truncated(resp).await;
+                return Err(classify_status(status.as_u16(), body));
+            }
+            Ok(())
+        }
+    })
+    .await?;
 
     // Atropos has no concept of a browser-loadable "run URL" — the API
     // is a local microservice. The closest stable handle for the
@@ -222,6 +247,13 @@ pub(crate) async fn export_to_atropos_with_base(
         "{}/latest_example#env={}",
         base.trim_end_matches('/'),
         urlencoding::encode(&wandb_name),
+    );
+
+    tracing::info!(
+        target_run_url = %target_run_url,
+        bytes_uploaded = bytes_len,
+        env_id,
+        "rl-export: atropos upload complete",
     );
 
     Ok(ExportReceipt {
@@ -301,9 +333,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let receipt = export_to_atropos_with_base(&server.uri(), "rl-proj", sample_export("rid"))
-            .await
-            .expect("export must succeed against mock");
+        let receipt = export_to_atropos_with_base(
+            &server.uri(),
+            "rl-proj",
+            AtroposTuning::default(),
+            sample_export("rid"),
+        )
+        .await
+        .expect("export must succeed against mock");
 
         assert_eq!(
             receipt.target_run_url,
@@ -317,12 +354,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn export_translates_trainer_not_ready_to_upstream_rejected_503() {
+    async fn export_translates_trainer_not_ready_to_dedicated_variant() {
         // Atropos returns HTTP 200 with {"status": "wait for trainer to
         // start"} and NO env_id when the trainer side hasn't booted.
-        // This crate converts that overloaded 200-as-busy into a
-        // synthetic 503 UpstreamRejected so callers see a clear
-        // retry-after-trainer-up signal.
+        // We surface a dedicated `TrainerNotReady` variant so callers
+        // can pattern-match the condition without parsing the body
+        // (the prior synthetic 503 collided with real 503s from the
+        // upstream).
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/register-env"))
@@ -333,15 +371,22 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = export_to_atropos_with_base(&server.uri(), "rl-proj", sample_export("rid"))
-            .await
-            .expect_err("trainer-not-ready sentinel must surface as ExportError");
+        let err = export_to_atropos_with_base(
+            &server.uri(),
+            "rl-proj",
+            AtroposTuning::default(),
+            sample_export("rid"),
+        )
+        .await
+        .expect_err("trainer-not-ready sentinel must surface as ExportError");
         match err {
-            ExportError::UpstreamRejected { status, body } => {
-                assert_eq!(status, 503);
-                assert!(body.contains("wait for trainer to start"), "body={body}");
+            ExportError::TrainerNotReady { status_label } => {
+                assert!(
+                    status_label.contains("wait for trainer to start"),
+                    "status_label must echo upstream sentinel: {status_label}",
+                );
             }
-            other => panic!("expected UpstreamRejected{{503,..}}, got {other:?}"),
+            other => panic!("expected TrainerNotReady, got {other:?}"),
         }
     }
 
@@ -359,9 +404,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = export_to_atropos_with_base(&server.uri(), "rl-proj", sample_export("rid"))
-            .await
-            .expect_err("401 must surface as ExportError");
+        let err = export_to_atropos_with_base(
+            &server.uri(),
+            "rl-proj",
+            AtroposTuning::default(),
+            sample_export("rid"),
+        )
+        .await
+        .expect_err("401 must surface as ExportError");
         assert!(matches!(err, ExportError::AuthError), "got {err:?}");
     }
 
@@ -390,9 +440,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = export_to_atropos_with_base(&server.uri(), "rl-proj", sample_export("rid"))
-            .await
-            .expect_err("422 must surface as UpstreamRejected");
+        let err = export_to_atropos_with_base(
+            &server.uri(),
+            "rl-proj",
+            AtroposTuning::default(),
+            sample_export("rid"),
+        )
+        .await
+        .expect_err("422 must surface as UpstreamRejected");
         match err {
             ExportError::UpstreamRejected { status, body } => {
                 assert_eq!(status, 422);
@@ -405,10 +460,12 @@ mod tests {
     #[tokio::test]
     async fn empty_project_is_rejected_before_any_http() {
         // InvalidConfig must fire before we touch the network. We use a
-        // bogus base URL to prove no I/O happens.
+        // bogus base URL to prove no I/O happens — the project check
+        // runs before SSRF validation.
         let err = export_to_atropos_with_base(
-            "http://will.not.be.contacted.invalid",
+            "http://127.0.0.1:65535/will-not-be-contacted",
             "",
+            AtroposTuning::default(),
             sample_export("rid"),
         )
         .await
@@ -421,13 +478,19 @@ mod tests {
         // Atropos's ScoredData validator would reject an empty body
         // anyway, but rejecting it locally avoids a pointless round
         // trip and surfaces InvalidConfig (caller config), not
-        // UpstreamRejected (server error).
+        // UpstreamRejected (server error). Use a loopback base URL
+        // that satisfies the SSRF guard so we can reach the empty-
+        // body check.
         let mut export = sample_export("rid");
         export.trajectory_bytes.clear();
-        let err =
-            export_to_atropos_with_base("http://will.not.be.contacted.invalid", "rl-proj", export)
-                .await
-                .expect_err("empty trajectory_bytes must be rejected up front");
+        let err = export_to_atropos_with_base(
+            "http://127.0.0.1:65535/will-not-be-contacted",
+            "rl-proj",
+            AtroposTuning::default(),
+            export,
+        )
+        .await
+        .expect_err("empty trajectory_bytes must be rejected up front");
         assert!(matches!(err, ExportError::InvalidConfig(_)), "got {err:?}");
     }
 }
