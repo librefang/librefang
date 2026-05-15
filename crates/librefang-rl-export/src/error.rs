@@ -99,3 +99,26 @@ pub(crate) async fn read_body_truncated(resp: reqwest::Response) -> String {
     };
     String::from_utf8_lossy(slice).into_owned()
 }
+
+/// Classify a `reqwest::Error` raised by [`reqwest::Response::json`].
+/// Inside that call, the body is first streamed off the wire and then
+/// deserialized — either step can fail. Splitting them keeps the error
+/// taxonomy honest:
+///
+/// - **Decode failure** (`is_decode()`): the body arrived intact but
+///   didn't match the expected shape. Upstream contract drift; surface
+///   as [`ExportError::MalformedResponse`].
+/// - **Anything else** (transport drop while reading the body, TLS
+///   reset mid-read, …): treat as [`ExportError::NetworkError`] so a
+///   transient blip isn't mislabelled as an upstream API change.
+///
+/// `context` identifies the call site (e.g. `"create-run JSON"`) and
+/// is prepended to the message on the decode path so the operator can
+/// tell which response failed to parse.
+pub(crate) fn classify_response_decode_error(err: reqwest::Error, context: &str) -> ExportError {
+    if err.is_decode() {
+        ExportError::MalformedResponse(format!("{context}: {err}"))
+    } else {
+        ExportError::NetworkError(err.to_string())
+    }
+}

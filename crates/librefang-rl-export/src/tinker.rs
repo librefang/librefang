@@ -42,7 +42,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    error::{classify_status, read_body_truncated, ExportError},
+    error::{classify_response_decode_error, classify_status, read_body_truncated, ExportError},
     ExportReceipt, TrajectoryExport,
 };
 
@@ -174,7 +174,7 @@ pub(crate) async fn export_to_tinker_with_base(
     let create_json: CreateSessionResponse = create_resp
         .json()
         .await
-        .map_err(|e| ExportError::MalformedResponse(format!("create-session JSON: {e}")))?;
+        .map_err(|e| classify_response_decode_error(e, "create-session JSON"))?;
 
     // Step 2: submit the trajectory as a single GenericEvent under the
     // newly created session. Tinker's telemetry endpoint accepts arbitrary

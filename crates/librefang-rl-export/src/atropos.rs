@@ -52,7 +52,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    error::{classify_status, read_body_truncated, ExportError},
+    error::{classify_response_decode_error, classify_status, read_body_truncated, ExportError},
     ExportReceipt, TrajectoryExport,
 };
 
@@ -166,7 +166,7 @@ pub(crate) async fn export_to_atropos_with_base(
     let register_json: RegisterEnvResponse = register_resp
         .json()
         .await
-        .map_err(|e| ExportError::MalformedResponse(format!("register-env JSON: {e}")))?;
+        .map_err(|e| classify_response_decode_error(e, "register-env JSON"))?;
 
     // Atropos returns 200 with `{"status": "wait for trainer to start"}`
     // and no env_id when the trainer side hasn't booted yet. Convert

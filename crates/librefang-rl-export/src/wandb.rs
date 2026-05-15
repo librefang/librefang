@@ -26,7 +26,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    error::{classify_status, read_body_truncated, ExportError},
+    error::{classify_response_decode_error, classify_status, read_body_truncated, ExportError},
     ExportReceipt, TrajectoryExport,
 };
 
@@ -136,7 +136,7 @@ pub(crate) async fn export_to_wandb_with_base(
     let create_json: CreateRunResponse = create_resp
         .json()
         .await
-        .map_err(|e| ExportError::MalformedResponse(format!("create-run JSON: {e}")))?;
+        .map_err(|e| classify_response_decode_error(e, "create-run JSON"))?;
 
     // The entity used for the upload path: prefer the caller-supplied
     // value; fall back to a literal "default" placeholder for the upload
@@ -377,6 +377,42 @@ mod tests {
         let header = build_basic_auth("secret");
         let expected_b64 = base64::engine::general_purpose::STANDARD.encode("api:secret");
         assert_eq!(header, format!("Basic {expected_b64}"));
+    }
+
+    /// A 2xx response whose body fails to deserialize into the expected
+    /// shape must surface as `MalformedResponse`, not `NetworkError` —
+    /// the bytes arrived intact, the upstream just spoke a different
+    /// contract. Pins the decode-vs-network split that lives in
+    /// `error::classify_response_decode_error`.
+    #[tokio::test]
+    async fn export_maps_2xx_non_json_body_to_malformed_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/runs"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json at all"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = export_to_wandb_with_base(
+            &server.uri(),
+            "rl-proj",
+            Some("acme"),
+            None,
+            "key",
+            sample_export("rid"),
+        )
+        .await
+        .expect_err("non-JSON 2xx body must surface as ExportError");
+        match err {
+            ExportError::MalformedResponse(msg) => {
+                assert!(
+                    msg.contains("create-run JSON"),
+                    "decode error must carry call-site context, got: {msg}",
+                );
+            }
+            other => panic!("expected MalformedResponse, got {other:?}"),
+        }
     }
 
     /// Upload-URL path segments must be percent-encoded. A caller that
