@@ -1,0 +1,41 @@
+{
+  "phase": "phase-2-rebrand-cleanup",
+  "backend": "native-tool",
+  "tool": "claude-code",
+  "started": "2026-05-15T00:00:00Z",
+  "assessment_complete": true,
+  "assessment_completed_at": "2026-05-15T00:00:00Z",
+  "plan_complete": false,
+  "changes_total": 0,
+  "changes_completed": 0,
+  "changes_in_progress": 0,
+  "changes_blocked": 0,
+  "changes_pending": 0,
+  "changes": [],
+  "goal_completion": {
+    "M8_dashboard_jsx_prose": "PENDING",
+    "M9b_config_defaults_doc_sweep": "PENDING — awaiting human decision on code default change",
+    "M10_legacy_key_removal_planning": "PENDING",
+    "M11_app_tsx_ts6133": "PENDING"
+  },
+  "pending_decisions": [
+    {
+      "id": "m9b-code-default-change",
+      "question": "Should default_name() be changed from 'LibreFang Agent OS' to 'BossFang Agent OS' and default_totp_issuer() from 'LibreFang' to 'BossFang'?",
+      "options": ["YES — change code defaults (recommended)", "NO — leave code defaults, add prose note in docs"],
+      "blocking": "M9b"
+    },
+    {
+      "id": "enforce-branding-dashboard-scope",
+      "question": "Should enforce-branding.py prose scope be extended to crates/librefang-api/dashboard/src/?",
+      "options": ["YES — extend scope", "NO — keep dashboard coverage limited to color tokens"],
+      "blocking": null
+    },
+    {
+      "id": "shellcheck-pre-push-hook",
+      "question": "Should shellcheck web/public/install.sh be added to scripts/hooks/pre-push?",
+      "options": ["YES — add to pre-push hook", "NO — remain CI-only"],
+      "blocking": null
+    }
+  ]
+}
