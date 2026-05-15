@@ -4770,9 +4770,7 @@ dependencies = [
  "librefang-llm-driver",
  "librefang-llm-drivers",
  "librefang-memory",
- "librefang-runtime-apply-patch",
  "librefang-runtime-audit",
- "librefang-runtime-browser",
  "librefang-runtime-mcp",
  "librefang-runtime-media",
  "librefang-runtime-sandbox-docker",
@@ -4815,15 +4813,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "librefang-runtime-apply-patch"
-version = "2026.5.12-beta.11"
-dependencies = [
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "librefang-runtime-audit"
 version = "2026.5.12-beta.11"
 dependencies = [
@@ -4840,24 +4829,6 @@ dependencies = [
  "tempfile",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "librefang-runtime-browser"
-version = "2026.5.12-beta.11"
-dependencies = [
- "chrono",
- "dashmap",
- "futures",
- "http",
- "librefang-http",
- "librefang-types",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "tracing",
 ]
 
 [[package]]

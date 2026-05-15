@@ -1,9 +1,9 @@
 //! Browser tool dispatcher (browser_navigate / click / type / etc.).
 //!
-//! Lives in runtime (rather than `librefang-runtime-browser`) because the
-//! tool wiring depends on `crate::web_fetch::check_ssrf` and
-//! `crate::web_content::wrap_external_content` — both of which would
-//! cascade further refactoring if moved.
+//! Split out of `browser.rs` so SSRF and content-wrapping wiring
+//! (`crate::web_fetch::check_ssrf`, `crate::web_content::wrap_external_content`)
+//! stays next to the rest of the tool dispatchers in `tool_runner/` rather
+//! than mixed with the CDP/WebSocket transport in `browser.rs`.
 
 use crate::browser::{BrowserCommand, BrowserManager};
 

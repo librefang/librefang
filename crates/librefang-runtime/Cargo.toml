@@ -10,9 +10,7 @@ readme = "README.md"
 librefang-types = { path = "../librefang-types" }
 librefang-http = { path = "../librefang-http" }
 librefang-kernel-handle = { path = "../librefang-kernel-handle" }
-librefang-runtime-apply-patch = { path = "../librefang-runtime-apply-patch" }
 librefang-runtime-audit = { path = "../librefang-runtime-audit" }
-librefang-runtime-browser = { path = "../librefang-runtime-browser", optional = true }
 librefang-runtime-media = { path = "../librefang-runtime-media", optional = true }
 librefang-runtime-sandbox-docker = { path = "../librefang-runtime-sandbox-docker", optional = true }
 librefang-runtime-mcp = { path = "../librefang-runtime-mcp" }
@@ -99,7 +97,7 @@ daytona-backend = []
 # modules and consumer code paths so build-time configurations can omit
 # whole subsystems for size/security.
 media = ["dep:librefang-runtime-media"]
-browser = ["dep:librefang-runtime-browser"]
+browser = []
 docker-sandbox = ["dep:librefang-runtime-sandbox-docker"]
 
 

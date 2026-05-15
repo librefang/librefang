@@ -384,7 +384,7 @@ impl BrowserSession {
             let new_url = format!("{base}/json/new");
             let resp = tokio::time::timeout(
                 Duration::from_secs(CDP_CONNECT_TIMEOUT_SECS),
-                librefang_http::new_client().get(&new_url).send(),
+                crate::http_client::new_client().get(&new_url).send(),
             )
             .await
             .map_err(|_| format!("Timed out connecting to CDP endpoint: {cdp_endpoint}"))?
@@ -489,7 +489,7 @@ impl BrowserSession {
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
-            let resp = match librefang_http::new_client().get(list_url).send().await {
+            let resp = match crate::http_client::new_client().get(list_url).send().await {
                 Ok(r) => r,
                 Err(_) => continue,
             };
@@ -971,7 +971,10 @@ impl BrowserManager {
                     let cdp_endpoint = self.config.cdp_endpoint.as_deref().unwrap_or("");
                     let base = cdp_endpoint.trim_end_matches('/');
                     let close_url = format!("{base}/json/close/{target_id}");
-                    let _ = librefang_http::new_client().get(&close_url).send().await;
+                    let _ = crate::http_client::new_client()
+                        .get(&close_url)
+                        .send()
+                        .await;
                     debug!(agent_id, target_id, "Closed remote CDP tab");
                 }
             }

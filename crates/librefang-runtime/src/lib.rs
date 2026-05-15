@@ -10,13 +10,13 @@ pub const USER_AGENT: &str = concat!("librefang/", env!("CARGO_PKG_VERSION"));
 pub mod a2a;
 pub mod agent_context;
 pub mod agent_loop;
-pub use librefang_runtime_apply_patch as apply_patch;
+pub mod apply_patch;
 pub mod artifact_store;
 pub use librefang_runtime_audit as audit;
 pub mod auth_cooldown;
 pub mod aux_client;
 #[cfg(feature = "browser")]
-pub use librefang_runtime_browser as browser;
+pub mod browser;
 #[cfg(not(feature = "browser"))]
 #[path = "browser_stub.rs"]
 pub mod browser;
