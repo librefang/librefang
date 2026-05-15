@@ -1,3 +1,4 @@
+use super::install::parse_plugin_i18n_blocks;
 use super::registry::{
     is_valid_registry_pubkey_b64, registry_index_urls, registry_pubkey_cache_path,
     EMBEDDED_REGISTRY_PUBKEYS,
