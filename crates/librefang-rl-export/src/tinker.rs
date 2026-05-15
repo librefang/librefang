@@ -229,10 +229,12 @@ pub(crate) async fn export_to_tinker_with_base(
     // is the session id itself. Surface a stable session URL pattern so
     // operators can wire it through; the literal path mirrors the
     // Tinker SDK's `service.get_session(session_id)` convention.
+    // Percent-encode the session_id segment — Tinker's id is opaque
+    // server-side and there is no documented charset guarantee.
     let target_run_url = format!(
         "{}/api/v1/get_session/{}",
         base.trim_end_matches('/'),
-        create_json.session_id
+        urlencoding::encode(&create_json.session_id),
     );
 
     Ok(ExportReceipt {

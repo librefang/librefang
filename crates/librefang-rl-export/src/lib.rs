@@ -52,8 +52,14 @@ use chrono::{DateTime, Utc};
 ///
 /// This enum is `#[non_exhaustive]` so additional variants can land
 /// without breaking callers.
+///
+/// `Debug` is hand-implemented (not derived) so that `api_key` fields
+/// never appear in logs / panics / tracing spans verbatim. Adding a new
+/// variant with secret material requires updating the `Debug` impl —
+/// the in-crate `match` is exhaustive on purpose to force that
+/// awareness.
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum ExportTarget {
     /// Export to Weights & Biases (<https://wandb.ai>). The W&B REST
     /// surface accepts run metadata + arbitrary file artefacts; we
@@ -125,6 +131,44 @@ pub enum ExportTarget {
         /// `wiremock::MockServer`.
         base_url: Option<String>,
     },
+}
+
+impl std::fmt::Debug for ExportTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Each variant intentionally renders `api_key` as a fixed
+        // placeholder. The `match` is exhaustive (no wildcard arm) so
+        // a future secret-bearing variant fails to compile until its
+        // arm is added — which is the safety property we want.
+        match self {
+            Self::WandB {
+                project,
+                entity,
+                run_id,
+                api_key: _,
+            } => f
+                .debug_struct("WandB")
+                .field("project", project)
+                .field("entity", entity)
+                .field("run_id", run_id)
+                .field("api_key", &"<redacted>")
+                .finish(),
+            Self::Tinker {
+                api_key: _,
+                project,
+                base_url,
+            } => f
+                .debug_struct("Tinker")
+                .field("api_key", &"<redacted>")
+                .field("project", project)
+                .field("base_url", base_url)
+                .finish(),
+            Self::Atropos { project, base_url } => f
+                .debug_struct("Atropos")
+                .field("project", project)
+                .field("base_url", base_url)
+                .finish(),
+        }
+    }
 }
 
 /// A single trajectory ready to be exported.
@@ -232,3 +276,48 @@ pub async fn export(
 // without each adding their own `librefang-types = { … }` line.
 #[doc(hidden)]
 pub use librefang_types as _types;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The hand-written `Debug` impl must redact api_key fields across
+    /// every secret-bearing variant. Asserting against the literal key
+    /// guards the property: even a misplaced field-list reordering
+    /// during a future refactor will fail this test.
+    #[test]
+    fn debug_redacts_api_key_for_secret_bearing_variants() {
+        let secret = "sk-live-DO-NOT-LEAK-12345";
+
+        let wandb = ExportTarget::WandB {
+            project: "rl-proj".to_string(),
+            entity: Some("acme".to_string()),
+            run_id: Some("run-1".to_string()),
+            api_key: secret.to_string(),
+        };
+        let rendered = format!("{wandb:?}");
+        assert!(
+            !rendered.contains(secret),
+            "Debug must not include api_key plaintext: {rendered}"
+        );
+        assert!(
+            rendered.contains("<redacted>"),
+            "Debug must render placeholder: {rendered}"
+        );
+
+        let tinker = ExportTarget::Tinker {
+            api_key: secret.to_string(),
+            project: "rl-proj".to_string(),
+            base_url: None,
+        };
+        let rendered = format!("{tinker:?}");
+        assert!(
+            !rendered.contains(secret),
+            "Debug must not include api_key plaintext: {rendered}"
+        );
+        assert!(
+            rendered.contains("<redacted>"),
+            "Debug must render placeholder: {rendered}"
+        );
+    }
+}

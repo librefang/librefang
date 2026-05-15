@@ -215,10 +215,14 @@ pub(crate) async fn export_to_atropos_with_base(
     let wandb_name = register_json
         .wandb_name
         .unwrap_or_else(|| format!("{project}_{env_id}"));
+    // Encode the fragment payload: `wandb_name` can carry `#`, `&`, or
+    // other reserved characters once Atropos appends its index suffix,
+    // and an unescaped one would corrupt the rendered URL the operator
+    // copies out of the receipt.
     let target_run_url = format!(
         "{}/latest_example#env={}",
         base.trim_end_matches('/'),
-        wandb_name
+        urlencoding::encode(&wandb_name),
     );
 
     Ok(ExportReceipt {

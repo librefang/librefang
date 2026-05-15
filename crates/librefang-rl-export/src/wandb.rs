@@ -148,13 +148,16 @@ pub(crate) async fn export_to_wandb_with_base(
     let upload_entity = entity.unwrap_or("default");
 
     // Step 2: upload the trajectory bytes as a file artefact under the
-    // newly created run.
+    // newly created run. Each path segment is percent-encoded — entity,
+    // project, and run_id are caller-controlled strings and unescaped
+    // `/` or reserved characters would otherwise reshape the request
+    // path or smuggle a query/fragment.
     let upload_url = format!(
         "{}/files/{}/{}/{}",
         base.trim_end_matches('/'),
-        upload_entity,
-        project,
-        create_json.run_id,
+        urlencoding::encode(upload_entity),
+        urlencoding::encode(project),
+        urlencoding::encode(&create_json.run_id),
     );
     let bytes_len = export.trajectory_bytes.len() as u64;
 
@@ -404,5 +407,50 @@ mod tests {
         let header = build_basic_auth("secret");
         let expected_b64 = base64::engine::general_purpose::STANDARD.encode("api:secret");
         assert_eq!(header, format!("Basic {expected_b64}"));
+    }
+
+    /// Upload-URL path segments must be percent-encoded. A caller that
+    /// passes `entity` / `project` / `run_id` strings containing `/`,
+    /// space, or any reserved character must NOT reshape the request
+    /// path; the mock asserts the exact encoded path it expects.
+    #[tokio::test]
+    async fn upload_url_percent_encodes_path_segments() {
+        let server = MockServer::start().await;
+
+        // Server-assigned run_id intentionally contains characters that
+        // would otherwise corrupt the path: `/`, space, `+`.
+        Mock::given(method("POST"))
+            .and(path("/api/runs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "run_id": "run/with space+plus",
+                "url": "https://wandb.ai/x/y/runs/r",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // urlencoding::encode renders ` ` as `%20`, `/` as `%2F`, `+`
+        // as `%2B`. The wandb-side path must reflect that exactly, or
+        // the file upload would land on a different (or invalid) URL.
+        Mock::given(method("POST"))
+            .and(path(
+                "/files/acme%2Fteam/rl%20proj/run%2Fwith%20space%2Bplus",
+            ))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let receipt = export_to_wandb_with_base(
+            &server.uri(),
+            "rl proj",
+            Some("acme/team"),
+            None,
+            "k",
+            sample_export("rid"),
+        )
+        .await
+        .expect("export must succeed with encoded path");
+        assert_eq!(receipt.bytes_uploaded, 23);
     }
 }
