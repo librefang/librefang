@@ -8,10 +8,10 @@
   "plan_complete": true,
   "plan_completed_at": "2026-05-15T00:00:00Z",
   "changes_total": 3,
-  "changes_completed": 1,
+  "changes_completed": 2,
   "changes_in_progress": 0,
   "changes_blocked": 0,
-  "changes_pending": 2,
+  "changes_pending": 1,
   "changes": [
     {
       "id": "m8-m11-dashboard-prose-cleanup",
@@ -44,19 +44,29 @@
     {
       "id": "m9b-config-defaults-doc-sweep",
       "milestones": ["M9b"],
-      "status": "PENDING",
+      "status": "DONE",
+      "started": "2026-05-15T00:00:00Z",
+      "started_by": "kbd-execute",
+      "completed": "2026-05-15T00:00:00Z",
+      "tool": "claude-code",
       "scope": [
-        "crates/librefang-types/src/config/types.rs — default_name() → 'BossFang Agent OS'",
-        "crates/librefang-types/src/config/types.rs — totp_issuer default → 'BossFang'",
+        "crates/librefang-types/src/config/types.rs — default_a2a_name() → 'BossFang Agent OS'",
+        "crates/librefang-types/src/approval.rs — default_totp_issuer() → 'BossFang'",
         "docs/src/app/configuration/features/page.mdx — 4 sites (TOML fence + table spans)",
-        "docs/src/app/configuration/page.mdx — 3 sites (TOML fences + table span)",
+        "docs/src/app/configuration/page.mdx — 4 sites (heading + TOML fences + table span)",
         "docs/src/app/security/approvals/page.mdx — 1 TOML fence",
-        "docs/src/app/integrations/desktop/page.mdx — 2 sites (prose bold + table span)",
-        "docs/src/app/integrations/cli/commands/page.mdx — 1 prose (Windows registry name)",
+        "docs/src/app/integrations/desktop/page.mdx — 2 sites (tray tooltip + window title)",
+        "docs/src/app/integrations/cli/commands/page.mdx — 1 manual fix (Windows registry backtick span)",
         "docs/src/app/integrations/acp/page.mdx — 1 JSON fence",
         "docs/src/app/integrations/api/communication/page.mdx — 1 JSON fence",
-        "ZH mirrors: zh/configuration/features, zh/configuration, zh/security/approvals, zh/integrations/desktop, zh/integrations/api/communication"
-      ]
+        "docs/src/app/agent/auto-evolution/page.mdx — prose pass (upstream added after M4)",
+        "ZH mirrors: all of the above zh/ equivalents"
+      ],
+      "verification": {
+        "cargo_check": "PASS — cargo check -p librefang-types exit 0",
+        "enforce_branding_check": "PASS — exit 0 (clean after auto-evolution prose fix)"
+      },
+      "pr": "https://github.com/GQAdonis/librefang/pull/19"
     },
     {
       "id": "m10-legacy-key-removal-planning",
@@ -75,7 +85,7 @@
   },
   "goal_completion": {
     "M8_dashboard_jsx_prose": "MET",
-    "M9b_config_defaults_doc_sweep": "PENDING",
+    "M9b_config_defaults_doc_sweep": "MET",
     "M10_legacy_key_removal_planning": "PENDING",
     "M11_app_tsx_ts6133": "MET"
   }

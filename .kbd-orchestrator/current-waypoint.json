@@ -6,14 +6,14 @@
   "backend": "native-tool",
   "backend_rationale": "No OpenSpec in this project. Single-tool (Claude Code) execution with progress.json bookkeeping. Hybrid not warranted at this scale.",
   "next_action": {
-    "command": "/kbd-execute m9b-config-defaults-doc-sweep",
-    "description": "M8+M11 DONE (PR #18). Execute change 2 of 3: change default_name() to 'BossFang Agent OS' and totp_issuer default to 'BossFang' in crates/librefang-types/src/config/types.rs, then sweep ~20 MDX doc files (EN + ZH) for fenced code block examples and backtick table spans. Verify: cargo check -p librefang-types."
+    "command": "/kbd-execute m10-legacy-key-removal-planning",
+    "description": "M9b DONE (PR #19). Execute change 3 of 3: add TODO(drop-legacy-key) comments to 4 sites in crates/librefang-api/dashboard/src/api.ts and add v2026.8.x removal notice to CHANGELOG.md [Unreleased]."
   },
-  "phase_progress": "Phase 2: 1/3 changes DONE (M8+M11). Advance to /kbd-execute m9b-config-defaults-doc-sweep.",
+  "phase_progress": "Phase 2: 2/3 changes DONE (M8+M11, M9b). Advance to /kbd-execute m10-legacy-key-removal-planning.",
   "last_completed": {
-    "change_id": "m8-m11-dashboard-prose-cleanup",
-    "milestones": ["M8", "M11"],
+    "change_id": "m9b-config-defaults-doc-sweep",
+    "milestones": ["M9b"],
     "completed_at": "2026-05-15T00:00:00Z",
-    "pr": "https://github.com/GQAdonis/librefang/pull/18"
+    "pr": "https://github.com/GQAdonis/librefang/pull/19"
   }
 }

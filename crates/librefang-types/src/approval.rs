@@ -733,7 +733,7 @@ impl Default for ApprovalPolicy {
 }
 
 fn default_totp_issuer() -> String {
-    "LibreFang".to_string()
+    "BossFang".to_string()
 }
 
 fn default_totp_grace_period() -> u64 {

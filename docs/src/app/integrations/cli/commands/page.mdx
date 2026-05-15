@@ -1035,7 +1035,7 @@ librefang service install
 
 - **Linux:** Creates a systemd user service at `~/.config/systemd/user/librefang.service`, then runs `systemctl --user daemon-reload` and `systemctl --user enable librefang.service`.
 - **macOS:** Creates a LaunchAgent at `~/Library/LaunchAgents/ai.librefang.daemon.plist` and loads it with `launchctl load`.
-- **Windows:** Adds a `LibreFang` entry to `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+- **Windows:** Adds a `BossFang` entry to `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
 The binary path is detected from the running executable (`std::env::current_exe`). If you move the binary, re-run `librefang service install` to update the path.
 

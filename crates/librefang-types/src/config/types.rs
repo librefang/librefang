@@ -5517,7 +5517,7 @@ pub struct A2aConfig {
 }
 
 fn default_a2a_name() -> String {
-    "LibreFang Agent OS".to_string()
+    "BossFang Agent OS".to_string()
 }
 
 fn default_a2a_path() -> String {
