@@ -4771,6 +4771,7 @@ dependencies = [
  "librefang-llm-drivers",
  "librefang-memory",
  "librefang-runtime-audit",
+ "librefang-runtime-browser",
  "librefang-runtime-mcp",
  "librefang-runtime-sandbox-docker",
  "librefang-skills",
@@ -4828,6 +4829,24 @@ dependencies = [
  "tempfile",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "librefang-runtime-browser"
+version = "2026.5.12-beta.11"
+dependencies = [
+ "chrono",
+ "dashmap",
+ "futures",
+ "http",
+ "librefang-http",
+ "librefang-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
 ]
 
 [[package]]

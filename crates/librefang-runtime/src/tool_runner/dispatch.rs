@@ -1062,7 +1062,7 @@ pub async fn execute_tool_raw(
             match browser_ctx {
                 Some(mgr) => {
                     let aid = caller_agent_id.unwrap_or("default");
-                    crate::browser::tool_browser_navigate(input, mgr, aid).await
+                    crate::browser_tools::tool_browser_navigate(input, mgr, aid).await
                 }
                 None => Err(
                     "Browser tools not available. Ensure Chrome/Chromium is installed.".to_string(),
@@ -1073,7 +1073,7 @@ pub async fn execute_tool_raw(
         "browser_click" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_click(input, mgr, aid).await
+                crate::browser_tools::tool_browser_click(input, mgr, aid).await
             }
             None => {
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
@@ -1083,7 +1083,7 @@ pub async fn execute_tool_raw(
         "browser_type" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_type(input, mgr, aid).await
+                crate::browser_tools::tool_browser_type(input, mgr, aid).await
             }
             None => {
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
@@ -1096,7 +1096,7 @@ pub async fn execute_tool_raw(
                 let upload_dir = kernel
                     .map(|k| k.effective_upload_dir())
                     .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
-                crate::browser::tool_browser_screenshot(input, mgr, aid, &upload_dir).await
+                crate::browser_tools::tool_browser_screenshot(input, mgr, aid, &upload_dir).await
             }
             None => {
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
@@ -1106,7 +1106,7 @@ pub async fn execute_tool_raw(
         "browser_read_page" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_read_page(input, mgr, aid).await
+                crate::browser_tools::tool_browser_read_page(input, mgr, aid).await
             }
             None => {
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
@@ -1116,7 +1116,7 @@ pub async fn execute_tool_raw(
         "browser_close" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_close(input, mgr, aid).await
+                crate::browser_tools::tool_browser_close(input, mgr, aid).await
             }
             None => {
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
@@ -1126,7 +1126,7 @@ pub async fn execute_tool_raw(
         "browser_scroll" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_scroll(input, mgr, aid).await
+                crate::browser_tools::tool_browser_scroll(input, mgr, aid).await
             }
             None => {
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
@@ -1136,7 +1136,7 @@ pub async fn execute_tool_raw(
         "browser_wait" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_wait(input, mgr, aid).await
+                crate::browser_tools::tool_browser_wait(input, mgr, aid).await
             }
             None => {
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
@@ -1146,7 +1146,7 @@ pub async fn execute_tool_raw(
         "browser_run_js" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_run_js(input, mgr, aid).await
+                crate::browser_tools::tool_browser_run_js(input, mgr, aid).await
             }
             None => {
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
@@ -1156,7 +1156,7 @@ pub async fn execute_tool_raw(
         "browser_back" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_back(input, mgr, aid).await
+                crate::browser_tools::tool_browser_back(input, mgr, aid).await
             }
             None => {
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())

@@ -16,10 +16,12 @@ pub use librefang_runtime_audit as audit;
 pub mod auth_cooldown;
 pub mod aux_client;
 #[cfg(feature = "browser")]
-pub mod browser;
+pub use librefang_runtime_browser as browser;
 #[cfg(not(feature = "browser"))]
 #[path = "browser_stub.rs"]
 pub mod browser;
+#[cfg(feature = "browser")]
+pub mod browser_tools;
 pub mod catalog_sync;
 pub mod channel_registry;
 pub mod chatgpt_oauth;

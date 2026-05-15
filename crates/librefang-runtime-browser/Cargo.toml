@@ -1,0 +1,23 @@
+[package]
+name = "librefang-runtime-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Headless browser (CDP/WebSocket) for LibreFang tool subsystem (refs #3710 Phase 1)"
+
+[dependencies]
+librefang-types = { path = "../librefang-types" }
+librefang-http = { path = "../librefang-http" }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dashmap = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+http = "1"
+
+[lints]
+workspace = true
