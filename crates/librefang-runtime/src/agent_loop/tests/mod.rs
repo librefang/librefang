@@ -671,6 +671,7 @@ fn silent_response_single_source_of_truth() {
         // entry above.)
         "agent_loop/types.rs", // post-split: AgentLoopResult shape + small helpers
         "agent_loop/message.rs", // post-split: assistant-message construction helpers
+        "agent_loop/run_streaming.rs", // post-split: streaming agent-loop body, comments only
         "session_repair/tests.rs", // session_repair tests moved into module subdir
     ];
     let offenders: Vec<&str> = stdout
