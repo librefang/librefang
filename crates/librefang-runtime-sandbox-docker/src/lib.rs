@@ -672,10 +672,18 @@ mod tests {
 /// and `librefang-runtime::str_utils` so this crate has no cyclic dep back into
 /// the parent runtime crate. The originals stay in their home modules; this is
 /// a duplicate-by-design copy bounded to ~60 LOC of pure-string logic.
-mod helpers {
+///
+/// Exposed as `pub` (not `pub(crate)`) so the parent `librefang-runtime` crate
+/// can drive a parity test asserting these byte-for-byte mirror the canonical
+/// implementations — see
+/// `crates/librefang-runtime/tests/docker_sandbox_helpers_parity.rs`. The
+/// shell-metacharacter check is a security boundary on Docker `exec`; the
+/// parity test guards against silent drift when the canonical denylist gains
+/// a new entry.
+pub mod helpers {
     /// UTF-8-safe truncate (mirrors `librefang_runtime::str_utils::safe_truncate_str`).
     #[inline]
-    pub(super) fn safe_truncate_str(s: &str, max_bytes: usize) -> &str {
+    pub fn safe_truncate_str(s: &str, max_bytes: usize) -> &str {
         if s.len() <= max_bytes {
             return s;
         }
@@ -688,7 +696,7 @@ mod helpers {
 
     /// Shell-metacharacter denylist (mirrors
     /// `librefang_runtime::subprocess_sandbox::contains_shell_metacharacters`).
-    pub(super) fn contains_shell_metacharacters(command: &str) -> Option<String> {
+    pub fn contains_shell_metacharacters(command: &str) -> Option<String> {
         if command.contains('\n') || command.contains('\r') {
             return Some("embedded newline".to_string());
         }
