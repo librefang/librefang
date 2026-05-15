@@ -81,6 +81,44 @@ pub enum LlmError {
         /// Last known activity before the process stalled.
         last_activity: String,
     },
+
+    /// Every entry in a [`crate::LlmDriver`] fallback chain refused the
+    /// request — either pre-checked as exhausted (#4807) or attempted and
+    /// failed. `details` enumerates the slots and the reason each is out;
+    /// the vec is sorted by `provider_id` ascending so any stringified
+    /// surface (logs, error responses, prompt-included error text) is
+    /// byte-identical across processes (#3298). The chain still surfaces
+    /// the *last* underlying provider error via `source()`-style chains
+    /// further up the stack; this variant is the typed "chain is dry"
+    /// signal callers want to recognise without parsing the wrapped
+    /// `Api { message, ... }` it used to be.
+    #[error("All providers exhausted ({}): {}", details.len(), format_chain_details(details))]
+    AllProvidersExhausted {
+        /// One entry per slot in the chain, sorted by provider id.
+        details: Vec<ProviderExhaustionDetail>,
+    },
+}
+
+/// One row of [`LlmError::AllProvidersExhausted::details`] — which
+/// provider was tried and why it was out. Kept here next to `LlmError`
+/// (rather than imported from [`crate::exhaustion`]) because constructing
+/// this row only requires a string and a reason — the in-memory store is
+/// not on the path of building the error.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderExhaustionDetail {
+    pub provider_id: String,
+    pub reason: crate::exhaustion::ExhaustionReason,
+}
+
+fn format_chain_details(details: &[ProviderExhaustionDetail]) -> String {
+    if details.is_empty() {
+        return "<empty chain>".to_string();
+    }
+    details
+        .iter()
+        .map(|d| format!("{}={}", d.provider_id, d.reason.as_metric_label()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl LlmError {
@@ -173,6 +211,11 @@ impl LlmError {
             // Distinct from Timeout (inactivity/subprocess) — these are network
             // layer failures before the API even responded.
             LlmError::Http(_) => FailoverReason::HttpError,
+
+            // The chain has nothing left to try. Classify as Unknown so the
+            // caller propagates instead of looping further; the variant is
+            // already a *terminal* error, not a switching hint.
+            LlmError::AllProvidersExhausted { .. } => FailoverReason::Unknown,
         }
     }
 }
@@ -933,5 +976,10 @@ mod tests {
     }
 }
 
+pub mod exhaustion;
 pub mod llm_errors;
+pub use exhaustion::{
+    ExhaustionReason, ExhaustionSnapshotRow, ProviderExhaustion, ProviderExhaustionStore,
+    DEFAULT_LONG_BACKOFF,
+};
 pub use llm_errors::FailoverReason;

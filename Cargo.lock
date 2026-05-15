@@ -4627,10 +4627,12 @@ dependencies = [
 name = "librefang-kernel-metering"
 version = "2026.5.12-beta.11"
 dependencies = [
+ "librefang-llm-driver",
  "librefang-memory",
  "librefang-runtime",
  "librefang-types",
  "serde",
+ "tracing",
 ]
 
 [[package]]
@@ -4653,11 +4655,13 @@ name = "librefang-llm-driver"
 version = "2026.5.12-beta.11"
 dependencies = [
  "async-trait",
+ "dashmap",
  "librefang-types",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

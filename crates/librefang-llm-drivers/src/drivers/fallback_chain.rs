@@ -22,8 +22,12 @@
 
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
 use async_trait::async_trait;
-use librefang_llm_driver::FailoverReason;
+use librefang_llm_driver::exhaustion::{
+    ExhaustionReason, ProviderExhaustionStore, DEFAULT_LONG_BACKOFF,
+};
+use librefang_llm_driver::{FailoverReason, ProviderExhaustionDetail};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tracing::warn;
 
@@ -70,6 +74,15 @@ pub struct FallbackChain {
     /// Sleep duration (ms) to use when a rate-limit error carries no
     /// `Retry-After` hint.
     rate_limit_sleep_ms: u64,
+    /// Shared exhaustion store (#4807). When `Some`, each `complete` /
+    /// `stream` call pre-checks every slot via
+    /// [`ProviderExhaustionStore::is_exhausted`] and skips exhausted
+    /// slots without invoking the underlying driver. Failed attempts
+    /// classified as rate-limit / quota / auth mark the slot exhausted
+    /// so subsequent requests within the backoff window also skip it.
+    /// `None` preserves the historical un-gated behaviour for callers
+    /// that have not opted in (tests, ad-hoc one-shot chains).
+    exhaustion_store: Option<ProviderExhaustionStore>,
 }
 
 impl FallbackChain {
@@ -85,12 +98,27 @@ impl FallbackChain {
         Self {
             entries,
             rate_limit_sleep_ms: DEFAULT_RATE_LIMIT_SLEEP_MS,
+            exhaustion_store: None,
         }
     }
 
     /// Override the default rate-limit sleep duration (milliseconds).
     pub fn with_rate_limit_sleep_ms(mut self, ms: u64) -> Self {
         self.rate_limit_sleep_ms = ms;
+        self
+    }
+
+    /// Attach a shared exhaustion store (#4807). When attached, the chain
+    /// skips slots that have been marked exhausted (rate-limit, quota,
+    /// budget, auth) without invoking the underlying driver — and marks
+    /// slots exhausted itself after a failing attempt.
+    ///
+    /// The store is reference-counted internally; cloning is cheap. The
+    /// same store should be passed to every `FallbackChain` constructed
+    /// against the same set of provider slots so all chains see a
+    /// coherent exhaustion view.
+    pub fn with_exhaustion_store(mut self, store: ProviderExhaustionStore) -> Self {
+        self.exhaustion_store = Some(store);
         self
     }
 
@@ -175,8 +203,25 @@ impl FallbackChain {
 impl LlmDriver for FallbackChain {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let mut last_error: Option<LlmError> = None;
+        // Tracks why each slot was skipped, for `AllProvidersExhausted`
+        // when nothing in the chain succeeds. Keyed by provider_name so
+        // duplicate provider entries collapse — the most recent reason
+        // wins (consistent with `ProviderExhaustionStore::mark_exhausted`).
+        let mut skip_reasons: std::collections::BTreeMap<String, ExhaustionReason> =
+            std::collections::BTreeMap::new();
 
         for entry in &self.entries {
+            // Pre-check: if a shared exhaustion store says this slot is
+            // out, skip it without invoking the driver. This is the
+            // primary win of #4807 — we don't burn latency re-asking a
+            // provider we know is rate-limited or out of credit.
+            if let Some(store) = &self.exhaustion_store {
+                if let Some(rec) = store.record_skip(&entry.provider_name) {
+                    skip_reasons.insert(entry.provider_name.clone(), rec.reason);
+                    continue;
+                }
+            }
+
             match self.try_entry(entry, request.clone()).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) => {
@@ -188,6 +233,21 @@ impl LlmDriver for FallbackChain {
                         reason = ?reason,
                         "FallbackChain: provider exhausted, trying next"
                     );
+
+                    // Record the slot in the shared exhaustion store so
+                    // subsequent requests within the backoff window skip
+                    // it (#4807).
+                    if let Some(store) = &self.exhaustion_store {
+                        if let Some(exhaust_reason) = exhaustion_reason_for(&reason) {
+                            let until = exhaustion_until_for(&e, &reason);
+                            store.mark_exhausted(
+                                entry.provider_name.clone(),
+                                exhaust_reason,
+                                until,
+                            );
+                            skip_reasons.insert(entry.provider_name.clone(), exhaust_reason);
+                        }
+                    }
 
                     match reason {
                         // Skip to next provider.
@@ -209,6 +269,25 @@ impl LlmDriver for FallbackChain {
             }
         }
 
+        // Every entry refused or was pre-skipped. When the store gave us
+        // enough information to enumerate the chain we surface the typed
+        // `AllProvidersExhausted` variant — callers can react to "chain
+        // is dry" without parsing a generic Api message string (#4807).
+        // We always emit the typed variant when at least one slot was
+        // pre-skipped from the store; otherwise we surface the last
+        // underlying provider error (legacy callers downcast on it).
+        if !skip_reasons.is_empty() && last_error.is_none() {
+            return Err(LlmError::AllProvidersExhausted {
+                details: skip_reasons
+                    .into_iter()
+                    .map(|(provider_id, reason)| ProviderExhaustionDetail {
+                        provider_id,
+                        reason,
+                    })
+                    .collect(),
+            });
+        }
+
         Err(last_error.unwrap_or_else(|| LlmError::Api {
             status: 0,
             message: "FallbackChain: all providers exhausted".to_string(),
@@ -222,8 +301,20 @@ impl LlmDriver for FallbackChain {
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
         let mut last_error: Option<LlmError> = None;
+        let mut skip_reasons: std::collections::BTreeMap<String, ExhaustionReason> =
+            std::collections::BTreeMap::new();
 
         for entry in &self.entries {
+            // Pre-check the exhaustion store before opening the upstream
+            // stream — exhaustion-aware fallback applies equally to
+            // streaming and non-streaming paths (#4807).
+            if let Some(store) = &self.exhaustion_store {
+                if let Some(rec) = store.record_skip(&entry.provider_name) {
+                    skip_reasons.insert(entry.provider_name.clone(), rec.reason);
+                    continue;
+                }
+            }
+
             let mut req = request.clone();
             if !entry.model_override.is_empty() {
                 req.model = entry.model_override.clone();
@@ -302,6 +393,20 @@ impl LlmDriver for FallbackChain {
                         return Err(e);
                     }
 
+                    // Mark the slot exhausted so subsequent calls skip it
+                    // within the backoff window (#4807).
+                    if let Some(store) = &self.exhaustion_store {
+                        if let Some(exhaust_reason) = exhaustion_reason_for(&reason) {
+                            let until = exhaustion_until_for(&e, &reason);
+                            store.mark_exhausted(
+                                entry.provider_name.clone(),
+                                exhaust_reason,
+                                until,
+                            );
+                            skip_reasons.insert(entry.provider_name.clone(), exhaust_reason);
+                        }
+                    }
+
                     match reason {
                         FailoverReason::CreditExhausted
                         | FailoverReason::ModelUnavailable
@@ -320,11 +425,95 @@ impl LlmDriver for FallbackChain {
             }
         }
 
+        if !skip_reasons.is_empty() && last_error.is_none() {
+            return Err(LlmError::AllProvidersExhausted {
+                details: skip_reasons
+                    .into_iter()
+                    .map(|(provider_id, reason)| ProviderExhaustionDetail {
+                        provider_id,
+                        reason,
+                    })
+                    .collect(),
+            });
+        }
+
         Err(last_error.unwrap_or_else(|| LlmError::Api {
             status: 0,
             message: "FallbackChain(stream): all providers exhausted".to_string(),
             code: None,
         }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Exhaustion reason / until helpers (#4807)
+// ---------------------------------------------------------------------------
+
+/// Map a [`FailoverReason`] (per-error structural classification) onto the
+/// store's [`ExhaustionReason`]. Returns `None` for failure modes that
+/// should NOT mark the slot — context-too-long (caller error, slot is
+/// fine), unknown (could not classify), and the transient
+/// `ModelUnavailable` / `HttpError` / `Timeout` paths where a single
+/// failure isn't evidence the slot is durably down.
+fn exhaustion_reason_for(failover: &FailoverReason) -> Option<ExhaustionReason> {
+    match failover {
+        FailoverReason::RateLimit(_) => Some(ExhaustionReason::RateLimited),
+        FailoverReason::CreditExhausted => Some(ExhaustionReason::QuotaExceeded),
+        FailoverReason::AuthError => Some(ExhaustionReason::AuthFailed),
+        // ModelUnavailable / Timeout / HttpError can be transient (network
+        // hiccup, single 503). One failure shouldn't park the slot for an
+        // hour — let the next call re-attempt. If the slot truly is down,
+        // it will keep failing and any cumulative health-penalty layer
+        // (FallbackDriver) handles that orthogonally.
+        FailoverReason::ModelUnavailable
+        | FailoverReason::Timeout
+        | FailoverReason::HttpError
+        | FailoverReason::ContextTooLong
+        | FailoverReason::Unknown => None,
+    }
+}
+
+/// Minimum exhaustion backoff applied to rate-limit hints. Some providers
+/// (and `try_entry`'s synthetic short hints used in tests) report
+/// `Retry-After: 0` or tiny single-digit-millisecond values; honouring those
+/// literally would clear the exhaustion entry before the next request even
+/// gets to the store, defeating the point of the skip-on-next-call gate.
+/// 30s is short enough that a rate-limit window genuinely lifting in
+/// seconds is barely delayed; long enough that the store retains its value.
+const MIN_RATE_LIMIT_EXHAUSTION_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Compute the auto-clear `Instant` for an exhaustion record based on the
+/// underlying error. RateLimit honours the server's `Retry-After` hint
+/// (parsed from `LlmError::RateLimited.retry_after_ms` / `Overloaded`)
+/// floored at [`MIN_RATE_LIMIT_EXHAUSTION_BACKOFF`]; the hard-action
+/// variants (quota, auth) use [`DEFAULT_LONG_BACKOFF`].
+fn exhaustion_until_for(err: &LlmError, failover: &FailoverReason) -> Option<Instant> {
+    let now = Instant::now();
+    match failover {
+        FailoverReason::RateLimit(Some(ms)) if *ms > 0 => {
+            let hinted = Duration::from_millis(*ms);
+            Some(now + hinted.max(MIN_RATE_LIMIT_EXHAUSTION_BACKOFF))
+        }
+        FailoverReason::RateLimit(_) => {
+            // Server didn't tell us when to retry. Pull the embedded hint
+            // off RateLimited / Overloaded variants when present, else
+            // fall back to the default short back-off used by `try_entry`.
+            let hint_ms = match err {
+                LlmError::RateLimited { retry_after_ms, .. } if *retry_after_ms > 0 => {
+                    Some(*retry_after_ms)
+                }
+                LlmError::Overloaded { retry_after_ms } if *retry_after_ms > 0 => {
+                    Some(*retry_after_ms)
+                }
+                _ => None,
+            };
+            let hinted = Duration::from_millis(hint_ms.unwrap_or(DEFAULT_RATE_LIMIT_SLEEP_MS));
+            Some(now + hinted.max(MIN_RATE_LIMIT_EXHAUSTION_BACKOFF))
+        }
+        FailoverReason::CreditExhausted | FailoverReason::AuthError => {
+            Some(now + DEFAULT_LONG_BACKOFF)
+        }
+        _ => None,
     }
 }
 
@@ -789,5 +978,305 @@ mod tests {
         ]);
         let r = chain.complete(test_request()).await.unwrap();
         assert_eq!(r.text(), "fallback");
+    }
+
+    // ── #4807: exhaustion-store-aware fallback ──────────────────────────
+
+    /// Driver that counts every call so tests can prove a slot was (or
+    /// was not) invoked.
+    struct CountingOkDriver {
+        calls: std::sync::atomic::AtomicUsize,
+        label: &'static str,
+    }
+
+    #[async_trait]
+    impl LlmDriver for CountingOkDriver {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ok_response(self.label))
+        }
+    }
+
+    /// Driver that always rate-limits with a server-supplied retry hint,
+    /// counting calls so we can prove the chain skips it on subsequent
+    /// invocations.
+    struct RateLimitedCountingDriver {
+        calls: std::sync::atomic::AtomicUsize,
+        retry_after_ms: u64,
+    }
+
+    #[async_trait]
+    impl LlmDriver for RateLimitedCountingDriver {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(LlmError::RateLimited {
+                retry_after_ms: self.retry_after_ms,
+                message: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn exhaustion_store_skips_marked_provider() {
+        // With a shared exhaustion store: pre-marked providers are skipped
+        // without invoking their driver.
+        let store = ProviderExhaustionStore::new();
+        store.mark_exhausted(
+            "p1",
+            ExhaustionReason::RateLimited,
+            Some(Instant::now() + Duration::from_secs(60)),
+        );
+
+        let p1_driver = Arc::new(CountingOkDriver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            label: "p1",
+        });
+        let p1_counter = Arc::clone(&p1_driver);
+
+        let chain = FallbackChain::new(vec![
+            ChainEntry {
+                driver: p1_driver as Arc<dyn LlmDriver>,
+                model_override: String::new(),
+                provider_name: "p1".to_string(),
+            },
+            entry(Arc::new(OkDriver("p2")), "p2"),
+        ])
+        .with_exhaustion_store(store);
+
+        let r = chain.complete(test_request()).await.unwrap();
+        assert_eq!(r.text(), "p2", "exhausted p1 must be skipped");
+        assert_eq!(
+            p1_counter.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "exhausted slot's driver must NOT be called"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limit_failure_marks_slot_with_retry_after() {
+        // After the chain learns p1 is rate-limited, a second invocation
+        // skips p1 directly via the store — proving exhaustion state
+        // persists between calls.
+        let store = ProviderExhaustionStore::new();
+        // `retry_after_ms = 1` keeps `try_entry`'s internal back-off short
+        // (1 ms × MAX_RATE_LIMIT_RETRIES) so the test isn't stalled by the
+        // embedded hint. The store-side `until` derived in
+        // `exhaustion_until_for` lands ~1 ms in the future, which is more
+        // than enough to be past `now` on the second pass — exactly what we
+        // need: prove the second call skips even when the embedded hint
+        // is short, because the store entry is fresh.
+        let p1_driver = Arc::new(RateLimitedCountingDriver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            retry_after_ms: 1,
+        });
+        let p1_counter = Arc::clone(&p1_driver);
+
+        let p2_driver = Arc::new(CountingOkDriver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            label: "p2",
+        });
+        let p2_counter = Arc::clone(&p2_driver);
+
+        let chain = FallbackChain::new(vec![
+            ChainEntry {
+                driver: p1_driver as Arc<dyn LlmDriver>,
+                model_override: String::new(),
+                provider_name: "p1".to_string(),
+            },
+            ChainEntry {
+                driver: p2_driver as Arc<dyn LlmDriver>,
+                model_override: String::new(),
+                provider_name: "p2".to_string(),
+            },
+        ])
+        .with_rate_limit_sleep_ms(0)
+        .with_exhaustion_store(store.clone());
+
+        // First call: p1 fails MAX_RATE_LIMIT_RETRIES + 1 times then p2 wins.
+        let _ = chain.complete(test_request()).await.unwrap();
+        let calls_after_first = p1_counter.calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            calls_after_first > 0,
+            "p1 must have been called on the first request"
+        );
+
+        // Store should now have p1 marked as RateLimited.
+        let rec = store.is_exhausted("p1").expect("p1 should be marked");
+        assert_eq!(rec.reason, ExhaustionReason::RateLimited);
+        assert!(rec.until.is_some(), "rate-limit should carry a retry time");
+
+        // Second call: p1 must be skipped entirely — driver call count
+        // does not change.
+        let _ = chain.complete(test_request()).await.unwrap();
+        assert_eq!(
+            p1_counter.calls.load(std::sync::atomic::Ordering::SeqCst),
+            calls_after_first,
+            "p1 driver must NOT be invoked on the second call (slot marked exhausted)"
+        );
+        assert_eq!(
+            p2_counter.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "p2 must serve both requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_failure_marks_slot_with_long_backoff() {
+        struct AuthFailDriver;
+
+        #[async_trait]
+        impl LlmDriver for AuthFailDriver {
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Err(LlmError::AuthenticationFailed("bad key".to_string()))
+            }
+        }
+
+        let store = ProviderExhaustionStore::new();
+        let chain = FallbackChain::new(vec![
+            entry(Arc::new(AuthFailDriver), "p1"),
+            entry(Arc::new(OkDriver("p2")), "p2"),
+        ])
+        .with_exhaustion_store(store.clone());
+
+        let _ = chain.complete(test_request()).await.unwrap();
+
+        let rec = store.is_exhausted("p1").expect("p1 should be marked");
+        assert_eq!(rec.reason, ExhaustionReason::AuthFailed);
+        // AuthError uses DEFAULT_LONG_BACKOFF (1h). Confirm `until` is at
+        // least 30 minutes in the future — generous tolerance for slow
+        // test runners.
+        let until = rec.until.expect("auth failure must carry a backoff");
+        let remaining = until.saturating_duration_since(Instant::now());
+        assert!(
+            remaining > Duration::from_secs(30 * 60),
+            "auth-failed backoff should be ~1h, got {remaining:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn all_exhausted_yields_typed_variant_when_store_present() {
+        // When every slot in the chain is pre-marked exhausted, the
+        // returned error is the typed `AllProvidersExhausted` variant
+        // listing each slot — callers can recognise "chain is dry"
+        // without parsing a generic Api message.
+        let store = ProviderExhaustionStore::new();
+        let until = Instant::now() + Duration::from_secs(60);
+        store.mark_exhausted("p1", ExhaustionReason::RateLimited, Some(until));
+        store.mark_exhausted("p2", ExhaustionReason::QuotaExceeded, Some(until));
+
+        let chain = FallbackChain::new(vec![
+            entry(Arc::new(OkDriver("should-not-reach-1")), "p1"),
+            entry(Arc::new(OkDriver("should-not-reach-2")), "p2"),
+        ])
+        .with_exhaustion_store(store);
+
+        let err = chain.complete(test_request()).await.unwrap_err();
+        match err {
+            LlmError::AllProvidersExhausted { details } => {
+                assert_eq!(details.len(), 2);
+                // Sorted by provider_id — p1 then p2.
+                assert_eq!(details[0].provider_id, "p1");
+                assert_eq!(details[0].reason, ExhaustionReason::RateLimited);
+                assert_eq!(details[1].provider_id, "p2");
+                assert_eq!(details[1].reason, ExhaustionReason::QuotaExceeded);
+            }
+            other => panic!("expected AllProvidersExhausted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_no_store_chain_preserves_old_error_shape() {
+        // Without a store attached: the chain falls back to the historical
+        // Api { message: "...all providers exhausted" } error so callers
+        // that downcast on it keep working.
+        let chain = FallbackChain::new(vec![
+            entry(Arc::new(CreditExhaustedDriver), "p1"),
+            entry(Arc::new(ModelUnavailableDriver), "p2"),
+        ]);
+
+        let err = chain.complete(test_request()).await.unwrap_err();
+        assert!(
+            !matches!(err, LlmError::AllProvidersExhausted { .. }),
+            "without store, must NOT synthesize AllProvidersExhausted",
+        );
+    }
+
+    #[test]
+    fn exhaustion_reason_for_classifies_rate_limit_quota_auth() {
+        assert_eq!(
+            exhaustion_reason_for(&FailoverReason::RateLimit(None)),
+            Some(ExhaustionReason::RateLimited)
+        );
+        assert_eq!(
+            exhaustion_reason_for(&FailoverReason::CreditExhausted),
+            Some(ExhaustionReason::QuotaExceeded)
+        );
+        assert_eq!(
+            exhaustion_reason_for(&FailoverReason::AuthError),
+            Some(ExhaustionReason::AuthFailed)
+        );
+    }
+
+    #[test]
+    fn exhaustion_reason_for_skips_transient_and_caller_errors() {
+        // Transient errors don't park the slot — let the next call retry.
+        assert_eq!(
+            exhaustion_reason_for(&FailoverReason::ModelUnavailable),
+            None
+        );
+        assert_eq!(exhaustion_reason_for(&FailoverReason::Timeout), None);
+        assert_eq!(exhaustion_reason_for(&FailoverReason::HttpError), None);
+        // Caller errors (ContextTooLong) and unclassifiable errors do not
+        // mark the slot — the slot is fine.
+        assert_eq!(exhaustion_reason_for(&FailoverReason::ContextTooLong), None);
+        assert_eq!(exhaustion_reason_for(&FailoverReason::Unknown), None);
+    }
+
+    #[test]
+    fn exhaustion_until_honours_rate_limit_retry_after() {
+        // 5-second server hint is below MIN_RATE_LIMIT_EXHAUSTION_BACKOFF
+        // (30 s) — must be floored to 30s. This is intentional: a very
+        // short server-reported back-off doesn't earn us a window in
+        // which to skip the slot, so we extend it to a useful minimum.
+        let err = LlmError::RateLimited {
+            retry_after_ms: 5_000,
+            message: None,
+        };
+        let until = exhaustion_until_for(&err, &FailoverReason::RateLimit(Some(5_000)))
+            .expect("rate-limit should set an `until`");
+        let delta = until.saturating_duration_since(Instant::now());
+        assert!(
+            delta >= Duration::from_secs(25) && delta <= Duration::from_secs(35),
+            "until should be ~30s (min floor) out, got {delta:?}"
+        );
+
+        // 5-minute server hint exceeds the floor and is preserved.
+        let err_long = LlmError::RateLimited {
+            retry_after_ms: 300_000,
+            message: None,
+        };
+        let until_long = exhaustion_until_for(&err_long, &FailoverReason::RateLimit(Some(300_000)))
+            .expect("rate-limit should set an `until`");
+        let delta_long = until_long.saturating_duration_since(Instant::now());
+        assert!(
+            delta_long >= Duration::from_secs(290) && delta_long <= Duration::from_secs(310),
+            "until should honour large hint, got {delta_long:?}"
+        );
+    }
+
+    #[test]
+    fn exhaustion_until_auth_failure_uses_long_backoff() {
+        let err = LlmError::AuthenticationFailed("bad".to_string());
+        let until = exhaustion_until_for(&err, &FailoverReason::AuthError)
+            .expect("auth failure should set an `until`");
+        let delta = until.saturating_duration_since(Instant::now());
+        // DEFAULT_LONG_BACKOFF is 1h — anything ≥ 30 min is fine here.
+        assert!(
+            delta >= Duration::from_secs(30 * 60),
+            "auth failure should use long backoff, got {delta:?}"
+        );
     }
 }

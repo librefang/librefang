@@ -1,10 +1,14 @@
 //! Metering engine — tracks LLM cost and enforces spending quotas.
 
+use librefang_llm_driver::exhaustion::{
+    ExhaustionReason, ProviderExhaustionStore, DEFAULT_LONG_BACKOFF,
+};
 use librefang_memory::usage::{ModelUsage, UsageRecord, UsageStore, UsageSummary};
 use librefang_types::agent::{AgentId, ResourceQuota, UserId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::model_catalog::ModelCatalogEntry;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 const DEFAULT_INPUT_COST_PER_M: f64 = 1.0;
 const DEFAULT_OUTPUT_COST_PER_M: f64 = 3.0;
@@ -97,6 +101,11 @@ pub struct MeteringEngine {
     store: Arc<UsageStore>,
     /// In-memory ledger of pre-charged but not-yet-settled USD cost (#3616).
     pending: Arc<CostReservationLedger>,
+    /// Optional shared provider-exhaustion store (#4807). When set,
+    /// per-provider budget breaches (operator caps in `[budget.providers]`)
+    /// flag the provider as exhausted so the fallback chain skips it
+    /// instead of attempting the call and getting a fresh quota error.
+    exhaustion: Option<ProviderExhaustionStore>,
 }
 
 impl MeteringEngine {
@@ -105,6 +114,50 @@ impl MeteringEngine {
         Self {
             store,
             pending: Arc::new(CostReservationLedger::default()),
+            exhaustion: None,
+        }
+    }
+
+    /// Attach a shared provider-exhaustion store (#4807). When set, the
+    /// metering engine marks a provider as `BudgetExceeded` whenever its
+    /// operator-set per-provider budget gate trips, so the LLM fallback
+    /// chain skips that slot for [`DEFAULT_LONG_BACKOFF`] without first
+    /// dispatching a request that the gate would only deny again.
+    ///
+    /// The store is cheap-clone — pass the same instance the
+    /// `FallbackChain` uses so both layers observe a coherent view.
+    pub fn with_exhaustion_store(mut self, store: ProviderExhaustionStore) -> Self {
+        self.exhaustion = Some(store);
+        self
+    }
+
+    /// Return a clone of the attached exhaustion store, when one is wired.
+    /// Used by callers that need to seed the same store into other layers
+    /// (e.g. an `AuxClient` built after the metering engine).
+    pub fn exhaustion_store(&self) -> Option<ProviderExhaustionStore> {
+        self.exhaustion.clone()
+    }
+
+    /// Mark a provider as budget-exhausted on the attached store, if any.
+    /// No-op when no exhaustion store is wired (legacy callers). Centralised
+    /// here so every "budget refused this provider" site uses the same
+    /// reason / backoff combo.
+    fn flag_provider_budget_exhausted(&self, provider: &str) {
+        if provider.is_empty() {
+            return;
+        }
+        if let Some(store) = &self.exhaustion {
+            tracing::info!(
+                target: "metering",
+                event = "provider_budget_exhausted",
+                provider = %provider,
+                "operator budget cap reached; flagging provider in exhaustion store"
+            );
+            store.mark_exhausted(
+                provider,
+                ExhaustionReason::BudgetExceeded,
+                Some(Instant::now() + DEFAULT_LONG_BACKOFF),
+            );
         }
     }
 
@@ -512,6 +565,11 @@ impl MeteringEngine {
     /// gating or dashboards).
     ///
     /// Zero limits are treated as "unlimited" and are skipped.
+    ///
+    /// When the gate refuses a provider AND an exhaustion store is attached
+    /// (see [`Self::with_exhaustion_store`]), the provider is also marked
+    /// as `BudgetExceeded` for [`DEFAULT_LONG_BACKOFF`] so the LLM fallback
+    /// chain skips it on subsequent calls without re-dispatching (#4807).
     pub fn check_provider_budget(
         &self,
         provider: &str,
@@ -524,6 +582,7 @@ impl MeteringEngine {
         if budget.max_cost_per_hour_usd > 0.0 {
             let cost = self.store.query_provider_hourly(provider)?;
             if cost >= budget.max_cost_per_hour_usd {
+                self.flag_provider_budget_exhausted(provider);
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Provider '{}' exceeded hourly cost budget: ${:.4} / ${:.4}",
                     provider, cost, budget.max_cost_per_hour_usd
@@ -534,6 +593,7 @@ impl MeteringEngine {
         if budget.max_cost_per_day_usd > 0.0 {
             let cost = self.store.query_provider_daily(provider)?;
             if cost >= budget.max_cost_per_day_usd {
+                self.flag_provider_budget_exhausted(provider);
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Provider '{}' exceeded daily cost budget: ${:.4} / ${:.4}",
                     provider, cost, budget.max_cost_per_day_usd
@@ -544,6 +604,7 @@ impl MeteringEngine {
         if budget.max_cost_per_month_usd > 0.0 {
             let cost = self.store.query_provider_monthly(provider)?;
             if cost >= budget.max_cost_per_month_usd {
+                self.flag_provider_budget_exhausted(provider);
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Provider '{}' exceeded monthly cost budget: ${:.4} / ${:.4}",
                     provider, cost, budget.max_cost_per_month_usd
@@ -554,6 +615,7 @@ impl MeteringEngine {
         if budget.max_tokens_per_hour > 0 {
             let tokens = self.store.query_provider_tokens_hourly(provider)?;
             if tokens >= budget.max_tokens_per_hour {
+                self.flag_provider_budget_exhausted(provider);
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Provider '{}' exceeded hourly token budget: {} / {}",
                     provider, tokens, budget.max_tokens_per_hour
@@ -1303,5 +1365,151 @@ mod tests {
         // Even a huge estimate must pass when no limit is configured.
         let r = engine.reserve_global_budget(&budget, 9_999.0).unwrap();
         r.settle();
+    }
+
+    // ── #4807: per-provider budget breach flips exhaustion store ────────
+
+    /// When a per-provider hourly cap trips, the engine must flag the
+    /// provider in the attached exhaustion store. The fallback chain
+    /// reads this on its next call and skips the slot without dispatch.
+    #[test]
+    fn provider_hourly_budget_flips_exhaustion_store() {
+        let exhaustion = ProviderExhaustionStore::new();
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = Arc::new(UsageStore::new(substrate.pool()));
+        let engine = MeteringEngine::new(store).with_exhaustion_store(exhaustion.clone());
+
+        let agent_id = AgentId::new();
+        let provider_budget = librefang_types::config::ProviderBudget {
+            max_cost_per_hour_usd: 0.01,
+            ..Default::default()
+        };
+
+        // Record cost above the cap.
+        engine
+            .record(&UsageRecord {
+                agent_id,
+                provider: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+                input_tokens: 1_000,
+                output_tokens: 500,
+                cost_usd: 0.50,
+                tool_calls: 0,
+                latency_ms: 100,
+                ..Default::default()
+            })
+            .unwrap();
+
+        // Pre-condition: nothing marked yet.
+        assert!(exhaustion.is_exhausted("openai").is_none());
+
+        let result = engine.check_provider_budget("openai", &provider_budget);
+        assert!(result.is_err(), "budget gate should refuse");
+
+        // Post-condition: provider flagged with BudgetExceeded.
+        let rec = exhaustion
+            .is_exhausted("openai")
+            .expect("provider should be flagged");
+        assert_eq!(rec.reason, ExhaustionReason::BudgetExceeded);
+        assert!(
+            rec.until.is_some(),
+            "budget-exceeded must carry an auto-clear time"
+        );
+    }
+
+    /// Per-provider token cap trips the same path.
+    #[test]
+    fn provider_token_budget_flips_exhaustion_store() {
+        let exhaustion = ProviderExhaustionStore::new();
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = Arc::new(UsageStore::new(substrate.pool()));
+        let engine = MeteringEngine::new(store).with_exhaustion_store(exhaustion.clone());
+
+        let agent_id = AgentId::new();
+        let provider_budget = librefang_types::config::ProviderBudget {
+            max_tokens_per_hour: 100,
+            ..Default::default()
+        };
+
+        engine
+            .record(&UsageRecord {
+                agent_id,
+                provider: "groq".to_string(),
+                model: "llama-3-70b".to_string(),
+                input_tokens: 1_000,
+                output_tokens: 500,
+                cost_usd: 0.0,
+                tool_calls: 0,
+                latency_ms: 100,
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert!(engine
+            .check_provider_budget("groq", &provider_budget)
+            .is_err());
+        let rec = exhaustion
+            .is_exhausted("groq")
+            .expect("groq should be flagged");
+        assert_eq!(rec.reason, ExhaustionReason::BudgetExceeded);
+    }
+
+    /// Without an attached store the engine works exactly as before —
+    /// the flag call is a no-op and existing call sites are unaffected.
+    #[test]
+    fn provider_budget_no_store_attached_is_legacy_compatible() {
+        let engine = setup();
+        let provider_budget = librefang_types::config::ProviderBudget {
+            max_cost_per_hour_usd: 0.01,
+            ..Default::default()
+        };
+        let agent_id = AgentId::new();
+        engine
+            .record(&UsageRecord {
+                agent_id,
+                provider: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+                input_tokens: 1_000,
+                output_tokens: 500,
+                cost_usd: 0.50,
+                tool_calls: 0,
+                latency_ms: 100,
+                ..Default::default()
+            })
+            .unwrap();
+
+        // Still errors with QuotaExceeded — no panic, no store wiring needed.
+        assert!(engine
+            .check_provider_budget("openai", &provider_budget)
+            .is_err());
+    }
+
+    /// `exhaustion_store()` accessor returns the same instance the engine
+    /// was wired with, so the kernel can pass the same store down to the
+    /// fallback-chain layer.
+    #[test]
+    fn exhaustion_store_accessor_round_trips_attached_handle() {
+        let exhaustion = ProviderExhaustionStore::new();
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = Arc::new(UsageStore::new(substrate.pool()));
+        let engine = MeteringEngine::new(store).with_exhaustion_store(exhaustion.clone());
+
+        let from_engine = engine
+            .exhaustion_store()
+            .expect("engine should expose attached store");
+        // Mark via the engine-returned handle, observe via the original —
+        // both must point at the same underlying DashMap.
+        from_engine.mark_exhausted(
+            "openai",
+            ExhaustionReason::BudgetExceeded,
+            Some(Instant::now() + DEFAULT_LONG_BACKOFF),
+        );
+        assert!(exhaustion.is_exhausted("openai").is_some());
+    }
+
+    #[test]
+    fn exhaustion_store_accessor_returns_none_when_unwired() {
+        let engine = setup();
+        assert!(engine.exhaustion_store().is_none());
     }
 }
