@@ -2,25 +2,27 @@
 //!
 //! This crate is the LibreFang-side egress surface that turns a finished
 //! agent rollout into an upload to an upstream RL-tracking service. It
-//! is the first concrete piece of issue #3331 ("Long-horizon RL rollout
-//! entry point").
+//! is the concrete delivery of issue #3331 ("Long-horizon RL rollout
+//! entry point"); all three upstream targets land together.
 //!
-//! # Scope of this crate (#3331 step 1 of 3)
+//! # Scope of this crate (#3331)
 //!
-//! - **Step 1 — Weights & Biases (this PR).** Most upstream-stable of
-//!   the three target services; their public REST API has been frozen
-//!   for years and is the conventional first integration for any
-//!   trajectory producer.
-//! - **Step 2 — Tinker** (follow-up PR). Lands as an additive
-//!   `ExportTarget::Tinker { … }` variant + `src/tinker.rs` module;
-//!   no breaking change to the public API of this crate.
-//! - **Step 3 — Atropos** (follow-up PR). Same shape: additive
-//!   `ExportTarget::Atropos { … }` + `src/atropos.rs`.
+//! Three upstream targets are supported today, each behind an additive
+//! variant on the `#[non_exhaustive]` [`ExportTarget`] enum:
+//!
+//! - **Weights & Biases** — REST API has been frozen for years; the
+//!   conventional first integration for any trajectory producer.
+//! - **Tinker** — Thinking Machines' distributed LLM post-training API;
+//!   no dedicated opaque-trajectory upload endpoint today, so the
+//!   exporter maps onto Tinker's `(create_session, telemetry)` pair.
+//! - **Atropos** — NousResearch's local FastAPI RL-environments
+//!   microservice; the exporter maps onto Atropos's
+//!   `(register-env, scored_data)` pair.
 //!
 //! # Wire-format decoupling (#3330)
 //!
 //! The exporter is intentionally **format-agnostic**. A
-//! [`TrajectoryExport`] carries the trajectory as an opaque
+//! [`RlTrajectoryExport`] carries the trajectory as an opaque
 //! `Vec<u8>` plus structured metadata; whatever bytes the rollout
 //! producer hands us are uploaded verbatim. The companion RFC #3330
 //! locks the on-the-wire serialization for trajectories, but **this
@@ -116,7 +118,7 @@ pub enum ExportTarget {
     /// Atropos's `register-env` / `scored_data` pair; see the module
     /// docs in `atropos.rs` for the trainer-must-be-running assumption.
     ///
-    /// `TrajectoryExport.trajectory_bytes` MUST already be valid
+    /// `RlTrajectoryExport.trajectory_bytes` MUST already be valid
     /// `ScoredData` JSON (`tokens` / `masks` / `scores` / …); the
     /// exporter forwards the bytes verbatim and lets Atropos validate.
     Atropos {
@@ -171,15 +173,23 @@ impl std::fmt::Debug for ExportTarget {
     }
 }
 
-/// A single trajectory ready to be exported.
+/// A single RL rollout trajectory ready to be exported.
 ///
 /// `trajectory_bytes` is opaque — the wire format is owned by the
 /// producer (and ultimately locked by #3330). The exporter does not
 /// inspect, validate, or transcode the payload; it forwards the bytes
 /// to the upstream verbatim. This keeps the exporter stable across
 /// wire-format iterations.
+///
+/// Named `RlTrajectoryExport` (not `TrajectoryExport`) so the type is
+/// unambiguously distinct from the kernel's
+/// `librefang_kernel::trajectory::TrajectoryExporter` — that one emits a
+/// redacted **session** audit trail for support / compliance, whereas
+/// this struct describes an **RL rollout** egress destined for an
+/// external training service. The two concepts share zero state and
+/// must not be confused.
 #[derive(Debug, Clone)]
-pub struct TrajectoryExport {
+pub struct RlTrajectoryExport {
     /// Caller-side run identifier. Used as a default hint when the
     /// target accepts one (e.g. W&B's `run_id` field); upstreams may
     /// reassign and return their own server-side id, which ends up in
@@ -212,7 +222,7 @@ pub struct ExportReceipt {
     /// Public, browser-loadable URL of the run on the upstream.
     pub target_run_url: String,
     /// Number of trajectory bytes uploaded. Mirrors
-    /// `TrajectoryExport::trajectory_bytes.len()` on success.
+    /// `RlTrajectoryExport::trajectory_bytes.len()` on success.
     pub bytes_uploaded: u64,
     /// Wall-clock time the upload completed, as observed locally.
     pub uploaded_at: DateTime<Utc>,
@@ -240,7 +250,7 @@ pub struct ExportReceipt {
 ///   the body did not match the expected shape.
 pub async fn export(
     target: ExportTarget,
-    export: TrajectoryExport,
+    export: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
     match target {
         ExportTarget::WandB {

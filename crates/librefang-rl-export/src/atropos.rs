@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{classify_response_decode_error, classify_status, read_body_truncated, ExportError},
-    ExportReceipt, TrajectoryExport,
+    ExportReceipt, RlTrajectoryExport,
 };
 
 /// Default Atropos REST base URL. Matches the Atropos `run-api` default
@@ -112,7 +112,7 @@ const DEFAULT_WEIGHT: f32 = 1.0;
 pub(crate) async fn export_to_atropos(
     project: &str,
     base_url_override: Option<&str>,
-    export: TrajectoryExport,
+    export: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
     let base = base_url_override.unwrap_or(DEFAULT_ATROPOS_BASE);
     export_to_atropos_with_base(base, project, export).await
@@ -125,7 +125,7 @@ pub(crate) async fn export_to_atropos(
 pub(crate) async fn export_to_atropos_with_base(
     base: &str,
     project: &str,
-    export: TrajectoryExport,
+    export: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
     if project.is_empty() {
         return Err(ExportError::InvalidConfig(
@@ -243,14 +243,14 @@ mod tests {
     /// Build a sample export. Atropos consumes the trajectory bytes as a
     /// `ScoredData` JSON payload, so the sample bytes are a minimal
     /// valid `ScoredData` blob.
-    fn sample_export(run_id: &str) -> TrajectoryExport {
+    fn sample_export(run_id: &str) -> RlTrajectoryExport {
         let scored_data = serde_json::json!({
             "tokens": [[1, 2, 3]],
             "masks": [[1, 1, 1]],
             "scores": [0.5],
         });
         let bytes = serde_json::to_vec(&scored_data).unwrap();
-        TrajectoryExport {
+        RlTrajectoryExport {
             run_id: run_id.to_string(),
             trajectory_bytes: bytes,
             toolset_metadata: None,

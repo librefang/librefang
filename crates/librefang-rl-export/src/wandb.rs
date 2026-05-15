@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{classify_response_decode_error, classify_status, read_body_truncated, ExportError},
-    ExportReceipt, TrajectoryExport,
+    ExportReceipt, RlTrajectoryExport,
 };
 
 /// Default W&B API base URL. Tests override via `export_to_wandb_with_base`.
@@ -69,7 +69,7 @@ pub(crate) async fn export_to_wandb(
     entity: Option<&str>,
     run_id_hint: Option<&str>,
     api_key: &str,
-    export: TrajectoryExport,
+    export: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
     export_to_wandb_with_base(
         DEFAULT_WANDB_BASE,
@@ -92,7 +92,7 @@ pub(crate) async fn export_to_wandb_with_base(
     entity: Option<&str>,
     run_id_hint: Option<&str>,
     api_key: &str,
-    export: TrajectoryExport,
+    export: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
     if api_key.is_empty() {
         return Err(ExportError::InvalidConfig(
@@ -202,8 +202,8 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn sample_export(run_id: &str) -> TrajectoryExport {
-        TrajectoryExport {
+    fn sample_export(run_id: &str) -> RlTrajectoryExport {
+        RlTrajectoryExport {
             run_id: run_id.to_string(),
             trajectory_bytes: b"opaque-trajectory-bytes".to_vec(),
             toolset_metadata: Some(serde_json::json!({"tools": ["shell", "fetch"]})),

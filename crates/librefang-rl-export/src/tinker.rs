@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{classify_response_decode_error, classify_status, read_body_truncated, ExportError},
-    ExportReceipt, TrajectoryExport,
+    ExportReceipt, RlTrajectoryExport,
 };
 
 /// Default Tinker REST base URL. Mirrors the value the Tinker Python
@@ -118,7 +118,7 @@ pub(crate) async fn export_to_tinker(
     project: &str,
     api_key: &str,
     base_url_override: Option<&str>,
-    export: TrajectoryExport,
+    export: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
     let base = base_url_override.unwrap_or(DEFAULT_TINKER_BASE);
     export_to_tinker_with_base(base, project, api_key, export).await
@@ -132,7 +132,7 @@ pub(crate) async fn export_to_tinker_with_base(
     base: &str,
     project: &str,
     api_key: &str,
-    export: TrajectoryExport,
+    export: RlTrajectoryExport,
 ) -> Result<ExportReceipt, ExportError> {
     if api_key.is_empty() {
         return Err(ExportError::InvalidConfig(
@@ -255,8 +255,8 @@ mod tests {
     use wiremock::matchers::{body_partial_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn sample_export(run_id: &str) -> TrajectoryExport {
-        TrajectoryExport {
+    fn sample_export(run_id: &str) -> RlTrajectoryExport {
+        RlTrajectoryExport {
             run_id: run_id.to_string(),
             trajectory_bytes: b"opaque-trajectory-bytes".to_vec(),
             toolset_metadata: Some(serde_json::json!({"tools": ["shell", "fetch"]})),
