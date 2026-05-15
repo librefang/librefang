@@ -87,10 +87,15 @@ describe("dashboard auth helpers", () => {
     expect(protocols).toEqual([]);
   });
 
-  it("stores the token in sessionStorage, not localStorage", () => {
+  it("stores the token in sessionStorage under the BossFang key, not localStorage", () => {
     setApiKey("secret-token");
 
-    expect(sessionStorageMock.getItem("librefang-api-key")).toBe("secret-token");
+    // New key written to sessionStorage.
+    expect(sessionStorageMock.getItem("bossfang-api-key")).toBe("secret-token");
+    // Never written to localStorage (XSS-reduction policy).
+    expect(localStorageMock.getItem("bossfang-api-key")).toBeNull();
+    // Legacy key cleared from both stores on every setApiKey call.
+    expect(sessionStorageMock.getItem("librefang-api-key")).toBeNull();
     expect(localStorageMock.getItem("librefang-api-key")).toBeNull();
   });
 
@@ -99,6 +104,10 @@ describe("dashboard auth helpers", () => {
     fetchMock.mockResolvedValue(new Response("", { status: 401 }));
 
     await expect(verifyStoredAuth()).resolves.toBe(false);
+    // BossFang key cleared.
+    expect(sessionStorageMock.getItem("bossfang-api-key")).toBeNull();
+    expect(localStorageMock.getItem("bossfang-api-key")).toBeNull();
+    // Legacy key cleared too.
     expect(sessionStorageMock.getItem("librefang-api-key")).toBeNull();
     expect(localStorageMock.getItem("librefang-api-key")).toBeNull();
   });
