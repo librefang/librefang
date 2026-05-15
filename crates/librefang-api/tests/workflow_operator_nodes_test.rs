@@ -809,12 +809,24 @@ async fn branch_step_arm_hit_routes_to_target_and_skips_intermediate_steps() {
         "intermediates must be skipped; got step trail: {step_names_a:?}"
     );
     // Branch prompt slot records the dispatched arm for the dashboard.
+    // The trace is a JSON object keyed by `op` (see the unified
+    // operator-prompt-trace shape in `operator_prompt_trace` —
+    // #4980 review nit #4); we assert the parsed fields so the test
+    // doesn't depend on `serde_json::Map`'s key-ordering choice.
     let branch_sr = &run_a_full.step_results[1];
     assert_eq!(branch_sr.agent_name, "_operator:branch");
+    let trace: serde_json::Value = serde_json::from_str(&branch_sr.prompt)
+        .unwrap_or_else(|e| panic!("branch prompt must be JSON; got {}: {e}", branch_sr.prompt));
+    assert_eq!(trace["op"], "branch");
+    assert_eq!(trace["target"], "publish");
+    assert_eq!(trace["matched"], true);
+    assert_eq!(trace["arm_idx"], 0);
+    // The decision input must be carried (#4980 review nit #5) so an
+    // operator debugging a "wrong arm fired" report can see the value
+    // the comparator saw, not just the arm index.
     assert!(
-        branch_sr.prompt.contains("branch -> 'publish'"),
-        "branch step's prompt slot must record the dispatched target; got: {}",
-        branch_sr.prompt
+        trace["input"].is_string(),
+        "branch prompt must carry the decision input; got: {trace}"
     );
 
     // Run B — same shape, different terminal — proves the routing
@@ -1075,5 +1087,271 @@ async fn branch_step_ambiguous_target_halts_with_recorded_reason() {
             .iter()
             .any(|o| o.contains("first:") || o.contains("second:")),
         "neither duplicate target's transform output should appear; got: {output_strs:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Validate fail-closed (#4980 review blocking #1) — DAG + operator-node
+// combinations are rejected at register time so the silent run-time
+// failure from `execute_run_dag` calling `agent_resolver` on an operator
+// node never reaches a real run.
+// ---------------------------------------------------------------------------
+
+/// Engine-level smoke test for the DAG+operator-node fail-closed rule.
+/// The kernel-unit test
+/// (`workflow_validate_rejects_operator_node_combined_with_dag_depends_on`)
+/// covers each variant individually; here we just pin that the
+/// integration boundary (the `Workflow::validate` call the HTTP route
+/// makes before forwarding to `register_workflow`) sees the same
+/// errors. Pre-fix, a DAG workflow containing operator nodes
+/// serialised, persisted, round-tripped through pause/resume, and only
+/// failed at run time with `format_missing_agent_error`.
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_rejects_dag_workflow_with_operator_node_step() {
+    let test = boot();
+    let _engine = test.state.kernel.workflow_engine();
+
+    // Producer is a vanilla Sequential step the operator node depends
+    // on; the operator node itself is a Wait variant — but Gate,
+    // Approval, Transform, Branch all behave identically (covered by
+    // the kernel-unit cases). The presence of `depends_on` is what
+    // triggers the rule.
+    let producer = WorkflowStep {
+        name: "producer".to_string(),
+        agent: StepAgent::ByName {
+            name: "_producer".to_string(),
+        },
+        prompt_template: "{{input}}".to_string(),
+        mode: StepMode::Sequential,
+        timeout_secs: 30,
+        error_mode: ErrorMode::Fail,
+        output_var: None,
+        inherit_context: None,
+        depends_on: vec![],
+        session_mode: None,
+    };
+    let op = WorkflowStep {
+        name: "op".to_string(),
+        agent: StepAgent::ByName {
+            name: "_operator_placeholder".to_string(),
+        },
+        prompt_template: "{{input}}".to_string(),
+        mode: StepMode::Wait { duration_secs: 1 },
+        timeout_secs: 30,
+        error_mode: ErrorMode::Fail,
+        output_var: None,
+        inherit_context: None,
+        depends_on: vec!["producer".to_string()],
+        session_mode: None,
+    };
+    let wf = Workflow {
+        id: WorkflowId::new(),
+        name: "dag-plus-operator".to_string(),
+        description: "must be rejected at validate time".to_string(),
+        steps: vec![producer, op],
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: None,
+    };
+    let errs = wf.validate();
+    assert!(
+        errs.iter().any(|(s, r)| s == "op" && r.contains("DAG")),
+        "validate must reject DAG + operator-node combination; got: {errs:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// dry_run (#4980 review blocking #2) — operator-node steps must be
+// previewed as `_operator:<kind>` with `agent_found = true`, not fall
+// through to the agent-shaped branch and report as missing-agent.
+// ---------------------------------------------------------------------------
+
+/// Pre-fix, `dry_run` matched only on `Conditional` and fell through to
+/// `agent_resolver` for everything else; operator-node steps surfaced
+/// in the dashboard preview as `agent_found = false`, "missing agent"
+/// rows. This test pins that the preview now names each operator
+/// kind and reports it as found.
+#[tokio::test(flavor = "multi_thread")]
+async fn dry_run_reports_operator_nodes_as_found_with_synthetic_agent_names() {
+    let test = boot();
+    let engine = test.state.kernel.workflow_engine();
+
+    // Build a workflow with one step per operator-node variant. No
+    // `depends_on` (operator + DAG combination is rejected by
+    // `validate` per blocking #1), so we exercise the sequential
+    // dry-run path. Five operator variants, one terminal Sequential
+    // step (the agent resolver is allowed to fail for that one — we
+    // assert the operator nodes specifically).
+    let mk = |name: &str, mode: StepMode| WorkflowStep {
+        name: name.to_string(),
+        agent: StepAgent::ByName {
+            name: "_op_placeholder".to_string(),
+        },
+        prompt_template: "{{input}}".to_string(),
+        mode,
+        timeout_secs: 30,
+        error_mode: ErrorMode::Fail,
+        output_var: None,
+        inherit_context: None,
+        depends_on: vec![],
+        session_mode: None,
+    };
+    let wf = Workflow {
+        id: WorkflowId::new(),
+        name: "dry-run-operators".to_string(),
+        description: "dry_run operator-node preview test".to_string(),
+        steps: vec![
+            mk("w", StepMode::Wait { duration_secs: 5 }),
+            mk(
+                "g",
+                StepMode::Gate {
+                    condition: GateCondition {
+                        field: Some("/score".to_string()),
+                        op: GateOp::Gt,
+                        value: serde_json::json!(0.8),
+                    },
+                },
+            ),
+            mk(
+                "a",
+                StepMode::Approval {
+                    recipients: vec!["telegram:@pakman".into()],
+                    timeout_secs: Some(3600),
+                },
+            ),
+            mk(
+                "t",
+                StepMode::Transform {
+                    code: "hello {{ prev }}".to_string(),
+                },
+            ),
+            mk(
+                "b",
+                StepMode::Branch {
+                    arms: vec![BranchArm {
+                        match_value: serde_json::json!("ok"),
+                        then: "fin".to_string(),
+                    }],
+                },
+            ),
+        ],
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: None,
+    };
+    let wf_id = wf.id;
+    engine.register(wf).await;
+
+    // The agent resolver would fire on `Sequential` / `Conditional` /
+    // `Loop` / `FanOut` / `Collect` steps; this workflow has none of
+    // those, so it must never be called. We pass a panicking resolver
+    // to enforce the contract.
+    let preview = engine
+        .dry_run(
+            wf_id,
+            "seed",
+            |_agent: &StepAgent| -> Option<(AgentId, String, bool)> {
+                panic!("dry_run must not call agent_resolver for operator nodes");
+            },
+        )
+        .await
+        .expect("dry_run");
+
+    assert_eq!(preview.len(), 5, "one preview row per step");
+    let expected: Vec<(&str, &str)> = vec![
+        ("w", "_operator:wait"),
+        ("g", "_operator:gate"),
+        ("a", "_operator:approval"),
+        ("t", "_operator:transform"),
+        ("b", "_operator:branch"),
+    ];
+    for (preview_row, (expected_name, expected_kind)) in preview.iter().zip(expected.iter()) {
+        assert_eq!(
+            preview_row.step_name, *expected_name,
+            "step name mismatch in dry_run preview"
+        );
+        assert!(
+            preview_row.agent_found,
+            "operator-node step `{expected_name}` must report agent_found=true; \
+             pre-fix this was false because dry_run fell through to agent_resolver"
+        );
+        assert_eq!(
+            preview_row.agent_name.as_deref(),
+            Some(*expected_kind),
+            "operator-node step `{expected_name}` must carry the `{expected_kind}` synthetic name"
+        );
+        assert!(
+            !preview_row.skipped,
+            "operator-node step `{expected_name}` must not be marked skipped on a clean dry_run"
+        );
+    }
+}
+
+/// A `Transform` step with a syntax-broken Tera template must surface
+/// in the dry_run preview as a `skipped` row with a typed reason —
+/// the same shape the run-time executor surfaces and the same shape
+/// `Workflow::validate` rejects at register time. dry_run is reachable
+/// for workflows loaded from disk that bypass the HTTP gate, so the
+/// dry-run preview must double-check the template independently.
+#[tokio::test(flavor = "multi_thread")]
+async fn dry_run_marks_unparseable_transform_template_as_skipped() {
+    let test = boot();
+    let engine = test.state.kernel.workflow_engine();
+
+    let wf = Workflow {
+        id: WorkflowId::new(),
+        name: "dry-run-bad-transform".to_string(),
+        description: "dry_run surfaces template syntax errors".to_string(),
+        steps: vec![WorkflowStep {
+            name: "bad-transform".to_string(),
+            agent: StepAgent::ByName {
+                name: "_op_placeholder".to_string(),
+            },
+            prompt_template: "{{input}}".to_string(),
+            mode: StepMode::Transform {
+                // Unterminated expression — Tera rejects at parse time.
+                code: "hello {{ prev".to_string(),
+            },
+            timeout_secs: 30,
+            error_mode: ErrorMode::Fail,
+            output_var: None,
+            inherit_context: None,
+            depends_on: vec![],
+            session_mode: None,
+        }],
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: None,
+    };
+    let wf_id = wf.id;
+    engine.register(wf).await;
+
+    let preview = engine
+        .dry_run(
+            wf_id,
+            "seed",
+            |_agent: &StepAgent| -> Option<(AgentId, String, bool)> {
+                panic!("dry_run must not call agent_resolver for Transform");
+            },
+        )
+        .await
+        .expect("dry_run");
+
+    assert_eq!(preview.len(), 1);
+    let row = &preview[0];
+    assert_eq!(row.step_name, "bad-transform");
+    assert_eq!(row.agent_name.as_deref(), Some("_operator:transform"));
+    assert!(row.agent_found);
+    assert!(
+        row.skipped,
+        "Tera parse error must surface as skipped in dry_run"
+    );
+    let reason = row
+        .skip_reason
+        .as_deref()
+        .expect("skip_reason must be set on Tera parse error");
+    assert!(
+        reason.contains("transform template parse failed"),
+        "skip_reason should wrap the Tera parse error; got: {reason}"
     );
 }
