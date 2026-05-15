@@ -20,6 +20,29 @@
 //! runtime`'s entire dependency tree (tower middleware, channel
 //! adapters, tokenizer pipelines) into a leaf egress crate. The local
 //! shape below is ~25 lines and unit-testable in isolation.
+//!
+//! ## Deliberate divergence from `agent_loop.rs:108-111`
+//!
+//! The *transient classification* matches the workspace standard
+//! (network drops + 5xx + 429); the *timing* does not. `agent_loop`
+//! uses `MAX_RETRIES = 3` over `0..=MAX_RETRIES` (4 attempts) with
+//! `BASE_RETRY_DELAY_MS = 1000`. This module uses 3 attempts at 200ms
+//! base — chosen for the exporter latency profile:
+//!
+//! - W&B / Tinker / Atropos rate-limit windows are seconds, not
+//!   minutes, so a 200ms-then-400ms backoff covers the common
+//!   transient blip without the 1s wake-up tax.
+//! - Sub-second retry keeps the operator-visible failure latency low
+//!   when an upstream is genuinely down (3 attempts at 200ms + 400ms
+//!   ≈ 600ms wall + per-call timeouts, vs ~3s for the agent-loop
+//!   shape).
+//! - Trajectories are post-rollout; the caller is not blocking a user
+//!   on the retry budget, so the workspace's longer LLM-call retry
+//!   shape would burn time for no recovery benefit.
+//!
+//! Do NOT "fix" this back to 1000ms/4 attempts to "match the
+//! workspace" — the divergence is intentional. If you are tuning
+//! retries, update the constants below AND this docstring together.
 
 use std::future::Future;
 use std::time::Duration;
@@ -27,10 +50,17 @@ use std::time::Duration;
 use crate::error::ExportError;
 
 /// Maximum number of attempts (including the first).
+///
+/// Diverges from `librefang_runtime::agent_loop::MAX_RETRIES` (3 retries
+/// over 4 attempts) — see module-level "Deliberate divergence" note.
 const MAX_ATTEMPTS: u32 = 3;
 
 /// Base delay for the exponential backoff. Attempt N waits
 /// `BASE_DELAY_MS * 2^(N-1)` ms before retrying (i.e. 200ms, 400ms).
+///
+/// Diverges from `librefang_runtime::agent_loop::BASE_RETRY_DELAY_MS`
+/// (1000ms) — see module-level "Deliberate divergence" note for the
+/// exporter-latency rationale.
 const BASE_DELAY_MS: u64 = 200;
 
 /// Run `op` up to [`MAX_ATTEMPTS`] times, retrying transient
@@ -46,6 +76,13 @@ const BASE_DELAY_MS: u64 = 200;
 /// for any per-attempt cloning (the upload body, headers, …). This
 /// shape matches how `reqwest::RequestBuilder` consumes its body and
 /// avoids leaking the consumed state across retries.
+///
+/// Timing differs from the workspace's LLM retry loop
+/// (`librefang_runtime::agent_loop::call_with_retry`, 1000ms / 4
+/// attempts) by design — 200ms / 3 attempts is chosen for the
+/// exporter latency profile (sub-second retry preferred for fast
+/// feedback on transient W&B / Tinker / Atropos failures). See the
+/// module-level "Deliberate divergence" note before tuning.
 pub(crate) async fn retry_upload<F, Fut, T>(
     label: &'static str,
     mut op: F,
