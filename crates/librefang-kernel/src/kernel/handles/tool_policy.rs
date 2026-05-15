@@ -46,6 +46,10 @@ impl kernel_handle::ToolPolicy for LibreFangKernel {
         Some(self.config.load().channels.effective_file_download_dir())
     }
 
+    fn deduplicate_file_reads(&self) -> bool {
+        self.config.load().context_engine.deduplicate_file_reads
+    }
+
     fn effective_upload_dir(&self) -> std::path::PathBuf {
         self.config_ref().channels.effective_file_download_dir()
     }

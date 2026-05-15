@@ -1033,6 +1033,16 @@ pub trait ToolPolicy: Send + Sync {
         None
     }
 
+    /// Whether the runtime should collapse repeated `file_read` calls on the
+    /// same path within a session into a short stub (#4971). Backed by
+    /// `[context_engine] deduplicate_file_reads` — default `true`. Stub
+    /// implementations leave the legacy "always full content" behaviour by
+    /// returning `false` so they don't have to think about session-scoped
+    /// state.
+    fn deduplicate_file_reads(&self) -> bool {
+        false
+    }
+
     /// Return the effective directory for storing runtime-generated uploads
     /// (image_generate, browser_screenshot, etc.). Honors operator-configured
     /// `[channels].file_download_dir` when set, otherwise falls back to the

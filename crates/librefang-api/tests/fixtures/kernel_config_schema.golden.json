@@ -345,7 +345,8 @@
             "name": "Official",
             "github_repo": "librefang/librefang-registry"
           }
-        ]
+        ],
+        "deduplicate_file_reads": true
       },
       "allOf": [
         {
@@ -571,6 +572,20 @@
       "items": {
         "$ref": "#/definitions/FallbackProviderConfig"
       }
+    },
+    "gateway_compression": {
+      "description": "Gateway-level safety-net compression (#4972). Cheap pre-loop pass that prunes oversized tool results and oldest non-pinned messages when a session has grown past the model's context window *between* turns, before the first LLM call. Runs at a higher threshold (0.85) than the agent-level compactor (0.70) — they are complementary, not alternatives. See [`GatewayCompressionConfig`].",
+      "default": {
+        "enabled": true,
+        "threshold_ratio": 0.8500000238418579,
+        "max_tool_result_chars": 200,
+        "keep_recent_messages": 5
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/GatewayCompressionConfig"
+        }
+      ]
     },
     "health_check": {
       "description": "Health check configuration.",
@@ -927,6 +942,18 @@
       "allOf": [
         {
           "$ref": "#/definitions/ProactiveMemoryConfig"
+        }
+      ]
+    },
+    "prompt_cache": {
+      "description": "Prompt cache breakpoint strategy (#4970).\n\nAnthropic and compatible providers reuse a request's prefix when explicit `cache_control` breakpoints anchor stable text. The strategy selects which stability anchors are emitted:\n\n- `disabled` — no breakpoints emitted; the prefix is still cached automatically by providers that support it (OpenAI / DeepSeek) above their own length thresholds, but Anthropic gets no hint. - `system_only` — one breakpoint at the end of the system block. Caches `(system)` only; tool schemas and history are re-billed every turn. - `system_and_N` (default `system_and_3`) — adds the last-tool marker and an N-deep rolling window over the most recent messages. Anthropic enforces a hard cap of 4 `cache_control` breakpoints per request; effective N is clipped accordingly.\n\nThe master switch is still [`Self::prompt_caching`]: when that is `false`, the strategy is ignored and no markers are written.",
+      "default": {
+        "strategy": "system_and_3",
+        "cache_ttl_hint_secs": 300
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/PromptCacheConfig"
         }
       ]
     },
@@ -3446,6 +3473,11 @@
       "description": "External authentication provider configuration (OAuth2/OIDC).\n\nAllows delegating user authentication to an external identity provider (Okta, Auth0, Keycloak, Google, GitHub, Microsoft, etc.).\n\nSingle provider (backward-compatible): ```toml [external_auth] enabled = true issuer_url = \"https://accounts.google.com\" client_id = \"your-client-id.apps.googleusercontent.com\" client_secret_env = \"LIBREFANG_OAUTH_CLIENT_SECRET\" redirect_url = \"http://127.0.0.1:4545/api/auth/callback\" scopes = [\"openid\", \"profile\", \"email\"] ```\n\nMultiple providers: ```toml [external_auth] enabled = true\n\n[[external_auth.providers]] id = \"google\" display_name = \"Google\" issuer_url = \"https://accounts.google.com\" client_id = \"your-google-client-id\" client_secret_env = \"GOOGLE_OAUTH_CLIENT_SECRET\"\n\n[[external_auth.providers]] id = \"github\" display_name = \"GitHub\" issuer_url = \"https://token.actions.githubusercontent.com\" auth_url = \"https://github.com/login/oauth/authorize\" token_url = \"https://github.com/login/oauth/access_token\" userinfo_url = \"https://api.github.com/user\" client_id = \"your-github-client-id\" Pluggable context engine configuration.\n\nConfigure in config.toml: ```toml [context_engine] engine = \"default\"     # built-in engine: \"default\"\n\n[context_engine.hooks] ingest = \"~/.librefang/plugins/my_recall.py\" after_turn = \"~/.librefang/plugins/my_indexer.py\" ```\n\nHeavy hooks (`assemble`, `compact`) always run in Rust for performance. Light hooks (`ingest`, `after_turn`) can be overridden with Python scripts using the same JSON stdin/stdout protocol as Python agents.\n\n# Usage\n\n**Simple (plugin-based):** ```toml [context_engine] plugin = \"qdrant-recall\"   # resolves to ~/.librefang/plugins/qdrant-recall/ ```\n\n**Manual (direct hook paths):** ```toml [context_engine.hooks] ingest = \"~/.librefang/scripts/my_recall.py\" after_turn = \"~/.librefang/scripts/my_indexer.py\" ```",
       "type": "object",
       "properties": {
+        "deduplicate_file_reads": {
+          "description": "When `true` (default), repeated `file_read` calls on the same path in a session are collapsed: if the on-disk content's hash matches a prior read in the same session, the tool returns a short `[File already read — content unchanged since turn N. See above for full content.]` stub instead of the full body. If the hash differs, the result is prefixed with `[File updated since last read at turn N]`. Set to `false` to send the full file content every time (legacy behaviour). The tracker is reset whenever automatic context compression fires, because the prior full content is no longer present in the history (#4971).",
+          "default": true,
+          "type": "boolean"
+        },
         "engine": {
           "description": "Built-in engine name. Supported values: - `\"default\"`: plain [`DefaultContextEngine`] with no additional wrapping - `\"summary\"`: [`SummaryContextEngine`] — threshold-gated LLM summarisation that fires when prompt tokens cross ~80 % of the context window - `\"no_compact\"`: [`NoCompactContextEngine`] — disables automatic compaction while wiring all other lifecycle hooks\n\nDefault: `\"default\"`.",
           "default": "default",
@@ -3900,6 +3932,13 @@
             {
               "$ref": "#/definitions/ChannelOverrides"
             }
+          ]
+        },
+        "proxy": {
+          "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Discord adapter's REST client (#4795). Affects REST API calls only — the gateway WebSocket is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+          "type": [
+            "string",
+            "null"
           ]
         }
       }
@@ -4791,6 +4830,37 @@
           "type": "integer",
           "format": "uint16",
           "minimum": 0.0
+        }
+      }
+    },
+    "GatewayCompressionConfig": {
+      "description": "Gateway-level safety-net compression (exposed in `[gateway_compression]` TOML section). Runs at the top of the agent loop, *before* the first LLM call and *before* the LLM-based [`CompactionTomlConfig`] runs.\n\nPurpose: catch sessions that grew between turns (overnight Telegram backlog, cron-job output piling up, etc.) and have already exceeded the model's context window when the next turn starts. Without this pass the first LLM call would 400 with \"context too long\" before the agent-level compactor ever gets a chance to run.\n\nTrade-off vs. [`CompactionTomlConfig`]: - Gateway pass: cheap (rough token estimation, no LLM call), runs at a *higher* threshold (default 0.85), prunes tool results + drops oldest non-pinned messages. - Agent-level compactor: LLM-summarises, runs at a *lower* threshold (default 0.70). Owns history compaction proper.\n\nThe gateway pass aims to bring the session below ~0.80 so the agent-level compactor can run normally on the next iteration. It never calls the LLM.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Master switch. Default ON. Set to `false` to disable the gateway safety-net pass entirely (the agent-level compactor still runs).",
+          "default": true,
+          "type": "boolean"
+        },
+        "keep_recent_messages": {
+          "description": "Number of most-recent messages always kept verbatim (default: 5). Older non-pinned messages are dropped first if stubbing tool results alone does not bring the estimate below the threshold.",
+          "default": 5,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "max_tool_result_chars": {
+          "description": "Tool results larger than this character count get stubbed (default: 200). Stubbing preserves `tool_use_id` pairing so the assistant ↔ tool-result chain stays well-formed for the provider.",
+          "default": 200,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "threshold_ratio": {
+          "description": "Trigger ratio: gateway pass fires when estimated session tokens exceed `context_window * threshold_ratio` (default: 0.85). Must be strictly greater than [`CompactionTomlConfig::token_threshold_ratio`] (default 0.70) so the agent-level compactor gets first crack.",
+          "default": 0.8500000238418579,
+          "type": "number",
+          "format": "float"
         }
       }
     },
@@ -6065,6 +6135,13 @@
             {
               "$ref": "#/definitions/ChannelOverrides"
             }
+          ]
+        },
+        "proxy": {
+          "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Mattermost adapter's REST client (#4795). Affects REST API calls only — the Mattermost WebSocket connection is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+          "type": [
+            "string",
+            "null"
           ]
         },
         "server_url": {
@@ -7698,6 +7775,13 @@
                   "$ref": "#/definitions/ChannelOverrides"
                 }
               ]
+            },
+            "proxy": {
+              "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Discord adapter's REST client (#4795). Affects REST API calls only — the gateway WebSocket is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         },
@@ -9146,6 +9230,13 @@
                 }
               ]
             },
+            "proxy": {
+              "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Mattermost adapter's REST client (#4795). Affects REST API calls only — the Mattermost WebSocket connection is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "server_url": {
               "description": "Mattermost server URL (e.g., `\"https://mattermost.example.com\"`).",
               "default": "",
@@ -10261,6 +10352,13 @@
                 }
               ]
             },
+            "proxy": {
+              "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Slack adapter's REST client (#4795). Affects Web API calls only — the Socket Mode WebSocket is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "unfurl_links": {
               "description": "Whether to disable link unfurling (preview expansion) in sent messages. When set to `false`, Slack will not expand link previews. When `None` (default), Slack uses its own default behavior.",
               "default": null,
@@ -10500,6 +10598,13 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0.0
+            },
+            "proxy": {
+              "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Telegram adapter's REST client (#4795). When unset, the adapter follows reqwest's normal env-var fallback (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`). When set, the per-channel value overrides any env var.\n\nAccepted schemes: `http://`, `https://`, `socks5://`, `socks5h://`. Auth is supported via `user:pass@host:port`. Invalid URLs are rejected at adapter init.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "thread_routes": {
               "description": "Thread-based agent routing for forum topics.\n\nMaps Telegram `message_thread_id` (as string) to an agent name. Messages in a matched thread are routed to that agent instead of the `default_agent`. Unmatched threads fall back to normal routing.\n\n```toml [channels.telegram.thread_routes] \"12345\" = \"research-agent\" \"67890\" = \"coding-agent\" ```",
@@ -12013,6 +12118,33 @@
         }
       }
     },
+    "PromptCacheConfig": {
+      "description": "Prompt cache configuration section (`[prompt_cache]`).\n\nLives under [`KernelConfig::prompt_cache`]. The master switch remains [`KernelConfig::prompt_caching`] — when that is `false`, drivers ignore this section entirely.",
+      "type": "object",
+      "properties": {
+        "cache_ttl_hint_secs": {
+          "description": "TTL hint (seconds) for the cached prefix. Anthropic exposes two discrete windows — 5 min (default) and 1 h (beta). The runtime maps this hint to the closer of those: ≥ 1800 s selects the 1 h beta cache; otherwise the default 5 min ephemeral cache. Other providers ignore this hint.",
+          "default": 300,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "strategy": {
+          "description": "Breakpoint placement strategy. See [`PromptCacheStrategy`] for the wire format and the per-provider semantics.",
+          "default": "system_and_3",
+          "allOf": [
+            {
+              "$ref": "#/definitions/PromptCacheStrategy"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "PromptCacheStrategy": {
+      "description": "Prompt cache strategy. One of: \"disabled\", \"system_only\", or \"system_and_N\" where N is a non-negative integer (e.g. \"system_and_3\").",
+      "type": "string"
+    },
     "PromptIntelligenceConfig": {
       "description": "Configuration for prompt versioning and A/B testing.",
       "type": "object",
@@ -13354,6 +13486,13 @@
             }
           ]
         },
+        "proxy": {
+          "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Slack adapter's REST client (#4795). Affects Web API calls only — the Socket Mode WebSocket is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "unfurl_links": {
           "description": "Whether to disable link unfurling (preview expansion) in sent messages. When set to `false`, Slack will not expand link previews. When `None` (default), Slack uses its own default behavior.",
           "default": null,
@@ -13893,6 +14032,13 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0.0
+        },
+        "proxy": {
+          "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Telegram adapter's REST client (#4795). When unset, the adapter follows reqwest's normal env-var fallback (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`). When set, the per-channel value overrides any env var.\n\nAccepted schemes: `http://`, `https://`, `socks5://`, `socks5h://`. Auth is supported via `user:pass@host:port`. Invalid URLs are rejected at adapter init.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "thread_routes": {
           "description": "Thread-based agent routing for forum topics.\n\nMaps Telegram `message_thread_id` (as string) to an agent name. Messages in a matched thread are routed to that agent instead of the `default_agent`. Unmatched threads fall back to normal routing.\n\n```toml [channels.telegram.thread_routes] \"12345\" = \"research-agent\" \"67890\" = \"coding-agent\" ```",

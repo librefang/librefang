@@ -1,6 +1,10 @@
 //! Media understanding engine — image description, audio transcription, video analysis.
 //!
-//! Auto-cascades through available providers based on configured API keys.
+//! Each modality dispatches to a single provider: either the one explicitly
+//! configured in `[media]` (`image_provider` / `audio_provider`), or — when
+//! no explicit provider is set — the first one whose API key env var is
+//! present. There is no runtime cascade across providers; a failure on the
+//! chosen provider surfaces as an `Err` to the caller.
 
 use librefang_types::media::{
     MediaAttachment, MediaConfig, MediaSource, MediaType, MediaUnderstanding,
@@ -27,7 +31,9 @@ impl MediaEngine {
     }
 
     /// Describe an image using a vision-capable LLM.
-    /// Auto-cascade: Anthropic -> OpenAI -> Gemini (based on API key availability).
+    /// Picks a single provider: `[media] image_provider` if set, otherwise
+    /// the first of Anthropic / OpenAI / Gemini whose API key env var is
+    /// present. No runtime fallback if the chosen provider errors.
     pub async fn describe_image(
         &self,
         attachment: &MediaAttachment,
@@ -56,7 +62,10 @@ impl MediaEngine {
     }
 
     /// Transcribe audio using speech-to-text.
-    /// Auto-cascade: Groq (whisper-large-v3-turbo) -> OpenAI (whisper-1).
+    /// Picks a single provider: `[media] audio_provider` if set, otherwise
+    /// the first one detected from env vars (Groq, OpenAI, Gemini,
+    /// ElevenLabs, …). There is no runtime cascade; a provider failure
+    /// surfaces as `Err` to the caller.
     pub async fn transcribe_audio(
         &self,
         attachment: &MediaAttachment,
@@ -343,17 +352,29 @@ async fn whisper_transcribe(
         .timeout(std::time::Duration::from_secs(60))
         .send()
         .await
-        .map_err(|e| format!("Transcription request failed: {}", e))?;
+        .map_err(|e| {
+            // Operator-facing: full error in logs. User-facing Err is
+            // sanitized to drop the underlying reqwest::Error display,
+            // which can echo URLs / request internals. See #4999.
+            tracing::warn!(error = %e, "Whisper transcription request failed");
+            "Transcription request failed".to_string()
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
+        // Operator log keeps the response body for diagnosis; the Err
+        // returned to the bridge / agent prompt only carries the status
+        // code so a misconfigured provider can't leak a key (some
+        // providers echo the request envelope) into the LLM prompt.
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Transcription API error ({}): {}", status, body));
+        tracing::warn!(%status, body = %body, "Whisper transcription returned non-2xx");
+        return Err(format!("Transcription API error ({})", status));
     }
 
-    resp.text()
-        .await
-        .map_err(|e| format!("Failed to read transcription response: {}", e))
+    resp.text().await.map_err(|e| {
+        tracing::warn!(error = %e, "Failed to read transcription response");
+        "Failed to read transcription response".to_string()
+    })
 }
 
 /// Transcribe using Gemini's multimodal generateContent API.
@@ -398,18 +419,26 @@ async fn gemini_transcribe(
         .timeout(std::time::Duration::from_secs(60))
         .send()
         .await
-        .map_err(|e| format!("Gemini transcription request failed: {}", e))?;
+        .map_err(|e| {
+            // Critical: Gemini's URL embeds the API key as `?key=…`.
+            // The `reqwest::Error` display can reproduce the URL — never
+            // surface it to the LLM prompt. Log + return a sanitized Err.
+            // See #4999.
+            tracing::warn!(error = %e, "Gemini transcription request failed");
+            "Gemini transcription request failed".to_string()
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let err_body = resp.text().await.unwrap_or_default();
-        return Err(format!("Gemini API error ({}): {}", status, err_body));
+        tracing::warn!(%status, body = %err_body, "Gemini transcription returned non-2xx");
+        return Err(format!("Gemini API error ({})", status));
     }
 
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse Gemini response: {}", e))?;
+    let json: serde_json::Value = resp.json().await.map_err(|e| {
+        tracing::warn!(error = %e, "Failed to parse Gemini response");
+        "Failed to parse Gemini response".to_string()
+    })?;
 
     json["candidates"][0]["content"]["parts"][0]["text"]
         .as_str()
@@ -442,18 +471,22 @@ async fn elevenlabs_transcribe(
         .timeout(std::time::Duration::from_secs(60))
         .send()
         .await
-        .map_err(|e| format!("ElevenLabs STT request failed: {}", e))?;
+        .map_err(|e| {
+            tracing::warn!(error = %e, "ElevenLabs STT request failed");
+            "ElevenLabs STT request failed".to_string()
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let err_body = resp.text().await.unwrap_or_default();
-        return Err(format!("ElevenLabs API error ({}): {}", status, err_body));
+        tracing::warn!(%status, body = %err_body, "ElevenLabs STT returned non-2xx");
+        return Err(format!("ElevenLabs API error ({})", status));
     }
 
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse ElevenLabs response: {}", e))?;
+    let json: serde_json::Value = resp.json().await.map_err(|e| {
+        tracing::warn!(error = %e, "Failed to parse ElevenLabs response");
+        "Failed to parse ElevenLabs response".to_string()
+    })?;
 
     json["text"]
         .as_str()

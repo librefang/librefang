@@ -373,6 +373,7 @@ const zhNavigation: Array<NavGroup> = [
 		links: [
 			{ title: "Agent 模板", href: withPrefix("/zh/agent/templates") },
 			{ title: "自主 Hands", href: withPrefix("/zh/agent/hands") },
+			{ title: "自动进化模式", href: withPrefix("/zh/agent/auto-evolution") },
 			{ title: "内存系统", href: withPrefix("/zh/agent/memory") },
 			{ title: "技能开发", href: withPrefix("/zh/agent/skills") },
 			{ title: "插件开发", href: withPrefix("/zh/agent/plugins") },
@@ -475,6 +476,7 @@ export const enNavigation: Array<NavGroup> = [
 		links: [
 			{ title: "Agent Templates", href: withPrefix("/agent/templates") },
 			{ title: "Autonomous Hands", href: withPrefix("/agent/hands") },
+			{ title: "Auto-Evolution Mode", href: withPrefix("/agent/auto-evolution") },
 			{ title: "Memory System", href: withPrefix("/agent/memory") },
 			{ title: "Skills", href: withPrefix("/agent/skills") },
 			{ title: "Plugins", href: withPrefix("/agent/plugins") },

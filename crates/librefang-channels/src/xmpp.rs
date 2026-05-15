@@ -142,6 +142,15 @@ impl ChannelAdapter for XmppAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the XMPP
+    /// JID / resource identifier) so the bridge approval listener builds
+    /// the same `xmpp:<account_id>` key the router stores in
+    /// `channel_defaults`, scoping ApprovalRequested delivery to the JID
+    /// bound to the requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -306,5 +315,32 @@ mod tests {
             msg.contains("not started") && msg.contains("tokio-xmpp"),
             "stub error must mention not-started + tokio-xmpp, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_xmpp_account_id_default_none() {
+        let adapter = XmppAdapter::new(
+            "bot@example.com".to_string(),
+            "pass".to_string(),
+            "example.com".to_string(),
+            5222,
+            vec![],
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_xmpp_account_id_returns_configured_value() {
+        // #5003: two XMPP JIDs must resolve under distinct
+        // `xmpp:<account_id>` keys via the trait override.
+        let adapter = XmppAdapter::new(
+            "bot@example.com".to_string(),
+            "pass".to_string(),
+            "example.com".to_string(),
+            5222,
+            vec![],
+        )
+        .with_account_id(Some("jid-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("jid-42"));
     }
 }

@@ -2282,6 +2282,74 @@ impl Default for CompactionTomlConfig {
     }
 }
 
+/// Gateway-level safety-net compression (exposed in `[gateway_compression]`
+/// TOML section). Runs at the top of the agent loop, *before* the first LLM
+/// call and *before* the LLM-based [`CompactionTomlConfig`] runs.
+///
+/// Purpose: catch sessions that grew between turns (overnight Telegram
+/// backlog, cron-job output piling up, etc.) and have already exceeded the
+/// model's context window when the next turn starts. Without this pass the
+/// first LLM call would 400 with "context too long" before the agent-level
+/// compactor ever gets a chance to run.
+///
+/// Trade-off vs. [`CompactionTomlConfig`]:
+/// - Gateway pass: cheap (rough token estimation, no LLM call), runs at a
+///   *higher* threshold (default 0.85), prunes tool results + drops oldest
+///   non-pinned messages.
+/// - Agent-level compactor: LLM-summarises, runs at a *lower* threshold
+///   (default 0.70). Owns history compaction proper.
+///
+/// The gateway pass aims to bring the session below ~0.80 so the agent-level
+/// compactor can run normally on the next iteration. It never calls the LLM.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct GatewayCompressionConfig {
+    /// Master switch. Default ON. Set to `false` to disable the gateway
+    /// safety-net pass entirely (the agent-level compactor still runs).
+    #[serde(default = "default_gateway_compression_enabled")]
+    pub enabled: bool,
+    /// Trigger ratio: gateway pass fires when estimated session tokens
+    /// exceed `context_window * threshold_ratio` (default: 0.85). Must be
+    /// strictly greater than [`CompactionTomlConfig::token_threshold_ratio`]
+    /// (default 0.70) so the agent-level compactor gets first crack.
+    #[serde(default = "default_gateway_compression_threshold_ratio")]
+    pub threshold_ratio: f32,
+    /// Tool results larger than this character count get stubbed (default:
+    /// 200). Stubbing preserves `tool_use_id` pairing so the assistant ↔
+    /// tool-result chain stays well-formed for the provider.
+    #[serde(default = "default_gateway_compression_max_tool_result_chars")]
+    pub max_tool_result_chars: usize,
+    /// Number of most-recent messages always kept verbatim (default: 5).
+    /// Older non-pinned messages are dropped first if stubbing tool results
+    /// alone does not bring the estimate below the threshold.
+    #[serde(default = "default_gateway_compression_keep_recent")]
+    pub keep_recent_messages: usize,
+}
+
+fn default_gateway_compression_enabled() -> bool {
+    true
+}
+fn default_gateway_compression_threshold_ratio() -> f32 {
+    0.85
+}
+fn default_gateway_compression_max_tool_result_chars() -> usize {
+    200
+}
+fn default_gateway_compression_keep_recent() -> usize {
+    5
+}
+
+impl Default for GatewayCompressionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_gateway_compression_enabled(),
+            threshold_ratio: default_gateway_compression_threshold_ratio(),
+            max_tool_result_chars: default_gateway_compression_max_tool_result_chars(),
+            keep_recent_messages: default_gateway_compression_keep_recent(),
+        }
+    }
+}
+
 /// Where a context injection should be placed in the session message list.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -3077,12 +3145,41 @@ pub struct KernelConfig {
     /// - **OpenAI**: automatic prefix caching (response cache stats are parsed).
     #[serde(default = "default_prompt_caching")]
     pub prompt_caching: bool,
+    /// Prompt cache breakpoint strategy (#4970).
+    ///
+    /// Anthropic and compatible providers reuse a request's prefix when
+    /// explicit `cache_control` breakpoints anchor stable text. The
+    /// strategy selects which stability anchors are emitted:
+    ///
+    /// - `disabled` — no breakpoints emitted; the prefix is still cached
+    ///   automatically by providers that support it (OpenAI / DeepSeek)
+    ///   above their own length thresholds, but Anthropic gets no hint.
+    /// - `system_only` — one breakpoint at the end of the system block.
+    ///   Caches `(system)` only; tool schemas and history are re-billed
+    ///   every turn.
+    /// - `system_and_N` (default `system_and_3`) — adds the last-tool
+    ///   marker and an N-deep rolling window over the most recent
+    ///   messages. Anthropic enforces a hard cap of 4 `cache_control`
+    ///   breakpoints per request; effective N is clipped accordingly.
+    ///
+    /// The master switch is still [`Self::prompt_caching`]: when that
+    /// is `false`, the strategy is ignored and no markers are written.
+    #[serde(default)]
+    pub prompt_cache: PromptCacheConfig,
     /// Session retention policy (automatic cleanup of old/excess sessions).
     #[serde(default)]
     pub session: SessionConfig,
     /// Session compaction configuration (LLM-based history summarization).
     #[serde(default)]
     pub compaction: CompactionTomlConfig,
+    /// Gateway-level safety-net compression (#4972). Cheap pre-loop pass
+    /// that prunes oversized tool results and oldest non-pinned messages
+    /// when a session has grown past the model's context window *between*
+    /// turns, before the first LLM call. Runs at a higher threshold (0.85)
+    /// than the agent-level compactor (0.70) — they are complementary, not
+    /// alternatives. See [`GatewayCompressionConfig`].
+    #[serde(default)]
+    pub gateway_compression: GatewayCompressionConfig,
     /// Message queue configuration (depth limits, TTL, concurrency).
     #[serde(default)]
     pub queue: QueueConfig,
@@ -3495,6 +3592,23 @@ pub struct ContextEngineTomlConfig {
     /// Defaults to the official `librefang/librefang-registry`.
     #[serde(default = "default_plugin_registries")]
     pub plugin_registries: Vec<PluginRegistrySource>,
+    /// When `true` (default), repeated `file_read` calls on the same path in a
+    /// session are collapsed: if the on-disk content's hash matches a prior
+    /// read in the same session, the tool returns a short
+    /// `[File already read — content unchanged since turn N. See above for
+    /// full content.]` stub instead of the full body. If the hash differs,
+    /// the result is prefixed with
+    /// `[File updated since last read at turn N]`. Set to `false` to send the
+    /// full file content every time (legacy behaviour). The tracker is reset
+    /// whenever automatic context compression fires, because the prior full
+    /// content is no longer present in the history (#4971).
+    #[serde(default = "default_deduplicate_file_reads")]
+    pub deduplicate_file_reads: bool,
+}
+
+/// Default for [`ContextEngineTomlConfig::deduplicate_file_reads`]: enabled.
+fn default_deduplicate_file_reads() -> bool {
+    true
 }
 
 impl Default for ContextEngineTomlConfig {
@@ -3506,6 +3620,7 @@ impl Default for ContextEngineTomlConfig {
             plugin_stack_weights: Vec::new(),
             hooks: ContextEngineHooks::default(),
             plugin_registries: default_plugin_registries(),
+            deduplicate_file_reads: default_deduplicate_file_reads(),
         }
     }
 }
@@ -4721,6 +4836,342 @@ fn default_prompt_caching() -> bool {
     true
 }
 
+/// Prompt cache breakpoint strategy (#4970).
+///
+/// Selects which stability anchors get an explicit `cache_control`
+/// breakpoint on Anthropic and compatible providers. The strategy is a
+/// parsed form of the `[prompt_cache] strategy = "…"` config value; see
+/// [`PromptCacheStrategy::from_str`] for the wire format.
+///
+/// Anthropic enforces a hard cap of **4** `cache_control` breakpoints
+/// per request, counted across system + tools + messages. Drivers that
+/// honour the strategy are responsible for clipping in
+/// most-stable-first order (system → tools → newest message backward).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptCacheStrategy {
+    /// No breakpoints emitted. The provider may still cache automatically
+    /// (OpenAI, DeepSeek) but Anthropic gets no `cache_control` hints.
+    Disabled,
+    /// One breakpoint at the end of the system block. Tool schemas and
+    /// message history are re-billed every turn.
+    SystemOnly,
+    /// System + tools-last + the trailing `N` messages. N is a hint;
+    /// drivers will clip the effective count to the provider's
+    /// breakpoint cap (4 for Anthropic).
+    SystemAndN(u8),
+}
+
+impl PromptCacheStrategy {
+    /// Anthropic's hard cap on `cache_control` breakpoints per request.
+    /// Drivers must not emit more than this across system + tools +
+    /// messages combined.
+    pub const ANTHROPIC_BREAKPOINT_CAP: usize = 4;
+
+    /// Default strategy: `system_and_3`. Empirically saturates the
+    /// 4-slot Anthropic budget (system + tools-last + 2 trailing
+    /// messages) without overflow and yields the ~75 % input-token
+    /// savings reported in the issue.
+    pub const fn default_strategy() -> Self {
+        Self::SystemAndN(3)
+    }
+
+    /// Whether this strategy emits any breakpoints at all. Used by
+    /// drivers to short-circuit before allocating marker structures.
+    pub const fn is_disabled(self) -> bool {
+        matches!(self, Self::Disabled)
+    }
+
+    /// How many trailing-message breakpoints this strategy would like
+    /// to place, **before** the provider-side cap is applied. Used by
+    /// drivers when computing the rolling window.
+    pub const fn message_window(self) -> usize {
+        match self {
+            Self::Disabled | Self::SystemOnly => 0,
+            Self::SystemAndN(n) => n as usize,
+        }
+    }
+
+    /// Whether the system-block breakpoint should be emitted.
+    pub const fn marks_system(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+}
+
+impl Default for PromptCacheStrategy {
+    fn default() -> Self {
+        Self::default_strategy()
+    }
+}
+
+impl std::fmt::Display for PromptCacheStrategy {
+    /// Round-trip with [`Self::from_str`] — the wire / TOML form.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disabled => f.write_str("disabled"),
+            Self::SystemOnly => f.write_str("system_only"),
+            Self::SystemAndN(n) => write!(f, "system_and_{n}"),
+        }
+    }
+}
+
+/// Error returned when [`PromptCacheStrategy::from_str`] cannot parse
+/// a config value. The `Display` impl produces a user-facing message
+/// that points at the bad input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptCacheStrategyParseError {
+    pub input: String,
+}
+
+impl std::fmt::Display for PromptCacheStrategyParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid prompt_cache.strategy value {:?}: expected \"disabled\", \"system_only\", or \"system_and_N\" where N is a non-negative integer (e.g. \"system_and_3\")",
+            self.input
+        )
+    }
+}
+
+impl std::error::Error for PromptCacheStrategyParseError {}
+
+impl std::str::FromStr for PromptCacheStrategy {
+    type Err = PromptCacheStrategyParseError;
+
+    /// Parse one of:
+    ///   - `"disabled"`
+    ///   - `"system_only"`
+    ///   - `"system_and_<N>"` where N is a `u8` (`0..=255`)
+    ///
+    /// Matching is case-insensitive on the keyword; the numeric tail
+    /// is parsed exactly. Anything else returns
+    /// [`PromptCacheStrategyParseError`].
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if lower == "disabled" {
+            return Ok(Self::Disabled);
+        }
+        if lower == "system_only" {
+            return Ok(Self::SystemOnly);
+        }
+        if let Some(rest) = lower.strip_prefix("system_and_") {
+            if let Ok(n) = rest.parse::<u8>() {
+                return Ok(Self::SystemAndN(n));
+            }
+        }
+        Err(PromptCacheStrategyParseError {
+            input: trimmed.to_string(),
+        })
+    }
+}
+
+impl Serialize for PromptCacheStrategy {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for PromptCacheStrategy {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(de)?;
+        raw.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// schemars: emit the union of literal strings the parser accepts plus
+/// the `system_and_<N>` pattern. The string form is the only on-wire
+/// representation, so the schema declares `type: string` with an
+/// informative description.
+impl schemars::JsonSchema for PromptCacheStrategy {
+    fn schema_name() -> String {
+        "PromptCacheStrategy".to_string()
+    }
+
+    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        let mut obj = schemars::schema::SchemaObject {
+            instance_type: Some(schemars::schema::InstanceType::String.into()),
+            ..Default::default()
+        };
+        obj.metadata().description = Some(
+            "Prompt cache strategy. One of: \"disabled\", \"system_only\", or \"system_and_N\" where N is a non-negative integer (e.g. \"system_and_3\")."
+                .to_string(),
+        );
+        schemars::schema::Schema::Object(obj)
+    }
+}
+
+/// Prompt cache configuration section (`[prompt_cache]`).
+///
+/// Lives under [`KernelConfig::prompt_cache`]. The master switch
+/// remains [`KernelConfig::prompt_caching`] — when that is `false`,
+/// drivers ignore this section entirely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PromptCacheConfig {
+    /// Breakpoint placement strategy. See [`PromptCacheStrategy`] for
+    /// the wire format and the per-provider semantics.
+    #[serde(default)]
+    pub strategy: PromptCacheStrategy,
+    /// TTL hint (seconds) for the cached prefix. Anthropic exposes two
+    /// discrete windows — 5 min (default) and 1 h (beta). The runtime
+    /// maps this hint to the closer of those: ≥ 1800 s selects the 1 h
+    /// beta cache; otherwise the default 5 min ephemeral cache. Other
+    /// providers ignore this hint.
+    #[serde(default = "default_cache_ttl_hint_secs")]
+    pub cache_ttl_hint_secs: u32,
+}
+
+fn default_cache_ttl_hint_secs() -> u32 {
+    300
+}
+
+impl Default for PromptCacheConfig {
+    fn default() -> Self {
+        Self {
+            strategy: PromptCacheStrategy::default(),
+            cache_ttl_hint_secs: default_cache_ttl_hint_secs(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod prompt_cache_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn strategy_parses_disabled() {
+        assert_eq!(
+            PromptCacheStrategy::from_str("disabled").unwrap(),
+            PromptCacheStrategy::Disabled,
+        );
+        // case-insensitive
+        assert_eq!(
+            PromptCacheStrategy::from_str("DISABLED").unwrap(),
+            PromptCacheStrategy::Disabled,
+        );
+    }
+
+    #[test]
+    fn strategy_parses_system_only() {
+        assert_eq!(
+            PromptCacheStrategy::from_str("system_only").unwrap(),
+            PromptCacheStrategy::SystemOnly,
+        );
+    }
+
+    #[test]
+    fn strategy_parses_system_and_n() {
+        assert_eq!(
+            PromptCacheStrategy::from_str("system_and_3").unwrap(),
+            PromptCacheStrategy::SystemAndN(3),
+        );
+        assert_eq!(
+            PromptCacheStrategy::from_str("system_and_0").unwrap(),
+            PromptCacheStrategy::SystemAndN(0),
+        );
+        assert_eq!(
+            PromptCacheStrategy::from_str("system_and_255").unwrap(),
+            PromptCacheStrategy::SystemAndN(255),
+        );
+    }
+
+    #[test]
+    fn strategy_rejects_bad_input() {
+        // Negative / non-numeric tail
+        assert!(PromptCacheStrategy::from_str("system_and_-1").is_err());
+        assert!(PromptCacheStrategy::from_str("system_and_abc").is_err());
+        // Overflow u8
+        assert!(PromptCacheStrategy::from_str("system_and_256").is_err());
+        // Typo
+        assert!(PromptCacheStrategy::from_str("system-only").is_err());
+        // Empty
+        assert!(PromptCacheStrategy::from_str("").is_err());
+        // The error message must mention the bad value for operator
+        // ergonomics — the issue spec requires this.
+        let err = PromptCacheStrategy::from_str("nonsense").unwrap_err();
+        assert!(err.to_string().contains("nonsense"));
+    }
+
+    #[test]
+    fn strategy_display_round_trips() {
+        for s in [
+            PromptCacheStrategy::Disabled,
+            PromptCacheStrategy::SystemOnly,
+            PromptCacheStrategy::SystemAndN(3),
+            PromptCacheStrategy::SystemAndN(0),
+            PromptCacheStrategy::SystemAndN(42),
+        ] {
+            assert_eq!(s.to_string().parse::<PromptCacheStrategy>().unwrap(), s);
+        }
+    }
+
+    #[test]
+    fn strategy_default_is_system_and_3() {
+        assert_eq!(
+            PromptCacheStrategy::default(),
+            PromptCacheStrategy::SystemAndN(3),
+        );
+    }
+
+    #[test]
+    fn strategy_serde_via_string() {
+        // serde uses the same string form as Display/FromStr.
+        let s = PromptCacheStrategy::SystemAndN(3);
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(json, "\"system_and_3\"");
+        let back: PromptCacheStrategy = serde_json::from_str("\"system_only\"").unwrap();
+        assert_eq!(back, PromptCacheStrategy::SystemOnly);
+    }
+
+    #[test]
+    fn strategy_serde_rejects_bad_value_with_clear_error() {
+        // Bad config values should bubble up at deserialize time
+        // (config-load), not silently fall through to the default.
+        let err = serde_json::from_str::<PromptCacheStrategy>("\"bananas\"").unwrap_err();
+        assert!(err.to_string().contains("bananas"));
+    }
+
+    #[test]
+    fn config_default_section_matches_spec() {
+        let c = PromptCacheConfig::default();
+        assert_eq!(c.strategy, PromptCacheStrategy::SystemAndN(3));
+        assert_eq!(c.cache_ttl_hint_secs, 300);
+    }
+
+    #[test]
+    fn config_toml_round_trip() {
+        let toml = r#"
+strategy = "system_and_5"
+cache_ttl_hint_secs = 3600
+"#;
+        let parsed: PromptCacheConfig = toml::from_str(toml).unwrap();
+        assert_eq!(parsed.strategy, PromptCacheStrategy::SystemAndN(5));
+        assert_eq!(parsed.cache_ttl_hint_secs, 3600);
+    }
+
+    #[test]
+    fn config_rejects_unknown_field() {
+        // `deny_unknown_fields` catches typos at config load.
+        let toml = r#"
+strategy = "system_only"
+nope = 1
+"#;
+        assert!(toml::from_str::<PromptCacheConfig>(toml).is_err());
+    }
+
+    #[test]
+    fn strategy_helpers() {
+        assert!(PromptCacheStrategy::Disabled.is_disabled());
+        assert!(!PromptCacheStrategy::SystemOnly.is_disabled());
+        assert!(!PromptCacheStrategy::Disabled.marks_system());
+        assert!(PromptCacheStrategy::SystemOnly.marks_system());
+        assert_eq!(PromptCacheStrategy::Disabled.message_window(), 0);
+        assert_eq!(PromptCacheStrategy::SystemOnly.message_window(), 0);
+        assert_eq!(PromptCacheStrategy::SystemAndN(3).message_window(), 3);
+    }
+}
+
 /// Taint skip rules for a single argument path within a tool.
 ///
 /// The policy key is a minimal JSONPath expression matched by the runtime
@@ -5198,8 +5649,10 @@ impl Default for KernelConfig {
             sidecar_channels: Vec::new(),
             proxy: ProxyConfig::default(),
             prompt_caching: default_prompt_caching(),
+            prompt_cache: PromptCacheConfig::default(),
             session: SessionConfig::default(),
             compaction: CompactionTomlConfig::default(),
+            gateway_compression: GatewayCompressionConfig::default(),
             queue: QueueConfig::default(),
             task_board: TaskBoardConfig::default(),
             external_auth: ExternalAuthConfig::default(),
@@ -6091,6 +6544,17 @@ pub struct TelegramConfig {
     /// ```
     #[serde(default)]
     pub thread_routes: std::collections::HashMap<String, String>,
+    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Telegram
+    /// adapter's REST client (#4795). When unset, the adapter follows
+    /// reqwest's normal env-var fallback (`HTTP_PROXY` / `HTTPS_PROXY`
+    /// / `ALL_PROXY` / `NO_PROXY`). When set, the per-channel value
+    /// overrides any env var.
+    ///
+    /// Accepted schemes: `http://`, `https://`, `socks5://`,
+    /// `socks5h://`. Auth is supported via `user:pass@host:port`.
+    /// Invalid URLs are rejected at adapter init.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 impl Default for TelegramConfig {
@@ -6108,6 +6572,7 @@ impl Default for TelegramConfig {
             overrides: ChannelOverrides::default(),
             message_coalesce_window_ms: None,
             thread_routes: std::collections::HashMap::new(),
+            proxy: None,
         }
     }
 }
@@ -6172,6 +6637,13 @@ pub struct DiscordConfig {
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Discord
+    /// adapter's REST client (#4795). Affects REST API calls only —
+    /// the gateway WebSocket is not currently routed through the
+    /// proxy. See `TelegramConfig::proxy` for accepted URL shapes
+    /// and env-var interaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 impl Default for DiscordConfig {
@@ -6188,6 +6660,7 @@ impl Default for DiscordConfig {
             initial_backoff_secs: default_channel_initial_backoff_secs(),
             max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
+            proxy: None,
         }
     }
 }
@@ -6226,6 +6699,13 @@ pub struct SlackConfig {
     /// of threaded replies. Defaults to `None` (i.e. use normal threading).
     #[serde(default)]
     pub force_flat_replies: Option<bool>,
+    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Slack
+    /// adapter's REST client (#4795). Affects Web API calls only —
+    /// the Socket Mode WebSocket is not currently routed through the
+    /// proxy. See `TelegramConfig::proxy` for accepted URL shapes
+    /// and env-var interaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 impl Default for SlackConfig {
@@ -6241,6 +6721,7 @@ impl Default for SlackConfig {
             max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
             force_flat_replies: None,
+            proxy: None,
         }
     }
 }
@@ -6566,6 +7047,13 @@ pub struct MattermostConfig {
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Mattermost
+    /// adapter's REST client (#4795). Affects REST API calls only —
+    /// the Mattermost WebSocket connection is not currently routed
+    /// through the proxy. See `TelegramConfig::proxy` for accepted
+    /// URL shapes and env-var interaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 impl Default for MattermostConfig {
@@ -6579,6 +7067,7 @@ impl Default for MattermostConfig {
             initial_backoff_secs: default_channel_initial_backoff_secs(),
             max_backoff_secs: default_channel_max_backoff_secs(),
             overrides: ChannelOverrides::default(),
+            proxy: None,
         }
     }
 }

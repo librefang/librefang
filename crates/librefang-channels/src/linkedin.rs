@@ -416,6 +416,16 @@ impl ChannelAdapter for LinkedInAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the LinkedIn
+    /// organization identifier) so the bridge approval listener builds the
+    /// same `linkedin:<account_id>` key the router stores in
+    /// `channel_defaults`, scoping ApprovalRequested delivery to the
+    /// organization bound to the requesting agent (#5003, follow-up to
+    /// #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -586,5 +596,20 @@ mod tests {
             err.to_string().contains("403"),
             "error should mention status code, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_linkedin_account_id_default_none() {
+        let adapter = LinkedInAdapter::new("token".to_string(), "org-1".to_string());
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_linkedin_account_id_returns_configured_value() {
+        // #5003: two LinkedIn organizations must resolve under distinct
+        // `linkedin:<account_id>` keys via the trait override.
+        let adapter = LinkedInAdapter::new("token".to_string(), "org-1".to_string())
+            .with_account_id(Some("org-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("org-42"));
     }
 }

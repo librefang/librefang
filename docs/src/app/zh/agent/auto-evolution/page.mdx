@@ -1,0 +1,219 @@
+# 自动进化模式
+
+自动进化模式（Auto-Evolution Mode）是 **DevOps Hand** 的可选能力：让 daemon 周期性地监视 GitHub 仓库并自主行动——review 打开的 PR、triage 打开的 issue，并通过 Brainstorm → Architect → PRD → Implement（BMAD）流水线，把已归类的 bug 修复或功能需求产出为草稿 PR。
+
+<Note>
+**它不是独立的 Hand。** 它是现有 DevOps Hand 的 Phase 7 扩展，共用同一套 sub-agent（coordinator、engineer、ops、code-reviewer），仅新增一个 implementer。激活方式：把 DevOps Hand 的 `auto_evolve` 设置改成 `true`——只要执行过 `librefang hand install devops`，就无需额外安装。
+</Note>
+
+## 目录
+
+- [它做什么](#它做什么)
+- [它在平台中的定位](#它在平台中的定位)
+- [安装与配置](#安装与配置)
+- [GitHub Token 权限](#github-token-权限)
+- [配置项参考](#配置项参考)
+- [安全模型](#安全模型)
+- [BMAD 流水线四阶段](#bmad-流水线四阶段)
+- [可观察性](#可观察性)
+- [故障排查](#故障排查)
+- [它不做什么](#它不做什么)
+
+---
+
+## 它做什么
+
+每过 `evolution_check_interval`（默认 15 分钟），Hand 进入 Phase 7，对 `evolution_repos` 里每个 `owner/repo` 对：
+
+1. **Review 打开的 PR** —— 拉 diff，调用现有的 `code-reviewer` sub-agent 生成结构化判定，把单条 `COMMENT` review（或对阻塞性问题用 `REQUEST_CHANGES`，绝不自动 `APPROVE`）发回 GitHub。当前 `head_sha` 已 review 过的 PR 自动跳过。
+2. **Triage 打开的 issue** —— 优先用 label（`bug` / `feature` / `question` / `wontfix`），label 缺失时回退到一次性单轮 LLM 分类。结果限定为 `bug-fix | feature | needs-info | skip`。
+3. **实现可行动的 issue** —— 把 `bug-fix` 与 `feature` 分发给 implementer sub-agent，跑 BMAD 流水线（深度由 `bmad_strictness` 决定）并提一个 **draft PR**。
+
+机器人作者（dependabot、renovate 等）的 PR 走 token-cheap 短路：记录但不做深度 review。变更超过 200 个文件的 PR 直接交人审，不浪费 token 去 review 一个 reviewer agent 根本 ground 不住的 diff。
+
+---
+
+## 它在平台中的定位
+
+LibreFang 内置三套自治型自我改进子系统，设计上互补不重复：
+
+| 子系统 | 作用域 | 触发 | 产出 |
+|---|---|---|---|
+| **`auto_dream`** | agent 自己的 memory | 时间 + 会话计数 gate，agent 级 opt-in | 整合后的 memory 条目 |
+| **`skill_workshop`** | 从 agent turn 里捕获可复用工作流 | turn 结束钩子，agent 级 opt-in | `~/.librefang/skills/pending/` 下的候选 skill |
+| **`auto_evolve`**（本页） | 上游 repo 的源代码 | DevOps Hand 内的 cron gate，Hand 实例级 opt-in | PR review 评论 + draft PR |
+
+三者构成平台「代码进化 / memory 整合 / 工作流提炼」三件套。每一个都可独立 gate、独立关闭。同样的设计模式可参考 `docs/architecture/skill-workshop.md`（应用在 skill 捕获上）。
+
+---
+
+## 安装与配置
+
+Hand 定义托管在 [`librefang/librefang-registry`](https://github.com/librefang/librefang-registry) 的 `hands/devops/` 目录。安装、配置、激活：
+
+```bash
+# 1. 安装或更新 DevOps Hand
+librefang hand install devops
+# 或，已安装时：
+librefang hand update devops
+
+# 2. 提供 GitHub Personal Access Token（权限见下节）
+export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+# 或在 ~/.librefang/.env 中写 GITHUB_TOKEN=...
+
+# 3. 配置 4 个进化相关设置
+librefang hand config devops auto_evolve=true
+librefang hand config devops evolution_repos=librefang/librefang,librefang/librefang-registry
+librefang hand config devops evolution_check_interval=15min
+librefang hand config devops bmad_strictness=standard
+# 可选：调整单 PR 文件改动上限
+librefang hand config devops max_changed_files=30
+
+# 4. 激活（已激活则重启）
+librefang hand activate devops
+```
+
+Hand 层面完整的配置矩阵（每个选项的作用与默认值）见 registry 的 [`hands/devops/README.md`](https://github.com/librefang/librefang-registry/blob/main/hands/devops/README.md)。本页聚焦平台行为，不重复 Hand 文档。
+
+---
+
+## GitHub Token 权限
+
+**公共仓库** —— fine-grained token 需要：
+
+- **Pull requests** —— read & write（发 review、开 draft PR）
+- **Issues** —— read & write（triage 评论、在原 issue 上交叉链接）
+- **Contents** —— read & write（推送实现分支）
+- **Metadata** —— read（解析 `default_branch` 用于建 PR）
+
+**私有仓库** —— 追加 classic `repo` 作用域，并确保目标 repo 在 `evolution_repos` 中显式列出。私有 fork 仍按私有仓库对待。
+
+<Note>
+**不要把 PAT 写进 `librefang.toml` 或 Hand 的 setting 字段。** 放在 daemon 启动时读取的 `GITHUB_TOKEN` 环境变量中，或写进 `~/.librefang/.env`。Hand 的 `shell_exec` 调用直接引用 `$GITHUB_TOKEN`，token 不会落到 agent 消息历史或 memory 里。
+</Note>
+
+---
+
+## 配置项参考
+
+| 设置 | 类型 | 默认 | 作用 |
+|---|---|---|---|
+| `auto_evolve` | toggle | `false` | 总开关。`false` 时 Phase 7 在每一 tick 完全跳过。 |
+| `evolution_repos` | text | `""` | 逗号分隔的 `owner/repo` 对。留空也能在不动 `auto_evolve` 的情况下停止循环。 |
+| `evolution_check_interval` | select | `15min` | 每个 repo 的扫描频率。可选 `5min` / `15min` / `1hour` / `6hour` / `1day`。 |
+| `bmad_strictness` | select | `standard` | BMAD 流水线深度（见下）。可选 `light` / `standard` / `strict`。 |
+| `max_changed_files` | select | `30` | 单个自动生成 draft PR 的文件改动上限。更大的工作量拆成多个 PR。 |
+| `approval_mode` | toggle（继承） | `true` | `true` 时部署性 / 破坏性动作进 `devops_queue.json` 待人审；同样作用于进化工作。 |
+
+---
+
+## 安全模型
+
+自动进化运行在三道无法被运维人员误关的护栏下：
+
+**1. 仅 draft PR。** implementer 创建的 PR 都是 `draft: true`。Hand 永不把 PR 标 ready-for-review，永不 merge。人始终是 ready 标识与合并按钮的唯一执行者。
+
+**2. 绝不写保护分支。** implementer 不向 `main`、`master`、`trunk` 或任何受 GitHub ruleset 保护的分支推送；不使用 `--force`、`--no-verify`、`--no-gpg-sign`、`--amend` 对远程分支操作。上游的 pre-commit / pre-push / commit-msg 钩子通过 `git config core.hooksPath` 发现并执行，钩子失败直接 abort 任务，不重试。
+
+**3. 路径安全底线。** 以下情况 implementer 不提交，而是写入 `devops_queue.json` 交人审：
+
+- `Cargo.toml` 中的 workspace `members = [...]` 改动
+- 迁移文件（任何 `*/migrations/*`、`*/migrate/*` 或 `*.sql`）
+- 秘密相关路径（`.env*`、`*.pem`、`*.p12`、`id_rsa`、`id_ed25519`、`credentials*`、`secrets*`、`vault_*.key`）
+- 超过 `max_changed_files`（默认 30）个文件
+
+此外每个进化 tick 主动控制在每 turn token 预算的约 70% 内，给后续 tick 留出 headroom，避免某次流水线狂飙拖死 Hand 其余工作。
+
+---
+
+## BMAD 流水线四阶段
+
+implementer 被分发到可行动 issue（`bug-fix` 或 `feature`）时，跑 4 阶段流水线，深度随 `bmad_strictness` 变化：
+
+| 阶段 | `light` | `standard` | `strict` |
+|---|---|---|---|
+| **B**rainstorm（构思） | 跳过 | 不超过 200 字 inline | inline + queue 卡口 |
+| **A**rchitect（架构） | 一直执行 | 一直执行 | 一直执行 + queue 卡口 |
+| **P**RD（验收标准） | 跳过 | 必须 | 必须 + queue 卡口 |
+| **I**mplement（实现） | 一直执行 | 一直执行 | 一直执行 |
+
+每阶段的产物追加到与实现一同提交的 `BMAD.md`，让 reviewer 看到推导出 diff 的过程。
+
+修 bug 时实现阶段 **严格 test-first**：可复现的失败测试在修复之前先 commit（在同一个 PR 内）。新功能时测试与代码同提。
+
+**strict 模式 queue 卡口。** 每阶段之间，implementer 把产物写进 `devops_queue.json`（`status: "pending"`），然后**结束当前 turn**。下一个 continuous tick 会重新读取 queue：若用户已 out-of-band 把 `status` 翻成 `approved`，从下一阶段继续；否则跳过这个 issue，下一 tick 再查。turn 内没有任何 polling 或 sleep——queue 设计上跨 turn 持久化。
+
+---
+
+## 可观察性
+
+dashboard（`http://127.0.0.1:4545`）新增三个指标：
+
+- **PRs Reviewed** —— 成功发出的 review 总数（`devops_hand_prs_reviewed`）
+- **Issues Processed** —— triage 过的 issue 总数，不论结果（`devops_hand_issues_processed`）
+- **Draft PRs Opened** —— 自动生成的 draft PR 总数（`devops_hand_draft_prs_opened`）
+
+Hand 同时发布 4 个 advisory 事件，订阅方（dashboard、审计日志、下游 Hand）可按需消费：
+
+| 事件名 | Payload | 触发时机 |
+|---|---|---|
+| `devops_evolution_pr_reviewed` | `{ pr_url, verdict, head_sha }` | review 发布之后 |
+| `devops_evolution_pr_opened` | `{ pr_url, issue_url, classification }` | 由 issue 产生的 draft PR 创建后 |
+| `devops_evolution_blocked` | `{ reason, pr_or_issue_url, retry_after }` | tick 被安全底线 / API / 钩子打断 |
+| `devops_evolution_skipped` | `{ pr_or_issue_url, reason }` | 频率 gate 或过滤器跳过条目 |
+
+每个 PR / issue 的状态存在 memory 中（`devops_pr_review_<owner>_<repo>_<num>` 与 `devops_issue_state_<owner>_<repo>_<num>` 等键），daemon 重启后进度仍在。
+
+---
+
+## 故障排查
+
+### 「没动静」
+
+按顺序查：
+
+1. **`auto_evolve` 真的开了吗** —— `librefang hand config devops` 看 setting 是否为 `true`。
+2. **`evolution_repos` 非空且格式正确** —— `owner/repo` 对，不带 `https://`，不带末尾斜杠。
+3. **`GITHUB_TOKEN` 在 daemon 的环境里**，不只是当前交互 shell。若 daemon 启动早于 export，重启 daemon。
+4. **频率 gate 还没到** —— 看 memory 中的 `devops_evolution_cursor_<owner>_<repo>`，若 `last_tick_at` 距现在还不到 `evolution_check_interval`，下一 tick 尚未到。
+
+### 「review 发出去了但 verdict 怪怪的」
+
+reviewer sub-agent 返回 `approve | request_changes | block | comment_only` 之一。GitHub 事件映射：
+
+- `approve` → 发为 `COMMENT`（Hand 永不自动 `APPROVE`，得由人来）
+- `request_changes` → `REQUEST_CHANGES`
+- `block` → `REQUEST_CHANGES`，body 前置 `**Reviewer flagged as BLOCKING — escalate to a maintainer**`
+- `comment_only` / 未知值 → `COMMENT`
+
+如果 `REQUEST_CHANGES` 比预期多，查 review body 里的 `summary` 字段或 memory 中的 `devops_pr_review_<owner>_<repo>_<num>`。
+
+### 「draft PR 提了但 CI 里 cargo 失败」
+
+implementer 推送前会跑本地 lint/test gate（通常是 `cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo test -p <crate>`）。仅 CI 失败通常是：
+
+- 项目 CI 跑了 implementer 没跑的命令（自定义 integration、`xtask` 任务）—— 通过 `justfile` 或 `CONTRIBUTING.md` runbook 给 agent 看到这些命令
+- implementer 本地缓存与 CI 干净构建不同 —— 多半是 implementer 没 commit `Cargo.lock` 的再生成；BMAD 流水线在依赖相关改动后应重新 stage `Cargo.lock`
+
+### 「Hand 想动 `Cargo.toml` / migration / secrets 然后停下来了」
+
+是路径安全底线在工作。查 `devops_queue.json`；如果改动确实必要，手动从队列取出、out-of-band 完成编辑，implementer 下次 tick 会基于干净 tree 继续。
+
+### 「钩子拒绝 implementer 的 push」
+
+最常见的是上游禁止 `Co-Authored-By: Claude` 之类的 AI 归属。implementer 的 prompt 禁止 LLM 厂商归属（Claude / GPT / 🤖 等），但流程归属（`Generated by DevOps Hand → implementer`）允许，用于可追溯性。如果上游连后者也拒绝，定制 Hand 定义里的 commit-message 模板——**不要**加 `--no-verify`（Hand 的安全底线本身会拒绝）。
+
+---
+
+## 它不做什么
+
+为了设定合理预期：
+
+- **不** merge PR。永远人来 merge。
+- **不** 把 draft PR 标 ready-for-review。
+- **不** 推送 `main` / `master` / 保护分支。
+- **不** 处理私有 repo —— 除非 PAT 有 `repo` 作用域且 repo 在 `evolution_repos` 中。
+- **不** 改 `Cargo.toml` workspace members、迁移文件、秘密路径，或单 PR 改动超过 `max_changed_files`。
+- **不** 在单 tick 内消耗超过约 70% 每 turn token 预算。
+
+Hand 级完整规范与每个 sub-agent 的提示词源码：[`hands/devops/HAND.toml`](https://github.com/librefang/librefang-registry/blob/main/hands/devops/HAND.toml) 与 [`hands/devops/SKILL.md`](https://github.com/librefang/librefang-registry/blob/main/hands/devops/SKILL.md)，均在 registry 仓库里。

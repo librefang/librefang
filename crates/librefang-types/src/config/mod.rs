@@ -111,6 +111,68 @@ mod tests {
         assert!(sl3.unfurl_links.is_none());
     }
 
+    /// Per-channel `proxy = "…"` round-trips through TOML on each
+    /// adapter that wires it through (#4795). Absent key must yield
+    /// `None`; present key must round-trip the raw string. We do NOT
+    /// validate the URL here — that's the adapter's job at init.
+    #[test]
+    fn test_channel_proxy_roundtrips() {
+        // Telegram
+        let tg: TelegramConfig = toml::from_str(
+            r#"
+                bot_token_env = "TELEGRAM_BOT_TOKEN"
+                poll_interval_secs = 1
+                proxy = "http://proxy.local:3128"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(tg.proxy.as_deref(), Some("http://proxy.local:3128"));
+        let tg_none: TelegramConfig = toml::from_str(
+            r#"
+                bot_token_env = "TELEGRAM_BOT_TOKEN"
+                poll_interval_secs = 1
+            "#,
+        )
+        .unwrap();
+        assert!(tg_none.proxy.is_none());
+
+        // Discord
+        let dc: DiscordConfig = toml::from_str(
+            r#"
+                bot_token_env = "DISCORD_BOT_TOKEN"
+                intents = 0
+                proxy = "socks5://127.0.0.1:1080"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(dc.proxy.as_deref(), Some("socks5://127.0.0.1:1080"));
+
+        // Slack
+        let sl: SlackConfig = toml::from_str(
+            r#"
+                app_token_env = "SLACK_APP_TOKEN"
+                bot_token_env = "SLACK_BOT_TOKEN"
+                proxy = "https://corp-proxy.example.com:8443"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            sl.proxy.as_deref(),
+            Some("https://corp-proxy.example.com:8443")
+        );
+
+        // Mattermost
+        let mm: MattermostConfig = toml::from_str(
+            r#"
+                server_url = "https://mm.example.com"
+                token_env = "MATTERMOST_TOKEN"
+                proxy = "http://127.0.0.1:8080"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(mm.proxy.as_deref(), Some("http://127.0.0.1:8080"));
+    }
+
     #[test]
     fn test_validate_no_channels() {
         let config = KernelConfig::default();

@@ -221,6 +221,60 @@ async fn workflow_create_then_list_then_get_round_trips() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn workflow_create_parses_per_step_session_mode() {
+    // Regression: routes/workflows.rs previously hardcoded `session_mode: None`
+    // at both POST and PATCH step-construction sites, so HTTP-supplied workflows
+    // silently dropped the documented "per-step > manifest > kernel default"
+    // resolution down to "manifest > default". This test pins all four cases —
+    // explicit `new`, explicit `persistent`, absent (→ null), and malformed
+    // (→ lenient null) — at the route boundary.
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "session-mode-mix",
+            "steps": [
+                {"name": "s_new",    "agent_id": agent_id, "session_mode": "new"},
+                {"name": "s_persist","agent_id": agent_id, "session_mode": "persistent"},
+                {"name": "s_absent", "agent_id": agent_id},
+                {"name": "s_garbage","agent_id": agent_id, "session_mode": 42},
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"]
+        .as_str()
+        .expect("workflow_id")
+        .to_string();
+
+    let (status, body) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let steps = body["steps"].as_array().expect("steps array");
+    assert_eq!(steps.len(), 4);
+    assert_eq!(
+        steps[0]["session_mode"], "new",
+        "explicit 'new' must round-trip"
+    );
+    assert_eq!(
+        steps[1]["session_mode"], "persistent",
+        "explicit 'persistent' must round-trip"
+    );
+    assert!(
+        steps[2]["session_mode"].is_null(),
+        "absent session_mode must serialize as null (fall through to manifest/default)"
+    );
+    assert!(
+        steps[3]["session_mode"].is_null(),
+        "malformed session_mode must be silently ignored at the boundary (lenient parse)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn workflow_create_rejects_missing_steps() {
     let h = boot().await;
     let (status, body) = json_request(

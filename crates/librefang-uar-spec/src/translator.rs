@@ -180,6 +180,7 @@ pub fn artifact_to_manifest(artifact: &AgentArtifact) -> Result<AgentManifest> {
         skill_workshop: librefang_types::agent::SkillWorkshopConfig::default(),
         proactive_memory: librefang_types::memory::ProactiveMemoryOverrides::default(),
         mcp_disabled: false,
+        compaction: None,
     })
 }
 

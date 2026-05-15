@@ -499,6 +499,16 @@ impl ChannelAdapter for WebhookAdapter {
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the
+    /// webhook endpoint / secret identifier) so the bridge approval
+    /// listener builds the same `webhook:<account_id>` key the router
+    /// stores in `channel_defaults`, scoping ApprovalRequested delivery to
+    /// the endpoint bound to the requesting agent (#5003, follow-up to
+    /// #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -741,5 +751,22 @@ mod tests {
             WebhookAdapter::verify_request(SECRET, body, &sig, Some(future_edge), now()).is_ok(),
             "timestamp exactly at +5 min edge must be accepted"
         );
+    }
+
+    #[test]
+    fn test_webhook_account_id_default_none() {
+        let adapter = WebhookAdapter::new("secret".to_string(), 0, None)
+            .expect("WebhookAdapter::new must accept no callback");
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_webhook_account_id_returns_configured_value() {
+        // #5003: two webhook endpoints must resolve under distinct
+        // `webhook:<account_id>` keys via the trait override.
+        let adapter = WebhookAdapter::new("secret".to_string(), 0, None)
+            .expect("WebhookAdapter::new must accept no callback")
+            .with_account_id(Some("endpoint-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("endpoint-42"));
     }
 }
