@@ -2661,7 +2661,9 @@ auto_memorize = true
 auto_retrieve = true
 max_retrieve = 10
 extraction_threshold = 0.7
-# extraction_model = "gpt-4o-mini"  # optional, enables LLM-powered extraction
+# extraction_model = "gpt-4o-mini"             # uses default provider
+# extraction_model = "anthropic/claude-haiku-4" # targets a specific provider
+# extraction_model = "anthropic:claude-haiku-4" # colon form also works
 extract_categories = ["user_preference", "important_fact", "task_context", "relationship"]
 session_ttl_hours = 24
 duplicate_threshold = 0.5
@@ -2676,7 +2678,7 @@ max_memories_per_agent = 1000
 | `auto_retrieve` | bool | `true` | Automatically retrieve relevant memories before each agent execution. |
 | `max_retrieve` | usize | `10` | Maximum number of memories to retrieve per query. |
 | `extraction_threshold` | f32 | `0.7` | Confidence threshold for near-duplicate detection (0.0–1.0). |
-| `extraction_model` | string or null | `null` | LLM model to use for extraction. If `null`, uses rule-based extraction. |
+| `extraction_model` | string or null | `null` | LLM model for extraction. Supports `provider/model` (e.g. `"anthropic/claude-haiku-4"`), `provider:model`, or bare model name (uses default provider). If `null`, uses rule-based extraction. There is no separate `extraction_provider` field. |
 | `extract_categories` | list of strings | `["user_preference", "important_fact", "task_context", "relationship"]` | Categories to extract from conversations. |
 | `session_ttl_hours` | u32 | `24` | Session memory TTL in hours. Memories older than this are cleaned up before each agent execution. |
 | `duplicate_threshold` | f32 | `0.5` | Similarity threshold for duplicate detection (0.0–1.0). Uses vector cosine similarity when embeddings are available, otherwise falls back to Jaccard word overlap. |
