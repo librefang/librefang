@@ -181,7 +181,15 @@ jobs:
               'Conflict Check', 'CI Status Check', 'PR Size',
               'Docs/CI Check', 'Review State',
             ]);
-            const externalRuns = allCheckRuns.filter(cr => !SELF_JOBS.has(cr.name));
+            // Guard against undefined / partial entries — `github.paginate`
+            // can surface items without a `name` when a transient API hiccup
+            // leaves `response.data.check_runs` shaped unexpectedly on one
+            // page. Without the guard, the next line crashed on main
+            // b7b39ee1 with `TypeError: Cannot read properties of undefined
+            // (reading 'name')` (run 25899402530) and the whole job failed.
+            const externalRuns = allCheckRuns.filter(
+              cr => cr && cr.name && !SELF_JOBS.has(cr.name),
+            );
 
             const hasFailure = externalRuns.some(
               cr => cr.conclusion === 'failure' || cr.conclusion === 'timed_out'
