@@ -347,6 +347,20 @@ impl LibreFangKernel {
         // Runs before the proactive auto-register pass so manifest entries
         // are visible to `agent_has_pattern` and the proactive path does
         // not duplicate a trigger an operator already declared explicitly.
+        //
+        // Cross-agent name resolution caveat: the resolver closure below
+        // looks up `target_agent` names against the *current* registry
+        // snapshot. If agent A is spawned at runtime and its manifest
+        // references agent B by name, but B has not been spawned yet,
+        // the resolver returns `None` and the trigger registers with
+        // `target_agent = None` (with a WARN log naming the unresolved
+        // string). The trigger will still fire on its owner; to wire it
+        // up to B, the operator must `POST /api/agents/A/reload` after
+        // B is spawned so reconcile re-runs against the now-populated
+        // registry. The boot path in `boot.rs` avoids this race by
+        // reconciling once after the full agent registry has been
+        // restored from disk, so cold-start ordering of manifests does
+        // not matter.
         if !entry.manifest.triggers.is_empty()
             || matches!(
                 entry.manifest.reconcile_orphans,

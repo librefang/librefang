@@ -420,12 +420,48 @@ impl TriggerEngine {
         session_mode: Option<librefang_types::agent::SessionMode>,
         workflow_id: Option<String>,
     ) -> TriggerId {
+        self.register_with_target_enabled(
+            agent_id,
+            pattern,
+            prompt_template,
+            max_fires,
+            target_agent,
+            cooldown_secs,
+            session_mode,
+            workflow_id,
+            true,
+        )
+    }
+
+    /// Like [`register_with_target`], but sets the `enabled` flag at
+    /// construction so callers that want a disabled trigger do not have
+    /// to follow up with [`set_enabled`].
+    ///
+    /// The follow-up form was racy: the event bus could observe the new
+    /// trigger between `register_with_target` (enabled=true) and a
+    /// subsequent `set_enabled(false)` call and fire it once before the
+    /// mute landed. Reconcile of manifest entries with `enabled = false`
+    /// goes through this constructor so the registration is a single
+    /// locked operation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_with_target_enabled(
+        &self,
+        agent_id: AgentId,
+        pattern: TriggerPattern,
+        prompt_template: String,
+        max_fires: u64,
+        target_agent: Option<AgentId>,
+        cooldown_secs: Option<u64>,
+        session_mode: Option<librefang_types::agent::SessionMode>,
+        workflow_id: Option<String>,
+        enabled: bool,
+    ) -> TriggerId {
         let trigger = Trigger {
             id: TriggerId::new(),
             agent_id,
             pattern,
             prompt_template,
-            enabled: true,
+            enabled,
             created_at: Utc::now(),
             fire_count: 0,
             max_fires,
@@ -439,7 +475,7 @@ impl TriggerEngine {
         self.triggers.insert(id, trigger);
         self.agent_triggers.entry(agent_id).or_default().push(id);
 
-        info!(trigger_id = %id, agent_id = %agent_id, ?target_agent, "Trigger registered");
+        info!(trigger_id = %id, agent_id = %agent_id, ?target_agent, enabled, "Trigger registered");
         id
     }
 
@@ -913,9 +949,20 @@ impl TriggerEngine {
             let workflow_id = mt.workflow_id.as_ref().filter(|s| !s.is_empty()).cloned();
 
             // Match by (pattern, prompt_template) against the existing
-            // store for this agent. First unclaimed match wins; the
-            // remaining duplicates fall through to orphan handling so a
-            // manifest entry never collides with itself.
+            // store for this agent. First unclaimed runtime trigger wins
+            // and is "claimed" so the next manifest entry with the same
+            // key cannot grab it. If the manifest contains N identical
+            // entries and the store has M ≤ N runtime triggers with that
+            // key, the first M manifest entries update those triggers
+            // in place and the remaining N-M fall through to the `None`
+            // arm below, which calls `register_with_target` to create a
+            // fresh runtime trigger per duplicate. Net effect: the
+            // runtime trigger count for that key matches the manifest
+            // count (no dedup), and a subsequent reconcile against the
+            // same manifest is still idempotent because each of the N
+            // entries now has exactly one matching runtime trigger.
+            // Orphan handling is unrelated and only applies to runtime
+            // triggers that no manifest entry claimed.
             let matched_id = existing.iter().find_map(|t| {
                 if claimed.contains(&t.id) {
                     return None;
@@ -964,8 +1011,12 @@ impl TriggerEngine {
                     }
                 }
                 None => {
-                    // New manifest entry — register it.
-                    let new_id = self.register_with_target(
+                    // New manifest entry — register it. Pass `mt.enabled`
+                    // at construction so a disabled manifest entry never
+                    // exists in the store as enabled=true (closes the
+                    // register-then-patch race where the event bus could
+                    // fire the trigger between the two operations).
+                    let new_id = self.register_with_target_enabled(
                         agent_id,
                         pattern,
                         mt.prompt_template.clone(),
@@ -974,13 +1025,8 @@ impl TriggerEngine {
                         cooldown_secs,
                         mt.session_mode,
                         workflow_id,
+                        mt.enabled,
                     );
-                    // Honour the manifest's enabled flag — register_with_target
-                    // defaults to enabled=true, so we only need a patch when
-                    // the manifest says disabled.
-                    if !mt.enabled {
-                        self.set_enabled(new_id, false);
-                    }
                     claimed.insert(new_id);
                     report.created += 1;
                     info!(
@@ -2642,8 +2688,9 @@ mod tests {
     #[test]
     fn reconcile_disabled_manifest_trigger_persists_disabled() {
         // A new entry with `enabled = false` must end up disabled in the
-        // store — register_with_target defaults to enabled, so the
-        // reconcile path is responsible for the override.
+        // store. The reconcile path routes through
+        // `register_with_target_enabled` so the trigger is born disabled
+        // (no register-then-patch race window).
         let engine = TriggerEngine::new();
         let agent = AgentId::new();
         let manifest = vec![mt("muted {{event}}", 0, false)];
@@ -2655,5 +2702,49 @@ mod tests {
         let triggers = engine.list_agent_triggers(agent);
         assert_eq!(triggers.len(), 1);
         assert!(!triggers[0].enabled, "manifest enabled=false must stick");
+    }
+
+    #[test]
+    fn reconcile_duplicate_manifest_entries_create_one_runtime_trigger_each() {
+        // Two identical `[[triggers]]` blocks in the manifest. The first
+        // entry has no prior runtime match and is registered fresh; the
+        // second cannot claim the trigger the first one just created (it
+        // is already in `claimed`), so it falls through to the `None`
+        // arm and registers its own copy. Net: 2 manifest entries → 2
+        // runtime triggers.
+        let engine = TriggerEngine::new();
+        let agent = AgentId::new();
+        let dup = mt("identical {{event}}", 3, true);
+        let manifest = vec![dup.clone(), dup.clone()];
+
+        let first =
+            engine.reconcile_manifest_triggers(agent, &manifest, OrphanPolicy::Keep, |_| None);
+        assert_eq!(first.created, 2, "two duplicate entries → two creates");
+        assert_eq!(first.updated, 0);
+        assert_eq!(first.deleted, 0);
+        assert_eq!(first.orphans_kept, 0);
+
+        let triggers = engine.list_agent_triggers(agent);
+        assert_eq!(triggers.len(), 2, "two runtime triggers must exist");
+        for t in &triggers {
+            assert_eq!(t.prompt_template, "identical {{event}}");
+            assert_eq!(t.max_fires, 3);
+            assert!(t.enabled);
+        }
+
+        // Second reconcile against the same manifest must be idempotent:
+        // entry #1 claims trigger A, entry #2 claims trigger B (because
+        // A is already claimed), and neither needs an update.
+        let second =
+            engine.reconcile_manifest_triggers(agent, &manifest, OrphanPolicy::Keep, |_| None);
+        assert!(
+            !second.mutated(),
+            "re-reconcile against duplicate manifest must be a no-op, got {second:?}"
+        );
+        assert_eq!(second.created, 0);
+        assert_eq!(second.updated, 0);
+        assert_eq!(second.deleted, 0);
+        assert_eq!(second.orphans_kept, 0);
+        assert_eq!(engine.list_agent_triggers(agent).len(), 2);
     }
 }
