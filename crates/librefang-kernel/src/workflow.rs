@@ -4362,6 +4362,47 @@ impl WorkflowEngine {
                         skipped,
                         skip_reason,
                     });
+                    // Advance `current_input` with the rendered output
+                    // so downstream steps' `{{input}}` previews reflect
+                    // the post-Transform value the run-time executor
+                    // will see (the run-time arm sets
+                    // `current_input = rendered`). Wait / Gate /
+                    // Approval / Branch are pass-through at run time,
+                    // so they intentionally leave `current_input`
+                    // alone — only Transform diverges. If the template
+                    // is unparseable we already marked the step
+                    // `skipped`; leave `current_input` unchanged in
+                    // that case so downstream previews match the
+                    // run-time failure mode (the workflow would have
+                    // halted here). Deterministic `BTreeMap`
+                    // conversion mirrors the run-time arm (#3298):
+                    // Tera context iteration order must not depend on
+                    // HashMap hash seeding.
+                    if !skipped {
+                        let bt_vars: BTreeMap<String, String> = variables
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        if let Ok(rendered) =
+                            render_transform_template(code, &current_input, &bt_vars)
+                        {
+                            // Apply the run-time output cap so the
+                            // dry-run preview never propagates a
+                            // payload the executor would have
+                            // rejected mid-run. Without this an
+                            // unbounded `{% for %}` loop would
+                            // silently inflate `current_input` for
+                            // every downstream step's preview even
+                            // though the real run would have failed
+                            // on the first Transform.
+                            if rendered.len() <= MAX_TRANSFORM_OUTPUT_BYTES {
+                                if let Some(ref var) = step.output_var {
+                                    variables.insert(var.clone(), rendered.clone());
+                                }
+                                current_input = rendered;
+                            }
+                        }
+                    }
                 }
                 StepMode::Branch { arms } => {
                     preview.push(DryRunStep {

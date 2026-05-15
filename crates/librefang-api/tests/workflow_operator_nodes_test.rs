@@ -1355,3 +1355,106 @@ async fn dry_run_marks_unparseable_transform_template_as_skipped() {
         "skip_reason should wrap the Tera parse error; got: {reason}"
     );
 }
+
+/// dry_run must advance `current_input` through a Transform step so
+/// downstream operator nodes' previews reflect the post-Transform
+/// value the run-time executor will see. The run-time Transform arm
+/// sets `current_input = rendered`; without mirroring that in
+/// `dry_run`, `{{input}}` previews on subsequent steps diverge from
+/// what the real run produces. Wait / Gate / Approval / Branch stay
+/// pass-through both at run time and in the preview — only Transform
+/// rewrites `current_input`. Re-review nit #1.
+#[tokio::test(flavor = "multi_thread")]
+async fn dry_run_transform_advances_current_input_for_downstream_previews() {
+    let test = boot();
+    let engine = test.state.kernel.workflow_engine();
+
+    // Two-node sequence: Transform → Wait. Wait's `prompt_template`
+    // expands `{{input}}` against the post-Transform value; we
+    // pre-fix this would have echoed the seed verbatim.
+    let wf = Workflow {
+        id: WorkflowId::new(),
+        name: "dry-run-transform-feeds-wait".to_string(),
+        description: "Transform output must flow into downstream {{input}}".to_string(),
+        steps: vec![
+            WorkflowStep {
+                name: "uppercase".to_string(),
+                agent: StepAgent::ByName {
+                    name: "_op_placeholder".to_string(),
+                },
+                // Wait's `prompt_template` is the value under test; the
+                // Transform step's `prompt_template` is irrelevant
+                // because its row's `resolved_prompt` is the static
+                // `"transform: <code>"` string.
+                prompt_template: "{{input}}".to_string(),
+                mode: StepMode::Transform {
+                    code: "{{ prev | upper }}".to_string(),
+                },
+                timeout_secs: 30,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+                session_mode: None,
+            },
+            WorkflowStep {
+                name: "after-transform".to_string(),
+                agent: StepAgent::ByName {
+                    name: "_op_placeholder".to_string(),
+                },
+                // This is the assertion target: dry_run expands
+                // `{{input}}` against `current_input`, which the
+                // preceding Transform must have rewritten to
+                // `"SEED"`.
+                prompt_template: "after: {{input}}".to_string(),
+                mode: StepMode::Wait { duration_secs: 5 },
+                timeout_secs: 30,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+                session_mode: None,
+            },
+        ],
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: None,
+    };
+    let wf_id = wf.id;
+    engine.register(wf).await;
+
+    let preview = engine
+        .dry_run(
+            wf_id,
+            "seed",
+            |_agent: &StepAgent| -> Option<(AgentId, String, bool)> {
+                panic!("dry_run must not call agent_resolver for operator nodes");
+            },
+        )
+        .await
+        .expect("dry_run");
+
+    assert_eq!(preview.len(), 2);
+
+    // First row: Transform itself — sanity-check the existing
+    // contract so a future regression here doesn't masquerade as the
+    // bug under test.
+    assert_eq!(preview[0].step_name, "uppercase");
+    assert_eq!(
+        preview[0].agent_name.as_deref(),
+        Some("_operator:transform")
+    );
+    assert!(!preview[0].skipped, "valid template must not be skipped");
+
+    // Second row: Wait. The expanded prompt must reflect the
+    // Transform's rendered output ("SEED"), not the seed input
+    // ("seed"). Pre-fix this would have been `"after: seed"` because
+    // dry_run left `current_input` untouched on the Transform arm.
+    assert_eq!(preview[1].step_name, "after-transform");
+    assert_eq!(
+        preview[1].resolved_prompt, "after: SEED",
+        "downstream step's {{{{input}}}} preview must reflect the Transform's rendered output; \
+         got {:?}",
+        preview[1].resolved_prompt
+    );
+}
