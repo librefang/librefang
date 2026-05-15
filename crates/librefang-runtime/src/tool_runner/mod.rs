@@ -20,11 +20,13 @@ mod goal;
 mod hand;
 mod image;
 mod knowledge;
+#[cfg(feature = "media")]
 mod media;
 mod memory;
 mod meta;
 mod notify;
 mod process;
+#[cfg(feature = "docker-sandbox")]
 mod sandbox;
 mod schedule;
 mod shell;
@@ -61,6 +63,7 @@ use self::image::tool_image_analyze;
 use self::knowledge::{
     tool_knowledge_add_entity, tool_knowledge_add_relation, tool_knowledge_query,
 };
+#[cfg(feature = "media")]
 use self::media::{
     tool_image_generate, tool_media_describe, tool_media_transcribe, tool_music_generate,
     tool_speech_to_text, tool_text_to_speech, tool_video_generate, tool_video_status,
@@ -71,6 +74,7 @@ use self::notify::tool_notify_owner;
 use self::process::{
     tool_process_kill, tool_process_list, tool_process_poll, tool_process_start, tool_process_write,
 };
+#[cfg(feature = "docker-sandbox")]
 use self::sandbox::tool_docker_exec;
 use self::schedule::{tool_schedule_create, tool_schedule_delete, tool_schedule_list};
 use self::shell::tool_shell_exec;

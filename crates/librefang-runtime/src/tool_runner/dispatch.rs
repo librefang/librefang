@@ -102,6 +102,13 @@ pub struct ToolExecContext<'a> {
 /// the right implementation.  All pre-flight checks (capability enforcement,
 /// approval gate, taint checks, truncated-args detection) live in the outer
 /// [`execute_tool`] wrapper; this function only handles the match.
+//
+// The `#[allow(unused_variables)]` is for `--no-default-features` builds
+// where the media / browser / docker-sandbox tool arms are cfg-gated out
+// and the destructured `media_engine`, `media_drivers`, `browser_ctx`,
+// `tts_engine`, `docker_config` bindings have no consumer. Re-flagging
+// them per-feature would be 5 nested `cfg_attr` blocks; this is cleaner.
+#[allow(unused_variables)]
 pub async fn execute_tool_raw(
     tool_use_id: &str,
     tool_name: &str,
@@ -899,6 +906,7 @@ pub async fn execute_tool_raw(
         }
 
         // Media understanding tools
+        #[cfg(feature = "media")]
         "media_describe" => {
             // #4981: see image_analyze above — staging dir is read-side allowlisted.
             let mut extra = named_ws_prefixes(*kernel, *caller_agent_id);
@@ -908,6 +916,7 @@ pub async fn execute_tool_raw(
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
             tool_media_describe(input, *media_engine, *workspace_root, &extra_refs).await
         }
+        #[cfg(feature = "media")]
         "media_transcribe" => {
             // #4981: see image_analyze above — staging dir is read-side allowlisted.
             // This is the primary path: Telegram voice messages land at
@@ -922,20 +931,26 @@ pub async fn execute_tool_raw(
         }
 
         // Media generation tools (MediaDriver-based)
+        #[cfg(feature = "media")]
         "image_generate" => {
             let upload_dir = kernel
                 .map(|k| k.effective_upload_dir())
                 .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
             tool_image_generate(input, *media_drivers, *workspace_root, &upload_dir).await
         }
+        #[cfg(feature = "media")]
         "video_generate" => tool_video_generate(input, *media_drivers).await,
+        #[cfg(feature = "media")]
         "video_status" => tool_video_status(input, *media_drivers).await,
+        #[cfg(feature = "media")]
         "music_generate" => tool_music_generate(input, *media_drivers, *workspace_root).await,
 
         // TTS/STT tools
+        #[cfg(feature = "media")]
         "text_to_speech" => {
             tool_text_to_speech(input, *media_drivers, *tts_engine, *workspace_root).await
         }
+        #[cfg(feature = "media")]
         "speech_to_text" => {
             // #4981: see image_analyze above — staging dir is read-side allowlisted.
             let mut extra = named_ws_prefixes(*kernel, *caller_agent_id);
@@ -947,6 +962,7 @@ pub async fn execute_tool_raw(
         }
 
         // Docker sandbox tool
+        #[cfg(feature = "docker-sandbox")]
         "docker_exec" => {
             tool_docker_exec(input, *docker_config, *workspace_root, *caller_agent_id).await
         }
@@ -1025,6 +1041,7 @@ pub async fn execute_tool_raw(
         "workflow_cancel" => tool_workflow_cancel(input, *kernel).await,
 
         // Browser automation tools
+        #[cfg(feature = "browser")]
         "browser_navigate" => {
             let Some(url) = input["url"].as_str() else {
                 return ToolResult {
@@ -1052,6 +1069,7 @@ pub async fn execute_tool_raw(
                 ),
             }
         }
+        #[cfg(feature = "browser")]
         "browser_click" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
@@ -1061,6 +1079,7 @@ pub async fn execute_tool_raw(
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
             }
         },
+        #[cfg(feature = "browser")]
         "browser_type" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
@@ -1070,6 +1089,7 @@ pub async fn execute_tool_raw(
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
             }
         },
+        #[cfg(feature = "browser")]
         "browser_screenshot" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
@@ -1082,6 +1102,7 @@ pub async fn execute_tool_raw(
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
             }
         },
+        #[cfg(feature = "browser")]
         "browser_read_page" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
@@ -1091,6 +1112,7 @@ pub async fn execute_tool_raw(
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
             }
         },
+        #[cfg(feature = "browser")]
         "browser_close" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
@@ -1100,6 +1122,7 @@ pub async fn execute_tool_raw(
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
             }
         },
+        #[cfg(feature = "browser")]
         "browser_scroll" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
@@ -1109,6 +1132,7 @@ pub async fn execute_tool_raw(
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
             }
         },
+        #[cfg(feature = "browser")]
         "browser_wait" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
@@ -1118,6 +1142,7 @@ pub async fn execute_tool_raw(
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
             }
         },
+        #[cfg(feature = "browser")]
         "browser_run_js" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
@@ -1127,6 +1152,7 @@ pub async fn execute_tool_raw(
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
             }
         },
+        #[cfg(feature = "browser")]
         "browser_back" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");

@@ -4,7 +4,10 @@
 //! starts with; `select_native_tools()` projects it down to the
 //! `ALWAYS_NATIVE_TOOLS` shortlist used in lazy-load mode (#3044).
 
+#[cfg(feature = "media")]
 use super::media::SUPPORTED_AUDIO_EXTS_DOC;
+#[cfg(not(feature = "media"))]
+const SUPPORTED_AUDIO_EXTS_DOC: &str = "(media feature disabled)";
 use librefang_types::tool::ToolDefinition;
 
 /// Tools that are always shipped as full JSON schemas in every LLM request,

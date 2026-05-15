@@ -15,6 +15,10 @@ pub mod artifact_store;
 pub mod audit;
 pub mod auth_cooldown;
 pub mod aux_client;
+#[cfg(feature = "browser")]
+pub mod browser;
+#[cfg(not(feature = "browser"))]
+#[path = "browser_stub.rs"]
 pub mod browser;
 pub mod catalog_sync;
 pub mod channel_registry;
@@ -28,6 +32,10 @@ pub mod context_compressor;
 pub mod context_engine;
 pub mod context_overflow;
 pub use librefang_runtime_oauth::copilot_oauth;
+#[cfg(feature = "docker-sandbox")]
+pub mod docker_sandbox;
+#[cfg(not(feature = "docker-sandbox"))]
+#[path = "docker_sandbox_stub.rs"]
 pub mod docker_sandbox;
 pub mod gateway_compression;
 pub use librefang_llm_drivers::drivers;
@@ -50,7 +58,15 @@ pub use librefang_runtime_mcp as mcp;
 pub mod mcp_migrate;
 pub use librefang_runtime_mcp::mcp_oauth;
 pub mod mcp_server;
+#[cfg(feature = "media")]
 pub mod media;
+#[cfg(not(feature = "media"))]
+#[path = "media_stub.rs"]
+pub mod media;
+#[cfg(feature = "media")]
+pub mod media_understanding;
+#[cfg(not(feature = "media"))]
+#[path = "media_understanding_stub.rs"]
 pub mod media_understanding;
 pub mod model_catalog;
 pub mod model_metadata;

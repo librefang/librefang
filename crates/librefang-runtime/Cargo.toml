@@ -80,6 +80,7 @@ wiremock = "0.6"
 tracing-subscriber = { workspace = true }
 
 [features]
+default = ["media", "browser", "docker-sandbox"]
 landlock-sandbox = ["dep:landlock"]
 seccomp-sandbox = ["dep:seccompiler"]
 # Remote SSH tool-execution backend (#3332).
@@ -87,6 +88,13 @@ ssh-backend = ["dep:russh", "dep:russh-keys"]
 # Daytona managed-sandbox tool-execution backend (#3332).
 # Uses the existing reqwest stack — no new top-level deps needed.
 daytona-backend = []
+# Optional subsystems (refs #3710 Phase 1). On by default — `cargo build
+# -p librefang-runtime --no-default-features` excludes the corresponding
+# modules and consumer code paths so build-time configurations can omit
+# whole subsystems for size/security.
+media = []
+browser = []
+docker-sandbox = []
 
 
 [lints]
