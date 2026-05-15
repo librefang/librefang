@@ -149,6 +149,29 @@ fn is_telegram_voice_payload(mime_type: &str, filename: &str) -> bool {
     name_lower.ends_with(".ogg") || name_lower.ends_with(".oga") || name_lower.ends_with(".opus")
 }
 
+/// Whether an OGG-container payload carries an Opus codec packet on its first
+/// page (#5005). Telegram's `sendVoice` requires Opus inside OGG specifically;
+/// OGG Vorbis (rare in 2026 but still legal) is rejected server-side with
+/// `Bad Request: VOICE_MESSAGES_FORBIDDEN`.
+///
+/// The standard first OGG page lays out as: 27-byte page header (`OggS`,
+/// version, header_type, granule_pos[8], serial[4], seq[4], checksum[4],
+/// page_segments[1]), then a 1-byte segment table for a single-segment page,
+/// then the codec identification packet at offset 28. Opus identifies with
+/// the ASCII magic `OpusHead`; Vorbis with `\x01vorbis`. The caller has
+/// already confirmed the `OggS` prefix via `detect_audio_magic`, so this
+/// helper only inspects the codec-id slot.
+///
+/// Limitation: only single-segment BOS pages are recognised. Non-canonical
+/// encoders that emit a multi-segment first page (`page_segments > 1`) push
+/// the codec id past offset 28, which this helper conservatively reports as
+/// "not Opus" — the caller then downgrades to `sendDocument`. That's an
+/// acceptable false negative; the alternative (sending a Vorbis OGG as
+/// `sendVoice`) trips Telegram's `VOICE_MESSAGES_FORBIDDEN`.
+fn is_ogg_opus(bytes: &[u8]) -> bool {
+    bytes.len() >= 36 && &bytes[28..36] == b"OpusHead"
+}
+
 /// Fire-and-forget HTTP POST. Logs errors at debug level.
 fn fire_and_forget_post(client: reqwest::Client, url: String, body: serde_json::Value) {
     tokio::spawn(async move {
@@ -1707,14 +1730,18 @@ impl TelegramAdapter {
                 // bytes actually start with the OGG container magic before
                 // committing to sendVoice; otherwise fall through to
                 // sendDocument so the file still reaches the user.
-                // 12 = the longest prefix `detect_audio_magic` inspects
-                // (M4A's `ftyp` box). OGG itself only needs the first 4
-                // bytes, but feeding 12 keeps the call site future-proof
-                // for additional container formats added to the helper.
-                let bytes_look_like_ogg =
-                    crate::bridge::detect_audio_magic(&data[..data.len().min(12)])
-                        == Some("audio/ogg");
-                if is_telegram_voice_payload(&mime_type, &filename) && bytes_look_like_ogg {
+                //
+                // Codec discrimination (#5005): sendVoice further requires
+                // Opus inside OGG. OGG Vorbis (nearly extinct in 2026 but
+                // still legal) trips a 400 with `VOICE_MESSAGES_FORBIDDEN`.
+                // Peek at the codec-id packet at offset 28 of the first page
+                // and downgrade anything that isn't Opus to sendDocument.
+                let sniff = &data[..data.len().min(36)];
+                let routes_to_voice = is_telegram_voice_payload(&mime_type, &filename)
+                    && crate::bridge::detect_audio_magic(&sniff[..sniff.len().min(12)])
+                        == Some("audio/ogg")
+                    && is_ogg_opus(sniff);
+                if routes_to_voice {
                     self.api_send_voice_upload(chat_id, data, &filename, &mime_type, thread_id)
                         .await?;
                 } else {
@@ -5478,6 +5505,27 @@ mod tests {
         }
     }
 
+    /// Synthesize a minimal first OGG page (header + 8-byte codec-id slot).
+    /// `codec_id` must be 8 bytes; this is the byte sequence Telegram's
+    /// sendVoice validator (and the #5005 sniff) looks at. Used by the
+    /// voice-routing tests so the magic-byte + Opus checks see real-shape
+    /// input without dragging in a full Opus encoder.
+    fn synth_ogg_first_page(codec_id: &[u8; 8]) -> Vec<u8> {
+        let mut page = Vec::with_capacity(36);
+        page.extend_from_slice(b"OggS"); // capture pattern
+        page.push(0); // version
+        page.push(0x02); // header type: BOS
+        page.extend_from_slice(&[0; 8]); // granule position
+        page.extend_from_slice(&[0; 4]); // serial number
+        page.extend_from_slice(&[0; 4]); // page sequence
+        page.extend_from_slice(&[0; 4]); // checksum (we don't validate it)
+        page.push(1); // page_segments
+        page.push(codec_id.len() as u8); // segment table: one segment of 8 bytes
+        page.extend_from_slice(codec_id); // codec identification packet
+        debug_assert_eq!(page.len(), 36);
+        page
+    }
+
     #[tokio::test]
     async fn telegram_send_text_calls_send_message() {
         let server = MockServer::start().await;
@@ -5789,7 +5837,9 @@ mod tests {
             .send(
                 &dummy_user("1"),
                 ChannelContent::FileData {
-                    data: vec![0x4F, 0x67, 0x67, 0x53], // "OggS" — not validated, just illustrative
+                    // Real-shape OGG Opus first page so the #5004 magic sniff
+                    // and the #5005 codec check both pass.
+                    data: synth_ogg_first_page(b"OpusHead"),
                     filename: "voice.ogg".into(),
                     mime_type: "audio/ogg".into(),
                 },
@@ -5819,10 +5869,11 @@ mod tests {
             .send(
                 &dummy_user("1"),
                 ChannelContent::FileData {
-                    // OggS magic — required by the #5004 magic-byte sniff so
-                    // the routing predicate can confirm the payload really is
-                    // an OGG container before committing to sendVoice.
-                    data: vec![0x4F, 0x67, 0x67, 0x53],
+                    // Real-shape OGG Opus first page — required by the #5004
+                    // magic-byte sniff and the #5005 Opus check. Extension
+                    // still wins for the predicate, but the bytes must be
+                    // consistent.
+                    data: synth_ogg_first_page(b"OpusHead"),
                     filename: "memo.oga".into(),
                     // Intentionally generic — extension must still win.
                     mime_type: "application/octet-stream".into(),
@@ -5936,6 +5987,86 @@ mod tests {
             )
             .await
             .expect("mislabeled MP3 must downgrade to sendDocument");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_file_data_ogg_vorbis_routes_to_send_document() {
+        // #5005: sendVoice requires Opus inside OGG. An OGG Vorbis payload
+        // (extension .ogg, MIME audio/ogg, real OggS prefix) would otherwise
+        // satisfy the #5004 magic-byte gate but be rejected by Telegram with
+        // `Bad Request: VOICE_MESSAGES_FORBIDDEN`. The codec sniff at offset
+        // 28 must catch the `\x01vorbis` identifier and downgrade.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendDocument")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendVoice")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::FileData {
+                    // OGG Vorbis identification packet starts with
+                    // `\x01vorbis` (7 bytes). Pad to 8 to fit the synth
+                    // helper's fixed-width codec slot.
+                    data: synth_ogg_first_page(b"\x01vorbis\x00"),
+                    filename: "song.ogg".into(),
+                    mime_type: "audio/ogg".into(),
+                },
+            )
+            .await
+            .expect("OGG Vorbis must downgrade to sendDocument");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_file_data_ogg_opus_routes_to_send_voice() {
+        // #5005 positive case: explicit `OpusHead` codec id at offset 28
+        // keeps the sendVoice path. Pairs with the Vorbis test above to pin
+        // the predicate on both sides — a regression that always returns
+        // Some("audio/ogg") without checking the codec would route Vorbis
+        // back to sendVoice; a regression that always returns false would
+        // route Opus to sendDocument.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendVoice")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendDocument")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::FileData {
+                    data: synth_ogg_first_page(b"OpusHead"),
+                    filename: "voice.ogg".into(),
+                    mime_type: "audio/ogg".into(),
+                },
+            )
+            .await
+            .expect("OGG Opus must route to sendVoice");
     }
 
     #[tokio::test]
@@ -6078,5 +6209,23 @@ mod tests {
             Err(other) => panic!("expected InvalidUrl, got: {other:?}"),
             Ok(_) => panic!("garbage proxy URL must fail at init"),
         }
+    }
+
+    #[test]
+    fn is_ogg_opus_recognizes_opus_head_only() {
+        // #5005 regression net: positive on OpusHead, negative on Vorbis and
+        // on truncated / non-OGG inputs. The predicate must not accept a
+        // bare `OggS` prefix — that's the #5004 magic check, not the codec
+        // check.
+        let opus_page = synth_ogg_first_page(b"OpusHead");
+        assert!(is_ogg_opus(&opus_page));
+
+        let vorbis_page = synth_ogg_first_page(b"\x01vorbis\x00");
+        assert!(!is_ogg_opus(&vorbis_page));
+
+        // Truncated — fewer than 36 bytes cannot carry a codec id.
+        assert!(!is_ogg_opus(&opus_page[..35]));
+        assert!(!is_ogg_opus(b"OggS"));
+        assert!(!is_ogg_opus(&[]));
     }
 }
