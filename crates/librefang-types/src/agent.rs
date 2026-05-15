@@ -785,6 +785,111 @@ pub struct ToolConfig {
     pub params: HashMap<String, serde_json::Value>,
 }
 
+/// Reconciliation policy for triggers present in the runtime store but
+/// missing from the manifest's `[[triggers]]` list (#5014).
+///
+/// Triggers created at runtime via `POST /api/triggers` or
+/// `librefang trigger create` coexist with declarative TOML triggers.
+/// When `reconcile_orphans` is set on an agent, the kernel checks every
+/// runtime-only trigger owned by that agent on spawn / reload and applies
+/// this policy:
+///
+/// - `Keep` (default): runtime-only triggers are preserved untouched.
+///   This is the conservative default — a missing TOML entry never
+///   silently deletes a trigger an operator created via API/CLI.
+/// - `Warn`: emit a `WARN` log naming the orphan trigger id and pattern,
+///   but keep it. Useful when migrating an existing deployment to
+///   declarative triggers — operators can see what's outside the TOML
+///   without losing live state.
+/// - `Delete`: remove runtime-only triggers from the store. Use this
+///   when `agent.toml` is the canonical source of truth and ad-hoc
+///   API-created triggers should be reaped on the next reconcile.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrphanPolicy {
+    /// Leave runtime-only triggers in place (default).
+    #[default]
+    Keep,
+    /// Emit a warning log for each runtime-only trigger and keep it.
+    Warn,
+    /// Remove runtime-only triggers from the store.
+    Delete,
+}
+
+/// Declarative event trigger in `agent.toml` (#5014).
+///
+/// Mirrors the wire shape of the runtime
+/// [`librefang_kernel::triggers::Trigger`] for the operator-facing fields,
+/// so a manifest entry round-trips through the same JSON serialization
+/// that `POST /api/triggers` accepts. The runtime-managed fields (`id`,
+/// `created_at`, `fire_count`, `last_fired_at`) are intentionally absent
+/// — they are state, not configuration.
+///
+/// The `pattern` field stays as a `serde_json::Value` so that adding new
+/// `TriggerPattern` variants in the kernel does not require coordinated
+/// edits to this crate; deserialization happens at reconcile time, after
+/// the same `preprocess_pattern_json` normalisation the API route uses.
+///
+/// Example:
+/// ```toml
+/// [[triggers]]
+/// pattern = { task_posted = {} }
+/// prompt_template = "New task: {{event}}"
+/// max_fires = 0
+/// cooldown_secs = 0
+/// session_mode = "persistent"
+/// enabled = true
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ManifestTrigger {
+    /// Event pattern this trigger matches. See
+    /// [`librefang_kernel::triggers::TriggerPattern`] for the variant set.
+    /// Carried as a `serde_json::Value` so the manifest crate does not
+    /// have to depend on the kernel.
+    pub pattern: serde_json::Value,
+    /// Prompt template sent to the LLM when the trigger fires.
+    /// `{{event}}` is replaced with the rendered event description.
+    pub prompt_template: String,
+    /// Maximum number of times this trigger may fire (`0` = unlimited).
+    pub max_fires: u64,
+    /// Cooldown in seconds before the trigger may fire again
+    /// (`0` = engine default, see `TriggersConfig.cooldown_secs`).
+    pub cooldown_secs: u64,
+    /// Per-trigger session mode override. `None` inherits the agent
+    /// manifest's `session_mode`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_mode: Option<SessionMode>,
+    /// Optional cross-session wake target — the triggered message is
+    /// routed to this agent (by **name**, resolved at reconcile time)
+    /// instead of the manifest's owning agent. Empty string is treated
+    /// as unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_agent: Option<String>,
+    /// Optional workflow id to fire instead of dispatching a message.
+    /// `prompt_template` is still rendered and used as the workflow's
+    /// initial input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    /// Whether this trigger is enabled.
+    pub enabled: bool,
+}
+
+impl Default for ManifestTrigger {
+    fn default() -> Self {
+        Self {
+            pattern: serde_json::Value::Null,
+            prompt_template: String::new(),
+            max_fires: 0,
+            cooldown_secs: 0,
+            session_mode: None,
+            target_agent: None,
+            workflow_id: None,
+            enabled: true,
+        }
+    }
+}
+
 /// Complete agent manifest — defines everything about an agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1082,6 +1187,29 @@ pub struct AgentManifest {
     /// fits-all once both agents share a daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<CompactionOverrides>,
+    /// Declarative event triggers (#5014) — symmetric to runtime
+    /// triggers created via `POST /api/triggers`. On agent spawn or
+    /// reload the kernel reconciles this list against the existing
+    /// `trigger_jobs.json` store: missing entries are created,
+    /// matching entries are left alone, and entries whose
+    /// configuration drifted (prompt template, max_fires,
+    /// cooldown_secs, session_mode, target_agent, workflow_id,
+    /// enabled) are updated in place — TOML wins. Triggers created via
+    /// API / CLI are NOT touched unless `reconcile_orphans = "delete"`
+    /// is set explicitly.
+    ///
+    /// Empty list (the default) means "no declarative triggers";
+    /// runtime triggers continue to work unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<ManifestTrigger>,
+    /// Policy for runtime triggers that are owned by this agent but
+    /// have no matching entry in `triggers` (#5014). See
+    /// [`OrphanPolicy`] for the three options. Default is `Keep` —
+    /// the conservative path that never deletes a runtime-only trigger
+    /// silently. Set to `Delete` to make `agent.toml` the canonical
+    /// source of truth.
+    #[serde(default)]
+    pub reconcile_orphans: OrphanPolicy,
 }
 
 /// Per-agent override for the kernel-global `[compaction]` configuration
@@ -1281,6 +1409,8 @@ impl Default for AgentManifest {
             skill_workshop: SkillWorkshopConfig::default(),
             proactive_memory: crate::memory::ProactiveMemoryOverrides::default(),
             compaction: None,
+            triggers: Vec::new(),
+            reconcile_orphans: OrphanPolicy::default(),
         }
     }
 }
@@ -2959,5 +3089,159 @@ model = "claude-3-haiku-20240307"
             manifest.compaction.is_none(),
             "missing [compaction] must deserialize to None, not Default::default()"
         );
+    }
+
+    // -- ManifestTrigger / OrphanPolicy (#5014) --------------------------------
+
+    #[test]
+    fn manifest_triggers_default_empty_orphan_keep() {
+        // No [[triggers]] block → empty Vec, orphan policy = Keep (conservative).
+        let toml_str = r#"
+name = "chat-agent"
+
+[model]
+provider = "anthropic"
+model = "claude-3-haiku-20240307"
+"#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert!(manifest.triggers.is_empty());
+        assert_eq!(manifest.reconcile_orphans, OrphanPolicy::Keep);
+    }
+
+    #[test]
+    fn manifest_triggers_parse_full_shape() {
+        // Full [[triggers]] block: every operator-facing field set.
+        let toml_str = r#"
+name = "task-watcher"
+reconcile_orphans = "delete"
+
+[model]
+provider = "anthropic"
+model = "claude-3-haiku-20240307"
+
+[[triggers]]
+pattern = { task_posted = {} }
+prompt_template = "New task: {{event}}"
+max_fires = 0
+cooldown_secs = 30
+session_mode = "new"
+target_agent = "writer"
+enabled = true
+
+[[triggers]]
+pattern = { content_match = { substring = "deploy" } }
+prompt_template = "Deploy mentioned: {{event}}"
+max_fires = 5
+cooldown_secs = 0
+enabled = false
+"#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(manifest.triggers.len(), 2);
+        assert_eq!(manifest.reconcile_orphans, OrphanPolicy::Delete);
+
+        let t1 = &manifest.triggers[0];
+        assert_eq!(t1.prompt_template, "New task: {{event}}");
+        assert_eq!(t1.max_fires, 0);
+        assert_eq!(t1.cooldown_secs, 30);
+        assert_eq!(t1.session_mode, Some(SessionMode::New));
+        assert_eq!(t1.target_agent.as_deref(), Some("writer"));
+        assert!(t1.enabled);
+
+        let t2 = &manifest.triggers[1];
+        assert_eq!(t2.prompt_template, "Deploy mentioned: {{event}}");
+        assert_eq!(t2.max_fires, 5);
+        assert_eq!(t2.cooldown_secs, 0);
+        assert!(t2.session_mode.is_none());
+        assert!(t2.target_agent.is_none());
+        assert!(!t2.enabled);
+    }
+
+    #[test]
+    fn manifest_trigger_defaults_per_field() {
+        // Only `pattern` and `prompt_template` are required in practice — the
+        // others should fall through to `#[serde(default)]` values.
+        let toml_str = r#"
+name = "minimal"
+
+[model]
+provider = "anthropic"
+model = "claude-3-haiku-20240307"
+
+[[triggers]]
+pattern = { task_posted = {} }
+prompt_template = "x"
+"#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(manifest.triggers.len(), 1);
+        let t = &manifest.triggers[0];
+        assert_eq!(t.max_fires, 0);
+        assert_eq!(t.cooldown_secs, 0);
+        assert!(t.session_mode.is_none());
+        assert!(t.target_agent.is_none());
+        assert!(t.workflow_id.is_none());
+        // Default for `enabled` is true — operators rarely declare a
+        // trigger they want disabled at boot.
+        assert!(t.enabled);
+    }
+
+    #[test]
+    fn orphan_policy_serde_round_trip() {
+        for policy in [OrphanPolicy::Keep, OrphanPolicy::Warn, OrphanPolicy::Delete] {
+            let json = serde_json::to_string(&policy).unwrap();
+            let back: OrphanPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(policy, back);
+        }
+    }
+
+    #[test]
+    fn orphan_policy_toml_string_form() {
+        // Mirrors how SessionMode parses ("persistent"/"new") — snake_case.
+        let toml_str = r#"
+name = "x"
+reconcile_orphans = "warn"
+
+[model]
+provider = "anthropic"
+model = "claude-3-haiku-20240307"
+"#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(manifest.reconcile_orphans, OrphanPolicy::Warn);
+    }
+
+    #[test]
+    fn manifest_trigger_round_trip_toml() {
+        // Build a manifest in Rust, serialise to TOML, parse back — every
+        // declarative-trigger field must survive the round-trip.
+        let manifest = AgentManifest {
+            name: "rt".to_string(),
+            reconcile_orphans: OrphanPolicy::Warn,
+            triggers: vec![ManifestTrigger {
+                // `task_posted` is a struct variant that accepts the empty
+                // table form — the same shape `normalize_manifest_pattern_json`
+                // canonicalises strings into.
+                pattern: serde_json::json!({ "task_posted": {} }),
+                prompt_template: "Saw event: {{event}}".to_string(),
+                max_fires: 3,
+                cooldown_secs: 60,
+                session_mode: Some(SessionMode::New),
+                target_agent: Some("downstream".to_string()),
+                workflow_id: None,
+                enabled: true,
+            }],
+            ..AgentManifest::default()
+        };
+
+        let toml_str = toml::to_string(&manifest).unwrap();
+        let back: AgentManifest = toml::from_str(&toml_str).unwrap();
+        assert_eq!(back.reconcile_orphans, OrphanPolicy::Warn);
+        assert_eq!(back.triggers.len(), 1);
+        let t = &back.triggers[0];
+        assert_eq!(t.prompt_template, "Saw event: {{event}}");
+        assert_eq!(t.max_fires, 3);
+        assert_eq!(t.cooldown_secs, 60);
+        assert_eq!(t.session_mode, Some(SessionMode::New));
+        assert_eq!(t.target_agent.as_deref(), Some("downstream"));
+        assert!(t.workflow_id.is_none());
+        assert!(t.enabled);
     }
 }

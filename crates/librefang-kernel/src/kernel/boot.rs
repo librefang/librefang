@@ -1896,6 +1896,65 @@ impl LibreFangKernel {
             }
         }
 
+        // Reconcile declarative `[[triggers]]` from each restored agent's
+        // manifest against the runtime trigger store loaded earlier from
+        // `trigger_jobs.json` (#5014).
+        //
+        // Runs once after the full registry is populated so that
+        // `target_agent` lookups by name see every restored agent. The
+        // reconcile is idempotent — restarting a daemon with unchanged
+        // manifests is a no-op (no writes to the persist file, no log
+        // spam beyond a single "registered/updated" line per drift).
+        {
+            let snapshot: Vec<(AgentId, librefang_types::agent::AgentManifest)> = kernel
+                .agents
+                .registry
+                .list()
+                .into_iter()
+                .map(|e| (e.id, e.manifest.clone()))
+                .collect();
+            let mut any_change = false;
+            for (agent_id, manifest) in snapshot {
+                if manifest.triggers.is_empty()
+                    && matches!(
+                        manifest.reconcile_orphans,
+                        librefang_types::agent::OrphanPolicy::Keep
+                    )
+                {
+                    continue;
+                }
+                let report = kernel.workflows.triggers.reconcile_manifest_triggers(
+                    agent_id,
+                    &manifest.triggers,
+                    manifest.reconcile_orphans,
+                    |target_name| {
+                        kernel
+                            .agents
+                            .registry
+                            .find_by_name(target_name)
+                            .map(|e| e.id)
+                    },
+                );
+                if report.mutated() {
+                    any_change = true;
+                    info!(
+                        agent_id = %agent_id,
+                        created = report.created,
+                        updated = report.updated,
+                        deleted = report.deleted,
+                        skipped = report.skipped,
+                        orphans_kept = report.orphans_kept,
+                        "Reconciled manifest triggers on boot"
+                    );
+                }
+            }
+            if any_change {
+                if let Err(e) = kernel.workflows.triggers.persist() {
+                    tracing::warn!("Failed to persist trigger reconcile on boot: {e}");
+                }
+            }
+        }
+
         // One-time webui → canonical session migration.
         //
         // Before the unify fix, the dashboard WS wrote to

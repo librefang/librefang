@@ -808,11 +808,283 @@ impl TriggerEngine {
     pub fn get(&self, trigger_id: TriggerId) -> Option<Trigger> {
         self.triggers.get(&trigger_id).map(|t| t.clone())
     }
+
+    /// Reconcile the runtime trigger store with an agent's declarative
+    /// `[[triggers]]` block from `agent.toml` (#5014).
+    ///
+    /// Matching key: `(pattern_canonical_json, prompt_template)`. The
+    /// rationale: triggers have no natural primary key — the same pattern
+    /// can be reused with a different prompt for a different purpose, so
+    /// `pattern` alone is too coarse; the `prompt_template` is the
+    /// next-most-stable identifier on the operator side. The
+    /// `created_at` / `fire_count` / `last_fired_at` runtime fields are
+    /// state, not configuration, and intentionally excluded from the key.
+    ///
+    /// Behaviour:
+    /// - **Manifest entry, no runtime match** → register a new trigger
+    ///   with the manifest's fields.
+    /// - **Manifest entry, runtime match** → update mutable fields
+    ///   (`prompt_template` already matches by construction;
+    ///   `enabled`, `max_fires`, `cooldown_secs`, `session_mode`,
+    ///   `target_agent`, `workflow_id`) on the existing trigger so
+    ///   TOML wins.
+    /// - **Runtime trigger, no manifest match** (orphan) →
+    ///   apply `orphan_policy`. `Keep` is no-op, `Warn` logs and
+    ///   keeps, `Delete` removes.
+    ///
+    /// `resolve_target_agent` translates the manifest's `target_agent`
+    /// name to a registered `AgentId`. Returning `None` causes the
+    /// trigger to be registered without a target (legacy single-agent
+    /// dispatch); the reconcile function logs a warning naming the
+    /// unresolved string so operators can spot typos. Empty strings are
+    /// treated as `None` before the resolver is consulted.
+    ///
+    /// The function is idempotent: applying it twice with the same
+    /// inputs produces no changes after the first call (modulo timestamps
+    /// on logs).
+    ///
+    /// Returns the number of (created, updated, deleted) triggers so the
+    /// caller can decide whether to call `persist()`.
+    pub fn reconcile_manifest_triggers(
+        &self,
+        agent_id: AgentId,
+        manifest_triggers: &[librefang_types::agent::ManifestTrigger],
+        orphan_policy: librefang_types::agent::OrphanPolicy,
+        resolve_target_agent: impl Fn(&str) -> Option<AgentId>,
+    ) -> ReconcileReport {
+        let mut report = ReconcileReport::default();
+
+        // Snapshot existing triggers for this agent so we can match by
+        // (pattern, prompt) and detect orphans in a single pass without
+        // holding the DashMap shard lock across mutation calls.
+        let existing: Vec<Trigger> = self.list_agent_triggers(agent_id);
+        // Track which existing trigger ids were "claimed" by a manifest entry.
+        let mut claimed: std::collections::HashSet<TriggerId> = std::collections::HashSet::new();
+
+        for (idx, mt) in manifest_triggers.iter().enumerate() {
+            // Normalise + parse the pattern. Skip the entry (with a
+            // warning) if it doesn't deserialise — a single bad entry
+            // must not abort the rest of the reconcile.
+            let normalised = normalize_manifest_pattern_json(mt.pattern.clone());
+            let pattern: TriggerPattern = match serde_json::from_value(normalised.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(
+                        agent = %agent_id,
+                        index = idx,
+                        pattern = %normalised,
+                        error = %e,
+                        "Skipping manifest trigger: invalid pattern"
+                    );
+                    report.skipped += 1;
+                    continue;
+                }
+            };
+
+            // Resolve target_agent name → AgentId. Empty string == unset.
+            let target_agent: Option<AgentId> = match mt.target_agent.as_deref() {
+                None | Some("") => None,
+                Some(name) => match resolve_target_agent(name) {
+                    Some(id) => Some(id),
+                    None => {
+                        warn!(
+                            agent = %agent_id,
+                            index = idx,
+                            target = %name,
+                            "Manifest trigger target_agent name did not resolve; \
+                             registering with no target (event will fire on owner)"
+                        );
+                        None
+                    }
+                },
+            };
+
+            // cooldown_secs: TOML uses u64; the runtime stores Option<u64>
+            // where `Some(0)` means "no cooldown" and `None` means "engine
+            // default". Map `0` → None so the engine default applies, any
+            // other value → Some(v). This matches the API behaviour where
+            // the JSON field is optional.
+            let cooldown_secs: Option<u64> = if mt.cooldown_secs == 0 {
+                None
+            } else {
+                Some(mt.cooldown_secs)
+            };
+
+            let workflow_id = mt.workflow_id.as_ref().filter(|s| !s.is_empty()).cloned();
+
+            // Match by (pattern, prompt_template) against the existing
+            // store for this agent. First unclaimed match wins; the
+            // remaining duplicates fall through to orphan handling so a
+            // manifest entry never collides with itself.
+            let matched_id = existing.iter().find_map(|t| {
+                if claimed.contains(&t.id) {
+                    return None;
+                }
+                if t.pattern == pattern && t.prompt_template == mt.prompt_template {
+                    Some(t.id)
+                } else {
+                    None
+                }
+            });
+
+            match matched_id {
+                Some(id) => {
+                    claimed.insert(id);
+                    // Update mutable fields in place — TOML wins. Skip the
+                    // update if every field already matches so the
+                    // reconcile is genuinely idempotent (no persist
+                    // thrash, no spurious "trigger changed" log lines).
+                    let needs_update = self
+                        .triggers
+                        .get(&id)
+                        .map(|t| {
+                            t.enabled != mt.enabled
+                                || t.max_fires != mt.max_fires
+                                || t.cooldown_secs != cooldown_secs
+                                || t.session_mode != mt.session_mode
+                                || t.target_agent != target_agent
+                                || t.workflow_id != workflow_id
+                        })
+                        .unwrap_or(false);
+                    if needs_update {
+                        if let Some(mut entry) = self.triggers.get_mut(&id) {
+                            entry.enabled = mt.enabled;
+                            entry.max_fires = mt.max_fires;
+                            entry.cooldown_secs = cooldown_secs;
+                            entry.session_mode = mt.session_mode;
+                            entry.target_agent = target_agent;
+                            entry.workflow_id = workflow_id.clone();
+                        }
+                        report.updated += 1;
+                        debug!(
+                            agent = %agent_id,
+                            trigger_id = %id,
+                            "Updated trigger from manifest (TOML wins)"
+                        );
+                    }
+                }
+                None => {
+                    // New manifest entry — register it.
+                    let new_id = self.register_with_target(
+                        agent_id,
+                        pattern,
+                        mt.prompt_template.clone(),
+                        mt.max_fires,
+                        target_agent,
+                        cooldown_secs,
+                        mt.session_mode,
+                        workflow_id,
+                    );
+                    // Honour the manifest's enabled flag — register_with_target
+                    // defaults to enabled=true, so we only need a patch when
+                    // the manifest says disabled.
+                    if !mt.enabled {
+                        self.set_enabled(new_id, false);
+                    }
+                    claimed.insert(new_id);
+                    report.created += 1;
+                    info!(
+                        agent = %agent_id,
+                        trigger_id = %new_id,
+                        "Registered manifest trigger"
+                    );
+                }
+            }
+        }
+
+        // Orphan handling: every existing trigger not claimed by a
+        // manifest entry above.
+        let orphans: Vec<TriggerId> = existing
+            .iter()
+            .filter(|t| !claimed.contains(&t.id))
+            .map(|t| t.id)
+            .collect();
+        match orphan_policy {
+            librefang_types::agent::OrphanPolicy::Keep => {
+                // No-op — the original ad-hoc trigger(s) survive. Count
+                // them so the caller has visibility into the orphan set
+                // without scanning the store separately.
+                report.orphans_kept = orphans.len();
+            }
+            librefang_types::agent::OrphanPolicy::Warn => {
+                report.orphans_kept = orphans.len();
+                for id in &orphans {
+                    if let Some(t) = self.triggers.get(id) {
+                        warn!(
+                            agent = %agent_id,
+                            trigger_id = %id,
+                            pattern = ?t.pattern,
+                            "Runtime trigger has no matching manifest entry \
+                             (reconcile_orphans=\"warn\") — keeping"
+                        );
+                    }
+                }
+            }
+            librefang_types::agent::OrphanPolicy::Delete => {
+                for id in orphans {
+                    if self.remove(id) {
+                        report.deleted += 1;
+                        info!(
+                            agent = %agent_id,
+                            trigger_id = %id,
+                            "Removed orphan trigger (reconcile_orphans=\"delete\")"
+                        );
+                    }
+                }
+            }
+        }
+
+        report
+    }
 }
 
 impl Default for TriggerEngine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Outcome of a `reconcile_manifest_triggers` call.
+///
+/// `created + updated + deleted == 0 && skipped == 0` means the manifest
+/// and runtime state were already in sync — the caller can safely skip
+/// the persist() write. `skipped` counts manifest entries that failed
+/// to deserialise (bad `pattern`) and were ignored.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReconcileReport {
+    /// Manifest triggers that did not exist before this call.
+    pub created: usize,
+    /// Existing triggers whose mutable fields were updated from the
+    /// manifest.
+    pub updated: usize,
+    /// Runtime-only triggers removed under
+    /// `OrphanPolicy::Delete`.
+    pub deleted: usize,
+    /// Runtime-only triggers preserved under
+    /// `OrphanPolicy::Keep` / `Warn`.
+    pub orphans_kept: usize,
+    /// Manifest entries skipped because their `pattern` did not
+    /// deserialise into a `TriggerPattern`.
+    pub skipped: usize,
+}
+
+impl ReconcileReport {
+    /// True when the runtime store was mutated.
+    pub fn mutated(&self) -> bool {
+        self.created > 0 || self.updated > 0 || self.deleted > 0
+    }
+}
+
+/// Normalise a manifest trigger pattern JSON value (#5014).
+///
+/// Mirrors `normalize_pattern_json` in the API route so a manifest entry
+/// like `pattern = "task_posted"` parses identically to the API form
+/// `{"task_posted": {}}`. Extend the match when other variants gain
+/// optional fields.
+pub fn normalize_manifest_pattern_json(value: serde_json::Value) -> serde_json::Value {
+    match value.as_str() {
+        Some(tag @ "task_posted") => serde_json::json!({ tag: {} }),
+        _ => value,
     }
 }
 
@@ -2116,5 +2388,272 @@ mod tests {
             0,
             "Cooldown must be honoured after loading persisted state"
         );
+    }
+
+    // -- reconcile_manifest_triggers (#5014) ------------------------------------
+
+    use librefang_types::agent::{ManifestTrigger, OrphanPolicy};
+
+    fn mt(prompt: &str, max_fires: u64, enabled: bool) -> ManifestTrigger {
+        ManifestTrigger {
+            // `All` is a unit variant — serde uses the bare string form.
+            pattern: serde_json::Value::String("all".to_string()),
+            prompt_template: prompt.to_string(),
+            max_fires,
+            cooldown_secs: 0,
+            session_mode: None,
+            target_agent: None,
+            workflow_id: None,
+            enabled,
+        }
+    }
+
+    #[test]
+    fn reconcile_creates_missing_triggers() {
+        let engine = TriggerEngine::new();
+        let agent = AgentId::new();
+        let manifest = vec![
+            mt("alpha {{event}}", 0, true),
+            mt("beta {{event}}", 7, true),
+        ];
+
+        let report =
+            engine.reconcile_manifest_triggers(agent, &manifest, OrphanPolicy::Keep, |_| None);
+        assert_eq!(report.created, 2);
+        assert_eq!(report.updated, 0);
+        assert_eq!(report.deleted, 0);
+        assert_eq!(report.orphans_kept, 0);
+        assert!(report.mutated());
+
+        let listed = engine.list_agent_triggers(agent);
+        assert_eq!(listed.len(), 2);
+        // `beta` got its non-default max_fires.
+        let beta = listed
+            .iter()
+            .find(|t| t.prompt_template == "beta {{event}}")
+            .expect("beta trigger must be present");
+        assert_eq!(beta.max_fires, 7);
+    }
+
+    #[test]
+    fn reconcile_is_idempotent_second_run_is_noop() {
+        let engine = TriggerEngine::new();
+        let agent = AgentId::new();
+        let manifest = vec![mt("alpha {{event}}", 0, true)];
+
+        let first =
+            engine.reconcile_manifest_triggers(agent, &manifest, OrphanPolicy::Keep, |_| None);
+        assert_eq!(first.created, 1);
+
+        let second =
+            engine.reconcile_manifest_triggers(agent, &manifest, OrphanPolicy::Keep, |_| None);
+        assert!(
+            !second.mutated(),
+            "second reconcile with identical inputs must be a no-op, got {second:?}"
+        );
+        assert_eq!(second.created, 0);
+        assert_eq!(second.updated, 0);
+    }
+
+    #[test]
+    fn reconcile_updates_mutable_fields_toml_wins() {
+        let engine = TriggerEngine::new();
+        let agent = AgentId::new();
+
+        // First reconcile: seed the trigger with enabled=true, max_fires=0.
+        let manifest_v1 = vec![mt("alpha {{event}}", 0, true)];
+        engine.reconcile_manifest_triggers(agent, &manifest_v1, OrphanPolicy::Keep, |_| None);
+
+        // Second reconcile: same pattern + prompt, but max_fires=5 and disabled.
+        let mut manifest_v2 = manifest_v1.clone();
+        manifest_v2[0].max_fires = 5;
+        manifest_v2[0].enabled = false;
+        manifest_v2[0].cooldown_secs = 30;
+
+        let report =
+            engine.reconcile_manifest_triggers(agent, &manifest_v2, OrphanPolicy::Keep, |_| None);
+        assert_eq!(report.created, 0);
+        assert_eq!(report.updated, 1);
+        assert_eq!(report.deleted, 0);
+
+        let triggers = engine.list_agent_triggers(agent);
+        assert_eq!(triggers.len(), 1);
+        let t = &triggers[0];
+        assert_eq!(t.max_fires, 5);
+        assert!(!t.enabled);
+        assert_eq!(t.cooldown_secs, Some(30));
+    }
+
+    #[test]
+    fn reconcile_orphan_keep_preserves_runtime_triggers() {
+        let engine = TriggerEngine::new();
+        let agent = AgentId::new();
+
+        // Register a runtime-only trigger.
+        let runtime_id = engine.register(
+            agent,
+            TriggerPattern::Lifecycle,
+            "runtime {{event}}".to_string(),
+            0,
+        );
+
+        // Empty manifest, Keep policy → orphan survives.
+        let report = engine.reconcile_manifest_triggers(agent, &[], OrphanPolicy::Keep, |_| None);
+        assert_eq!(report.created, 0);
+        assert_eq!(report.updated, 0);
+        assert_eq!(report.deleted, 0);
+        assert_eq!(report.orphans_kept, 1);
+        assert!(!report.mutated());
+        assert!(engine.get(runtime_id).is_some());
+    }
+
+    #[test]
+    fn reconcile_orphan_warn_preserves_runtime_triggers() {
+        let engine = TriggerEngine::new();
+        let agent = AgentId::new();
+
+        let runtime_id = engine.register(
+            agent,
+            TriggerPattern::Lifecycle,
+            "runtime {{event}}".to_string(),
+            0,
+        );
+
+        // Empty manifest, Warn policy → orphan kept, no delete.
+        let report = engine.reconcile_manifest_triggers(agent, &[], OrphanPolicy::Warn, |_| None);
+        assert_eq!(report.deleted, 0);
+        assert_eq!(report.orphans_kept, 1);
+        assert!(engine.get(runtime_id).is_some());
+    }
+
+    #[test]
+    fn reconcile_orphan_delete_removes_runtime_triggers() {
+        let engine = TriggerEngine::new();
+        let agent = AgentId::new();
+
+        let runtime_id = engine.register(
+            agent,
+            TriggerPattern::Lifecycle,
+            "runtime {{event}}".to_string(),
+            0,
+        );
+
+        // Empty manifest, Delete policy → orphan removed.
+        let report = engine.reconcile_manifest_triggers(agent, &[], OrphanPolicy::Delete, |_| None);
+        assert_eq!(report.deleted, 1);
+        assert_eq!(report.orphans_kept, 0);
+        assert!(report.mutated());
+        assert!(engine.get(runtime_id).is_none());
+    }
+
+    #[test]
+    fn reconcile_target_agent_name_resolves_via_closure() {
+        let engine = TriggerEngine::new();
+        let owner = AgentId::new();
+        let target = AgentId::new();
+
+        let mut manifest_entry = mt("notify {{event}}", 0, true);
+        manifest_entry.target_agent = Some("downstream".to_string());
+
+        let report = engine.reconcile_manifest_triggers(
+            owner,
+            std::slice::from_ref(&manifest_entry),
+            OrphanPolicy::Keep,
+            |name| {
+                if name == "downstream" {
+                    Some(target)
+                } else {
+                    None
+                }
+            },
+        );
+        assert_eq!(report.created, 1);
+
+        let triggers = engine.list_agent_triggers(owner);
+        assert_eq!(triggers.len(), 1);
+        assert_eq!(triggers[0].target_agent, Some(target));
+    }
+
+    #[test]
+    fn reconcile_unresolvable_target_logs_and_registers_without_target() {
+        let engine = TriggerEngine::new();
+        let owner = AgentId::new();
+
+        let mut manifest_entry = mt("notify {{event}}", 0, true);
+        manifest_entry.target_agent = Some("nope".to_string());
+
+        let report = engine.reconcile_manifest_triggers(
+            owner,
+            std::slice::from_ref(&manifest_entry),
+            OrphanPolicy::Keep,
+            |_| None,
+        );
+        assert_eq!(report.created, 1);
+
+        let triggers = engine.list_agent_triggers(owner);
+        assert!(triggers[0].target_agent.is_none());
+    }
+
+    #[test]
+    fn reconcile_skips_invalid_pattern_continues_with_rest() {
+        let engine = TriggerEngine::new();
+        let agent = AgentId::new();
+
+        let manifest = vec![
+            ManifestTrigger {
+                pattern: serde_json::json!({ "bogus_variant": {} }),
+                prompt_template: "x".to_string(),
+                ..Default::default()
+            },
+            mt("good {{event}}", 0, true),
+        ];
+
+        let report =
+            engine.reconcile_manifest_triggers(agent, &manifest, OrphanPolicy::Keep, |_| None);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.created, 1);
+        assert_eq!(engine.list_agent_triggers(agent).len(), 1);
+    }
+
+    #[test]
+    fn reconcile_string_form_task_posted_normalises_to_struct() {
+        // Legacy operators sometimes write `pattern = "task_posted"`. The
+        // normalisation helper should turn the bare string into the struct
+        // form so it deserialises like the API.
+        let engine = TriggerEngine::new();
+        let agent = AgentId::new();
+        let manifest = vec![ManifestTrigger {
+            pattern: serde_json::Value::String("task_posted".to_string()),
+            prompt_template: "task: {{event}}".to_string(),
+            ..Default::default()
+        }];
+
+        let report =
+            engine.reconcile_manifest_triggers(agent, &manifest, OrphanPolicy::Keep, |_| None);
+        assert_eq!(report.created, 1);
+
+        let triggers = engine.list_agent_triggers(agent);
+        assert!(matches!(
+            triggers[0].pattern,
+            TriggerPattern::TaskPosted { .. }
+        ));
+    }
+
+    #[test]
+    fn reconcile_disabled_manifest_trigger_persists_disabled() {
+        // A new entry with `enabled = false` must end up disabled in the
+        // store — register_with_target defaults to enabled, so the
+        // reconcile path is responsible for the override.
+        let engine = TriggerEngine::new();
+        let agent = AgentId::new();
+        let manifest = vec![mt("muted {{event}}", 0, false)];
+
+        let report =
+            engine.reconcile_manifest_triggers(agent, &manifest, OrphanPolicy::Keep, |_| None);
+        assert_eq!(report.created, 1);
+
+        let triggers = engine.list_agent_triggers(agent);
+        assert_eq!(triggers.len(), 1);
+        assert!(!triggers[0].enabled, "manifest enabled=false must stick");
     }
 }

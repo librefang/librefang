@@ -308,6 +308,46 @@ impl LibreFangKernel {
         // by allowlist content so it self-invalidates when the list changes.
         self.prompt_metadata_cache.tools.remove(&agent_id);
 
+        // Reconcile declarative `[[triggers]]` from the freshly loaded
+        // manifest (#5014). Same shape as the spawn path — runs after the
+        // registry has the new manifest so the orphan policy can compare
+        // the live runtime store against the latest TOML state. Skipped
+        // when the manifest has no `[[triggers]]` and no orphan policy
+        // override, so unrelated reloads pay no work.
+        if let Some(refreshed) = self.agents.registry.get(agent_id) {
+            if !refreshed.manifest.triggers.is_empty()
+                || matches!(
+                    refreshed.manifest.reconcile_orphans,
+                    librefang_types::agent::OrphanPolicy::Warn
+                        | librefang_types::agent::OrphanPolicy::Delete
+                )
+            {
+                let report = self.workflows.triggers.reconcile_manifest_triggers(
+                    agent_id,
+                    &refreshed.manifest.triggers,
+                    refreshed.manifest.reconcile_orphans,
+                    |target_name| self.agents.registry.find_by_name(target_name).map(|e| e.id),
+                );
+                if report.mutated() {
+                    if let Err(e) = self.workflows.triggers.persist() {
+                        warn!(
+                            agent_id = %agent_id,
+                            "Failed to persist trigger reconcile on reload: {e}"
+                        );
+                    }
+                    info!(
+                        agent_id = %agent_id,
+                        created = report.created,
+                        updated = report.updated,
+                        deleted = report.deleted,
+                        skipped = report.skipped,
+                        orphans_kept = report.orphans_kept,
+                        "Reconciled manifest triggers on reload"
+                    );
+                }
+            }
+        }
+
         info!(agent_id = %agent_id, path = %toml_path.display(), "Reloaded agent manifest from disk");
         Ok(())
     }
