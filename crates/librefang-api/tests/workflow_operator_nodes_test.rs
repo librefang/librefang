@@ -864,3 +864,127 @@ async fn branch_step_no_match_solo_halts_workflow() {
     let run = engine.get_run(run_id).await.expect("run exists");
     assert!(matches!(run.state, WorkflowRunState::Failed));
 }
+
+/// A sequential workflow with two steps sharing the Branch arm's
+/// target name must halt explicitly rather than silently jump to
+/// whichever appears first.
+///
+/// Background: duplicate-name detection lives in
+/// `build_dependency_graph`, which is only reached via
+/// `topological_sort`. `execute_run` only calls the DAG path when at
+/// least one step declares a `depends_on` edge — a workflow without
+/// any `depends_on` (the historical sequential path) skips topo sort
+/// entirely. Without the in-Branch uniqueness guard this exact case
+/// silently routed to the first matching step.
+#[tokio::test(flavor = "multi_thread")]
+async fn branch_step_ambiguous_target_halts_with_recorded_reason() {
+    let test = boot();
+    let engine = test.state.kernel.workflow_engine();
+
+    // No depends_on anywhere → sequential path, so topo sort (and its
+    // duplicate-name guard) is skipped.
+    let step = |name: &str, code: &str, mode: StepMode| WorkflowStep {
+        name: name.to_string(),
+        agent: StepAgent::ByName {
+            name: "_operator_placeholder".to_string(),
+        },
+        prompt_template: code.to_string(),
+        mode,
+        timeout_secs: 120,
+        error_mode: ErrorMode::Fail,
+        output_var: None,
+        inherit_context: None,
+        depends_on: vec![],
+        session_mode: None,
+    };
+    let workflow = Workflow {
+        id: WorkflowId::new(),
+        name: "branch-ambiguous".to_string(),
+        description: "duplicate target name guard".to_string(),
+        steps: vec![
+            step(
+                "seed",
+                "ignored",
+                StepMode::Transform {
+                    code: "go".to_string(),
+                },
+            ),
+            step(
+                "decide",
+                "ignored",
+                StepMode::Branch {
+                    arms: vec![BranchArm {
+                        match_value: serde_json::json!("go"),
+                        then: "target".to_string(),
+                    }],
+                },
+            ),
+            // Two steps share the name "target" — the Branch arm's
+            // target name resolves to both.
+            step(
+                "target",
+                "ignored",
+                StepMode::Transform {
+                    code: "first:{{ prev }}".to_string(),
+                },
+            ),
+            step(
+                "target",
+                "ignored",
+                StepMode::Transform {
+                    code: "second:{{ prev }}".to_string(),
+                },
+            ),
+        ],
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: None,
+    };
+    let wf_id = workflow.id;
+    engine.register(workflow).await;
+    let run_id = engine
+        .create_run(wf_id, "ignored".to_string())
+        .await
+        .expect("create_run");
+    let result = engine
+        .execute_run(
+            run_id,
+            panicking_agent_resolver,
+            |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
+                panic!("operator-node executor must not call send_message");
+                #[allow(unreachable_code)]
+                Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
+            },
+        )
+        .await;
+    let err = result.expect_err("ambiguous branch target must halt");
+    assert!(
+        err.contains("ambiguous") && err.contains("target"),
+        "ambiguous-target reason should be explicit; got: {err}"
+    );
+    let run = engine.get_run(run_id).await.expect("run exists");
+    assert!(matches!(run.state, WorkflowRunState::Failed));
+    // Neither duplicate `target` step must have executed. The
+    // `decide` Branch step itself fails before it pushes its own
+    // synthetic StepResult — matching the existing "target not found"
+    // and "backward jump" arms — so the trail naturally stops at
+    // `seed`. If routing silently picked the first match, the trail
+    // would extend into `target` (output `first:go`).
+    let step_names: Vec<&str> = run
+        .step_results
+        .iter()
+        .map(|s| s.step_name.as_str())
+        .collect();
+    assert_eq!(
+        step_names,
+        vec!["seed"],
+        "ambiguous branch must not dispatch either duplicate target; got: {step_names:?}"
+    );
+    let output_strs: Vec<&str> = run.step_results.iter().map(|s| s.output.as_str()).collect();
+    assert!(
+        !output_strs
+            .iter()
+            .any(|o| o.contains("first:") || o.contains("second:")),
+        "neither duplicate target's transform output should appear; got: {output_strs:?}"
+    );
+}

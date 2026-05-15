@@ -624,6 +624,18 @@ pub fn validate_transform_template(template: &str) -> Result<(), String> {
 pub fn evaluate_gate_condition(cond: &GateCondition, output: &str) -> Result<(), String> {
     let parsed_root: Option<serde_json::Value> = serde_json::from_str(output).ok();
 
+    // Fail-closed on JSON null at the root. A predecessor that returned
+    // bare `null` cannot meaningfully satisfy a positive gate condition,
+    // and treating `Null == Null` as a pass would silently let through
+    // degenerate outputs (e.g. a step that returned `null` instead of its
+    // documented result shape). Doc-level contract: "missing pointer or
+    // non-JSON output fails the gate" — we extend the same fail-closed
+    // policy to root-level JSON null, which is neither missing nor
+    // structurally a value the gate can compare against.
+    if matches!(parsed_root, Some(serde_json::Value::Null)) {
+        return Err("previous step output is JSON null — gate fails closed".to_string());
+    }
+
     // Resolve the left-hand side. `lhs_json` is `Some` when the resolved
     // value parses as JSON (which lets us do JSON-typed equality and
     // numeric ordering); `lhs_str` is always present as a fallback for
@@ -631,6 +643,17 @@ pub fn evaluate_gate_condition(cond: &GateCondition, output: &str) -> Result<(),
     let (lhs_json, lhs_str): (Option<serde_json::Value>, String) = match &cond.field {
         Some(ptr) if !ptr.is_empty() => match parsed_root.as_ref() {
             Some(root) => match root.pointer(ptr) {
+                Some(v) if v.is_null() => {
+                    // Same fail-closed policy as the root-null branch:
+                    // a pointer that resolves to JSON null is
+                    // semantically empty for the purposes of gate
+                    // evaluation. Distinguishing `missing` from
+                    // `present-but-null` here would invite drift from
+                    // the root-level behaviour.
+                    return Err(format!(
+                        "field '{ptr}' resolves to JSON null — gate fails closed"
+                    ));
+                }
                 Some(v) => {
                     let s = match v {
                         serde_json::Value::String(s) => s.clone(),
@@ -3518,7 +3541,46 @@ impl WorkflowEngine {
                             // let an unbounded loop hide inside a
                             // Branch when `Loop` already exists for
                             // that semantic.
-                            let target_idx = workflow.steps.iter().position(|s| s.name == arm.then);
+                            //
+                            // Defensive uniqueness check: duplicate
+                            // step-name detection lives in
+                            // `build_dependency_graph`, which is only
+                            // reached via `topological_sort`. Sequential
+                            // workflows that have no `depends_on` edges
+                            // can skip that path entirely, so we refuse
+                            // an ambiguous target here rather than let
+                            // `iter().position` pick the silent first
+                            // match.
+                            let mut target_iter = workflow
+                                .steps
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, s)| s.name == arm.then);
+                            let first = target_iter.next();
+                            let second = target_iter.next();
+                            let target_idx = match (first, second) {
+                                (Some((idx, _)), None) => Some(idx),
+                                (None, _) => None,
+                                (Some(_), Some(_)) => {
+                                    let err = format!(
+                                        "Branch step '{}' target name '{}' is ambiguous: \
+                                         multiple steps share that name",
+                                        step.name, arm.then
+                                    );
+                                    warn!(
+                                        error = %err,
+                                        "Branch step blocked workflow on ambiguous target"
+                                    );
+                                    if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                        if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                            r.state = WorkflowRunState::Failed;
+                                            r.error = Some(err.clone());
+                                            r.completed_at = Some(Utc::now());
+                                        }
+                                    }
+                                    return Err(err);
+                                }
+                            };
                             match target_idx {
                                 Some(t) if t > i => {
                                     let output = current_input.clone();
@@ -5636,6 +5698,54 @@ mod tests {
         };
         assert!(evaluate_gate_condition(&cond, "this is urgent work").is_ok());
         assert!(evaluate_gate_condition(&cond, "this is fine").is_err());
+    }
+
+    /// A predecessor that emitted bare `null` must fail the gate
+    /// closed, regardless of whether `cond.value` happens to also be
+    /// JSON null. Treating `Null == Null` as a pass is the regression
+    /// this test pins down.
+    #[test]
+    fn evaluate_gate_condition_root_null_fails_closed() {
+        let cond_eq_null = GateCondition {
+            field: None,
+            op: GateOp::Eq,
+            value: serde_json::Value::Null,
+        };
+        let err = evaluate_gate_condition(&cond_eq_null, "null").unwrap_err();
+        assert!(
+            err.contains("null") && err.contains("fails closed"),
+            "root-null reason should be explicit: {err}"
+        );
+
+        let cond_eq_value = GateCondition {
+            field: None,
+            op: GateOp::Eq,
+            value: serde_json::json!("ok"),
+        };
+        let err = evaluate_gate_condition(&cond_eq_value, "null").unwrap_err();
+        assert!(
+            err.contains("fails closed"),
+            "root-null reason should fire before op comparison: {err}"
+        );
+    }
+
+    /// Pointer that resolves to JSON null (field present, value
+    /// explicitly null) is treated the same as the root-null case —
+    /// fail-closed. This pins the distinction between "missing" and
+    /// "present-but-null" without letting present-but-null silently
+    /// pass.
+    #[test]
+    fn evaluate_gate_condition_pointer_to_null_fails_closed() {
+        let cond = GateCondition {
+            field: Some("/score".to_string()),
+            op: GateOp::Eq,
+            value: serde_json::Value::Null,
+        };
+        let err = evaluate_gate_condition(&cond, r#"{"score": null}"#).unwrap_err();
+        assert!(
+            err.contains("/score") && err.contains("fails closed"),
+            "pointer-null reason should name field and fail-closed status: {err}"
+        );
     }
 
     // --- Transform / Tera tests (#4980 step 3) -----------------------------
