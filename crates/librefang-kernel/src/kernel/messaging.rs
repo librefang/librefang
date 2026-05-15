@@ -378,25 +378,6 @@ impl LibreFangKernel {
         None
     }
 
-    /// Pre-dispatch provider-budget check.
-    ///
-    /// Read-only: looks up the `[providers.<name>]` entry (if any) and
-    /// queries the metering store. Used by every dispatch path
-    /// (ephemeral / full / streaming) BEFORE any token or USD
-    /// reservation is acquired, so a rejection cannot leak reservations
-    /// and a hot loop of denied calls cannot drain the per-agent burst
-    /// window or the in-memory pending USD ledger.
-    fn check_provider_budget_for(
-        &self,
-        provider: &str,
-    ) -> librefang_types::error::LibreFangResult<()> {
-        let bc = self.metering.budget_config.load();
-        if let Some(pb) = bc.providers.get(provider) {
-            self.metering.engine.check_provider_budget(provider, pb)?;
-        }
-        Ok(())
-    }
-
     /// Send an ephemeral "side question" to an agent (`/btw` command).
     ///
     /// The message is answered using the agent's system prompt and model, but in a
@@ -418,9 +399,11 @@ impl LibreFangKernel {
             return Ok(AgentLoopResult::default());
         }
 
-        // Pre-dispatch provider budget gate (ephemeral path).
-        self.check_provider_budget_for(&entry.manifest.model.provider)
-            .map_err(KernelError::LibreFang)?;
+        // #4807: the pre-dispatch provider-budget gate was removed from
+        // this path. Budget exhaustion is now signalled through the
+        // shared `ProviderExhaustionStore` and consumed by the LLM
+        // fallback chain, so an exhausted primary provider can fail
+        // over to a healthy slot instead of refusing the whole call.
 
         // Ephemeral: no tools — prevents side effects (tool writes to memory/disk)
         let tools: Vec<librefang_types::tool::ToolDefinition> = vec![];
@@ -804,12 +787,11 @@ impl LibreFangKernel {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
-        // Pre-dispatch provider budget gate (full path). Placed BEFORE
-        // both reservations so a rejection cannot leak the pending USD
-        // ledger or the per-agent burst window — bare `?` is sufficient
-        // because no resources have been acquired yet.
-        self.check_provider_budget_for(&entry.manifest.model.provider)
-            .map_err(KernelError::LibreFang)?;
+        // #4807: the pre-dispatch provider-budget gate was removed
+        // from this path. The shared `ProviderExhaustionStore` carries
+        // budget-exhaustion signals into the LLM fallback chain so an
+        // exhausted primary provider can fail over to a healthy slot
+        // instead of refusing the whole call.
 
         let estimated_usd = {
             // Best-effort pre-call estimate: model.max_tokens worth of
@@ -1716,12 +1698,11 @@ impl LibreFangKernel {
             loop_opts.compaction_config = Some(merged);
         }
 
-        // Pre-dispatch provider budget gate (streaming path). Placed
-        // BEFORE `check_quota_and_reserve` so a rejection cannot leak
-        // the per-agent burst window — bare `?` is sufficient because
-        // no token reservation has been acquired yet.
-        self.check_provider_budget_for(&entry.manifest.model.provider)
-            .map_err(KernelError::LibreFang)?;
+        // #4807: the pre-dispatch provider-budget gate was removed
+        // from this path. The shared `ProviderExhaustionStore` carries
+        // budget-exhaustion signals into the LLM fallback chain so an
+        // exhausted primary provider can fail over to a healthy slot
+        // instead of refusing the whole call.
 
         // Pre-charge the estimated token budget atomically to prevent the
         // TOCTOU race (#3736).  The reservation is settled inside the spawned
