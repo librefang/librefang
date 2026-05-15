@@ -4564,30 +4564,26 @@ impl Workflow {
                         ));
                     }
                 }
-                StepMode::Gate { condition } => {
-                    // Catch the parser's fail-closed sentinel
-                    // (Eq=null with no field) so the operator sees the
-                    // misconfiguration at register time rather than a
-                    // mysterious "gate fails closed" mid-run.
+                // Catch the parser's fail-closed sentinel (Eq=null with no
+                // field) so the operator sees the misconfiguration at register
+                // time rather than a mysterious "gate fails closed" mid-run.
+                StepMode::Gate { condition }
                     if condition.field.is_none()
                         && matches!(condition.op, GateOp::Eq)
-                        && matches!(condition.value, serde_json::Value::Null)
-                    {
-                        errs.push((
-                            step.name.clone(),
-                            "gate.condition matches the parser's fail-closed default \
-                             (op=eq, value=null, no field) — likely missing or malformed"
-                                .to_string(),
-                        ));
-                    }
+                        && matches!(condition.value, serde_json::Value::Null) =>
+                {
+                    errs.push((
+                        step.name.clone(),
+                        "gate.condition matches the parser's fail-closed default \
+                         (op=eq, value=null, no field) — likely missing or malformed"
+                            .to_string(),
+                    ));
                 }
-                StepMode::Branch { arms } => {
-                    if arms.is_empty() {
-                        errs.push((
-                            step.name.clone(),
-                            "branch.arms is empty — likely missing from the manifest".to_string(),
-                        ));
-                    }
+                StepMode::Branch { arms } if arms.is_empty() => {
+                    errs.push((
+                        step.name.clone(),
+                        "branch.arms is empty — likely missing from the manifest".to_string(),
+                    ));
                 }
                 _ => {}
             }
