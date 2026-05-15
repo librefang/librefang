@@ -1035,7 +1035,7 @@ librefang service install
 
 - **Linux：** 在 `~/.config/systemd/user/librefang.service` 创建 systemd 用户服务，然后执行 `systemctl --user daemon-reload` 和 `systemctl --user enable librefang.service`。
 - **macOS：** 在 `~/Library/LaunchAgents/ai.librefang.daemon.plist` 创建 LaunchAgent，并通过 `launchctl load` 加载。
-- **Windows：** 在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 添加 `LibreFang` 注册表项。
+- **Windows：** 在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 添加 `BossFang` 注册表项。
 
 二进制路径通过当前运行的可执行文件自动检测。如果移动了二进制文件，重新运行 `librefang service install` 即可更新路径。
 

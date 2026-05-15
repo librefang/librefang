@@ -136,7 +136,7 @@ api_key_env = ""
 
 ```toml
 # ============================================================
-# LibreFang Agent OS -- Complete Configuration Reference
+# BossFang Agent OS -- Complete Configuration Reference
 # ============================================================
 
 # --- Top-level fields ---
@@ -293,7 +293,7 @@ method = "post"
 # --- A2A Protocol ---
 [a2a]
 enabled = false
-name = "LibreFang Agent OS"
+name = "BossFang Agent OS"
 description = ""
 listen_path = "/a2a"
 
@@ -1663,7 +1663,7 @@ Agent-to-Agent protocol configuration, enabling inter-agent communication across
 ```toml
 [a2a]
 enabled = true
-name = "LibreFang Agent OS"
+name = "BossFang Agent OS"
 description = "My production agent OS"
 listen_path = "/a2a"
 
@@ -1679,7 +1679,7 @@ url = "https://reviewer.example.com/.well-known/agent.json"
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `false` | Whether A2A protocol is enabled. |
-| `name` | string | `"LibreFang Agent OS"` | Service-level display name shown in the well-known agent card. |
+| `name` | string | `"BossFang Agent OS"` | Service-level display name shown in the well-known agent card. |
 | `description` | string | `""` | Service-level description shown in the well-known agent card. |
 | `listen_path` | string | `"/a2a"` | URL path prefix for A2A endpoints. |
 | `external_agents` | list of objects | `[]` | External A2A agents to discover and interact with. |
