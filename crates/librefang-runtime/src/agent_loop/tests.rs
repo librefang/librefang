@@ -662,6 +662,15 @@ fn silent_response_single_source_of_truth() {
         "lib.rs",             // librefang-types: legacy is_no_reply_sentinel compat shim
         "mod.rs",             // librefang-kernel: inline comment only
         "cron_tick.rs", // librefang-kernel #4713 phase 3: split out of kernel/mod.rs, comment only
+        // #3710 god-file split: the literal moved out of `agent_loop.rs`
+        // and `session_repair.rs` into new submodule siblings. Each
+        // entry is a path suffix (matched via `ends_with`) so no
+        // unrelated `types.rs` / `message.rs` / `tests.rs` is silently
+        // exempted by a bare-filename match.
+        "agent_loop/types.rs", // post-split: AgentLoopResult shape + small helpers
+        "agent_loop/message.rs", // post-split: assistant-message construction helpers
+        "agent_loop/tests.rs", // this grep guard itself + adjacent unit tests
+        "session_repair/tests.rs", // session_repair tests moved into module subdir
     ];
     let offenders: Vec<&str> = stdout
         .lines()
