@@ -66,6 +66,18 @@ impl LibreFangKernel {
         // update_manifest).
         validate_manifest_module_path(&manifest, &name)?;
 
+        // #4980 nit: the workflow engine labels operator-node step
+        // results with synthetic `_operator:<kind>` agent names. Reject
+        // user-supplied agent names that collide with that prefix at
+        // spawn time so dry-run previews and step-result rows stay
+        // unambiguous. `update_name` enforces the same check on
+        // rename; `update_manifest` / `reload_agent_from_disk` preserve
+        // the existing name and don't need a separate gate.
+        if let Err(reason) = librefang_types::agent::validate_agent_name(&name) {
+            warn!(agent = %name, %reason, "Rejecting manifest — reserved agent-name namespace");
+            return Err(KernelError::LibreFang(reason));
+        }
+
         // tool_exec backend (#3332): if the manifest pins a backend
         // override, the matching subtable must exist on the global
         // config — otherwise the agent would fail at the first tool

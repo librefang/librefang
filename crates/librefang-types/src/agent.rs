@@ -154,6 +154,36 @@ pub enum HookEvent {
     AgentLoopEnd,
 }
 
+/// Reserved prefix for synthetic operator-node "agent" names emitted by
+/// the workflow engine (#4980). The dry-run preview and step results
+/// label operator nodes (Wait / Gate / Approval / Transform / Branch)
+/// with names like `_operator:wait` so the dashboard can distinguish
+/// them from real agents. A user-supplied agent name that collides
+/// with this prefix would make the run history ambiguous (is
+/// `_operator:wait` the builtin step or a hand-rolled agent that
+/// happens to share the name?), so the prefix is reserved at the
+/// registry boundary.
+pub const RESERVED_OPERATOR_AGENT_NAME_PREFIX: &str = "_operator:";
+
+/// Reject agent names that collide with the reserved `_operator:`
+/// namespace used by workflow operator-node step results (#4980).
+///
+/// Returns `Err(LibreFangError::InvalidInput)` ready to be propagated
+/// through `spawn_agent` / `update_name` / any other manifest entry
+/// point. Empty / whitespace-only names are NOT rejected here — that
+/// is a separate concern handled by the registry's `find_by_name`
+/// callers and the boot-time manifest loader.
+pub fn validate_agent_name(name: &str) -> Result<(), crate::error::LibreFangError> {
+    if name.starts_with(RESERVED_OPERATOR_AGENT_NAME_PREFIX) {
+        return Err(crate::error::LibreFangError::InvalidInput(format!(
+            "Agent name {name:?} uses reserved namespace \
+             '{RESERVED_OPERATOR_AGENT_NAME_PREFIX}' \
+             (operator-node synthetic names — see #4980)"
+        )));
+    }
+    Ok(())
+}
+
 /// Unique identifier for an agent instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentId(pub Uuid);
@@ -3243,5 +3273,43 @@ model = "claude-3-haiku-20240307"
         assert_eq!(t.target_agent.as_deref(), Some("downstream"));
         assert!(t.workflow_id.is_none());
         assert!(t.enabled);
+    }
+
+    #[test]
+    fn validate_agent_name_accepts_ordinary_names() {
+        // Sanity: typical agent names pass — only the reserved prefix is
+        // gated, the validator must not regress into a stricter charset
+        // check that surprises existing manifests.
+        assert!(validate_agent_name("chat-agent").is_ok());
+        assert!(validate_agent_name("assistant").is_ok());
+        assert!(validate_agent_name("hand:role").is_ok());
+        assert!(validate_agent_name("_internal").is_ok());
+        assert!(validate_agent_name("").is_ok());
+        // Substring, not prefix — must not match.
+        assert!(validate_agent_name("foo_operator:bar").is_ok());
+    }
+
+    #[test]
+    fn validate_agent_name_rejects_operator_prefix() {
+        // #4980 nit: a user-supplied agent named `_operator:foo` would
+        // collide with the synthetic step-result labels the workflow
+        // engine emits for Wait/Gate/Approval/Transform/Branch nodes,
+        // making run history ambiguous. Reject at the registry boundary.
+        for name in [
+            "_operator:foo",
+            "_operator:wait",
+            "_operator:gate",
+            "_operator:approval",
+            "_operator:transform",
+            "_operator:branch",
+            "_operator:",
+        ] {
+            let err = validate_agent_name(name).expect_err(name);
+            let msg = err.to_string();
+            assert!(
+                msg.contains("reserved namespace") && msg.contains("_operator:"),
+                "rejection for {name:?} should mention the reserved namespace; got: {msg}"
+            );
+        }
     }
 }

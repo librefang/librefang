@@ -577,6 +577,13 @@ impl AgentRegistry {
 
     /// Update an agent's name (also updates the name index).
     pub fn update_name(&self, id: AgentId, new_name: String) -> LibreFangResult<()> {
+        // #4980 nit: reject renames into the reserved `_operator:`
+        // namespace — synthetic operator-node step-result names would
+        // collide with the real agent and make run history ambiguous.
+        // `spawn_agent_inner` enforces the same rule at create time;
+        // the rename path needs its own gate because it bypasses spawn.
+        librefang_types::agent::validate_agent_name(&new_name)?;
+
         // Use atomic entry() API to avoid TOCTOU race between contains_key and insert.
         match self.name_index.entry(new_name.clone()) {
             Entry::Occupied(_) => {
