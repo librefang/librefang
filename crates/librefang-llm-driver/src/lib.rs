@@ -87,15 +87,25 @@ pub enum LlmError {
     /// failed. `details` enumerates the slots and the reason each is out;
     /// the vec is sorted by `provider_id` ascending so any stringified
     /// surface (logs, error responses, prompt-included error text) is
-    /// byte-identical across processes (#3298). The chain still surfaces
-    /// the *last* underlying provider error via `source()`-style chains
-    /// further up the stack; this variant is the typed "chain is dry"
-    /// signal callers want to recognise without parsing the wrapped
-    /// `Api { message, ... }` it used to be.
+    /// byte-identical across processes (#3298).
+    ///
+    /// `cause` carries the last underlying provider error when at least
+    /// one slot was attempted before the chain ran dry. It is exposed
+    /// through [`std::error::Error::source`] via `thiserror`'s `#[source]`
+    /// attribute so callers walking the error chain still see the
+    /// upstream failure (`librefang-llm-driver/AGENTS.md` rule, #3745).
+    /// `None` when every slot was pre-skipped from the exhaustion
+    /// store and the underlying provider was never invoked.
     #[error("All providers exhausted ({}): {}", details.len(), format_chain_details(details))]
     AllProvidersExhausted {
         /// One entry per slot in the chain, sorted by provider id.
         details: Vec<ProviderExhaustionDetail>,
+        /// The last underlying provider error from the most recent
+        /// attempt before the chain gave up. `Box`ed so the variant
+        /// itself stays small and so the recursive `LlmError` type is
+        /// well-sized.
+        #[source]
+        cause: Option<Box<LlmError>>,
     },
 }
 
@@ -718,6 +728,42 @@ mod tests {
         // Failover classification is unaffected by the field-shape change.
         assert_eq!(err.failover_reason(), FailoverReason::Timeout);
         assert_eq!(empty.failover_reason(), FailoverReason::Timeout);
+    }
+
+    // #4807 / #3745 — `AllProvidersExhausted` MUST preserve the
+    // upstream provider error via `Error::source()`. The trait crate's
+    // own `AGENTS.md` rule is that no variant introduced for fallback
+    // accounting may drop the source chain — this test pins that
+    // contract so future field-shape edits can't silently regress it.
+    #[test]
+    fn all_providers_exhausted_preserves_source_chain() {
+        let inner = LlmError::Api {
+            status: 402,
+            message: "credit exhausted".to_string(),
+            code: None,
+        };
+        let inner_display = inner.to_string();
+
+        let err = LlmError::AllProvidersExhausted {
+            details: vec![crate::ProviderExhaustionDetail {
+                provider_id: "p1".to_string(),
+                reason: crate::exhaustion::ExhaustionReason::QuotaExceeded,
+            }],
+            cause: Some(Box::new(inner)),
+        };
+
+        // Walking `Error::source` lands on (a non-None) error whose
+        // Display matches the wrapped upstream variant.
+        let src = std::error::Error::source(&err)
+            .expect("AllProvidersExhausted with a cause must expose source()");
+        assert_eq!(src.to_string(), inner_display);
+        // And the `None`-cause shape (every slot pre-skipped) must NOT
+        // fabricate a synthetic source — `source()` returns None.
+        let empty = LlmError::AllProvidersExhausted {
+            details: vec![],
+            cause: None,
+        };
+        assert!(std::error::Error::source(&empty).is_none());
     }
 
     #[test]
