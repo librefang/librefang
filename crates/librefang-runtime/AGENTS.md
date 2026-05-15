@@ -6,11 +6,12 @@ See repo-root `CLAUDE.md` for cross-cutting rules.
 ## Purpose
 
 Agent execution. Tool dispatch. Context management. Audit. A2A peer protocol. Channel registry. Sandboxes (browser, docker, process).
-Re-exports OAuth subsystems from `librefang-runtime-oauth`.
+Owns the ChatGPT / Copilot OAuth flows and the in-tree WASM host functions (`chatgpt_oauth`, `copilot_oauth`, `host_functions`, `sandbox`); the post-#3710 collapse folded these back in as feature-gated modules rather than separate crates.
 
 ## Boundary
 
-- Owns: `agent_loop`, `tool_runner`, `compactor`, `context_budget`, `context_compressor`, `context_overflow`, `audit`, `auth_cooldown`, `aux_client`, `browser`, `catalog_sync`, `channel_registry`, `checkpoint_manager`, `dangerous_command`, `docker_sandbox`, `media`, `model_catalog` (the type), `mcp` (client), `prompt_builder`.
+- Owns: `agent_loop`, `tool_runner`, `apply_patch`, `chatgpt_oauth`, `copilot_oauth`, `compactor`, `context_budget`, `context_compressor`, `context_overflow`, `auth_cooldown`, `aux_client`, `browser`, `catalog_sync`, `channel_registry`, `checkpoint_manager`, `dangerous_command`, `host_functions`, `model_catalog` (the type), `prompt_builder`, `sandbox`, `subprocess_sandbox`.
+- Re-exports from sibling leaf crates (historical module paths preserved): `audit` → `librefang-runtime-audit`; `docker_sandbox` → `librefang-runtime-sandbox-docker` (feature `docker-sandbox`); `media`, `media_understanding` → `librefang-runtime-media` (feature `media`); `mcp`, `mcp_oauth` → `librefang-runtime-mcp`.
 - Does NOT own: agent registry / scheduler / cron / orchestration → `librefang-kernel`. HTTP routing → `librefang-api`. Channel transport adapters → `librefang-channels`. Skill loader → `librefang-skills`.
 - Depends on: `librefang-types`, `librefang-http`, `librefang-kernel-handle` (NOT `librefang-kernel` directly — that would be circular).
 
