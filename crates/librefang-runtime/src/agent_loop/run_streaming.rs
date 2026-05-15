@@ -1,274 +1,24 @@
-//! Core agent execution loop.
+//! `run_agent_loop_streaming` — the streaming variant of the main loop.
 //!
-//! The agent loop handles receiving a user message, recalling relevant memories,
-//! calling the LLM, executing tool calls, and saving the conversation.
+//! Like `run_agent_loop`, but sends `StreamEvent`s to the provided channel
+//! as tokens arrive from the LLM. Tool execution happens between LLM calls
+//! and is not streamed. Extracted into its own file to keep `mod.rs` under
+//! the #3710 2,000 LOC cap.
 
-use crate::checkpoint_manager::CheckpointManager;
-use crate::context_budget::{apply_context_guard, ContextBudget};
-use crate::context_engine::ContextEngine;
-use crate::context_overflow::{recover_from_overflow, RecoveryStage};
-use crate::embedding::EmbeddingDriver;
-use crate::kernel_handle::prelude::*;
-use crate::llm_driver::{CompletionRequest, LlmDriver, StreamEvent, PHASE_RESPONSE_COMPLETE};
-use crate::loop_guard::{LoopGuard, LoopGuardConfig, LoopGuardVerdict};
-use crate::mcp::McpConnection;
-use crate::tool_budget::{ToolBudgetEnforcer, ToolResultEntry};
-use crate::tool_runner;
-use crate::web_search::WebToolsContext;
-use librefang_memory::session::Session;
-use librefang_memory::{MemorySubstrate, ProactiveMemoryHooks};
-use librefang_skills::registry::SkillRegistry;
-use librefang_types::agent::AgentManifest;
-use librefang_types::error::{LibreFangError, LibreFangResult};
-use librefang_types::memory::{Memory, MemoryFilter, MemorySource};
-use librefang_types::memory::{MemoryFragment, MemoryId};
-use librefang_types::message::{
-    ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
-};
-use librefang_types::tool::{AgentLoopSignal, DecisionTrace, ToolCall, ToolDefinition};
-use std::collections::HashMap;
-use std::path::Path;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
-use tracing::{debug, info, instrument, warn};
+use super::retry::stream_with_retry;
+use super::*;
 
-mod end_turn;
-mod history;
-mod message;
-mod model;
-mod prompt;
-mod retry;
-mod run_streaming;
-mod text_recovery;
-mod tool_call;
-mod tool_resolution;
-mod types;
-mod web_augment;
-
-pub use self::history::DEFAULT_MAX_HISTORY_MESSAGES;
-pub use self::model::{apply_session_model_override_to_manifest, strip_provider_prefix};
-pub use self::run_streaming::run_agent_loop_streaming;
-pub use self::types::{AgentLoopResult, ExperimentContext, LoopOptions, LoopPhase, PhaseCallback};
-
-use self::end_turn::{
-    build_silent_agent_loop_result, classify_end_turn_retry, finalize_end_turn_text,
-    finalize_successful_end_turn, gated_proactive_memory_for_memorize,
-    gated_proactive_memory_for_retrieve, maybe_fold_stale_tool_results, EndTurnRetry,
-    EndTurnRetryContext, FinalizeEndTurnContext, FinalizeEndTurnResultData,
-};
-use self::history::resolve_max_history;
-use self::message::{
-    accumulate_token_usage, is_cascade_leak, is_no_reply, is_parameter_error_content,
-    is_progress_text_leak, is_soft_error_content, push_accumulated_text, safe_trim_messages,
-    sanitize_sender_label, sanitize_tool_result_content, strip_prior_image_data,
-    strip_processed_image_data,
-};
-use self::model::{stable_prefix_mode_enabled, UNKNOWN_MODEL_CONTEXT_WINDOW};
-use self::prompt::{
-    build_prompt_setup, log_repair_stats, prepare_llm_messages, push_filtered_user_message,
-    reply_directives_from_parsed, select_running_experiment, setup_recalled_memories,
-    PreparedMessages, PromptExperimentSelection, PromptSetup, PromptSetupContext, RecallSetup,
-    RecallSetupContext,
-};
-use self::retry::call_with_retry;
-use self::text_recovery::recover_text_tool_calls;
-use self::tool_call::{
-    append_skipped_tool_results, execute_single_tool_call, handle_mid_turn_signal,
-    stage_tool_use_turn, tool_use_blocks_from_calls, update_consecutive_hard_failures,
-    ToolExecutionContext, ToolResultOutcomeSummary,
-};
-use self::tool_resolution::ResolvedToolsCache;
-use self::web_augment::web_search_augment;
-
-/// Maximum iterations in the agent loop before giving up.
+/// Run the agent execution loop with streaming support.
 ///
-/// Single source of truth is `AutonomousConfig::DEFAULT_MAX_ITERATIONS` in
-/// `librefang-types` — kept as a local alias here so the hot-path branches
-/// in this file read as a plain constant instead of a fully-qualified
-/// path. Changing the policy value in one place propagates to both the
-/// runtime fallback and the manifest default.
-const MAX_ITERATIONS: u32 = librefang_types::agent::AutonomousConfig::DEFAULT_MAX_ITERATIONS;
-
-/// Timeout for individual tool executions (seconds).
-/// Raised from 120s to 600s for agent_send/agent_spawn and long-running builds.
-const TOOL_TIMEOUT_SECS: u64 = 600;
-
-/// Maximum consecutive MaxTokens continuations before returning partial response.
-/// Raised from 3 to 5 to allow longer-form generation.
-const MAX_CONTINUATIONS: u32 = 5;
-
-/// Run session repair on `session.messages` before persisting on failure paths.
-///
-/// When the agent loop exits via circuit breaker, max iterations, or timeout,
-/// the session history may contain orphaned `ToolUse` blocks with no matching
-/// `ToolResult`.  Providers that enforce strict pairing (Moonshot, OpenAI)
-/// then return 400 on next load, making the session permanently broken.
-///
-/// This helper replaces `session.messages` with the repaired copy so the
-/// persisted history is always well-formed.
-fn repair_session_before_save(session: &mut Session, agent_id: &str, reason: &str) {
-    let (repaired, stats) =
-        crate::session_repair::validate_and_repair_with_stats(&session.messages);
-    if stats != crate::session_repair::RepairStats::default() {
-        tracing::warn!(
-            agent_id,
-            reason,
-            orphaned_results_removed = stats.orphaned_results_removed,
-            empty_messages_removed = stats.empty_messages_removed,
-            messages_merged = stats.messages_merged,
-            results_reordered = stats.results_reordered,
-            synthetic_results_inserted = stats.synthetic_results_inserted,
-            duplicates_removed = stats.duplicates_removed,
-            misplaced_results_rescued = stats.misplaced_results_rescued,
-            positional_synthetic_inserted = stats.positional_synthetic_inserted,
-            "Session repair applied before save"
-        );
-    }
-    session.set_messages(repaired);
-    session.last_repaired_generation = Some(session.messages_generation);
-}
-
-/// Maximum consecutive iterations where every executed tool failed before
-/// the loop exits with `RepeatedToolFailures`. Catches expensive wheel-spinning
-/// when the LLM cannot fix a tool call (bad auth, permanent 404, etc.).
-const MAX_CONSECUTIVE_ALL_FAILED: u32 = 3;
-
-/// Marker included in timeout error messages when partial output was delivered.
-/// Used by channel_bridge to detect this case without fragile string matching.
-pub const TIMEOUT_PARTIAL_OUTPUT_MARKER: &str = "[partial_output_delivered]";
-
-/// Notify the stream consumer that the LLM has finished producing text for
-/// this turn so the UI can unblock input before the agent loop's remaining
-/// post-processing (session persistence, proactive memory extraction) lands
-/// the final `response` event. Fire-and-forget: send failures are ignored
-/// because a disconnected consumer is not fatal to the turn.
-async fn signal_response_complete(tx: &mpsc::Sender<StreamEvent>) {
-    let _ = tx
-        .send(StreamEvent::PhaseChange {
-            phase: PHASE_RESPONSE_COMPLETE.to_string(),
-            detail: None,
-        })
-        .await;
-}
-
-fn max_tokens_response_text(response: &crate::llm_driver::CompletionResponse) -> String {
-    let text = response.text();
-    if text.trim().is_empty() {
-        "[Partial response — token limit reached with no text output.]".to_string()
-    } else {
-        text
-    }
-}
-
-fn fire_hook_best_effort(
-    hook_reg: Option<&crate::hooks::HookRegistry>,
-    ctx: &crate::hooks::HookContext<'_>,
-) {
-    if let Some(hook_reg) = hook_reg {
-        if let Err(err) = hook_reg.fire(ctx) {
-            warn!(
-                event = ?ctx.event,
-                agent = ctx.agent_name,
-                error = %err,
-                "Hook failed in best-effort path"
-            );
-        }
-    }
-}
-
-fn recall_or_default<T, E>(result: Result<T, E>, warning: &str) -> T
-where
-    T: Default,
-    E: std::fmt::Display,
-{
-    match result {
-        Ok(value) => value,
-        Err(err) => {
-            warn!(error = %err, "{}", warning);
-            T::default()
-        }
-    }
-}
-
-/// Distinguishes system-fired turns from real human ones in the user
-/// message itself. The kernel synthesises a `SenderContext` with
-/// `channel = "cron"` or `"autonomous"` for scheduled / loop fires, but
-/// the user message that reaches the LLM is otherwise indistinguishable
-/// from a real human turn. The model has been observed answering a
-/// scheduled trigger as if a person had asked, then conflating that
-/// response with the next real human request that arrives.
-///
-/// Returns a typed marker prepended to the user message so the LLM can
-/// distinguish "this came from a cron job" from "this came from a person".
-/// The string is stable so few-shot examples and persona rules can
-/// reference it explicitly. Returns `None` for human-driven channels so
-/// 1:1 chats and API calls keep their existing un-prefixed message shape.
-///
-/// **Prompt cache safety**: the marker is byte-stable per channel (no
-/// clock or PID interpolation) and only mutates the *current* user
-/// message tail — historical session bytes are not rewritten. This is the
-/// distinction the `build_sender_prefix` carve-out below cares about:
-/// dynamic per-turn names like a Web-UI display would invalidate the
-/// cache; a fixed channel-keyed marker does not.
-fn build_automation_marker_prefix(sender_channel: Option<&str>) -> Option<&'static str> {
-    match sender_channel {
-        Some("cron") => Some("[Scheduled trigger]\n"),
-        Some("autonomous") => Some("[Autonomous trigger]\n"),
-        _ => None,
-    }
-}
-
-/// Build the `[sender]: message` prefix for a user turn.
-///
-/// Emits a sanitized prefix when a real human sender identity is available
-/// (group chat, channel DM with display_name / user_id). Returns `None` when:
-/// - No identity available (no `sender_display_name`, no `sender_user_id`), OR
-/// - Channel is a kernel-internal / dashboard surface where the synthesized
-///   `display_name` is a placeholder, not a real user identity (`webui`,
-///   `cron`, `autonomous`). Adding `[Web UI]: ` / `[cron]: ` to every
-///   message there would be noise and would invalidate the provider prompt
-///   cache by mutating the user-message body each turn.
-///
-/// The prefix is applied AFTER PII filtering to prevent display names that look like emails
-/// or phone numbers from being redacted into the message content.
-fn build_sender_prefix(manifest: &AgentManifest, sender_user_id: Option<&str>) -> Option<String> {
-    let channel = manifest
-        .metadata
-        .get("sender_channel")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    // Keep these literals in sync with the kernel-side synthetic channel
-    // sentinels: `librefang_kernel::SYSTEM_CHANNEL_{CRON,AUTONOMOUS,WEBUI}`.
-    // Runtime can't import the constants directly (circular dep — runtime
-    // is below kernel), so a grep-pointer is the best we can do; api / cli
-    // / kernel sites reference the kernel constants by name and stay in
-    // lock-step.
-    if matches!(channel, "webui" | "cron" | "autonomous") {
-        return None;
-    }
-    let raw = manifest
-        .metadata
-        .get("sender_display_name")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .or(sender_user_id)?;
-    Some(format!("[{}]: ", sanitize_sender_label(raw)))
-}
-
-/// Run the agent execution loop for a single user message.
-///
-/// This is the core of LibreFang: it loads session context, recalls memories,
-/// runs the LLM in a tool-use loop, and saves the updated session.
+/// Like `run_agent_loop`, but sends `StreamEvent`s to the provided channel
+/// as tokens arrive from the LLM. Tool execution happens between LLM calls
+/// and is not streamed.
 #[allow(clippy::too_many_arguments)]
-// `level = "warn"` (not the default `info`) so the daemon's baseline filter
-// (`librefang_runtime=warn` in `init_tracing_stderr`) keeps this span alive.
-// At INFO the span gets filtered out before it's ever created, and every
-// WARN/ERROR event inside the loop loses its parent context — including the
-// `agent.id` / `session.id` fields, which is the whole point of instrumenting.
-// The span itself does not emit a log line; the level only gates creation.
+// `level = "warn"` to survive the daemon's `librefang_runtime=warn` baseline
+// filter — see the comment on `run_agent_loop` above. Also fold in
+// `session.id` so streaming events get the same correlation surface.
 #[instrument(level = "warn", skip_all, fields(agent.name = %manifest.name, agent.id = %session.agent_id, session.id = %session.id))]
-pub async fn run_agent_loop(
+pub async fn run_agent_loop_streaming(
     manifest: &AgentManifest,
     user_message: &str,
     session: &mut Session,
@@ -276,6 +26,7 @@ pub async fn run_agent_loop(
     driver: Arc<dyn LlmDriver>,
     available_tools: &[ToolDefinition],
     kernel: Option<Arc<dyn KernelHandle>>,
+    stream_tx: mpsc::Sender<StreamEvent>,
     skill_registry: Option<&SkillRegistry>,
     mcp_connections: Option<&tokio::sync::Mutex<Vec<McpConnection>>>,
     web_ctx: Option<&WebToolsContext>,
@@ -298,32 +49,27 @@ pub async fn run_agent_loop(
     pending_messages: Option<&tokio::sync::Mutex<mpsc::Receiver<AgentLoopSignal>>>,
     opts: &LoopOptions,
 ) -> LibreFangResult<AgentLoopResult> {
-    info!(agent = %manifest.name, "Starting agent loop");
+    info!(agent = %manifest.name, "Starting streaming agent loop");
 
-    // Start index of new messages added during this turn. Initialized to
-    // current session length so early returns (before the user message is
-    // pushed) expose an empty slice to callers. Updated after
-    // safe_trim_messages to point at the post-trim position of the just-
-    // pushed user message (len-1) so slicing stays in-bounds even when the
-    // trim drains deeper than (len - DEFAULT_MAX_HISTORY_MESSAGES). Fixes #2067.
+    // Start index of new messages added during this turn. See the matching
+    // comment in run_agent_loop for details. Initialized to the current
+    // session length, updated post-trim to len-1. Fixes #2067.
     let mut new_messages_start = session.messages.len();
 
-    // Early return if driver is not configured
+    // Skip streaming agent loop if no LLM provider is configured.
     if !driver.is_configured() {
+        info!(agent = %manifest.name, "Skipping streaming agent loop — no LLM provider configured");
         return Ok(AgentLoopResult {
             silent: true,
             provider_not_configured: true,
+            experiment_context: None,
             new_messages_start,
             ..Default::default()
         });
     }
 
-    // Gateway-level safety-net compression (#4972). Runs before any prompt
-    // build / first LLM call: catches sessions that grew between turns
-    // (overnight channel backlog, cron output piling up) and have already
-    // exceeded the context window before the agent-level compactor would
-    // ever get a chance to fire. No-op when the session is under threshold,
-    // when ctx_window is unknown, or when the kernel did not enable it.
+    // Gateway-level safety-net compression (#4972). See the matching block
+    // in `run_agent_loop` for rationale. Same pure-function entry point.
     if let (Some(cfg), Some(ctx_window)) = (
         opts.gateway_compression.as_ref(),
         context_window_tokens.filter(|w| *w > 0),
@@ -332,11 +78,9 @@ pub async fn run_agent_loop(
         let report =
             crate::gateway_compression::apply_if_needed(&mut session.messages, ctx_window_u32, cfg);
         if report.mutated() {
-            // `new_messages_start` is recomputed unconditionally in
-            // `prepare_messages` (set to `session.messages.len() - 1`
-            // after `safe_trim_messages` runs), so no fixup is needed
-            // here — the gateway prune only narrows the prior history
-            // and the just-pushed user message hasn't been added yet.
+            // See the matching block in `run_agent_loop` for why we don't
+            // touch `new_messages_start` here — `prepare_messages`
+            // recomputes it unconditionally after `safe_trim_messages`.
             session.mark_messages_mutated();
             info!(
                 agent = %manifest.name,
@@ -346,11 +90,9 @@ pub async fn run_agent_loop(
                 tool_results_stubbed = report.tool_results_stubbed,
                 tool_result_bytes_elided = report.tool_result_bytes_elided,
                 messages_dropped = report.messages_dropped,
-                "Gateway compression pruned session before agent loop (#4972)"
+                "Gateway compression pruned session before streaming loop (#4972)"
             );
         } else if report.fired {
-            // Fired but nothing pruned (e.g. entirely pinned history). The
-            // LLM compactor's summarisation is the only remedy.
             tracing::warn!(
                 agent = %manifest.name,
                 session_id = %session.id,
@@ -363,7 +105,7 @@ pub async fn run_agent_loop(
     let PromptExperimentSelection {
         experiment_context,
         running_experiment,
-    } = select_running_experiment(manifest, session, kernel.as_ref(), false);
+    } = select_running_experiment(manifest, session, kernel.as_ref(), true);
 
     // Extract hand-allowed env vars from manifest metadata (set by kernel for hand settings)
     let hand_allowed_env: Vec<String> = manifest
@@ -412,7 +154,7 @@ pub async fn run_agent_loop(
         sender_channel: sender_channel.as_deref(),
         kernel: kernel.as_ref(),
         stable_prefix_mode,
-        streaming: false,
+        streaming: true,
         opts,
     })
     .await;
@@ -441,7 +183,7 @@ pub async fn run_agent_loop(
         running_experiment: running_experiment.as_ref(),
         memories: &memories,
         stable_prefix_mode,
-        streaming: false,
+        streaming: true,
     });
 
     // Mutable collector for memories saved during this turn (populated by auto_memorize).
@@ -570,11 +312,8 @@ pub async fn run_agent_loop(
 
     let mut total_usage = TokenUsage::default();
     let final_response;
-    // Accumulate text content from intermediate tool_use iterations. A turn
-    // that yields a tool_use response may also carry user-facing text (e.g.
-    // "Looking that up for you..." before a memory_store call). Without this
-    // buffer that text is lost when the final EndTurn iteration returns an
-    // empty body and the empty-response guard takes over. See #fix-3074.
+    // Accumulated text from intermediate tool_use iterations — see the
+    // matching declaration in run_agent_loop for full rationale.
     let mut accumulated_text = String::new();
 
     new_messages_start = prepared_new_messages_start;
@@ -660,11 +399,9 @@ pub async fn run_agent_loop(
         engine.update_model(&initial_model, ctx_window);
     }
 
-    // The system prompt is constant across all iterations but `CompletionRequest`
-    // takes it by value, so we clone it per-iteration.  Keep a single pre-cloned
-    // copy so each per-iteration clone is always from the same allocation rather
-    // than potentially going through Arc/mutex indirection on the original source.
-    // This is a minor but measurable improvement for long autonomous runs.
+    // Pre-clone the system prompt for the streaming loop.  Identical rationale
+    // to the non-streaming path: constant across iterations, cloned per-LLM call
+    // because CompletionRequest takes ownership, so clone once up-front.
     let system_prompt_snapshot = system_prompt.clone();
 
     // Resolve tool list once before the loop and reuse via Arc on every
@@ -673,13 +410,14 @@ pub async fn run_agent_loop(
         ResolvedToolsCache::new(available_tools, &session_loaded_tools, lazy_tools);
 
     for iteration in 0..max_iterations {
-        debug!(iteration, "Agent loop iteration");
+        debug!(iteration, "Streaming agent loop iteration");
 
         // Check for session-scoped interrupt at each iteration boundary.
-        // This allows a /stop signal to abort the loop between LLM calls
-        // without affecting other concurrent sessions.
         if opts.interrupt.as_ref().is_some_and(|i| i.is_cancelled()) {
-            debug!(iteration, "Agent loop interrupted by session cancel signal");
+            debug!(
+                iteration,
+                "Streaming agent loop interrupted by session cancel signal"
+            );
             return Ok(AgentLoopResult {
                 silent: true,
                 new_messages_start,
@@ -687,29 +425,17 @@ pub async fn run_agent_loop(
             });
         }
 
-        // Fire agent:step external hook (fire-and-forget).
-        if let Some(ref k) = kernel {
-            k.fire_agent_step(&agent_id_str, iteration);
-        }
-
-        // Pluggable context engine: threshold-gated compaction. When the
-        // engine signals that the current token count has crossed its
-        // compression threshold, run a compaction pass *before* assemble so
-        // the assembled context is already trimmed.
-        //
-        // `last_prompt_tokens` carries the prompt-token count from the
-        // previous LLM call — never a running sum.  This correctly gates
-        // `should_compress` on each turn's own input cost.  On the first
-        // iteration `last_prompt_tokens` is 0, so compaction can only fire
-        // when the model's context window itself (via `ctx_window`) is
-        // below threshold.  `total_usage` (accumulated across iterations) is
-        // never read here, so it remains a clean snapshot for the kernel
-        // budget tracker and is never mutated by the compaction path.
+        // Pluggable context engine: threshold-gated compaction (same as the
+        // non-streaming loop). `last_prompt_tokens` carries only the previous
+        // turn's prompt cost — never the cumulative total.  `total_usage`
+        // (accumulated) is never read or written here.
         if let Some(engine) = context_engine {
             if engine.should_compress(last_prompt_tokens, ctx_window) {
                 debug!(
                     iteration,
-                    last_prompt_tokens, ctx_window, "Context engine requested compaction"
+                    last_prompt_tokens,
+                    ctx_window,
+                    "Context engine requested compaction (streaming path)"
                 );
                 // Normalize the model ID before passing to the engine — raw
                 // manifest values may carry a provider prefix (e.g.
@@ -730,7 +456,7 @@ pub async fn run_agent_loop(
                     Ok(result) => {
                         debug!(
                             kept = result.kept_messages.len(),
-                            "Context engine compaction complete"
+                            "Context engine compaction complete (streaming)"
                         );
                         // Inject the LLM-generated summary as a synthetic user message
                         // so the agent retains context about what was compacted.
@@ -752,22 +478,19 @@ pub async fn run_agent_loop(
                         }
                         compacted.extend(result.kept_messages);
                         messages = compacted;
-                        // `last_prompt_tokens` is intentionally NOT reset here.
-                        // A second compaction should only fire after the next
-                        // LLM call raises it above threshold again.  Resetting
-                        // to 0 would cause premature re-trigger.
+                        // `last_prompt_tokens` is NOT reset — see non-streaming
+                        // comment for rationale.
                     }
                     Err(e) => {
-                        warn!("Context engine compaction failed (continuing): {e}");
+                        warn!("Context engine compaction failed (continuing, streaming): {e}");
                     }
                 }
             }
         }
 
         // History fold (#3347 3/N): rewrite stale tool-result blocks in place
-        // before context assembly so the LLM never sees raw bulk payloads
-        // from old turns.  Runs fold first, then the compressor, mirroring
-        // the ordering rationale in `history_fold`'s module-level doc.
+        // before context assembly — streaming path mirrors non-streaming via
+        // `maybe_fold_stale_tool_results` (#4 review-followup DRY).
         let fold_echo_policy = kernel
             .as_ref()
             .map(|k| k.reasoning_echo_policy_for(&manifest.model.model))
@@ -782,13 +505,13 @@ pub async fn run_agent_loop(
             &manifest.model.model,
             opts.aux_client.as_deref(),
             driver.clone(),
-            false,
+            true,
             fold_echo_policy,
         )
         .await;
 
         // Context assembly — use context engine if available, else inline logic
-        if let Some(engine) = context_engine {
+        let recovery = if let Some(engine) = context_engine {
             let result = engine
                 .assemble(
                     session.agent_id,
@@ -798,17 +521,8 @@ pub async fn run_agent_loop(
                     ctx_window,
                 )
                 .await?;
-            if result.recovery == RecoveryStage::FinalError {
-                warn!("Context overflow unrecoverable — suggest /reset or /compact");
-            }
+            result.recovery
         } else {
-            // Inline fallback: LLM-based context compression (soft), then
-            // overflow recovery (hard trim), then context guard.
-            //
-            // When the kernel wired an [`AuxClient`] through `opts.aux_client`,
-            // summarisation routes to the cheap-tier auxiliary chain
-            // (issue #3314); otherwise the primary `driver` is used —
-            // preserving baseline behaviour.
             let (compressed, compression_events) = context_compressor
                 .compress_if_needed_with_aux(
                     messages.clone(),
@@ -833,30 +547,25 @@ pub async fn run_agent_loop(
                 crate::context_compressor::reset_post_compression_side_state(session.id);
             }
 
-            // Hard-trim only if still above threshold after soft compression
-            // and repair. Keep the pre-existing ordering so token estimation
-            // and recovery boundaries are computed on provider-valid history.
             let remaining_tokens = crate::compactor::estimate_token_count(
                 &messages,
                 Some(&system_prompt),
                 Some(available_tools),
             );
             let hard_trim_threshold = (ctx_window as f64 * 0.70) as usize;
-            if remaining_tokens > hard_trim_threshold {
-                let recovery = recover_from_overflow(
+            let recovery = if remaining_tokens > hard_trim_threshold {
+                let r = recover_from_overflow(
                     &mut messages,
                     &system_prompt,
                     available_tools,
                     ctx_window,
                 );
-                if recovery == RecoveryStage::FinalError {
-                    warn!("Context overflow unrecoverable — suggest /reset or /compact");
-                }
-                hard_trimmed = recovery != RecoveryStage::None;
-            }
+                hard_trimmed = r != RecoveryStage::None;
+                r
+            } else {
+                RecoveryStage::None
+            };
 
-            // Repair again only if hard trim ran; trimming can cut across a
-            // tool-call boundary even when the pre-trim history was valid.
             if hard_trimmed {
                 messages = crate::session_repair::validate_and_repair(&messages);
                 messages = crate::session_repair::ensure_starts_with_user(messages);
@@ -865,6 +574,26 @@ pub async fn run_agent_loop(
                 session.set_messages(messages.clone());
             }
             apply_context_guard(&mut messages, &context_budget, available_tools);
+            recovery
+        };
+        match &recovery {
+            RecoveryStage::None => {}
+            RecoveryStage::FinalError => {
+                if stream_tx.send(StreamEvent::PhaseChange {
+                    phase: "context_warning".to_string(),
+                    detail: Some("Context overflow unrecoverable. Use /reset or /compact.".to_string()),
+                }).await.is_err() {
+                    warn!("Stream consumer disconnected while sending context overflow warning");
+                }
+            }
+            _ => {
+                if stream_tx.send(StreamEvent::PhaseChange {
+                    phase: "context_warning".to_string(),
+                    detail: Some("Older messages trimmed to stay within context limits. Use /compact for smarter summarization.".to_string()),
+                }).await.is_err() {
+                    warn!("Stream consumer disconnected while sending context trim warning");
+                }
+            }
         }
 
         // Strip provider prefix: "openrouter/google/gemini-2.5-flash" → "google/gemini-2.5-flash"
@@ -902,40 +631,39 @@ pub async fn run_agent_loop(
             .and_then(|v| v.as_u64())
             .and_then(|secs| if secs >= 1800 { Some("1h") } else { None });
 
+        // Per-request timeout: manifest metadata takes priority, then browser
+        // heuristic, then driver default (None = use driver's configured value).
         let timeout_override = manifest
             .metadata
             .get("timeout_secs")
             .and_then(|v| v.as_u64())
             .or_else(|| {
+                // Auto-extend for agents with browser tools
                 if available_tools
                     .iter()
                     .any(|t| t.name.starts_with("browser_") || t.name.starts_with("playwright_"))
                 {
-                    Some(600)
+                    Some(600) // 10 minutes for browser tasks
                 } else {
                     None
                 }
             });
 
-        // Catalog-driven reasoning_echo_policy lookup (#4842). Falls back
-        // to `None` when no kernel handle is wired or the model isn't in
-        // the catalog; the OpenAI driver then resolves the policy via its
-        // own substring fallback for backwards compatibility.
+        // Catalog-driven reasoning_echo_policy lookup (#4842), same as the
+        // non-streaming path above.
         let reasoning_echo_policy = kernel
             .as_ref()
             .map(|k| k.reasoning_echo_policy_for(&api_model))
             .unwrap_or_default();
 
-        // Wrap messages once per turn — call_with_retry's `request.clone()`
-        // becomes a refcount bump instead of a deep clone of the history (#3766).
+        // Same Arc-wrap as the non-streaming hot path (#3766).
         let request = CompletionRequest {
             model: api_model,
             messages: std::sync::Arc::new(messages.clone()),
             tools: tools_cache.get(available_tools, &session_loaded_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
-            // Clone from the pre-built snapshot rather than the original to
-            // avoid redundant Arc-deref / string traversal on every iteration.
+            // Clone from pre-built snapshot (same rationale as non-streaming loop).
             system: Some(system_prompt_snapshot.clone()),
             thinking: manifest.thinking.clone(),
             prompt_caching,
@@ -954,9 +682,15 @@ pub async fn run_agent_loop(
             reasoning_echo_policy,
         };
 
-        // Notify phase: Thinking
+        // Notify phase: on first iteration emit Streaming; on subsequent
+        // iterations (after tool execution) emit Thinking so the UI shows
+        // "Thinking..." instead of overwriting streamed text with "streaming".
         if let Some(cb) = on_phase {
-            cb(LoopPhase::Thinking);
+            if iteration == 0 {
+                cb(LoopPhase::Streaming);
+            } else {
+                cb(LoopPhase::Thinking);
+            }
         }
 
         // Stamp last_active before LLM call to prevent heartbeat false-positives
@@ -965,16 +699,91 @@ pub async fn run_agent_loop(
             k.touch_heartbeat(&agent_id_str);
         }
 
-        // Call LLM with retry, error classification, and circuit breaker
+        // Stream LLM call with retry, error classification, and circuit breaker
         let provider_name = manifest.model.provider.as_str();
-        let mut response = call_with_retry(&*driver, request, Some(provider_name), None).await?;
+        let stream_result = match stream_with_retry(
+            &*driver,
+            request,
+            stream_tx.clone(),
+            Some(provider_name),
+            None,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("timed out") {
+                    // Extract last_activity from error if present (format: "last: <activity>")
+                    let activity = err_str
+                        .find("last: ")
+                        .map(|i| {
+                            let start = i + 6;
+                            let end = err_str[start..]
+                                .find(')')
+                                .map_or(err_str.len(), |j| start + j);
+                            &err_str[start..end]
+                        })
+                        .unwrap_or("unknown");
+                    let note = format!(
+                        "[System: your previous task timed out while doing: {activity}. \
+                         The user's request could not be completed. \
+                         Any partial output was already sent to the user.]"
+                    );
+                    session.push_message(Message::assistant(note));
+                    repair_session_before_save(session, agent_id_str.as_str(), "streaming_timeout");
+                    if !opts.is_fork && !opts.incognito {
+                        if let Err(save_err) = memory.save_session_async(session).await {
+                            warn!(
+                                "Failed to persist timeout note to session: {save_err}. \
+                                 The timeout marker will not appear on next session load."
+                            );
+                        }
+                    }
+                }
+                return Err(e);
+            }
+        };
+
+        // Incremental cascade-leak guard fired mid-stream: the forward task
+        // already stopped emitting TextDelta. Treat the turn as a silent
+        // drop unconditionally — regardless of stop_reason (including
+        // ToolUse). This prevents an attacker from leaking the system prompt
+        // and then forcing tool execution by emitting a tool_use block after
+        // the leak trigger.
+        if stream_result.cascade_leak_aborted {
+            warn!(
+                event = "silent_response_detected",
+                agent = %manifest.name,
+                reason = ?crate::silent_response::SilentReason::PromptRegurgitated,
+                source = "agent_loop.streaming.incremental",
+                "Incremental cascade-leak guard fired mid-stream — aborting turn, delivering [no reply needed]"
+            );
+            session
+                .messages
+                .push(Message::assistant("[no reply needed]".to_string()));
+            if !opts.is_fork && !opts.incognito {
+                memory
+                    .save_session_async(session)
+                    .await
+                    .map_err(LibreFangError::memory)?;
+            }
+            return Ok(build_silent_agent_loop_result(
+                total_usage,
+                iteration + 1,
+                Default::default(),
+                decision_traces,
+                memories_used.clone(),
+                experiment_context.clone(),
+                new_messages_start,
+            ));
+        }
+
+        let mut response = stream_result.response;
 
         accumulate_token_usage(&mut total_usage, &response.usage);
 
         // Snapshot prompt tokens for the next iteration's should_compress check.
-        // This is the per-turn input cost, NOT a running sum — we deliberately
-        // do NOT accumulate into last_prompt_tokens.
-        //
         // Some drivers (gemini_cli, codex_cli) return input_tokens = 0.  Fall
         // back to a local estimate so should_compress is not permanently
         // suppressed for those providers.
@@ -994,8 +803,7 @@ pub async fn run_agent_loop(
             session.mark_messages_mutated();
         }
 
-        // Recover tool calls output as text by models that don't use the tool_calls API field
-        // (e.g. Groq/Llama, DeepSeek emit `<function=name>{json}</function>` in text)
+        // Recover tool calls output as text (streaming path)
         let mut tools_recovered_from_text = false;
         if matches!(
             response.stop_reason,
@@ -1006,7 +814,7 @@ pub async fn run_agent_loop(
             if !recovered.is_empty() {
                 info!(
                     count = recovered.len(),
-                    "Recovered text-based tool calls → promoting to ToolUse"
+                    "Recovered text-based tool calls (streaming) → promoting to ToolUse"
                 );
                 response.tool_calls = recovered;
                 response.stop_reason = StopReason::ToolUse;
@@ -1017,17 +825,16 @@ pub async fn run_agent_loop(
 
         match response.stop_reason {
             StopReason::EndTurn | StopReason::StopSequence => {
-                // LLM is done — extract text and save
                 let text = response.text();
 
-                // Parse reply directives from the response text
-                let (cleaned_text, parsed_directives) =
+                // Parse reply directives from the streaming response text
+                let (cleaned_text_s, parsed_directives_s) =
                     crate::reply_directives::parse_directives(&text);
-                let text = cleaned_text;
+                let text = cleaned_text_s;
 
                 // NO_REPLY: agent intentionally chose not to reply
-                if is_no_reply(&text) || parsed_directives.silent {
-                    let reason = if parsed_directives.silent {
+                if is_no_reply(&text) || parsed_directives_s.silent {
+                    let reason = if parsed_directives_s.silent {
                         crate::silent_response::SilentReason::PolicyBlock
                     } else {
                         crate::silent_response::SilentReason::NoReply
@@ -1036,10 +843,10 @@ pub async fn run_agent_loop(
                         event = "silent_response_detected",
                         agent = %manifest.name,
                         reason = ?reason,
-                        source = "agent_loop.non_streaming",
+                        source = "agent_loop.streaming",
                         "Agent chose silent completion"
                     );
-                    debug!(agent = %manifest.name, "Agent chose NO_REPLY/silent — silent completion");
+                    debug!(agent = %manifest.name, "Agent chose NO_REPLY/silent (streaming) — silent completion");
                     session
                         .messages
                         .push(Message::assistant("[no reply needed]".to_string()));
@@ -1052,7 +859,7 @@ pub async fn run_agent_loop(
                     return Ok(build_silent_agent_loop_result(
                         total_usage,
                         iteration + 1,
-                        parsed_directives,
+                        parsed_directives_s,
                         decision_traces,
                         memories_used.clone(),
                         experiment_context.clone(),
@@ -1060,11 +867,9 @@ pub async fn run_agent_loop(
                     ));
                 }
 
-                // Cascade scaffolding-leak guard: model dumped two or more
-                // structural markers (memory frames, prompt section headers,
-                // gateway envelopes) into the reply text. This is almost
-                // always recall-regurgitation rather than user-facing content
-                // (see is_cascade_leak doc-comment). Drop as silent.
+                // Cascade scaffolding-leak guard (streaming path) — see
+                // non-stream mirror above. Drops text-only EndTurn replies
+                // that contain 2+ structural prompt/memory markers.
                 if response.tool_calls.is_empty()
                     && !tools_recovered_from_text
                     && is_cascade_leak(&text)
@@ -1072,7 +877,7 @@ pub async fn run_agent_loop(
                     warn!(
                         agent = %manifest.name,
                         text_excerpt = %text.chars().take(120).collect::<String>(),
-                        "Cascade scaffolding leak detected (2+ structural markers in text-only EndTurn) — dropping as silent"
+                        "Cascade scaffolding leak detected (streaming, 2+ structural markers in text-only EndTurn) — dropping as silent"
                     );
                     session
                         .messages
@@ -1086,7 +891,7 @@ pub async fn run_agent_loop(
                     return Ok(build_silent_agent_loop_result(
                         total_usage,
                         iteration + 1,
-                        parsed_directives,
+                        parsed_directives_s,
                         decision_traces,
                         memories_used.clone(),
                         experiment_context.clone(),
@@ -1094,12 +899,9 @@ pub async fn run_agent_loop(
                     ));
                 }
 
-                // Progress-text-leak guard: model emitted a short ellipsis-
-                // terminated acknowledgment ("Waiting for the script to
-                // complete...") but the turn ended without producing the
-                // tool call that preamble was introducing. Surfacing this
-                // to the channel reads as nonsense; drop as silent and let
-                // the operator retrigger.
+                // Progress-text-leak guard (streaming path) — see non-stream
+                // mirror above. Drops ellipsis-terminated short preambles
+                // that arrive without the promised tool_use.
                 if response.tool_calls.is_empty()
                     && !tools_recovered_from_text
                     && is_progress_text_leak(&text)
@@ -1107,7 +909,7 @@ pub async fn run_agent_loop(
                     warn!(
                         agent = %manifest.name,
                         text_excerpt = %text.chars().take(80).collect::<String>(),
-                        "Progress-text leak detected (ellipsis-terminated short reply without tool_use) — dropping as silent"
+                        "Progress-text leak detected (streaming, ellipsis-terminated short reply without tool_use) — dropping as silent"
                     );
                     session
                         .messages
@@ -1121,7 +923,7 @@ pub async fn run_agent_loop(
                     return Ok(build_silent_agent_loop_result(
                         total_usage,
                         iteration + 1,
-                        parsed_directives,
+                        parsed_directives_s,
                         decision_traces,
                         memories_used.clone(),
                         experiment_context.clone(),
@@ -1146,7 +948,7 @@ pub async fn run_agent_loop(
                             input_tokens = response.usage.input_tokens,
                             output_tokens = response.usage.output_tokens,
                             silent_failure = is_silent_failure,
-                            "Empty response, retrying once"
+                            "Empty response (streaming), retrying once"
                         );
                         if is_silent_failure {
                             messages = crate::session_repair::validate_and_repair(&messages);
@@ -1157,13 +959,10 @@ pub async fn run_agent_loop(
                     }
                     Some(EndTurnRetry::HallucinatedAction) => {
                         hallucination_retried = true;
-                        // One-shot corrective retry — expected in mixed-capability
-                        // model fleets and not an error condition. Keep as info
-                        // so operators can still see how often it fires.
                         info!(
                             agent = %manifest.name,
                             iteration,
-                            "Detected hallucinated action — agent claimed action without tool calls, retrying"
+                            "Detected hallucinated action (streaming) — agent claimed action without tool calls, retrying"
                         );
                         messages.push(Message::assistant(&text));
                         messages.push(Message::user(
@@ -1177,7 +976,7 @@ pub async fn run_agent_loop(
                         info!(
                             agent = %manifest.name,
                             iteration,
-                            "User requested action but LLM responded without tool calls — nudging retry"
+                            "User requested action but LLM responded without tool calls (streaming) — nudging retry"
                         );
                         messages.push(Message::assistant(&text));
                         messages.push(Message::user(
@@ -1196,10 +995,12 @@ pub async fn run_agent_loop(
                     iteration,
                     &total_usage,
                     messages.len(),
-                    "Empty response from LLM — guard activated",
+                    "Empty response from LLM (streaming) — guard activated",
                     &accumulated_text,
                 );
                 final_response = text.clone();
+
+                signal_response_complete(&stream_tx).await;
 
                 return finalize_successful_end_turn(
                     FinalizeEndTurnContext {
@@ -1218,7 +1019,7 @@ pub async fn run_agent_loop(
                         user_message,
                         messages: &messages,
                         sender_user_id: sender_user_id.as_deref(),
-                        streaming: false,
+                        streaming: true,
                         opts,
                     },
                     FinalizeEndTurnResultData {
@@ -1229,8 +1030,8 @@ pub async fn run_agent_loop(
                         memories_saved,
                         memories_used,
                         memory_conflicts,
-                        experiment_context: experiment_context.clone(),
-                        directives: reply_directives_from_parsed(parsed_directives),
+                        experiment_context,
+                        directives: reply_directives_from_parsed(parsed_directives_s),
                         new_messages_start,
                         owner_notice: pending_owner_notice.take(),
                     },
@@ -1242,11 +1043,36 @@ pub async fn run_agent_loop(
                 consecutive_max_tokens = 0;
                 any_tools_executed = true;
 
-                // Capture any text content from this tool_use turn — the LLM
-                // may emit text alongside tool calls (e.g. a chat reply
-                // before a memory_store invocation). Without this the text
-                // is lost if the next iteration returns EndTurn with empty
-                // text.
+                // Capture text from this tool_use turn (streaming path) — the
+                // streaming sink already forwards the deltas to the channel,
+                // but the in-memory accumulator is what feeds the empty-text
+                // fallback in finalize_end_turn_text. Mirrors the sync path.
+                //
+                // IMPORTANT (streaming-already-emitted semantics): every byte
+                // pushed into `accumulated_text` here has *already been
+                // delivered to the client* via the streaming sink. The
+                // accumulator is a **post-stream** fallback, not a re-emit:
+                //   * On final EndTurn with non-empty text the live deltas
+                //     drove the UI, and `final_response` is only used for
+                //     session persistence + memory extraction.
+                //   * On final EndTurn with empty text, finalize_end_turn_text
+                //     returns `accumulated_text` as `final_response`, but the
+                //     stream has already drained — no re-push to `stream_tx`
+                //     happens (see signal_response_complete is fire-only).
+                //   * The bridge.rs streaming success path
+                //     (channel_bridge.rs ~3032 `Ok(())` arm) calls only
+                //     `record_delivery` + lifecycle reaction; it never invokes
+                //     `send_response` with the buffered text. Fallback to
+                //     `send_response(buffered_text)` only fires on the
+                //     `Err(stream_error)` adapter-failure arm — that is the
+                //     intended recovery path, not a duplicate display.
+                //
+                // So the surface-level concern of "double display" does not
+                // manifest with the current bridge wiring. Any future
+                // refactor that has the streaming success arm also
+                // re-emit `final_response` MUST either drop the
+                // accumulated_text fallback in finalize_end_turn_text or
+                // gate it on a `streaming_already_emitted: bool` flag.
                 //
                 // Buffer is capped at ACCUMULATED_TEXT_MAX_BYTES — see
                 // push_accumulated_text.
@@ -1255,13 +1081,9 @@ pub async fn run_agent_loop(
                     push_accumulated_text(&mut accumulated_text, intermediate_text.trim());
                 }
 
-                // Stage the turn locally — session.messages is NOT
-                // mutated until `staged.commit(...)` runs below (or the
-                // mid-turn signal handler commits on our behalf). If
-                // execute_single_tool_call propagates `?` before commit,
-                // the staged turn drops silently and session.messages is
-                // unchanged — by construction, no orphan ToolUse can
-                // reach the persistence layer. See #2381.
+                // See non-streaming branch above for the full rationale
+                // — this is the streaming twin of the #2381 staged-commit
+                // fix.
                 let mut staged = stage_tool_use_turn(
                     &response,
                     session,
@@ -1310,7 +1132,7 @@ pub async fn run_agent_loop(
                         rationale_text: &staged.rationale_text,
                         tools_recovered_from_text,
                         iteration,
-                        streaming: false,
+                        streaming: true,
                         agent_id_str: agent_id_str.as_str(),
                         opts,
                         interrupt: opts.interrupt.clone(),
@@ -1318,17 +1140,28 @@ pub async fn run_agent_loop(
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
 
-                    // §A — capture owner_notice side-channel from notify_owner tool.
+                    // §A — capture owner_notice from notify_owner tool and
+                    // surface it on the live SSE stream so the gateway can
+                    // route it to OWNER_JID without waiting for turn end.
                     if let Some(ref notice) = executed.result.owner_notice {
                         pending_owner_notice = Some(match pending_owner_notice.take() {
                             Some(prev) => format!("{prev}\n\n{notice}"),
                             None => notice.clone(),
                         });
+                        if stream_tx
+                            .send(StreamEvent::OwnerNotice {
+                                text: notice.clone(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            warn!(agent = %manifest.name, "Stream consumer disconnected during owner_notice emit");
+                        }
                     }
 
-                    // Capture lazy-load side-channel from the tool_load meta-tool
-                    // (issue #3044). Tools registered this way become callable on
-                    // subsequent iterations of this loop.
+                    // Capture lazy-load side-channel (issue #3044) — the
+                    // streaming path, same rationale as the non-streaming
+                    // version above.
                     if let Some(def) = executed.result.loaded_tool.clone() {
                         if !session_loaded_tools.iter().any(|t| t.name == def.name) {
                             session_loaded_tools.push(def);
@@ -1343,6 +1176,21 @@ pub async fn run_agent_loop(
                                 &executed.final_content,
                                 &executed.result.tool_use_id,
                             );
+
+                    // Notify client of tool execution result (detect dead consumer)
+                    let preview: String = budgeted_content.chars().take(300).collect();
+                    if stream_tx
+                        .send(StreamEvent::ToolExecutionResult {
+                            name: tool_call.name.clone(),
+                            result_preview: preview,
+                            is_error: executed.result.is_error,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        warn!(agent = %manifest.name, "Stream consumer disconnected — continuing tool loop but will not stream further");
+                    }
+
                     staged.append_result(ContentBlock::ToolResult {
                         tool_use_id: executed.result.tool_use_id.clone(),
                         tool_name: tool_call.name.clone(),
@@ -1355,17 +1203,15 @@ pub async fn run_agent_loop(
                     // Stop executing remaining tool calls on failure (#948)
                     // but not for approval denials or sandbox security rejections —
                     // those should let the LLM recover and retry with a valid path (#1861)
-                    // Issue #2381: emit stub tool_results for the remaining unexecuted
-                    // calls so OpenAI / Anthropic see a response for every tool_call_id.
-                    // Without this the next API request returns 400 with
-                    // "tool_call_ids ... did not have response messages" and the agent
-                    // gets bricked.
+                    // Issue #2381: stub the remaining tool_calls so every tool_call_id
+                    // has a matching tool_result. See the non-streaming branch above for
+                    // the full explanation of why this matters.
                     let is_soft_error = executed.result.status.is_soft_error()
                         || is_soft_error_content(&executed.result.content);
                     if executed.result.is_error && !is_soft_error {
                         warn!(
                             tool = %tool_call.name,
-                            "Tool execution failed — skipping remaining tool calls"
+                            "Tool execution failed — skipping remaining tool calls (streaming)"
                         );
                         append_skipped_tool_results(
                             &mut staged.tool_result_blocks,
@@ -1376,10 +1222,8 @@ pub async fn run_agent_loop(
                     }
 
                     // Mid-turn message injection (#956): check for
-                    // pending user messages between tool calls. The
-                    // handler pads missing results and commits the
-                    // staged turn BEFORE injecting the user message, so
-                    // the session never has orphan tool_use_ids.
+                    // pending user messages between tool calls (streaming
+                    // variant).
                     if let Some(flushed_outcomes) = handle_mid_turn_signal(
                         pending_messages,
                         &manifest.name,
@@ -1387,12 +1231,6 @@ pub async fn run_agent_loop(
                         &mut messages,
                         &mut staged,
                     ) {
-                        // Same #2381 invariant: even when the batch is
-                        // interrupted by a mid-turn signal, every tool_call
-                        // must end up with a tool_result. handle_mid_turn_signal
-                        // already called pad_missing_results before committing,
-                        // so remaining ids are covered. This stub call is a
-                        // belt-and-suspenders guard for any ids not yet in staged.
                         if call_idx + 1 < total_tool_calls {
                             append_skipped_tool_results(
                                 &mut staged.tool_result_blocks,
@@ -1411,9 +1249,6 @@ pub async fn run_agent_loop(
                     iteration_outcomes.accumulate(staged.commit(session, &mut messages));
                 }
 
-                // Interim save after tool execution to prevent data loss on crash.
-                // Skipped for fork and incognito turns — both are ephemeral and
-                // must not pollute the canonical session even on mid-turn crashes.
                 if !opts.is_fork && !opts.incognito {
                     if let Err(e) = memory.save_session_async(session).await {
                         warn!("Failed to interim-save session: {e}");
@@ -1422,7 +1257,7 @@ pub async fn run_agent_loop(
                 // Track consecutive all-failed iterations to cap wasted retries.
                 // (soft errors — approval denials, sandbox rejections, truncation —
                 //  do NOT count; the LLM is expected to recover from those cheaply.)
-                // NOTE: keep in sync with run_agent_loop_streaming.
+                // NOTE: keep in sync with run_agent_loop (non-streaming).
                 let hard_error_count = update_consecutive_hard_failures(
                     &mut consecutive_all_failed,
                     iteration_outcomes,
@@ -1435,7 +1270,7 @@ pub async fn run_agent_loop(
                         agent = %manifest.name,
                         consecutive_all_failed,
                         hard_error_count,
-                        "Tool failures in {MAX_CONSECUTIVE_ALL_FAILED} consecutive iterations — exiting loop"
+                        "Tool failures in {MAX_CONSECUTIVE_ALL_FAILED} consecutive iterations — exiting streaming loop"
                     );
                     let ctx = crate::hooks::HookContext {
                         agent_name: &manifest.name,
@@ -1458,15 +1293,9 @@ pub async fn run_agent_loop(
             }
             StopReason::MaxTokens => {
                 consecutive_max_tokens += 1;
-                // If the LLM hit the token cap without emitting any tool
-                // calls, this is a pure-text overflow — continuing would
-                // only make the response longer without ever completing
-                // an action, and downstream channels (Telegram: 4096 char
-                // cap) will keep rejecting it. Return the partial text
-                // immediately instead of burning more tokens (#2286).
+                // See non-streaming branch above — same logic for #2286.
                 let pure_text_overflow = response.tool_calls.is_empty();
                 if pure_text_overflow || consecutive_max_tokens >= MAX_CONTINUATIONS {
-                    // Return partial response instead of continuing forever
                     let text = max_tokens_response_text(&response);
                     let (cleaned_text, parsed_directives) =
                         crate::reply_directives::parse_directives(&text);
@@ -1482,13 +1311,13 @@ pub async fn run_agent_loop(
                             iteration,
                             consecutive_max_tokens,
                             text_len = text.len(),
-                            "Max tokens hit on pure-text response — returning partial (no tool calls to continue)"
+                            "Max tokens hit on pure-text response (streaming) — returning partial (no tool calls to continue)"
                         );
                     } else {
                         warn!(
                             iteration,
                             consecutive_max_tokens,
-                            "Max continuations reached, returning partial response"
+                            "Max continuations reached (streaming), returning partial response"
                         );
                     }
                     // Fire AgentLoopEnd hook
@@ -1503,6 +1332,7 @@ pub async fn run_agent_loop(
                         }),
                     };
                     fire_hook_best_effort(hooks, &ctx);
+                    signal_response_complete(&stream_tx).await;
                     return Ok(AgentLoopResult {
                         response: text,
                         total_usage,
@@ -1522,18 +1352,15 @@ pub async fn run_agent_loop(
                         owner_notice: None,
                     });
                 }
-                // Model hit token limit — add partial response and continue
                 let text = response.text();
                 session.push_message(Message::assistant(&text));
                 messages.push(Message::assistant(&text));
                 session.push_message(Message::user("Please continue."));
                 messages.push(Message::user("Please continue."));
-                warn!(iteration, "Max tokens hit, continuing");
+                warn!(iteration, "Max tokens hit (streaming), continuing");
             }
             StopReason::ContentFiltered => {
-                // Provider refused / safety-filtered the response (#3450).
-                // Persist any partial text and surface as a structured error
-                // — never fall through into the EndTurn success path.
+                // Streaming twin of the non-streaming refusal handler (#3450).
                 let text = response.text();
                 let partial = if text.trim().is_empty() {
                     "[content filtered by provider]".to_string()
@@ -1543,7 +1370,7 @@ pub async fn run_agent_loop(
                 warn!(
                     agent = %manifest.name,
                     iteration,
-                    "LLM response blocked by provider safety / content filter"
+                    "LLM response blocked by provider safety / content filter (streaming)"
                 );
                 session.push_message(Message::assistant(&partial));
                 if !opts.is_fork && !opts.incognito {
@@ -1551,15 +1378,13 @@ pub async fn run_agent_loop(
                         warn!("Failed to save session on content filter: {e}");
                     }
                 }
+                signal_response_complete(&stream_tx).await;
                 return Err(LibreFangError::ContentFiltered { message: partial });
             }
         }
     }
 
-    // Save session before failing so conversation history is preserved.
-    // Fork and incognito turns skip — both are ephemeral and must not
-    // pollute canonical session history even when the loop bailed out.
-    repair_session_before_save(session, agent_id_str.as_str(), "max_iterations");
+    repair_session_before_save(session, agent_id_str.as_str(), "streaming_max_iterations");
     if !opts.is_fork && !opts.incognito {
         if let Err(e) = memory.save_session_async(session).await {
             warn!("Failed to save session on max iterations: {e}");
@@ -1581,6 +1406,3 @@ pub async fn run_agent_loop(
 
     Err(LibreFangError::MaxIterationsExceeded(max_iterations))
 }
-
-#[cfg(test)]
-mod tests;
