@@ -10,6 +10,7 @@ readme = "README.md"
 librefang-types = { path = "../librefang-types" }
 librefang-http = { path = "../librefang-http" }
 librefang-kernel-handle = { path = "../librefang-kernel-handle" }
+librefang-runtime-apply-patch = { path = "../librefang-runtime-apply-patch" }
 librefang-runtime-audit = { path = "../librefang-runtime-audit" }
 librefang-runtime-browser = { path = "../librefang-runtime-browser", optional = true }
 librefang-runtime-media = { path = "../librefang-runtime-media", optional = true }

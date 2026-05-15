@@ -277,7 +277,111 @@ fn resolve_patch_path(
     workspace_root: &Path,
     additional_roots: &[&Path],
 ) -> Result<PathBuf, String> {
-    crate::workspace_sandbox::resolve_sandbox_path_ext(raw, workspace_root, additional_roots)
+    sandbox::resolve_sandbox_path_ext(raw, workspace_root, additional_roots)
+}
+
+/// Local copy of `librefang_runtime::workspace_sandbox::resolve_sandbox_path_ext`.
+///
+/// Duplicated to keep this crate dependency-free and avoid a circular dep on
+/// `librefang-runtime`. The function is < 80 LOC of pure path logic that
+/// rarely changes; the trade-off mirrors the helper inlining inside
+/// `librefang-runtime-sandbox-docker`.
+mod sandbox {
+    use std::path::{Path, PathBuf};
+
+    pub const ERR_PATH_TRAVERSAL: &str = "Path traversal denied";
+    pub const ERR_SANDBOX_ESCAPE: &str = "resolves outside workspace";
+
+    pub fn resolve_sandbox_path_ext(
+        user_path: &str,
+        workspace_root: &Path,
+        additional_roots: &[&Path],
+    ) -> Result<PathBuf, String> {
+        let path = Path::new(user_path);
+
+        for component in path.components() {
+            if matches!(component, std::path::Component::ParentDir) {
+                return Err(format!(
+                    "{ERR_PATH_TRAVERSAL}: '..' components are forbidden"
+                ));
+            }
+        }
+
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            workspace_root.join(path)
+        };
+
+        let canon_root = workspace_root
+            .canonicalize()
+            .map_err(|e| format!("Failed to resolve workspace root: {e}"))?;
+
+        let canon_candidate = if candidate.exists() {
+            candidate
+                .canonicalize()
+                .map_err(|e| format!("Failed to resolve path: {e}"))?
+        } else {
+            let parent = candidate
+                .parent()
+                .ok_or_else(|| "Invalid path: no parent directory".to_string())?;
+            let filename = candidate
+                .file_name()
+                .ok_or_else(|| "Invalid path: no filename".to_string())?;
+            if parent.exists() {
+                let canon_parent = parent
+                    .canonicalize()
+                    .map_err(|e| format!("Failed to resolve parent directory: {e}"))?;
+                canon_parent.join(filename)
+            } else {
+                let mut rebased: Option<PathBuf> = None;
+                if path.is_absolute() {
+                    for root in additional_roots {
+                        if let Ok(rel) = candidate.strip_prefix(root) {
+                            rebased = Some(root.join(rel));
+                            break;
+                        }
+                    }
+                }
+                if let Some(p) = rebased {
+                    p
+                } else {
+                    let relative = candidate
+                        .strip_prefix(workspace_root)
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|_| candidate.clone());
+                    canon_root.join(relative)
+                }
+            }
+        };
+
+        let inside_primary = canon_candidate.starts_with(&canon_root);
+        let inside_additional = additional_roots
+            .iter()
+            .any(|root| canon_candidate.starts_with(root));
+        if !inside_primary && !inside_additional {
+            let named_hint = if additional_roots.is_empty() {
+                "If the path lives in a shared location, declare it under \
+                 [workspaces] in agent.toml (e.g. `foo = { path = \"shared/foo\", \
+                 mode = \"rw\" }`) so it becomes accessible as a named workspace. "
+            } else {
+                "The agent has named workspaces declared, but this path is not \
+                 inside any of them. Check the [workspaces] entries in agent.toml \
+                 and the @-prefixed roots listed in TOOLS.md. "
+            };
+            return Err(format!(
+                "Access denied: path '{}' {ERR_SANDBOX_ESCAPE}. \
+                 {named_hint}\
+                 Alternatively, if you have an MCP filesystem server configured, \
+                 use the mcp_filesystem_* tools (e.g. mcp_filesystem_read_file, \
+                 mcp_filesystem_list_directory) to access files outside \
+                 the workspace.",
+                user_path
+            ));
+        }
+
+        Ok(canon_candidate)
+    }
 }
 
 /// Apply parsed patch operations against the filesystem.

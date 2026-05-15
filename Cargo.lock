@@ -4770,6 +4770,7 @@ dependencies = [
  "librefang-llm-driver",
  "librefang-llm-drivers",
  "librefang-memory",
+ "librefang-runtime-apply-patch",
  "librefang-runtime-audit",
  "librefang-runtime-browser",
  "librefang-runtime-mcp",
@@ -4811,6 +4812,15 @@ dependencies = [
  "wasmtime",
  "wiremock",
  "zeroize",
+]
+
+[[package]]
+name = "librefang-runtime-apply-patch"
+version = "2026.5.12-beta.11"
+dependencies = [
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

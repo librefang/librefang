@@ -5,6 +5,7 @@ members = [
     "crates/librefang-memory",
     "crates/librefang-memory-wiki",
     "crates/librefang-runtime",
+    "crates/librefang-runtime-apply-patch",
     "crates/librefang-runtime-audit",
     "crates/librefang-runtime-browser",
     "crates/librefang-runtime-media",
