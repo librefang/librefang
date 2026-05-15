@@ -10,7 +10,6 @@ readme = "README.md"
 librefang-types = { path = "../librefang-types" }
 librefang-llm-driver = { path = "../librefang-llm-driver" }
 librefang-http = { path = "../librefang-http" }
-librefang-runtime-oauth = { path = "../librefang-runtime-oauth" }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
