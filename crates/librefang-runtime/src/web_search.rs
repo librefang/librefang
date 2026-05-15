@@ -485,7 +485,7 @@ impl WebSearchEngine {
             .client
             .get("https://html.duckduckgo.com/html/")
             .query(&[("q", query)])
-            .header("User-Agent", "Mozilla/5.0 (compatible; LibreFangAgent/0.1)")
+            .header("User-Agent", "Mozilla/5.0 (compatible; BossFangAgent/0.1)")
             .send()
             .await
             .map_err(|e| format!("DuckDuckGo request failed: {e}"))?;
@@ -574,7 +574,7 @@ impl WebSearchEngine {
                 ("categories", category),
                 ("pageno", page_str.as_str()),
             ])
-            .header("User-Agent", "Mozilla/5.0 (compatible; LibreFangAgent/0.1)")
+            .header("User-Agent", "Mozilla/5.0 (compatible; BossFangAgent/0.1)")
             .send()
             .await
             .map_err(|e| format!("SearXNG request failed: {e}"))?;
@@ -671,7 +671,7 @@ impl WebSearchEngine {
                     "{}/config",
                     self.config.searxng.url.trim_end_matches('/')
                 ))
-                .header("User-Agent", "Mozilla/5.0 (compatible; LibreFangAgent/0.1)")
+                .header("User-Agent", "Mozilla/5.0 (compatible; BossFangAgent/0.1)")
                 .send()
                 .await
                 .map_err(|e| format!("SearXNG config request failed: {e}"))?;
