@@ -102,21 +102,72 @@ impl LibreFangKernel {
             return Ok(self.llm.default_driver.clone());
         }
 
-        // Always create a fresh driver by reading current env vars.
-        // This ensures API keys saved at runtime (via dashboard POST
-        // /api/providers/{name}/key which calls std::env::set_var) are
-        // picked up immediately — the boot-time default_driver cache is
-        // only used as a final fallback when driver creation fails.
-        let primary = {
+        // Resolve base_url (shared between pooled and single-key paths).
+        let base_url = if has_custom_url {
+            manifest.model.base_url.clone()
+        } else if agent_provider == default_provider {
+            effective_default
+                .base_url
+                .clone()
+                .or_else(|| self.lookup_provider_url(agent_provider))
+        } else {
+            self.lookup_provider_url(agent_provider)
+        };
+
+        // Build the base DriverConfig skeleton (without api_key — will be
+        // filled in by either the pool or single-key path below).
+        let make_driver_config = |api_key: Option<String>| DriverConfig {
+            provider: agent_provider.clone(),
+            api_key,
+            base_url: base_url.clone(),
+            vertex_ai: cfg.vertex_ai.clone(),
+            azure_openai: cfg.azure_openai.clone(),
+            skip_permissions: true,
+            message_timeout_secs: cfg.default_model.message_timeout_secs,
+            mcp_bridge: Some(build_mcp_bridge_cfg(&cfg)),
+            proxy_url: cfg.provider_proxy_urls.get(agent_provider).cloned(),
+            request_timeout_secs: cfg
+                .provider_request_timeout_secs
+                .get(agent_provider)
+                .copied(),
+            emit_caller_trace_headers: cfg.telemetry.emit_caller_trace_headers,
+        };
+
+        // Check for a credential pool for this provider.
+        // If the pool exists and has at least one available key, create a
+        // PooledDriver that acquires a key from the pool on every call.
+        // If the pool is empty / all keys exhausted, fall through to the
+        // normal single-key path.
+        // When the agent explicitly sets a custom API key env var, skip the
+        // pool and use the agent-specified key directly.
+        let pool_opt = if has_custom_key {
+            None
+        } else {
+            self.llm
+                .credential_pools
+                .get(agent_provider)
+                .filter(|entry| entry.available_count() > 0)
+                .map(|entry| entry.value().clone())
+        };
+
+        let primary: Arc<dyn LlmDriver> = if let Some(pool) = pool_opt {
+            // Credential pool is non-empty — wrap in PooledDriver.
+            let base_config = make_driver_config(None);
+            Arc::new(pooled_driver::PooledDriver::new(
+                pool,
+                Arc::clone(&self.llm.driver_cache),
+                base_config,
+            ))
+        } else {
+            // No credential pool (or all keys exhausted) — resolve a single
+            // API key the traditional way.
             let api_key = if has_custom_key {
-                // Agent explicitly set an API key env var — use it
                 manifest
                     .model
                     .api_key_env
                     .as_ref()
                     .and_then(|env| std::env::var(env).ok())
             } else if agent_provider == default_provider {
-                // Same provider as effective default — use its env var
                 if !effective_default.api_key_env.is_empty() {
                     std::env::var(&effective_default.api_key_env).ok()
                 } else {
@@ -124,53 +175,15 @@ impl LibreFangKernel {
                     std::env::var(&env_var).ok()
                 }
             } else {
-                // Different provider — check auth profiles, provider_api_keys,
-                // and convention-based env var. For custom providers (not in the
-                // hardcoded list), this is the primary path for API key resolution.
                 let env_var = cfg.resolve_api_key_env(agent_provider);
                 std::env::var(&env_var).ok()
             };
 
-            // Don't inherit default provider's base_url when switching providers.
-            // Uses lookup_provider_url() which checks both boot-time config AND the
-            // runtime model catalog, so custom providers added via the dashboard
-            // (which only update the catalog, not self.config) are found (#494).
-            let base_url = if has_custom_url {
-                manifest.model.base_url.clone()
-            } else if agent_provider == default_provider {
-                effective_default
-                    .base_url
-                    .clone()
-                    .or_else(|| self.lookup_provider_url(agent_provider))
-            } else {
-                // Check provider_urls + catalog before falling back to hardcoded defaults
-                self.lookup_provider_url(agent_provider)
-            };
-
-            let driver_config = DriverConfig {
-                provider: agent_provider.clone(),
-                api_key,
-                base_url,
-                vertex_ai: cfg.vertex_ai.clone(),
-                azure_openai: cfg.azure_openai.clone(),
-                skip_permissions: true,
-                message_timeout_secs: cfg.default_model.message_timeout_secs,
-                mcp_bridge: Some(build_mcp_bridge_cfg(&cfg)),
-                proxy_url: cfg.provider_proxy_urls.get(agent_provider).cloned(),
-                request_timeout_secs: cfg
-                    .provider_request_timeout_secs
-                    .get(agent_provider)
-                    .copied(),
-                emit_caller_trace_headers: cfg.telemetry.emit_caller_trace_headers,
-            };
+            let driver_config = make_driver_config(api_key);
 
             match self.llm.driver_cache.get_or_create(&driver_config) {
                 Ok(d) => d,
                 Err(e) => {
-                    // If fresh driver creation fails (e.g. key not yet set for this
-                    // provider), fall back to the boot-time default driver. This
-                    // keeps existing agents working while the user is still
-                    // configuring providers via the dashboard.
                     if agent_provider == default_provider && !has_custom_key && !has_custom_url {
                         debug!(
                             provider = %agent_provider,
