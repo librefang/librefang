@@ -4,10 +4,10 @@
   "tool": "claude-code",
   "started": "2026-05-14T00:00:00Z",
   "changes_total": 5,
-  "changes_completed": 2,
+  "changes_completed": 3,
   "changes_in_progress": 0,
   "changes_blocked": 0,
-  "changes_pending": 3,
+  "changes_pending": 2,
   "changes": [
     {
       "id": "m1-m2-cli-banner-install-paths-config-templates",
@@ -66,7 +66,32 @@
     {
       "id": "m4-docs-mdx-sweep",
       "milestones": ["M4"],
-      "status": "PENDING"
+      "status": "DONE",
+      "started": "2026-05-14T00:00:00Z",
+      "started_by": "kbd-execute",
+      "completed": "2026-05-14T00:00:00Z",
+      "tool": "claude-code",
+      "scope": [
+        "scripts/enforce-branding.py — extended with prose-mode pass over docs/src/app and docs/src/components. New PROSE_REPLACEMENTS table with single regex \\bLibreFang\\b → BossFang. .mdx files skip fenced code blocks (``` and ~~~) and inline-code spans (`…`); .ts/.tsx files apply replacement unconditionally (no markdown awareness needed).",
+        "scripts/test_enforce_branding.py — new file, 15 unit tests covering word-boundary preservation, fence skipping, inline-code skipping, idempotency, multi-marker fences, indented fences.",
+        "docs/src/app/**/*.mdx — 119 files prose-flipped. Fenced TOML / Rust / shell snippets preserved (e.g. `name = \"LibreFang Agent OS\"` inside ```toml blocks stays). Layer Internal symbols (LibreFangKernel, LibreFangError, LibreFangConfig) preserved by word-boundary regex.",
+        "docs/src/components/Logo.tsx — JSX wordmark LibreFang → BossFang.",
+        "docs/src/app/layout.tsx — page metadata template + default flipped to BossFang Docs.",
+        "Upstream-owned URLs deliberately preserved: librefang.ai, deploy.librefang.ai, librefang.com, discord.gg/librefang, github.com/librefang/librefang/issues|pull|blob/* (historical permalinks; flipping would break references to upstream issue tracker)."
+      ],
+      "verification": {
+        "unit_tests": "PASS — 15/15 tests in scripts/test_enforce_branding.py",
+        "enforce_branding_apply": "PASS — 121 files modified (119 .mdx + 2 .tsx)",
+        "enforce_branding_check": "PASS — --check exits 0 across all 460 files (color-token + prose passes)",
+        "fence_preservation_sample": "PASS — `name = \"LibreFang Agent OS\"` at docs/src/app/configuration/page.mdx:296,1666 untouched inside ```toml fences",
+        "layer_internal_preservation_sample": "PASS — LibreFangKernel / LibreFangError references at docs/src/app/integrations/desktop/page.mdx preserved",
+        "default_path_preservation_sample": "PASS — ~/.librefang/config.toml references in prose preserved (lowercase path; regex doesn't match)"
+      },
+      "out_of_scope_identified": [
+        "Dashboard prose flips: 4 .ts/.tsx files under crates/librefang-api/dashboard/src contain PascalCase LibreFang in user-visible JSX strings (skillHubs.ts, UsersPage.tsx, SkillsPage.tsx, MobilePairingPage.test.tsx). NOT included in M4 scope; recommend tagging as a future M8 or bundling with M6 dashboard work.",
+        "Lowercase `librefang` in prose: skipped intentionally — matches crate names, paths, identifier prefixes. Audit per case in follow-up.",
+        "LibreFang inside backticked inline code (e.g. `\"LibreFang Agent OS\"` documenting UI strings): preserved by inline-code skipping. Will become stale documentation now that the UI banner reads \"BossFang\". Address in a follow-up that updates these inline references with explicit context."
+      ]
     },
     {
       "id": "m5-m7-ua-strings-env-aliases",
@@ -83,7 +108,7 @@
     "M1_cli_banner_install_paths": "MET",
     "M2_init_config_templates": "MET",
     "M3_install_script": "MET",
-    "M4_docs_mdx_sweep": "NOT_STARTED",
+    "M4_docs_mdx_sweep": "MET",
     "M5_ua_strings": "NOT_STARTED",
     "M6_dashboard_localstorage": "NOT_STARTED",
     "M7_env_aliases": "NOT_STARTED"

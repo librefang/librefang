@@ -1,8 +1,8 @@
 # API 参考
 
-LibreFang 在守护进程运行时提供 REST API、WebSocket 端点和 SSE 流式传输。默认监听地址为 `http://127.0.0.1:4545`。
+BossFang 在守护进程运行时提供 REST API、WebSocket 端点和 SSE 流式传输。默认监听地址为 `http://127.0.0.1:4545`。
 
-所有响应均包含安全头（CSP、X-Frame-Options、X-Content-Type-Options、HSTS），并受 GCRA 成本感知速率限制器保护，支持按 IP 的令牌桶追踪和过期条目自动清理。LibreFang 实现了 16 个安全系统，包括 Merkle 审计链、污点追踪、WASM 双重计量、Ed25519 清单签名、SSRF 防护、子进程沙箱和密钥归零。
+所有响应均包含安全头（CSP、X-Frame-Options、X-Content-Type-Options、HSTS），并受 GCRA 成本感知速率限制器保护，支持按 IP 的令牌桶追踪和过期条目自动清理。BossFang 实现了 16 个安全系统，包括 Merkle 审计链、污点追踪、WASM 双重计量、Ed25519 清单签名、SSRF 防护、子进程沙箱和密钥归零。
 
 
 ## 目录

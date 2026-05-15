@@ -69,7 +69,7 @@ Get the current status of the WhatsApp QR code session (pending/scanned/authenti
 
 ## MCP & A2A Protocol Endpoints
 
-LibreFang supports both Model Context Protocol (MCP) for tool interoperability and Agent-to-Agent (A2A) protocol for cross-system agent communication.
+BossFang supports both Model Context Protocol (MCP) for tool interoperability and Agent-to-Agent (A2A) protocol for cross-system agent communication.
 
 ### GET /api/mcp/servers
 
@@ -164,7 +164,7 @@ Check the status of a task sent to an external A2A agent.
 
 ### POST /mcp
 
-MCP HTTP transport endpoint. Accepts JSON-RPC 2.0 requests and exposes LibreFang tools via the MCP protocol to external clients.
+MCP HTTP transport endpoint. Accepts JSON-RPC 2.0 requests and exposes BossFang tools via the MCP protocol to external clients.
 
 **Request Body** (JSON-RPC 2.0):
 
@@ -283,7 +283,7 @@ Cancel a running A2A task (unversioned).
 
 ## Audit & Security Endpoints
 
-LibreFang maintains a Merkle hash chain audit trail for all security-relevant operations. These endpoints allow inspection and verification of the audit log integrity.
+BossFang maintains a Merkle hash chain audit trail for all security-relevant operations. These endpoints allow inspection and verification of the audit log integrity.
 
 ### GET /api/audit/recent
 
@@ -816,7 +816,7 @@ Returns `400` if the code is invalid or TOTP is not enrolled.
 
 ### GET /api/peers
 
-List OFP (LibreFang Protocol) wire peers and their connection status.
+List OFP (BossFang Protocol) wire peers and their connection status.
 
 **Response** `200 OK`:
 

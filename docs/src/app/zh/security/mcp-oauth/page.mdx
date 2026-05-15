@@ -1,12 +1,12 @@
 # MCP OAuth 主机钉接
 
-当 LibreFang 完成对某个 MCP 服务器的 OAuth 授权时,它要把授权码 POST 到的
+当 BossFang 完成对某个 MCP 服务器的 OAuth 授权时,它要把授权码 POST 到的
 那个 URL,是从该服务器的发现文档(`/.well-known/oauth-authorization-server`)
 里读出来的。这份文档属于"攻击者可影响的数据":一份被篡改或被恶意托管的
 metadata 可以把 token 交换重定向到运营者从未授权过的主机,从而泄露授权码或
 最终的 access token。
 
-LibreFang 会把 token 交换的目标钉到运营者在 `config.toml` 里**亲手输入**的
+BossFang 会把 token 交换的目标钉到运营者在 `config.toml` 里**亲手输入**的
 那个主机上。钉接策略只接受两种形态,其它一律拒绝并在守护进程日志里抛出安全
 错误,授权流程随之失败。
 

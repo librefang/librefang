@@ -1,6 +1,6 @@
 # Prompt Intelligence
 
-Prompt Intelligence provides **prompt version management** and **A/B experiments** for LibreFang agents. Track prompt changes over time, compare variants side-by-side, and let the system automatically activate the best-performing prompt.
+Prompt Intelligence provides **prompt version management** and **A/B experiments** for BossFang agents. Track prompt changes over time, compare variants side-by-side, and let the system automatically activate the best-performing prompt.
 
 ---
 
@@ -37,7 +37,7 @@ Click **Metrics** on a running experiment to see per-variant success rate, laten
 
 ### Automatic Tracking
 
-When `enabled = true`, LibreFang computes a hash of each agent's system prompt at the start of every request. If the prompt content has changed since the last tracked version, a new version is created automatically and marked as active.
+When `enabled = true`, BossFang computes a hash of each agent's system prompt at the start of every request. If the prompt content has changed since the last tracked version, a new version is created automatically and marked as active.
 
 This means any change to an agent's `system_prompt` in its manifest or via the API is captured without manual intervention.
 
@@ -293,7 +293,7 @@ See the [Configuration Reference](/configuration#prompt_intelligence) for the fu
 
 ## Database
 
-Prompt Intelligence uses SQLite (same database as the rest of LibreFang). Migration v13 creates four tables:
+Prompt Intelligence uses SQLite (same database as the rest of BossFang). Migration v13 creates four tables:
 
 | Table | Purpose |
 |-------|---------|

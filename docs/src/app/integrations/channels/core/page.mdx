@@ -269,7 +269,7 @@ default_agent = "assistant"
 allowed_users = []        # empty = allow all; format: "hash@im.wechat"
 ```
 
-2. Start (or restart) the LibreFang daemon.
+2. Start (or restart) the BossFang daemon.
 3. A QR code will appear in the daemon logs — scan it with your WeChat app.
 4. Once confirmed, the adapter begins receiving messages.
 
@@ -433,7 +433,7 @@ Features:
 **Source:** `librefang-channels/src/message_truncator.rs`
 
 Messaging platforms impose hard character limits on outbound messages, counted in
-**UTF-16 code units** rather than bytes or Unicode code points. LibreFang measures
+**UTF-16 code units** rather than bytes or Unicode code points. BossFang measures
 message length in UTF-16 units and handles oversized messages automatically.
 
 ### Platform Limits
@@ -465,13 +465,13 @@ boundary. The result is never split mid-codepoint or mid-surrogate-pair.
 ### Splitting
 
 `split_to_utf16_chunks(text, limit)` divides the message into sequential chunks, each
-within `limit` UTF-16 units. LibreFang sends the chunks as separate messages in order,
+within `limit` UTF-16 units. BossFang sends the chunks as separate messages in order,
 preserving all content. The split boundary respects Unicode scalar boundaries — no
 chunk ends in the middle of a character.
 
 ### Disabling Automatic Splitting
 
-If you want LibreFang to truncate rather than split long messages for a specific
+If you want BossFang to truncate rather than split long messages for a specific
 channel, set `split_long_messages = false` in the channel configuration:
 
 ```toml

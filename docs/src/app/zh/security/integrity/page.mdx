@@ -130,7 +130,7 @@ pub fn verify_integrity(&self) -> Result<(), String> {
 
 **源码：** `librefang-types/src/taint.rs`
 
-LibreFang 实现了基于格的污点传播模型，防止被污染的值在未经显式解密的
+BossFang 实现了基于格的污点传播模型，防止被污染的值在未经显式解密的
 情况下流入敏感汇聚点。此机制可防范提示注入、数据外泄和混淆代理攻击。
 
 ### 污点标签
@@ -295,7 +295,7 @@ pub fn verify(&self) -> Result<(), String> {
 
 **源码：** 所有 LLM 驱动模块、通道适配器和网络搜索模块。
 
-LibreFang 在所有持有密钥材料的字段上使用 `zeroize` crate 提供的
+BossFang 在所有持有密钥材料的字段上使用 `zeroize` crate 提供的
 `Zeroizing<String>`。当值被销毁时，其内存会被零覆盖，防止密钥在
 内存中残留。
 

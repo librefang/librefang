@@ -1,6 +1,6 @@
 # Hosted Provider APIs
 
-This page covers internet-hosted model providers that authenticate with an API key and connect through LibreFang's native Anthropic/Gemini drivers or the shared OpenAI-compatible driver.
+This page covers internet-hosted model providers that authenticate with an API key and connect through BossFang's native Anthropic/Gemini drivers or the shared OpenAI-compatible driver.
 
 ## Included Providers
 
@@ -556,7 +556,7 @@ The `model` field is passed verbatim into the endpoint path, so use the full Bed
 **Capabilities:**
 - Tool use (function calling) via the Converse `toolConfig` shape, with full message-shape repair for `toolResult` / `toolUse` pairing.
 - Streaming and non-streaming completions.
-- Vision is **not** wired today: image content blocks are dropped before the request because Bedrock Converse rejects the LibreFang `Image` / `ImageFile` shapes.
+- Vision is **not** wired today: image content blocks are dropped before the request because Bedrock Converse rejects the BossFang `Image` / `ImageFile` shapes.
 - Prompt-cache token counters are not surfaced — Bedrock Converse does not expose `cache_creation_input_tokens` / `cache_read_input_tokens` separately, so they report as zero in metering.
 
 **Notes:** Region resolution order is the explicit driver argument, then `AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1`. If you want a regional inference profile (e.g. `eu.anthropic.…`), set `AWS_REGION` to a matching region (`eu-west-1`, etc.) and use the prefixed model ID.

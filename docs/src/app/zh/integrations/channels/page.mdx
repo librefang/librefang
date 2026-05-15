@@ -1,6 +1,6 @@
 # 通道适配器
 
-LibreFang 通过 **45 个通道适配器** 连接各类消息平台，让用户可以在所有主流通信平台上与 Agent 交互。适配器覆盖消费级即时通讯、企业协作、社交媒体、社区平台、隐私优先协议、通用 Webhook 以及可扩展的 Sidecar 进程。
+BossFang 通过 **45 个通道适配器** 连接各类消息平台，让用户可以在所有主流通信平台上与 Agent 交互。适配器覆盖消费级即时通讯、企业协作、社交媒体、社区平台、隐私优先协议、通用 Webhook 以及可扩展的 Sidecar 进程。
 
 所有适配器共享统一的基础能力：通过 `watch::channel` 实现优雅关闭、连接失败时指数退避重试、使用 `Zeroizing<String>` 保护密钥、超出平台长度限制时自动拆分消息、支持按通道覆盖模型/提示词、DM/群组策略控制、按用户速率限制，以及输出格式化（Markdown、TelegramHTML、SlackMrkdwn、PlainText）。
 
@@ -71,7 +71,7 @@ default_agent = "home-assistant"
 
 ### 通用字段
 
-- `bot_token_env` / `token_env` -- 保存 Bot/访问令牌的环境变量名。LibreFang 在启动时从该环境变量读取令牌。所有密钥以 `Zeroizing<String>` 存储，释放时自动清零。
+- `bot_token_env` / `token_env` -- 保存 Bot/访问令牌的环境变量名。BossFang 在启动时从该环境变量读取令牌。所有密钥以 `Zeroizing<String>` 存储，释放时自动清零。
 - `default_agent` -- 当没有特定路由规则时，接收消息的 Agent 名称（或 ID）。
 - `allowed_users` -- 可选的平台用户 ID 白名单。留空表示允许所有用户。
 - `overrides` -- 可选的按通道行为覆盖（参见下方[通道覆盖](#channel-overrides)）。

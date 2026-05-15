@@ -1,18 +1,18 @@
 {
   "active_phase": "phase-1-rebrand-completion",
-  "active_change": "m4-docs-mdx-sweep",
+  "active_change": "m5-m7-ua-strings-env-aliases",
   "last_updated": "2026-05-14T00:00:00Z",
   "last_updated_by": "kbd-execute",
   "backend": "native-tool",
   "backend_rationale": "No OpenSpec in this project. Single-tool (Claude Code) execution with progress.json bookkeeping. Hybrid not warranted at this scale.",
   "next_action": {
-    "command": "/kbd-execute m4-docs-mdx-sweep",
-    "description": "Execute change m4-docs-mdx-sweep (M4): 120 .mdx files in docs/src/app/** flipped via an extended enforce-branding.py that skips fenced code blocks. Single-word prose-only edits — biggest churn of the phase."
+    "command": "/kbd-execute m5-m7-ua-strings-env-aliases",
+    "description": "Execute change m5-m7-ua-strings-env-aliases (M5+M7 bundle): outbound User-Agent string flips in copilot.rs + web_search.rs (LibreFang/1.0 → BossFang/1.0, LibreFangAgent/0.1 → BossFangAgent/0.1) and additive BOSSFANG_* env-var aliases for INSTALL_DIR (placed in install.sh, M3), REGISTRY_PUBKEY, REGISTRY_PUBKEY_URL, DASHBOARD_EMBEDDED_ONLY."
   },
-  "phase_progress": "3/7 milestones done (M1, M2, M3). Next: M4 docs MDX sweep.",
+  "phase_progress": "4/7 milestones done (M1, M2, M3, M4). Next: M5+M7 bundle (UA + env aliases).",
   "last_completed": {
-    "change_id": "m3-install-script",
-    "milestones": ["M3"],
+    "change_id": "m4-docs-mdx-sweep",
+    "milestones": ["M4"],
     "completed_at": "2026-05-14T00:00:00Z"
   }
 }

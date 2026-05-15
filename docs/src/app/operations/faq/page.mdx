@@ -1,12 +1,12 @@
 # FAQ
 
-Frequently asked questions about LibreFang.
+Frequently asked questions about BossFang.
 
 ---
 
 ## Installation and Configuration
 
-### Q: How to install LibreFang?
+### Q: How to install BossFang?
 
 ```bash
 # Install using cargo
@@ -20,7 +20,7 @@ cargo install --path crates/librefang-cli
 
 ### Q: Which API keys do I need to configure?
 
-LibreFang requires API keys from at least one LLM provider:
+BossFang requires API keys from at least one LLM provider:
 
 ```bash
 # Option 1: Anthropic (recommended)
@@ -137,7 +137,7 @@ def my_tool(param: str) -> str:
 
 ### Q: Which messaging platforms are supported?
 
-LibreFang supports 44 channel adapters:
+BossFang supports 44 channel adapters:
 
 - **Core**: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email
 - **Enterprise**: Microsoft Teams, Google Chat, Webex, Feishu
@@ -147,7 +147,7 @@ LibreFang supports 44 channel adapters:
 
 1. Create Bot: @BotFather on Telegram
 2. Get Bot Token
-3. Configure LibreFang:
+3. Configure BossFang:
 
 ```toml
 [telegram]
@@ -168,9 +168,9 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
 ## Security
 
-### Q: How does LibreFang protect my data?
+### Q: How does BossFang protect my data?
 
-LibreFang uses 16-layer security protection:
+BossFang uses 16-layer security protection:
 
 1. **WASM Dual-Metering Sandbox** - Tools run in isolated environment
 2. **Merkle Hash Chain** - All operations are auditable
@@ -313,9 +313,9 @@ librefang migrate --from openclaw --dry-run
 
 ## Billing and Costs
 
-### Q: Does LibreFang charge?
+### Q: Does BossFang charge?
 
-LibreFang itself is open source and free. You only pay for LLM provider API fees.
+BossFang itself is open source and free. You only pay for LLM provider API fees.
 
 ### Q: How to track costs?
 
@@ -358,9 +358,9 @@ Refer to the "Adding New Channels" section in the Development Guide.
 
 ## Other
 
-### Q: How is LibreFang different from other frameworks?
+### Q: How is BossFang different from other frameworks?
 
-| Feature | LibreFang | OpenClaw | LangChain |
+| Feature | BossFang | OpenClaw | LangChain |
 |---------|-----------|----------|-----------|
 | Language | Rust | Node.js | Python |
 | Memory | ~40MB | ~200MB | Language-dependent |

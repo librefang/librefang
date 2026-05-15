@@ -33,7 +33,7 @@ app_secret_env = "TEAMS_APP_SECRET"
 default_agent = "ops"
 ```
 
-7. 在 Azure 中将消息端点配置为指向 LibreFang 实例的公网 URL（例如 `https://your-domain.com:4545/channels/teams/webhook`）。
+7. 在 Azure 中将消息端点配置为指向 BossFang 实例的公网 URL（例如 `https://your-domain.com:4545/channels/teams/webhook`）。
 8. 重启守护进程。
 
 ### 工作原理
@@ -168,7 +168,7 @@ Webex 适配器向 Webex API 注册 webhook 以接收消息事件。传入消息
 1. 前往[飞书开放平台](https://open.feishu.cn/)，创建自建应用。
 2. 在应用能力中启用 **机器人**。
 3. 从应用凭证页面记录 **App ID** 和 **App Secret**。
-4. 配置事件订阅，指向 LibreFang 实例的 webhook URL。
+4. 配置事件订阅，指向 BossFang 实例的 webhook URL。
 5. 设置环境变量：
 
 ```bash

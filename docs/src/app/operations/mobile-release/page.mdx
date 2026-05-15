@@ -1,6 +1,6 @@
 # Mobile Release SOP
 
-End-to-end runbook for shipping LibreFang mobile builds to **TestFlight**
+End-to-end runbook for shipping BossFang mobile builds to **TestFlight**
 (iOS) and **Play Internal Testing** (Android). Pairs with the desktop
 release flow in [Production](/operations/production) — these steps cover
 only what is mobile-specific.
@@ -38,7 +38,7 @@ Track these in the issue tracker; once done they do not recur.
 ### Apple
 
 1. **Apple Developer Program** enrollment ($99 / year). Pick the
-   organisational variant if LibreFang has a legal entity, individual
+   organisational variant if BossFang has a legal entity, individual
    otherwise. Personnel changes inside an organisational team do not
    force a re-enrollment.
 2. **App Store Connect app record** with bundle id `ai.librefang.app`,
@@ -56,7 +56,7 @@ Track these in the issue tracker; once done they do not recur.
 6. **App Privacy questionnaire** in App Store Connect. Declare:
    - "API key" → user-input contact info
    - "Agent conversation logs" → user content
-   - All entries marked **Data Not Linked to User** (LibreFang does not
+   - All entries marked **Data Not Linked to User** (BossFang does not
      bind data to an Apple ID).
 7. **Encryption export compliance**: the iOS build pipeline already
    stamps `ITSAppUsesNonExemptEncryption = false` into the Info.plist
@@ -141,7 +141,7 @@ step prints `::notice::` and exits 0.
 
 After `mobile_ios` finishes the upload step:
 
-1. App Store Connect → My Apps → LibreFang → **TestFlight** tab. The
+1. App Store Connect → My Apps → BossFang → **TestFlight** tab. The
    build appears in *Processing* (5–30 min for a clean build, longer if
    binary symbol upload is slow).
 2. While processing: fill in the *Test Information* fields (test
@@ -170,7 +170,7 @@ After `mobile_ios` finishes the upload step:
 
 After `mobile_android` finishes the upload step:
 
-1. Play Console → LibreFang → **Testing → Internal testing**. The
+1. Play Console → BossFang → **Testing → Internal testing**. The
    `.aab` appears in the active release within ~5 min.
 2. **Pre-launch report**: Play runs the build on a fleet of real
    devices and emails crash reports. Always read these before

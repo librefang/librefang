@@ -1,6 +1,6 @@
 # Developer Tool Providers
 
-This page covers providers that integrate through local assistant tooling or CLI runtimes instead of a standard remote LLM API. They are useful when LibreFang agents need to reuse an existing coding or terminal-assistant stack.
+This page covers providers that integrate through local assistant tooling or CLI runtimes instead of a standard remote LLM API. They are useful when BossFang agents need to reuse an existing coding or terminal-assistant stack.
 
 ## Included Providers
 
@@ -16,7 +16,7 @@ This page covers providers that integrate through local assistant tooling or CLI
 
 ## CLI logins as first-class default providers
 
-When you have not set a provider API key but **do** have a working CLI login (`claude`, `codex`, `gemini`, `qwen` available on `PATH` and authenticated), LibreFang will pick the CLI provider as the default model for new agents. The detection runs at startup and is rechecked when the daemon refreshes provider availability.
+When you have not set a provider API key but **do** have a working CLI login (`claude`, `codex`, `gemini`, `qwen` available on `PATH` and authenticated), BossFang will pick the CLI provider as the default model for new agents. The detection runs at startup and is rechecked when the daemon refreshes provider availability.
 
 Detection priority (in order, first match wins):
 
@@ -142,9 +142,9 @@ model = "kimi-coder"
 **Setup:**
 1. Install Aider: `pip install aider-install && aider-install`
 2. Configure Aider's LLM provider via its own env vars (e.g. `OPENAI_API_KEY`)
-3. No additional LibreFang configuration needed
+3. No additional BossFang configuration needed
 
-**Notes:** CLI Provider — LibreFang spawns the `aider` binary as a subprocess in non-interactive mode (`--message`). Aider handles its own LLM provider authentication via standard environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.). Aider's `--yes-always`, `--no-auto-commits`, and `--no-git` flags are applied automatically. Use `AIDER_CLI_PATH` to override the binary path.
+**Notes:** CLI Provider — BossFang spawns the `aider` binary as a subprocess in non-interactive mode (`--message`). Aider handles its own LLM provider authentication via standard environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.). Aider's `--yes-always`, `--no-auto-commits`, and `--no-git` flags are applied automatically. Use `AIDER_CLI_PATH` to override the binary path.
 
 ---
 
@@ -163,9 +163,9 @@ model = "kimi-coder"
 **Setup:**
 1. Install Claude Code: `npm install -g @anthropic-ai/claude-code`
 2. Authenticate: `claude auth login`
-3. No additional LibreFang configuration needed
+3. No additional BossFang configuration needed
 
-**Notes:** CLI Provider — LibreFang spawns the `claude` binary as a subprocess in print mode (`-p`). The driver strips other providers' API keys from the subprocess environment to prevent leakage. Active subprocess PIDs are tracked and message timeouts (default 5 minutes) prevent hung processes from blocking agents. Vision input is supported via base64-encoded images.
+**Notes:** CLI Provider — BossFang spawns the `claude` binary as a subprocess in print mode (`-p`). The driver strips other providers' API keys from the subprocess environment to prevent leakage. Active subprocess PIDs are tracked and message timeouts (default 5 minutes) prevent hung processes from blocking agents. Vision input is supported via base64-encoded images.
 
 ---
 
@@ -184,9 +184,9 @@ model = "kimi-coder"
 **Setup:**
 1. Install Codex CLI: `npm install -g @openai/codex`
 2. `export OPENAI_API_KEY="sk-..."`
-3. No additional LibreFang configuration needed
+3. No additional BossFang configuration needed
 
-**Notes:** CLI Provider — LibreFang spawns the `codex` binary as a subprocess in quiet mode (`-q`). The driver strips other providers' API keys from the subprocess environment (preserving only `OPENAI_API_KEY` and `CODEX_*` variables). This allows users with Codex CLI installed to use it as an LLM provider without additional configuration.
+**Notes:** CLI Provider — BossFang spawns the `codex` binary as a subprocess in quiet mode (`-q`). The driver strips other providers' API keys from the subprocess environment (preserving only `OPENAI_API_KEY` and `CODEX_*` variables). This allows users with Codex CLI installed to use it as an LLM provider without additional configuration.
 
 ---
 
@@ -205,9 +205,9 @@ model = "kimi-coder"
 **Setup:**
 1. Install Gemini CLI: `npm install -g @google/gemini-cli`
 2. Authenticate: `gemini auth login`
-3. No additional LibreFang configuration needed
+3. No additional BossFang configuration needed
 
-**Notes:** CLI Provider — LibreFang spawns the `gemini` binary as a subprocess in print mode (`-p`). The driver preserves `GEMINI_*` and `GOOGLE_*` environment variables while stripping other providers' secrets. No separate API key is needed when using Google OAuth authentication.
+**Notes:** CLI Provider — BossFang spawns the `gemini` binary as a subprocess in print mode (`-p`). The driver preserves `GEMINI_*` and `GOOGLE_*` environment variables while stripping other providers' secrets. No separate API key is needed when using Google OAuth authentication.
 
 ---
 
@@ -226,6 +226,6 @@ model = "kimi-coder"
 **Setup:**
 1. Install Qwen Code: `npm install -g @alibaba/qwen-code`
 2. Authenticate: `qwen auth login`
-3. No additional LibreFang configuration needed
+3. No additional BossFang configuration needed
 
-**Notes:** CLI Provider — LibreFang spawns the `qwen` binary as a subprocess in print mode (`-p`). The driver preserves `QWEN_*` environment variables while stripping other providers' secrets. Supports streaming JSON output from the Qwen Code CLI. No separate API key is needed when using Qwen OAuth authentication.
+**Notes:** CLI Provider — BossFang spawns the `qwen` binary as a subprocess in print mode (`-p`). The driver preserves `QWEN_*` environment variables while stripping other providers' secrets. Supports streaming JSON output from the Qwen Code CLI. No separate API key is needed when using Qwen OAuth authentication.

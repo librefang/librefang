@@ -1,6 +1,6 @@
 # Usage Examples
 
-This page is organized around LibreFang's core capabilities: agents, hands, channels, workflows, scheduling, webhooks, memory, and API usage. The examples below follow the current CLI, REST API, and config shapes in the source tree.
+This page is organized around BossFang's core capabilities: agents, hands, channels, workflows, scheduling, webhooks, memory, and API usage. The examples below follow the current CLI, REST API, and config shapes in the source tree.
 
 For full field-by-field references, continue with:
 
@@ -11,11 +11,11 @@ For full field-by-field references, continue with:
 
 ---
 
-## What LibreFang Can Do
+## What BossFang Can Do
 
 Start with the capability map, then move to concrete usage.
 
-In the current source tree, LibreFang is not just a chat wrapper. It is an Agent OS with several layers:
+In the current source tree, BossFang is not just a chat wrapper. It is an Agent OS with several layers:
 
 - `Agents`: spawn built-in templates or custom `agent.toml` manifests, then talk to them over CLI, dashboard, or REST API.
 - `Hands`: pre-packaged autonomous capability modules such as `researcher`, `lead`, `browser`, `clip`, and `devops`.
@@ -29,14 +29,14 @@ In the current source tree, LibreFang is not just a chat wrapper. It is an Agent
 
 This page answers two questions:
 
-1. What can LibreFang be used for?
+1. What can BossFang be used for?
 2. How do those capabilities map to the current codebase and commands?
 
 The examples below follow that structure.
 
 ---
 
-## 1. Get LibreFang Running
+## 1. Get BossFang Running
 
 On first run, `librefang start` auto-runs quick initialization. By default, the API and dashboard listen on `http://127.0.0.1:4545`.
 
@@ -66,7 +66,7 @@ librefang init --quick
 
 ## 2. Use a Built-In Agent Template
 
-The fastest way to use LibreFang is to spawn a built-in template and send it a message.
+The fastest way to use BossFang is to spawn a built-in template and send it a message.
 
 ```bash
 # Spawn the built-in coder agent
@@ -84,7 +84,7 @@ librefang chat coder
 
 Common built-in templates include `assistant`, `coder`, `researcher`, `writer`, `customer-support`, and `meeting-assistant`.
 
-This is the base layer of LibreFang: run an agent and make it complete a concrete task. If your use case is code generation, review, writing, research, or support, this is usually the first layer to reach for.
+This is the base layer of BossFang: run an agent and make it complete a concrete task. If your use case is code generation, review, writing, research, or support, this is usually the first layer to reach for.
 
 ---
 
@@ -137,7 +137,7 @@ librefang message customer-support "A user says their payment failed."
 
 Channel config lives under `[channels.<name>]` in `~/.librefang/config.toml`, not under top-level tables like `[telegram]` or `[discord]`.
 
-This is LibreFang's external interface layer: the agent is no longer only a local CLI object, but something users can interact with from Telegram, Discord, Slack, WeChat, and similar systems.
+This is BossFang's external interface layer: the agent is no longer only a local CLI object, but something users can interact with from Telegram, Discord, Slack, WeChat, and similar systems.
 
 The easiest path is the interactive setup flow:
 
@@ -260,7 +260,7 @@ librefang webhooks list
 
 Hands are pre-packaged autonomous capability modules. For many use cases, activating a Hand is simpler than building the whole setup yourself.
 
-This is the part of LibreFang that is closest to “productized capabilities”. For research, OSINT, lead generation, browser automation, content workflows, and similar tasks, Hands are often the right starting point instead of assembling raw agents from scratch.
+This is the part of BossFang that is closest to “productized capabilities”. For research, OSINT, lead generation, browser automation, content workflows, and similar tasks, Hands are often the right starting point instead of assembling raw agents from scratch.
 
 ```bash
 # See available Hands
@@ -309,7 +309,7 @@ librefang memory delete customer-support customer:alice:last_order
 
 ---
 
-## 9. Call LibreFang over REST
+## 9. Call BossFang over REST
 
 The most common external flow is: create an agent, then send it a message.
 

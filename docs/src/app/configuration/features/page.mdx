@@ -99,7 +99,7 @@ Uses the Streamable HTTP transport (MCP spec 2025-03-26+). Unlike SSE, this is a
 
 ### `[a2a]`
 
-Agent-to-Agent protocol configuration, enabling inter-agent communication across LibreFang instances.
+Agent-to-Agent protocol configuration, enabling inter-agent communication across BossFang instances.
 
 ```toml
 [a2a]
@@ -735,7 +735,7 @@ roles = ["premium"]
 
 ### `[pairing]`
 
-Configures device pairing for the LibreFang mobile companion app and push notifications.
+Configures device pairing for the BossFang mobile companion app and push notifications.
 
 ```toml
 [pairing]
@@ -958,7 +958,7 @@ The compactor system prompt now instructs the LLM to **write summaries in the sa
 
 #### Pluggable `ContextEngine`
 
-The compression algorithm is implemented behind a `ContextEngine` trait. The current implementation uses an LLM-based summarizer. Future versions of LibreFang will allow configuring alternative compression algorithms — including DAG-based compression and LCM (Latent Context Modeling) — once those implementations stabilize.
+The compression algorithm is implemented behind a `ContextEngine` trait. The current implementation uses an LLM-based summarizer. Future versions of BossFang will allow configuring alternative compression algorithms — including DAG-based compression and LCM (Latent Context Modeling) — once those implementations stabilize.
 
 #### No configuration needed
 
@@ -976,7 +976,7 @@ See [Cron Scheduler](/configuration/features/cron) for the full schema, fan-out 
 
 ### Observability — Tempo + business spans
 
-LibreFang ships an opt-in observability stack you can bring up with one `docker compose` invocation. It captures HTTP requests **and** LibreFang's own work — agent turns, tool calls, channel sends, cron fires — as searchable Tempo traces.
+BossFang ships an opt-in observability stack you can bring up with one `docker compose` invocation. It captures HTTP requests **and** BossFang's own work — agent turns, tool calls, channel sends, cron fires — as searchable Tempo traces.
 
 **Stack components** (all bundled in-binary; no external download required):
 
@@ -984,7 +984,7 @@ LibreFang ships an opt-in observability stack you can bring up with one `docker 
 - `librefang-tempo` — single-binary Grafana Tempo with local-filesystem storage and 24 h retention. Receiver on internal `:4317`, query API on `:3200`.
 - `librefang-grafana` — pre-provisioned Grafana with the Tempo data source wired.
 
-**Auto-start is opt-in.** The observability stack is **not** brought up automatically with `librefang start` — set `[telemetry] auto_start = true` in `config.toml` if you want the daemon to manage the lifecycle for you. Otherwise control it explicitly with `librefang observability up` / `down`. The bundled containers run under per-`home_dir` Docker labels so multiple LibreFang installs on the same host don't fight for the same names; teardown uses RAII-style cleanup that reaps containers even on abnormal daemon exit.
+**Auto-start is opt-in.** The observability stack is **not** brought up automatically with `librefang start` — set `[telemetry] auto_start = true` in `config.toml` if you want the daemon to manage the lifecycle for you. Otherwise control it explicitly with `librefang observability up` / `down`. The bundled containers run under per-`home_dir` Docker labels so multiple BossFang installs on the same host don't fight for the same names; teardown uses RAII-style cleanup that reaps containers even on abnormal daemon exit.
 
 **Bring it up:**
 

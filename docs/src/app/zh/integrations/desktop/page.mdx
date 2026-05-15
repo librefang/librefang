@@ -1,10 +1,10 @@
-# LibreFang 桌面应用
+# BossFang 桌面应用
 
-LibreFang 桌面应用是基于 [Tauri 2.0](https://v2.tauri.app/) 构建的原生桌面封装，将整个 LibreFang Agent OS 打包为一个可安装的应用程序。用户无需运行 CLI 守护进程再打开浏览器，而是直接获得一个原生窗口，具备系统托盘集成、操作系统通知和单实例强制等功能——底层驱动的内核和 API 服务器与无头部署模式完全相同。
+BossFang 桌面应用是基于 [Tauri 2.0](https://v2.tauri.app/) 构建的原生桌面封装，将整个 BossFang Agent OS 打包为一个可安装的应用程序。用户无需运行 CLI 守护进程再打开浏览器，而是直接获得一个原生窗口，具备系统托盘集成、操作系统通知和单实例强制等功能——底层驱动的内核和 API 服务器与无头部署模式完全相同。
 
 **Crate:** `librefang-desktop`
 **Identifier:** `ai.librefang.desktop`
-**Product name:** LibreFang
+**Product name:** BossFang
 
 ---
 
@@ -104,15 +104,15 @@ let server = axum::serve(listener, app.into_make_service_with_connect_info::<Soc
 | **Launch at Login** | 复选框——通过 `tauri-plugin-autostart` 切换操作系统级别的开机自启 |
 | **Check for Updates...** | 检查更新、下载、安装并在有可用更新时重启。通过通知显示进度/成功/失败状态 |
 | **Open Config Directory** | 在操作系统文件管理器中打开 `~/.librefang/` |
-| **Quit LibreFang** | 记录退出事件并调用 `app.exit(0)` |
+| **Quit BossFang** | 记录退出事件并调用 `app.exit(0)` |
 
-托盘提示文本为 **"LibreFang Agent OS"**。
+托盘提示文本为 **"BossFang Agent OS"**。
 
 **左键单击托盘图标**会显示主窗口（与 "Show Window" 菜单项效果相同）。此功能通过 `on_tray_icon_event` 监听 `MouseButton::Left` 配合 `MouseButtonState::Up` 实现。
 
 ### 单实例强制
 
-在桌面平台上，`tauri-plugin-single-instance` 防止同时运行多个 LibreFang 实例。当第二个实例尝试启动时，现有实例的主窗口会被显示、取消最小化并获得焦点：
+在桌面平台上，`tauri-plugin-single-instance` 防止同时运行多个 BossFang 实例。当第二个实例尝试启动时，现有实例的主窗口会被显示、取消最小化并获得焦点：
 
 ```rust
 #[cfg(desktop)]
@@ -143,7 +143,7 @@ let server = axum::serve(listener, app.into_make_service_with_connect_info::<Soc
 })
 ```
 
-要真正退出应用，请使用系统托盘菜单中的 **"Quit LibreFang"** 选项。
+要真正退出应用，请使用系统托盘菜单中的 **"Quit BossFang"** 选项。
 
 ### 原生操作系统通知
 
@@ -206,7 +206,7 @@ const count: number = await invoke("get_agent_count");
 
 ### `get_autostart` / `set_autostart`
 
-检查或切换 LibreFang 是否在操作系统登录时自动启动。使用 `tauri-plugin-autostart`（macOS 上使用 launchd，Windows 上使用注册表，Linux 上使用 systemd）。
+检查或切换 BossFang 是否在操作系统登录时自动启动。使用 `tauri-plugin-autostart`（macOS 上使用 launchd，Windows 上使用注册表，Linux 上使用 systemd）。
 
 ### `check_for_updates`
 
@@ -436,7 +436,7 @@ crates/librefang-desktop/
 |------|------|
 | `RUST_LOG` | 控制日志追踪的详细程度。未设置时默认为 `librefang=info,tauri=info`。 |
 
-其他所有 LibreFang 环境变量（API 密钥、配置等）照常生效，因为桌面应用启动的内核与无头守护进程完全相同。
+其他所有 BossFang 环境变量（API 密钥、配置等）照常生效，因为桌面应用启动的内核与无头守护进程完全相同。
 
 ---
 

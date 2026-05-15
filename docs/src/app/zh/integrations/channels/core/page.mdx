@@ -265,7 +265,7 @@ default_agent = "assistant"
 allowed_users = []        # 留空允许所有人；格式: "hash@im.wechat"
 ```
 
-2. 启动（或重启）LibreFang 守护进程。
+2. 启动（或重启）BossFang 守护进程。
 3. 守护进程日志中会显示一个二维码 -- 用微信扫码确认。
 4. 确认后，适配器开始接收消息。
 
@@ -428,7 +428,7 @@ http://127.0.0.1:4545/
 
 **源码：** `librefang-channels/src/message_truncator.rs`
 
-消息平台对出站消息有严格的字符数限制，以 **UTF-16 编码单元**（而非字节或 Unicode 码位）计量。LibreFang 以 UTF-16 单元数衡量消息长度，并自动处理超长消息。
+消息平台对出站消息有严格的字符数限制，以 **UTF-16 编码单元**（而非字节或 Unicode 码位）计量。BossFang 以 UTF-16 单元数衡量消息长度，并自动处理超长消息。
 
 ### 平台限制
 
@@ -454,11 +454,11 @@ http://127.0.0.1:4545/
 
 ### 拆分
 
-`split_to_utf16_chunks(text, limit)` 将消息分割为多个连续块，每块的 UTF-16 单元数均在 `limit` 以内。LibreFang 按顺序发送各块，保留所有内容。拆分边界遵守 Unicode 标量边界——不会在字符中间结束一个块。
+`split_to_utf16_chunks(text, limit)` 将消息分割为多个连续块，每块的 UTF-16 单元数均在 `limit` 以内。BossFang 按顺序发送各块，保留所有内容。拆分边界遵守 Unicode 标量边界——不会在字符中间结束一个块。
 
 ### 禁用自动拆分
 
-如需 LibreFang 对特定渠道的超长消息进行截断而非拆分，可在渠道配置中设置 `split_long_messages = false`：
+如需 BossFang 对特定渠道的超长消息进行截断而非拆分，可在渠道配置中设置 `split_long_messages = false`：
 
 ```toml
 [channels.telegram]

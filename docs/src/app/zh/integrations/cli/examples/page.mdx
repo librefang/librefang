@@ -1,6 +1,6 @@
 # CLI 示例与指南
 
-LibreFang CLI 的实用示例、迁移指南和集成说明。
+BossFang CLI 的实用示例、迁移指南和集成说明。
 
 有关命令详情，请参阅 [CLI 命令参考](/zh/integrations/cli/commands)。有关概述和安装，请参阅 [CLI 参考](/zh/integrations/cli)。
 
@@ -26,7 +26,7 @@ librefang migrate --from <FRAMEWORK> [--source-dir <PATH>] [--dry-run]
 
 **行为：**
 
-- 将源框架的 Agent 配置、YAML 清单和设置转换为 LibreFang 格式。
+- 将源框架的 Agent 配置、YAML 清单和设置转换为 BossFang 格式。
 - 将导入的数据保存到 `~/.librefang/`。
 - 生成 `migration_report.md` 总结导入内容。
 
@@ -63,7 +63,7 @@ librefang mcp
 
 **行为：**
 
-- 通过 stdin/stdout 上的 JSON-RPC 2.0 协议（Content-Length 分帧）将运行中的 LibreFang Agent 暴露为 MCP 工具。
+- 通过 stdin/stdout 上的 JSON-RPC 2.0 协议（Content-Length 分帧）将运行中的 BossFang Agent 暴露为 MCP 工具。
 - 每个 Agent 成为名为 `librefang_agent_<name>` 的可调用工具（连字符替换为下划线）。
 - 如果可用，通过 HTTP 连接到运行中的守护进程；否则启动进程内核。
 - 协议版本：`2024-11-05`。

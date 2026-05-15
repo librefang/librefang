@@ -1,6 +1,6 @@
 # 移动端发布 SOP
 
-将 LibreFang 移动端构建发布到 **TestFlight** (iOS) 与 **Play 内部测试**
+将 BossFang 移动端构建发布到 **TestFlight** (iOS) 与 **Play 内部测试**
 (Android) 的端到端运行手册。与桌面端的[生产部署](/zh/operations/production)
 配套——本文仅涵盖移动端特有的步骤。
 
@@ -36,7 +36,7 @@
 
 ### Apple
 
-1. **Apple Developer Program** 注册（$99 / 年）。如 LibreFang 有法人实体
+1. **Apple Developer Program** 注册（$99 / 年）。如 BossFang 有法人实体
    则选组织版，否则选个人版。组织团队内部人员变动不需要重新注册。
 2. **App Store Connect 应用记录**：bundle id `ai.librefang.app`，主类目
    *Productivity*。尽早占位——bundle id 抢注无法回滚。
@@ -52,7 +52,7 @@
 6. App Store Connect 中的 **App Privacy 问卷**。声明：
    - "API key" → 用户输入的联系信息
    - "Agent 对话日志" → 用户内容
-   - 全部标记为 **Data Not Linked to User**（LibreFang 不将数据
+   - 全部标记为 **Data Not Linked to User**（BossFang 不将数据
      绑定到 Apple ID）。
 7. **加密出口合规**：iOS 构建流程已自动将
    `ITSAppUsesNonExemptEncryption = false` 写入 Info.plist，并向
@@ -127,7 +127,7 @@
 
 `mobile_ios` 完成上传步骤后：
 
-1. App Store Connect → My Apps → LibreFang → **TestFlight** 标签页。
+1. App Store Connect → My Apps → BossFang → **TestFlight** 标签页。
    build 会进入 *Processing*（干净 build 5–30 分钟，符号上传慢的话
    更久）。
 2. 处理期间填写 *Test Information* 字段（测试凭据见下；要测试什么；
@@ -151,7 +151,7 @@
 
 `mobile_android` 完成上传步骤后：
 
-1. Play Console → LibreFang → **Testing → Internal testing**。`.aab`
+1. Play Console → BossFang → **Testing → Internal testing**。`.aab`
    会在约 5 分钟内出现在当前 release 中。
 2. **Pre-launch report**：Play 会在真机集群上运行该 build 并通过邮件
    报告崩溃。在升级到 Closed / Open testing 前**务必**阅读这些报告——

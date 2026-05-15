@@ -4,7 +4,7 @@ export function Logo(props: React.ComponentPropsWithoutRef<"span">) {
 			{...props}
 			className="text-lg font-bold text-zinc-900 dark:text-white"
 		>
-			LibreFang
+			BossFang
 		</span>
 	);
 }

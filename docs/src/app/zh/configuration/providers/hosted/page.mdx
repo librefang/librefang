@@ -1,6 +1,6 @@
 # 托管 API 提供商
 
-本页覆盖需要 API Key、并通过 LibreFang 原生 Anthropic/Gemini 驱动或共享 OpenAI-compatible 驱动接入的云端模型提供商。
+本页覆盖需要 API Key、并通过 BossFang 原生 Anthropic/Gemini 驱动或共享 OpenAI-compatible 驱动接入的云端模型提供商。
 
 ## 包含的提供商
 
@@ -556,7 +556,7 @@ model = "anthropic.claude-sonnet-4-20250514-v1:0"
 **能力：**
 - Tool use（function calling）走 Converse 的 `toolConfig` 结构，包含完整的 `toolResult` / `toolUse` 配对消息修复。
 - 支持 streaming 与非 streaming completion。
-- 视觉**未接入**：image content block 在请求前被丢弃，因为 Bedrock Converse 不接受 LibreFang 的 `Image` / `ImageFile` 形状。
+- 视觉**未接入**：image content block 在请求前被丢弃，因为 Bedrock Converse 不接受 BossFang 的 `Image` / `ImageFile` 形状。
 - prompt-cache token 计数未暴露 — Bedrock Converse 不单独返回 `cache_creation_input_tokens` / `cache_read_input_tokens`，metering 里这两个值恒为 0。
 
 **注意事项：** 区域解析顺序：driver 显式参数 → `AWS_REGION` → `AWS_DEFAULT_REGION` → `us-east-1`。要用区域 inference profile（比如 `eu.anthropic.…`）就把 `AWS_REGION` 设成对应区域（`eu-west-1` 等）并使用带前缀的 model id。

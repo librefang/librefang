@@ -1,12 +1,12 @@
 # Migration Guide
 
-Migrating to LibreFang from other systems.
+Migrating to BossFang from other systems.
 
 ---
 
 ## Overview
 
-LibreFang provides the following migration support:
+BossFang provides the following migration support:
 
 - **OpenFang** - Automated migration via `librefang-migrate` crate (`librefang migrate --from openfang`)
 - **OpenClaw** - Automated migration via `librefang-migrate` crate (`librefang migrate --from openclaw`)
@@ -17,7 +17,7 @@ LibreFang provides the following migration support:
 
 ## Migrating from OpenFang
 
-OpenFang and LibreFang share the same directory structure and config format (LibreFang is a community fork of OpenFang). Migration is a straightforward recursive copy of `~/.openfang` → `~/.librefang` with content rewriting in `.toml` and `.env` files.
+OpenFang and BossFang share the same directory structure and config format (BossFang is a community fork of OpenFang). Migration is a straightforward recursive copy of `~/.openfang` → `~/.librefang` with content rewriting in `.toml` and `.env` files.
 
 ### Automatic Migration
 
@@ -94,11 +94,11 @@ librefang migrate --from openclaw --import
 ## Migrating from LangChain
 
 > **Note**: LangChain migration is a **manual process**. There is no automated tool support.
-> The guide below shows how to manually convert LangChain configurations to LibreFang format.
+> The guide below shows how to manually convert LangChain configurations to BossFang format.
 
 ### Agent Configuration Conversion
 
-Convert LangChain agent configuration to LibreFang format:
+Convert LangChain agent configuration to BossFang format:
 
 ```python
 # LangChain configuration
@@ -124,7 +124,7 @@ memory_write = ["self.*"]
 
 ### Tool Mapping
 
-| LangChain Tool | LibreFang Tool |
+| LangChain Tool | BossFang Tool |
 |---------------|----------------|
 | `serpapi` | `web_search` |
 | `python_repl` | `python` |
@@ -155,7 +155,7 @@ result = agent.run("What is the capital of France?")
 ## Migrating from AutoGPT
 
 > **Note**: AutoGPT migration is a **manual process**. There is no automated tool support.
-> The guide below shows how to manually convert AutoGPT configurations to LibreFang format.
+> The guide below shows how to manually convert AutoGPT configurations to BossFang format.
 
 ### Configuration Conversion
 
@@ -169,7 +169,7 @@ result = agent.run("What is the capital of France?")
 }
 ```
 
-Convert to LibreFang:
+Convert to BossFang:
 
 ```toml
 # LibreFang agent.toml
@@ -197,7 +197,7 @@ tasks:
     result: "Summary ready"
 ```
 
-Convert to LibreFang workflow:
+Convert to BossFang workflow:
 
 ```json
 {

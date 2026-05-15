@@ -37,7 +37,7 @@ enabled = true
 
 ### 自动追踪
 
-启用后，LibreFang 在每次请求开始时计算 agent system prompt 的哈希值。如果 prompt 内容与上次记录的版本不同，自动创建新版本并标记为 active。
+启用后，BossFang 在每次请求开始时计算 agent system prompt 的哈希值。如果 prompt 内容与上次记录的版本不同，自动创建新版本并标记为 active。
 
 这意味着任何对 agent `system_prompt` 的修改（无论是通过 manifest 还是 API）都会被自动捕获。
 
@@ -293,7 +293,7 @@ max_versions_per_agent = 50  # 超出后自动清理旧版本（默认 50）
 
 ## 数据库
 
-Prompt 智能使用 SQLite（与 LibreFang 其他功能共用）。Migration v13 创建四张表：
+Prompt 智能使用 SQLite（与 BossFang 其他功能共用）。Migration v13 创建四张表：
 
 | 表名 | 用途 |
 |------|------|

@@ -1,6 +1,6 @@
-# LibreFang 快速上手
+# BossFang 快速上手
 
-本指南将带你安装 LibreFang、配置第一个 LLM 供应商、生成 Agent 并与其对话。
+本指南将带你安装 BossFang、配置第一个 LLM 供应商、生成 Agent 并与其对话。
 
 项目官网：[https://librefang.ai/](https://librefang.ai/)
 
@@ -135,7 +135,7 @@ librefang --version
 
 ### SDK
 
-用于将 LibreFang API 集成到你自己应用中的 SDK。
+用于将 BossFang API 集成到你自己应用中的 SDK。
 
 **JavaScript / TypeScript**
 
@@ -268,7 +268,7 @@ librefang init
 
 ### 配置 API Key
 
-LibreFang 至少需要一个 LLM 供应商的 API Key。作为环境变量设置：
+BossFang 至少需要一个 LLM 供应商的 API Key。作为环境变量设置：
 
 ```bash
 # Anthropic (Claude)
@@ -283,7 +283,7 @@ export GROQ_API_KEY=gsk_...
 
 将 export 写入你的 shell 配置（`~/.bashrc`、`~/.zshrc` 等）以便持久化。
 
-LibreFang 支持三层密钥存储（按优先级从高到低）：
+BossFang 支持三层密钥存储（按优先级从高到低）：
 
 | 层级 | 文件 | 设置方式 | 备注 |
 |------|------|---------|------|
@@ -323,7 +323,7 @@ librefang doctor
 
 ### 使用内置模板
 
-LibreFang 在 [registry](https://github.com/librefang/librefang-registry/tree/main/agents) 中提供了 32 个 Agent 模板（`assistant` 预装，其他可从仪表盘安装）。生成 hello-world Agent：
+BossFang 在 [registry](https://github.com/librefang/librefang-registry/tree/main/agents) 中提供了 32 个 Agent 模板（`assistant` 预装，其他可从仪表盘安装）。生成 hello-world Agent：
 
 ```bash
 librefang agent spawn agents/hello-world/agent.toml
@@ -489,7 +489,7 @@ http://127.0.0.1:4545/
 
 ## 下一步
 
-当你已经运行起 LibreFang：
+当你已经运行起 BossFang：
 
 - **探索 Agent 模板**：浏览 `agents/` 目录中的预置 Agent（coder、researcher、writer、ops、analyst、security-auditor 等）。
 - **创建自定义 Agent**：编写你自己的 `agent.toml` 清单。能力与调度详见 [架构文档](/zh/architecture)。

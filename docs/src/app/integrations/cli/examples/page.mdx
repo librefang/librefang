@@ -1,6 +1,6 @@
 # CLI Examples & Guides
 
-Practical examples, migration guides, and integration instructions for the LibreFang CLI.
+Practical examples, migration guides, and integration instructions for the BossFang CLI.
 
 For command details, see the [CLI Command Reference](/integrations/cli/commands). For an overview and installation, see the [CLI Reference](/integrations/cli).
 
@@ -26,7 +26,7 @@ librefang migrate --from <FRAMEWORK> [--source-dir <PATH>] [--dry-run]
 
 **Behavior:**
 
-- Converts agent configurations, YAML manifests, and settings from the source framework into LibreFang format.
+- Converts agent configurations, YAML manifests, and settings from the source framework into BossFang format.
 - Saves imported data to `~/.librefang/`.
 - Writes a `migration_report.md` summarizing what was imported.
 
@@ -63,7 +63,7 @@ librefang mcp
 
 **Behavior:**
 
-- Exposes running LibreFang agents as MCP tools via JSON-RPC 2.0 over stdin/stdout with Content-Length framing.
+- Exposes running BossFang agents as MCP tools via JSON-RPC 2.0 over stdin/stdout with Content-Length framing.
 - Each agent becomes a callable tool named `librefang_agent_<name>` (hyphens replaced with underscores).
 - Connects to a running daemon via HTTP if available; otherwise boots an in-process kernel.
 - Protocol version: `2024-11-05`.

@@ -1,9 +1,9 @@
-# LibreFang Security Architecture
+# BossFang Security Architecture
 
 > **Security Contact:** Use GitHub private vulnerability reporting at `https://github.com/librefang/librefang/security/advisories/new`.
 
 This document provides a comprehensive technical reference for every security
-system in the LibreFang Agent Operating System.  All struct names, function
+system in the BossFang Agent Operating System.  All struct names, function
 signatures, constant values, and algorithm descriptions are drawn directly from
 the source code.
 
@@ -37,7 +37,7 @@ the source code.
 
 ## 1. Security Overview
 
-LibreFang implements **defense-in-depth** security.  No single mechanism is
+BossFang implements **defense-in-depth** security.  No single mechanism is
 trusted to be the sole protector; instead, 16 independent systems form
 overlapping layers so that a failure in any one layer is caught by others.
 
@@ -67,7 +67,7 @@ overlapping layers so that a failure in any one layer is caught by others.
 
 **Source:** `librefang-types/src/capability.rs`
 
-LibreFang uses capability-based security.  An agent can only perform actions
+BossFang uses capability-based security.  An agent can only perform actions
 it has been explicitly granted permission to do.  Capabilities are immutable
 after agent creation and are enforced at the kernel level.
 
@@ -388,7 +388,7 @@ mutexes, ensuring the audit log remains available even after a panic.
 
 **Source:** `librefang-types/src/taint.rs`
 
-LibreFang implements a lattice-based taint propagation model that prevents
+BossFang implements a lattice-based taint propagation model that prevents
 tainted values from flowing into sensitive sinks without explicit
 declassification.  This guards against prompt injection, data exfiltration,
 and confused-deputy attacks.
@@ -692,7 +692,7 @@ Even with a matching allowlist entry, the following are **always** rejected:
 
 **Source:** All LLM driver modules, channel adapters, and web search modules.
 
-LibreFang uses `Zeroizing<String>` from the `zeroize` crate on every field
+BossFang uses `Zeroizing<String>` from the `zeroize` crate on every field
 that holds secret material.  When the value is dropped, its memory is
 overwritten with zeros, preventing secrets from lingering in memory.
 
@@ -760,7 +760,7 @@ the secret is overwritten as soon as it is no longer needed.
 
 **Source:** `librefang-wire/src/peer.rs`
 
-The LibreFang Wire Protocol (OFP) uses HMAC-SHA256 with nonce-based mutual
+The BossFang Wire Protocol (OFP) uses HMAC-SHA256 with nonce-based mutual
 authentication over TCP connections.
 
 ### 9.1 Pre-Shared Key Requirement
@@ -893,7 +893,7 @@ pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Bo
 
 **Source:** `librefang-api/src/rate_limiter.rs`
 
-LibreFang uses the Generic Cell Rate Algorithm (GCRA) for cost-aware API
+BossFang uses the Generic Cell Rate Algorithm (GCRA) for cost-aware API
 rate limiting via the `governor` crate.
 
 ### 11.1 Algorithm
@@ -1346,7 +1346,7 @@ fn merge_content(dst: &mut MessageContent, src: MessageContent) {
 
 **Source:** `librefang-api/src/routes.rs`
 
-LibreFang provides two health endpoints with different information levels.
+BossFang provides two health endpoints with different information levels.
 
 ### 17.1 Public Endpoint: `GET /api/health`
 
@@ -1404,7 +1404,7 @@ if api_key.is_empty() {
 
 ## 18. Dashboard Authentication
 
-LibreFang supports optional username/password authentication for the web dashboard.
+BossFang supports optional username/password authentication for the web dashboard.
 
 ### 18.1 Configuration
 

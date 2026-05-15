@@ -42,7 +42,7 @@ my-recall-plugin/
     └── merge_subagent.py     # scaffolded — called after sub-agent completes
 ```
 
-LibreFang loads the manifest, wires the declared hook scripts into the context engine, and runs them as subprocesses at well-defined lifecycle points. Each hook invocation is a fresh subprocess: one JSON object in on stdin, one JSON object out on stdout.
+BossFang loads the manifest, wires the declared hook scripts into the context engine, and runs them as subprocesses at well-defined lifecycle points. Each hook invocation is a fresh subprocess: one JSON object in on stdin, one JSON object out on stdout.
 
 Plugins are sandboxed by default — env vars are scrubbed to a safe baseline, the working directory is controlled, and a configurable timeout (default 30 seconds) kills runaway hooks. The `bootstrap` hook gets double the configured timeout since it runs only once and may need time to connect to external services.
 
@@ -205,7 +205,7 @@ Messages carry their **full structure**, including `tool_use` / `tool_result` / 
 }
 ```
 
-Return the trimmed / reordered message list. If you return an empty list or the hook fails, LibreFang automatically falls back to the default trimming strategy.
+Return the trimmed / reordered message list. If you return an empty list or the hook fails, BossFang automatically falls back to the default trimming strategy.
 
 ---
 
@@ -334,7 +334,7 @@ The hook is exposed in the same `Plugin` trait that ships `ingest` / `assemble` 
 
 ### Errors
 
-Exit with a non-zero code and write an error to stderr. LibreFang logs the stderr at `warn` level and falls back to the default context engine result. The turn still proceeds.
+Exit with a non-zero code and write an error to stderr. BossFang logs the stderr at `warn` level and falls back to the default context engine result. The turn still proceeds.
 
 ---
 
@@ -414,7 +414,7 @@ qdrant_url = os.environ["QDRANT_URL"]
 api_key    = os.environ.get("QDRANT_API_KEY", "")
 ```
 
-**Order of precedence** (highest wins): `[env]` values override LibreFang's baseline set (`LIBREFANG_AGENT_ID`, `PATH`, `HOME`, runtime passthrough vars) for any key that appears in both. Variables in the agent's `allowed_env_vars` list are applied after `[env]` and therefore take final precedence.
+**Order of precedence** (highest wins): `[env]` values override BossFang's baseline set (`LIBREFANG_AGENT_ID`, `PATH`, `HOME`, runtime passthrough vars) for any key that appears in both. Variables in the agent's `allowed_env_vars` list are applied after `[env]` and therefore take final precedence.
 
 ---
 
@@ -550,7 +550,7 @@ after_turn = "~/.librefang/plugins/prefs/hooks/after_turn.py"
 runtime = "python"
 ```
 
-### 5. Restart LibreFang
+### 5. Restart BossFang
 
 ```bash
 librefang start
@@ -682,7 +682,7 @@ Counters reset when the daemon restarts. Use this endpoint to identify slow hook
 
 ## Testing Locally
 
-Every hook is just a script that reads JSON from stdin and writes JSON to stdout — you can test it without LibreFang running:
+Every hook is just a script that reads JSON from stdin and writes JSON to stdout — you can test it without BossFang running:
 
 ```bash
 echo '{"type":"ingest","agent_id":"test","message":"hello","peer_id":"u1"}' \
@@ -734,9 +734,9 @@ Call this whenever a plugin mysteriously does nothing — `runtime_available: fa
 - **Empty output**: if the script exits 0 but prints nothing, `EmptyOutput` is returned and the default result is used.
 - **Malformed JSON**: the runtime walks stdout lines from the bottom up, taking the first JSON-parseable one. If none are parseable, it wraps the last line of stdout as `{ "text": "..." }`.
 - **Path traversal**: script paths may not contain `..` components — rejected at every invocation, not just load time.
-- **Env scrubbing**: every inherited env var is wiped (`env_clear`) before the subprocess spawns. LibreFang then sets `LIBREFANG_AGENT_ID`, `LIBREFANG_MESSAGE`, `LIBREFANG_RUNTIME`, forwards `PATH` and `HOME` from the parent process, adds the runtime's passthrough set (e.g. `PYTHONPATH`/`VIRTUAL_ENV` for Python, `GEM_HOME`/`GEM_PATH` for Ruby — see `runtime_passthrough_vars`), and finally forwards anything listed in the agent's `allowed_env_vars`. Your hook can read `LIBREFANG_AGENT_ID` / `LIBREFANG_MESSAGE` from the environment as an alternative to parsing stdin JSON.
+- **Env scrubbing**: every inherited env var is wiped (`env_clear`) before the subprocess spawns. BossFang then sets `LIBREFANG_AGENT_ID`, `LIBREFANG_MESSAGE`, `LIBREFANG_RUNTIME`, forwards `PATH` and `HOME` from the parent process, adds the runtime's passthrough set (e.g. `PYTHONPATH`/`VIRTUAL_ENV` for Python, `GEM_HOME`/`GEM_PATH` for Ruby — see `runtime_passthrough_vars`), and finally forwards anything listed in the agent's `allowed_env_vars`. Your hook can read `LIBREFANG_AGENT_ID` / `LIBREFANG_MESSAGE` from the environment as an alternative to parsing stdin JSON.
 
-Hook stderr is captured and printed to LibreFang's own logs — use it liberally for debug logging from inside your hook. Each line is forwarded to tracing **as it arrives** under the `plugin_stderr` target (Python tools get `python_stderr`), so long-running hooks can stream progress to `journalctl` / `docker logs` instead of going silent until they exit. Filter with `RUST_LOG=plugin_stderr=info` (or `python_stderr=info`).
+Hook stderr is captured and printed to BossFang's own logs — use it liberally for debug logging from inside your hook. Each line is forwarded to tracing **as it arrives** under the `plugin_stderr` target (Python tools get `python_stderr`), so long-running hooks can stream progress to `journalctl` / `docker logs` instead of going silent until they exit. Filter with `RUST_LOG=plugin_stderr=info` (or `python_stderr=info`).
 
 After the hook exits, the full captured stderr is *also* emitted as a single `debug!`-level summary so existing tooling that scrapes `"hook stderr:"` keeps working. The two channels are independent — operators that enable both will see each line streamed live AND once more in the post-exit summary.
 

@@ -1,6 +1,6 @@
 # Skill Development
 
-Skills are pluggable tool bundles that extend agent capabilities in LibreFang. A skill packages one or more tools with their implementation, letting agents do things that built-in tools do not cover. This guide covers skill creation, the manifest format, Python and WASM runtimes, publishing to FangHub, and CLI management.
+Skills are pluggable tool bundles that extend agent capabilities in BossFang. A skill packages one or more tools with their implementation, letting agents do things that built-in tools do not cover. This guide covers skill creation, the manifest format, Python and WASM runtimes, publishing to FangHub, and CLI management.
 
 ## Table of Contents
 
@@ -40,7 +40,7 @@ Skills are installed to `~/.librefang/skills/`. Official skills are available in
 
 ### 60 Bundled Skills
 
-LibreFang provides 60 expert knowledge skills available for installation from the dashboard:
+BossFang provides 60 expert knowledge skills available for installation from the dashboard:
 
 | Category | Skills |
 |----------|--------|
@@ -168,7 +168,7 @@ Each `[[tools.provided]]` entry defines one tool that the skill provides:
 
 ## Skill Config Variables
 
-Skills can declare configuration variables in `skill.toml`. At agent startup, LibreFang resolves each variable from the user's `~/.librefang/config.toml` and injects the resolved values into the agent's system prompt, making them available to the skill without hard-coding secrets or environment-specific values.
+Skills can declare configuration variables in `skill.toml`. At agent startup, BossFang resolves each variable from the user's `~/.librefang/config.toml` and injects the resolved values into the agent's system prompt, making them available to the skill without hard-coding secrets or environment-specific values.
 
 ### Declaring variables in `skill.toml`
 
@@ -227,7 +227,7 @@ Skill subprocesses run with `env_clear()` by default — no host environment var
 
 Some skills legitimately need a specific host variable. The canonical example is a skill that wraps a CLI tool which uses an env-based credential helper (e.g. `gog`'s file-backed keyring needs `GOG_KEYRING_PASSWORD`).
 
-This works as a **two-party opt-in**: the skill author declares which variables the skill *wants*, and the operator (the person running LibreFang) decides which of those requests to *grant*.
+This works as a **two-party opt-in**: the skill author declares which variables the skill *wants*, and the operator (the person running BossFang) decides which of those requests to *grant*.
 
 ### Skill author: declare in `skill.toml`
 
@@ -294,7 +294,7 @@ Python skills are the simplest to write. They run as subprocesses and communicat
 
 ### Protocol
 
-1. LibreFang sends a JSON payload to the script's stdin:
+1. BossFang sends a JSON payload to the script's stdin:
 
 ```json
 {
@@ -382,7 +382,7 @@ if __name__ == "__main__":
     main()
 ```
 
-### Using the LibreFang Python SDK
+### Using the BossFang Python SDK
 
 For more advanced skills, use the Python SDK (`sdk/python/librefang_sdk.py`):
 
@@ -545,7 +545,7 @@ librefang skill remove web-summarizer
 
 ## Publishing to FangHub
 
-FangHub is the community skill marketplace for LibreFang.
+FangHub is the community skill marketplace for BossFang.
 
 ### Preparing Your Skill
 
@@ -662,7 +662,7 @@ The kernel loads skill tools and prompts at agent spawn time, merging them with 
 
 ## OpenClaw Compatibility
 
-LibreFang can install and run OpenClaw-format skills. The skill installer auto-detects OpenClaw skills (by looking for `package.json` + `index.ts`/`index.js`) and converts them.
+BossFang can install and run OpenClaw-format skills. The skill installer auto-detects OpenClaw skills (by looking for `package.json` + `index.ts`/`index.js`) and converts them.
 
 ### Automatic Conversion
 
@@ -670,12 +670,12 @@ LibreFang can install and run OpenClaw-format skills. The skill installer auto-d
 librefang skill install /path/to/openclaw-skill
 ```
 
-If the directory contains an OpenClaw-style skill (Node.js package), LibreFang:
+If the directory contains an OpenClaw-style skill (Node.js package), BossFang:
 
 1. Detects the OpenClaw format.
 2. Generates a `skill.toml` manifest from `package.json`.
-3. Maps tool names to LibreFang conventions.
-4. Copies the skill to the LibreFang skills directory.
+3. Maps tool names to BossFang conventions.
+4. Copies the skill to the BossFang skills directory.
 
 ### Manual Conversion
 

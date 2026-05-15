@@ -37,7 +37,7 @@ app_secret_env = "TEAMS_APP_SECRET"
 default_agent = "ops"
 ```
 
-7. Configure the messaging endpoint in Azure to point to your LibreFang instance's public URL (e.g., `https://your-domain.com:4545/channels/teams/webhook`).
+7. Configure the messaging endpoint in Azure to point to your BossFang instance's public URL (e.g., `https://your-domain.com:4545/channels/teams/webhook`).
 8. Restart the daemon.
 
 ### How It Works
@@ -96,7 +96,7 @@ The Mattermost adapter connects to the Mattermost server via WebSocket for real-
 
 1. In the [Google Cloud Console](https://console.cloud.google.com/), enable the Google Chat API.
 2. Create a service account and download the JSON key file.
-3. Configure a Chat app in the Google Chat API settings, selecting the **HTTP endpoint** connection type. Set the endpoint URL to your LibreFang instance (e.g., `https://your-domain.com:4545/channels/google_chat/webhook`).
+3. Configure a Chat app in the Google Chat API settings, selecting the **HTTP endpoint** connection type. Set the endpoint URL to your BossFang instance (e.g., `https://your-domain.com:4545/channels/google_chat/webhook`).
 4. Set environment variables:
 
 ```bash
@@ -172,7 +172,7 @@ The Webex adapter registers a webhook with the Webex API to receive message even
 1. Go to the [Feishu Open Platform](https://open.feishu.cn/) and create a custom application.
 2. Enable **Bot** under the app's capabilities.
 3. Note the **App ID** and **App Secret** from the app credentials page.
-4. Configure event subscriptions to point to your LibreFang instance's webhook URL (e.g., `https://your-domain.com:4545/channels/feishu/webhook`).
+4. Configure event subscriptions to point to your BossFang instance's webhook URL (e.g., `https://your-domain.com:4545/channels/feishu/webhook`).
 5. Set environment variables:
 
 ```bash

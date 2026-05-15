@@ -132,7 +132,7 @@ mutexes, ensuring the audit log remains available even after a panic.
 
 **Source:** `librefang-types/src/taint.rs`
 
-LibreFang implements a lattice-based taint propagation model that prevents
+BossFang implements a lattice-based taint propagation model that prevents
 tainted values from flowing into sensitive sinks without explicit
 declassification.  This guards against prompt injection, data exfiltration,
 and confused-deputy attacks.
@@ -302,7 +302,7 @@ pub fn verify(&self) -> Result<(), String> {
 
 **Source:** All LLM driver modules, channel adapters, and web search modules.
 
-LibreFang uses `Zeroizing<String>` from the `zeroize` crate on every field
+BossFang uses `Zeroizing<String>` from the `zeroize` crate on every field
 that holds secret material.  When the value is dropped, its memory is
 overwritten with zeros, preventing secrets from lingering in memory.
 

@@ -1,7 +1,7 @@
 # Event Hook System
 
 Lifecycle hooks let external scripts react to agent and session events without modifying
-agent code. When an event fires, LibreFang spawns the configured executable, passes
+agent code. When an event fires, BossFang spawns the configured executable, passes
 structured data through environment variables, and continues — regardless of whether the
 hook exits cleanly.
 
@@ -71,7 +71,7 @@ command: ./run.sh
 | `session:start` | A session is created or resumed for the first time in a daemon lifetime |
 | `session:end` | A session is explicitly closed |
 | `session:reset` | A session is cleared by the auto-reset policy or a manual API call |
-| `gateway:startup` | The LibreFang daemon finishes its boot sequence |
+| `gateway:startup` | The BossFang daemon finishes its boot sequence |
 
 **Wildcard patterns** are evaluated with standard glob rules:
 
@@ -88,7 +88,7 @@ exact event name.
 
 ## Environment Variables
 
-LibreFang passes two variables to every hook process:
+BossFang passes two variables to every hook process:
 
 | Variable | Type | Content |
 |---|---|---|
@@ -159,7 +159,7 @@ environment (including `PATH`), so system tools are available without extra setu
 
 | Field | Type | Description |
 |---|---|---|
-| `version` | string | LibreFang daemon version, e.g. `"2026.4.21-beta1"` |
+| `version` | string | BossFang daemon version, e.g. `"2026.4.21-beta1"` |
 | `started_at` | string (ISO 8601) | UTC timestamp of boot completion |
 
 ### `transform_tool_result`
@@ -229,7 +229,7 @@ not hot-reload hook files mid-execution — restart or send `SIGHUP` after addin
 
 ## Error Handling
 
-- If a hook exits with a non-zero code, LibreFang logs a `WARN` entry with the hook name,
+- If a hook exits with a non-zero code, BossFang logs a `WARN` entry with the hook name,
   event, and exit code, then continues normally.
 - Hooks have a **5-second wall-clock timeout**. A hook that exceeds this limit is killed and
   a warning is emitted. Adjust long-running work to run asynchronously (e.g. spawn a
@@ -248,7 +248,7 @@ Errors in hooks never propagate to the agent or caller.
   other listeners. Offload heavy work to a background queue or message broker.
 - **No return value.** Hooks cannot modify the agent response, inject messages into the
   session, or signal the kernel. They are purely observational.
-- **No secrets injection.** LibreFang does not expose vault secrets to hook processes.
+- **No secrets injection.** BossFang does not expose vault secrets to hook processes.
   Pass credentials through the daemon's environment or a secrets manager of your choice.
 - **Single executable per hook.** Each `HOOK.yaml` specifies one command. Compose multiple
   actions inside that script, or register multiple hooks for the same event.

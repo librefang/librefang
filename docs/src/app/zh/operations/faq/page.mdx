@@ -1,12 +1,12 @@
 # 常见问题
 
-LibreFang 常见问题解答。
+BossFang 常见问题解答。
 
 ---
 
 ## 安装与配置
 
-### Q: 如何安装 LibreFang？
+### Q: 如何安装 BossFang？
 
 ```bash
 # 使用 cargo 安装
@@ -20,7 +20,7 @@ cargo install --path crates/librefang-cli
 
 ### Q: 需要配置哪些 API 密钥？
 
-LibreFang 需要至少一个 LLM 提供商的 API 密钥：
+BossFang 需要至少一个 LLM 提供商的 API 密钥：
 
 ```bash
 # 选项 1: Anthropic (推荐)
@@ -137,7 +137,7 @@ def my_tool(param: str) -> str:
 
 ### Q: 支持哪些消息平台？
 
-LibreFang 支持 42 个通道适配器：
+BossFang 支持 42 个通道适配器：
 
 - **核心**: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email
 - **企业**: Microsoft Teams, Google Chat, Webex, Feishu
@@ -147,7 +147,7 @@ LibreFang 支持 42 个通道适配器：
 
 1. 创建 Bot: @BotFather on Telegram
 2. 获取 Bot Token
-3. 配置 LibreFang：
+3. 配置 BossFang：
 
 ```toml
 [telegram]
@@ -168,9 +168,9 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
 ## 安全
 
-### Q: LibreFang 如何保护我的数据？
+### Q: BossFang 如何保护我的数据？
 
-LibreFang 采用 16 层安全防护：
+BossFang 采用 16 层安全防护：
 
 1. **WASM 双计量沙箱** - 工具在隔离环境中运行
 2. **Merkle 哈希链** - 所有操作可审计
@@ -313,9 +313,9 @@ librefang migrate --from openclaw --dry-run
 
 ## 计费与成本
 
-### Q: LibreFang 收费吗？
+### Q: BossFang 收费吗？
 
-LibreFang 本身是开源免费的。您只需支付 LLM 提供商的 API 费用。
+BossFang 本身是开源免费的。您只需支付 LLM 提供商的 API 费用。
 
 ### Q: 如何跟踪成本？
 
@@ -358,9 +358,9 @@ alert_threshold = 0.8  # 80% 时告警
 
 ## 其他
 
-### Q: LibreFang 与其他框架的区别？
+### Q: BossFang 与其他框架的区别？
 
-| 特性 | LibreFang | OpenClaw | LangChain |
+| 特性 | BossFang | OpenClaw | LangChain |
 |------|-----------|----------|-----------|
 | 语言 | Rust | Node.js | Python |
 | 内存 | ~40MB | ~200MB | 依赖语言 |
