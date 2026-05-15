@@ -1,18 +1,18 @@
 {
   "active_phase": "phase-1-rebrand-completion",
-  "active_change": "m6-dashboard-localstorage-shim",
+  "active_change": null,
   "last_updated": "2026-05-14T00:00:00Z",
   "last_updated_by": "kbd-execute",
   "backend": "native-tool",
   "backend_rationale": "No OpenSpec in this project. Single-tool (Claude Code) execution with progress.json bookkeeping. Hybrid not warranted at this scale.",
   "next_action": {
-    "command": "/kbd-execute m6-dashboard-localstorage-shim",
-    "description": "Execute change m6-dashboard-localstorage-shim (M6): read-old/write-new localStorage shim in crates/librefang-api/dashboard/src/api.ts — getApiKey() reads bossfang-api-key first, falls back to librefang-api-key and promotes on hit; setApiKey() writes only bossfang-api-key and removes librefang-api-key. 4 call sites (lines ~1019, ~1020, ~3339, ~3340, ~3347, ~3348)."
+    "command": null,
+    "description": "Phase 1 complete — all 7 milestones met (M1-M7). No further changes pending. PR merge sequence: #10 (M1+M2) → #11 (M3) → #12 (M4) → #13 (M5+M7) → #14 (M6). Rebase each PR onto main as the previous one merges."
   },
-  "phase_progress": "6/7 milestones done (M1, M2, M3, M4, M5, M7). Next: M6 (dashboard localStorage shim).",
+  "phase_progress": "7/7 milestones done (M1, M2, M3, M4, M5, M6, M7). Phase 1 COMPLETE.",
   "last_completed": {
-    "change_id": "m5-m7-ua-strings-env-aliases",
-    "milestones": ["M5", "M7"],
+    "change_id": "m6-dashboard-localstorage-shim",
+    "milestones": ["M6"],
     "completed_at": "2026-05-14T00:00:00Z"
   }
 }

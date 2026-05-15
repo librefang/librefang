@@ -4,10 +4,10 @@
   "tool": "claude-code",
   "started": "2026-05-14T00:00:00Z",
   "changes_total": 5,
-  "changes_completed": 4,
+  "changes_completed": 5,
   "changes_in_progress": 0,
   "changes_blocked": 0,
-  "changes_pending": 1,
+  "changes_pending": 0,
   "changes": [
     {
       "id": "m1-m2-cli-banner-install-paths-config-templates",
@@ -122,7 +122,23 @@
     {
       "id": "m6-dashboard-localstorage-shim",
       "milestones": ["M6"],
-      "status": "PENDING"
+      "status": "DONE",
+      "started": "2026-05-14T00:00:00Z",
+      "started_by": "kbd-execute",
+      "completed": "2026-05-14T00:00:00Z",
+      "tool": "claude-code",
+      "scope": [
+        "crates/librefang-api/dashboard/src/api.ts — added API_KEY = \"bossfang-api-key\" and API_KEY_LEGACY = \"librefang-api-key\" module-level constants",
+        "crates/librefang-api/dashboard/src/api.ts:getStoredApiKey() — reads bossfang-api-key from sessionStorage/localStorage first; on legacy hit promotes value to new key and clears both legacy stores (read-old/write-new shim)",
+        "crates/librefang-api/dashboard/src/api.ts:setApiKey() — writes bossfang-api-key to sessionStorage; removes legacy librefang-api-key from both stores",
+        "crates/librefang-api/dashboard/src/api.ts:clearApiKey() — removes both bossfang-api-key and librefang-api-key from sessionStorage + localStorage",
+        "crates/librefang-api/dashboard/src/pages/AuditPage.tsx:109 — replaced rogue localStorage.getItem(\"librefang-api-key\") with getStoredApiKey() (import added)",
+        "crates/librefang-api/dashboard/src/api.test.ts — updated assertions to expect writes on bossfang-api-key and verify librefang-api-key is cleared on every setApiKey/clearApiKey call"
+      ],
+      "verification": {
+        "pnpm_test": "PASS — 588/588 tests (63 test files) via vitest run",
+        "pnpm_typecheck": "PASS — only pre-existing App.tsx TS6133 errors (unused variables USER_AVATAR_STYLE, BRAND_MARK_STYLE) also present on the base branch; no new errors introduced"
+      }
     }
   ],
   "goal_completion": {
@@ -131,7 +147,7 @@
     "M3_install_script": "MET",
     "M4_docs_mdx_sweep": "MET",
     "M5_ua_strings": "MET",
-    "M6_dashboard_localstorage": "NOT_STARTED",
+    "M6_dashboard_localstorage": "MET",
     "M7_env_aliases": "MET"
   }
 }

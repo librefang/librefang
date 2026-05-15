@@ -1011,15 +1011,35 @@ export function setOnUnauthorized(fn: (() => void) | null) {
   _unauthorizedFired = false;
 }
 
+// BossFang localStorage/sessionStorage key names.
+// API_KEY is the preferred key written by new builds.
+// API_KEY_LEGACY is the old "librefang-api-key" accepted as a read-fallback
+// for users upgrading from an older dashboard build. On a legacy hit the value
+// is promoted to the new key automatically (read-old/write-new shim).
+// Drop the legacy branch in ~2 release cycles once the upgrade window closes.
+const API_KEY = "bossfang-api-key";
+const API_KEY_LEGACY = "librefang-api-key";
+
 export function getStoredApiKey(): string {
   // #3620: Prefer sessionStorage (tab-scoped, not persisted to disk) over
-  // localStorage to reduce the XSS exfil window. Fall back to localStorage so
-  // tokens stored by older versions of the dashboard keep working.
-  return (
-    sessionStorage.getItem("librefang-api-key") ||
-    localStorage.getItem("librefang-api-key") ||
-    ""
-  );
+  // localStorage to reduce the XSS exfil window. Check BossFang key names
+  // first; fall back to the legacy "librefang-api-key" for users upgrading
+  // from older dashboard builds. On a legacy hit the value is promoted to
+  // the new key so the shim is transparent after a single tab load.
+  const newKey =
+    sessionStorage.getItem(API_KEY) || localStorage.getItem(API_KEY);
+  if (newKey) return newKey;
+
+  // Legacy fallback + promote to new key name.
+  const legacy =
+    sessionStorage.getItem(API_KEY_LEGACY) ||
+    localStorage.getItem(API_KEY_LEGACY);
+  if (legacy) {
+    sessionStorage.setItem(API_KEY, legacy);
+    sessionStorage.removeItem(API_KEY_LEGACY);
+    localStorage.removeItem(API_KEY_LEGACY);
+  }
+  return legacy || "";
 }
 
 export function authHeader(): HeadersInit {
@@ -3336,16 +3356,23 @@ export async function getA2ATaskStatus(taskId: string): Promise<A2ATaskStatus> {
 export function setApiKey(key: string) {
   // #3620: Store in sessionStorage (tab-scoped, reduced XSS exposure) and
   // remove any stale localStorage copy so the two stores don't diverge.
-  sessionStorage.setItem("librefang-api-key", key);
-  localStorage.removeItem("librefang-api-key");
+  // Write the BossFang key and clear the legacy key from both stores so
+  // users upgrading from an older build start clean on the next login.
+  sessionStorage.setItem(API_KEY, key);
+  localStorage.removeItem(API_KEY);
+  sessionStorage.removeItem(API_KEY_LEGACY);
+  localStorage.removeItem(API_KEY_LEGACY);
   // Reset the 401-fired guard so future unauthorized responses
   // (e.g. after token expiry) can re-trigger the login dialog.
   _unauthorizedFired = false;
 }
 
 export function clearApiKey() {
-  sessionStorage.removeItem("librefang-api-key");
-  localStorage.removeItem("librefang-api-key");
+  sessionStorage.removeItem(API_KEY);
+  localStorage.removeItem(API_KEY);
+  // Also clear the legacy key so upgraded sessions don't ghost-persist.
+  sessionStorage.removeItem(API_KEY_LEGACY);
+  localStorage.removeItem(API_KEY_LEGACY);
 }
 
 /** Invalidate the server-side session + cookie, then clear the local token.
