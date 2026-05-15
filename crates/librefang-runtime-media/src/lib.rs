@@ -9,8 +9,24 @@
 pub mod elevenlabs;
 pub mod gemini;
 pub mod google_tts;
+pub mod media_understanding;
 pub mod minimax;
 pub mod openai;
+
+/// UTF-8-safe truncation helper. Duplicates `librefang_runtime::str_utils::safe_truncate_str`
+/// (kept in `librefang-runtime` because most call sites still live there). Splitting it
+/// into its own crate just for media would be over-engineering; the function is < 10 LOC.
+#[inline]
+pub(crate) fn safe_truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 use async_trait::async_trait;
 use dashmap::DashMap;

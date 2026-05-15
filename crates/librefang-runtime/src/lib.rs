@@ -61,12 +61,12 @@ pub mod mcp_migrate;
 pub use librefang_runtime_mcp::mcp_oauth;
 pub mod mcp_server;
 #[cfg(feature = "media")]
-pub mod media;
+pub use librefang_runtime_media as media;
 #[cfg(not(feature = "media"))]
 #[path = "media_stub.rs"]
 pub mod media;
 #[cfg(feature = "media")]
-pub mod media_understanding;
+pub use librefang_runtime_media::media_understanding;
 #[cfg(not(feature = "media"))]
 #[path = "media_understanding_stub.rs"]
 pub mod media_understanding;

@@ -12,6 +12,7 @@ librefang-http = { path = "../librefang-http" }
 librefang-kernel-handle = { path = "../librefang-kernel-handle" }
 librefang-runtime-audit = { path = "../librefang-runtime-audit" }
 librefang-runtime-browser = { path = "../librefang-runtime-browser", optional = true }
+librefang-runtime-media = { path = "../librefang-runtime-media", optional = true }
 librefang-runtime-sandbox-docker = { path = "../librefang-runtime-sandbox-docker", optional = true }
 librefang-runtime-mcp = { path = "../librefang-runtime-mcp" }
 librefang-llm-drivers = { path = "../librefang-llm-drivers" }
@@ -96,7 +97,7 @@ daytona-backend = []
 # -p librefang-runtime --no-default-features` excludes the corresponding
 # modules and consumer code paths so build-time configurations can omit
 # whole subsystems for size/security.
-media = []
+media = ["dep:librefang-runtime-media"]
 browser = ["dep:librefang-runtime-browser"]
 docker-sandbox = ["dep:librefang-runtime-sandbox-docker"]
 

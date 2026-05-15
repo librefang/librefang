@@ -99,7 +99,7 @@ impl MediaDriver for ElevenLabsMediaDriver {
             self.base_url, voice_id, format
         );
 
-        let client = crate::http_client::proxied_client();
+        let client = librefang_http::proxied_client();
         let response = client
             .post(&url)
             .header("xi-api-key", &api_key)
@@ -112,7 +112,7 @@ impl MediaDriver for ElevenLabsMediaDriver {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let err = response.text().await.unwrap_or_default();
-            let truncated = crate::str_utils::safe_truncate_str(&err, 500);
+            let truncated = crate::safe_truncate_str(&err, 500);
             return Err(MediaError::Api {
                 status,
                 message: truncated.to_string(),

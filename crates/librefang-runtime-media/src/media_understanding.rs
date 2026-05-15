@@ -344,7 +344,7 @@ async fn whisper_transcribe(
         .text("model", model.to_string())
         .text("response_format", "text");
 
-    let client = crate::http_client::proxied_client();
+    let client = librefang_http::proxied_client();
     let resp = client
         .post(api_url)
         .bearer_auth(api_key)
@@ -412,7 +412,7 @@ async fn gemini_transcribe(
         model, api_key
     );
 
-    let client = crate::http_client::proxied_client();
+    let client = librefang_http::proxied_client();
     let resp = client
         .post(&url)
         .json(&body)
@@ -463,7 +463,7 @@ async fn elevenlabs_transcribe(
         .part("file", file_part)
         .text("model_id", model.to_string());
 
-    let client = crate::http_client::proxied_client();
+    let client = librefang_http::proxied_client();
     let resp = client
         .post("https://api.elevenlabs.io/v1/speech-to-text")
         .header("xi-api-key", &api_key)

@@ -96,7 +96,7 @@ impl MediaDriver for OpenAIMediaDriver {
         }
 
         let url = format!("{}/images/generations", self.base_url);
-        let client = crate::http_client::proxied_client();
+        let client = librefang_http::proxied_client();
         let response = client
             .post(&url)
             .bearer_auth(&api_key)
@@ -109,7 +109,7 @@ impl MediaDriver for OpenAIMediaDriver {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let err = response.text().await.unwrap_or_default();
-            let truncated = crate::str_utils::safe_truncate_str(&err, 500);
+            let truncated = crate::safe_truncate_str(&err, 500);
             return Err(MediaError::Api {
                 status,
                 message: truncated.to_string(),
@@ -192,7 +192,7 @@ impl MediaDriver for OpenAIMediaDriver {
         }
 
         let url = format!("{}/audio/speech", self.base_url);
-        let client = crate::http_client::proxied_client();
+        let client = librefang_http::proxied_client();
         let response = client
             .post(&url)
             .bearer_auth(&api_key)
@@ -205,7 +205,7 @@ impl MediaDriver for OpenAIMediaDriver {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let err = response.text().await.unwrap_or_default();
-            let truncated = crate::str_utils::safe_truncate_str(&err, 500);
+            let truncated = crate::safe_truncate_str(&err, 500);
             return Err(MediaError::Api {
                 status,
                 message: truncated.to_string(),
@@ -333,7 +333,7 @@ impl MediaDriver for GenericOpenAICompatMediaDriver {
         }
 
         let url = format!("{}/images/generations", self.base_url);
-        let client = crate::http_client::proxied_client();
+        let client = librefang_http::proxied_client();
         let response = client
             .post(&url)
             .bearer_auth(&api_key)
@@ -346,7 +346,7 @@ impl MediaDriver for GenericOpenAICompatMediaDriver {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let err = response.text().await.unwrap_or_default();
-            let truncated = crate::str_utils::safe_truncate_str(&err, 500);
+            let truncated = crate::safe_truncate_str(&err, 500);
             return Err(MediaError::Api {
                 status,
                 message: truncated.to_string(),

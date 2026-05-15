@@ -4773,6 +4773,7 @@ dependencies = [
  "librefang-runtime-audit",
  "librefang-runtime-browser",
  "librefang-runtime-mcp",
+ "librefang-runtime-media",
  "librefang-runtime-sandbox-docker",
  "librefang-skills",
  "librefang-types",
@@ -4871,6 +4872,27 @@ dependencies = [
  "tracing",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "librefang-runtime-media"
+version = "2026.5.12-beta.11"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "dashmap",
+ "hex",
+ "librefang-http",
+ "librefang-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
 ]
 
 [[package]]

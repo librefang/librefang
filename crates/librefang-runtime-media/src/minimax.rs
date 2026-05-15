@@ -144,7 +144,7 @@ impl MediaDriver for MiniMaxMediaDriver {
         }
 
         let url = format!("{}/image_generation", self.base_url);
-        let client = crate::http_client::proxied_client();
+        let client = librefang_http::proxied_client();
         let response = client
             .post(&url)
             .bearer_auth(&api_key)
@@ -157,7 +157,7 @@ impl MediaDriver for MiniMaxMediaDriver {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let err = response.text().await.unwrap_or_default();
-            let truncated = crate::str_utils::safe_truncate_str(&err, 500);
+            let truncated = crate::safe_truncate_str(&err, 500);
             return Err(MediaError::Api {
                 status,
                 message: truncated.to_string(),
@@ -245,7 +245,7 @@ impl MediaDriver for MiniMaxMediaDriver {
         }
 
         let url = format!("{}/t2a_v2", self.base_url);
-        let client = crate::http_client::proxied_client();
+        let client = librefang_http::proxied_client();
         let response = client
             .post(&url)
             .bearer_auth(&api_key)
@@ -258,7 +258,7 @@ impl MediaDriver for MiniMaxMediaDriver {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let err = response.text().await.unwrap_or_default();
-            let truncated = crate::str_utils::safe_truncate_str(&err, 500);
+            let truncated = crate::safe_truncate_str(&err, 500);
             return Err(MediaError::Api {
                 status,
                 message: truncated.to_string(),
@@ -340,7 +340,7 @@ impl MediaDriver for MiniMaxMediaDriver {
         }
 
         let url = format!("{}/video_generation", self.base_url);
-        let client = crate::http_client::proxied_client();
+        let client = librefang_http::proxied_client();
         let response = client
             .post(&url)
             .bearer_auth(&api_key)
@@ -353,7 +353,7 @@ impl MediaDriver for MiniMaxMediaDriver {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let err = response.text().await.unwrap_or_default();
-            let truncated = crate::str_utils::safe_truncate_str(&err, 500);
+            let truncated = crate::safe_truncate_str(&err, 500);
             return Err(MediaError::Api {
                 status,
                 message: truncated.to_string(),
@@ -386,7 +386,7 @@ impl MediaDriver for MiniMaxMediaDriver {
             "{}/query/video_generation?task_id={}",
             self.base_url, task_id
         );
-        let client = crate::http_client::proxied_client();
+        let client = librefang_http::proxied_client();
         let response = client
             .get(&url)
             .bearer_auth(&api_key)
@@ -398,7 +398,7 @@ impl MediaDriver for MiniMaxMediaDriver {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let err = response.text().await.unwrap_or_default();
-            let truncated = crate::str_utils::safe_truncate_str(&err, 500);
+            let truncated = crate::safe_truncate_str(&err, 500);
             return Err(MediaError::Api {
                 status,
                 message: truncated.to_string(),
@@ -437,7 +437,7 @@ impl MediaDriver for MiniMaxMediaDriver {
             "{}/query/video_generation?task_id={}",
             self.base_url, task_id
         );
-        let client = crate::http_client::proxied_client();
+        let client = librefang_http::proxied_client();
         let response = client
             .get(&url)
             .bearer_auth(&api_key)
@@ -538,7 +538,7 @@ impl MediaDriver for MiniMaxMediaDriver {
         }
 
         let url = format!("{}/music_generation", self.base_url);
-        let client = crate::http_client::proxied_client();
+        let client = librefang_http::proxied_client();
         let response = client
             .post(&url)
             .bearer_auth(&api_key)
@@ -551,7 +551,7 @@ impl MediaDriver for MiniMaxMediaDriver {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let err = response.text().await.unwrap_or_default();
-            let truncated = crate::str_utils::safe_truncate_str(&err, 500);
+            let truncated = crate::safe_truncate_str(&err, 500);
             return Err(MediaError::Api {
                 status,
                 message: truncated.to_string(),
