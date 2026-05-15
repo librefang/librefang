@@ -25,15 +25,13 @@ use base64::Engine;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::{error::ExportError, ExportReceipt, TrajectoryExport};
+use crate::{
+    error::{classify_status, read_body_truncated, ExportError},
+    ExportReceipt, TrajectoryExport,
+};
 
 /// Default W&B API base URL. Tests override via `export_to_wandb_with_base`.
 const DEFAULT_WANDB_BASE: &str = "https://api.wandb.ai";
-
-/// Maximum upstream response body size we keep on an error. Larger
-/// bodies are truncated so a pathological upstream cannot bloat the
-/// returned `ExportError::UpstreamRejected`.
-const MAX_ERROR_BODY_BYTES: usize = 4096;
 
 /// Wire shape of the W&B "create run" request body. Field names match
 /// the REST documentation; optional fields are omitted via
@@ -192,34 +190,6 @@ fn build_basic_auth(api_key: &str) -> String {
     let raw = format!("api:{api_key}");
     let encoded = base64::engine::general_purpose::STANDARD.encode(raw.as_bytes());
     format!("Basic {encoded}")
-}
-
-/// Map an HTTP status + body to the appropriate `ExportError` variant.
-/// 401 / 403 collapse into `AuthError` so callers can prompt for a
-/// fresh API key without showing the raw body (some upstreams echo the
-/// rejected token).
-fn classify_status(status: u16, body: String) -> ExportError {
-    if status == 401 || status == 403 {
-        ExportError::AuthError
-    } else {
-        ExportError::UpstreamRejected { status, body }
-    }
-}
-
-/// Read an error response body, truncating to `MAX_ERROR_BODY_BYTES`
-/// to keep the returned error bounded. Lossy UTF-8 decoding so any
-/// upstream that returns non-text bytes still surfaces *something*.
-async fn read_body_truncated(resp: reqwest::Response) -> String {
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(e) => return format!("<error reading body: {e}>"),
-    };
-    let slice = if bytes.len() > MAX_ERROR_BODY_BYTES {
-        &bytes[..MAX_ERROR_BODY_BYTES]
-    } else {
-        &bytes[..]
-    };
-    String::from_utf8_lossy(slice).into_owned()
 }
 
 #[cfg(test)]

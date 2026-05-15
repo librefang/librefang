@@ -4753,7 +4753,6 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "librefang-http",
- "librefang-types",
  "reqwest",
  "serde",
  "serde_json",

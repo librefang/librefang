@@ -269,14 +269,6 @@ pub async fn export(
     }
 }
 
-// Forward-compatibility anchor: re-export the workspace types crate so
-// follow-up integrations (Tinker / Atropos) that need to project
-// rollout-side structs (agent ids, session ids, tool metadata) into
-// upstream-specific request bodies have one canonical import path
-// without each adding their own `librefang-types = { … }` line.
-#[doc(hidden)]
-pub use librefang_types as _types;
-
 #[cfg(test)]
 mod tests {
     use super::*;

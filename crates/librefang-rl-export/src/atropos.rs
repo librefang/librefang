@@ -51,17 +51,16 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::{error::ExportError, ExportReceipt, TrajectoryExport};
+use crate::{
+    error::{classify_status, read_body_truncated, ExportError},
+    ExportReceipt, TrajectoryExport,
+};
 
 /// Default Atropos REST base URL. Matches the Atropos `run-api` default
 /// documented in the project's README (the server binds to
 /// `http://localhost:8000` unless overridden by CLI flags). Tests
 /// override via `export_to_atropos_with_base`.
 const DEFAULT_ATROPOS_BASE: &str = "http://localhost:8000";
-
-/// Maximum upstream response body size we keep on an error. Matches the
-/// W&B / Tinker exporters so error sizes are bounded uniformly.
-const MAX_ERROR_BODY_BYTES: usize = 4096;
 
 /// Wire shape of the Atropos `RegisterEnv` request body. Mirrors the
 /// `RegisterEnv` Pydantic model in
@@ -230,32 +229,6 @@ pub(crate) async fn export_to_atropos_with_base(
         bytes_uploaded: bytes_len,
         uploaded_at: Utc::now(),
     })
-}
-
-/// Map an HTTP status + body to the appropriate `ExportError` variant.
-/// Mirrors `wandb::classify_status` / `tinker::classify_status`. Atropos
-/// itself has no auth, so 401 / 403 are unlikely in practice — kept for
-/// parity in case a reverse proxy fronts the API.
-fn classify_status(status: u16, body: String) -> ExportError {
-    if status == 401 || status == 403 {
-        ExportError::AuthError
-    } else {
-        ExportError::UpstreamRejected { status, body }
-    }
-}
-
-/// Read an error response body, truncating to `MAX_ERROR_BODY_BYTES`.
-async fn read_body_truncated(resp: reqwest::Response) -> String {
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(e) => return format!("<error reading body: {e}>"),
-    };
-    let slice = if bytes.len() > MAX_ERROR_BODY_BYTES {
-        &bytes[..MAX_ERROR_BODY_BYTES]
-    } else {
-        &bytes[..]
-    };
-    String::from_utf8_lossy(slice).into_owned()
 }
 
 #[cfg(test)]

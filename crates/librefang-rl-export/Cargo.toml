@@ -6,7 +6,6 @@ license.workspace = true
 description = "Long-horizon RL rollout trajectory exporter (W&B / Tinker / Atropos integration surface)"
 
 [dependencies]
-librefang-types = { path = "../librefang-types" }
 librefang-http = { path = "../librefang-http" }
 reqwest = { workspace = true }
 tokio = { workspace = true }

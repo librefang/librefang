@@ -64,3 +64,38 @@ impl From<reqwest::Error> for ExportError {
         ExportError::NetworkError(err.to_string())
     }
 }
+
+/// Maximum upstream response body size kept on an error. Larger bodies
+/// are truncated so a pathological upstream cannot bloat the returned
+/// [`ExportError::UpstreamRejected`]. Shared across all exporters so
+/// the error surface stays uniform.
+pub(crate) const MAX_ERROR_BODY_BYTES: usize = 4096;
+
+/// Map an HTTP status + body to the appropriate `ExportError` variant.
+/// 401 / 403 collapse into `AuthError` so callers can prompt for a
+/// fresh credential without showing the raw body (some upstreams echo
+/// the rejected token). All other non-2xx codes surface as
+/// `UpstreamRejected` with the (already-truncated) body forwarded.
+pub(crate) fn classify_status(status: u16, body: String) -> ExportError {
+    if status == 401 || status == 403 {
+        ExportError::AuthError
+    } else {
+        ExportError::UpstreamRejected { status, body }
+    }
+}
+
+/// Read an error response body, truncating to [`MAX_ERROR_BODY_BYTES`].
+/// Lossy UTF-8 decoding so any upstream that returns non-text bytes
+/// still surfaces *something*.
+pub(crate) async fn read_body_truncated(resp: reqwest::Response) -> String {
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => return format!("<error reading body: {e}>"),
+    };
+    let slice = if bytes.len() > MAX_ERROR_BODY_BYTES {
+        &bytes[..MAX_ERROR_BODY_BYTES]
+    } else {
+        &bytes[..]
+    };
+    String::from_utf8_lossy(slice).into_owned()
+}
