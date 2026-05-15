@@ -430,7 +430,7 @@ export function AgentManifestForm({
             placeholder={t("agents.form.tags_placeholder")}
           />
         </Field>
-        <Field label={t("agents.form.skills")}>
+        <Field label={t("agents.form.skills")} hint={t("agents.form.skills_hint")}>
           {skillFinder ? (
             <MultiSelectCmdk
               options={skillFinder.options}

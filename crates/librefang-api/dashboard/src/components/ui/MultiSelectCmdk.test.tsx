@@ -206,6 +206,37 @@ describe("MultiSelectCmdk", () => {
     ).toBeInTheDocument();
   });
 
+  it("allowFreeText=true does not duplicate an already-selected chip on Enter (#5049)", async () => {
+    const user = userEvent.setup();
+    function FreeTextHarness() {
+      const [value, setValue] = useState<string[]>(["custom_tool"]);
+      return (
+        <MultiSelectCmdk
+          options={["alpha", "beta"]}
+          value={value}
+          onChange={(next) =>
+            setValue((prev) => (typeof next === "function" ? next(prev) : next))
+          }
+          placeholder="Search…"
+          allowFreeText
+        />
+      );
+    }
+    render(<FreeTextHarness />);
+    // Chip starts pre-selected — the input now uses the "Add more…" placeholder.
+    const input = screen.getByPlaceholderText("Add more…");
+    await user.click(input);
+    await user.type(input, "custom_tool");
+    await user.keyboard("{Enter}");
+
+    // Only one chip — Enter on a duplicate must NOT create a second one.
+    expect(
+      screen.getAllByRole("button", { name: "Remove custom_tool" }),
+    ).toHaveLength(1);
+    // Input is cleared so the user can keep typing.
+    expect(input).toHaveValue("");
+  });
+
   it("allowFreeText=false does NOT commit free text on Enter (#5049)", async () => {
     const user = userEvent.setup();
     render(<Harness />);
