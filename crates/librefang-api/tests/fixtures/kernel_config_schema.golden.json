@@ -756,6 +756,12 @@
           "format": "double",
           "type": "number"
         },
+        "default_burst_ratio": {
+          "default": 0.0,
+          "description": "Global default burst ratio for all agents (`0.0` = unset, use compiled default `0.2`). Overridden per-agent via `ResourceQuota.burst_ratio`.\n\nValidated at parse time: NaN, infinity, and values outside `[0.0, 1.0]` are rejected with a serde error rather than silently sanitised at the rate-limiter use site. The compiled-default fallback for an out-of-range agent override still lives in `ResourceQuota::effective_burst_ratio` (defence in depth), but operator-provided config that's nonsensical should fail loud at boot, not paper over a typo.",
+          "format": "float",
+          "type": "number"
+        },
         "default_max_llm_tokens_per_hour": {
           "default": 0,
           "description": "Default per-agent hourly token limit override. When set (> 0), all agents will be overridden to this value. Set to 0 to keep each agent's own limit. Use this to globally raise or lower the token budget for all agents.",
@@ -785,7 +791,7 @@
           "additionalProperties": {
             "$ref": "#/definitions/ProviderBudget"
           },
-          "description": "Per-provider spending caps, keyed by provider id (e.g. `\"moonshot\"`, `\"openai\"`, `\"litellm\"`). Missing providers are unlimited.",
+          "description": "Per-provider spending caps, keyed by provider id (e.g. `\"moonshot\"`, `\"openai\"`, `\"litellm\"`). Missing providers are unlimited.\n\n`BTreeMap` so the serialised form is deterministic — `[budget].providers` round-trips byte-identically across reloads, so `field_changed` in `config_reload::build_reload_plan` (which compares JSON forms) does not emit a spurious `HotAction::UpdateBudget` from HashMap iteration-order drift when the operator hasn't actually touched the caps.",
           "type": "object"
         }
       },
@@ -1189,6 +1195,13 @@
         "file_download_max_bytes": {
           "default": 52428800,
           "description": "Maximum file size in bytes for channel file downloads (default: 50 MB).",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "file_upload_max_bytes": {
+          "default": 52428800,
+          "description": "Maximum file size in bytes for channel file uploads (bot → server), applied uniformly by the Matrix and Telegram adapters before sending outbound media (default: 50 MB).\n\nDistinct from `file_download_max_bytes` (inbound: server → agent → disk). An operator who wants a larger inbound budget but a smaller outbound budget — or vice versa — must set both independently. The 50 MiB default matches both the Matrix homeserver convention and Telegram's bot API ceiling, so omitting the field leaves behaviour unchanged from the pre-#4882 hardcoded constants.",
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
@@ -1900,6 +1913,11 @@
     "ContextEngineTomlConfig": {
       "description": "External authentication provider configuration (OAuth2/OIDC).\n\nAllows delegating user authentication to an external identity provider (Okta, Auth0, Keycloak, Google, GitHub, Microsoft, etc.).\n\nSingle provider (backward-compatible): ```toml [external_auth] enabled = true issuer_url = \"https://accounts.google.com\" client_id = \"your-client-id.apps.googleusercontent.com\" client_secret_env = \"LIBREFANG_OAUTH_CLIENT_SECRET\" redirect_url = \"http://127.0.0.1:4545/api/auth/callback\" scopes = [\"openid\", \"profile\", \"email\"] ```\n\nMultiple providers: ```toml [external_auth] enabled = true\n\n[[external_auth.providers]] id = \"google\" display_name = \"Google\" issuer_url = \"https://accounts.google.com\" client_id = \"your-google-client-id\" client_secret_env = \"GOOGLE_OAUTH_CLIENT_SECRET\"\n\n[[external_auth.providers]] id = \"github\" display_name = \"GitHub\" issuer_url = \"https://token.actions.githubusercontent.com\" auth_url = \"https://github.com/login/oauth/authorize\" token_url = \"https://github.com/login/oauth/access_token\" userinfo_url = \"https://api.github.com/user\" client_id = \"your-github-client-id\" Pluggable context engine configuration.\n\nConfigure in config.toml: ```toml [context_engine] engine = \"default\"     # built-in engine: \"default\"\n\n[context_engine.hooks] ingest = \"~/.librefang/plugins/my_recall.py\" after_turn = \"~/.librefang/plugins/my_indexer.py\" ```\n\nHeavy hooks (`assemble`, `compact`) always run in Rust for performance. Light hooks (`ingest`, `after_turn`) can be overridden with Python scripts using the same JSON stdin/stdout protocol as Python agents.\n\n# Usage\n\n**Simple (plugin-based):** ```toml [context_engine] plugin = \"qdrant-recall\"   # resolves to ~/.librefang/plugins/qdrant-recall/ ```\n\n**Manual (direct hook paths):** ```toml [context_engine.hooks] ingest = \"~/.librefang/scripts/my_recall.py\" after_turn = \"~/.librefang/scripts/my_indexer.py\" ```",
       "properties": {
+        "deduplicate_file_reads": {
+          "default": true,
+          "description": "When `true` (default), repeated `file_read` calls on the same path in a session are collapsed: if the on-disk content's hash matches a prior read in the same session, the tool returns a short `[File already read — content unchanged since turn N. See above for full content.]` stub instead of the full body. If the hash differs, the result is prefixed with `[File updated since last read at turn N]`. Set to `false` to send the full file content every time (legacy behaviour). The tracker is reset whenever automatic context compression fires, because the prior full content is no longer present in the history (#4971).",
+          "type": "boolean"
+        },
         "engine": {
           "default": "default",
           "description": "Built-in engine name. Supported values: - `\"default\"`: plain [`DefaultContextEngine`] with no additional wrapping - `\"summary\"`: [`SummaryContextEngine`] — threshold-gated LLM summarisation that fires when prompt tokens cross ~80 % of the context window - `\"no_compact\"`: [`NoCompactContextEngine`] — disables automatic compaction while wiring all other lifecycle hooks\n\nDefault: `\"default\"`.",
@@ -2355,6 +2373,13 @@
             "usage_footer": null
           },
           "description": "Per-channel behavior overrides."
+        },
+        "proxy": {
+          "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Discord adapter's REST client (#4795). Affects REST API calls only — the gateway WebSocket is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -2790,6 +2815,18 @@
         },
         "smtp_username": {
           "description": "SMTP-specific username (falls back to `username` if not set).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tls_accept_invalid_certs": {
+          "default": false,
+          "description": "When `true`, the IMAP TLS connection accepts ANY server certificate — hostname, expiry, signature, and chain are all ignored. **This makes the connection vulnerable to MITM and exposes the entire mailbox.** Provided as a last-resort dev escape hatch (e.g., expired self-signed cert that cannot be renewed). Defaults to `false`. A WARN is logged on every IMAP connect attempt while this is enabled, so the risk stays visible in operator logs rather than being noticed once at startup and then forgotten (#4877).",
+          "type": "boolean"
+        },
+        "tls_root_ca_path": {
+          "description": "Path to a PEM file containing one or more CA certificates to trust **in addition to** the system root store for the IMAP TLS connection (#4877). Use this for self-hosted IMAP behind a private CA — strictly preferred over [`Self::tls_accept_invalid_certs`] because hostname / expiry / signature validation remain ON.",
           "type": [
             "string",
             "null"
@@ -3233,6 +3270,37 @@
           "format": "uint16",
           "minimum": 0.0,
           "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "GatewayCompressionConfig": {
+      "description": "Gateway-level safety-net compression (exposed in `[gateway_compression]` TOML section). Runs at the top of the agent loop, *before* the first LLM call and *before* the LLM-based [`CompactionTomlConfig`] runs.\n\nPurpose: catch sessions that grew between turns (overnight Telegram backlog, cron-job output piling up, etc.) and have already exceeded the model's context window when the next turn starts. Without this pass the first LLM call would 400 with \"context too long\" before the agent-level compactor ever gets a chance to run.\n\nTrade-off vs. [`CompactionTomlConfig`]: - Gateway pass: cheap (rough token estimation, no LLM call), runs at a *higher* threshold (default 0.85), prunes tool results + drops oldest non-pinned messages. - Agent-level compactor: LLM-summarises, runs at a *lower* threshold (default 0.70). Owns history compaction proper.\n\nThe gateway pass aims to bring the session below ~0.80 so the agent-level compactor can run normally on the next iteration. It never calls the LLM.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Master switch. Default ON. Set to `false` to disable the gateway safety-net pass entirely (the agent-level compactor still runs).",
+          "type": "boolean"
+        },
+        "keep_recent_messages": {
+          "default": 5,
+          "description": "Number of most-recent messages always kept verbatim (default: 5). Older non-pinned messages are dropped first if stubbing tool results alone does not bring the estimate below the threshold.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_tool_result_chars": {
+          "default": 200,
+          "description": "Tool results larger than this character count get stubbed (default: 200). Stubbing preserves `tool_use_id` pairing so the assistant ↔ tool-result chain stays well-formed for the provider.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "threshold_ratio": {
+          "default": 0.8500000238418579,
+          "description": "Trigger ratio: gateway pass fires when estimated session tokens exceed `context_window * threshold_ratio` (default: 0.85). Must be strictly greater than [`CompactionTomlConfig::token_threshold_ratio`] (default 0.70) so the agent-level compactor gets first crack.",
+          "format": "float",
+          "type": "number"
         }
       },
       "type": "object"
@@ -4509,6 +4577,13 @@
           },
           "description": "Per-channel behavior overrides."
         },
+        "proxy": {
+          "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Mattermost adapter's REST client (#4795). Affects REST API calls only — the Mattermost WebSocket connection is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "server_url": {
           "default": "",
           "description": "Mattermost server URL (e.g., `\"https://mattermost.example.com\"`).",
@@ -4523,7 +4598,7 @@
       "type": "object"
     },
     "McpOAuthConfig": {
-      "description": "Optional OAuth configuration for an MCP server.\n\nUsed as fallback when the server doesn't support `.well-known` discovery, or to override specific values from discovery. All fields are optional — discovery results fill gaps, config values take precedence.\n\n# Example (config.toml)\n\n```toml [[mcp_servers]] name = \"custom-server\" transport = { type = \"http\", url = \"https://my-server.com/mcp\" }\n\n[mcp_servers.oauth] auth_url = \"https://my-server.com/oauth/authorize\" token_url = \"https://my-server.com/oauth/token\" client_id = \"my-client-id\" scopes = [\"read\", \"write\"] ```",
+      "description": "Optional OAuth configuration for an MCP server.\n\nUsed as fallback when the server doesn't support `.well-known` discovery, or to override specific values from discovery. All fields are optional — discovery results fill gaps, config values take precedence.\n\n# Example (config.toml)\n\n```toml [[mcp_servers]] name = \"custom-server\" transport = { type = \"http\", url = \"https://my-server.com/mcp\" }\n\n[mcp_servers.oauth] auth_url = \"https://my-server.com/oauth/authorize\" token_url = \"https://my-server.com/oauth/token\" client_id = \"my-client-id\" client_secret_env = \"MY_SERVER_CLIENT_SECRET\" scopes = [\"read\", \"write\"] ```",
       "properties": {
         "auth_url": {
           "default": null,
@@ -4534,6 +4609,14 @@
         },
         "client_id": {
           "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client_secret_env": {
+          "default": null,
+          "description": "Name of the environment variable holding the OAuth client secret. The secret itself is never stored in `config.toml`. Required when the upstream provider treats the client as confidential (e.g. Google Workspace MCP servers reject the refresh request without `client_secret`, even for Desktop/Installed OAuth client types). Leave unset for purely public PKCE clients (Notion, ChatGPT, etc.) — the OAuth flow is unchanged.\n\nResolved once at `auth_start`; the resolved value is persisted in the credential vault under the `client_secret` field alongside `refresh_token`, so it survives daemon restarts and is reused on every refresh.",
           "type": [
             "string",
             "null"
@@ -6140,6 +6223,13 @@
                 "usage_footer": null
               },
               "description": "Per-channel behavior overrides."
+            },
+            "proxy": {
+              "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Discord adapter's REST client (#4795). Affects REST API calls only — the gateway WebSocket is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "type": "object"
@@ -6377,6 +6467,18 @@
             },
             "smtp_username": {
               "description": "SMTP-specific username (falls back to `username` if not set).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tls_accept_invalid_certs": {
+              "default": false,
+              "description": "When `true`, the IMAP TLS connection accepts ANY server certificate — hostname, expiry, signature, and chain are all ignored. **This makes the connection vulnerable to MITM and exposes the entire mailbox.** Provided as a last-resort dev escape hatch (e.g., expired self-signed cert that cannot be renewed). Defaults to `false`. A WARN is logged on every IMAP connect attempt while this is enabled, so the risk stays visible in operator logs rather than being noticed once at startup and then forgotten (#4877).",
+              "type": "boolean"
+            },
+            "tls_root_ca_path": {
+              "description": "Path to a PEM file containing one or more CA certificates to trust **in addition to** the system root store for the IMAP TLS connection (#4877). Use this for self-hosted IMAP behind a private CA — strictly preferred over [`Self::tls_accept_invalid_certs`] because hostname / expiry / signature validation remain ON.",
               "type": [
                 "string",
                 "null"
@@ -7576,6 +7678,13 @@
               },
               "description": "Per-channel behavior overrides."
             },
+            "proxy": {
+              "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Mattermost adapter's REST client (#4795). Affects REST API calls only — the Mattermost WebSocket connection is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "server_url": {
               "default": "",
               "description": "Mattermost server URL (e.g., `\"https://mattermost.example.com\"`).",
@@ -8691,6 +8800,13 @@
               },
               "description": "Per-channel behavior overrides."
             },
+            "proxy": {
+              "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Slack adapter's REST client (#4795). Affects Web API calls only — the Socket Mode WebSocket is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "unfurl_links": {
               "default": null,
               "description": "Whether to disable link unfurling (preview expansion) in sent messages. When set to `false`, Slack will not expand link previews. When `None` (default), Slack uses its own default behavior.",
@@ -8930,6 +9046,13 @@
               "format": "uint64",
               "minimum": 0.0,
               "type": "integer"
+            },
+            "proxy": {
+              "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Telegram adapter's REST client (#4795). When unset, the adapter follows reqwest's normal env-var fallback (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`). When set, the per-channel value overrides any env var.\n\nAccepted schemes: `http://`, `https://`, `socks5://`, `socks5h://`. Auth is supported via `user:pass@host:port`. Invalid URLs are rejected at adapter init.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "thread_routes": {
               "additionalProperties": {
@@ -10444,6 +10567,33 @@
       },
       "type": "object"
     },
+    "PromptCacheConfig": {
+      "additionalProperties": false,
+      "description": "Prompt cache configuration section (`[prompt_cache]`).\n\nLives under [`KernelConfig::prompt_cache`]. The master switch remains [`KernelConfig::prompt_caching`] — when that is `false`, drivers ignore this section entirely.",
+      "properties": {
+        "cache_ttl_hint_secs": {
+          "default": 300,
+          "description": "TTL hint (seconds) for the cached prefix. Anthropic exposes two discrete windows — 5 min (default) and 1 h (beta). The runtime maps this hint to the closer of those: ≥ 1800 s selects the 1 h beta cache; otherwise the default 5 min ephemeral cache. Other providers ignore this hint.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "strategy": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/PromptCacheStrategy"
+            }
+          ],
+          "default": "system_and_3",
+          "description": "Breakpoint placement strategy. See [`PromptCacheStrategy`] for the wire format and the per-provider semantics."
+        }
+      },
+      "type": "object"
+    },
+    "PromptCacheStrategy": {
+      "description": "Prompt cache strategy. One of: \"disabled\", \"system_only\", or \"system_and_N\" where N is a non-negative integer (e.g. \"system_and_3\").",
+      "type": "string"
+    },
     "PromptIntelligenceConfig": {
       "description": "Configuration for prompt versioning and A/B testing.",
       "properties": {
@@ -11741,6 +11891,13 @@
           },
           "description": "Per-channel behavior overrides."
         },
+        "proxy": {
+          "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Slack adapter's REST client (#4795). Affects Web API calls only — the Socket Mode WebSocket is not currently routed through the proxy. See `TelegramConfig::proxy` for accepted URL shapes and env-var interaction.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "unfurl_links": {
           "default": null,
           "description": "Whether to disable link unfurling (preview expansion) in sent messages. When set to `false`, Slack will not expand link previews. When `None` (default), Slack uses its own default behavior.",
@@ -12176,6 +12333,13 @@
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "proxy": {
+          "description": "Per-channel HTTP/HTTPS/SOCKS5 proxy applied to this Telegram adapter's REST client (#4795). When unset, the adapter follows reqwest's normal env-var fallback (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`). When set, the per-channel value overrides any env var.\n\nAccepted schemes: `http://`, `https://`, `socks5://`, `socks5h://`. Auth is supported via `user:pass@host:port`. Invalid URLs are rejected at adapter init.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "thread_routes": {
           "additionalProperties": {
@@ -13723,6 +13887,7 @@
           ],
           "default": {
             "max_chars": 50000,
+            "max_file_bytes": 52428800,
             "max_response_bytes": 10485760,
             "readability": true,
             "ssrf_allowed_hosts": [],
@@ -13809,6 +13974,13 @@
           "default": 50000,
           "description": "Maximum characters to return in content.",
           "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "max_file_bytes": {
+          "default": 52428800,
+          "description": "Maximum bytes a single `web_fetch_to_file` download may write to disk. Caps response size before the body reaches the workspace; an agent-supplied `max_bytes` parameter is further clamped down to this value, never up.",
+          "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
         },
@@ -14504,6 +14676,7 @@
       ],
       "default": {
         "alert_threshold": 0.8,
+        "default_burst_ratio": 0.0,
         "default_max_llm_tokens_per_hour": 0,
         "max_daily_usd": 0.0,
         "max_hourly_usd": 0.0,
@@ -14547,6 +14720,7 @@
         "feishu": null,
         "file_download_dir": null,
         "file_download_max_bytes": 52428800,
+        "file_upload_max_bytes": 52428800,
         "flock": null,
         "gitter": null,
         "google_chat": null,
@@ -14618,6 +14792,7 @@
         }
       ],
       "default": {
+        "deduplicate_file_reads": true,
         "engine": "default",
         "hooks": {
           "after_turn": null,
@@ -14884,6 +15059,20 @@
         "$ref": "#/definitions/FallbackProviderConfig"
       },
       "type": "array"
+    },
+    "gateway_compression": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/GatewayCompressionConfig"
+        }
+      ],
+      "default": {
+        "enabled": true,
+        "keep_recent_messages": 5,
+        "max_tool_result_chars": 200,
+        "threshold_ratio": 0.8500000238418579
+      },
+      "description": "Gateway-level safety-net compression (#4972). Cheap pre-loop pass that prunes oversized tool results and oldest non-pinned messages when a session has grown past the model's context window *between* turns, before the first LLM call. Runs at a higher threshold (0.85) than the agent-level compactor (0.70) — they are complementary, not alternatives. See [`GatewayCompressionConfig`]."
     },
     "health_check": {
       "allOf": [
@@ -15242,6 +15431,18 @@
         "session_ttl_hours": 24
       },
       "description": "Proactive memory (mem0-style) configuration."
+    },
+    "prompt_cache": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/PromptCacheConfig"
+        }
+      ],
+      "default": {
+        "cache_ttl_hint_secs": 300,
+        "strategy": "system_and_3"
+      },
+      "description": "Prompt cache breakpoint strategy (#4970).\n\nAnthropic and compatible providers reuse a request's prefix when explicit `cache_control` breakpoints anchor stable text. The strategy selects which stability anchors are emitted:\n\n- `disabled` — no breakpoints emitted; the prefix is still cached automatically by providers that support it (OpenAI / DeepSeek) above their own length thresholds, but Anthropic gets no hint. - `system_only` — one breakpoint at the end of the system block. Caches `(system)` only; tool schemas and history are re-billed every turn. - `system_and_N` (default `system_and_3`) — adds the last-tool marker and an N-deep rolling window over the most recent messages. Anthropic enforces a hard cap of 4 `cache_control` breakpoints per request; effective N is clipped accordingly.\n\nThe master switch is still [`Self::prompt_caching`]: when that is `false`, the strategy is ignored and no markers are written."
     },
     "prompt_caching": {
       "default": true,
@@ -15748,6 +15949,7 @@
         "cache_ttl_minutes": 15,
         "fetch": {
           "max_chars": 50000,
+          "max_file_bytes": 52428800,
           "max_response_bytes": 10485760,
           "readability": true,
           "ssrf_allowed_hosts": [],
@@ -15790,6 +15992,15 @@
       ],
       "default": null,
       "description": "Webhook trigger configuration (external event injection)."
+    },
+    "workflow_default_total_timeout_secs": {
+      "description": "Default wall-clock timeout (seconds) for an entire workflow run.\n\nIndividual workflows can override this via `Workflow::total_timeout_secs`. When both are `None` the workflow runs unbounded (no total timeout). Default: `None` (unbounded).",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
     },
     "workflow_stale_timeout_minutes": {
       "default": 60,

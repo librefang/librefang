@@ -305,6 +305,43 @@ pub async fn auth_start(
     // Build a KernelOAuthProvider for vault access
     let provider = KernelOAuthProvider::new(state.kernel.home_dir().to_path_buf());
 
+    // Resolve the optional OAuth client secret from the environment and
+    // persist it in the vault so both `auth_callback` (initial token
+    // exchange) and `try_refresh` (later refresh requests) can pick it
+    // up. Confidential clients (e.g. Google Workspace MCP servers) reject
+    // refresh requests without `client_secret`; public PKCE clients
+    // leave `client_secret_env` unset and this whole block is a no-op.
+    if let Some(env_var) = oauth_config.client_secret_env.as_deref() {
+        match std::env::var(env_var) {
+            Ok(secret) if !secret.is_empty() => {
+                let vault_key = KernelOAuthProvider::vault_key(&server_url, "client_secret");
+                if let Err(e) = provider.vault_set(&vault_key, &secret) {
+                    tracing::error!(
+                        target: "audit",
+                        op = "vault_set",
+                        key = %vault_key,
+                        error = %e,
+                        "vault op failed persisting MCP client_secret"
+                    );
+                }
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    env_var,
+                    server = %name,
+                    "client_secret_env resolved to an empty value — treating as unset"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    env_var,
+                    server = %name,
+                    "client_secret_env points at an undefined environment variable"
+                );
+            }
+        }
+    }
+
     // Derive the redirect URI from the incoming request — validated
     // against `trusted_hosts` to prevent Host-header spoofing from
     // redirecting the OAuth code to an attacker origin.
@@ -719,6 +756,17 @@ pub async fn auth_callback(
     ];
     if let Some(ref cid) = client_id {
         form_params.push(("client_id", cid.clone()));
+    }
+    // Confidential clients require `client_secret` on the initial code
+    // exchange in addition to the refresh request. The secret was
+    // persisted to the vault at `auth_start` when
+    // `McpOAuthConfig::client_secret_env` was configured; public PKCE
+    // clients leave it unset and the form stays purely PKCE.
+    if let Some(secret) = provider.vault_get_or_warn(&KernelOAuthProvider::vault_key(
+        &server_url,
+        "client_secret",
+    )) {
+        form_params.push(("client_secret", secret));
     }
 
     // #3730: user-visible errors must NOT leak the token endpoint URL or the
