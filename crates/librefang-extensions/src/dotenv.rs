@@ -40,6 +40,17 @@ fn secrets_file_path() -> Option<PathBuf> {
 /// `std::env::set_var` is UB in Rust 1.80+ once other threads exist.
 pub fn load_dotenv() {
     DOTENV_LOADED.call_once(|| {
+        // Bootstrap step: scan the dotenv files for `LIBREFANG_VAULT_KEY` and
+        // inject it into the process env *before* the vault unlock attempt.
+        // Without this pre-pass, container deployments that ship the vault key
+        // in `secrets.env` (rather than the host env) hit a chicken-and-egg:
+        // the vault wants the key from env, but the key isn't in env yet
+        // because secrets.env hasn't been loaded. The bootstrap is scoped
+        // strictly to the vault-key var, so the documented priority order
+        // (system env > vault > .env > secrets.env) for every other secret
+        // stays intact — `load_env_file` later still skips keys the vault
+        // (or system env) already populated.
+        prime_vault_key_from_dotenv();
         load_vault();
         if let Some(p) = env_file_path() {
             load_env_file(&p);
@@ -48,6 +59,59 @@ pub fn load_dotenv() {
             load_env_file(&p);
         }
     });
+}
+
+/// Inject only `LIBREFANG_VAULT_KEY` from `.env` / `secrets.env` into the
+/// process env if it isn't already set there. The vault unlock that runs
+/// immediately after needs the key in env; the bulk dotenv load happens
+/// later, after the vault has been consulted (so vault secrets keep their
+/// documented precedence over dotenv files for every other variable).
+fn prime_vault_key_from_dotenv() {
+    if std::env::var(crate::vault::VAULT_KEY_ENV).is_ok() {
+        // System env already supplies the key — nothing to do.
+        return;
+    }
+    // Scan in priority order: `.env` first, then `secrets.env`. Stop on the
+    // first file that yields a non-empty value — matches the priority that
+    // `load_env_file` would have applied later.
+    for path in [env_file_path(), secrets_file_path()].into_iter().flatten() {
+        if let Some(value) = extract_env_value(&path, crate::vault::VAULT_KEY_ENV) {
+            // SAFETY: called from synchronous main() before the tokio runtime
+            // exists; no other threads have been spawned yet.
+            unsafe { std::env::set_var(crate::vault::VAULT_KEY_ENV, value) };
+            return;
+        }
+    }
+}
+
+/// Pull a single `KEY=VALUE` out of a dotenv file without populating the
+/// rest of the process env. Returns the trimmed value (without surrounding
+/// quotes) when found, or `None` for missing key / unreadable file / blank
+/// value.
+fn extract_env_value(path: &Path, key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (k, v) = line.split_once('=')?;
+        if k.trim() != key {
+            continue;
+        }
+        let v = v.trim();
+        // Strip a single layer of matching surrounding quotes, if present.
+        let v = v
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+            .unwrap_or(v);
+        if v.is_empty() {
+            return None;
+        }
+        return Some(v.to_string());
+    }
+    None
 }
 
 /// Try to unlock the credential vault and inject secrets into process env.
@@ -363,6 +427,48 @@ mod tests {
     fn test_load_env_file_nonexistent() {
         // Should not panic
         load_env_file(&PathBuf::from("/nonexistent/.env"));
+    }
+
+    #[test]
+    fn extract_env_value_finds_key_with_base64_padding() {
+        // The vault key is base64 — the trailing `=` is data, not a delimiter.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.env");
+        std::fs::write(
+            &path,
+            "GROQ_API_KEY=plain\nLIBREFANG_VAULT_KEY=GNTYsbsWZijklydfyPftpxKsq9TH1HT4Fp8vjUTB0T0=\n",
+        )
+        .unwrap();
+        assert_eq!(
+            extract_env_value(&path, "LIBREFANG_VAULT_KEY").as_deref(),
+            Some("GNTYsbsWZijklydfyPftpxKsq9TH1HT4Fp8vjUTB0T0="),
+        );
+    }
+
+    #[test]
+    fn extract_env_value_handles_quoted_and_commented_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.env");
+        std::fs::write(
+            &path,
+            "# LIBREFANG_VAULT_KEY=ignored_because_comment\nLIBREFANG_VAULT_KEY=\"quoted_value\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            extract_env_value(&path, "LIBREFANG_VAULT_KEY").as_deref(),
+            Some("quoted_value"),
+        );
+    }
+
+    #[test]
+    fn extract_env_value_returns_none_for_missing_and_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent.env");
+        assert!(extract_env_value(&missing, "ANYTHING").is_none());
+
+        let blank = dir.path().join("blank.env");
+        std::fs::write(&blank, "LIBREFANG_VAULT_KEY=\n").unwrap();
+        assert!(extract_env_value(&blank, "LIBREFANG_VAULT_KEY").is_none());
     }
 
     /// Regression for #3790: a value containing a literal newline must

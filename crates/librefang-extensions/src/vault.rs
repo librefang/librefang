@@ -26,7 +26,7 @@ use tracing::error;
 use zeroize::Zeroizing;
 
 /// Env var fallback for vault key.
-const VAULT_KEY_ENV: &str = "LIBREFANG_VAULT_KEY";
+pub(crate) const VAULT_KEY_ENV: &str = "LIBREFANG_VAULT_KEY";
 
 /// Reserved vault key for the startup-validated sentinel (#3651).
 ///
