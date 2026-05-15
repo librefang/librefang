@@ -4770,6 +4770,7 @@ dependencies = [
  "librefang-llm-driver",
  "librefang-llm-drivers",
  "librefang-memory",
+ "librefang-runtime-audit",
  "librefang-runtime-mcp",
  "librefang-skills",
  "librefang-types",
@@ -4807,6 +4808,25 @@ dependencies = [
  "wasmtime",
  "wiremock",
  "zeroize",
+]
+
+[[package]]
+name = "librefang-runtime-audit"
+version = "2026.5.12-beta.11"
+dependencies = [
+ "chrono",
+ "hex",
+ "librefang-types",
+ "metrics",
+ "r2d2",
+ "r2d2_sqlite",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

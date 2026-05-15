@@ -5,6 +5,7 @@ members = [
     "crates/librefang-memory",
     "crates/librefang-memory-wiki",
     "crates/librefang-runtime",
+    "crates/librefang-runtime-audit",
     "crates/librefang-runtime-mcp",
     "crates/librefang-llm-drivers",
     "crates/librefang-llm-driver",

@@ -1,0 +1,26 @@
+[package]
+name = "librefang-runtime-audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tamper-evident audit log for LibreFang runtime (refs #3710 Phase 1)"
+
+[dependencies]
+librefang-types = { path = "../librefang-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+metrics = { workspace = true }
+rusqlite = { workspace = true }
+r2d2 = { workspace = true }
+r2d2_sqlite = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
