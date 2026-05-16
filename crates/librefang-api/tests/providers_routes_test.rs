@@ -1112,3 +1112,140 @@ async fn list_providers_exposes_suppression_state() {
         "after POST /enable, suppressed must flip back to false; got {claude_final}",
     );
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/providers/{name}/default — regression coverage for #5116.
+//
+// Pre-fix, `persist_default_model` read config.toml with
+// `unwrap_or_default()` and then rewrote the file from a fresh TOML tree
+// containing only `[default_model]`, destroying every operator-authored
+// section (e.g. `[email]`, `[telegram]`, `[proxy]`) on rewrite. The
+// regression here is the data-loss path itself — pre-seed config.toml
+// with a sibling section, switch the default provider through the route,
+// then assert the sibling section survives the rewrite.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_default_provider_preserves_other_config_sections() {
+    let h = boot();
+
+    // Seed config.toml with `[default_model]` + sibling `[email]` and
+    // `[proxy]` sections that the pre-fix `unwrap_or_default()` / rewrite
+    // path would have silently wiped. The home dir is the kernel's
+    // tempdir, so writing here doesn't escape the harness sandbox.
+    let config_path = h._state.kernel.home_dir().join("config.toml");
+    let seeded = r#"# Seeded by integration test for #5116
+
+[default_model]
+provider = "openai"
+model = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"
+
+[email]
+smtp_host = "smtp.example.com"
+smtp_port = 587
+username = "alice@example.com"
+
+[proxy]
+http = "http://127.0.0.1:8118"
+"#;
+    std::fs::write(&config_path, seeded).expect("seed config.toml");
+
+    // Switch default provider via the route. The catalog seeded by `boot()`
+    // only has `openai`, but switching from openai -> openai still exercises
+    // the same persist_default_model path that wipes other sections.
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/providers/openai/default",
+        Some(serde_json::json!({ "model": "gpt-4o-mini" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "unexpected body: {body}");
+    assert_eq!(
+        body["persisted"].as_bool(),
+        Some(true),
+        "config.toml should have been persisted; got {body}",
+    );
+
+    // Reload and confirm both sibling sections survived the rewrite.
+    let after = std::fs::read_to_string(&config_path).expect("read config.toml back");
+    let parsed: toml::Value = toml::from_str(&after).expect("post-write config.toml parses");
+
+    let dm = parsed
+        .get("default_model")
+        .and_then(|v| v.as_table())
+        .expect("default_model section must still exist");
+    assert_eq!(
+        dm.get("provider").and_then(|v| v.as_str()),
+        Some("openai"),
+        "default_model.provider should reflect the PATCH; full toml:\n{after}",
+    );
+
+    let email = parsed
+        .get("email")
+        .and_then(|v| v.as_table())
+        .unwrap_or_else(|| {
+            panic!("[email] section was wiped — regression of #5116; full toml:\n{after}")
+        });
+    assert_eq!(
+        email.get("smtp_host").and_then(|v| v.as_str()),
+        Some("smtp.example.com"),
+        "[email].smtp_host must survive default-model rewrite; full toml:\n{after}",
+    );
+    assert_eq!(
+        email.get("smtp_port").and_then(|v| v.as_integer()),
+        Some(587),
+        "[email].smtp_port must survive default-model rewrite; full toml:\n{after}",
+    );
+
+    let proxy = parsed
+        .get("proxy")
+        .and_then(|v| v.as_table())
+        .unwrap_or_else(|| {
+            panic!("[proxy] section was wiped — regression of #5116; full toml:\n{after}")
+        });
+    assert_eq!(
+        proxy.get("http").and_then(|v| v.as_str()),
+        Some("http://127.0.0.1:8118"),
+        "[proxy].http must survive default-model rewrite; full toml:\n{after}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_default_provider_when_config_toml_absent_creates_it_with_default_model() {
+    // The companion happy path for the read-then-write contract: when
+    // config.toml is missing entirely (fresh daemon, no operator config),
+    // the route MUST create it and seed `[default_model]`. The bug fix
+    // discriminates `NotFound` from other read errors — make sure the
+    // NotFound branch still produces a usable file.
+    let h = boot();
+    let config_path = h._state.kernel.home_dir().join("config.toml");
+    // Sanity: the boot helper does not pre-write config.toml.
+    assert!(
+        !config_path.exists(),
+        "boot() should not pre-write config.toml; harness assumption broken",
+    );
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/providers/openai/default",
+        Some(serde_json::json!({ "model": "gpt-4o-mini" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "unexpected body: {body}");
+    assert_eq!(body["persisted"].as_bool(), Some(true));
+
+    let after = std::fs::read_to_string(&config_path).expect("config.toml created");
+    let parsed: toml::Value = toml::from_str(&after).expect("new config.toml parses");
+    let dm = parsed
+        .get("default_model")
+        .and_then(|v| v.as_table())
+        .expect("[default_model] missing from freshly-created config.toml");
+    assert_eq!(dm.get("provider").and_then(|v| v.as_str()), Some("openai"));
+    assert_eq!(
+        dm.get("model").and_then(|v| v.as_str()),
+        Some("gpt-4o-mini")
+    );
+}
