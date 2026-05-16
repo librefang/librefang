@@ -115,6 +115,20 @@ pub struct PromptContext {
     pub base_system_prompt: String,
     /// Tool names this agent has access to.
     pub granted_tools: Vec<String>,
+    /// Per-tool short description hint, keyed by tool name. Populated by the
+    /// kernel from each `ToolDefinition.description` so the lazy-mode catalog
+    /// (#4805) can surface MCP and skill tools with their own descriptions
+    /// instead of bare names. Builtin tools fall back to the curated
+    /// [`tool_hint`] table — that table is the source of truth for builtins
+    /// because their descriptions are tuned for the catalog's compact format.
+    /// Empty by default for backwards compatibility with the legacy
+    /// names-only catalog.
+    ///
+    /// `BTreeMap` because anything that reaches the LLM prompt must iterate
+    /// deterministically (#3298). Today the catalog iterates `granted_tools`
+    /// directly, but using a `BTreeMap` here keeps the map's own iteration
+    /// order stable in case future call sites surface it directly.
+    pub granted_tool_hints: std::collections::BTreeMap<String, String>,
     /// Recalled memories as (key, content) pairs.
     pub recalled_memories: Vec<(String, String)>,
     /// Skill summary text (from kernel.build_skill_summary()).
@@ -221,7 +235,7 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
     }
 
     // Section 3 — Available Tools (always present if tools exist)
-    let tools_section = build_tools_section(&ctx.granted_tools);
+    let tools_section = build_tools_section_with_hints(&ctx.granted_tools, &ctx.granted_tool_hints);
     if !tools_section.is_empty() {
         sections.push(tools_section);
     }
@@ -470,25 +484,50 @@ code blocks — always call the tool instead.";
 
 /// Build the grouped tools section (Section 3).
 ///
+/// Backwards-compatible shim around [`build_tools_section_with_hints`]
+/// that supplies an empty hint map. Builtin tools still get their hints
+/// from the curated [`tool_hint`] table; MCP and skill tools render as
+/// bare names. Prefer the `_with_hints` variant when descriptions are
+/// available — see #4805.
+pub fn build_tools_section(granted_tools: &[String]) -> String {
+    build_tools_section_with_hints(granted_tools, &std::collections::BTreeMap::new())
+}
+
+/// Build the grouped tools section (Section 3) with per-tool description hints.
+///
+/// `granted_tool_hints` maps tool name → short description (typically
+/// `ToolDefinition.description` truncated to one line). Used as a fallback
+/// hint source for tools the builtin [`tool_hint`] table doesn't know about
+/// (MCP servers, skill-provided tools). Builtin hints take priority because
+/// they're already tuned for the compact catalog format.
+///
 /// When `tool_load` appears in `granted_tools`, the section is framed as a
 /// lazy-load catalog: only a handful of tools carry full JSON schemas in the
 /// request (see [`tool_runner::ALWAYS_NATIVE_TOOLS`]) and the rest are
-/// listed by name so the LLM can call `tool_load(name)` before using them.
-/// This keeps per-turn request payload ~1.5k tokens instead of ~6k when the
-/// agent has access to the full builtin catalog (issue #3044).
-pub fn build_tools_section(granted_tools: &[String]) -> String {
+/// listed by name + short hint so the LLM can call `tool_load(name)` before
+/// using them. Issue #4805 extends this to MCP and skill tools, which
+/// previously appeared as bare names with no description for the LLM to
+/// pick from.
+pub fn build_tools_section_with_hints(
+    granted_tools: &[String],
+    granted_tool_hints: &std::collections::BTreeMap<String, String>,
+) -> String {
     if granted_tools.is_empty() {
         return String::new();
     }
 
     let lazy_mode = granted_tools.iter().any(|t| t == "tool_load");
 
-    // Group tools by category
-    let mut groups: std::collections::BTreeMap<&str, Vec<(&str, &str)>> =
+    // Group tools by category. Owned `String` for the hint so we can carry
+    // either the static curated hint or a sanitised one from the hint map
+    // without lifetime gymnastics — `granted_tools` is on the small side
+    // (median ~30) so the per-name allocation is dwarfed by the prompt
+    // build's other allocations.
+    let mut groups: std::collections::BTreeMap<&str, Vec<(&str, String)>> =
         std::collections::BTreeMap::new();
     for name in granted_tools {
         let cat = tool_category(name);
-        let hint = tool_hint(name);
+        let hint = resolve_tool_hint(name, granted_tool_hints);
         groups.entry(cat).or_default().push((name.as_str(), hint));
     }
 
@@ -1179,6 +1218,72 @@ pub fn tool_hint(name: &str) -> &'static str {
 
         _ => "",
     }
+}
+
+/// Build a [`PromptContext::granted_tool_hints`] map from a slice of
+/// `ToolDefinition`s, indexing each tool's description by its name. Used by
+/// the kernel to populate the lazy-mode catalog hints for MCP and skill
+/// tools (#4805); builtins fall back to the curated [`tool_hint`] table at
+/// render time so this map's values for them are ignored.
+///
+/// Skips tools whose description is empty so the map stays cheap to clone.
+pub fn build_granted_tool_hints(
+    tools: &[librefang_types::tool::ToolDefinition],
+) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for t in tools {
+        if t.description.is_empty() {
+            continue;
+        }
+        out.insert(t.name.clone(), t.description.clone());
+    }
+    out
+}
+
+/// Maximum length of a description hint pulled from `granted_tool_hints`
+/// in the system prompt's tool catalog (#4805).
+///
+/// 80 chars is roughly one console line and matches the longest hand-written
+/// hints in [`tool_hint`]. Anything longer would either wrap awkwardly in
+/// the rendered prompt or burn tokens on detail the LLM can fetch with
+/// `tool_load` once it actually wants the tool.
+const TOOL_HINT_MAX_CHARS: usize = 80;
+
+/// Look up a per-tool catalog hint, preferring the curated builtin table.
+///
+/// Resolution order:
+/// 1. [`tool_hint`] — hand-tuned one-liners for builtin tools.
+/// 2. `granted_tool_hints[name]` — typically `ToolDefinition.description`
+///    surfaced by the kernel for MCP and skill tools (#4805). The first
+///    sentence is extracted and truncated to [`TOOL_HINT_MAX_CHARS`] so
+///    long marketplace-style descriptions don't bloat the prompt.
+///
+/// Returns an empty `String` when neither source has anything — the
+/// catalog renderer treats that as "name only".
+fn resolve_tool_hint(
+    name: &str,
+    granted_tool_hints: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let curated = tool_hint(name);
+    if !curated.is_empty() {
+        return curated.to_string();
+    }
+    let Some(desc) = granted_tool_hints.get(name) else {
+        return String::new();
+    };
+    // Take the first sentence-ish unit so we get the headline, not the API
+    // contract. Split on `. ` rather than `.` to keep file extensions and
+    // version numbers intact in the snippet.
+    let first_clause = desc
+        .split_once(". ")
+        .map(|(head, _)| head)
+        .unwrap_or(desc.as_str())
+        .trim()
+        .trim_end_matches('.');
+    if first_clause.is_empty() {
+        return String::new();
+    }
+    cap_str(first_clause, TOOL_HINT_MAX_CHARS)
 }
 
 // ---------------------------------------------------------------------------

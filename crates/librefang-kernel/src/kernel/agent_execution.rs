@@ -590,6 +590,9 @@ impl LibreFangKernel {
                 agent_description: manifest.description.clone(),
                 base_system_prompt: manifest.model.system_prompt.clone(),
                 granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
+                granted_tool_hints: librefang_runtime::prompt_builder::build_granted_tool_hints(
+                    &tools,
+                ),
                 recalled_memories: vec![], // Recalled in agent_loop, not here
                 skill_summary: skill_meta
                     .as_ref()
