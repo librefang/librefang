@@ -5201,7 +5201,13 @@ pub struct NamedTaintRuleSet {
 ///
 /// This is the config.toml representation. The runtime `McpServerConfig`
 /// struct is constructed from this during kernel boot.
+//
+// `deny_unknown_fields` catches typos inside `[[mcp_servers]]` elements at
+// deserialize time. The detect_unknown_nested_fields walker can't see into
+// repeated-table elements (#5130), so the only way to surface a typo in,
+// say, `[[mcp_servers]] timout_secs = 30` is for serde itself to reject it.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct McpServerConfigEntry {
     /// Display name for this server.
     pub name: String,
@@ -6362,8 +6368,13 @@ impl ChannelsConfig {
 }
 
 /// Telegram channel adapter configuration.
+//
+// `deny_unknown_fields` catches typos inside `[[channels.telegram]]`
+// elements at deserialize time. The detect_unknown_nested_fields walker
+// can't see into repeated-table elements (#5130), so the only way to
+// surface a typo here is for serde itself to reject it.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TelegramConfig {
     /// Env var name holding the bot token (NOT the token itself).
     pub bot_token_env: String,
@@ -6476,8 +6487,10 @@ impl TelegramConfig {
 }
 
 /// Discord channel adapter configuration.
+//
+// `deny_unknown_fields` — see `TelegramConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DiscordConfig {
     /// Env var name holding the bot token (NOT the token itself).
     pub bot_token_env: String,
@@ -6542,8 +6555,10 @@ impl Default for DiscordConfig {
 }
 
 /// Slack channel adapter configuration.
+//
+// `deny_unknown_fields` — see `TelegramConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SlackConfig {
     /// Env var name holding the app-level token (xapp-) for Socket Mode.
     pub app_token_env: String,
@@ -6603,8 +6618,10 @@ impl Default for SlackConfig {
 }
 
 /// WhatsApp Cloud API channel adapter configuration.
+//
+// `deny_unknown_fields` — see `TelegramConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct WhatsAppConfig {
     /// Env var name holding the access token (Cloud API mode).
     pub access_token_env: String,
@@ -6899,8 +6916,10 @@ impl Default for TeamsConfig {
 }
 
 /// Mattermost channel adapter configuration.
+//
+// `deny_unknown_fields` — see `TelegramConfig` for the rationale (#5130).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct MattermostConfig {
     /// Mattermost server URL (e.g., `"https://mattermost.example.com"`).
     pub server_url: String,
