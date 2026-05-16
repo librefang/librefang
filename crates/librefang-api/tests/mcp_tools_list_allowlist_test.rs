@@ -210,7 +210,9 @@ async fn tools_list_honours_agent_allowlist() {
         "allowlisted tool must be visible; got {names:?}"
     );
     assert!(
-        !names.iter().any(|n| n == BIG_TOOL_KEEP || n == BIG_TOOL_DROP),
+        !names
+            .iter()
+            .any(|n| n == BIG_TOOL_KEEP || n == BIG_TOOL_DROP),
         "non-allowlisted MCP tools must be hidden from tools/list; got {names:?}"
     );
 }
