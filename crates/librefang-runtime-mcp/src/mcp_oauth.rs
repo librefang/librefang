@@ -165,34 +165,45 @@ pub fn extract_metadata_url(params: &HashMap<String, String>, server_url: &str) 
 
 /// Return `true` when the given host string is a literal IP address or
 /// known internal hostname that must not be reachable via OAuth metadata
-/// fetches (SSRF defence-in-depth).  No DNS resolution is performed —
-/// only the literal value is matched.  A public hostname that DNS-rebinds
-/// to an internal IP at fetch time is out of scope; mitigate at the
-/// network layer.
+/// fetches or MCP transport connections (SSRF defence-in-depth).  No DNS
+/// resolution is performed — only the literal value is matched.  A public
+/// hostname that DNS-rebinds to an internal IP at fetch time is out of
+/// scope; mitigate at the network layer.
 ///
 /// Blocked values:
-/// * Exact hostnames:   `localhost`, `metadata.google.internal`
+/// * Exact hostnames:   `localhost`, `ip6-localhost`, `metadata.google.internal`,
+///   `metadata.aws.internal`, `instance-data`
 /// * IPv4 loopback      127.0.0.0/8
+/// * IPv4 unspecified   0.0.0.0
 /// * IPv4 private       10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+/// * IPv4 CGNAT         100.64.0.0/10 (incl. Alibaba Cloud IMDS 100.100.100.200)
 /// * IPv4 link-local    169.254.0.0/16 (covers IMDS 169.254.169.254)
 /// * IPv6 loopback      ::1
 /// * IPv6 unique-local  fc00::/7
 /// * IPv6 link-local    fe80::/10
-/// * IPv4-mapped IPv6   `::ffff:x.x.x.x` when the embedded v4 is private
-/// * NAT64              `64:ff9b::x.x.x.x` when the embedded v4 is private
+/// * IPv4-mapped IPv6   `::ffff:x.x.x.x` when the embedded v4 is blocked
+/// * NAT64              `64:ff9b::x.x.x.x` when the embedded v4 is blocked
+///
+/// Shared with the MCP transport SSRF guard (`McpConnection::check_ssrf`)
+/// via [`is_ssrf_blocked_url`] so OAuth discovery, token exchange, and the
+/// SSE / Streamable-HTTP / HTTP-compat connect paths cannot diverge.
 fn is_ssrf_blocked_host(host: &str) -> bool {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     fn blocked_v4(v4: Ipv4Addr) -> bool {
         let o = v4.octets();
+        // 0.0.0.0 unspecified — connects to every interface incl. loopback
+        (o[0] == 0 && o[1] == 0 && o[2] == 0 && o[3] == 0)
         // 127.0.0.0/8 loopback
-        o[0] == 127
+        || o[0] == 127
         // 10.0.0.0/8
         || o[0] == 10
         // 172.16.0.0/12
         || (o[0] == 172 && (o[1] & 0xf0) == 16)
         // 192.168.0.0/16
         || (o[0] == 192 && o[1] == 168)
+        // 100.64.0.0/10 CGNAT (also Alibaba Cloud IMDS at 100.100.100.200)
+        || (o[0] == 100 && (o[1] & 0xc0) == 64)
         // 169.254.0.0/16 link-local (incl. cloud IMDS 169.254.169.254)
         || (o[0] == 169 && o[1] == 254)
     }
@@ -224,7 +235,18 @@ fn is_ssrf_blocked_host(host: &str) -> bool {
     // Strip a trailing dot ("localhost." is the same host as "localhost"
     // to a resolver) before the hostname comparison.
     let lower = host.trim_end_matches('.').to_lowercase();
-    if lower == "localhost" || lower == "metadata.google.internal" {
+    // Block the names every major cloud provider uses for IMDS plus a
+    // couple of loopback aliases. Keep this list aligned with
+    // `librefang_runtime::web_fetch::check_ssrf`.
+    if matches!(
+        lower.as_str(),
+        "localhost"
+            | "ip6-localhost"
+            | "ip6-loopback"
+            | "metadata.google.internal"
+            | "metadata.aws.internal"
+            | "instance-data"
+    ) {
         return true;
     }
 

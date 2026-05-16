@@ -970,6 +970,10 @@ _338 PRs from 7 contributors since v2026.4.28-beta7._
 
 ## [Unreleased]
 
+### Security
+
+- **MCP transport SSRF guard — replace substring stub with parsed-URL allowlist** (#5124). `McpConnection::check_ssrf` (the gate on the SSE, Streamable-HTTP, and HTTP-compat connect paths in `crates/librefang-runtime-mcp/src/lib.rs`) was a lowercase substring match that rejected only `169.254.169.254` and `metadata.google` — every other internal address bypassed it, including loopback (`127.0.0.1`, `localhost`, `[::1]`), RFC1918 (`10/8`, `172.16/12`, `192.168/16`), CGNAT (`100.64.0.0/10`), AWS IMDS (`metadata.aws.internal`), the NAT64 well-known prefix smuggling IMDS (`[64:ff9b::a9fe:a9fe]`), IPv4-mapped IPv6 smuggling loopback (`[::ffff:7f00:1]`), DNS-rebinding hostnames (`169-254-169-254.nip.io`), `user:pw@host` userinfo URLs, and non-`http(s)` schemes like `file://`. A correct policy already existed in the same crate (`mcp_oauth::is_ssrf_blocked_url`); `check_ssrf` is now a thin wrapper around it, so the connect path and the OAuth discovery / token-exchange path share one policy and cannot diverge again. The shared helper also gained `100.64.0.0/10` (CGNAT, incl. Alibaba Cloud IMDS `100.100.100.200`), `metadata.aws.internal`, `instance-data`, `ip6-localhost`, `ip6-loopback`, and an explicit `0.0.0.0` block — aligning the blocklist with `librefang_runtime::web_fetch::check_ssrf`. Tests: the existing `test_ssrf_check` is extended to cover the new categories (loopback IPv4/IPv6/hostname, RFC1918, CGNAT, NAT64-IMDS, IPv4-mapped loopback, userinfo, `file://`, allowed public host). Closes #5124. (@houko)
+
 ### Fixed
 
 - **Docs sync for `DEFAULT_MAX_HISTORY_MESSAGES` (60, not 40)** — `CLAUDE.md` and `docs/architecture/message-history-trimming.md` still cited the compiled-in default as 40, but `crates/librefang-runtime/src/agent_loop/history.rs:38` has been 60 since #4891. Pure docs sync; no code or behaviour change. (@houko)
