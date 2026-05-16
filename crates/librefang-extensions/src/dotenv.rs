@@ -85,31 +85,38 @@ fn prime_vault_key_from_dotenv() {
 }
 
 /// Pull a single `KEY=VALUE` out of a dotenv file without populating the
-/// rest of the process env. Returns the trimmed value (without surrounding
-/// quotes) when found, or `None` for missing key / unreadable file / blank
-/// value.
+/// rest of the process env. Returns the unescaped value when found, or
+/// `None` for missing key / missing file / blank value.
+///
+/// Delegates per-line parsing to [`parse_env_line`] so quoting, escapes,
+/// and "no `=` on this line" handling stay consistent with the regular
+/// dotenv loader — a malformed line earlier in the file never aborts the
+/// scan, the way a bare `?` propagation would.
 fn extract_env_value(path: &Path, key: &str) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
-    for raw in content.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let (k, v) = line.split_once('=')?;
-        if k.trim() != key {
-            continue;
-        }
-        let v = v.trim();
-        // Strip a single layer of matching surrounding quotes, if present.
-        let v = v
-            .strip_prefix('"')
-            .and_then(|s| s.strip_suffix('"'))
-            .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
-            .unwrap_or(v);
-        if v.is_empty() {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            // Match `load_vault` and the broader bootstrap path: no tracing
+            // subscriber is installed yet when load_dotenv runs.
+            eprintln!(
+                "librefang-dotenv: cannot read {} for vault-key bootstrap: {e}; skipping",
+                path.display()
+            );
             return None;
         }
-        return Some(v.to_string());
+    };
+    for raw in content.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = parse_env_line(trimmed) else {
+            continue;
+        };
+        if k == key && !v.is_empty() {
+            return Some(v);
+        }
     }
     None
 }
@@ -545,5 +552,75 @@ mod tests {
 
         // SAFETY: same as above.
         unsafe { std::env::remove_var(key) };
+    }
+
+    /// A malformed line earlier in the file (no `=`, leftover marker, hand-
+    /// edit typo) must NOT abort the scan before the real vault-key line.
+    /// A previous implementation propagated `?` out of `split_once('=')` and
+    /// regressed exactly this case.
+    #[test]
+    fn extract_env_value_skips_malformed_lines_before_vault_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.env");
+        std::fs::write(
+            &path,
+            "# header comment\n\
+             STRAY_MARKER_NO_EQUALS\n\
+             ANOTHER_BAD_LINE\n\
+             LIBREFANG_VAULT_KEY=after_garbage\n",
+        )
+        .unwrap();
+        assert_eq!(
+            extract_env_value(&path, "LIBREFANG_VAULT_KEY").as_deref(),
+            Some("after_garbage"),
+        );
+    }
+
+    /// End-to-end regression for the boot-ordering fix: when only
+    /// `secrets.env` carries the vault key (the container-deploy
+    /// scenario this PR is named after), `prime_vault_key_from_dotenv`
+    /// must seed `LIBREFANG_VAULT_KEY` into the process env *before*
+    /// the vault unlock attempt.
+    ///
+    /// `#[serial]` for the same reason as the priority-order test:
+    /// `std::env::{set,remove}_var` is UB while other threads exist.
+    #[test]
+    #[serial_test::serial]
+    fn prime_vault_key_from_dotenv_seeds_env_from_secrets_env() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secrets = dir.path().join("secrets.env");
+        std::fs::write(
+            &secrets,
+            "# header\nSTRAY_MARKER\nLIBREFANG_VAULT_KEY=primed-from-secrets\n",
+        )
+        .unwrap();
+
+        let prev_home = std::env::var_os("LIBREFANG_HOME");
+        let prev_key = std::env::var_os(crate::vault::VAULT_KEY_ENV);
+        // SAFETY: #[serial] serialises env mutation across tests in this
+        // binary; no concurrent reader observes the transient state below.
+        unsafe {
+            std::env::set_var("LIBREFANG_HOME", dir.path());
+            std::env::remove_var(crate::vault::VAULT_KEY_ENV);
+        }
+
+        prime_vault_key_from_dotenv();
+        let after = std::env::var(crate::vault::VAULT_KEY_ENV).ok();
+
+        // Restore env BEFORE asserting so a failure does not leak state
+        // to sibling tests (same pattern as the priority-order test).
+        // SAFETY: same as above.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+                None => std::env::remove_var("LIBREFANG_HOME"),
+            }
+            match prev_key {
+                Some(v) => std::env::set_var(crate::vault::VAULT_KEY_ENV, v),
+                None => std::env::remove_var(crate::vault::VAULT_KEY_ENV),
+            }
+        }
+
+        assert_eq!(after.as_deref(), Some("primed-from-secrets"));
     }
 }
