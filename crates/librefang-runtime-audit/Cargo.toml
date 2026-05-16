@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Tamper-evident audit log for LibreFang runtime (refs #3710 Phase 1)"
+readme = "README.md"
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }
