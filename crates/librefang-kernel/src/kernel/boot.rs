@@ -150,10 +150,9 @@ impl LibreFangKernel {
         // with an unusable backend that fails on first tool call.
         // Lost during the kernel/mod split; restored here.
         if let Err(e) = config.tool_exec.validate() {
-            return Err(LibreFangError::BootFailed(format!(
-                "Invalid [tool_exec] config: {e}"
-            ))
-            .into());
+            return Err(
+                LibreFangError::BootFailed(format!("Invalid [tool_exec] config: {e}")).into(),
+            );
         }
 
         // Check TOTP configuration consistency
@@ -622,7 +621,9 @@ impl LibreFangKernel {
         // to avoid conflicts with UsageStore concurrent writes
         let prompt_store =
             librefang_memory::PromptStore::new_with_path(&db_path, config.memory.pool_size)
-                .map_err(|e| LibreFangError::BootFailed(format!("Prompt store init failed: {e}")))?;
+                .map_err(|e| {
+                    LibreFangError::BootFailed(format!("Prompt store init failed: {e}"))
+                })?;
 
         let supervisor = Supervisor::new();
         let background = BackgroundExecutor::with_concurrency(
