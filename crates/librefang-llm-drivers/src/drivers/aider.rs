@@ -168,6 +168,7 @@ impl LlmDriver for AiderDriver {
                 output_tokens: 0,
                 ..Default::default()
             },
+            actual_provider: None,
         })
     }
 }

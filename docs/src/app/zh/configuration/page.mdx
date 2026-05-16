@@ -2656,7 +2656,9 @@ auto_memorize = true
 auto_retrieve = true
 max_retrieve = 10
 extraction_threshold = 0.7
-# extraction_model = "gpt-4o-mini"  # 可选，启用 LLM 驱动的提取
+# extraction_model = "gpt-4o-mini"             # 使用默认提供商
+# extraction_model = "anthropic/claude-haiku-4" # 指定特定提供商
+# extraction_model = "anthropic:claude-haiku-4" # 冒号格式也可用
 extract_categories = ["user_preference", "important_fact", "task_context", "relationship"]
 session_ttl_hours = 24
 duplicate_threshold = 0.5
@@ -2671,7 +2673,7 @@ max_memories_per_agent = 1000
 | `auto_retrieve` | bool | `true` | 每次 Agent 执行前自动检索相关记忆。 |
 | `max_retrieve` | usize | `10` | 每次查询检索的最大记忆数。 |
 | `extraction_threshold` | f32 | `0.7` | 近似重复检测的置信度阈值（0.0-1.0）。 |
-| `extraction_model` | string 或 null | `null` | 用于提取的 LLM 模型。为 `null` 时使用基于规则的提取。 |
+| `extraction_model` | string 或 null | `null` | 用于提取的 LLM 模型。支持 `提供商/模型` 格式（如 `"anthropic/claude-haiku-4"`）、`提供商:模型` 格式，或裸模型名（使用默认提供商）。为 `null` 时使用基于规则的提取。没有单独的 `extraction_provider` 字段。 |
 | `extract_categories` | list of strings | `["user_preference", "important_fact", "task_context", "relationship"]` | 从对话中提取的类别。 |
 | `session_ttl_hours` | u32 | `24` | 会话记忆的 TTL（小时）。超过此时间的记忆在每次 Agent 执行前被清理。 |
 | `duplicate_threshold` | f32 | `0.5` | 重复检测的相似度阈值（0.0-1.0）。有嵌入向量时使用余弦相似度，否则回退到 Jaccard 词重叠。 |

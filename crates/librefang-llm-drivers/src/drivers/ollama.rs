@@ -738,6 +738,7 @@ impl LlmDriver for OllamaDriver {
             stop_reason,
             tool_calls,
             usage,
+            actual_provider: None,
         })
     }
 
@@ -985,6 +986,7 @@ impl LlmDriver for OllamaDriver {
             stop_reason,
             tool_calls,
             usage,
+            actual_provider: None,
         })
     }
 

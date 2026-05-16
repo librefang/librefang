@@ -51,7 +51,7 @@ pub enum ExtensionError {
     ///
     /// `hint` carries the recovery instruction for the operator (typically
     /// "restore the original env var, or rebuild from backup"). The
-    /// boot-path translates this into a `KernelError::BootFailed` so the
+    /// boot-path translates this into a `LibreFangError::BootFailed` so the
     /// daemon refuses to start instead of corrupting downstream state.
     #[error("Vault key mismatch: {hint}")]
     VaultKeyMismatch { hint: String },

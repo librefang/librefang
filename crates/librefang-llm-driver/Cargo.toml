@@ -8,10 +8,12 @@ description = "LLM driver trait and shared types for LibreFang"
 [dependencies]
 librefang-types = { path = "../librefang-types" }
 async-trait = { workspace = true }
+dashmap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

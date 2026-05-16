@@ -347,6 +347,241 @@ async fn test_patch_agent_without_token_returns_401_when_api_key_set() {
 }
 
 // ---------------------------------------------------------------------------
+// PATCH /api/agents/{id} — schedule field (#4984 / #4986)
+//
+// Refs the linked issue: the dashboard's Schedule tab toggle PATCHed the
+// `schedule` field, but the partial-update handler silently dropped it.
+// These tests pin the contract so a future refactor of `patch_agent`
+// cannot regress the same way.
+// ---------------------------------------------------------------------------
+
+/// Reactive happy path — set schedule to `"reactive"` and confirm the GET
+/// response reflects it. `format_schedule_mode` renders Reactive as
+/// `"manual"`, which is the dashboard-facing string and the read-after-
+/// write assertion this test pins.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_agent_updates_schedule_to_reactive() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "schedule-reactive-target");
+
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            serde_json::json!({"schedule": "reactive"}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(status, StatusCode::OK);
+    // ScheduleMode::Reactive renders as "manual" in the dashboard payload
+    // (see `format_schedule_mode`); this assertion pins that contract.
+    assert_eq!(body["schedule"], "manual", "body={body:?}");
+}
+
+/// Continuous schedule with explicit `check_interval_secs` — the snake-case
+/// JSON shape (`{"continuous":{"check_interval_secs":N}}`) is what the
+/// dashboard's payload normalizer is supposed to emit, and is the same
+/// shape `ScheduleMode` derives via `#[serde(rename_all = "snake_case")]`.
+/// Pin both the wire format AND the read-after-write side effect: GET
+/// must now report the formatted continuous string.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_agent_updates_schedule_to_continuous() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "schedule-continuous-target");
+
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            serde_json::json!({
+                "schedule": {"continuous": {"check_interval_secs": 120}}
+            }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["schedule"], "continuous · 120s", "body={body:?}");
+}
+
+/// Periodic schedule — covers the third non-Reactive variant so the test
+/// matrix isn't strictly Reactive ↔ Continuous (which would let a regression
+/// that only affects Periodic / Proactive land silently).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_agent_updates_schedule_to_periodic() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "schedule-periodic-target");
+
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            serde_json::json!({"schedule": {"periodic": {"cron": "*/15 * * * *"}}}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(status, StatusCode::OK);
+    // ScheduleMode::Periodic { cron } renders as the cron expression itself
+    // (see `format_schedule_mode`); the dashboard shows it verbatim.
+    assert_eq!(body["schedule"], "*/15 * * * *", "body={body:?}");
+}
+
+/// Malformed schedule — string that isn't a known variant must be rejected
+/// with 400, not silently coerced. Pinning this prevents the
+/// dashboard-currently-sends-`"manual"` case from quietly succeeding the
+/// next time someone adds a permissive `serde(other)` fallback to
+/// `ScheduleMode`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_agent_rejects_invalid_schedule_string() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "schedule-bad-string");
+
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            // `"manual"` is the dashboard display string — there's no
+            // `Manual` variant on `ScheduleMode`. The dashboard must
+            // alias it to `"reactive"` on the wire; if it ever stops,
+            // this test catches the regression at the API layer.
+            serde_json::json!({"schedule": "manual"}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
+    assert!(body["error"].is_string());
+}
+
+/// Malformed schedule payload — wrong inner shape (`continuous` without the
+/// nested object) must be rejected with 400. Distinct from the unknown-
+/// variant case above so a regression in either path surfaces on its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_agent_rejects_malformed_schedule_payload() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "schedule-bad-shape");
+
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            // `continuous` is a struct variant — passing a bare string
+            // is a serde shape error, not an unknown variant.
+            serde_json::json!({"schedule": "continuous"}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
+    assert!(body["error"].is_string());
+}
+
+/// Schedule field absent → existing schedule must be preserved. PATCH is
+/// a partial update, so a name-only PATCH should not touch the schedule.
+/// This pins the "unrelated field updates leave schedule alone" guarantee.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_agent_without_schedule_field_preserves_schedule() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "schedule-untouched-target");
+
+    // First, set schedule to a non-default value so "untouched" is observable.
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            serde_json::json!({"schedule": {"continuous": {"check_interval_secs": 60}}}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Then, PATCH a different field. Schedule must NOT revert to default.
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            serde_json::json!({"name": "schedule-untouched-renamed"}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], "schedule-untouched-renamed");
+    assert_eq!(body["schedule"], "continuous · 60s", "body={body:?}");
+}
+
+/// Refs #4984: PATCH from Reactive → Continuous must start the background
+/// loop immediately, and PATCH from Continuous → Reactive must stop it.
+/// Previously the registry was updated but `start_background_for_agent` /
+/// `stop_agent` were never called, so the runtime kept running whatever
+/// schedule was active at daemon start until restart.
+///
+/// We assert against the kernel's `background.active_count()` (via the
+/// kernel handle on `AppState`) rather than waiting for a tick to fire,
+/// because the test harness uses fake LLM models and `tokio::test` runs
+/// don't sleep long enough for the jitter-delayed first tick anyway.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_agent_schedule_starts_and_stops_background_loop() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "schedule-runtime-target");
+
+    // Newly spawned agent defaults to Reactive — no background loop.
+    let baseline_count = h.state.kernel.background_active_count();
+
+    // Reactive → Continuous: a new loop must register.
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            serde_json::json!({"schedule": {"continuous": {"check_interval_secs": 3600}}}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let after_start = h.state.kernel.background_active_count();
+    assert_eq!(
+        after_start,
+        baseline_count + 1,
+        "Reactive→Continuous PATCH must start the background loop (was {baseline_count}, now {after_start})"
+    );
+
+    // Continuous → Reactive: the loop must be stopped.
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            serde_json::json!({"schedule": "reactive"}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let after_stop = h.state.kernel.background_active_count();
+    assert_eq!(
+        after_stop, baseline_count,
+        "Continuous→Reactive PATCH must stop the background loop (was {after_start}, now {after_stop})"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // DELETE /api/agents/{id} — idempotency (#3509)
 // ---------------------------------------------------------------------------
 

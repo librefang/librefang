@@ -499,6 +499,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a054912289d18629dc78375ba2c3726a3afe3ff71b4edba9dedfca0e3446d1fc"
 dependencies = [
  "aws-lc-sys",
+ "untrusted 0.7.1",
  "zeroize",
 ]
 
@@ -748,6 +749,16 @@ checksum = "874bb8112abecc98cbd6d81ea4fa7e94fb9449648c93cc89aa40c81c24d7de03"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
+]
+
+[[package]]
+name = "bstr"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63044e1ae8e69f3b5a92c736ca6269b8d12fa7efe39bf34ddb06d102cf0e2cab"
+dependencies = [
+ "memchr",
+ "serde",
 ]
 
 [[package]]
@@ -3067,6 +3078,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "globset"
+version = "0.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52dfc19153a48bde0cbd630453615c8151bce3a5adfac7a0aebfbf0a1e1f57e3"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "globwalk"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bf760ebf69878d9fd8f110c89703d90ce35095324d1f1edcb595c63945ee757"
+dependencies = [
+ "bitflags 2.11.1",
+ "ignore",
+ "walkdir",
+]
+
+[[package]]
 name = "gobject-sys"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3628,6 +3663,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ignore"
+version = "0.4.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3d782a365a015e0f5c04902246139249abf769125006fbe7649e2ee88169b4a"
+dependencies = [
+ "crossbeam-deque",
+ "globset",
+ "log",
+ "memchr",
+ "regex-automata",
+ "same-file",
+ "walkdir",
+ "winapi-util",
+]
+
+[[package]]
 name = "image"
 version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4031,6 +4082,7 @@ version = "10.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eba32bfb4ffdeaca3e34431072faf01745c9b26d25504aa7a6cf5684334fc4fc"
 dependencies = [
+ "aws-lc-rs",
  "base64 0.22.1",
  "getrandom 0.2.17",
  "js-sys",
@@ -4328,6 +4380,7 @@ dependencies = [
  "psl",
  "rand 0.10.1",
  "reqwest",
+ "rsa",
  "rustix",
  "schemars 0.8.22",
  "serde",
@@ -4599,6 +4652,7 @@ dependencies = [
  "sha2",
  "subtle",
  "tempfile",
+ "tera",
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",
@@ -4628,10 +4682,12 @@ dependencies = [
 name = "librefang-kernel-metering"
 version = "2026.5.12-beta.11"
 dependencies = [
+ "librefang-llm-driver",
  "librefang-memory",
  "librefang-runtime",
  "librefang-types",
  "serde",
+ "tracing",
 ]
 
 [[package]]
@@ -4654,11 +4710,13 @@ name = "librefang-llm-driver"
 version = "2026.5.12-beta.11"
 dependencies = [
  "async-trait",
+ "dashmap",
  "librefang-types",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4673,7 +4731,6 @@ dependencies = [
  "futures",
  "librefang-http",
  "librefang-llm-driver",
- "librefang-runtime-oauth",
  "librefang-types",
  "metrics",
  "rand 0.10.1",
@@ -4748,6 +4805,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "librefang-rl-export"
+version = "2026.5.12-beta.11"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "librefang-http",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "urlencoding",
+ "wiremock",
+]
+
+[[package]]
 name = "librefang-runtime"
 version = "2026.5.12-beta.11"
 dependencies = [
@@ -4771,9 +4847,10 @@ dependencies = [
  "librefang-llm-driver",
  "librefang-llm-drivers",
  "librefang-memory",
+ "librefang-runtime-audit",
  "librefang-runtime-mcp",
- "librefang-runtime-oauth",
- "librefang-runtime-wasm",
+ "librefang-runtime-media",
+ "librefang-runtime-sandbox-docker",
  "librefang-skills",
  "librefang-types",
  "metrics",
@@ -4784,6 +4861,7 @@ dependencies = [
  "proptest",
  "r2d2",
  "r2d2_sqlite",
+ "rand 0.10.1",
  "regex-lite",
  "reqwest",
  "rusqlite",
@@ -4806,8 +4884,28 @@ dependencies = [
  "ureq",
  "url",
  "uuid",
+ "wasmtime",
  "wiremock",
  "zeroize",
+]
+
+[[package]]
+name = "librefang-runtime-audit"
+version = "2026.5.12-beta.11"
+dependencies = [
+ "chrono",
+ "hex",
+ "librefang-types",
+ "metrics",
+ "r2d2",
+ "r2d2_sqlite",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4835,39 +4933,37 @@ dependencies = [
 ]
 
 [[package]]
-name = "librefang-runtime-oauth"
+name = "librefang-runtime-media"
 version = "2026.5.12-beta.11"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
+ "chrono",
+ "dashmap",
  "hex",
  "librefang-http",
  "librefang-types",
- "rand 0.10.1",
  "reqwest",
  "serde",
  "serde_json",
+ "serial_test",
  "sha2",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
- "zeroize",
+ "url",
+ "uuid",
 ]
 
 [[package]]
-name = "librefang-runtime-wasm"
+name = "librefang-runtime-sandbox-docker"
 version = "2026.5.12-beta.11"
 dependencies = [
- "anyhow",
- "async-trait",
- "librefang-http",
- "librefang-kernel-handle",
+ "chrono",
+ "dashmap",
  "librefang-types",
  "serde_json",
- "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
- "wasmtime",
 ]
 
 [[package]]
@@ -7629,7 +7725,7 @@ dependencies = [
  "cfg-if",
  "getrandom 0.2.17",
  "libc",
- "untrusted",
+ "untrusted 0.9.0",
  "windows-sys 0.52.0",
 ]
 
@@ -7995,7 +8091,7 @@ checksum = "64ca1bc8749bd4cf37b5ce386cc146580777b4e8572c7b97baf22c83f444bee9"
 dependencies = [
  "ring",
  "rustls-pki-types",
- "untrusted",
+ "untrusted 0.9.0",
 ]
 
 [[package]]
@@ -8007,7 +8103,7 @@ dependencies = [
  "aws-lc-rs",
  "ring",
  "rustls-pki-types",
- "untrusted",
+ "untrusted 0.9.0",
 ]
 
 [[package]]
@@ -9610,6 +9706,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tera"
+version = "1.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8004bca281f2d32df3bacd59bc67b312cb4c70cea46cbd79dbe8ac5ed206722"
+dependencies = [
+ "globwalk",
+ "lazy_static",
+ "pest",
+ "pest_derive",
+ "regex",
+ "serde",
+ "serde_json",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "termcolor"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10466,6 +10578,12 @@ name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+
+[[package]]
+name = "untrusted"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a156c684c91ea7d62626509bce3cb4e1d9ed5c4d978f7b4352658f96a4c26b4a"
 
 [[package]]
 name = "untrusted"

@@ -530,14 +530,19 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                                     .await;
                                     // Fan out to multi-destination
                                     // delivery_targets (best-effort,
-                                    // failure-isolated).
-                                    cron_fan_out_targets(
-                                        &kernel_job,
-                                        &job_name,
-                                        &result.response,
-                                        &delivery_targets,
-                                    )
-                                    .await;
+                                    // failure-isolated). Skip the whole
+                                    // call when there are no targets so
+                                    // we never construct a fan-out engine
+                                    // for the common no-webhook job (#5127).
+                                    if !delivery_targets.is_empty() {
+                                        cron_fan_out_targets(
+                                            &kernel_job,
+                                            &job_name,
+                                            &result.response,
+                                            &delivery_targets,
+                                        )
+                                        .await;
+                                    }
                                 }
                             }
                             Ok(Err(e)) => {
@@ -635,13 +640,19 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                                             &delivery,
                                         )
                                         .await;
-                                        cron_fan_out_targets(
-                                            &kernel_job,
-                                            &job_name,
-                                            &output,
-                                            &delivery_targets,
-                                        )
-                                        .await;
+                                        // Skip the fan-out call when no
+                                        // targets are configured so we
+                                        // don't construct an engine for
+                                        // the common no-webhook job (#5127).
+                                        if !delivery_targets.is_empty() {
+                                            cron_fan_out_targets(
+                                                &kernel_job,
+                                                &job_name,
+                                                &output,
+                                                &delivery_targets,
+                                            )
+                                            .await;
+                                        }
                                     }
                                     Ok(Err(e)) => {
                                         let err_msg = format!("{e}");

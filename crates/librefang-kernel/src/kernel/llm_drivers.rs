@@ -12,6 +12,7 @@
 //! visibility surgery.
 
 use super::*;
+use librefang_types::error::LibreFangError;
 
 impl LibreFangKernel {
     /// Resolve the LLM driver for an agent.
@@ -191,9 +192,10 @@ impl LibreFangKernel {
                         );
                         Arc::clone(&self.llm.default_driver)
                     } else {
-                        return Err(KernelError::BootFailed(format!(
+                        return Err(LibreFangError::BootFailed(format!(
                             "Agent LLM driver init failed: {e}"
-                        )));
+                        ))
+                        .into());
                     }
                 }
             }

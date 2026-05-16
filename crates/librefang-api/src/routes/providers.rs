@@ -1911,6 +1911,15 @@ pub async fn set_default_provider(
 
 /// Safely persist the `[default_model]` section into config.toml using proper
 /// TOML serialization (avoids format-string injection).
+///
+/// Read failures other than `NotFound` are propagated rather than silently
+/// degrading to an empty config — the previous `unwrap_or_default()` path
+/// would destroy every operator-authored section (e.g. `[email]`,
+/// `[telegram]`, `[proxy]`) on any transient `EACCES` / `EIO` because the
+/// rewrite then serialized a fresh table that contained only
+/// `[default_model]`. See #5116. The on-disk replacement still goes through
+/// [`crate::atomic_write`] so a crash between the temp-write and the rename
+/// can never leave a partially-written `config.toml`.
 fn persist_default_model(
     config_path: &std::path::Path,
     provider: &str,
@@ -1928,7 +1937,16 @@ fn persist_default_model(
         toml::Value::String(api_key_env.to_string()),
     );
 
-    let content = std::fs::read_to_string(config_path).unwrap_or_default();
+    // Read existing config. A missing file is fine — the daemon may write
+    // config.toml for the first time here — but any *other* read error
+    // (permission denied, I/O failure) must abort: degrading to an empty
+    // string would wipe out every other operator-authored section on
+    // rewrite (refs #5116).
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(Box::new(e)),
+    };
     let mut doc: toml::Value = if content.trim().is_empty() {
         toml::Value::Table(toml::map::Map::new())
     } else {

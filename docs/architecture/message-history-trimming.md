@@ -56,7 +56,7 @@ manifest.max_history_messages       (Some — per-agent override)
   ↓ if None
 kernel_config.max_history_messages  (Some — operator/global override)
   ↓ if None
-DEFAULT_MAX_HISTORY_MESSAGES = 40   (compiled-in fallback)
+DEFAULT_MAX_HISTORY_MESSAGES = 60   (compiled-in fallback)
 ```
 
 Resolution lives in `resolve_max_history(&manifest, &opts)` inside

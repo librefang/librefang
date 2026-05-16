@@ -113,12 +113,22 @@ impl LibreFangKernel {
             // replaces the live snapshot — concurrent callers that already
             // resolved a chain keep using their `Arc<dyn LlmDriver>` until
             // the call completes.
-            self.llm.aux_client.store(std::sync::Arc::new(
-                librefang_runtime::aux_client::AuxClient::new(
-                    new_config_arc,
-                    Arc::clone(&self.llm.default_driver),
-                ),
-            ));
+            //
+            // Preserve the boot-time `ProviderExhaustionStore` handle
+            // across reloads (#4807): the in-memory state — rate-limit
+            // windows, operator-budget gate trips — must survive
+            // `[llm.auxiliary]` edits, otherwise an aux config touch
+            // would forget every active skip and start re-dispatching
+            // calls to providers we know are out. Fetched from the
+            // metering engine where boot stored it.
+            let mut new_aux = librefang_runtime::aux_client::AuxClient::new(
+                new_config_arc,
+                Arc::clone(&self.llm.default_driver),
+            );
+            if let Some(store) = self.metering.engine.exhaustion_store() {
+                new_aux = new_aux.with_exhaustion_store(store);
+            }
+            self.llm.aux_client.store(std::sync::Arc::new(new_aux));
         }
 
         Ok(plan)

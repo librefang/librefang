@@ -1708,12 +1708,29 @@ impl McpConnection {
         }
     }
 
+    /// SSRF guard for every MCP transport that opens an outbound HTTP
+    /// connection (SSE, Streamable HTTP, HTTP compatibility shim).
+    ///
+    /// Delegates to [`crate::mcp_oauth::is_ssrf_blocked_url`] so the
+    /// connect path and the OAuth discovery / token-exchange paths share
+    /// one policy. The shared helper:
+    ///
+    /// * parses the URL with the `url` crate (no substring matching),
+    /// * rejects non-`http(s)` schemes (`file://`, `ftp://`, …),
+    /// * rejects userinfo (`http://user:pw@host/`),
+    /// * blocks loopback (`127.0.0.0/8`, `::1`), RFC1918
+    ///   (`10/8`, `172.16/12`, `192.168/16`), CGNAT (`100.64.0.0/10`),
+    ///   link-local (`169.254/16`, `fe80::/10`), and ULA (`fc00::/7`),
+    /// * unwraps IPv4-mapped IPv6 and the NAT64 well-known prefix
+    ///   (`64:ff9b::/96`) before re-checking the embedded IPv4,
+    /// * blocks IMDS hostnames (`metadata.google.internal`,
+    ///   `metadata.aws.internal`, `instance-data`) and `localhost`.
+    ///
+    /// `label` is woven into the error so the operator can tell which
+    /// transport rejected the URL.
     fn check_ssrf(url: &str, label: &str) -> Result<(), String> {
-        let lower = url.to_lowercase();
-        if lower.contains("169.254.169.254") || lower.contains("metadata.google") {
-            return Err(format!("SSRF: {label} URL targets metadata endpoint"));
-        }
-        Ok(())
+        crate::mcp_oauth::is_ssrf_blocked_url(url)
+            .map_err(|reason| format!("SSRF: {label} URL rejected — {reason}"))
     }
 
     fn register_http_compat_tools(&mut self, tools: &[HttpCompatToolConfig]) {
@@ -3888,10 +3905,37 @@ mod tests {
 
     #[test]
     fn test_ssrf_check() {
+        // Cloud metadata endpoints (literal IP and DNS forms)
         assert!(
             McpConnection::check_ssrf("http://169.254.169.254/latest/meta-data", "test").is_err()
         );
         assert!(McpConnection::check_ssrf("http://metadata.google.internal/v1/", "test").is_err());
+        assert!(McpConnection::check_ssrf("http://metadata.aws.internal/", "test").is_err());
+
+        // Loopback — IPv4, hostname, and IPv6
+        assert!(McpConnection::check_ssrf("http://127.0.0.1/admin", "test").is_err());
+        assert!(McpConnection::check_ssrf("http://localhost/x", "test").is_err());
+        assert!(McpConnection::check_ssrf("http://[::1]/x", "test").is_err());
+
+        // RFC1918 and CGNAT
+        assert!(McpConnection::check_ssrf("http://10.0.0.1/x", "test").is_err());
+        assert!(McpConnection::check_ssrf("http://192.168.1.1/x", "test").is_err());
+        assert!(McpConnection::check_ssrf("http://172.16.0.1/x", "test").is_err());
+        assert!(McpConnection::check_ssrf("http://100.64.0.1/x", "test").is_err());
+
+        // NAT64 well-known prefix smuggling IMDS (64:ff9b::169.254.169.254)
+        assert!(McpConnection::check_ssrf("http://[64:ff9b::a9fe:a9fe]/x", "test").is_err());
+
+        // IPv4-mapped IPv6 smuggling loopback (::ffff:127.0.0.1)
+        assert!(McpConnection::check_ssrf("http://[::ffff:7f00:1]/x", "test").is_err());
+
+        // Userinfo — pre-#3623 substring stub let credentials through
+        assert!(McpConnection::check_ssrf("http://alice:pw@example.com/", "test").is_err());
+
+        // Non-http(s) schemes — file:// must never reach reqwest
+        assert!(McpConnection::check_ssrf("file:///etc/passwd", "test").is_err());
+
+        // Sanity: a normal public MCP endpoint is allowed
         assert!(McpConnection::check_ssrf("https://api.example.com/mcp", "test").is_ok());
     }
 

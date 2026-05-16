@@ -378,25 +378,6 @@ impl LibreFangKernel {
         None
     }
 
-    /// Pre-dispatch provider-budget check.
-    ///
-    /// Read-only: looks up the `[providers.<name>]` entry (if any) and
-    /// queries the metering store. Used by every dispatch path
-    /// (ephemeral / full / streaming) BEFORE any token or USD
-    /// reservation is acquired, so a rejection cannot leak reservations
-    /// and a hot loop of denied calls cannot drain the per-agent burst
-    /// window or the in-memory pending USD ledger.
-    fn check_provider_budget_for(
-        &self,
-        provider: &str,
-    ) -> librefang_types::error::LibreFangResult<()> {
-        let bc = self.metering.budget_config.load();
-        if let Some(pb) = bc.providers.get(provider) {
-            self.metering.engine.check_provider_budget(provider, pb)?;
-        }
-        Ok(())
-    }
-
     /// Send an ephemeral "side question" to an agent (`/btw` command).
     ///
     /// The message is answered using the agent's system prompt and model, but in a
@@ -418,9 +399,17 @@ impl LibreFangKernel {
             return Ok(AgentLoopResult::default());
         }
 
-        // Pre-dispatch provider budget gate (ephemeral path).
-        self.check_provider_budget_for(&entry.manifest.model.provider)
-            .map_err(KernelError::LibreFang)?;
+        // #4807: the pre-dispatch provider-budget gate was removed
+        // from this path. Budget exhaustion is now signalled through
+        // the shared `ProviderExhaustionStore` (flagged by
+        // `MeteringEngine::flag_provider_budget_exhausted` when a
+        // per-provider operator cap trips) and consumed by the LLM
+        // fallback chain (`FallbackDriver` + `FallbackChain`), so an
+        // exhausted primary provider falls over to a healthy slot
+        // instead of refusing the whole call. Global `[budget]` caps
+        // and per-agent quotas still apply via `reserve_global_budget`
+        // / `check_quota_and_reserve` below — only the per-provider
+        // gate that #4807 explicitly asked to remove is gone.
 
         // Ephemeral: no tools — prevents side effects (tool writes to memory/disk)
         let tools: Vec<librefang_types::tool::ToolDefinition> = vec![];
@@ -456,6 +445,12 @@ impl LibreFangKernel {
                 .map(|w| self.cached_workspace_metadata(w, manifest.autonomous.is_some()));
 
             let agent_id_str = agent_id.0.to_string();
+            // One pass over `tools` produces both the name list (for the
+            // hook payload + `PromptContext::granted_tools`) and the
+            // description hint map (for `PromptContext::granted_tool_hints`).
+            // Avoids three separate walks per send (#4805 review).
+            let (granted_tool_names, granted_tool_hints) =
+                librefang_runtime::prompt_builder::collect_granted_tool_names_and_hints(&tools);
             let hook_ctx = librefang_runtime::hooks::HookContext {
                 agent_name: &manifest.name,
                 agent_id: agent_id_str.as_str(),
@@ -465,7 +460,7 @@ impl LibreFangKernel {
                     "call_site": "ephemeral",
                     "user_message": message,
                     "is_subagent": false,
-                    "granted_tools": tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+                    "granted_tools": granted_tool_names,
                 }),
             };
             let dynamic_sections = self.governance.hooks.collect_prompt_sections(&hook_ctx);
@@ -490,7 +485,8 @@ impl LibreFangKernel {
                 agent_name: manifest.name.clone(),
                 agent_description: manifest.description.clone(),
                 base_system_prompt: manifest.model.system_prompt.clone(),
-                granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
+                granted_tools: granted_tool_names,
+                granted_tool_hints,
                 recalled_memories: vec![],
                 skill_summary: String::new(),
                 skill_count: 0,
@@ -660,9 +656,16 @@ impl LibreFangKernel {
         // attribution to record. Per-user budget rollup will skip these.
         // session_id is also None: ephemerals run on a throwaway session
         // that is not persisted in the sessions table.
+        //
+        // #4807 review nit 10: honour `actual_provider` so a chain
+        // fail-over bills the slot that did the work.
+        let billed_provider = result
+            .actual_provider
+            .clone()
+            .unwrap_or_else(|| manifest.model.provider.clone());
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
-            provider: manifest.model.provider.clone(),
+            provider: billed_provider,
             model: model.clone(),
             input_tokens: result.total_usage.input_tokens,
             output_tokens: result.total_usage.output_tokens,
@@ -804,12 +807,12 @@ impl LibreFangKernel {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
-        // Pre-dispatch provider budget gate (full path). Placed BEFORE
-        // both reservations so a rejection cannot leak the pending USD
-        // ledger or the per-agent burst window — bare `?` is sufficient
-        // because no resources have been acquired yet.
-        self.check_provider_budget_for(&entry.manifest.model.provider)
-            .map_err(KernelError::LibreFang)?;
+        // #4807: the pre-dispatch provider-budget gate was removed
+        // from this path. Budget exhaustion is signalled through the
+        // shared `ProviderExhaustionStore` and consumed by the LLM
+        // fallback chain so an exhausted primary provider fails over
+        // to a healthy slot. See the ephemeral-path explanation
+        // above for the full rationale.
 
         let estimated_usd = {
             // Best-effort pre-call estimate: model.max_tokens worth of
@@ -1716,12 +1719,12 @@ impl LibreFangKernel {
             loop_opts.compaction_config = Some(merged);
         }
 
-        // Pre-dispatch provider budget gate (streaming path). Placed
-        // BEFORE `check_quota_and_reserve` so a rejection cannot leak
-        // the per-agent burst window — bare `?` is sufficient because
-        // no token reservation has been acquired yet.
-        self.check_provider_budget_for(&entry.manifest.model.provider)
-            .map_err(KernelError::LibreFang)?;
+        // #4807: the pre-dispatch provider-budget gate was removed
+        // from this path. Budget exhaustion is signalled through the
+        // shared `ProviderExhaustionStore` and consumed by the LLM
+        // fallback chain so an exhausted primary provider fails over
+        // to a healthy slot. See the ephemeral-path explanation
+        // above for the full rationale.
 
         // Pre-charge the estimated token budget atomically to prevent the
         // TOCTOU race (#3736).  The reservation is settled inside the spawned
@@ -2078,6 +2081,12 @@ impl LibreFangKernel {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let agent_id_str = agent_id.0.to_string();
+            // One pass over `tools` produces both the name list (for the
+            // hook payload + `PromptContext::granted_tools`) and the
+            // description hint map (for `PromptContext::granted_tool_hints`).
+            // Avoids three separate walks per send (#4805 review).
+            let (granted_tool_names, granted_tool_hints) =
+                librefang_runtime::prompt_builder::collect_granted_tool_names_and_hints(&tools);
             let hook_ctx = librefang_runtime::hooks::HookContext {
                 agent_name: &manifest.name,
                 agent_id: agent_id_str.as_str(),
@@ -2090,7 +2099,7 @@ impl LibreFangKernel {
                     "channel_type": sender_context.map(|s| s.channel.clone()),
                     "is_group": sender_context.map(|s| s.is_group).unwrap_or(false),
                     "is_subagent": is_subagent_flag,
-                    "granted_tools": tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+                    "granted_tools": granted_tool_names,
                 }),
             };
             let dynamic_sections = self.governance.hooks.collect_prompt_sections(&hook_ctx);
@@ -2110,7 +2119,8 @@ impl LibreFangKernel {
                 agent_name: manifest.name.clone(),
                 agent_description: manifest.description.clone(),
                 base_system_prompt: manifest.model.system_prompt.clone(),
-                granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
+                granted_tools: granted_tool_names,
+                granted_tool_hints,
                 recalled_memories: vec![],
                 skill_summary: skill_meta
                     .as_ref()
@@ -2587,9 +2597,16 @@ impl LibreFangKernel {
                         result.total_usage.cache_read_input_tokens,
                         result.total_usage.cache_creation_input_tokens,
                     );
+                    // #4807 review nit 10: honour `actual_provider`
+                    // so a chain fail-over bills the slot that did the
+                    // work, not the manifest-nominated provider.
+                    let billed_provider = result
+                        .actual_provider
+                        .clone()
+                        .unwrap_or_else(|| manifest.model.provider.clone());
                     let usage_record = librefang_memory::usage::UsageRecord {
                         agent_id,
-                        provider: manifest.model.provider.clone(),
+                        provider: billed_provider,
                         model: model.clone(),
                         input_tokens: result.total_usage.input_tokens,
                         output_tokens: result.total_usage.output_tokens,

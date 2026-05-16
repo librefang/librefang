@@ -5,10 +5,11 @@ members = [
     "crates/librefang-memory",
     "crates/librefang-memory-wiki",
     "crates/librefang-runtime",
+    "crates/librefang-runtime-audit",
+    "crates/librefang-runtime-media",
+    "crates/librefang-runtime-sandbox-docker",
     "crates/librefang-runtime-mcp",
-    "crates/librefang-runtime-oauth",
     "crates/librefang-llm-drivers",
-    "crates/librefang-runtime-wasm",
     "crates/librefang-llm-driver",
     "crates/librefang-kernel-handle",
     "crates/librefang-acp",
@@ -26,6 +27,7 @@ members = [
     "crates/librefang-hands",
     "crates/librefang-extensions",
     "crates/librefang-telemetry",
+    "crates/librefang-rl-export",
     "xtask",
     "crates/librefang-testing",
 ]
@@ -159,6 +161,15 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 # self-contained and reproducible.
 psl = "2"
 
+# Tera template engine — Jinja2-flavoured templates used by the workflow
+# `Transform` operator (#4980 step 3). Sandboxed by default (no I/O,
+# bounded recursion), well-maintained, MIT, and the standard pick when
+# the alternative is `mlua` / `rhai` / a hand-rolled DSL — all heavier
+# trees that we would have to babysit for security. Pin a single major
+# so a future bump is a deliberate review, not a transient dependabot
+# ping.
+tera = { version = "1", default-features = false }
+
 # WASM sandbox
 wasmtime = "44"
 
@@ -206,7 +217,17 @@ zeroize = { version = "1", features = ["derive"] }
 totp-rs = { version = "5", features = ["gen_secret", "otpauth", "qr"] }
 
 # JWT validation
-jsonwebtoken = "10"
+#
+# `jsonwebtoken` 10.x defers RSA / EC signature operations to a
+# process-level `CryptoProvider` and panics at `decode::<_>` time if no
+# provider feature is enabled. The default features only enable PEM
+# parsing, so we explicitly turn on `aws_lc_rs` to match the rustls
+# provider that `librefang-cli` installs at startup
+# (`aws_lc_rs::default_provider().install_default()`). Without this,
+# any real OIDC token validation (`/api/auth/introspect`, the OAuth
+# callback's ID-token path, and the `oidc_auth_middleware`) panics in
+# production. Discovered while landing the #5128 `sub`-required tests.
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 
 # Rate limiting
 governor = "0.10.4"

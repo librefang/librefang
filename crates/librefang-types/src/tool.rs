@@ -208,6 +208,13 @@ pub enum AgentLoopSignal {
         result_is_error: bool,
         result_status: ToolExecutionStatus,
     },
+    /// An async task registered earlier by this session has reached a
+    /// terminal state. The kernel injects this into the originating
+    /// `(agent, session)` so the runtime can surface the result on the
+    /// next (or current) turn. Refs #4983.
+    TaskCompleted {
+        event: crate::task::TaskCompletionEvent,
+    },
 }
 
 /// A structured trace of a tool selection decision during agent execution.
