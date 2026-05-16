@@ -799,12 +799,20 @@ fn host_kv_get(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
             json!({"ok": val})
         }
         Ok(None) => {
-            // WASM legacy fallback: try the old namespaced key format
-            // for guests that stored data before the agent_id parameter
-            // was introduced.
+            // Upgrade-compat fallback: pre-#5070 WASM rows were stored as
+            // (shared_uuid, "{agent_id}:{key}") with manual key prefixing.
+            // Retry the old format in the shared namespace.
             let legacy_key = format!("{}:{key}", state.agent_id);
-            match kernel.memory_recall(&legacy_key, Some(&state.agent_id), None) {
-                Ok(Some(val)) => json!({"ok": val}),
+            match kernel.memory_recall(&legacy_key, None, None) {
+                Ok(Some(val)) => {
+                    tracing::warn!(
+                        key = %key,
+                        agent_id = %state.agent_id,
+                        "host_kv_get: found value with deprecated key-prefix format; \
+                         re-store with current scheme to migrate"
+                    );
+                    json!({"ok": val})
+                }
                 _ => json!({"ok": null}),
             }
         }
