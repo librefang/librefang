@@ -31,8 +31,18 @@ static FAN_OUT_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// Build the cron fan-out HTTP client. Pulled out into a free function so
 /// tests can drive it directly without going through `OnceLock`.
+///
+/// Routes through `librefang_runtime::http_client::proxied_client_builder()`
+/// so the fan-out client picks up the daemon's `[proxy]` config (HTTPS_PROXY,
+/// HTTP_PROXY, NO_PROXY), the bundled `webpki-roots` TLS fallback (required
+/// on minimal Docker / Termux / musl images that lack a system CA bundle),
+/// and the project-wide `librefang/<version>` User-Agent. The legacy
+/// single-target webhook path below (`cron_deliver_response` →
+/// `CronDelivery::Webhook`) uses the same helper; the fan-out path used to
+/// drift to a bare `reqwest::Client::builder()` (no proxy, no CA fallback,
+/// no UA) which was a silent regression vs. the legacy delivery.
 fn build_fan_out_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    librefang_runtime::http_client::proxied_client_builder()
         .timeout(Duration::from_secs(FAN_OUT_WEBHOOK_TIMEOUT_SECS))
         .build()
         .expect("HTTP client build failed for cron fan-out engine")
