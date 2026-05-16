@@ -12,8 +12,8 @@
 //! real JWTs signed by an RSA-2048 keypair we generate in-process. The
 //! corresponding public key is served as a JWKS document from a local
 //! axum listener bound to `127.0.0.1:0`, so the daemon's
-//! `validate_jwt_cached` path runs exactly as in production (JWKS fetch
-//! + RS256 signature verification + claims validation) without needing
+//! `validate_jwt_cached` path runs exactly as in production (JWKS fetch,
+//! RS256 signature verification, and claims validation) without needing
 //! a live identity provider.
 //!
 //! Three cases cover the three security layers added in the fix:
