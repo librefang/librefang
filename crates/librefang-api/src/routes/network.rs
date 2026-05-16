@@ -1391,6 +1391,34 @@ pub async fn mcp_http(
         tools.extend(mcp_tools.iter().cloned());
     }
 
+    // Resolve the caller agent from the `X-LibreFang-Agent-Id` header,
+    // if any. When a CLI driver (e.g. claude-code's `--mcp-config`)
+    // re-exposes LibreFang tools to a spawned CLI, the driver writes
+    // the owning agent's ID into this header so we can rehydrate the
+    // ToolExecContext fields that the direct agent-loop path would
+    // populate (workspace_root, allowed_tools, allowed_skills,
+    // exec_policy, hand_allowed_env). Without it, every file/media/
+    // cron/schedule tool fails with "workspace sandbox not configured"
+    // or "Agent ID required" — issue #2699.
+    //
+    // Unauthenticated external MCP clients do not set this header and
+    // continue to run with `None` context: the fallback behaviour is
+    // unchanged.
+    //
+    // We resolve this up-front (rather than only inside the `tools/call`
+    // branch) because non-`tools/call` methods — chiefly `tools/list`
+    // during the Claude Code CLI's startup MCP handshake — also need
+    // the per-agent filter applied to the discovered tool catalogue.
+    // Without that, a `claude-code` driver agent wired to a large MCP
+    // server (e.g. Smithery `googlesuper`, 223 tools) gets the full
+    // kernel catalogue injected into the CLI's system prompt and the
+    // CLI silently exits with code 1 (#5101).
+    let caller_entry = headers
+        .get("x-librefang-agent-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<librefang_types::agent::AgentId>().ok())
+        .and_then(|id| state.kernel.agent_registry().get(id));
+
     // Check if this is a tools/call that needs real execution
     let method = request["method"].as_str().unwrap_or("");
     if method == "tools/call" {
@@ -1416,25 +1444,6 @@ pub async fn mcp_http(
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .snapshot();
-
-        // Resolve the caller agent from the `X-LibreFang-Agent-Id` header,
-        // if any. When a CLI driver (e.g. claude-code's `--mcp-config`)
-        // re-exposes LibreFang tools to a spawned CLI, the driver writes
-        // the owning agent's ID into this header so we can rehydrate the
-        // ToolExecContext fields that the direct agent-loop path would
-        // populate (workspace_root, allowed_tools, allowed_skills,
-        // exec_policy, hand_allowed_env). Without it, every file/media/
-        // cron/schedule tool fails with "workspace sandbox not configured"
-        // or "Agent ID required" — issue #2699.
-        //
-        // Unauthenticated external MCP clients do not set this header and
-        // continue to run with `None` context: the fallback behaviour is
-        // unchanged.
-        let caller_entry = headers
-            .get("x-librefang-agent-id")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<librefang_types::agent::AgentId>().ok())
-            .and_then(|id| state.kernel.agent_registry().get(id));
 
         let caller_agent_id_string = caller_entry.as_ref().map(|e| e.id.to_string());
         let workspace_root = caller_entry
@@ -1528,8 +1537,24 @@ pub async fn mcp_http(
         }));
     }
 
-    // For non-tools/call methods (initialize, tools/list, etc.), delegate to the handler
-    let response = librefang_kernel::mcp_server::handle_mcp_request(&request, &tools).await;
+    // For non-tools/call methods (initialize, tools/list, etc.), delegate
+    // to the handler. When the caller agent resolves, apply the same
+    // per-agent filter pipeline used by the `tools/call` branch and the
+    // direct agent-loop path (`kernel.available_tools(id)` + the
+    // workspace mode filter). This keeps `tools/list` symmetric with
+    // execution: the Claude Code CLI bridge — and any other discovery
+    // client that sends `X-LibreFang-Agent-Id` — only sees tools the
+    // agent is actually allowed to call (#5101). External MCP clients
+    // that don't set the header fall through to the unfiltered kernel
+    // catalogue, preserving pre-existing behaviour.
+    let tools_view: Vec<librefang_types::tool::ToolDefinition> = match caller_entry.as_ref() {
+        Some(e) => {
+            let allowed = state.kernel.available_tools(e.id);
+            e.mode.filter_tools((*allowed).clone())
+        }
+        None => tools,
+    };
+    let response = librefang_kernel::mcp_server::handle_mcp_request(&request, &tools_view).await;
     Json(response)
 }
 
