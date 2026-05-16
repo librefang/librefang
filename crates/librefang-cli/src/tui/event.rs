@@ -522,6 +522,7 @@ pub fn spawn_daemon_stream(
             new_messages_start: 0,
             skill_evolution_suggested: false,
             owner_notice: None,
+            actual_provider: None,
         })));
     });
     token
@@ -569,6 +570,7 @@ fn daemon_fallback(
             new_messages_start: 0,
             skill_evolution_suggested: false,
             owner_notice: None,
+            actual_provider: None,
         })
     } else {
         Err(body["error"]

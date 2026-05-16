@@ -2196,6 +2196,16 @@ pub struct AgentLoopResult {
     /// Multiple notify_owner calls in the same turn are concatenated with
     /// "\n\n" by the tool handler before being placed here.
     pub owner_notice: Option<String>,
+    /// The provider slot that actually served the LLM request (#4807
+    /// review nit 10). When a fallback wrapper (`FallbackDriver` /
+    /// `FallbackChain`) picks an alternative provider because the
+    /// nominated one was exhausted, this field carries the slot that
+    /// did the work. The kernel's `UsageRecord` construction sites
+    /// honour this value so billing attributes spend to the actual
+    /// provider, not the nominator. `None` when no fallover happened
+    /// (the call hit the originally nominated provider or no slot at
+    /// all is identifiable — e.g. CLI drivers).
+    pub actual_provider: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2620,6 +2630,9 @@ struct FinalizeEndTurnResultData {
     /// Accumulated owner notices captured during this turn via the
     /// `notify_owner` tool. Multiple invocations join with "\n\n".
     owner_notice: Option<String>,
+    /// Provider slot that actually served the LLM request (#4807 nit
+    /// 10). Carried through to [`AgentLoopResult::actual_provider`].
+    actual_provider: Option<String>,
 }
 
 struct EndTurnRetryContext<'a> {
@@ -3267,6 +3280,7 @@ fn build_silent_agent_loop_result(
         new_messages_start,
         skill_evolution_suggested: false,
         owner_notice: None,
+        actual_provider: None,
     }
 }
 
@@ -3521,6 +3535,7 @@ async fn finalize_successful_end_turn(
         new_messages_start: end_turn.new_messages_start,
         skill_evolution_suggested: tool_call_count >= 5,
         owner_notice: end_turn.owner_notice.clone(),
+        actual_provider: end_turn.actual_provider,
     })
 }
 
@@ -3978,6 +3993,13 @@ pub async fn run_agent_loop(
 
     let mut total_usage = TokenUsage::default();
     let final_response;
+    // Track the slot that actually served the most recent LLM call —
+    // populated by `FallbackDriver` / `FallbackChain` when a chain
+    // failover redirected the request to a different provider than the
+    // nominated one (#4807 review nit 10). The kernel reads this off
+    // `AgentLoopResult` and stamps the matching `UsageRecord.provider`
+    // so billing rolls up against the slot that did the work.
+    let mut last_actual_provider: Option<String> = None;
     // Accumulate text content from intermediate tool_use iterations. A turn
     // that yields a tool_use response may also carry user-facing text (e.g.
     // "Looking that up for you..." before a memory_store call). Without this
@@ -4378,6 +4400,15 @@ pub async fn run_agent_loop(
         let mut response = call_with_retry(&*driver, request, Some(provider_name), None).await?;
 
         accumulate_token_usage(&mut total_usage, &response.usage);
+        // Track the slot that actually served the latest call so the
+        // surrounding loop can stamp `AgentLoopResult.actual_provider`
+        // (#4807 review nit 10). When the driver layer set it (a
+        // fallback wrapper picked an alternative slot), prefer that
+        // over the nominated provider; otherwise leave it as the
+        // running last value (which is `None` until the chain decides).
+        if let Some(ref p) = response.actual_provider {
+            last_actual_provider = Some(p.clone());
+        }
 
         // Snapshot prompt tokens for the next iteration's should_compress check.
         // This is the per-turn input cost, NOT a running sum — we deliberately
@@ -4641,6 +4672,7 @@ pub async fn run_agent_loop(
                         directives: reply_directives_from_parsed(parsed_directives),
                         new_messages_start,
                         owner_notice: pending_owner_notice.take(),
+                        actual_provider: last_actual_provider.clone(),
                     },
                 )
                 .await;
@@ -4928,6 +4960,7 @@ pub async fn run_agent_loop(
                         latency_ms: 0,
                         new_messages_start,
                         owner_notice: None,
+                        actual_provider: None,
                     });
                 }
                 // Model hit token limit — add partial response and continue
@@ -5234,6 +5267,7 @@ async fn stream_with_retry(
                     stop_reason: StopReason::EndTurn,
                     tool_calls: vec![],
                     usage: TokenUsage::default(),
+                    actual_provider: None,
                 },
                 cascade_leak_aborted: true,
             });
@@ -5712,6 +5746,9 @@ pub async fn run_agent_loop_streaming(
 
     let mut total_usage = TokenUsage::default();
     let final_response;
+    // Track the slot that actually served the most recent LLM call (#4807
+    // review nit 10). See `run_agent_loop` for full rationale.
+    let mut last_actual_provider: Option<String> = None;
     // Accumulated text from intermediate tool_use iterations — see the
     // matching declaration in run_agent_loop for full rationale.
     let mut accumulated_text = String::new();
@@ -6182,6 +6219,11 @@ pub async fn run_agent_loop_streaming(
         let mut response = stream_result.response;
 
         accumulate_token_usage(&mut total_usage, &response.usage);
+        // Track the actual-serving slot for billing attribution
+        // (#4807 review nit 10). See run_agent_loop for rationale.
+        if let Some(ref p) = response.actual_provider {
+            last_actual_provider = Some(p.clone());
+        }
 
         // Snapshot prompt tokens for the next iteration's should_compress check.
         // Some drivers (gemini_cli, codex_cli) return input_tokens = 0.  Fall
@@ -6434,6 +6476,7 @@ pub async fn run_agent_loop_streaming(
                         directives: reply_directives_from_parsed(parsed_directives_s),
                         new_messages_start,
                         owner_notice: pending_owner_notice.take(),
+                        actual_provider: last_actual_provider.clone(),
                     },
                 )
                 .await;
@@ -6750,6 +6793,7 @@ pub async fn run_agent_loop_streaming(
                         latency_ms: 0,
                         new_messages_start,
                         owner_notice: None,
+                        actual_provider: None,
                     });
                 }
                 let text = response.text();
@@ -9941,6 +9985,7 @@ mod tests {
                         output_tokens: 5,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             } else {
                 // Second call: LLM returns EndTurn with EMPTY text (the bug)
@@ -9953,6 +9998,7 @@ mod tests {
                         output_tokens: 0,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }
@@ -9998,6 +10044,7 @@ mod tests {
                         output_tokens: 5,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             } else {
                 Ok(CompletionResponse {
@@ -10012,6 +10059,7 @@ mod tests {
                         output_tokens: 5,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }
@@ -10045,6 +10093,7 @@ mod tests {
                     output_tokens: 5,
                     ..Default::default()
                 },
+                actual_provider: None,
             })
         }
     }
@@ -10068,6 +10117,7 @@ mod tests {
                     output_tokens: 0,
                     ..Default::default()
                 },
+                actual_provider: None,
             })
         }
     }
@@ -10093,6 +10143,7 @@ mod tests {
                     output_tokens: 8,
                     ..Default::default()
                 },
+                actual_provider: None,
             })
         }
     }
@@ -10120,6 +10171,7 @@ mod tests {
                     output_tokens: 8,
                     ..Default::default()
                 },
+                actual_provider: None,
             })
         }
     }
@@ -10501,6 +10553,7 @@ mod tests {
                         output_tokens: 3,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             } else {
                 Ok(CompletionResponse {
@@ -10515,6 +10568,7 @@ mod tests {
                         output_tokens: 8,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }
@@ -10542,6 +10596,7 @@ mod tests {
                     output_tokens: 8,
                     ..Default::default()
                 },
+                actual_provider: None,
             })
         }
     }
@@ -11284,6 +11339,7 @@ mod tests {
                         output_tokens: 0,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             } else {
                 // Second call (retry): normal response
@@ -11299,6 +11355,7 @@ mod tests {
                         output_tokens: 8,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }
@@ -11323,6 +11380,7 @@ mod tests {
                     output_tokens: 0,
                     ..Default::default()
                 },
+                actual_provider: None,
             })
         }
     }
@@ -12204,6 +12262,7 @@ mod tests {
                         output_tokens: 15,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             } else {
                 // After tool result, return normal response
@@ -12219,6 +12278,7 @@ mod tests {
                         output_tokens: 12,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }
