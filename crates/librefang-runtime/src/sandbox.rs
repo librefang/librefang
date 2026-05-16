@@ -1401,4 +1401,211 @@ mod tests {
             other => panic!("Expected SandboxError::Execution with 'timed out', got: {other:?}"),
         }
     }
+
+    // ── Boundary tests ported from the deleted librefang-runtime-wasm
+    //    integration suite (#3710 god-crate split). The unit tests above
+    //    cover the happy path and a fuel cap; the four below pin the
+    //    structural boundaries that should not regress: disk-loaded modules,
+    //    ABI rejection, capability symmetry (allow + readback, not just
+    //    deny), and end-to-end memory-cap enforcement through the public
+    //    `execute()` entry — `test_memory_limiter_blocks_excess_growth`
+    //    only exercises the limiter directly.
+
+    /// ABI fixture: omits the required `execute` export. Drives the typed
+    /// ABI-violation path in `WasmSandbox::execute_sync`.
+    const MISSING_EXECUTE_WAT: &str = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "alloc") (param $size i32) (result i32)
+                (local.get $size)
+            )
+        )
+    "#;
+
+    /// Memory-cap fixture: each invocation asks for 200 pages (≈ 12.5 MiB)
+    /// via `memory.grow`. Under a `max_memory_bytes` cap below that, the
+    /// `MemoryLimiter` denies growth and `memory.grow` returns -1 — the
+    /// guest packs that into `result_len`, which the host's i32→u32 cast
+    /// turns into a huge value that trips the oversized-result guard.
+    const MEMORY_GROW_WAT: &str = r#"
+        (module
+            (memory (export "memory") 1)
+            (global $bump (mut i32) (i32.const 1024))
+
+            (func (export "alloc") (param $size i32) (result i32)
+                (local $ptr i32)
+                (local.set $ptr (global.get $bump))
+                (global.set $bump (i32.add (global.get $bump) (local.get $size)))
+                (local.get $ptr)
+            )
+
+            (func (export "execute") (param $ptr i32) (param $len i32) (result i64)
+                (local $grow_result i32)
+                (local.set $grow_result (memory.grow (i32.const 200)))
+                ;; Pack ptr=0, len=grow_result. -1 cast through u32 lands
+                ;; far above the 1 MiB result cap, surfacing as AbiError.
+                (i64.extend_i32_u (local.get $grow_result))
+            )
+        )
+    "#;
+
+    /// Sandbox loads a guest module read from disk just as well as from
+    /// inline bytes. Defends against any future "expects ownership / can't
+    /// be borrowed through fs::read" regression on the public API.
+    #[tokio::test]
+    async fn sandbox_accepts_module_loaded_from_disk() {
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        tmp.write_all(ECHO_WAT.as_bytes()).expect("write wat");
+        let bytes = std::fs::read(tmp.path()).expect("read wat back");
+
+        let sandbox = WasmSandbox::new().unwrap();
+        let result = sandbox
+            .execute(
+                &bytes,
+                json!({"hello": "from disk"}),
+                SandboxConfig::default(),
+                None,
+                "disk-load-agent",
+            )
+            .await
+            .expect("disk-loaded module should execute");
+
+        assert_eq!(result.output, json!({"hello": "from disk"}));
+    }
+
+    /// A module that violates the guest ABI (missing the required `execute`
+    /// export) must be rejected with a typed `AbiError`, not a panic and
+    /// not a generic execution error.
+    #[tokio::test]
+    async fn sandbox_rejects_module_missing_required_exports() {
+        let sandbox = WasmSandbox::new().unwrap();
+
+        let err = sandbox
+            .execute(
+                MISSING_EXECUTE_WAT.as_bytes(),
+                json!({}),
+                SandboxConfig::default(),
+                None,
+                "broken-abi-agent",
+            )
+            .await
+            .expect_err("module missing `execute` must be rejected");
+
+        match err {
+            SandboxError::AbiError(msg) => {
+                assert!(
+                    msg.contains("execute"),
+                    "AbiError must mention the missing export, got: {msg}"
+                );
+            }
+            other => panic!("expected AbiError for missing export, got: {other}"),
+        }
+    }
+
+    /// With `EnvRead("PATH")` granted, the guest can read PATH. Without it,
+    /// the same call is denied. The pair confirms the capability check is
+    /// actually dispatched (vs always-allow or always-deny). The
+    /// `test_host_call_capability_denied` test above only covers the deny
+    /// direction; without this test, a regression that flips the check
+    /// into always-deny would still pass.
+    #[tokio::test]
+    async fn sandbox_capability_grant_toggles_env_read() {
+        let sandbox = WasmSandbox::new().unwrap();
+        let input = json!({
+            "method": "env_read",
+            "params": {"name": "PATH"}
+        });
+
+        let allow_cfg = SandboxConfig {
+            capabilities: vec![Capability::EnvRead("PATH".into())],
+            ..Default::default()
+        };
+        let allow = sandbox
+            .execute(
+                HOST_CALL_PROXY_WAT.as_bytes(),
+                input.clone(),
+                allow_cfg,
+                None,
+                "env-allow-agent",
+            )
+            .await
+            .expect("granted env_read should run");
+        let allow_err = allow
+            .output
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            !allow_err.contains("denied"),
+            "with EnvRead(PATH) granted, env_read must not be denied; got: {allow_err}"
+        );
+
+        let deny_cfg = SandboxConfig {
+            capabilities: vec![],
+            ..Default::default()
+        };
+        let deny = sandbox
+            .execute(
+                HOST_CALL_PROXY_WAT.as_bytes(),
+                input,
+                deny_cfg,
+                None,
+                "env-deny-agent",
+            )
+            .await
+            .expect("proxy itself should still run");
+        let deny_err = deny
+            .output
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            deny_err.contains("denied") || deny_err.contains("Capability"),
+            "without EnvRead, env_read must be denied; got: {deny_err}"
+        );
+    }
+
+    /// End-to-end memory cap: a guest that requests growth past the cap
+    /// must not OOM the host. Acceptable outcomes are an `AbiError` (the
+    /// failed grow surfaced as a -1 result_len that fails the 1 MiB cap)
+    /// or any other non-Ok variant — the invariant being asserted is that
+    /// the limiter ran inside the public `execute()` path, not just at
+    /// the `MemoryLimiter` unit level.
+    #[tokio::test]
+    async fn sandbox_memory_cap_blocks_oversized_growth() {
+        let sandbox = WasmSandbox::new().unwrap();
+        let cfg = SandboxConfig {
+            max_memory_bytes: 1024 * 1024, // 1 MiB — well below the 12.5 MiB grow attempt
+            fuel_limit: 1_000_000,
+            ..Default::default()
+        };
+
+        let outcome = sandbox
+            .execute(
+                MEMORY_GROW_WAT.as_bytes(),
+                json!({}),
+                cfg,
+                None,
+                "memory-hog-agent",
+            )
+            .await;
+
+        match outcome {
+            Err(SandboxError::AbiError(_)) => {
+                // expected — failed grow surfaces as -1 / oversized result
+            }
+            Err(other) => {
+                // Any other Err is also fine — the invariant is "memory cap
+                // was respected", not the exact failure mode.
+                eprintln!("memory-cap test: non-Abi error variant accepted: {other}");
+            }
+            Ok(result) => {
+                panic!(
+                    "memory cap appears to have been bypassed — got Ok with: {:?}",
+                    result.output
+                );
+            }
+        }
+    }
 }
