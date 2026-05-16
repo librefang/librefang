@@ -758,6 +758,20 @@ pub trait ChannelAdapter: Send + Sync {
     fn notification_recipients(&self) -> Vec<ChannelUser> {
         Vec::new()
     }
+
+    /// Account identifier for multi-bot deployments on the same channel type
+    /// (e.g. two Telegram bots in the same daemon, each with a different
+    /// `account_id` in `[[channels.telegram]]`). Used by the bridge to build
+    /// the same account-qualified channel key the `AgentRouter` stores when
+    /// resolving `channel_default(channel_key)` — so an approval routed to
+    /// agent A reaches only the adapter(s) bound to agent A (#4985).
+    ///
+    /// Default `None` matches single-bot adapters and adapters whose channel
+    /// has no multi-account concept. Adapters that accept per-account
+    /// configuration MUST override this to return the configured value.
+    fn account_id(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Split a message into chunks of at most `max_len` characters,

@@ -122,6 +122,7 @@ pub async fn review_candidate(
         // Each candidate is unique; no shared prefix to cache.
         prompt_caching: false,
         cache_ttl: None,
+        prompt_cache_strategy: None,
         response_format: None,
         timeout_secs: Some(30),
         extra_body: None,
@@ -283,6 +284,7 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
                 tool_calls: vec![],
                 usage: TokenUsage::default(),
+                actual_provider: None,
             })
         }
     }

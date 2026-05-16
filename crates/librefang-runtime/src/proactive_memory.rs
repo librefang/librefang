@@ -445,6 +445,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             thinking: None,
             prompt_caching: self.prompt_caching,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: Some(ResponseFormat::Json),
             timeout_secs: Some(30),
             extra_body: None,
@@ -600,6 +601,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             thinking: None,
             prompt_caching: self.prompt_caching,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             // DECISION_SYSTEM_PROMPT asks for `{"action": "...", "existing_id": "..."}`
             // — tell JSON-mode-capable providers to honour it so weak models
             // can't drift into prose.
@@ -938,6 +940,7 @@ mod tests {
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
                 },
+                actual_provider: None,
             })
         }
         fn is_configured(&self) -> bool {

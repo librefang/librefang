@@ -836,6 +836,16 @@ impl ChannelAdapter for WeChatAdapter {
             last_error,
         }
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the WeChat
+    /// `gh_id` or WeCom corp/app identifier) so the bridge approval
+    /// listener builds the same `wechat:<account_id>` key the router stores
+    /// in `channel_defaults`, scoping ApprovalRequested delivery to the
+    /// account bound to the requesting agent (#5003, follow-up to
+    /// #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -847,6 +857,22 @@ mod tests {
         let adapter = WeChatAdapter::new(Some("test_token".to_string()), vec![]);
         assert_eq!(adapter.name(), "wechat");
         assert_eq!(adapter.channel_type(), ChannelType::WeChat);
+    }
+
+    #[test]
+    fn test_wechat_account_id_default_none() {
+        let adapter = WeChatAdapter::new(Some("test_token".to_string()), vec![]);
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_wechat_account_id_returns_configured_value() {
+        // #5003: two WeChat / WeCom apps (each with its own `gh_id` /
+        // corp app identifier) must resolve under distinct
+        // `wechat:<account_id>` keys via the trait override.
+        let adapter = WeChatAdapter::new(Some("test_token".to_string()), vec![])
+            .with_account_id(Some("gh_acme".to_string()));
+        assert_eq!(adapter.account_id(), Some("gh_acme"));
     }
 
     #[test]

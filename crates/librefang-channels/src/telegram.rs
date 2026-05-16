@@ -127,6 +127,51 @@ fn is_group_chat(chat_type: &str) -> bool {
     chat_type == "group" || chat_type == "supergroup"
 }
 
+/// Whether an outbound file should be sent as a Telegram voice memo
+/// (`sendVoice`) rather than a generic document (`sendDocument`).
+///
+/// Telegram renders voice memos as native push-to-talk bubbles with a
+/// waveform, which requires the file to be uploaded via `sendVoice` so the
+/// resulting `Document` carries `DocumentAttributeAudio(voice=True)`. The
+/// expected container is OGG Opus (see #4959 for the bug report — the agent
+/// sent a `.ogg` payload but it landed in the chat as a downloadable file
+/// because we were calling `sendDocument`).
+///
+/// MP3 / FLAC / WAV / M4A do *not* qualify as voice memos and continue to go
+/// through `sendAudio` / `sendDocument` as before; Telegram's `sendVoice`
+/// endpoint rejects non-OGG payloads.
+fn is_telegram_voice_payload(mime_type: &str, filename: &str) -> bool {
+    let mime_lower = mime_type.trim().to_ascii_lowercase();
+    if mime_lower == "audio/ogg" || mime_lower == "audio/opus" {
+        return true;
+    }
+    let name_lower = filename.to_ascii_lowercase();
+    name_lower.ends_with(".ogg") || name_lower.ends_with(".oga") || name_lower.ends_with(".opus")
+}
+
+/// Whether an OGG-container payload carries an Opus codec packet on its first
+/// page (#5005). Telegram's `sendVoice` requires Opus inside OGG specifically;
+/// OGG Vorbis (rare in 2026 but still legal) is rejected server-side with
+/// `Bad Request: VOICE_MESSAGES_FORBIDDEN`.
+///
+/// The standard first OGG page lays out as: 27-byte page header (`OggS`,
+/// version, header_type, granule_pos[8], serial[4], seq[4], checksum[4],
+/// page_segments[1]), then a 1-byte segment table for a single-segment page,
+/// then the codec identification packet at offset 28. Opus identifies with
+/// the ASCII magic `OpusHead`; Vorbis with `\x01vorbis`. The caller has
+/// already confirmed the `OggS` prefix via `detect_audio_magic`, so this
+/// helper only inspects the codec-id slot.
+///
+/// Limitation: only single-segment BOS pages are recognised. Non-canonical
+/// encoders that emit a multi-segment first page (`page_segments > 1`) push
+/// the codec id past offset 28, which this helper conservatively reports as
+/// "not Opus" — the caller then downgrades to `sendDocument`. That's an
+/// acceptable false negative; the alternative (sending a Vorbis OGG as
+/// `sendVoice`) trips Telegram's `VOICE_MESSAGES_FORBIDDEN`.
+fn is_ogg_opus(bytes: &[u8]) -> bool {
+    bytes.len() >= 36 && &bytes[28..36] == b"OpusHead"
+}
+
 /// Fire-and-forget HTTP POST. Logs errors at debug level.
 fn fire_and_forget_post(client: reqwest::Client, url: String, body: serde_json::Value) {
     tokio::spawn(async move {
@@ -312,6 +357,32 @@ impl TelegramAdapter {
             poll_contexts: Arc::new(DashMap::new()),
             max_upload_bytes: DEFAULT_TELEGRAM_UPLOAD_BYTES,
         }
+    }
+
+    /// Route this adapter's REST client through `proxy_url`
+    /// (#4795). `None` leaves the default client untouched —
+    /// reqwest's env-var fallback (`HTTP_PROXY` / `HTTPS_PROXY` /
+    /// `ALL_PROXY`) still applies. `Some(url)` rebuilds the
+    /// internal `reqwest::Client` with an explicit
+    /// `Proxy::all(url)` override (env vars are ignored).
+    ///
+    /// Returns [`crate::http_client::ChannelProxyError`] when the URL is
+    /// not a shape `reqwest::Proxy::all` accepts (`http://`,
+    /// `https://`, `socks5://`, `socks5h://`, optionally with
+    /// `user:pass@`). Validation runs at construction time so a
+    /// typo in `config.toml` fails fast instead of breaking the
+    /// first message send.
+    pub fn with_proxy(
+        mut self,
+        proxy_url: Option<&str>,
+    ) -> Result<Self, crate::http_client::ChannelProxyError> {
+        // `None` keeps the default no-proxy client built in `new` —
+        // a redundant rebuild would defeat reqwest's connection-pool
+        // reuse without changing observable behavior.
+        if proxy_url.is_some() {
+            self.client = crate::http_client::new_proxied_client(proxy_url)?;
+        }
+        Ok(self)
     }
 
     /// When enabled, the Done reaction is removed (cleared) instead of
@@ -611,6 +682,34 @@ impl TelegramAdapter {
         self.api_send_media_upload(
             "sendDocument",
             "document",
+            chat_id,
+            data,
+            filename,
+            mime_type,
+            None,
+            thread_id,
+        )
+        .await
+    }
+
+    /// Call `sendVoice` with multipart upload for local file data.
+    ///
+    /// Used by the proactive `channel_send` tool when an OGG audio payload is
+    /// detected (issue #4959). Telegram renders the result as a native voice
+    /// memo bubble (waveform + push-to-talk) instead of a generic file
+    /// download — the document path produces `MessageMediaDocument` with
+    /// `voice=False`, which is the user-visible bug being fixed here.
+    async fn api_send_voice_upload(
+        &self,
+        chat_id: i64,
+        data: Vec<u8>,
+        filename: &str,
+        mime_type: &str,
+        thread_id: Option<i64>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.api_send_media_upload(
+            "sendVoice",
+            "voice",
             chat_id,
             data,
             filename,
@@ -1602,16 +1701,53 @@ impl TelegramAdapter {
                     .await?;
             }
             ChannelContent::File { url, filename } => {
-                self.api_send_document(chat_id, &url, &filename, thread_id)
-                    .await?;
+                // Route OGG payloads through sendVoice so Telegram renders a
+                // native voice-memo bubble (#4959). The URL path has no MIME
+                // hint, so we classify on filename only — note that
+                // `api_send_voice` already handles the private-URL → multipart
+                // fallback inside, mirroring `api_send_document`.
+                if is_telegram_voice_payload("", &filename) {
+                    self.api_send_voice(chat_id, &url, None, thread_id).await?;
+                } else {
+                    self.api_send_document(chat_id, &url, &filename, thread_id)
+                        .await?;
+                }
             }
             ChannelContent::FileData {
                 data,
                 filename,
                 mime_type,
             } => {
-                self.api_send_document_upload(chat_id, data, &filename, &mime_type, thread_id)
-                    .await?;
+                // Same OGG voice-routing rule as the URL branch (#4959). The
+                // local-file path is the one users hit via `channel_send`'s
+                // `file_path` parameter and the one called out in the bug
+                // report.
+                //
+                // Magic-byte sniff (#5004): MIME/filename may be wrong (e.g.
+                // an MP3 mislabeled as `voice.ogg` / `audio/ogg`). Telegram's
+                // sendVoice validates the container server-side and 400s,
+                // surfacing as a generic channel-send failure. Verify the
+                // bytes actually start with the OGG container magic before
+                // committing to sendVoice; otherwise fall through to
+                // sendDocument so the file still reaches the user.
+                //
+                // Codec discrimination (#5005): sendVoice further requires
+                // Opus inside OGG. OGG Vorbis (nearly extinct in 2026 but
+                // still legal) trips a 400 with `VOICE_MESSAGES_FORBIDDEN`.
+                // Peek at the codec-id packet at offset 28 of the first page
+                // and downgrade anything that isn't Opus to sendDocument.
+                let sniff = &data[..data.len().min(36)];
+                let routes_to_voice = is_telegram_voice_payload(&mime_type, &filename)
+                    && crate::bridge::detect_audio_magic(&sniff[..sniff.len().min(12)])
+                        == Some("audio/ogg")
+                    && is_ogg_opus(sniff);
+                if routes_to_voice {
+                    self.api_send_voice_upload(chat_id, data, &filename, &mime_type, thread_id)
+                        .await?;
+                } else {
+                    self.api_send_document_upload(chat_id, data, &filename, &mime_type, thread_id)
+                        .await?;
+                }
             }
             ChannelContent::Voice { url, caption, .. } => {
                 self.api_send_voice(chat_id, &url, caption.as_deref(), thread_id)
@@ -2364,6 +2500,14 @@ impl ChannelAdapter for TelegramAdapter {
                 librefang_user: None,
             })
             .collect()
+    }
+
+    /// Expose the configured multi-bot `account_id` so the bridge approval
+    /// listener can build the same account-qualified channel key the router
+    /// uses (`telegram:<account_id>`) and scope ApprovalRequested delivery to
+    /// the adapter(s) bound to the requesting agent (#4985).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
     }
 }
 
@@ -5361,6 +5505,27 @@ mod tests {
         }
     }
 
+    /// Synthesize a minimal first OGG page (header + 8-byte codec-id slot).
+    /// `codec_id` must be 8 bytes; this is the byte sequence Telegram's
+    /// sendVoice validator (and the #5005 sniff) looks at. Used by the
+    /// voice-routing tests so the magic-byte + Opus checks see real-shape
+    /// input without dragging in a full Opus encoder.
+    fn synth_ogg_first_page(codec_id: &[u8; 8]) -> Vec<u8> {
+        let mut page = Vec::with_capacity(36);
+        page.extend_from_slice(b"OggS"); // capture pattern
+        page.push(0); // version
+        page.push(0x02); // header type: BOS
+        page.extend_from_slice(&[0; 8]); // granule position
+        page.extend_from_slice(&[0; 4]); // serial number
+        page.extend_from_slice(&[0; 4]); // page sequence
+        page.extend_from_slice(&[0; 4]); // checksum (we don't validate it)
+        page.push(1); // page_segments
+        page.push(codec_id.len() as u8); // segment table: one segment of 8 bytes
+        page.extend_from_slice(codec_id); // codec identification packet
+        debug_assert_eq!(page.len(), 36);
+        page
+    }
+
     #[tokio::test]
     async fn telegram_send_text_calls_send_message() {
         let server = MockServer::start().await;
@@ -5632,5 +5797,435 @@ mod tests {
             res.is_ok(),
             "interactive send currently swallows 5xx (see PR #3820 production observation)"
         );
+    }
+
+    // ----- Outbound voice routing (#4959) -------------------------------------
+    //
+    // `channel_send` with an OGG payload must reach Telegram via `sendVoice`,
+    // not `sendDocument`, so the message renders as a native voice memo
+    // (waveform + push-to-talk) instead of a generic file download.
+    //
+    // We assert the routing at the API-path level by registering a wiremock
+    // expectation on `/bot{token}/sendVoice` (or `/sendDocument`) and counting
+    // hits. The OGG bytes are an empty body — wiremock doesn't validate the
+    // multipart contents, only that the right endpoint was hit, which is what
+    // the bug is about.
+
+    #[tokio::test]
+    async fn telegram_send_file_data_ogg_routes_to_send_voice() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendVoice")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // Ensure sendDocument is NOT called — any hit here means the bug
+        // regressed.
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendDocument")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::FileData {
+                    // Real-shape OGG Opus first page so the #5004 magic sniff
+                    // and the #5005 codec check both pass.
+                    data: synth_ogg_first_page(b"OpusHead"),
+                    filename: "voice.ogg".into(),
+                    mime_type: "audio/ogg".into(),
+                },
+            )
+            .await
+            .expect("OGG send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_file_data_oga_extension_routes_to_send_voice() {
+        // `.oga` is the IANA-registered extension for OGG audio; some browsers
+        // and the Telegram CDN itself emit this when a voice memo is saved.
+        // Routing must catch it even when the MIME hint is generic.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendVoice")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::FileData {
+                    // Real-shape OGG Opus first page — required by the #5004
+                    // magic-byte sniff and the #5005 Opus check. Extension
+                    // still wins for the predicate, but the bytes must be
+                    // consistent.
+                    data: synth_ogg_first_page(b"OpusHead"),
+                    filename: "memo.oga".into(),
+                    // Intentionally generic — extension must still win.
+                    mime_type: "application/octet-stream".into(),
+                },
+            )
+            .await
+            .expect("OGA send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_file_data_mp3_still_routes_to_send_document() {
+        // Backwards-compat guard: non-OGG audio must NOT be re-routed to
+        // sendVoice (Telegram's voice endpoint rejects non-OGG payloads).
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendDocument")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendVoice")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::FileData {
+                    data: vec![],
+                    filename: "song.mp3".into(),
+                    mime_type: "audio/mpeg".into(),
+                },
+            )
+            .await
+            .expect("MP3 file_data must still go via sendDocument");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_file_data_unknown_routes_to_send_document() {
+        // Unknown / generic payloads keep the existing sendDocument path so
+        // the OGG branch is purely additive.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendDocument")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::FileData {
+                    data: vec![],
+                    filename: "report.pdf".into(),
+                    mime_type: "application/pdf".into(),
+                },
+            )
+            .await
+            .expect("PDF must still go via sendDocument");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_file_data_ogg_labeled_but_mp3_bytes_routes_to_send_document() {
+        // #5004: caller-supplied MIME/filename can lie. An MP3 mislabeled as
+        // `voice.ogg` / `audio/ogg` must be downgraded to sendDocument —
+        // Telegram's sendVoice rejects non-OGG containers server-side, and
+        // the resulting 400 would surface as a generic channel-send failure
+        // with no hint that the label was wrong.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendDocument")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendVoice")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::FileData {
+                    // ID3v2 tag header — the standard MP3 magic. MIME and
+                    // filename below claim OGG; the bytes win.
+                    data: vec![
+                        0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    ],
+                    filename: "voice.ogg".into(),
+                    mime_type: "audio/ogg".into(),
+                },
+            )
+            .await
+            .expect("mislabeled MP3 must downgrade to sendDocument");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_file_data_ogg_vorbis_routes_to_send_document() {
+        // #5005: sendVoice requires Opus inside OGG. An OGG Vorbis payload
+        // (extension .ogg, MIME audio/ogg, real OggS prefix) would otherwise
+        // satisfy the #5004 magic-byte gate but be rejected by Telegram with
+        // `Bad Request: VOICE_MESSAGES_FORBIDDEN`. The codec sniff at offset
+        // 28 must catch the `\x01vorbis` identifier and downgrade.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendDocument")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendVoice")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::FileData {
+                    // OGG Vorbis identification packet starts with
+                    // `\x01vorbis` (7 bytes). Pad to 8 to fit the synth
+                    // helper's fixed-width codec slot.
+                    data: synth_ogg_first_page(b"\x01vorbis\x00"),
+                    filename: "song.ogg".into(),
+                    mime_type: "audio/ogg".into(),
+                },
+            )
+            .await
+            .expect("OGG Vorbis must downgrade to sendDocument");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_file_data_ogg_opus_routes_to_send_voice() {
+        // #5005 positive case: explicit `OpusHead` codec id at offset 28
+        // keeps the sendVoice path. Pairs with the Vorbis test above to pin
+        // the predicate on both sides — a regression that always returns
+        // Some("audio/ogg") without checking the codec would route Vorbis
+        // back to sendVoice; a regression that always returns false would
+        // route Opus to sendDocument.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendVoice")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendDocument")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::FileData {
+                    data: synth_ogg_first_page(b"OpusHead"),
+                    filename: "voice.ogg".into(),
+                    mime_type: "audio/ogg".into(),
+                },
+            )
+            .await
+            .expect("OGG Opus must route to sendVoice");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_file_url_with_ogg_extension_routes_to_send_voice() {
+        // The URL-based `ChannelContent::File` branch carries no MIME, so
+        // routing must classify on filename. This matches the behaviour of
+        // the local-file branch above.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendVoice")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::File {
+                    url: "https://example.com/voice.ogg".into(),
+                    filename: "voice.ogg".into(),
+                },
+            )
+            .await
+            .expect("OGG URL send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_file_url_with_mp3_extension_routes_to_send_document() {
+        // Negative counterpart to the OGG URL test above: non-OGG audio URLs
+        // must keep the existing sendDocument path. The URL branch has no
+        // MIME hint, so this exercises the filename-only classifier — a
+        // regression here would mean a stray match on the OGG predicate
+        // (e.g. substring rather than extension check) silently re-routing
+        // MP3 / WAV / etc. to sendVoice, which Telegram would then reject.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendDocument")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendVoice")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::File {
+                    url: "https://example.com/song.mp3".into(),
+                    filename: "song.mp3".into(),
+                },
+            )
+            .await
+            .expect("MP3 URL must still go via sendDocument");
+    }
+
+    #[test]
+    fn is_telegram_voice_payload_classification() {
+        // Pure-function table check — cheaper than spinning up a MockServer
+        // and serves as a regression net for the routing predicate itself.
+        assert!(is_telegram_voice_payload("audio/ogg", "voice.ogg"));
+        assert!(is_telegram_voice_payload("audio/ogg", "anything.bin"));
+        assert!(is_telegram_voice_payload(
+            "application/octet-stream",
+            "memo.ogg"
+        ));
+        assert!(is_telegram_voice_payload(
+            "application/octet-stream",
+            "memo.oga"
+        ));
+        assert!(is_telegram_voice_payload(
+            "application/octet-stream",
+            "track.opus"
+        ));
+        assert!(is_telegram_voice_payload("AUDIO/OGG", "x")); // case-insensitive
+        assert!(is_telegram_voice_payload("", "x.OGG")); // case-insensitive ext
+
+        assert!(!is_telegram_voice_payload("audio/mpeg", "song.mp3"));
+        assert!(!is_telegram_voice_payload("audio/wav", "clip.wav"));
+        assert!(!is_telegram_voice_payload("application/pdf", "doc.pdf"));
+        assert!(!is_telegram_voice_payload("image/png", "pic.png"));
+        assert!(!is_telegram_voice_payload("", ""));
+    }
+
+    // -------- per-channel proxy (#4795) -----------------------------------
+
+    #[test]
+    fn with_proxy_none_keeps_default_client() {
+        let a = TelegramAdapter::new("t".to_string(), vec![], Duration::from_secs(1), None)
+            .with_proxy(None)
+            .expect("None proxy must always succeed");
+        // Smoke: the adapter must still be usable after the no-op proxy
+        // call. We can't introspect reqwest's internal proxy config,
+        // so this is the strongest assertion the public API allows.
+        drop(a);
+    }
+
+    #[test]
+    fn with_proxy_some_valid_url_rebuilds_client() {
+        let a = TelegramAdapter::new("t".to_string(), vec![], Duration::from_secs(1), None)
+            .with_proxy(Some("http://127.0.0.1:8080"))
+            .expect("valid http proxy URL must succeed");
+        drop(a);
+    }
+
+    #[test]
+    fn with_proxy_socks5_url_rebuilds_client() {
+        let a = TelegramAdapter::new("t".to_string(), vec![], Duration::from_secs(1), None)
+            .with_proxy(Some("socks5://127.0.0.1:1080"))
+            .expect("socks5 URL requires the reqwest `socks` feature");
+        drop(a);
+    }
+
+    #[test]
+    fn with_proxy_invalid_url_errors() {
+        // `expect_err` requires `T: Debug` and `TelegramAdapter` does
+        // not derive Debug. Match on the Result so the test compiles
+        // without forcing a Debug derive across the adapter just for
+        // this single line.
+        let result = TelegramAdapter::new("t".to_string(), vec![], Duration::from_secs(1), None)
+            .with_proxy(Some("not a url"));
+        // Pin only the variant — the inner string comes from reqwest.
+        match result {
+            Err(crate::http_client::ChannelProxyError::InvalidUrl { value, .. }) => {
+                assert_eq!(value, "not a url");
+            }
+            Err(other) => panic!("expected InvalidUrl, got: {other:?}"),
+            Ok(_) => panic!("garbage proxy URL must fail at init"),
+        }
+    }
+
+    #[test]
+    fn is_ogg_opus_recognizes_opus_head_only() {
+        // #5005 regression net: positive on OpusHead, negative on Vorbis and
+        // on truncated / non-OGG inputs. The predicate must not accept a
+        // bare `OggS` prefix — that's the #5004 magic check, not the codec
+        // check.
+        let opus_page = synth_ogg_first_page(b"OpusHead");
+        assert!(is_ogg_opus(&opus_page));
+
+        let vorbis_page = synth_ogg_first_page(b"\x01vorbis\x00");
+        assert!(!is_ogg_opus(&vorbis_page));
+
+        // Truncated — fewer than 36 bytes cannot carry a codec id.
+        assert!(!is_ogg_opus(&opus_page[..35]));
+        assert!(!is_ogg_opus(b"OggS"));
+        assert!(!is_ogg_opus(&[]));
     }
 }

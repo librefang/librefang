@@ -555,6 +555,7 @@ async fn summarise_batch(
         // without any subsequent hit.
         prompt_caching: false,
         cache_ttl: None,
+        prompt_cache_strategy: None,
         response_format: None,
         timeout_secs: None,
         extra_body: None,
@@ -721,6 +722,7 @@ mod tests {
                 tool_calls: vec![],
                 stop_reason: librefang_types::message::StopReason::EndTurn,
                 usage: librefang_types::message::TokenUsage::default(),
+                actual_provider: None,
             })
         }
     }
@@ -740,6 +742,7 @@ mod tests {
                 tool_calls: vec![],
                 stop_reason: librefang_types::message::StopReason::EndTurn,
                 usage: librefang_types::message::TokenUsage::default(),
+                actual_provider: None,
             })
         }
     }

@@ -288,6 +288,18 @@ impl CredentialVault {
     }
 
     /// Initialize a new vault. Generates a master key and stores it in the OS keyring.
+    ///
+    /// Key resolution shares the exact same path as [`Self::resolve_master_key`]
+    /// (env var → OS keyring) so that a subsequent `unlock()` on a fresh
+    /// `CredentialVault` over the same file is guaranteed to read the same
+    /// master-key bytes init wrote with. Pre-fix #5069 the two sites
+    /// duplicated the env / keyring lookup code, so the two paths could
+    /// diverge whenever the environment (or keyring) mutated between
+    /// init's save and the next unlock's read — surfacing as an
+    /// `aead::Error` on the second `vault_set` from the MCP OAuth handler.
+    /// Only the "no key available anywhere" branch generates a random key;
+    /// that branch falls through to `store_keyring_key` so the next
+    /// `resolve_master_key` finds the same value via the keyring path.
     pub fn init(&mut self) -> ExtensionResult<()> {
         if self.path.exists() {
             return Err(ExtensionError::Vault(
@@ -295,37 +307,42 @@ impl CredentialVault {
             ));
         }
 
-        // Check if a master key is already available (env var or keyring)
-        let key_bytes = if let Ok(existing_b64) = std::env::var(VAULT_KEY_ENV) {
-            // Use the existing key from env var
-            info!("Using existing vault key from {}", VAULT_KEY_ENV);
-            decode_master_key(&existing_b64)?
-        } else if let Ok(existing_b64) = load_keyring_key() {
-            info!("Using existing vault key from OS keyring");
-            decode_master_key(&existing_b64)?
-        } else {
-            // Generate a random master key
-            let mut kb = Zeroizing::new([0u8; 32]);
-            OsRng.fill_bytes(kb.as_mut());
-            let key_b64 = Zeroizing::new(base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                kb.as_ref(),
-            ));
+        // Resolve the master key through the SAME code path used by
+        // unlock-time `resolve_master_key`, so a freshly-init'd vault is
+        // always decryptable by the next `unlock()` on a separate instance
+        // (the MCP OAuth handler's vault_set pattern in #5069).
+        // `cached_key` is None here (we just constructed `self` or a prior
+        // op left it cleared), so this call falls through to env → keyring.
+        let key_bytes = match self.resolve_master_key() {
+            Ok(k) => k,
+            Err(ExtensionError::VaultLocked) => {
+                // No master key resolvable anywhere — generate a random
+                // one and persist it to the OS keyring (or file fallback)
+                // so subsequent `resolve_master_key` calls on fresh
+                // instances find the same value.
+                let mut kb = Zeroizing::new([0u8; 32]);
+                OsRng.fill_bytes(kb.as_mut());
+                let key_b64 = Zeroizing::new(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    kb.as_ref(),
+                ));
 
-            // Try to store in OS keyring
-            match store_keyring_key(&key_b64) {
-                Ok(()) => {
-                    info!("Vault master key stored in OS keyring");
+                // Try to store in OS keyring (or file fallback)
+                match store_keyring_key(&key_b64) {
+                    Ok(()) => {
+                        info!("Vault master key stored in OS keyring");
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Could not store vault key in OS keyring: {e}. \
+                             Set {VAULT_KEY_ENV} env var manually. \
+                             Use `librefang vault init` interactively to retrieve the key.",
+                        );
+                    }
                 }
-                Err(e) => {
-                    warn!(
-                        "Could not store vault key in OS keyring: {e}. \
-                         Set {VAULT_KEY_ENV} env var manually. \
-                         Use `librefang vault init` interactively to retrieve the key.",
-                    );
-                }
+                kb
             }
-            kb
+            Err(other) => return Err(other),
         };
 
         // Create empty vault file with the startup sentinel pre-written
@@ -339,6 +356,45 @@ impl CredentialVault {
         );
         self.unlocked = true;
         self.save(&key_bytes)?;
+
+        // Post-write verification (#5069): immediately confirm the file we
+        // just persisted is decryptable by a fresh `CredentialVault::new`
+        // instance walking the unlock path — i.e. the exact code path the
+        // next `KernelOAuthProvider::vault_set` call from the MCP OAuth
+        // handler will take. Catches any latent init/unlock divergence at
+        // the source (clear, actionable error) rather than letting the
+        // next caller fail with an opaque `aead::Error`. Constructing a
+        // sibling instance (instead of just re-resolving the key) also
+        // catches a path-binding regression where AAD would differ between
+        // save and load.
+        let mut verify = CredentialVault::new(self.path.clone());
+        if let Err(e) = verify.unlock() {
+            // Roll back the freshly-written file so the next `init()`
+            // attempt isn't blocked by the "Vault already exists" guard
+            // against a file that can't be opened. Rollback failure is
+            // informational — the divergence error below is what callers
+            // need to see — but log it so operators can clean up a stale
+            // corrupt file that a permission error left behind (EACCES
+            // would otherwise leave the next `init()` returning "Vault
+            // already exists" against an unreadable file).
+            if let Err(unlink_err) = std::fs::remove_file(&self.path) {
+                warn!(
+                    error = ?unlink_err,
+                    path = ?self.path,
+                    "vault init rollback: failed to unlink corrupt vault file",
+                );
+            }
+            return Err(ExtensionError::Vault(format!(
+                "Vault init succeeded on disk but the freshly-written file \
+                 cannot be decrypted by a fresh CredentialVault::unlock() \
+                 — the same code path subsequent vault_set calls will \
+                 walk. This means init() and resolve_master_key() resolved \
+                 different master keys; LIBREFANG_VAULT_KEY may have \
+                 changed during init or the OS keyring returned an \
+                 unexpected value. Underlying error: {e}"
+            )));
+        }
+
         self.cached_key = Some(key_bytes);
         info!("Credential vault initialized at {:?}", self.path);
         Ok(())
@@ -1588,6 +1644,35 @@ fn machine_fingerprint() -> Vec<u8> {
 /// Windows: MachineGuid via `reg query HKLM\SOFTWARE\Microsoft\Cryptography`.
 ///          If the reg query fails, emit nothing — fingerprint relies on the
 ///          persisted random_id alone (same posture as Linux without machine-id).
+/// Pick the first candidate that we can resolve. Absolute paths must exist on
+/// disk; bare names are accepted (PATH lookup will be used). Falls back to the
+/// last candidate as a last resort. Required because launchd / Windows service
+/// contexts may run with a minimal PATH that excludes `/usr/sbin` or
+/// `C:\Windows\System32`, so a bare `Command::new("ioreg")` / `Command::new("reg")`
+/// silently returns ENOENT (see #5025).
+///
+/// On Linux the lib build has no production callers (both call sites are
+/// gated to `target_os = "macos"` / `target_os = "windows"`), so the
+/// `--deny=warnings` CI lane flags this as dead code. The unit tests
+/// (cfg(test)) cover all platforms, but the lib-only metadata build that
+/// `cargo llvm-cov` performs first does not include them.
+#[allow(dead_code)]
+fn resolve_command(candidates: &[&'static str]) -> &'static str {
+    for &p in candidates {
+        let is_absolute = p.starts_with('/') || p.contains(":\\");
+        if is_absolute {
+            if std::path::Path::new(p).exists() {
+                return p;
+            }
+            // Doesn't exist — fall through to next candidate.
+            continue;
+        }
+        // Bare name: trust PATH; return immediately.
+        return p;
+    }
+    candidates.last().copied().unwrap_or("")
+}
+
 #[cfg(not(test))]
 fn collect_os_machine_id_material() -> Vec<u8> {
     let mut out = Vec::new();
@@ -1644,26 +1729,56 @@ fn collect_os_machine_id_material() -> Vec<u8> {
     // This UUID is stable across reboots and unique per physical machine.
     // We shell out rather than reading /private/var/db/SystemPolicyConfiguration/SystemPolicy
     // (root-only, binary blob, content unstable across macOS releases).
+    //
+    // `ioreg` lives at `/usr/sbin/ioreg`, which launchd's default minimal PATH
+    // (`/usr/local/bin:/usr/bin:/bin`) does NOT include. A bare
+    // `Command::new("ioreg")` therefore silently ENOENTs in the daemon
+    // context, producing a different fingerprint than the one that wrote the
+    // keyring and leaving the vault locked at startup (#5025). Resolve to an
+    // absolute path first; only fall back to PATH lookup if no candidate
+    // exists on disk.
     #[cfg(target_os = "macos")]
     {
-        if let Ok(output) = std::process::Command::new("ioreg")
+        let ioreg = resolve_command(&["/usr/sbin/ioreg", "/sbin/ioreg", "ioreg"]);
+        match std::process::Command::new(ioreg)
             .args(["-rd1", "-c", "IOPlatformExpertDevice"])
             .output()
         {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if line.contains("IOPlatformUUID") {
-                    // Line format: `  "IOPlatformUUID" = "GUID-HERE"`
-                    // Split on '"' and take the 4th token (index 3) as the UUID value.
-                    let parts: Vec<&str> = line.splitn(4, '"').collect();
-                    if let Some(raw) = parts.get(3) {
-                        let uuid = raw.trim_end_matches('"').trim();
-                        if !uuid.is_empty() {
-                            emit(b"macos-platform-uuid", uuid.as_bytes());
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut found = false;
+                for line in stdout.lines() {
+                    if line.contains("IOPlatformUUID") {
+                        // Line format: `  "IOPlatformUUID" = "GUID-HERE"`
+                        // Split on '"' and take the 4th token (index 3) as the UUID value.
+                        let parts: Vec<&str> = line.splitn(4, '"').collect();
+                        if let Some(raw) = parts.get(3) {
+                            let uuid = raw.trim_end_matches('"').trim();
+                            if !uuid.is_empty() {
+                                emit(b"macos-platform-uuid", uuid.as_bytes());
+                                found = true;
+                            }
                         }
+                        break;
                     }
-                    break;
                 }
+                if !found {
+                    warn!(
+                        binary = ioreg,
+                        "ioreg did not return an IOPlatformUUID — macOS fingerprint will rely on random_id alone; \
+                         this will produce a DIFFERENT wrap key from the one that wrote the keyring and the vault \
+                         will appear locked at startup (#5025)"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    binary = ioreg,
+                    error = %e,
+                    "failed to spawn ioreg — macOS fingerprint will rely on random_id alone; \
+                     this will produce a DIFFERENT wrap key from the one that wrote the keyring and the vault \
+                     will appear locked at startup. Ensure /usr/sbin/ioreg exists or that /usr/sbin is on PATH (#5025)"
+                );
             }
         }
     }
@@ -1673,9 +1788,14 @@ fn collect_os_machine_id_material() -> Vec<u8> {
     // Shell out to `reg query` — no external crate needed, and vault load
     // happens only once per daemon start so the overhead is acceptable.
     // Output format: "    MachineGuid    REG_SZ    <guid>"
+    //
+    // `reg.exe` lives at `C:\Windows\System32\reg.exe`. A service-account
+    // context with a stripped PATH would hit the same class of bug as the
+    // macOS launchd case (#5025), so we resolve to an absolute path first.
     #[cfg(target_os = "windows")]
     {
-        if let Ok(output) = std::process::Command::new("reg")
+        let reg_bin = resolve_command(&[r"C:\Windows\System32\reg.exe", "reg"]);
+        match std::process::Command::new(reg_bin)
             .args([
                 "query",
                 r"HKLM\SOFTWARE\Microsoft\Cryptography",
@@ -1684,21 +1804,40 @@ fn collect_os_machine_id_material() -> Vec<u8> {
             ])
             .output()
         {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if line.contains("MachineGuid") && line.contains("REG_SZ") {
-                    // The GUID is the last whitespace-delimited token.
-                    if let Some(guid) = line.split_whitespace().last() {
-                        if !guid.is_empty() {
-                            emit(b"windows-machine-guid", guid.as_bytes());
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut found = false;
+                for line in stdout.lines() {
+                    if line.contains("MachineGuid") && line.contains("REG_SZ") {
+                        // The GUID is the last whitespace-delimited token.
+                        if let Some(guid) = line.split_whitespace().last() {
+                            if !guid.is_empty() {
+                                emit(b"windows-machine-guid", guid.as_bytes());
+                                found = true;
+                            }
                         }
+                        break;
                     }
-                    break;
+                }
+                if !found {
+                    warn!(
+                        binary = reg_bin,
+                        "reg query did not return a MachineGuid — Windows fingerprint will rely on random_id alone; \
+                         this will produce a DIFFERENT wrap key from the one that wrote the keyring and the vault \
+                         will appear locked at startup (#5025)"
+                    );
                 }
             }
+            Err(e) => {
+                warn!(
+                    binary = reg_bin,
+                    error = %e,
+                    "failed to spawn reg.exe — Windows fingerprint will rely on random_id alone; \
+                     this will produce a DIFFERENT wrap key from the one that wrote the keyring and the vault \
+                     will appear locked at startup. Ensure C:\\Windows\\System32\\reg.exe exists or is on PATH (#5025)"
+                );
+            }
         }
-        // If reg query fails: emit nothing — fingerprint falls back to the
-        // persisted random_id alone, same posture as Linux without machine-id.
     }
 
     out
@@ -2866,5 +3005,260 @@ mod tests {
             std::env::remove_var(VAULT_KEY_ENV);
             std::env::remove_var(VAULT_NO_KEYRING_ENV);
         }
+    }
+
+    /// Regression for #5069: when a daemon process explicitly calls `init()`
+    /// followed by `set()` on one handle, then drops the handle and tries to
+    /// `unlock()` a fresh handle on the same file using the env-supplied
+    /// master key, the unlock MUST succeed.
+    ///
+    /// The MCP OAuth `auth_start` handler hits this pattern when it stores
+    /// `pkce_verifier`, then `pkce_state`, then `redirect_uri` in sequence:
+    /// the first call walks the `init() + set()` branch, every subsequent
+    /// call walks the `unlock() + set()` branch against a fresh
+    /// `CredentialVault` instance constructed inside `KernelOAuthProvider::vault_set`.
+    /// Pre-fix the second call's `unlock()` failed with `aead::Error` because
+    /// `init()` duplicated the env / keyring lookup code from
+    /// `resolve_master_key()`. The two sites could resolve different master
+    /// keys on container hosts (keyring side effects, env-mutation races
+    /// from other code paths), leaving a file the same process could not
+    /// decrypt one call later. The fix routes init's key resolution through
+    /// `resolve_master_key()` and adds a post-write verification so any
+    /// future divergence fails fast at init time with an actionable error
+    /// instead of an opaque AEAD failure downstream.
+    #[test]
+    #[serial_test::serial]
+    fn init_then_set_then_reopen_unlock_via_env_key() {
+        const TEST_VAULT_KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+        unsafe {
+            std::env::set_var(VAULT_KEY_ENV, TEST_VAULT_KEY_B64);
+            std::env::set_var(VAULT_NO_KEYRING_ENV, "1");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.enc");
+
+        // Mirror `KernelOAuthProvider::vault_set` on a first call: fresh
+        // handle, file absent → init(), then set().
+        {
+            let mut vault = CredentialVault::new(path.clone());
+            assert!(!vault.exists());
+            vault.init().expect("init() with env key must succeed");
+            assert!(vault.exists());
+            vault
+                .set(
+                    "pkce_verifier".to_string(),
+                    Zeroizing::new("verifier-1".to_string()),
+                )
+                .expect("first set() must succeed");
+        } // drop
+
+        // Second call: fresh handle, file present → unlock() (the failing
+        // path in #5069), then set() of a different key.
+        {
+            let mut vault = CredentialVault::new(path.clone());
+            assert!(vault.exists());
+            vault
+                .unlock()
+                .expect("env key must unlock the vault written by init()+set()");
+            vault
+                .set(
+                    "pkce_state".to_string(),
+                    Zeroizing::new("state-1".to_string()),
+                )
+                .expect("second set() after unlock() must succeed");
+        }
+
+        // Third call mimicking `redirect_uri`: unlock and read everything
+        // back to confirm no entry was lost across the re-open boundary.
+        {
+            let mut vault = CredentialVault::new(path);
+            vault.unlock().expect("third unlock must succeed");
+            assert_eq!(
+                vault.get("pkce_verifier").map(|v| v.as_str().to_string()),
+                Some("verifier-1".to_string())
+            );
+            assert_eq!(
+                vault.get("pkce_state").map(|v| v.as_str().to_string()),
+                Some("state-1".to_string())
+            );
+        }
+
+        unsafe {
+            std::env::remove_var(VAULT_KEY_ENV);
+            std::env::remove_var(VAULT_NO_KEYRING_ENV);
+        }
+    }
+
+    /// Regression for #5069 (env mutation between init's save and the next
+    /// unlock's read). Pre-fix `init()` had no post-write verification, so
+    /// if `LIBREFANG_VAULT_KEY` mutated between init's save and a later
+    /// `unlock()` call the daemon would write a file the same process
+    /// could not decrypt — surfacing downstream as an opaque
+    /// `"Decryption failed: aead::Error"` on the next `vault_set`, with
+    /// the corrupt file left on disk for any subsequent `init()` to trip
+    /// over its `"Vault already exists"` guard.
+    ///
+    /// This test drives the divergence deterministically by mutating the
+    /// env var **inside** the init() call from a worker thread that wakes
+    /// while init's Argon2id-bound `save()` is still running. With the
+    /// post-fix unified resolution + post-write verify-unlock + rollback,
+    /// the divergence is caught at init time:
+    ///
+    /// 1. init() returns `ExtensionError::Vault(_)` whose message names
+    ///    the divergence (NOT a bare `Decryption failed: aead::Error`).
+    /// 2. The freshly-written corrupt file is unlinked so a follow-up
+    ///    `init()` under the new key can succeed cleanly without the
+    ///    operator manually deleting `vault.enc`.
+    ///
+    /// On `origin/main` (pre-fix) this test fails: init() returns Ok, the
+    /// file stays on disk under key_A, the follow-up init() with key_B is
+    /// blocked by the "Vault already exists" guard.
+    #[test]
+    #[serial_test::serial]
+    fn init_env_mutation_during_save_rolls_back_and_surfaces_typed_error() {
+        // Two valid 32-byte keys that decode cleanly. The decoded values
+        // are different so a file written under key_A cannot decrypt under
+        // key_B.
+        const KEY_A_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        const KEY_B_B64: &str = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+
+        unsafe {
+            std::env::set_var(VAULT_KEY_ENV, KEY_A_B64);
+            std::env::set_var(VAULT_NO_KEYRING_ENV, "1");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.enc");
+
+        // Spawn a worker that flips the env var to key_B shortly after the
+        // main thread enters init(). Argon2id inside save() takes well
+        // over 50 ms on every supported host (default Params are
+        // m_cost=19_456 KiB, t_cost=2, p_cost=1), so the 30 ms sleep
+        // lands the mutation between init's initial resolve_master_key()
+        // (read #1 — sees key_A) and init's post-write verify-unlock
+        // (read #2 — sees key_B). Serial_test::serial gates this whole
+        // test against any other VAULT_KEY mutator in this crate.
+        let worker = std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            // SAFETY: serial_test::serial gates concurrent mutators.
+            unsafe {
+                std::env::set_var(VAULT_KEY_ENV, KEY_B_B64);
+            }
+        });
+
+        let mut vault = CredentialVault::new(path.clone());
+        let init_result = vault.init();
+        worker.join().expect("env-mutator thread must join cleanly");
+
+        // Assertion 1: init() surfaces the divergence as a typed
+        // `ExtensionError::Vault(_)` (NOT a bare aead::Error / NOT
+        // silently Ok). The error message names the divergence so an
+        // operator reading the daemon log can act on it.
+        let err =
+            init_result.expect_err("init() must surface env-mutation divergence as a typed error");
+        match &err {
+            ExtensionError::Vault(msg) => {
+                assert!(
+                    msg.contains("freshly-written file")
+                        || msg.contains("cannot be decrypted")
+                        || msg.contains("different master keys"),
+                    "expected divergence-naming error message, got: {msg}",
+                );
+            }
+            other => {
+                panic!("expected ExtensionError::Vault(_) from init's verify-unlock, got {other:?}")
+            }
+        }
+
+        // Assertion 2: the freshly-written corrupt file was rolled back,
+        // so the "Vault already exists" guard does not block a follow-up
+        // init() under the current env key.
+        assert!(
+            !path.exists(),
+            "init() must roll back the corrupt vault.enc on divergence so \
+             a follow-up init() can recover without manual cleanup",
+        );
+
+        // Assertion 3: with env now stably at key_B (the worker landed
+        // its mutation), a fresh init() succeeds cleanly. This pins that
+        // the rollback path leaves the directory in a re-init-able state.
+        let mut recovery = CredentialVault::new(path.clone());
+        recovery
+            .init()
+            .expect("post-rollback init() under the stabilised env key must succeed");
+        assert!(
+            path.exists(),
+            "recovery init() must materialise vault.enc under key_B",
+        );
+
+        unsafe {
+            std::env::remove_var(VAULT_KEY_ENV);
+            std::env::remove_var(VAULT_NO_KEYRING_ENV);
+        }
+    }
+
+    // ── resolve_command ─────────────────────────────────────────────────
+    //
+    // Regression suite for the launchd `ioreg` ENOENT bug (#5025). The
+    // helper must:
+    //   1. Pick an existing absolute path when one is present.
+    //   2. Skip absolute paths that do not exist.
+    //   3. Accept a bare command name as an implicit "trust PATH" fallback.
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_picks_first_existing_absolute() {
+        // /bin/sh exists on every supported Unix host (macOS, Linux). If a
+        // CI environment ever pares this down we'll learn about it via this
+        // test, which is exactly the visibility #5025 wished it had.
+        let pick = resolve_command(&[
+            "/this/path/definitely/does/not/exist",
+            "/bin/sh",
+            "fallback-bare-name",
+        ]);
+        assert_eq!(pick, "/bin/sh");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_skips_missing_absolutes() {
+        // Both absolutes are bogus — the bare-name fallback wins.
+        let pick = resolve_command(&["/nope/one", "/nope/two", "fallback-bare-name"]);
+        assert_eq!(pick, "fallback-bare-name");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_returns_last_when_all_absolutes_missing_and_no_bare() {
+        // Edge case: all candidates are absolute and none exist. The helper
+        // returns the last candidate so the caller still passes a non-empty
+        // command to `Command::new` and gets a proper Err back (which the
+        // updated `collect_os_machine_id_material` logs explicitly).
+        let pick = resolve_command(&["/nope/one", "/nope/two"]);
+        assert_eq!(pick, "/nope/two");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_command_skips_missing_windows_absolutes() {
+        // On Windows the absolute-path discriminator is the drive prefix
+        // `X:\`. cmd.exe is virtually always present in System32.
+        let pick = resolve_command(&[
+            r"C:\nope\does\not\exist.exe",
+            r"C:\Windows\System32\cmd.exe",
+            "fallback-bare-name",
+        ]);
+        assert_eq!(pick, r"C:\Windows\System32\cmd.exe");
+    }
+
+    #[test]
+    fn resolve_command_accepts_bare_name_without_filesystem_check() {
+        // The bare name is returned immediately — even if no such command
+        // exists on PATH, the caller's `Command::new` will surface the
+        // ENOENT (and the updated collector logs that path explicitly).
+        let pick = resolve_command(&["definitely-not-a-real-command-1234567890"]);
+        assert_eq!(pick, "definitely-not-a-real-command-1234567890");
     }
 }

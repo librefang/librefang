@@ -1,0 +1,31 @@
+# Snapshot of librefang-kernel's RedactionPolicy regex source strings.
+#
+# Source of truth: crates/librefang-kernel/src/trajectory/mod.rs
+#                  (CompiledPatterns::get(), the api_key / jwt / long_b64
+#                  branches inside `OnceLock::get_or_init`).
+#
+# librefang-rl-export duplicates these patterns inline (`src/redact.rs`)
+# rather than depending on librefang-kernel — pulling the kernel into a
+# leaf egress crate would invert the dependency layer and drag ~50
+# transitive crates in for three regexes. See `src/redact.rs` module
+# docs for the full rationale.
+#
+# This fixture exists so that drift between the two copies fails CI
+# loudly. The companion test in `src/redact.rs::tests` reads this file
+# and asserts byte-for-byte equality against the rl-export-side
+# `const` strings.
+#
+# Sync this whenever librefang-kernel's RedactionPolicy patterns change.
+#
+# Format:
+#   - Lines beginning with `#` are comments (ignored by the parser).
+#   - Blank lines are ignored.
+#   - Every other line is one pattern label and the regex source,
+#     separated by a single literal TAB. Order MUST match the order
+#     `redact_string` applies the patterns in (jwt, api_key, long_b64);
+#     the kernel applies them in the same order via `redact_text`.
+#   - No quoting: the regex source ends at end-of-line, so do not
+#     include a trailing newline mid-pattern.
+jwt	\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b
+api_key	(?i)\b(?:sk|api[_-]?key|key|token|secret|bearer)[_\-=:\s]+[A-Za-z0-9_\-]{16,}\b
+long_b64	\b[A-Za-z0-9+/=]{40,}\b

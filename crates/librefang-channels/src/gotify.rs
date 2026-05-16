@@ -344,6 +344,15 @@ impl ChannelAdapter for GotifyAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Gotify
+    /// server / app identifier) so the bridge approval listener builds the
+    /// same `gotify:<account_id>` key the router stores in `channel_defaults`,
+    /// scoping ApprovalRequested delivery to the server bound to the
+    /// requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -613,5 +622,28 @@ mod tests {
             .send(&dummy_user(), ChannelContent::Text("auth-check".into()))
             .await
             .expect("must use app token in send URL");
+    }
+
+    #[test]
+    fn test_gotify_account_id_default_none() {
+        let adapter = GotifyAdapter::new(
+            "https://gotify.example.com".to_string(),
+            "APP".to_string(),
+            "CLIENT".to_string(),
+        );
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_gotify_account_id_returns_configured_value() {
+        // #5003: two Gotify servers must resolve under distinct
+        // `gotify:<account_id>` keys via the trait override.
+        let adapter = GotifyAdapter::new(
+            "https://gotify.example.com".to_string(),
+            "APP".to_string(),
+            "CLIENT".to_string(),
+        )
+        .with_account_id(Some("server-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("server-42"));
     }
 }

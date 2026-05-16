@@ -575,6 +575,15 @@ impl ChannelAdapter for TwistAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Twist
+    /// workspace identifier) so the bridge approval listener builds the
+    /// same `twist:<account_id>` key the router stores in `channel_defaults`,
+    /// scoping ApprovalRequested delivery to the workspace bound to the
+    /// requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -701,5 +710,20 @@ mod tests {
             err.to_string().contains("500"),
             "error should mention status code, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_twist_account_id_default_none() {
+        let adapter = TwistAdapter::new("token".to_string(), "ws-1".to_string(), vec![]);
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_twist_account_id_returns_configured_value() {
+        // #5003: two Twist workspaces must resolve under distinct
+        // `twist:<account_id>` keys via the trait override.
+        let adapter = TwistAdapter::new("token".to_string(), "ws-1".to_string(), vec![])
+            .with_account_id(Some("ws-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("ws-42"));
     }
 }

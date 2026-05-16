@@ -47,6 +47,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { truncateId } from "../lib/string";
+import { removeNodeAndCascadeEdges } from "../lib/canvas";
 import {
   useCreateWorkflow,
   useDeleteWorkflow,
@@ -2388,7 +2389,26 @@ function CanvasPageInner() {
                   </button>
                   <div className="h-px bg-border-subtle my-1" role="separator" />
                   <button role="menuitem" className="w-full px-3 py-1.5 text-xs text-left hover:bg-error/10 text-error flex items-center gap-2"
-                    onClick={() => { setNodes(nds => nds.filter(n => n.id !== contextMenu.nodeId)); setContextMenu(null); }}>
+                    onClick={() => {
+                      const nodeId = contextMenu.nodeId;
+                      if (!nodeId) { setContextMenu(null); return; }
+                      pushHistory();
+                      // Group nodes own their child nodes via `_childIds`;
+                      // dropping the group alone would orphan those children
+                      // (they'd still carry `_groupId`/`parentId` pointing at
+                      // a vanished group). Route to the group-aware deleter
+                      // so the children + their edges go too, matching the
+                      // GroupNodeComponent's _onDeleteGroup contract.
+                      const node = nodesRef.current.find(n => n.id === nodeId);
+                      if (node?.type === "groupNode") {
+                        deleteGroupAndChildrenRef.current(nodeId);
+                      } else {
+                        const next = removeNodeAndCascadeEdges(nodesRef.current, edgesRef.current, nodeId);
+                        setNodes(next.nodes);
+                        setEdges(next.edges);
+                      }
+                      setContextMenu(null);
+                    }}>
                     <Trash2 className="w-3 h-3" /> {t("common.delete")}
                   </button>
                 </>

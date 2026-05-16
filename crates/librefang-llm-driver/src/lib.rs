@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use librefang_types::config::{AzureOpenAiConfig, ResponseFormat, VertexAiConfig};
+use librefang_types::config::{
+    AzureOpenAiConfig, PromptCacheStrategy, ResponseFormat, VertexAiConfig,
+};
 use librefang_types::message::{ContentBlock, Message, StopReason, TokenUsage};
 use librefang_types::tool::{ToolCall, ToolDefinition};
 use serde::{Deserialize, Serialize};
@@ -79,6 +81,54 @@ pub enum LlmError {
         /// Last known activity before the process stalled.
         last_activity: String,
     },
+
+    /// Every entry in a [`crate::LlmDriver`] fallback chain refused the
+    /// request — either pre-checked as exhausted (#4807) or attempted and
+    /// failed. `details` enumerates the slots and the reason each is out;
+    /// the vec is sorted by `provider_id` ascending so any stringified
+    /// surface (logs, error responses, prompt-included error text) is
+    /// byte-identical across processes (#3298).
+    ///
+    /// `cause` carries the last underlying provider error when at least
+    /// one slot was attempted before the chain ran dry. It is exposed
+    /// through [`std::error::Error::source`] via `thiserror`'s `#[source]`
+    /// attribute so callers walking the error chain still see the
+    /// upstream failure (`librefang-llm-driver/AGENTS.md` rule, #3745).
+    /// `None` when every slot was pre-skipped from the exhaustion
+    /// store and the underlying provider was never invoked.
+    #[error("All providers exhausted ({}): {}", details.len(), format_chain_details(details))]
+    AllProvidersExhausted {
+        /// One entry per slot in the chain, sorted by provider id.
+        details: Vec<ProviderExhaustionDetail>,
+        /// The last underlying provider error from the most recent
+        /// attempt before the chain gave up. `Box`ed so the variant
+        /// itself stays small and so the recursive `LlmError` type is
+        /// well-sized.
+        #[source]
+        cause: Option<Box<LlmError>>,
+    },
+}
+
+/// One row of [`LlmError::AllProvidersExhausted::details`] — which
+/// provider was tried and why it was out. Kept here next to `LlmError`
+/// (rather than imported from [`crate::exhaustion`]) because constructing
+/// this row only requires a string and a reason — the in-memory store is
+/// not on the path of building the error.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderExhaustionDetail {
+    pub provider_id: String,
+    pub reason: crate::exhaustion::ExhaustionReason,
+}
+
+fn format_chain_details(details: &[ProviderExhaustionDetail]) -> String {
+    if details.is_empty() {
+        return "<empty chain>".to_string();
+    }
+    details
+        .iter()
+        .map(|d| format!("{}={}", d.provider_id, d.reason.as_metric_label()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl LlmError {
@@ -171,6 +221,14 @@ impl LlmError {
             // Distinct from Timeout (inactivity/subprocess) — these are network
             // layer failures before the API even responded.
             LlmError::Http(_) => FailoverReason::HttpError,
+
+            // The chain has nothing left to try. Classify as
+            // `ChainExhausted` — a dedicated terminal reason
+            // distinct from `Unknown` (the latter is "could not
+            // classify"; here we know precisely what happened).
+            // Callers propagate instead of looping further. Review
+            // nit 7.
+            LlmError::AllProvidersExhausted { .. } => FailoverReason::ChainExhausted,
         }
     }
 }
@@ -230,6 +288,26 @@ pub struct CompletionRequest {
     ///
     /// Ignored by drivers that don't implement `cache_control` markers.
     pub cache_ttl: Option<&'static str>,
+    /// Breakpoint strategy when [`Self::prompt_caching`] is enabled
+    /// (#4970).
+    ///
+    /// - `None` → driver picks its built-in default
+    ///   (Anthropic: `system_and_3`).
+    /// - `Some(PromptCacheStrategy::Disabled)` → no markers emitted
+    ///   even if `prompt_caching = true` (lets callers force-off the
+    ///   strategy without flipping the master switch).
+    /// - `Some(PromptCacheStrategy::SystemOnly)` → only the
+    ///   system-block marker is emitted; tools and message tail are
+    ///   not stamped.
+    /// - `Some(PromptCacheStrategy::SystemAndN(n))` → system +
+    ///   tools-last + N trailing-message markers, clipped to the
+    ///   provider's breakpoint cap (4 on Anthropic).
+    ///
+    /// Ignored by drivers that don't implement `cache_control`
+    /// breakpoints (OpenAI, DeepSeek, Gemini, Ollama, etc.). When
+    /// `prompt_caching` is `false` the strategy is ignored
+    /// unconditionally.
+    pub prompt_cache_strategy: Option<PromptCacheStrategy>,
     /// Desired response format (structured output).
     ///
     /// When set, instructs the LLM to return output in the specified format.
@@ -305,6 +383,17 @@ pub struct CompletionResponse {
     pub tool_calls: Vec<ToolCall>,
     /// Token usage statistics.
     pub usage: TokenUsage,
+    /// The provider slot that actually served the request.
+    ///
+    /// Populated by fallback wrappers ([`crate::LlmDriver`]
+    /// implementations that try multiple providers in sequence —
+    /// e.g. `FallbackChain`, `BudgetGatedDriver`) so that the billing
+    /// layer can attribute spend to the slot that *did* the work, not
+    /// the slot the caller nominated. `None` for direct driver calls
+    /// — billing falls back to the original nominator. Always `None`
+    /// on inner leaf drivers; populated by the outermost chain
+    /// wrapper. See librefang/librefang#4807 review nit 10.
+    pub actual_provider: Option<String>,
 }
 
 impl CompletionResponse {
@@ -655,6 +744,56 @@ mod tests {
         assert_eq!(empty.failover_reason(), FailoverReason::Timeout);
     }
 
+    // Review nit 7: `AllProvidersExhausted` must classify as the
+    // dedicated terminal reason `ChainExhausted`, not the generic
+    // `Unknown` that means "could not classify".
+    #[test]
+    fn all_providers_exhausted_classifies_as_chain_exhausted() {
+        use crate::llm_errors::FailoverReason;
+
+        let err = LlmError::AllProvidersExhausted {
+            details: vec![],
+            cause: None,
+        };
+        assert_eq!(err.failover_reason(), FailoverReason::ChainExhausted);
+    }
+
+    // #4807 / #3745 — `AllProvidersExhausted` MUST preserve the
+    // upstream provider error via `Error::source()`. The trait crate's
+    // own `AGENTS.md` rule is that no variant introduced for fallback
+    // accounting may drop the source chain — this test pins that
+    // contract so future field-shape edits can't silently regress it.
+    #[test]
+    fn all_providers_exhausted_preserves_source_chain() {
+        let inner = LlmError::Api {
+            status: 402,
+            message: "credit exhausted".to_string(),
+            code: None,
+        };
+        let inner_display = inner.to_string();
+
+        let err = LlmError::AllProvidersExhausted {
+            details: vec![crate::ProviderExhaustionDetail {
+                provider_id: "p1".to_string(),
+                reason: crate::exhaustion::ExhaustionReason::QuotaExceeded,
+            }],
+            cause: Some(Box::new(inner)),
+        };
+
+        // Walking `Error::source` lands on (a non-None) error whose
+        // Display matches the wrapped upstream variant.
+        let src = std::error::Error::source(&err)
+            .expect("AllProvidersExhausted with a cause must expose source()");
+        assert_eq!(src.to_string(), inner_display);
+        // And the `None`-cause shape (every slot pre-skipped) must NOT
+        // fabricate a synthetic source — `source()` returns None.
+        let empty = LlmError::AllProvidersExhausted {
+            details: vec![],
+            cause: None,
+        };
+        assert!(std::error::Error::source(&empty).is_none());
+    }
+
     #[test]
     fn test_completion_response_text() {
         let response = CompletionResponse {
@@ -671,6 +810,7 @@ mod tests {
             stop_reason: StopReason::EndTurn,
             tool_calls: vec![],
             usage: TokenUsage::default(),
+            actual_provider: None,
         };
         assert_eq!(response.text(), "Hello world!");
     }
@@ -812,6 +952,7 @@ mod tests {
                         output_tokens: 3,
                         ..Default::default()
                     },
+                    actual_provider: None,
                 })
             }
         }
@@ -828,6 +969,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -876,6 +1018,7 @@ mod tests {
                     stop_reason: StopReason::EndTurn,
                     tool_calls: vec![],
                     usage: TokenUsage::default(),
+                    actual_provider: None,
                 })
             }
         }
@@ -893,6 +1036,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -909,5 +1053,10 @@ mod tests {
     }
 }
 
+pub mod exhaustion;
 pub mod llm_errors;
+pub use exhaustion::{
+    ExhaustionReason, ExhaustionSnapshotRow, ProviderExhaustion, ProviderExhaustionStore,
+    DEFAULT_LONG_BACKOFF,
+};
 pub use llm_errors::FailoverReason;

@@ -265,6 +265,7 @@ impl LlmDriver for GeminiCliDriver {
                 output_tokens: 0,
                 ..Default::default()
             },
+            actual_provider: None,
         })
     }
 
@@ -457,6 +458,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -515,6 +517,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,

@@ -5,10 +5,11 @@ members = [
     "crates/librefang-memory",
     "crates/librefang-memory-wiki",
     "crates/librefang-runtime",
+    "crates/librefang-runtime-audit",
+    "crates/librefang-runtime-media",
+    "crates/librefang-runtime-sandbox-docker",
     "crates/librefang-runtime-mcp",
-    "crates/librefang-runtime-oauth",
     "crates/librefang-llm-drivers",
-    "crates/librefang-runtime-wasm",
     "crates/librefang-llm-driver",
     "crates/librefang-kernel-handle",
     "crates/librefang-acp",
@@ -26,6 +27,7 @@ members = [
     "crates/librefang-hands",
     "crates/librefang-extensions",
     "crates/librefang-telemetry",
+    "crates/librefang-rl-export",
     "xtask",
     "crates/librefang-testing",
 ]
@@ -102,7 +104,7 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 
 # HTTP client (for LLM drivers)
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "multipart", "rustls", "gzip", "deflate", "brotli", "form", "query"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "multipart", "rustls", "gzip", "deflate", "brotli", "form", "query", "socks"] }
 
 # TLS fallback — bundled Mozilla CA roots for systems without system certs (musl, Termux, minimal containers)
 rustls = "0.23"
@@ -158,6 +160,15 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 # data baked-in at compile time (no runtime fetch), keeping the security check
 # self-contained and reproducible.
 psl = "2"
+
+# Tera template engine — Jinja2-flavoured templates used by the workflow
+# `Transform` operator (#4980 step 3). Sandboxed by default (no I/O,
+# bounded recursion), well-maintained, MIT, and the standard pick when
+# the alternative is `mlua` / `rhai` / a hand-rolled DSL — all heavier
+# trees that we would have to babysit for security. Pin a single major
+# so a future bump is a deliberate review, not a transient dependabot
+# ping.
+tera = { version = "1", default-features = false }
 
 # WASM sandbox
 wasmtime = "44"

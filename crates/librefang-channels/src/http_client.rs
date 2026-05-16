@@ -32,6 +32,110 @@ pub fn new_client() -> reqwest::Client {
         .expect("HTTP client with bundled CA roots should always build")
 }
 
+/// Error returned when a per-channel `proxy = "…"` setting cannot be
+/// turned into a working `reqwest::Client`.
+///
+/// Two variants by design — the bridge needs to distinguish them in
+/// log output:
+///
+/// * [`Self::InvalidUrl`] — the operator typed `proxy = "not a url"`
+///   or used a scheme reqwest does not support
+///   (`reqwest::Proxy::all` accepts `http://`, `https://`, `socks5://`,
+///   `socks5h://`). Surfaced at config-load / adapter-init time so the
+///   error is obvious before the first send hits the wire.
+/// * [`Self::Build`] — `reqwest::ClientBuilder::build` itself failed
+///   after the proxy was attached (e.g., TLS setup). Carries the raw
+///   reqwest error string.
+#[derive(Debug)]
+pub enum ChannelProxyError {
+    /// Proxy URL string was not accepted by `reqwest::Proxy::all`.
+    /// `value` is the offending string (not redacted — `proxy` strings
+    /// can carry `user:pass@host` so the caller logs `redact_proxy_url`
+    /// in the channel bridge before printing).
+    InvalidUrl { value: String, source: String },
+    /// `reqwest::ClientBuilder::build` failed after the proxy was set.
+    Build(String),
+}
+
+impl std::fmt::Display for ChannelProxyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidUrl { value, source } => write!(
+                f,
+                "invalid channel proxy URL {value:?}: {source} \
+                 (accepted schemes: http, https, socks5, socks5h)"
+            ),
+            Self::Build(msg) => write!(f, "failed to build proxied HTTP client: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ChannelProxyError {}
+
+/// Build a [`reqwest::ClientBuilder`] that routes ALL traffic through
+/// `proxy_url` (HTTP, HTTPS, and any other scheme reqwest dispatches),
+/// on top of the same bundled-TLS configuration [`client_builder`]
+/// uses.
+///
+/// `proxy_url = None` returns the plain [`client_builder()`] — identical
+/// to today's behavior, so reqwest's default env-var fallback
+/// (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`) still
+/// applies. `Some(url)` *overrides* env vars: the per-channel setting
+/// is authoritative.
+///
+/// Returns [`ChannelProxyError::InvalidUrl`] when `proxy_url` is not a
+/// shape `reqwest::Proxy::all` understands. The accepted schemes are
+/// `http://`, `https://`, `socks5://`, `socks5h://`. SOCKS support is
+/// gated on reqwest's `socks` feature — enabled at the workspace level.
+pub fn proxied_client_builder(
+    proxy_url: Option<&str>,
+) -> Result<reqwest::ClientBuilder, ChannelProxyError> {
+    let mut builder = client_builder();
+    if let Some(url) = proxy_url {
+        let proxy = reqwest::Proxy::all(url).map_err(|e| ChannelProxyError::InvalidUrl {
+            value: url.to_string(),
+            source: e.to_string(),
+        })?;
+        builder = builder.proxy(proxy);
+    }
+    Ok(builder)
+}
+
+/// Build a [`reqwest::Client`] that routes traffic through `proxy_url`,
+/// or behaves identically to [`new_client`] when `proxy_url` is `None`.
+///
+/// This is the function channel adapters call from their `with_proxy`
+/// builders. See [`proxied_client_builder`] for accepted URL shapes and
+/// the env-var interaction contract.
+pub fn new_proxied_client(proxy_url: Option<&str>) -> Result<reqwest::Client, ChannelProxyError> {
+    proxied_client_builder(proxy_url)?
+        .build()
+        .map_err(|e| ChannelProxyError::Build(e.to_string()))
+}
+
+/// Emit a one-shot WARN naming the WS-bypass limitation for an adapter
+/// whose REST client honours the per-channel `proxy` setting (#4795) but
+/// whose long-lived WebSocket connection does not. Operators who set
+/// `proxy = "..."` because their corporate egress only allows the
+/// corporate HTTP proxy would otherwise see REST go through the proxy
+/// and WS go direct — silently failing on strict egress. Surfacing the
+/// limitation in startup logs (in addition to the docstring on each
+/// `with_proxy`) gives them a fighting chance to spot the misconfig
+/// before they file a bug.
+///
+/// Called by `SlackAdapter::start` (Socket Mode), `DiscordAdapter::start`
+/// (Gateway), and `MattermostAdapter::start` (WebSocket). Telegram is
+/// pure REST long-polling and does not call this. The `#[allow]` keeps it
+/// available when all three WS-using channel features happen to be off
+/// (the lib still compiles without forcing a `cfg(any(...))` here).
+#[allow(dead_code)]
+pub(crate) fn warn_ws_proxy_bypass(adapter: &str) {
+    tracing::warn!(
+        "{adapter}: proxy is configured but the long-lived WebSocket bypasses it; \
+         REST traffic only goes through the proxy (#4795 follow-up)"
+    );
+}
+
 /// Process-wide HTTP client used by [`fetch_url_bytes`] for safe
 /// outbound media fetches.
 ///
@@ -781,6 +885,109 @@ mod tests {
             .await
             .expect("auth'd request must succeed");
         assert_eq!(got, b"ok");
+    }
+
+    // -------- channel proxy override --------------------------------------
+
+    #[test]
+    fn proxied_client_none_builds_without_error() {
+        // No proxy set — must behave identically to `new_client()`.
+        let _client = new_proxied_client(None).expect("None proxy should always build");
+    }
+
+    #[test]
+    fn proxied_client_accepts_http_scheme() {
+        let _client = new_proxied_client(Some("http://127.0.0.1:8080"))
+            .expect("http:// proxy URL should be accepted by reqwest");
+    }
+
+    #[test]
+    fn proxied_client_accepts_https_scheme() {
+        let _client = new_proxied_client(Some("https://proxy.example.com:3128"))
+            .expect("https:// proxy URL should be accepted by reqwest");
+    }
+
+    #[test]
+    fn proxied_client_accepts_socks5_scheme() {
+        // Requires reqwest's `socks` feature — workspace Cargo.toml
+        // enables it. If this regresses to "not enabled", the URL gets
+        // refused at parse time with a clear "scheme not supported"
+        // reqwest error.
+        let _client = new_proxied_client(Some("socks5://127.0.0.1:1080"))
+            .expect("socks5:// proxy URL requires the `socks` reqwest feature");
+        let _client = new_proxied_client(Some("socks5h://127.0.0.1:1080"))
+            .expect("socks5h:// proxy URL requires the `socks` reqwest feature");
+    }
+
+    #[test]
+    fn proxied_client_accepts_proxy_with_userinfo() {
+        // reqwest stores the auth out-of-band and uses it for Proxy-Authorization.
+        let _client = new_proxied_client(Some("http://user:pass@proxy.example.com:3128"))
+            .expect("user:pass@host should be accepted");
+    }
+
+    #[test]
+    fn proxied_client_rejects_garbage_url() {
+        let err = new_proxied_client(Some("not a url")).expect_err("garbage must error");
+        match err {
+            ChannelProxyError::InvalidUrl { value, .. } => {
+                assert_eq!(value, "not a url");
+            }
+            other => panic!("expected InvalidUrl, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proxied_client_rejects_javascript_scheme() {
+        // `javascript:` does not parse as an absolute URL with an
+        // authority component — reqwest's `Proxy::all` rejects it at
+        // parse time.
+        let err = new_proxied_client(Some("javascript:alert(1)")).expect_err("must reject");
+        match err {
+            ChannelProxyError::InvalidUrl { value, source } => {
+                assert_eq!(value, "javascript:alert(1)");
+                // Operator-friendly error: source must say SOMETHING
+                // useful. Don't pin the exact wording — it's reqwest's.
+                assert!(
+                    !source.is_empty(),
+                    "InvalidUrl.source must carry the underlying reqwest reason"
+                );
+            }
+            other => panic!("expected InvalidUrl, got: {other:?}"),
+        }
+    }
+
+    /// Smoke test for the per-adapter WS-bypass WARN helper (#4795
+    /// follow-up). The behavioural assertion lives in each adapter test
+    /// (`*_with_proxy_some_sets_ws_bypass_warn_flag`) — this just pins
+    /// that the helper itself does not panic and accepts the three
+    /// adapter names the start() paths pass in.
+    #[cfg(any(
+        feature = "channel-slack",
+        feature = "channel-discord",
+        feature = "channel-mattermost",
+    ))]
+    #[test]
+    fn warn_ws_proxy_bypass_smoke() {
+        warn_ws_proxy_bypass("slack");
+        warn_ws_proxy_bypass("discord");
+        warn_ws_proxy_bypass("mattermost");
+    }
+
+    #[test]
+    fn channel_proxy_error_display_lists_accepted_schemes() {
+        // Operators need to know which schemes are valid in the error
+        // text — pin that contract so the message stays useful.
+        let err = ChannelProxyError::InvalidUrl {
+            value: "bogus".into(),
+            source: "boom".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("http"), "schemes list must mention http: {s}");
+        assert!(
+            s.contains("socks5"),
+            "schemes list must mention socks5: {s}"
+        );
     }
 
     // -------- ct_eq --------------------------------------------------------

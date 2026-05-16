@@ -41,6 +41,32 @@ impl LibreFangKernel {
             .await
     }
 
+    /// Send a message honouring a per-call `SessionMode` override.
+    ///
+    /// Used by workflow step execution (#4834) so a step targeting a registry
+    /// agent can opt-in to a fresh session (`SessionMode::New`) or insist on
+    /// the agent's persistent session (`SessionMode::Persistent`), overriding
+    /// the target agent's manifest default. Resolution precedence is enforced
+    /// inside `send_message_full`: per-call > manifest > kernel default.
+    pub async fn send_message_with_session_mode(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        session_mode_override: Option<librefang_types::agent::SessionMode>,
+    ) -> KernelResult<AgentLoopResult> {
+        self.send_message_full(
+            agent_id,
+            message,
+            self.kernel_handle(),
+            None,
+            None,
+            session_mode_override,
+            None,
+            None,
+        )
+        .await
+    }
+
     /// Send a multimodal message (text + images) to an agent and get a response.
     ///
     /// Used by channel bridges when a user sends a photo — the image is downloaded,
@@ -352,25 +378,6 @@ impl LibreFangKernel {
         None
     }
 
-    /// Pre-dispatch provider-budget check.
-    ///
-    /// Read-only: looks up the `[providers.<name>]` entry (if any) and
-    /// queries the metering store. Used by every dispatch path
-    /// (ephemeral / full / streaming) BEFORE any token or USD
-    /// reservation is acquired, so a rejection cannot leak reservations
-    /// and a hot loop of denied calls cannot drain the per-agent burst
-    /// window or the in-memory pending USD ledger.
-    fn check_provider_budget_for(
-        &self,
-        provider: &str,
-    ) -> librefang_types::error::LibreFangResult<()> {
-        let bc = self.metering.budget_config.load();
-        if let Some(pb) = bc.providers.get(provider) {
-            self.metering.engine.check_provider_budget(provider, pb)?;
-        }
-        Ok(())
-    }
-
     /// Send an ephemeral "side question" to an agent (`/btw` command).
     ///
     /// The message is answered using the agent's system prompt and model, but in a
@@ -392,9 +399,17 @@ impl LibreFangKernel {
             return Ok(AgentLoopResult::default());
         }
 
-        // Pre-dispatch provider budget gate (ephemeral path).
-        self.check_provider_budget_for(&entry.manifest.model.provider)
-            .map_err(KernelError::LibreFang)?;
+        // #4807: the pre-dispatch provider-budget gate was removed
+        // from this path. Budget exhaustion is now signalled through
+        // the shared `ProviderExhaustionStore` (flagged by
+        // `MeteringEngine::flag_provider_budget_exhausted` when a
+        // per-provider operator cap trips) and consumed by the LLM
+        // fallback chain (`FallbackDriver` + `FallbackChain`), so an
+        // exhausted primary provider falls over to a healthy slot
+        // instead of refusing the whole call. Global `[budget]` caps
+        // and per-agent quotas still apply via `reserve_global_budget`
+        // / `check_quota_and_reserve` below — only the per-provider
+        // gate that #4807 explicitly asked to remove is gone.
 
         // Ephemeral: no tools — prevents side effects (tool writes to memory/disk)
         let tools: Vec<librefang_types::tool::ToolDefinition> = vec![];
@@ -430,6 +445,12 @@ impl LibreFangKernel {
                 .map(|w| self.cached_workspace_metadata(w, manifest.autonomous.is_some()));
 
             let agent_id_str = agent_id.0.to_string();
+            // One pass over `tools` produces both the name list (for the
+            // hook payload + `PromptContext::granted_tools`) and the
+            // description hint map (for `PromptContext::granted_tool_hints`).
+            // Avoids three separate walks per send (#4805 review).
+            let (granted_tool_names, granted_tool_hints) =
+                librefang_runtime::prompt_builder::collect_granted_tool_names_and_hints(&tools);
             let hook_ctx = librefang_runtime::hooks::HookContext {
                 agent_name: &manifest.name,
                 agent_id: agent_id_str.as_str(),
@@ -439,7 +460,7 @@ impl LibreFangKernel {
                     "call_site": "ephemeral",
                     "user_message": message,
                     "is_subagent": false,
-                    "granted_tools": tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+                    "granted_tools": granted_tool_names,
                 }),
             };
             let dynamic_sections = self.governance.hooks.collect_prompt_sections(&hook_ctx);
@@ -464,7 +485,8 @@ impl LibreFangKernel {
                 agent_name: manifest.name.clone(),
                 agent_description: manifest.description.clone(),
                 base_system_prompt: manifest.model.system_prompt.clone(),
-                granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
+                granted_tools: granted_tool_names,
+                granted_tool_hints,
                 recalled_memories: vec![],
                 skill_summary: String::new(),
                 skill_count: 0,
@@ -601,6 +623,13 @@ impl LibreFangKernel {
                 // byte-budget enforcement (defaults: 16 KB per result,
                 // 50 KB per turn) still applies — only fold no-ops here.
                 tool_results_config: None,
+                // #4976: ephemeral /btw uses an empty session — the
+                // compressor will never fire here. Leave at None so the
+                // loop falls back to compiled defaults.
+                compaction_config: None,
+                // Ephemeral /btw also starts empty — gateway pass would
+                // no-op (under threshold) so we skip it explicitly.
+                gateway_compression: None,
             },
         )
         .await
@@ -627,9 +656,16 @@ impl LibreFangKernel {
         // attribution to record. Per-user budget rollup will skip these.
         // session_id is also None: ephemerals run on a throwaway session
         // that is not persisted in the sessions table.
+        //
+        // #4807 review nit 10: honour `actual_provider` so a chain
+        // fail-over bills the slot that did the work.
+        let billed_provider = result
+            .actual_provider
+            .clone()
+            .unwrap_or_else(|| manifest.model.provider.clone());
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
-            provider: manifest.model.provider.clone(),
+            provider: billed_provider,
             model: model.clone(),
             input_tokens: result.total_usage.input_tokens,
             output_tokens: result.total_usage.output_tokens,
@@ -771,12 +807,12 @@ impl LibreFangKernel {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
-        // Pre-dispatch provider budget gate (full path). Placed BEFORE
-        // both reservations so a rejection cannot leak the pending USD
-        // ledger or the per-agent burst window — bare `?` is sufficient
-        // because no resources have been acquired yet.
-        self.check_provider_budget_for(&entry.manifest.model.provider)
-            .map_err(KernelError::LibreFang)?;
+        // #4807: the pre-dispatch provider-budget gate was removed
+        // from this path. Budget exhaustion is signalled through the
+        // shared `ProviderExhaustionStore` and consumed by the LLM
+        // fallback chain so an exhausted primary provider fails over
+        // to a healthy slot. See the ephemeral-path explanation
+        // above for the full rationale.
 
         let estimated_usd = {
             // Best-effort pre-call estimate: model.max_tokens worth of
@@ -1350,6 +1386,11 @@ impl LibreFangKernel {
             aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: None,
             tool_results_config: Some(self.config.load().tool_results.clone()),
+            // #4976: per-agent compaction overrides are resolved inside
+            // `send_message_streaming_with_sender_and_opts` once the
+            // agent registry has been consulted — leave as None here.
+            compaction_config: None,
+            gateway_compression: Some(self.config.load().gateway_compression.clone()),
         };
         self.send_message_streaming_with_sender_and_opts(
             effective_id,
@@ -1537,6 +1578,14 @@ impl LibreFangKernel {
             aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: Some(parent_session_id),
             tool_results_config: Some(self.config.load().tool_results.clone()),
+            // #4976: per-agent compaction overrides are resolved inside
+            // `send_message_streaming_with_sender_and_opts` once the
+            // agent registry has been consulted — leave as None here.
+            // Forks inherit the parent agent's compaction policy (the
+            // forked agent_id is identical to the parent's at this
+            // layer; allowed_tools is the only fork-specific override).
+            compaction_config: None,
+            gateway_compression: Some(self.config.load().gateway_compression.clone()),
         };
         // INVARIANT: forks must use the canonical session so the parent turn's
         // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
@@ -1611,6 +1660,10 @@ impl LibreFangKernel {
             aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: None,
             tool_results_config: Some(self.config.load().tool_results.clone()),
+            // #4976: resolved inside the `_with_opts` callee once the
+            // registry has been consulted for this agent's manifest.
+            compaction_config: None,
+            gateway_compression: Some(self.config.load().gateway_compression.clone()),
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
@@ -1638,7 +1691,7 @@ impl LibreFangKernel {
         sender_context: Option<&SenderContext>,
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
-        loop_opts: librefang_runtime::agent_loop::LoopOptions,
+        mut loop_opts: librefang_runtime::agent_loop::LoopOptions,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
@@ -1652,12 +1705,26 @@ impl LibreFangKernel {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
-        // Pre-dispatch provider budget gate (streaming path). Placed
-        // BEFORE `check_quota_and_reserve` so a rejection cannot leak
-        // the per-agent burst window — bare `?` is sufficient because
-        // no token reservation has been acquired yet.
-        self.check_provider_budget_for(&entry.manifest.model.provider)
-            .map_err(KernelError::LibreFang)?;
+        // #4976: resolve per-agent [compaction] overrides against the
+        // kernel-global config and stash the merged snapshot on
+        // `loop_opts` so the in-loop `ContextCompressor` builder picks
+        // up the agent's keep_recent / max_summary_tokens /
+        // token_threshold_ratio. Callers that already populated this
+        // field (forks, future overrides) win.
+        if loop_opts.compaction_config.is_none() {
+            let merged = match entry.manifest.compaction.as_ref() {
+                Some(o) if !o.is_empty() => o.resolve(&cfg.compaction),
+                _ => cfg.compaction.clone(),
+            };
+            loop_opts.compaction_config = Some(merged);
+        }
+
+        // #4807: the pre-dispatch provider-budget gate was removed
+        // from this path. Budget exhaustion is signalled through the
+        // shared `ProviderExhaustionStore` and consumed by the LLM
+        // fallback chain so an exhausted primary provider fails over
+        // to a healthy slot. See the ephemeral-path explanation
+        // above for the full rationale.
 
         // Pre-charge the estimated token budget atomically to prevent the
         // TOCTOU race (#3736).  The reservation is settled inside the spawned
@@ -1877,9 +1944,16 @@ impl LibreFangKernel {
         // Computing it here on the pre-lock snapshot would make it stale: a
         // concurrent turn that committed history while we were waiting for
         // the lock could push us across (or back below) the threshold.
+        //
+        // #4976: merge per-agent `[compaction]` overrides on top of the
+        // global config so a chat agent and an orchestrator can use
+        // different thresholds / summary budgets in the same daemon.
         let compaction_config_snapshot = {
             use librefang_runtime::compactor::CompactionConfig;
-            CompactionConfig::from_toml(&cfg.compaction)
+            CompactionConfig::from_toml_with_overrides(
+                &cfg.compaction,
+                entry.manifest.compaction.as_ref(),
+            )
         };
 
         let tools = self.available_tools(agent_id);
@@ -2007,6 +2081,12 @@ impl LibreFangKernel {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let agent_id_str = agent_id.0.to_string();
+            // One pass over `tools` produces both the name list (for the
+            // hook payload + `PromptContext::granted_tools`) and the
+            // description hint map (for `PromptContext::granted_tool_hints`).
+            // Avoids three separate walks per send (#4805 review).
+            let (granted_tool_names, granted_tool_hints) =
+                librefang_runtime::prompt_builder::collect_granted_tool_names_and_hints(&tools);
             let hook_ctx = librefang_runtime::hooks::HookContext {
                 agent_name: &manifest.name,
                 agent_id: agent_id_str.as_str(),
@@ -2019,7 +2099,7 @@ impl LibreFangKernel {
                     "channel_type": sender_context.map(|s| s.channel.clone()),
                     "is_group": sender_context.map(|s| s.is_group).unwrap_or(false),
                     "is_subagent": is_subagent_flag,
-                    "granted_tools": tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+                    "granted_tools": granted_tool_names,
                 }),
             };
             let dynamic_sections = self.governance.hooks.collect_prompt_sections(&hook_ctx);
@@ -2039,7 +2119,8 @@ impl LibreFangKernel {
                 agent_name: manifest.name.clone(),
                 agent_description: manifest.description.clone(),
                 base_system_prompt: manifest.model.system_prompt.clone(),
-                granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
+                granted_tools: granted_tool_names,
+                granted_tool_hints,
                 recalled_memories: vec![],
                 skill_summary: skill_meta
                     .as_ref()
@@ -2123,6 +2204,16 @@ impl LibreFangKernel {
             manifest.metadata.insert(
                 "prompt_caching".to_string(),
                 serde_json::Value::Bool(cfg.prompt_caching),
+            );
+            // Pass the prompt-cache strategy (#4970) as a string —
+            // the agent loop parses it back into a `PromptCacheStrategy`.
+            manifest.metadata.insert(
+                "prompt_cache_strategy".to_string(),
+                serde_json::Value::String(cfg.prompt_cache.strategy.to_string()),
+            );
+            manifest.metadata.insert(
+                "prompt_cache_ttl_hint_secs".to_string(),
+                serde_json::Value::from(cfg.prompt_cache.cache_ttl_hint_secs),
             );
 
             // Pass privacy config to the agent loop via metadata.
@@ -2506,9 +2597,16 @@ impl LibreFangKernel {
                         result.total_usage.cache_read_input_tokens,
                         result.total_usage.cache_creation_input_tokens,
                     );
+                    // #4807 review nit 10: honour `actual_provider`
+                    // so a chain fail-over bills the slot that did the
+                    // work, not the manifest-nominated provider.
+                    let billed_provider = result
+                        .actual_provider
+                        .clone()
+                        .unwrap_or_else(|| manifest.model.provider.clone());
                     let usage_record = librefang_memory::usage::UsageRecord {
                         agent_id,
-                        provider: manifest.model.provider.clone(),
+                        provider: billed_provider,
                         model: model.clone(),
                         input_tokens: result.total_usage.input_tokens,
                         output_tokens: result.total_usage.output_tokens,
@@ -2610,7 +2708,15 @@ impl LibreFangKernel {
                             estimate_token_count, needs_compaction_by_tokens, CompactionConfig,
                         };
                         let compact_cfg = kernel_clone.config.load();
-                        let config = CompactionConfig::from_toml(&compact_cfg.compaction);
+                        // #4976: merge per-agent [compaction] overrides on
+                        // top of the global config. The token threshold
+                        // ratio is the field that primarily gates this
+                        // post-loop check, and it's now per-agent
+                        // tunable.
+                        let config = CompactionConfig::from_toml_with_overrides(
+                            &compact_cfg.compaction,
+                            manifest.compaction.as_ref(),
+                        );
                         let estimated = estimate_token_count(&session.messages, None, None);
                         if needs_compaction_by_tokens(estimated, &config) {
                             let kc = kernel_clone.clone();

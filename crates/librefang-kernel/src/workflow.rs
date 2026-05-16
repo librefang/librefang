@@ -13,7 +13,7 @@
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use librefang_memory::{WorkflowRunRow, WorkflowStore};
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentId, SessionMode};
 use librefang_types::subagent::SubagentContext;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -159,26 +159,13 @@ impl std::fmt::Display for WorkflowId {
 }
 
 /// Unique identifier for a running workflow instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct WorkflowRunId(pub Uuid);
-
-impl WorkflowRunId {
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
-
-impl Default for WorkflowRunId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for WorkflowRunId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+///
+/// Canonical definition lives in `librefang_types::task::WorkflowRunId`
+/// (re-exported here for source compatibility with pre-#4983 call sites).
+/// `librefang-types` sits at the bottom of the crate DAG so the kernel can
+/// re-use the same `Uuid`-shaped newtype that step 1 (PR #5033) introduced
+/// for the async-task tracker. One type, not two. Refs #4983.
+pub use librefang_types::task::WorkflowRunId;
 
 /// A workflow definition — a named sequence of steps.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +191,52 @@ pub struct Workflow {
     /// also `None` the workflow runs unbounded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_timeout_secs: Option<u64>,
+    /// Optional declared input parameters (#4982 — gap 2 / parameter
+    /// discovery). When set, agents discover these via `workflow_describe`
+    /// in preference to the legacy `{{var}}`-scanning fallback. The list
+    /// is authored in workflow TOML as repeated `[[input_schema]]` tables.
+    ///
+    /// Absent on workflows that pre-date the schema feature; deserializes
+    /// cleanly thanks to `#[serde(default)]`, and existing
+    /// `workflow_describe` calls fall back to auto-detected parameters
+    /// (matching the older `Workflow::to_template()` behaviour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<Vec<WorkflowInputParam>>,
+}
+
+/// One declared input parameter for a workflow (#4982 — gap 2).
+///
+/// Authored as a `[[input_schema]]` block in workflow TOML; surfaced to
+/// agents through the `workflow_describe` tool so the LLM knows what to
+/// pass in `workflow_run` / `workflow_start` input.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkflowInputParam {
+    /// Parameter name — corresponds to the `{{name}}` placeholder key in
+    /// step prompt templates and to the JSON-object key the caller passes
+    /// in the workflow input.
+    pub name: String,
+    /// Expected value type. One of `"string" | "number" | "boolean" |
+    /// "file" | "image" | "agent_id"`. `"file"` / `"image"` document that
+    /// the caller may pass an `{"_artifact": "sha256:<64-hex>"}`
+    /// reference (#4982 — gap 3) that the runtime resolves to the
+    /// artifact-store handle string before the workflow engine
+    /// substitutes it into the step prompt.
+    #[serde(default = "default_input_param_type")]
+    pub param_type: String,
+    /// Whether the caller must supply this parameter.
+    #[serde(default = "default_required")]
+    pub required: bool,
+    /// Optional human-readable description shown in the discovery surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+fn default_input_param_type() -> String {
+    "string".to_string()
+}
+
+fn default_required() -> bool {
+    true
 }
 
 /// A single step in a workflow.
@@ -238,6 +271,24 @@ pub struct WorkflowStep {
     /// instead of the default sequential/mode-based execution.
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// Per-step override for the target agent's `SessionMode`.
+    ///
+    /// Resolution precedence (per CLAUDE.md): per-step override > target
+    /// agent manifest `session_mode` > kernel default (`Persistent`).
+    ///
+    /// - `Some(Persistent)` — reuse the target registry agent's persistent
+    ///   `(agent, _)` session, even if its manifest defaults to `New`. Used
+    ///   to thread a workflow's step output into an agent's long-running
+    ///   context.
+    /// - `Some(New)` — mint a fresh `SessionId` for this step's invocation,
+    ///   even if the target agent's manifest defaults to `Persistent`. Used
+    ///   to isolate a workflow step from any prior agent state.
+    /// - `None` (default) — defer to the target agent's manifest.
+    ///
+    /// Has no effect when the target agent's module is `wasm:`/`python:`
+    /// (those modules don't use the session abstraction).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_mode: Option<librefang_types::agent::SessionMode>,
 }
 
 fn default_timeout() -> u64 {
@@ -245,7 +296,21 @@ fn default_timeout() -> u64 {
 }
 
 /// How to identify the agent for a step.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Deserialization accepts THREE on-wire shapes for operator ergonomics
+/// (the issue / PR docs use the bare-string form; the kernel and HTTP
+/// payloads use the tagged forms):
+///
+/// 1. Bare string: `agent = "researcher"` → [`StepAgent::ByName`].
+/// 2. Tagged object: `{ name = "researcher" }` → [`StepAgent::ByName`].
+/// 3. Tagged object: `{ id = "<uuid>" }` → [`StepAgent::ById`].
+///
+/// Exactly one of `id` / `name` must be present in the tagged form;
+/// supplying both or neither is a deserialization error.
+///
+/// Serialization continues to emit the tagged-object form (`Serialize`
+/// derive on the untagged-style enum picks the matching variant cleanly).
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum StepAgent {
     /// Reference an agent by UUID.
@@ -254,7 +319,67 @@ pub enum StepAgent {
     ByName { name: String },
 }
 
+impl<'de> Deserialize<'de> for StepAgent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        // Accept either a bare string (treated as `ByName`) or an object
+        // with exactly one of `id` / `name`. Going through `serde_json::Value`
+        // keeps the impl format-agnostic — TOML, JSON, and YAML deserializers
+        // all feed through serde's data model and produce a `Value` here.
+        let v = serde_json::Value::deserialize(deserializer)?;
+        match v {
+            serde_json::Value::String(s) => Ok(StepAgent::ByName { name: s }),
+            serde_json::Value::Object(map) => {
+                let id = map.get("id").and_then(|x| x.as_str());
+                let name = map.get("name").and_then(|x| x.as_str());
+                match (id, name) {
+                    (Some(_), Some(_)) => Err(D::Error::custom(
+                        "StepAgent: object form must set exactly one of `id` or `name`, not both",
+                    )),
+                    (Some(id), None) => Ok(StepAgent::ById { id: id.to_string() }),
+                    (None, Some(name)) => Ok(StepAgent::ByName {
+                        name: name.to_string(),
+                    }),
+                    (None, None) => Err(D::Error::custom(
+                        "StepAgent: object form must set exactly one of `id` or `name`",
+                    )),
+                }
+            }
+            other => Err(D::Error::custom(format!(
+                "StepAgent: expected string or object, got {}",
+                match other {
+                    serde_json::Value::Null => "null",
+                    serde_json::Value::Bool(_) => "bool",
+                    serde_json::Value::Number(_) => "number",
+                    serde_json::Value::Array(_) => "array",
+                    _ => "other",
+                }
+            ))),
+        }
+    }
+}
+
 /// Execution mode for a workflow step.
+///
+/// Variants split into two families:
+///
+/// * **Agent-dispatching** — `Sequential`, `FanOut`, `Collect`, `Conditional`,
+///   `Loop` — route their step body to a registered agent via the
+///   workflow's `agent_resolver`. These are the legacy modes and always
+///   consume the step's `agent` field.
+/// * **Operator nodes** (#4980) — `Wait`, `Gate`, `Approval`, `Transform`,
+///   `Branch` — never call an agent. The step's `agent` field is ignored
+///   for these variants (today it's still required syntactically; a
+///   follow-up may relax that at the HTTP layer). Only `Wait` is fully
+///   wired in the current PR — the others log a structured `warn!` and
+///   return success so the wire format is usable from day one while the
+///   open design questions on their bodies (Gate.condition syntax,
+///   Approval operator-identity, Transform.code shape) are still being
+///   sorted out. See #4980.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepMode {
@@ -269,6 +394,525 @@ pub enum StepMode {
     Conditional { condition: String },
     /// Loop — repeat this step until output contains `until` or `max_iterations` reached.
     Loop { max_iterations: u32, until: String },
+    /// Operator node: pause execution for `duration_secs` seconds, then
+    /// continue. Burns zero LLM tokens. Cancellation- and shutdown-aware
+    /// via `tokio::time::sleep` interleaved with the run's
+    /// `cancel_notify`. The previous step's output flows through
+    /// unchanged so downstream `{{input}}` substitutions still work.
+    Wait { duration_secs: u64 },
+    /// Operator node: short-circuit-style condition over the previous
+    /// step's output. The condition is a declarative comparator AST
+    /// (`field`, `op`, `value`) — deliberately not a string DSL, so the
+    /// wire format is the same shape that the dashboard editor and any
+    /// future linter would consume. The executor evaluates the
+    /// comparator against the previous step's output; if the condition
+    /// passes, execution continues to the next step. If it fails, the
+    /// run halts (`WorkflowRunState::Failed`) with a human-readable
+    /// reason naming the gate, the field, and the operator. See
+    /// [`GateCondition`] for the shape and [`GateOp`] for the operator
+    /// vocabulary.
+    ///
+    /// Design decision (deferred from step 1, locked in step 2 of
+    /// #4980): we picked a typed comparator over a string-DSL evaluator
+    /// because a string DSL forces a one-shot wire-format commitment —
+    /// callers would persist arbitrary expression strings that a later
+    /// richer DSL would have to either reparse or break. The comparator
+    /// shape is additive: future operators (regex, range, in-set) land
+    /// as new [`GateOp`] variants without touching anything else.
+    Gate { condition: GateCondition },
+    /// Operator node: human-in-the-loop pause. `recipients` is a
+    /// free-form `Vec<String>` like `["telegram:@pakman",
+    /// "email:foo@bar"]` for V1; the operator-identity model question
+    /// (per-channel UUIDs vs free-form strings vs Approval `Recipient`
+    /// type from #4977) is deferred to a follow-up. `timeout_secs` is
+    /// the wall-clock budget before a configurable timeout action
+    /// fires (also deferred — the current shape carries only the
+    /// timeout value, not the action). Executor is no-op-with-warn in
+    /// this PR (#4980).
+    Approval {
+        recipients: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_secs: Option<u64>,
+    },
+    /// Operator node: data transform / template expansion against the
+    /// previous step's output. `code` is a Tera template string. The
+    /// renderer exposes the previous step's output under two names:
+    /// `prev` is always the raw string; when the output parses as JSON
+    /// it is *also* exposed under `prev_json` so templates can index
+    /// into objects / arrays directly (`{{ prev_json.score }}`).
+    /// Workflow variables bound by earlier `output_var` steps are
+    /// exposed under `vars.<name>`.
+    ///
+    /// Design decision (deferred from step 1, locked in step 3 of
+    /// #4980): Tera was picked over a hand-rolled DSL, `mlua`, and
+    /// `rhai`. The discriminator: Tera is sandboxed by default (no
+    /// I/O, no shell escape, bounded recursion), MIT-licensed,
+    /// well-maintained, and adds a tree-of-five small crates. `mlua`
+    /// drags `liblua` in via FFI and would have to be sandboxed
+    /// manually; `rhai` is heavier and would force callers to learn a
+    /// bespoke scripting language for what is structurally a template
+    /// expansion. A future operator that wants real scripting can land
+    /// as a separate `Script` variant — it is not in scope here. Shell
+    /// exec is explicitly NOT considered.
+    Transform { code: String },
+    /// Operator node: conditional routing on the previous step's
+    /// output. Each `arm.match_value` is exact-matched against the
+    /// previous step's output (parsed as JSON when possible, raw
+    /// string otherwise); the first matching arm's `then` field is
+    /// the name of a *later* step to jump to. The dispatcher seeks
+    /// forward to that step and resumes sequential execution from
+    /// there. If no arm matches, the run halts with
+    /// `WorkflowRunState::Failed` and a reason naming the unmatched
+    /// output. If the named target step is missing or at-or-before
+    /// the current index, the run halts with a typed reason.
+    ///
+    /// Design decision (deferred from step 1, locked in step 4 of
+    /// #4980): exact equality on V1, matching the proposal in step
+    /// 1's PR body. Range / regex / in-set matchers can land as
+    /// additive `BranchArm` fields later (`match_range`, `match_regex`
+    /// with exactly-one-of validation) so the V1 shape does not paint
+    /// future evolution into a corner. Forward jumps only — backward
+    /// jumps would let an unbounded loop hide inside a Branch when
+    /// steps already have `Loop` semantics for that.
+    Branch { arms: Vec<BranchArm> },
+    /// Operator node: human-in-the-loop pause with rich channel
+    /// notification + multi-action vocabulary (#4977). Generalises the
+    /// older [`StepMode::Approval`] variant by carrying:
+    ///
+    /// - `notify`: one or more channel addresses (e.g.
+    ///   `telegram:@pakman`, `email:foo@bar`, `dashboard:`). The
+    ///   scheme prefix selects the channel adapter at delivery time.
+    /// - `actions`: the closed set of operator interactions the
+    ///   workflow author has authorised at this step. See
+    ///   [`OperatorAction`].
+    /// - `timeout_secs`: wall-clock budget before `timeout_action`
+    ///   fires. `None` = wait indefinitely.
+    /// - `timeout_action`: deterministic resolution when the budget
+    ///   expires (see [`OperatorTimeoutAction`]).
+    ///
+    /// **Executor state (#4977 step 1/N)**: this PR ships the types,
+    /// validate path, and a skeleton executor that pauses the run
+    /// using the existing [`WorkflowEngine::pause_run`] mechanism so
+    /// callers can already use the resume-token contract. Channel
+    /// notification dispatch, the timeout watchdog, and the operator
+    /// HTTP actions endpoint are deferred — see the per-arm
+    /// `TODO(#4977 step 2):` markers in the executor.
+    Operator {
+        /// Channel addresses to notify, one per recipient. Format is
+        /// `scheme:target` (e.g. `telegram:@pakman`). Validation
+        /// requires at least one entry and a known scheme prefix.
+        notify: Vec<String>,
+        /// Allowed operator interactions at this step.
+        actions: Vec<OperatorAction>,
+        /// Auto-resolve budget in seconds. `None` = wait forever.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_secs: Option<u64>,
+        /// Deterministic action taken when `timeout_secs` elapses
+        /// without an operator response.
+        #[serde(default)]
+        timeout_action: OperatorTimeoutAction,
+    },
+}
+
+/// Operator interactions a workflow author can authorise at an
+/// [`StepMode::Operator`] step. The set is intentionally closed —
+/// adding a verb requires a wire-format change so dashboards / channel
+/// adapters never see an unknown action mid-flight. Per #4977.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorAction {
+    /// Approve the previous step's output and continue the workflow.
+    Approve,
+    /// Reject the previous step's output and halt the workflow with a
+    /// `Failed` state.
+    Reject,
+    /// Provide free-form text input that becomes this step's output
+    /// and flows into the next step's `{{input}}`.
+    ProvideInput {
+        /// Name of the field the operator is providing — exposed to
+        /// the next step as `{{<field>}}` when `output_var` is unset,
+        /// or under `output_var` when set.
+        field: String,
+    },
+    /// Provide edits / corrections to the previous output. The edited
+    /// payload becomes this step's output.
+    Edit,
+    /// Open-ended freeform input (no field name). Equivalent to
+    /// `ProvideInput { field: "input" }` but kept distinct so the
+    /// dashboard UI can render a plain textbox rather than a
+    /// field-labelled form.
+    FreeformInput,
+}
+
+/// Deterministic resolution when an [`StepMode::Operator`] step's
+/// `timeout_secs` elapses without an operator response. Per #4977.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorTimeoutAction {
+    /// Auto-approve and continue to the next step.
+    Approve,
+    /// Auto-reject and halt the workflow with `Failed`.
+    Reject,
+    /// Halt the workflow with `Failed` and a "timeout" reason. Same
+    /// terminal state as `Reject` but with a distinct reason string
+    /// so the dashboard can distinguish operator vs auto-fail.
+    Fail,
+    /// Leave the run in `Paused` state (the executor already paused
+    /// when entering the operator step). Default — matches the
+    /// existing low-level `pause_run` contract.
+    #[default]
+    Continue,
+}
+
+/// Known channel-address schemes accepted by `OperatorAction.notify`
+/// entries. Kept as a single source of truth so the validator and any
+/// future channel-dispatch table agree on the supported set.
+const OPERATOR_NOTIFY_SCHEMES: &[&str] = &["telegram", "email", "dashboard", "slack", "webhook"];
+
+/// Whether `mode` is one of the operator-node variants (#4980 +
+/// #4977). Used by [`Workflow::validate`] to fail-closed on
+/// operator-node + DAG combinations, since the DAG executor
+/// (`execute_run_dag`) does not match on `StepMode` and would
+/// otherwise route operator nodes through `agent_resolver`.
+fn is_operator_step_mode(mode: &StepMode) -> bool {
+    matches!(
+        mode,
+        StepMode::Wait { .. }
+            | StepMode::Gate { .. }
+            | StepMode::Approval { .. }
+            | StepMode::Transform { .. }
+            | StepMode::Branch { .. }
+            | StepMode::Operator { .. }
+    )
+}
+
+/// Short label used in [`Workflow::validate`] error messages. Returns
+/// the snake-case wire tag for operator-node variants and `"agent"`
+/// for the dispatch variants (which never appear in operator-node
+/// rejection messages today but keep the helper total).
+fn operator_step_mode_label(mode: &StepMode) -> &'static str {
+    match mode {
+        StepMode::Wait { .. } => "wait",
+        StepMode::Gate { .. } => "gate",
+        StepMode::Approval { .. } => "approval",
+        StepMode::Transform { .. } => "transform",
+        StepMode::Branch { .. } => "branch",
+        StepMode::Operator { .. } => "operator",
+        StepMode::Sequential => "sequential",
+        StepMode::FanOut => "fan_out",
+        StepMode::Collect => "collect",
+        StepMode::Conditional { .. } => "conditional",
+        StepMode::Loop { .. } => "loop",
+    }
+}
+
+/// One arm of a [`StepMode::Branch`]. The shape is declarative on
+/// purpose: a `serde_json::Value` match value is analysable by the
+/// dashboard, by `dry_run`, and by future workflow linters; an opaque
+/// `String` expression would not be. The matching semantics (exact
+/// equality? regex? jsonpath?) are deliberately not pinned in this PR;
+/// the variant exists so downstream tooling can persist branch trees
+/// across the deferred-design follow-up without a schema migration.
+/// See #4980.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchArm {
+    /// Value to match the previous step's output against. Free-form
+    /// JSON so structural matches (`{"status":"ok"}`) and primitive
+    /// matches (`"approved"`, `0.8`, `true`) both round-trip without
+    /// stringification at the API boundary.
+    pub match_value: serde_json::Value,
+    /// Name of the step to jump to when this arm matches.
+    pub then: String,
+}
+
+/// Comparator AST consumed by [`StepMode::Gate`]. Picked over a string
+/// DSL because the typed shape is analysable end-to-end (dashboard
+/// editor, dry-run preview, future workflow linter) without inventing a
+/// parser. Each field is required on the wire — there is no default —
+/// so a manifest that omits any of them fails deserialization at load
+/// time rather than silently defaulting to a passing gate. See #4980.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateCondition {
+    /// JSON Pointer (RFC 6901) into the previous step's output. `None`
+    /// (or the root pointer `""`) compares against the whole output. A
+    /// missing pointer target causes the gate to fail with a reason
+    /// naming the missing field — never silently pass.
+    ///
+    /// If the previous step's output is not parseable as JSON the
+    /// pointer is ignored and the comparison happens against the raw
+    /// string (only `Eq`, `Ne`, `Contains` are meaningful on raw
+    /// strings; ordering ops on strings use lexicographic order).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// Comparison operator.
+    pub op: GateOp,
+    /// Right-hand-side value. JSON-typed so numbers, booleans, strings,
+    /// objects, and arrays all round-trip from TOML/JSON without a
+    /// stringification round-trip at the API boundary.
+    pub value: serde_json::Value,
+}
+
+/// Operators understood by [`GateCondition`]. Deliberately small: the
+/// step-2 surface area is the boring eq/ne/ord/contains set, which is
+/// enough for the issue's "score > 0.8" / "status == approved" /
+/// "tags contains beta" cases and trivially extensible later
+/// (`Regex`, `In`, `NotIn`, `Between`, …). Snake-case on the wire so
+/// the TOML shape matches the issue body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateOp {
+    /// Strict equality on JSON values. Mixed-type (e.g. `"0.8"` vs
+    /// `0.8`) does NOT coerce — explicit by design so an editor mistake
+    /// surfaces as a failed gate, not a silent type coercion.
+    Eq,
+    /// Strict inequality.
+    Ne,
+    /// Numeric `>`. Both sides must coerce to f64; otherwise the gate
+    /// fails with a typed reason. For non-JSON output, lexicographic
+    /// string comparison applies.
+    Gt,
+    /// Numeric `<` (or lexicographic for strings).
+    Lt,
+    /// Numeric `>=` (or lexicographic for strings).
+    Gte,
+    /// Numeric `<=` (or lexicographic for strings).
+    Lte,
+    /// Substring check: `value` (as string) is a substring of the
+    /// resolved field (rendered as a string). Case-sensitive — the
+    /// existing `evaluate_condition` already case-folds for
+    /// `StepMode::Conditional`; we keep the contracts distinct so an
+    /// operator who explicitly picks `Gate` gets predictable behaviour.
+    Contains,
+}
+
+impl std::fmt::Display for GateOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            GateOp::Eq => "eq",
+            GateOp::Ne => "ne",
+            GateOp::Gt => "gt",
+            GateOp::Lt => "lt",
+            GateOp::Gte => "gte",
+            GateOp::Lte => "lte",
+            GateOp::Contains => "contains",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Render a [`StepMode::Transform`] template against the previous
+/// step's output and the workflow's bound variables.
+///
+/// The Tera context is:
+///
+/// * `prev` — the previous step's raw output (always a string).
+/// * `prev_json` — the parsed JSON value, when `prev` parses as JSON.
+///   Missing from the context when the parse fails, so a template
+///   that references `prev_json` against a non-JSON predecessor surfaces
+///   a clear Tera "variable not found" error rather than silently
+///   rendering an empty string.
+/// * `vars` — a `BTreeMap<String, String>` of `output_var`-bound
+///   workflow variables. `BTreeMap` for deterministic iteration order
+///   in templates that iterate the map (`{% for k, v in vars %}`),
+///   matching the determinism contract from #3298.
+///
+/// Returns `Ok(rendered)` on success and `Err(reason)` when Tera
+/// either fails to parse the template (syntax error) or fails to
+/// render (missing variable, type mismatch). The reason string is
+/// surfaced verbatim in the workflow's `error` field; Tera's own
+/// errors carry line / column information, so the operator can pin
+/// the bad placeholder without re-running the workflow.
+///
+/// Templates are parsed via `Tera::one_off` rather than registered into
+/// a long-lived `Tera` instance. The Transform executor is rare
+/// (operator-node, not hot-path) and `one_off` keeps the runner
+/// stateless — no per-engine template registry to keep coherent
+/// across hot reloads, no shared mutable state to lock around.
+///
+/// Hard upper bound on Wait `duration_secs` so a manifest typo
+/// (`duration_secs: 99999999999`) cannot park a run for ~30 years until
+/// `Instant::now() + dur` saturates inside `tokio::time::sleep`. Seven
+/// days matches the longest reasonable wait the dashboard surfaces and
+/// is well under the `Duration` saturation threshold on every platform.
+pub const MAX_WAIT_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Hard cap on Transform-rendered output size. Without this a Tera
+/// template like `{% for i in range(end=10000000) %}x{% endfor %}` can
+/// expand to tens of MiB and pollute `current_input` (consumed by every
+/// downstream `{{input}}` agent step) and the persisted
+/// `step_result.output`. 1 MiB matches the workflow file size cap
+/// (`MAX_WORKFLOW_FILE_SIZE`) so the in-memory and on-disk budgets stay
+/// consistent.
+pub const MAX_TRANSFORM_OUTPUT_BYTES: usize = 1024 * 1024;
+
+pub fn render_transform_template(
+    template: &str,
+    prev: &str,
+    vars: &std::collections::BTreeMap<String, String>,
+) -> Result<String, String> {
+    let mut ctx = tera::Context::new();
+    ctx.insert("prev", prev);
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(prev) {
+        ctx.insert("prev_json", &parsed);
+    }
+    ctx.insert("vars", vars);
+
+    // `one_off(autoescape=false)` — Tera's HTML autoescape is off
+    // because Transform output flows back into the workflow's
+    // `current_input` (downstream consumers may be CSV, Markdown, or
+    // raw text). HTML escaping of those payloads is foot-gun, not
+    // safety; if a future workflow surface needs HTML escaping it
+    // should opt in at the consumer boundary.
+    tera::Tera::one_off(template, &ctx, false).map_err(|e| format!("transform render failed: {e}"))
+}
+
+/// Validate that a Tera template parses cleanly, without rendering it.
+///
+/// Surface used by `Workflow::validate` to fail at manifest-load time
+/// when a template contains a syntax error (`{% if %}` without
+/// `{% endif %}`, an unterminated `{{ expression`, etc.). Distinct
+/// from `render_transform_template` because parse-time errors should be
+/// caught before any run starts — operators do not want to discover a
+/// typo on production input.
+pub fn validate_transform_template(template: &str) -> Result<(), String> {
+    let mut t = tera::Tera::default();
+    t.add_raw_template("__transform_validate__", template)
+        .map_err(|e| format!("transform template parse failed: {e}"))?;
+    Ok(())
+}
+
+/// Evaluate a [`GateCondition`] against the previous step's output.
+///
+/// Returns `Ok(())` when the gate passes, `Err(reason)` when it fails
+/// (caller halts the workflow with the reason). The reason string is
+/// deliberately verbose: it surfaces in `workflow_runs.json` and in the
+/// dashboard run history, where the operator wants enough information
+/// to fix the manifest or the producing step without re-running the
+/// workflow.
+///
+/// Resolution order:
+///
+/// 1. If `cond.field` is `Some(ptr)`, try to parse `output` as JSON and
+///    look up `ptr` via [`serde_json::Value::pointer`]. A missing
+///    pointer or a non-JSON output fails the gate with a typed reason
+///    — silently defaulting to "no field, pass" would defeat the gate.
+/// 2. If `cond.field` is `None`, the comparison runs against the whole
+///    output. If `output` parses as JSON, the comparison is JSON-typed
+///    (`Eq`/`Ne` use JSON deep equality); otherwise it falls back to
+///    string comparison.
+pub fn evaluate_gate_condition(cond: &GateCondition, output: &str) -> Result<(), String> {
+    let parsed_root: Option<serde_json::Value> = serde_json::from_str(output).ok();
+
+    // Fail-closed on JSON null at the root. A predecessor that returned
+    // bare `null` cannot meaningfully satisfy a positive gate condition,
+    // and treating `Null == Null` as a pass would silently let through
+    // degenerate outputs (e.g. a step that returned `null` instead of its
+    // documented result shape). Doc-level contract: "missing pointer or
+    // non-JSON output fails the gate" — we extend the same fail-closed
+    // policy to root-level JSON null, which is neither missing nor
+    // structurally a value the gate can compare against.
+    if matches!(parsed_root, Some(serde_json::Value::Null)) {
+        return Err("previous step output is JSON null — gate fails closed".to_string());
+    }
+
+    // Resolve the left-hand side. `lhs_json` is `Some` when the resolved
+    // value parses as JSON (which lets us do JSON-typed equality and
+    // numeric ordering); `lhs_str` is always present as a fallback for
+    // contains / string ordering on non-JSON inputs.
+    let (lhs_json, lhs_str): (Option<serde_json::Value>, String) = match &cond.field {
+        Some(ptr) if !ptr.is_empty() => match parsed_root.as_ref() {
+            Some(root) => match root.pointer(ptr) {
+                Some(v) if v.is_null() => {
+                    // Same fail-closed policy as the root-null branch:
+                    // a pointer that resolves to JSON null is
+                    // semantically empty for the purposes of gate
+                    // evaluation. Distinguishing `missing` from
+                    // `present-but-null` here would invite drift from
+                    // the root-level behaviour.
+                    return Err(format!(
+                        "field '{ptr}' resolves to JSON null — gate fails closed"
+                    ));
+                }
+                Some(v) => {
+                    let s = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    (Some(v.clone()), s)
+                }
+                None => {
+                    return Err(format!("field '{ptr}' not found in previous step output"));
+                }
+            },
+            None => {
+                return Err(format!(
+                    "previous step output is not JSON; cannot resolve field '{ptr}'"
+                ));
+            }
+        },
+        _ => {
+            let s = output.to_string();
+            (parsed_root.clone(), s)
+        }
+    };
+
+    let rhs_str = match &cond.value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+
+    let passes = match cond.op {
+        GateOp::Eq => match &lhs_json {
+            Some(l) => l == &cond.value,
+            None => lhs_str == rhs_str,
+        },
+        GateOp::Ne => match &lhs_json {
+            Some(l) => l != &cond.value,
+            None => lhs_str != rhs_str,
+        },
+        GateOp::Contains => {
+            // Always string-domain: "does the rendered LHS contain the
+            // rendered RHS as a substring". The JSON path is not
+            // meaningful for `contains` since arrays/objects don't have
+            // a universally agreed-on "contains" semantics.
+            lhs_str.contains(&rhs_str)
+        }
+        GateOp::Gt | GateOp::Lt | GateOp::Gte | GateOp::Lte => {
+            // Numeric path when both sides parse as f64; otherwise
+            // lexicographic string compare.
+            let lhs_num = lhs_json
+                .as_ref()
+                .and_then(|v| v.as_f64())
+                .or_else(|| lhs_str.parse::<f64>().ok());
+            let rhs_num = cond.value.as_f64().or_else(|| rhs_str.parse::<f64>().ok());
+            match (lhs_num, rhs_num) {
+                (Some(l), Some(r)) => match cond.op {
+                    GateOp::Gt => l > r,
+                    GateOp::Lt => l < r,
+                    GateOp::Gte => l >= r,
+                    GateOp::Lte => l <= r,
+                    _ => unreachable!(),
+                },
+                _ => match cond.op {
+                    GateOp::Gt => lhs_str.as_str() > rhs_str.as_str(),
+                    GateOp::Lt => lhs_str.as_str() < rhs_str.as_str(),
+                    GateOp::Gte => lhs_str.as_str() >= rhs_str.as_str(),
+                    GateOp::Lte => lhs_str.as_str() <= rhs_str.as_str(),
+                    _ => unreachable!(),
+                },
+            }
+        }
+    };
+
+    if passes {
+        Ok(())
+    } else {
+        let field_repr = cond.field.as_deref().unwrap_or("<root>");
+        Err(format!(
+            "gate condition failed: field '{field_repr}' {} {}",
+            cond.op, rhs_str
+        ))
+    }
 }
 
 /// Error handling mode for a workflow step.
@@ -508,6 +1152,28 @@ pub struct WorkflowEngine {
     /// on the entry for `run_id` so that retry sleeps can wake up immediately
     /// instead of blocking for the full backoff duration.
     cancel_notify: Arc<DashMap<WorkflowRunId, Arc<tokio::sync::Notify>>>,
+}
+
+/// Format the error returned when a workflow step's `agent_resolver` returns
+/// `None` — i.e. the referenced registry agent does not exist (or, for
+/// `StepAgent::ById`, the UUID is malformed / unregistered).
+///
+/// We surface both the step name and the agent reference the workflow
+/// configured so an operator reading the failure can fix the workflow without
+/// having to map "step X" back to "which agent did that step want". Without
+/// the agent name in the error, the user only knew which step failed — not
+/// which spelling / id mismatch caused it (#4834).
+fn format_missing_agent_error(step_name: &str, agent: &StepAgent) -> String {
+    match agent {
+        StepAgent::ByName { name } => format!(
+            "Registry agent '{name}' not found for workflow step '{step_name}' \
+             (referenced by name; ensure the agent is registered in the kernel)"
+        ),
+        StepAgent::ById { id } => format!(
+            "Registry agent with id '{id}' not found for workflow step '{step_name}' \
+             (referenced by id; check the agent exists and the id is well-formed)"
+        ),
+    }
 }
 
 /// Evaluate a conditional expression against the previous step output.
@@ -1302,17 +1968,23 @@ impl WorkflowEngine {
     ///
     /// Called once at boot. Any run whose `started_at` age exceeds `stale_timeout` is
     /// transitioned to `Failed` with a "Interrupted by daemon restart" error message.
-    /// Returns the number of runs recovered. A `stale_timeout` of zero is
-    /// treated as "feature disabled" and returns `0` without inspecting any
-    /// runs — kernel boot guards on this anyway, but keeping the no-op here
-    /// means a future direct caller can't accidentally fail every run.
-    pub fn recover_stale_running_runs(&self, stale_timeout: std::time::Duration) -> usize {
+    /// Returns the list of `WorkflowRunId`s that were demoted so the caller can
+    /// drive any downstream side-effects (e.g. the async task tracker hook
+    /// `LibreFangKernel::synthesize_task_failures_for_recovered_runs` — #5033).
+    /// A `stale_timeout` of zero is treated as "feature disabled" and returns
+    /// an empty `Vec` without inspecting any runs — kernel boot guards on
+    /// this anyway, but keeping the no-op here means a future direct caller
+    /// can't accidentally fail every run.
+    pub fn recover_stale_running_runs(
+        &self,
+        stale_timeout: std::time::Duration,
+    ) -> Vec<WorkflowRunId> {
         if stale_timeout.is_zero() {
-            return 0;
+            return Vec::new();
         }
         let now = Utc::now();
         let stale_secs = stale_timeout.as_secs() as i64;
-        let mut recovered = 0usize;
+        let mut recovered: Vec<WorkflowRunId> = Vec::new();
         // DashMap's `iter_mut` takes a per-shard write lock as the iterator
         // visits each entry — no global write lock and no awaiting required.
         for mut entry in self.runs.iter_mut() {
@@ -1346,7 +2018,7 @@ impl WorkflowEngine {
             if self.store.is_some() {
                 self.upsert_run_to_store(run);
             }
-            recovered += 1;
+            recovered.push(run.id);
         }
         recovered
     }
@@ -1487,6 +2159,95 @@ impl WorkflowEngine {
         }
     }
 
+    /// Record a synthetic [`StepResult`] for an operator-node step whose
+    /// executor is intentionally a no-op. After steps 2–4 of #4980 only
+    /// `Approval` still routes through here; `Gate`, `Transform`, and
+    /// `Branch` build their own `StepResult` inline with operator-specific
+    /// trace data in the `prompt` field. Preserves `current_input` by
+    /// echoing it as the step's `output`, so downstream
+    /// `{{input}}` / `output_var` substitutions keep working as if the
+    /// operator step were absent.
+    ///
+    /// Pulled out as a static helper rather than a closure so the
+    /// Approval callsite stays one line; will remain the no-op surface for
+    /// any future operator-node variant whose body lands in a follow-up.
+    fn record_operator_noop_step_result(
+        runs: &Arc<DashMap<WorkflowRunId, WorkflowRun>>,
+        run_id: WorkflowRunId,
+        step: &WorkflowStep,
+        agent_name: &str,
+        current_input: &str,
+        variables: &mut HashMap<String, String>,
+        all_outputs: &mut Vec<String>,
+    ) {
+        let output = current_input.to_string();
+        let step_result = StepResult {
+            step_name: step.name.clone(),
+            agent_id: String::new(),
+            agent_name: agent_name.to_string(),
+            prompt: String::new(),
+            output: output.clone(),
+            input_tokens: 0,
+            output_tokens: 0,
+            duration_ms: 0,
+        };
+        if let Some(mut r) = runs.get_mut(&run_id) {
+            r.step_results.push(step_result);
+        }
+        if let Some(ref var) = step.output_var {
+            variables.insert(var.clone(), output.clone());
+        }
+        all_outputs.push(output);
+    }
+
+    /// Max prefix of an operator-node's decision input that gets folded
+    /// into the synthetic `StepResult.prompt` JSON trace. Keeps a
+    /// multi-MB predecessor output from inflating the persisted step
+    /// trace (matches the existing 200-char cap on the Branch no-match
+    /// error path).
+    const OPERATOR_INPUT_TRACE_CAP: usize = 200;
+
+    /// Truncate `input` to at most [`Self::OPERATOR_INPUT_TRACE_CAP`]
+    /// characters, appending an ellipsis when truncation actually
+    /// happened. Char-boundary aware so a multibyte glyph cannot get
+    /// split across the cap.
+    fn truncate_operator_input_trace(input: &str) -> String {
+        let cap = Self::OPERATOR_INPUT_TRACE_CAP;
+        if input.len() <= cap {
+            return input.to_string();
+        }
+        // Walk forward to the largest char boundary <= cap so a UTF-8
+        // codepoint never gets sliced.
+        let mut end = cap;
+        while end > 0 && !input.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut out = input[..end].to_string();
+        out.push('…');
+        out
+    }
+
+    /// Build the synthetic `StepResult.prompt` trace value for an
+    /// operator-node step. The shape is always a JSON object keyed by
+    /// `op` so a future dashboard renderer can dispatch on the operator
+    /// kind without a per-variant string parser. `extra` carries the
+    /// operator-specific fields (Wait → `duration_secs`, Gate →
+    /// `condition` + `input`, Transform → `code`, Branch → `arms`,
+    /// `target`, `arm_idx`, `input`). Pre-#4980-step-5 the four arms
+    /// each stored a different shape (raw string, format!-string, JSON,
+    /// JSON-of-comparator); pinning the JSON-object shape now keeps the
+    /// dashboard renderer from having to learn the legacy formats.
+    fn operator_prompt_trace(op: &str, extra: serde_json::Value) -> String {
+        let mut obj = serde_json::Map::new();
+        obj.insert("op".to_string(), serde_json::Value::String(op.to_string()));
+        if let serde_json::Value::Object(extra_obj) = extra {
+            for (k, v) in extra_obj {
+                obj.insert(k, v);
+            }
+        }
+        serde_json::Value::Object(obj).to_string()
+    }
+
     /// Replace `{{var_name}}` references in a template with stored variable values.
     fn expand_variables(template: &str, input: &str, vars: &HashMap<String, String>) -> String {
         let mut result = template.replace("{{input}}", input);
@@ -1494,6 +2255,56 @@ impl WorkflowEngine {
             result = result.replace(&format!("{{{{{key}}}}}"), value);
         }
         result
+    }
+
+    /// Populate per-key `{{var}}` substitution variables from the workflow's
+    /// input JSON (#4982 — gap 3 / rich invocation).
+    ///
+    /// The runtime (`tool_runner::resolve_workflow_input_artifacts`) already
+    /// rewrote `{"_artifact":"sha256:..."}` references in the input JSON to
+    /// bare handle strings before we see them here, so by the time this
+    /// runs every artifact ref is a plain string.
+    ///
+    /// Conversion rules (per top-level key of an object-shaped input):
+    /// - `string` → used verbatim.
+    /// - `number` / `bool` → `to_string()`.
+    /// - `object` / `array` → compact `serde_json::to_string(&value)`.
+    /// - `null` → empty string (caller asked for the key, accept it as such).
+    ///
+    /// `{{input}}` (the whole-input form) continues to render the original
+    /// blob — this seeding is purely additive. Whatever the workflow's
+    /// existing `output_var` writes still wins on later steps because step
+    /// outputs are inserted into the same map after this call, overwriting
+    /// any seed of the same name (the same shadowing pattern that already
+    /// applies between input-seed and step-output for variables with the
+    /// same name).
+    ///
+    /// No-op when `input` is not an object (e.g. legacy callers passing a
+    /// plain string).
+    fn seed_input_vars_from_json(input: &str, vars: &mut HashMap<String, String>) {
+        let parsed: serde_json::Value = match serde_json::from_str(input) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let obj = match parsed.as_object() {
+            Some(o) => o,
+            None => return,
+        };
+        for (k, v) in obj {
+            let s = match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => String::new(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                    serde_json::to_string(v).unwrap_or_default()
+                }
+            };
+            // Only insert when the key is absent — preserves the existing
+            // "step output_var wins" semantics on resume paths where
+            // `vars` is rehydrated from `paused_variables`.
+            vars.entry(k.clone()).or_insert(s);
+        }
     }
 
     /// Execute a single step with error mode handling. Returns (output, input_tokens, output_tokens).
@@ -1506,26 +2317,33 @@ impl WorkflowEngine {
         cancel_notify: &Arc<DashMap<WorkflowRunId, Arc<tokio::sync::Notify>>>,
     ) -> Result<Option<(String, u64, u64)>, String>
     where
-        F: Fn(AgentId, String) -> Fut,
+        F: Fn(AgentId, String, Option<SessionMode>) -> Fut,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>>,
     {
         let timeout_dur = std::time::Duration::from_secs(step.timeout_secs);
+        let session_mode = step.session_mode;
 
         match &step.error_mode {
             ErrorMode::Fail => {
-                let result = tokio::time::timeout(timeout_dur, send_message(agent_id, prompt))
-                    .await
-                    .map_err(|_| {
-                        format!(
-                            "Step '{}' timed out after {}s",
-                            step.name, step.timeout_secs
-                        )
-                    })?
-                    .map_err(|e| format!("Step '{}' failed: {}", step.name, e))?;
+                let result =
+                    tokio::time::timeout(timeout_dur, send_message(agent_id, prompt, session_mode))
+                        .await
+                        .map_err(|_| {
+                            format!(
+                                "Step '{}' timed out after {}s",
+                                step.name, step.timeout_secs
+                            )
+                        })?
+                        .map_err(|e| format!("Step '{}' failed: {}", step.name, e))?;
                 Ok(Some(result))
             }
             ErrorMode::Skip => {
-                match tokio::time::timeout(timeout_dur, send_message(agent_id, prompt)).await {
+                match tokio::time::timeout(
+                    timeout_dur,
+                    send_message(agent_id, prompt, session_mode),
+                )
+                .await
+                {
                     Ok(Ok(result)) => Ok(Some(result)),
                     Ok(Err(e)) => {
                         warn!("Step '{}' failed (skipping): {e}", step.name);
@@ -1547,8 +2365,11 @@ impl WorkflowEngine {
             } => {
                 let mut last_err = String::new();
                 for attempt in 0..=*max_retries {
-                    match tokio::time::timeout(timeout_dur, send_message(agent_id, prompt.clone()))
-                        .await
+                    match tokio::time::timeout(
+                        timeout_dur,
+                        send_message(agent_id, prompt.clone(), session_mode),
+                    )
+                    .await
                     {
                         Ok(Ok(result)) => return Ok(Some(result)),
                         Ok(Err(e)) => {
@@ -1901,7 +2722,7 @@ impl WorkflowEngine {
         send_message: F,
     ) -> Result<String, ResumeRunError>
     where
-        F: Fn(AgentId, String) -> Fut + Sync,
+        F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
     {
         // Validate state + token, snapshot what we need, flip state back to
@@ -2029,7 +2850,7 @@ impl WorkflowEngine {
         send_message: F,
     ) -> Result<String, String>
     where
-        F: Fn(AgentId, String) -> Fut + Sync,
+        F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
     {
         // Get the run and workflow. Mutate the run's state synchronously
@@ -2146,7 +2967,7 @@ impl WorkflowEngine {
         send_message: &F,
     ) -> Result<String, String>
     where
-        F: Fn(AgentId, String) -> Fut + Sync,
+        F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
     {
         // Resume snapshot: when the run was previously paused, the prior
@@ -2175,10 +2996,18 @@ impl WorkflowEngine {
                     );
                     (saved_input, saved_vars, saved_idx)
                 } else {
-                    (input.to_string(), HashMap::new(), 0_usize)
+                    // Fresh start: seed per-key vars from the input JSON so
+                    // that `{{cover}}` / `{{topic}}` (etc.) in step prompts
+                    // resolve from object-shaped input. `{{input}}` keeps
+                    // rendering the whole blob (#4982 — gap 3).
+                    let mut vars = HashMap::new();
+                    Self::seed_input_vars_from_json(input, &mut vars);
+                    (input.to_string(), vars, 0_usize)
                 }
             } else {
-                (input.to_string(), HashMap::new(), 0_usize)
+                let mut vars = HashMap::new();
+                Self::seed_input_vars_from_json(input, &mut vars);
+                (input.to_string(), vars, 0_usize)
             }
         };
         let mut all_outputs: Vec<String> = Vec::new();
@@ -2262,7 +3091,7 @@ impl WorkflowEngine {
                     let (agent_id, agent_name, agent_inherit) = match agent_resolver(&step.agent) {
                         Some(v) => v,
                         None => {
-                            let e = format!("Agent not found for step '{}'", step.name);
+                            let e = format_missing_agent_error(&step.name, &step.agent);
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 if !matches!(r.state, WorkflowRunState::Cancelled) {
                                     r.state = WorkflowRunState::Failed;
@@ -2376,7 +3205,8 @@ impl WorkflowEngine {
                             match agent_resolver(&fan_step.agent) {
                                 Some(v) => v,
                                 None => {
-                                    let e = format!("Agent not found for step '{}'", fan_step.name);
+                                    let e =
+                                        format_missing_agent_error(&fan_step.name, &fan_step.agent);
                                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                                         if !matches!(r.state, WorkflowRunState::Cancelled) {
                                             r.state = WorkflowRunState::Failed;
@@ -2406,7 +3236,7 @@ impl WorkflowEngine {
                         step_prompts.push(prompt.clone());
                         futures.push(tokio::time::timeout(
                             timeout_dur,
-                            send_message(agent_id, prompt),
+                            send_message(agent_id, prompt, fan_step.session_mode),
                         ));
                     }
 
@@ -2536,7 +3366,7 @@ impl WorkflowEngine {
 
                     // Condition met — execute like sequential
                     let (agent_id, agent_name, agent_inherit) = agent_resolver(&step.agent)
-                        .ok_or_else(|| format!("Agent not found for step '{}'", step.name))?;
+                        .ok_or_else(|| format_missing_agent_error(&step.name, &step.agent))?;
 
                     let raw_prompt =
                         Self::expand_variables(&step.prompt_template, &current_input, &variables);
@@ -2607,7 +3437,7 @@ impl WorkflowEngine {
                     until,
                 } => {
                     let (agent_id, agent_name, agent_inherit) = agent_resolver(&step.agent)
-                        .ok_or_else(|| format!("Agent not found for step '{}'", step.name))?;
+                        .ok_or_else(|| format_missing_agent_error(&step.name, &step.agent))?;
 
                     let until_lower = until.to_lowercase();
 
@@ -2700,6 +3530,743 @@ impl WorkflowEngine {
                     }
                     all_outputs.push(current_input.clone());
                 }
+
+                // -- Operator nodes (#4980) ----------------------------------
+                //
+                // Operator-node arms never call `agent_resolver`. They
+                // record a `StepResult` with an empty `agent_id` / a
+                // synthetic `agent_name` so the run history surfaces the
+                // step uniformly, leave `current_input` untouched (so
+                // downstream `{{input}}` substitutions still see the
+                // previous step's output), and emit a structured log so
+                // operators can see what happened in the daemon log
+                // without diffing run records.
+                //
+                // `Wait` is the only one with real semantics in this PR;
+                // the other four log a `warn!` and return success so the
+                // wire format is usable from day one while the deferred
+                // design questions (Gate.condition syntax,
+                // Approval operator-identity, Transform.code shape,
+                // Branch jump semantics) are still open. See #4980.
+                StepMode::Wait { duration_secs } => {
+                    let start = std::time::Instant::now();
+                    // Reject the step before we sleep when the manifest
+                    // requested longer than the documented cap. The
+                    // validator already rejects this on workflow
+                    // registration, but defensive double-checking here
+                    // covers persisted-pre-cap workflows reloaded after
+                    // an upgrade.
+                    if *duration_secs > MAX_WAIT_SECS {
+                        let err = format!(
+                            "Wait step '{}' duration_secs={duration_secs} exceeds cap {MAX_WAIT_SECS}",
+                            step.name
+                        );
+                        warn!(error = %err, "Wait step rejected by cap");
+                        if let Some(mut r) = self.runs.get_mut(&run_id) {
+                            if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                r.state = WorkflowRunState::Failed;
+                                r.error = Some(err.clone());
+                                r.completed_at = Some(Utc::now());
+                            }
+                        }
+                        return Err(err);
+                    }
+                    let dur = std::time::Duration::from_secs(*duration_secs);
+                    let notify = self.cancel_notify.get(&run_id).map(|n| Arc::clone(&*n));
+
+                    // Race the sleep against a cancellation signal so a
+                    // long Wait honours `cancel_run` at sub-step
+                    // granularity. Without this, a `Wait { 86400 }`
+                    // would ignore cancellation for a full day before
+                    // the step boundary observed the Cancelled state.
+                    let cancelled = if let Some(n) = notify {
+                        tokio::select! {
+                            _ = tokio::time::sleep(dur) => false,
+                            _ = n.notified() => true,
+                        }
+                    } else {
+                        tokio::time::sleep(dur).await;
+                        false
+                    };
+
+                    if cancelled {
+                        info!(
+                            run_id = %run_id,
+                            step = i + 1,
+                            name = %step.name,
+                            "Wait step cancelled mid-sleep"
+                        );
+                        return Err("workflow run cancelled".into());
+                    }
+
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    let output = current_input.clone();
+                    let step_result = StepResult {
+                        step_name: step.name.clone(),
+                        agent_id: String::new(),
+                        agent_name: "_operator:wait".to_string(),
+                        prompt: Self::operator_prompt_trace(
+                            "wait",
+                            serde_json::json!({ "duration_secs": duration_secs }),
+                        ),
+                        output: output.clone(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        duration_ms,
+                    };
+                    if let Some(mut r) = self.runs.get_mut(&run_id) {
+                        r.step_results.push(step_result);
+                    }
+                    if let Some(ref var) = step.output_var {
+                        variables.insert(var.clone(), output.clone());
+                    }
+                    all_outputs.push(output);
+                    info!(
+                        step = i + 1,
+                        name = %step.name,
+                        duration_secs,
+                        duration_ms,
+                        "Wait step completed"
+                    );
+                }
+
+                StepMode::Gate { condition } => {
+                    let start = std::time::Instant::now();
+                    let eval = evaluate_gate_condition(condition, &current_input);
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    let condition_json =
+                        serde_json::to_value(condition).unwrap_or(serde_json::Value::Null);
+                    let input_trace = Self::truncate_operator_input_trace(&current_input);
+                    match eval {
+                        Ok(()) => {
+                            let output = current_input.clone();
+                            let step_result = StepResult {
+                                step_name: step.name.clone(),
+                                agent_id: String::new(),
+                                agent_name: "_operator:gate".to_string(),
+                                // Unified operator-prompt-trace JSON
+                                // shape (#4980 follow-up nit #4): every
+                                // operator records `{op,...}` so a future
+                                // dashboard renderer dispatches on `op`
+                                // alone. Carries the truncated decision
+                                // input so a debugger can see *what* the
+                                // comparator saw (nit #5).
+                                prompt: Self::operator_prompt_trace(
+                                    "gate",
+                                    serde_json::json!({
+                                        "condition": condition_json,
+                                        "passed": true,
+                                        "input": input_trace,
+                                    }),
+                                ),
+                                output: output.clone(),
+                                input_tokens: 0,
+                                output_tokens: 0,
+                                duration_ms,
+                            };
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                r.step_results.push(step_result);
+                            }
+                            if let Some(ref var) = step.output_var {
+                                variables.insert(var.clone(), output.clone());
+                            }
+                            all_outputs.push(output);
+                            info!(
+                                step = i + 1,
+                                name = %step.name,
+                                field = ?condition.field,
+                                op = %condition.op,
+                                duration_ms,
+                                "Gate step passed"
+                            );
+                        }
+                        Err(reason) => {
+                            // A failed gate halts the run with a recorded
+                            // reason. We surface a synthetic StepResult so
+                            // the operator can see *which* step blocked the
+                            // workflow in the dashboard run history; the
+                            // run itself transitions to Failed via the
+                            // standard error path below.
+                            let step_result = StepResult {
+                                step_name: step.name.clone(),
+                                agent_id: String::new(),
+                                agent_name: "_operator:gate".to_string(),
+                                prompt: Self::operator_prompt_trace(
+                                    "gate",
+                                    serde_json::json!({
+                                        "condition": condition_json,
+                                        "passed": false,
+                                        "input": input_trace,
+                                    }),
+                                ),
+                                output: reason.clone(),
+                                input_tokens: 0,
+                                output_tokens: 0,
+                                duration_ms,
+                            };
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                r.step_results.push(step_result);
+                            }
+                            let err =
+                                format!("Gate step '{}' blocked workflow: {reason}", step.name);
+                            warn!(
+                                step = i + 1,
+                                name = %step.name,
+                                field = ?condition.field,
+                                op = %condition.op,
+                                reason = %reason,
+                                "Gate step blocked workflow"
+                            );
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                    r.state = WorkflowRunState::Failed;
+                                    r.error = Some(err.clone());
+                                    r.completed_at = Some(Utc::now());
+                                }
+                            }
+                            return Err(err);
+                        }
+                    }
+                }
+
+                StepMode::Approval {
+                    recipients,
+                    timeout_secs,
+                } => {
+                    // Cross-issue dependency marker, not a vanilla TODO:
+                    // the Approval executor needs the async-task-tracker
+                    // landing in #4983 to suspend the run on a channel
+                    // and resume it when a human replies. Until #4983
+                    // lands the stub stays a structured warn-and-noop so
+                    // a workflow that includes Approval still completes
+                    // visibly rather than failing closed.
+                    // TODO(#4983): wire real Approval executor once the
+                    // long-pending async-task tracker is available.
+                    warn!(
+                        step = i + 1,
+                        name = %step.name,
+                        recipients = ?recipients,
+                        timeout_secs = ?timeout_secs,
+                        "Approval executor not yet implemented — blocked on async-task-tracker landing in #4983 (refs #4980)"
+                    );
+                    Self::record_operator_noop_step_result(
+                        &self.runs,
+                        run_id,
+                        step,
+                        "_operator:approval",
+                        &current_input,
+                        &mut variables,
+                        &mut all_outputs,
+                    );
+                }
+
+                StepMode::Transform { code } => {
+                    let start = std::time::Instant::now();
+                    // Tera's context iterates its insertion order, so
+                    // copy `variables` into a `BTreeMap` for
+                    // determinism (#3298). The Tera renderer never
+                    // reaches an LLM prompt directly today, but the
+                    // rendered output flows into `current_input` and
+                    // is consumed by downstream agent steps via
+                    // `{{input}}` expansion — a non-deterministic iteration
+                    // order through `vars` would silently change
+                    // prompts across processes and invalidate the
+                    // provider prompt cache.
+                    let bt_vars: std::collections::BTreeMap<String, String> = variables
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    let result = render_transform_template(code, &current_input, &bt_vars);
+                    let duration_ms = start.elapsed().as_millis() as u64;
+
+                    match result {
+                        Ok(rendered) => {
+                            // Cap the rendered payload size: a template
+                            // like `{% for i in range(end=1e7) %}x{% endfor %}`
+                            // expands to tens of MiB, which pollutes
+                            // `current_input` (read by every downstream
+                            // `{{input}}` agent step) and the persisted
+                            // `step_result.output`. Halt with a typed
+                            // reason rather than silently propagating a
+                            // huge blob.
+                            if rendered.len() > MAX_TRANSFORM_OUTPUT_BYTES {
+                                let err = format!(
+                                    "Transform step '{}' rendered {} bytes (cap {MAX_TRANSFORM_OUTPUT_BYTES})",
+                                    step.name,
+                                    rendered.len()
+                                );
+                                warn!(
+                                    step = i + 1,
+                                    name = %step.name,
+                                    rendered_bytes = rendered.len(),
+                                    cap = MAX_TRANSFORM_OUTPUT_BYTES,
+                                    "Transform step exceeded output cap"
+                                );
+                                if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                    if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                        r.state = WorkflowRunState::Failed;
+                                        r.error = Some(err.clone());
+                                        r.completed_at = Some(Utc::now());
+                                    }
+                                }
+                                return Err(err);
+                            }
+                            let step_result = StepResult {
+                                step_name: step.name.clone(),
+                                agent_id: String::new(),
+                                agent_name: "_operator:transform".to_string(),
+                                prompt: Self::operator_prompt_trace(
+                                    "transform",
+                                    serde_json::json!({ "code": code }),
+                                ),
+                                output: rendered.clone(),
+                                input_tokens: 0,
+                                output_tokens: 0,
+                                duration_ms,
+                            };
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                r.step_results.push(step_result);
+                            }
+                            if let Some(ref var) = step.output_var {
+                                variables.insert(var.clone(), rendered.clone());
+                            }
+                            all_outputs.push(rendered.clone());
+                            current_input = rendered;
+                            info!(
+                                step = i + 1,
+                                name = %step.name,
+                                duration_ms,
+                                "Transform step rendered"
+                            );
+                        }
+                        Err(reason) => {
+                            let err = format!("Transform step '{}' failed: {reason}", step.name);
+                            warn!(
+                                step = i + 1,
+                                name = %step.name,
+                                reason = %reason,
+                                "Transform step failed"
+                            );
+                            // Record a synthetic StepResult so the
+                            // operator can see which transform step
+                            // blew up in the run history; the
+                            // `output` slot carries the Tera error
+                            // (line + column included by Tera).
+                            let step_result = StepResult {
+                                step_name: step.name.clone(),
+                                agent_id: String::new(),
+                                agent_name: "_operator:transform".to_string(),
+                                prompt: Self::operator_prompt_trace(
+                                    "transform",
+                                    serde_json::json!({ "code": code }),
+                                ),
+                                output: reason.clone(),
+                                input_tokens: 0,
+                                output_tokens: 0,
+                                duration_ms,
+                            };
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                r.step_results.push(step_result);
+                            }
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                    r.state = WorkflowRunState::Failed;
+                                    r.error = Some(err.clone());
+                                    r.completed_at = Some(Utc::now());
+                                }
+                            }
+                            return Err(err);
+                        }
+                    }
+                }
+
+                StepMode::Branch { arms } => {
+                    let start = std::time::Instant::now();
+                    // Resolve the value to match against. Parse as JSON
+                    // when possible — that lets numeric and structural
+                    // match values (`0.8`, `{"status":"ok"}`) compare
+                    // by JSON deep-equality rather than string form. A
+                    // non-JSON predecessor compares its raw output
+                    // against the string form of each arm's
+                    // `match_value`.
+                    let parsed_input: Option<serde_json::Value> =
+                        serde_json::from_str(&current_input).ok();
+                    let matched_arm_idx = arms.iter().position(|arm| match &parsed_input {
+                        Some(parsed) => parsed == &arm.match_value,
+                        None => {
+                            let rhs = match &arm.match_value {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            };
+                            current_input == rhs
+                        }
+                    });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+
+                    match matched_arm_idx {
+                        Some(arm_idx) => {
+                            let arm = &arms[arm_idx];
+                            // Resolve the target step name to its
+                            // index. The dispatcher only honours
+                            // FORWARD jumps — a backward jump would
+                            // let an unbounded loop hide inside a
+                            // Branch when `Loop` already exists for
+                            // that semantic.
+                            //
+                            // Defensive uniqueness check: duplicate
+                            // step-name detection lives in
+                            // `build_dependency_graph`, which is only
+                            // reached via `topological_sort`. Sequential
+                            // workflows that have no `depends_on` edges
+                            // can skip that path entirely, so we refuse
+                            // an ambiguous target here rather than let
+                            // `iter().position` pick the silent first
+                            // match.
+                            let mut target_iter = workflow
+                                .steps
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, s)| s.name == arm.then);
+                            let first = target_iter.next();
+                            let second = target_iter.next();
+                            let target_idx = match (first, second) {
+                                (Some((idx, _)), None) => Some(idx),
+                                (None, _) => None,
+                                (Some(_), Some(_)) => {
+                                    let err = format!(
+                                        "Branch step '{}' target name '{}' is ambiguous: \
+                                         multiple steps share that name",
+                                        step.name, arm.then
+                                    );
+                                    warn!(
+                                        error = %err,
+                                        "Branch step blocked workflow on ambiguous target"
+                                    );
+                                    if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                        if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                            r.state = WorkflowRunState::Failed;
+                                            r.error = Some(err.clone());
+                                            r.completed_at = Some(Utc::now());
+                                        }
+                                    }
+                                    return Err(err);
+                                }
+                            };
+                            match target_idx {
+                                Some(t) if t > i => {
+                                    let output = current_input.clone();
+                                    // Carry the truncated decision input
+                                    // into the trace so an operator
+                                    // debugging a "wrong arm fired"
+                                    // report can see the value the
+                                    // comparator saw, not just the arm
+                                    // index (#4980 review nit #5).
+                                    let input_trace =
+                                        Self::truncate_operator_input_trace(&current_input);
+                                    let step_result = StepResult {
+                                        step_name: step.name.clone(),
+                                        agent_id: String::new(),
+                                        agent_name: "_operator:branch".to_string(),
+                                        prompt: Self::operator_prompt_trace(
+                                            "branch",
+                                            serde_json::json!({
+                                                "target": arm.then,
+                                                "arm_idx": arm_idx,
+                                                "arms": arms.len(),
+                                                "matched": true,
+                                                "input": input_trace,
+                                            }),
+                                        ),
+                                        output: output.clone(),
+                                        input_tokens: 0,
+                                        output_tokens: 0,
+                                        duration_ms,
+                                    };
+                                    if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                        r.step_results.push(step_result);
+                                    }
+                                    if let Some(ref var) = step.output_var {
+                                        variables.insert(var.clone(), output.clone());
+                                    }
+                                    all_outputs.push(output);
+                                    info!(
+                                        step = i + 1,
+                                        name = %step.name,
+                                        target = %arm.then,
+                                        target_idx = t,
+                                        duration_ms,
+                                        "Branch jumped to target step"
+                                    );
+                                    i = t;
+                                    continue;
+                                }
+                                Some(t) => {
+                                    let err = format!(
+                                        "Branch step '{}' target '{}' (index {}) is at or before current step (index {}) — backward jumps not allowed",
+                                        step.name, arm.then, t, i
+                                    );
+                                    warn!(error = %err, "Branch step blocked workflow");
+                                    if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                        if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                            r.state = WorkflowRunState::Failed;
+                                            r.error = Some(err.clone());
+                                            r.completed_at = Some(Utc::now());
+                                        }
+                                    }
+                                    return Err(err);
+                                }
+                                None => {
+                                    let err = format!(
+                                        "Branch step '{}' target step '{}' not found in workflow",
+                                        step.name, arm.then
+                                    );
+                                    warn!(error = %err, "Branch step blocked workflow");
+                                    if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                        if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                            r.state = WorkflowRunState::Failed;
+                                            r.error = Some(err.clone());
+                                            r.completed_at = Some(Utc::now());
+                                        }
+                                    }
+                                    return Err(err);
+                                }
+                            }
+                        }
+                        None => {
+                            // No arm matched. We could fall through
+                            // (treating Branch as a no-op when nothing
+                            // matches) but that hides operator
+                            // mistakes — they almost certainly meant
+                            // for *some* arm to match. Halt with a
+                            // typed reason; a future additive shape
+                            // (`default_then: Option<String>`) can
+                            // relax this when explicitly opted into.
+                            let input_trace = Self::truncate_operator_input_trace(&current_input);
+                            let reason = format!(
+                                "Branch step '{}' had no matching arm for output: {}",
+                                step.name, input_trace
+                            );
+                            warn!(reason = %reason, "Branch step blocked workflow");
+                            let step_result = StepResult {
+                                step_name: step.name.clone(),
+                                agent_id: String::new(),
+                                agent_name: "_operator:branch".to_string(),
+                                prompt: Self::operator_prompt_trace(
+                                    "branch",
+                                    serde_json::json!({
+                                        "arms": arms.len(),
+                                        "matched": false,
+                                        "input": input_trace,
+                                    }),
+                                ),
+                                output: reason.clone(),
+                                input_tokens: 0,
+                                output_tokens: 0,
+                                duration_ms,
+                            };
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                r.step_results.push(step_result);
+                            }
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
+                                if !matches!(r.state, WorkflowRunState::Cancelled) {
+                                    r.state = WorkflowRunState::Failed;
+                                    r.error = Some(reason.clone());
+                                    r.completed_at = Some(Utc::now());
+                                }
+                            }
+                            return Err(reason);
+                        }
+                    }
+                }
+
+                StepMode::Operator {
+                    notify,
+                    actions,
+                    timeout_secs,
+                    timeout_action,
+                } => {
+                    // #4977 step 1/N — skeleton executor.
+                    //
+                    // What runs today: record a synthetic StepResult
+                    // under the `_operator:operator` agent name
+                    // (matching the `_operator:` namespace from
+                    // #5035), log the configuration for observability,
+                    // and request a pause on the run via the existing
+                    // `pause_request` mechanism. The pause is honored
+                    // by the pause-request gate at the *next* iteration
+                    // of the while loop, so the run transitions to
+                    // `Paused` with a fresh resume token before any
+                    // downstream step executes. Operators / dashboards
+                    // resume the run via the existing `resume_run`
+                    // API once the human has acted.
+                    //
+                    // TODO(#4977 step 2): dispatch channel
+                    // notifications via the channel bridge so the
+                    // configured `notify` recipients actually receive
+                    // the artifact + action buttons. Today the
+                    // skeleton only logs which recipients *would*
+                    // have been notified.
+                    //
+                    // TODO(#4977 step 2): spawn a timeout watchdog
+                    // honouring `timeout_secs` + `timeout_action` so
+                    // a `OperatorTimeoutAction::Approve` / `Reject` /
+                    // `Fail` resolves the pause automatically when
+                    // the budget elapses. Today `timeout_action` is
+                    // recorded on the trace but not enforced.
+                    //
+                    // TODO(#4977 step 2): wire the operator HTTP
+                    // actions endpoint so an operator's
+                    // `OperatorAction::Approve` / `Reject` / `Edit`
+                    // / `ProvideInput` / `FreeformInput` response
+                    // translates into a `resume_run` call with the
+                    // appropriate step output.
+                    let input_trace = Self::truncate_operator_input_trace(&current_input);
+                    let notify_count = notify.len();
+                    let action_count = actions.len();
+                    let timeout_action_label = match timeout_action {
+                        OperatorTimeoutAction::Approve => "approve",
+                        OperatorTimeoutAction::Reject => "reject",
+                        OperatorTimeoutAction::Fail => "fail",
+                        OperatorTimeoutAction::Continue => "continue",
+                    };
+                    let actions_json: Vec<serde_json::Value> = actions
+                        .iter()
+                        .map(|a| serde_json::to_value(a).unwrap_or(serde_json::Value::Null))
+                        .collect();
+                    let output = current_input.clone();
+                    let step_result = StepResult {
+                        step_name: step.name.clone(),
+                        agent_id: String::new(),
+                        agent_name: "_operator:operator".to_string(),
+                        prompt: Self::operator_prompt_trace(
+                            "operator",
+                            serde_json::json!({
+                                "notify": notify,
+                                "actions": actions_json,
+                                "timeout_secs": timeout_secs,
+                                "timeout_action": timeout_action_label,
+                                "input": input_trace,
+                            }),
+                        ),
+                        output: output.clone(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        duration_ms: 0,
+                    };
+                    if let Some(mut r) = self.runs.get_mut(&run_id) {
+                        r.step_results.push(step_result);
+                    }
+                    if let Some(ref var) = step.output_var {
+                        variables.insert(var.clone(), output.clone());
+                    }
+                    all_outputs.push(output);
+
+                    info!(
+                        step = i + 1,
+                        name = %step.name,
+                        notify_count,
+                        action_count,
+                        timeout_secs = ?timeout_secs,
+                        timeout_action = %timeout_action_label,
+                        "Operator step entered — pausing run for human-in-the-loop (#4977 skeleton)"
+                    );
+
+                    // Lodge a pause request. The pause-request gate at
+                    // the top of the next loop iteration atomically
+                    // takes this request, snapshots state, and
+                    // transitions the run to Paused with a resume
+                    // token. We advance `i` past this step *before*
+                    // pausing so the resume picks up at the NEXT
+                    // step, treating the operator's response as the
+                    // operator step's output (already recorded
+                    // above).
+                    let reason = format!(
+                        "operator step '{}' awaiting human response ({} recipient(s), {} action(s))",
+                        step.name, notify_count, action_count,
+                    );
+                    let token = Uuid::new_v4();
+                    let hash = Self::hash_resume_token(&token);
+                    if let Some(mut r) = self.runs.get_mut(&run_id) {
+                        // Only lodge if no caller-driven pause is
+                        // already pending — the operator step's
+                        // pause is implicit and must not clobber a
+                        // pre-existing one (idempotency parity with
+                        // `pause_run`).
+                        if r.pause_request.is_none() {
+                            r.pause_request = Some(PauseRequest {
+                                reason: reason.clone(),
+                                resume_token_hash: hash,
+                            });
+                        }
+                    }
+                    // The plaintext token is not returned to the
+                    // caller of `execute_run` today — it is recorded
+                    // in the structured log + step result trace so
+                    // operators can retrieve it via the dashboard /
+                    // API. The follow-up issue will surface the token
+                    // through a dedicated operator-step event.
+                    info!(
+                        run_id = %run_id,
+                        step = i + 1,
+                        resume_token = %token,
+                        "Operator step pause token generated (capture from logs until step 2 lands)"
+                    );
+
+                    // Advance the cursor so the pause snapshot
+                    // points at the *next* step. We then drive the
+                    // pause snapshot inline — relying on the
+                    // pause-request gate at the top of the next
+                    // iteration is unsound when the operator step is
+                    // the last step in the workflow: the `while i <
+                    // workflow.steps.len()` condition would fail
+                    // before the gate runs, and the function would
+                    // fall through to the Completed transition with
+                    // an orphan `pause_request` (caught by
+                    // `execute_run_operator_step_pauses_with_resume_token`).
+                    // Mirror the gate's atomic take-and-snapshot
+                    // exactly so the two paths stay in lockstep.
+                    i += 1;
+                    let pending_pause = if let Some(mut run) = self.runs.get_mut(&run_id) {
+                        if let Some(pause) = run.pause_request.take() {
+                            run.paused_step_index = Some(i);
+                            run.paused_variables = variables
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                            run.paused_current_input = Some(current_input.clone());
+                            run.state = WorkflowRunState::Paused {
+                                resume_token_hash: pause.resume_token_hash.clone(),
+                                reason: pause.reason.clone(),
+                                paused_at: Utc::now(),
+                            };
+                            Some(pause)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(pause) = pending_pause {
+                        // Persist immediately — same SIGKILL-safety
+                        // reasoning as the loop-top gate.
+                        if let Some(run) = self.runs.get(&run_id) {
+                            self.upsert_run_to_store(&run);
+                        }
+                        info!(
+                            run_id = %run_id,
+                            resume_step = i,
+                            reason = %pause.reason,
+                            "Workflow run paused at operator step boundary"
+                        );
+                        return Ok(current_input);
+                    }
+                    // No pause was actually lodged (idempotency
+                    // branch above declined because a caller-driven
+                    // pause was already pending). Continue so the
+                    // loop-top gate handles that pre-existing pause
+                    // on the next iteration.
+                    continue;
+                }
             }
 
             i += 1;
@@ -2740,7 +4307,7 @@ impl WorkflowEngine {
         send_message: &F,
     ) -> Result<String, String>
     where
-        F: Fn(AgentId, String) -> Fut + Sync,
+        F: Fn(AgentId, String, Option<SessionMode>) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
     {
         // Pause/resume support is sequential-path only in #3335. If a pause
@@ -2778,6 +4345,11 @@ impl WorkflowEngine {
 
         let layers = Self::topological_sort(&workflow.steps)?;
         let mut variables: HashMap<String, String> = HashMap::new();
+        // Seed per-key vars from object-shaped input JSON so that DAG step
+        // prompts can substitute `{{cover}}` / `{{topic}}` etc. directly
+        // from the caller's input (#4982 — gap 3 / rich invocation). The
+        // sequential dispatch path performs the same seeding above.
+        Self::seed_input_vars_from_json(input, &mut variables);
         // Track which step names have failed so we can skip dependents
         let mut failed_steps: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut last_output = input.to_string();
@@ -2827,7 +4399,7 @@ impl WorkflowEngine {
                 }
 
                 let (agent_id, agent_name, _agent_inherit) = agent_resolver(&step.agent)
-                    .ok_or_else(|| format!("Agent not found for step '{}'", step.name))?;
+                    .ok_or_else(|| format_missing_agent_error(&step.name, &step.agent))?;
 
                 let prompt = Self::expand_variables(&step.prompt_template, input, &variables);
                 let prompt_sent = prompt.clone();
@@ -2897,7 +4469,7 @@ impl WorkflowEngine {
                     let dep_failed = step.depends_on.iter().any(|dep| failed_steps.contains(dep));
 
                     let (agent_id, agent_name, _agent_inherit) = agent_resolver(&step.agent)
-                        .ok_or_else(|| format!("Agent not found for step '{}'", step.name))?;
+                        .ok_or_else(|| format_missing_agent_error(&step.name, &step.agent))?;
 
                     step_metas.push((
                         step_idx,
@@ -2937,12 +4509,15 @@ impl WorkflowEngine {
                         let timeout_dur = std::time::Duration::from_secs(step.timeout_secs);
                         let err_mode = step.error_mode.clone();
                         let step_name = step.name.clone();
+                        let step_session_mode = step.session_mode;
 
                         futures.push(Box::pin(async move {
                             let step_start = std::time::Instant::now();
-                            let result =
-                                tokio::time::timeout(timeout_dur, send_message(agent_id, prompt))
-                                    .await;
+                            let result = tokio::time::timeout(
+                                timeout_dur,
+                                send_message(agent_id, prompt, step_session_mode),
+                            )
+                            .await;
                             let step_duration = step_start.elapsed().as_millis() as u64;
                             let r = match result {
                                 Ok(Ok(output)) => Ok(Some(output)),
@@ -3066,6 +4641,10 @@ impl WorkflowEngine {
 
         let mut preview = Vec::new();
         let mut variables: HashMap<String, String> = HashMap::new();
+        // Mirror execute_run paths: seed per-key vars from JSON input so
+        // dry_run's resolved prompts reflect the real {{var}} substitution
+        // an actual run will perform (#4982 — gap 3).
+        Self::seed_input_vars_from_json(input, &mut variables);
         let mut current_input = input.to_string();
 
         for (i, step) in workflow.steps.iter().enumerate() {
@@ -3095,6 +4674,159 @@ impl WorkflowEngine {
                         },
                     });
                     // In dry-run, don't advance current_input for skipped steps
+                }
+                // Operator-node variants never reach `agent_resolver` at
+                // run time (#4980), so the dashboard dry-run preview
+                // must report them as "agent_found = true" with a
+                // synthetic `_operator:<kind>` name and a
+                // mode-specific resolved_prompt — not fall through to
+                // the agent-shaped branch below, which would surface
+                // them as broken-agent steps even though they execute
+                // correctly.
+                StepMode::Wait { duration_secs: _ } => {
+                    // Pass-through operator: `current_input` flows
+                    // through unchanged at run time, so downstream
+                    // previews must see the same value (post-Transform
+                    // if a Transform preceded). Use the expanded
+                    // `prompt_template` so the dashboard's
+                    // `resolved_prompt` column reflects what `{{input}}`
+                    // resolves to here. Validate rejects non-default
+                    // `prompt_template` on Wait, so in production this
+                    // is `""` or `current_input`; the test path that
+                    // bypasses validate via `engine.register` exercises
+                    // the general case. The operator kind + duration is
+                    // already on the row via `agent_name` and on the
+                    // step's `mode` field, so no info is lost.
+                    preview.push(DryRunStep {
+                        step_name: step.name.clone(),
+                        agent_name: Some("_operator:wait".to_string()),
+                        agent_found: true,
+                        resolved_prompt: raw_prompt,
+                        skipped: false,
+                        skip_reason: None,
+                    });
+                }
+                StepMode::Gate { .. } => {
+                    // Pass-through on gate-open at run time; same
+                    // contract as Wait — surface the expanded
+                    // `prompt_template` so downstream-step `{{input}}`
+                    // previews remain meaningful through a preceding
+                    // Transform. Condition is on `step.mode` for any
+                    // caller that needs it.
+                    preview.push(DryRunStep {
+                        step_name: step.name.clone(),
+                        agent_name: Some("_operator:gate".to_string()),
+                        agent_found: true,
+                        resolved_prompt: raw_prompt,
+                        skipped: false,
+                        skip_reason: None,
+                    });
+                }
+                StepMode::Approval { .. } => {
+                    // Pass-through on approve at run time. Recipients
+                    // and timeout are on `step.mode`.
+                    preview.push(DryRunStep {
+                        step_name: step.name.clone(),
+                        agent_name: Some("_operator:approval".to_string()),
+                        agent_found: true,
+                        resolved_prompt: raw_prompt,
+                        skipped: false,
+                        skip_reason: None,
+                    });
+                }
+                StepMode::Transform { code } => {
+                    // Re-run the parse-time validator so an
+                    // unparseable template surfaces on the dry-run
+                    // preview as a `skipped` step with a typed reason,
+                    // matching the run-time failure shape. The same
+                    // check runs in `Workflow::validate` at register
+                    // time, but dry-run is also reachable for
+                    // workflows loaded from disk that bypassed the
+                    // HTTP gate, so we re-check here for safety.
+                    let (skipped, skip_reason) = match validate_transform_template(code) {
+                        Ok(()) => (false, None),
+                        Err(reason) => (true, Some(reason)),
+                    };
+                    preview.push(DryRunStep {
+                        step_name: step.name.clone(),
+                        agent_name: Some("_operator:transform".to_string()),
+                        agent_found: true,
+                        resolved_prompt: format!("transform: {code}"),
+                        skipped,
+                        skip_reason,
+                    });
+                    // Advance `current_input` with the rendered output
+                    // so downstream steps' `{{input}}` previews reflect
+                    // the post-Transform value the run-time executor
+                    // will see (the run-time arm sets
+                    // `current_input = rendered`). Wait / Gate /
+                    // Approval / Branch are pass-through at run time,
+                    // so they intentionally leave `current_input`
+                    // alone — only Transform diverges. If the template
+                    // is unparseable we already marked the step
+                    // `skipped`; leave `current_input` unchanged in
+                    // that case so downstream previews match the
+                    // run-time failure mode (the workflow would have
+                    // halted here). Deterministic `BTreeMap`
+                    // conversion mirrors the run-time arm (#3298):
+                    // Tera context iteration order must not depend on
+                    // HashMap hash seeding.
+                    if !skipped {
+                        let bt_vars: BTreeMap<String, String> = variables
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        if let Ok(rendered) =
+                            render_transform_template(code, &current_input, &bt_vars)
+                        {
+                            // Apply the run-time output cap so the
+                            // dry-run preview never propagates a
+                            // payload the executor would have
+                            // rejected mid-run. Without this an
+                            // unbounded `{% for %}` loop would
+                            // silently inflate `current_input` for
+                            // every downstream step's preview even
+                            // though the real run would have failed
+                            // on the first Transform.
+                            if rendered.len() <= MAX_TRANSFORM_OUTPUT_BYTES {
+                                if let Some(ref var) = step.output_var {
+                                    variables.insert(var.clone(), rendered.clone());
+                                }
+                                current_input = rendered;
+                            }
+                        }
+                    }
+                }
+                StepMode::Branch { .. } => {
+                    // Pass-through at run time (Branch jumps based on
+                    // current_input without rewriting it). Surface the
+                    // expanded `prompt_template`; arm list is on
+                    // `step.mode` for callers that need it.
+                    preview.push(DryRunStep {
+                        step_name: step.name.clone(),
+                        agent_name: Some("_operator:branch".to_string()),
+                        agent_found: true,
+                        resolved_prompt: raw_prompt,
+                        skipped: false,
+                        skip_reason: None,
+                    });
+                }
+                StepMode::Operator { .. } => {
+                    // Pass-through at preview time — the dry-run
+                    // pipeline does not actually pause, so we surface
+                    // the operator step as a passthrough so any
+                    // following steps see the input the operator
+                    // would have approved. The `notify` / `actions`
+                    // / `timeout_*` fields are on `step.mode` for
+                    // callers that need them. See #4977.
+                    preview.push(DryRunStep {
+                        step_name: step.name.clone(),
+                        agent_name: Some("_operator:operator".to_string()),
+                        agent_found: true,
+                        resolved_prompt: raw_prompt,
+                        skipped: false,
+                        skip_reason: None,
+                    });
                 }
                 _ => {
                     let (agent_name, agent_found) = match agent_resolver(&step.agent) {
@@ -3258,6 +4990,12 @@ struct WorkflowFile {
     steps: Vec<WorkflowStep>,
     #[serde(default)]
     created_at: Option<DateTime<Utc>>,
+    /// Optional declared parameter list parsed from TOML / YAML
+    /// `[[input_schema]]` blocks (#4982 — gap 2). When absent, the
+    /// `workflow_describe` tool falls back to auto-detecting from
+    /// `{{var}}` placeholders.
+    #[serde(default)]
+    input_schema: Option<Vec<WorkflowInputParam>>,
 }
 
 impl From<WorkflowFile> for Workflow {
@@ -3270,6 +5008,7 @@ impl From<WorkflowFile> for Workflow {
             created_at: f.created_at.unwrap_or_else(Utc::now),
             layout: None,
             total_timeout_secs: None,
+            input_schema: f.input_schema,
         }
     }
 }
@@ -3446,6 +5185,233 @@ impl Workflow {
             created_at: Some(chrono::Utc::now().to_rfc3339()),
             i18n: Default::default(),
         }
+    }
+
+    /// Validate workflow definition before execution.
+    ///
+    /// Surfaces the misconfigurations that the executors would
+    /// otherwise discover at run time — manifest load is the right
+    /// place to fail because a workflow that serialises, persists, and
+    /// only blows up mid-run is much harder to debug than one that
+    /// refuses registration with a typed reason.
+    ///
+    /// Checks performed:
+    ///
+    /// * `Transform` — empty `code`, unparseable Tera template.
+    /// * `Wait` — zero `duration_secs` (parser's warn-and-default
+    ///   sentinel) and durations above [`MAX_WAIT_SECS`].
+    /// * `Gate` — the parser's fail-closed sentinel
+    ///   (`op=Eq, value=Null, field=None`).
+    /// * `Branch` — empty arms.
+    /// * **Operator-node + DAG combination** — any workflow that
+    ///   combines a `depends_on` edge with an operator-node `StepMode`
+    ///   (Wait / Gate / Approval / Transform / Branch) is rejected.
+    ///   The DAG executor calls `agent_resolver` unconditionally and
+    ///   does not match on `StepMode`, so an operator node in a DAG
+    ///   workflow attempts an agent dispatch and surfaces
+    ///   `format_missing_agent_error` at run time — not the operator's
+    ///   wait / gate / transform / branch behaviour. Catching this at
+    ///   register time keeps the silent run-time failure from
+    ///   reaching SQLite + pause/resume round-tripping. Wiring the
+    ///   operators *into* the DAG executor is a follow-up; the V1
+    ///   guard is the safer landing because Branch's forward-jump
+    ///   semantics interact non-trivially with DAG layer ordering.
+    /// * **Non-default `prompt_template` on operator nodes** — Wait /
+    ///   Gate / Approval / Branch ignore `prompt_template` entirely
+    ///   at run time, so a manifest author who writes a template on
+    ///   one of those variants sees their value silently discarded.
+    ///   Surface the typo at register time. `Transform` is exempt
+    ///   because Transform legitimately uses its `code` field, not
+    ///   `prompt_template`, and `Conditional` / `Loop` / `FanOut` /
+    ///   `Collect` / `Sequential` all dispatch to an agent and so
+    ///   legitimately use `prompt_template`.
+    ///
+    /// Other validations (DAG cycles, missing agent refs) live in
+    /// [`WorkflowEngine::topological_sort`] and the executor's
+    /// `agent_resolver` callback respectively; this method
+    /// intentionally covers only what cannot already be detected
+    /// elsewhere.
+    ///
+    /// Returns a vector of `(step_name, reason)` pairs — one per
+    /// failing step. Empty vec means the workflow is valid. Callers
+    /// that want a single error string can map / join.
+    pub fn validate(&self) -> Vec<(String, String)> {
+        let mut errs = Vec::new();
+        for step in &self.steps {
+            // Fail-closed: operator-node variants don't have DAG
+            // semantics today. `execute_run_dag` calls `agent_resolver`
+            // for every step in every layer, so an operator node in a
+            // DAG workflow silently attempts an agent dispatch and
+            // surfaces `format_missing_agent_error` at run time. Reject
+            // the combination at register time with a reason naming
+            // the step and the operator kind. See #4980 follow-up.
+            if !step.depends_on.is_empty() && is_operator_step_mode(&step.mode) {
+                errs.push((
+                    step.name.clone(),
+                    format!(
+                        "operator-node step (mode={}) combined with DAG \
+                         `depends_on` is not supported — operator nodes \
+                         currently only execute via the sequential path; \
+                         remove `depends_on` or change the step mode",
+                        operator_step_mode_label(&step.mode)
+                    ),
+                ));
+            }
+
+            // Reject a non-default `prompt_template` on operator-node
+            // variants that ignore the field at run time. The accepted
+            // "default" set is the empty string (manifest omission) and
+            // `{{input}}` (the HTTP layer's parse-time fallback in
+            // `routes/workflows.rs`); anything else means the manifest
+            // author wrote a template that will be silently discarded.
+            // Transform is exempt — it carries its own `code` field
+            // and `prompt_template` is unused for that variant but is
+            // not load-bearing for the manifest author either.
+            if matches!(
+                &step.mode,
+                StepMode::Wait { .. }
+                    | StepMode::Gate { .. }
+                    | StepMode::Approval { .. }
+                    | StepMode::Branch { .. }
+                    | StepMode::Operator { .. }
+            ) && !step.prompt_template.is_empty()
+                && step.prompt_template != "{{input}}"
+            {
+                errs.push((
+                    step.name.clone(),
+                    format!(
+                        "operator-node step (mode={}) has a non-default \
+                         `prompt_template` but operator nodes ignore the \
+                         field — remove the template or change the step mode",
+                        operator_step_mode_label(&step.mode)
+                    ),
+                ));
+            }
+
+            match &step.mode {
+                StepMode::Transform { code } => {
+                    if code.is_empty() {
+                        errs.push((
+                            step.name.clone(),
+                            "transform.code is empty — likely missing from the manifest"
+                                .to_string(),
+                        ));
+                    } else if let Err(reason) = validate_transform_template(code) {
+                        errs.push((step.name.clone(), reason));
+                    }
+                }
+                StepMode::Wait { duration_secs } => {
+                    // `duration_secs = 0` is the parser's warn-and-default
+                    // for a missing field; a real zero-wait would also be
+                    // a no-op step, so rejecting both is the same fix.
+                    if *duration_secs == 0 {
+                        errs.push((
+                            step.name.clone(),
+                            "wait.duration_secs is 0 — likely missing from the manifest"
+                                .to_string(),
+                        ));
+                    } else if *duration_secs > MAX_WAIT_SECS {
+                        errs.push((
+                            step.name.clone(),
+                            format!(
+                                "wait.duration_secs={duration_secs} exceeds cap {MAX_WAIT_SECS}"
+                            ),
+                        ));
+                    }
+                }
+                // Catch the parser's fail-closed sentinel (Eq=null with no
+                // field) so the operator sees the misconfiguration at register
+                // time rather than a mysterious "gate fails closed" mid-run.
+                StepMode::Gate { condition }
+                    if condition.field.is_none()
+                        && matches!(condition.op, GateOp::Eq)
+                        && matches!(condition.value, serde_json::Value::Null) =>
+                {
+                    errs.push((
+                        step.name.clone(),
+                        "gate.condition matches the parser's fail-closed default \
+                         (op=eq, value=null, no field) — likely missing or malformed"
+                            .to_string(),
+                    ));
+                }
+                StepMode::Branch { arms } if arms.is_empty() => {
+                    errs.push((
+                        step.name.clone(),
+                        "branch.arms is empty — likely missing from the manifest".to_string(),
+                    ));
+                }
+                StepMode::Operator {
+                    notify,
+                    actions,
+                    timeout_secs,
+                    timeout_action,
+                } => {
+                    // 1. Empty notify list — a human-in-the-loop step
+                    //    with no recipients can never resolve except
+                    //    via timeout, which is almost certainly a
+                    //    manifest authoring mistake. Reject up-front.
+                    if notify.is_empty() {
+                        errs.push((
+                            step.name.clone(),
+                            "operator.notify is empty — at least one channel \
+                             recipient is required (e.g. `telegram:@user`)"
+                                .to_string(),
+                        ));
+                    }
+
+                    // 2. Unknown channel-address scheme. The notify
+                    //    entries are `scheme:target`; an unknown
+                    //    scheme would silently drop the notification
+                    //    at delivery time, so fail-closed here.
+                    for entry in notify {
+                        let scheme = entry.split(':').next().unwrap_or("");
+                        if scheme.is_empty() || !OPERATOR_NOTIFY_SCHEMES.contains(&scheme) {
+                            errs.push((
+                                step.name.clone(),
+                                format!(
+                                    "operator.notify entry `{entry}` has unknown \
+                                     channel scheme — supported schemes: {:?}",
+                                    OPERATOR_NOTIFY_SCHEMES
+                                ),
+                            ));
+                        }
+                    }
+
+                    // 3. timeout_secs = 0 is the parser's warn-and-
+                    //    default for a missing field (mirrors the
+                    //    Wait variant's check). A real zero-timeout
+                    //    would also fire immediately on entry, which
+                    //    is a no-op step.
+                    if matches!(timeout_secs, Some(0)) {
+                        errs.push((
+                            step.name.clone(),
+                            "operator.timeout_secs is 0 — likely missing from \
+                             the manifest; omit the field to wait indefinitely"
+                                .to_string(),
+                        ));
+                    }
+
+                    // 4. Defensive: an Approve-on-timeout action only
+                    //    makes sense if the actions vocabulary
+                    //    *includes* Approve. Otherwise the workflow
+                    //    auto-approves a step the operator was never
+                    //    allowed to approve in the first place — a
+                    //    subtle authoring footgun.
+                    if matches!(timeout_action, OperatorTimeoutAction::Approve)
+                        && !actions.iter().any(|a| matches!(a, OperatorAction::Approve))
+                    {
+                        errs.push((
+                            step.name.clone(),
+                            "operator.timeout_action=approve requires `approve` \
+                             to be present in `actions`"
+                                .to_string(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        errs
     }
 }
 
@@ -3643,6 +5609,7 @@ impl WorkflowTemplateRegistry {
                     output_var: Some(ts.name.clone()),
                     inherit_context: None,
                     depends_on: ts.depends_on.clone(),
+                    session_mode: None,
                 }
             })
             .collect();
@@ -3655,6 +5622,7 @@ impl WorkflowTemplateRegistry {
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         })
     }
 }
@@ -3864,6 +5832,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "summarize".to_string(),
@@ -3877,11 +5846,13 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         }
     }
 
@@ -4005,7 +5976,7 @@ mod tests {
             .await
             .unwrap();
 
-        let sender = |_id: AgentId, msg: String| async move {
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 100u64, 50u64))
         };
 
@@ -4041,6 +6012,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "only-if-error".to_string(),
@@ -4056,11 +6028,13 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -4068,8 +6042,9 @@ mod tests {
             .await
             .unwrap();
 
-        let sender =
-            |_id: AgentId, msg: String| async move { Ok((format!("OK: {msg}"), 10u64, 5u64)) };
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
+            Ok((format!("OK: {msg}"), 10u64, 5u64))
+        };
 
         let result = engine.execute_run(run_id, mock_resolver, sender).await;
         assert!(result.is_ok());
@@ -4099,6 +6074,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "only-if-error".to_string(),
@@ -4114,17 +6090,19 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
 
         // This sender returns output containing "ERROR"
-        let sender = |_id: AgentId, _msg: String| async move {
+        let sender = |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
             Ok(("Found an ERROR in the data".to_string(), 10u64, 5u64))
         };
 
@@ -4158,17 +6136,19 @@ mod tests {
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             }],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "draft".to_string()).await.unwrap();
 
         let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let cc = call_count.clone();
-        let sender = move |_id: AgentId, _msg: String| {
+        let sender = move |_id: AgentId, _msg: String, _sm: Option<SessionMode>| {
             let cc = cc.clone();
             async move {
                 let n = cc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -4208,15 +6188,17 @@ mod tests {
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             }],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
 
-        let sender = |_id: AgentId, _msg: String| async move {
+        let sender = |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
             Ok(("iteration output".to_string(), 10u64, 5u64))
         };
 
@@ -4247,6 +6229,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "succeeds".to_string(),
@@ -4260,18 +6243,20 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
 
         let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let cc = call_count.clone();
-        let sender = move |_id: AgentId, _msg: String| {
+        let sender = move |_id: AgentId, _msg: String, _sm: Option<SessionMode>| {
             let cc = cc.clone();
             async move {
                 let n = cc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -4315,17 +6300,19 @@ mod tests {
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             }],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
 
         let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let cc = call_count.clone();
-        let sender = move |_id: AgentId, _msg: String| {
+        let sender = move |_id: AgentId, _msg: String, _sm: Option<SessionMode>| {
             let cc = cc.clone();
             async move {
                 let n = cc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -4363,6 +6350,7 @@ mod tests {
                     output_var: Some("first_result".to_string()),
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "transform".to_string(),
@@ -4376,6 +6364,7 @@ mod tests {
                     output_var: Some("second_result".to_string()),
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "combine".to_string(),
@@ -4390,18 +6379,20 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "start".to_string()).await.unwrap();
 
         let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let cc = call_count.clone();
-        let sender = move |_id: AgentId, msg: String| {
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
             let cc = cc.clone();
             async move {
                 let n = cc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -4441,6 +6432,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "task-b".to_string(),
@@ -4454,6 +6446,7 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "collect".to_string(),
@@ -4467,17 +6460,20 @@ mod tests {
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
 
-        let sender =
-            |_id: AgentId, msg: String| async move { Ok((format!("Done: {msg}"), 10u64, 5u64)) };
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
+            Ok((format!("Done: {msg}"), 10u64, 5u64))
+        };
 
         let result = engine.execute_run(run_id, mock_resolver, sender).await;
         assert!(result.is_ok());
@@ -4501,6 +6497,249 @@ mod tests {
             &vars,
         );
         assert_eq!(result, "Hello Alice, please do code review on main.rs");
+    }
+
+    /// `seed_input_vars_from_json` pulls each top-level key off an
+    /// object-shaped input JSON and inserts it into the substitution map
+    /// in the form `expand_variables` expects. Covers all value kinds
+    /// (string / number / bool / object / array / null) and the
+    /// "do-nothing for non-object input" case (#4982 — gap 3).
+    #[test]
+    fn seed_input_vars_from_json_covers_value_kinds() {
+        let mut vars: HashMap<String, String> = HashMap::new();
+        let raw = serde_json::json!({
+            "topic": "Rust",
+            "cover": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "count": 7,
+            "ready": true,
+            "absent": serde_json::Value::Null,
+            "meta": { "lang": "en" },
+            "tags": ["a", "b"],
+        })
+        .to_string();
+        WorkflowEngine::seed_input_vars_from_json(&raw, &mut vars);
+        assert_eq!(vars["topic"], "Rust");
+        assert_eq!(
+            vars["cover"],
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        );
+        assert_eq!(vars["count"], "7");
+        assert_eq!(vars["ready"], "true");
+        assert_eq!(vars["absent"], "");
+        // Nested object / array survive as compact JSON so `{{meta}}`
+        // expands to a parseable string in the step prompt.
+        assert_eq!(vars["meta"], r#"{"lang":"en"}"#);
+        assert_eq!(vars["tags"], r#"["a","b"]"#);
+    }
+
+    #[test]
+    fn seed_input_vars_from_json_noop_on_non_object_input() {
+        let mut vars: HashMap<String, String> = HashMap::new();
+        // Plain string (legacy callers).
+        WorkflowEngine::seed_input_vars_from_json("hello world", &mut vars);
+        assert!(vars.is_empty());
+        // Bare JSON string.
+        WorkflowEngine::seed_input_vars_from_json("\"hello\"", &mut vars);
+        assert!(vars.is_empty());
+        // JSON array.
+        WorkflowEngine::seed_input_vars_from_json("[1,2,3]", &mut vars);
+        assert!(vars.is_empty());
+        // Empty string.
+        WorkflowEngine::seed_input_vars_from_json("", &mut vars);
+        assert!(vars.is_empty());
+    }
+
+    /// Pre-existing entries in `vars` (e.g. rehydrated from a paused-run
+    /// snapshot or written by an earlier `output_var`) win over seed
+    /// inserts of the same name — the seed is purely additive.
+    #[test]
+    fn seed_input_vars_from_json_preserves_existing_entries() {
+        let mut vars: HashMap<String, String> = HashMap::new();
+        vars.insert("topic".to_string(), "preexisting".to_string());
+        WorkflowEngine::seed_input_vars_from_json(
+            &serde_json::json!({"topic": "incoming", "fresh": "v"}).to_string(),
+            &mut vars,
+        );
+        assert_eq!(vars["topic"], "preexisting");
+        assert_eq!(vars["fresh"], "v");
+    }
+
+    /// End-to-end engine substitution: a workflow with `{{topic}}` and
+    /// `{{cover}}` placeholders run with JSON object input must produce a
+    /// step prompt where the placeholders are filled with the input values
+    /// (#4982 — gap 3 BLOCKING). This pins the user-facing claim from the
+    /// PR body that an agent passing
+    ///   {"topic":"Rust","cover":"sha256:..."}
+    /// gets `{{topic}}` → "Rust" and `{{cover}}` → the handle string in
+    /// the step the agent receives.
+    #[tokio::test]
+    async fn execute_run_substitutes_per_key_vars_from_object_input() {
+        use std::sync::{Arc, Mutex};
+        let engine = WorkflowEngine::new();
+        let wf = Workflow {
+            id: WorkflowId::new(),
+            name: "rich-input".to_string(),
+            description: "".to_string(),
+            steps: vec![WorkflowStep {
+                name: "render".to_string(),
+                agent: StepAgent::ByName {
+                    name: "writer".to_string(),
+                },
+                prompt_template: "Topic: {{topic}}. Cover: {{cover}}.".to_string(),
+                mode: StepMode::Sequential,
+                timeout_secs: 30,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+                session_mode: None,
+            }],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+            input_schema: Some(vec![
+                WorkflowInputParam {
+                    name: "topic".to_string(),
+                    param_type: "string".to_string(),
+                    required: true,
+                    description: None,
+                },
+                WorkflowInputParam {
+                    name: "cover".to_string(),
+                    param_type: "file".to_string(),
+                    required: true,
+                    description: None,
+                },
+            ]),
+        };
+        let wf_id = engine.register(wf).await;
+
+        // The runtime's `_artifact` resolver runs upstream and lands the
+        // handle string in the input JSON before we see it, so for the
+        // engine-level test we pass the resolved shape directly.
+        let input_json = serde_json::json!({
+            "topic": "Rust",
+            "cover": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        })
+        .to_string();
+        let run_id = engine.create_run(wf_id, input_json).await.unwrap();
+
+        // Capture the prompt the engine would dispatch to the agent.
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&captured);
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
+            let sink = Arc::clone(&sink);
+            async move {
+                sink.lock().unwrap().push(msg.clone());
+                Ok((format!("ack:{msg}"), 1u64, 1u64))
+            }
+        };
+
+        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        assert!(result.is_ok(), "run failed: {:?}", result);
+
+        let prompts = captured.lock().unwrap();
+        assert_eq!(prompts.len(), 1, "exactly one step dispatched");
+        let p = &prompts[0];
+        assert!(
+            p.contains("Topic: Rust"),
+            "{{topic}} must be filled with the input value; got: {p}"
+        );
+        assert!(
+            p.contains(
+                "Cover: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            ),
+            "{{cover}} must be filled with the resolved handle string; got: {p}"
+        );
+        // No literal placeholders survived substitution.
+        assert!(
+            !p.contains("{{topic}}") && !p.contains("{{cover}}"),
+            "no placeholders should remain unsubstituted; got: {p}"
+        );
+    }
+
+    /// Same coverage but on the DAG dispatch path (any step with
+    /// non-empty `depends_on` routes execution through
+    /// `execute_run_dag`). Pins that BLOCKING 1 fix landed on both
+    /// execution branches (#4982 — gap 3).
+    #[tokio::test]
+    async fn execute_run_dag_substitutes_per_key_vars_from_object_input() {
+        use std::sync::{Arc, Mutex};
+        let engine = WorkflowEngine::new();
+        let wf = Workflow {
+            id: WorkflowId::new(),
+            name: "rich-input-dag".to_string(),
+            description: "".to_string(),
+            steps: vec![
+                WorkflowStep {
+                    name: "first".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "a".to_string(),
+                    },
+                    prompt_template: "Topic={{topic}}".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 30,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    depends_on: vec![],
+                    session_mode: None,
+                },
+                WorkflowStep {
+                    name: "second".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "b".to_string(),
+                    },
+                    prompt_template: "Cover={{cover}}".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 30,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    // Non-empty depends_on routes the whole workflow into
+                    // the DAG executor.
+                    depends_on: vec!["first".to_string()],
+                    session_mode: None,
+                },
+            ],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+            input_schema: None,
+        };
+        let wf_id = engine.register(wf).await;
+        let input_json = serde_json::json!({
+            "topic": "Rust",
+            "cover": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        })
+        .to_string();
+        let run_id = engine.create_run(wf_id, input_json).await.unwrap();
+
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&captured);
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
+            let sink = Arc::clone(&sink);
+            async move {
+                sink.lock().unwrap().push(msg.clone());
+                Ok((format!("ack:{msg}"), 1u64, 1u64))
+            }
+        };
+
+        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        assert!(result.is_ok(), "DAG run failed: {:?}", result);
+
+        let prompts = captured.lock().unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert!(
+            prompts.iter().any(|p| p.contains("Topic=Rust")),
+            "DAG step 1 must substitute {{topic}}; got: {prompts:?}"
+        );
+        assert!(
+            prompts.iter().any(|p| p.contains(
+                "Cover=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            )),
+            "DAG step 2 must substitute {{cover}}; got: {prompts:?}"
+        );
     }
 
     #[tokio::test]
@@ -4540,6 +6779,634 @@ mod tests {
         let json = serde_json::to_string(&mode).unwrap();
         let parsed: StepMode = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, StepMode::Loop { max_iterations: 5, until } if until == "done"));
+    }
+
+    // --- Operator-node serde round-trips (#4980) ------------------------------
+    //
+    // The five operator-node variants must serialise / deserialise cleanly
+    // through serde — workflow definitions persist to SQLite via
+    // `workflow_run_to_row` and load back through the same path, so a
+    // round-trip regression silently corrupts every paused workflow on disk.
+
+    #[tokio::test]
+    async fn test_step_mode_wait_serialization() {
+        let mode = StepMode::Wait { duration_secs: 42 };
+        let json = serde_json::to_string(&mode).unwrap();
+        assert!(json.contains("\"wait\""), "snake_case tag missing: {json}");
+        let parsed: StepMode = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, StepMode::Wait { duration_secs: 42 }));
+    }
+
+    #[tokio::test]
+    async fn test_step_mode_gate_serialization() {
+        let mode = StepMode::Gate {
+            condition: GateCondition {
+                field: Some("/score".to_string()),
+                op: GateOp::Gt,
+                value: serde_json::json!(0.8),
+            },
+        };
+        let json = serde_json::to_string(&mode).unwrap();
+        let parsed: StepMode = serde_json::from_str(&json).unwrap();
+        match parsed {
+            StepMode::Gate { condition } => {
+                assert_eq!(condition.field.as_deref(), Some("/score"));
+                assert_eq!(condition.op, GateOp::Gt);
+                assert_eq!(condition.value, serde_json::json!(0.8));
+            }
+            other => panic!("expected Gate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_step_mode_gate_malformed_fails_deserialization() {
+        // Missing `op` — the gate cannot default to "passing" silently,
+        // so a malformed comparator MUST surface as a deserialisation
+        // error at manifest load time rather than at run time.
+        let bad = r#"{"gate":{"condition":{"field":"/score","value":0.8}}}"#;
+        let err = serde_json::from_str::<StepMode>(bad).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("op") || msg.contains("missing"),
+            "expected serde to flag missing 'op'; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn evaluate_gate_condition_passes_when_field_satisfies_op() {
+        let cond = GateCondition {
+            field: Some("/score".to_string()),
+            op: GateOp::Gt,
+            value: serde_json::json!(0.8),
+        };
+        assert!(evaluate_gate_condition(&cond, r#"{"score": 0.95}"#).is_ok());
+    }
+
+    #[test]
+    fn evaluate_gate_condition_fails_when_field_does_not_satisfy_op() {
+        let cond = GateCondition {
+            field: Some("/score".to_string()),
+            op: GateOp::Gt,
+            value: serde_json::json!(0.8),
+        };
+        let err = evaluate_gate_condition(&cond, r#"{"score": 0.5}"#).unwrap_err();
+        assert!(err.contains("gate condition failed"), "{err}");
+    }
+
+    #[test]
+    fn evaluate_gate_condition_missing_field_fails_with_reason() {
+        let cond = GateCondition {
+            field: Some("/score".to_string()),
+            op: GateOp::Gt,
+            value: serde_json::json!(0.8),
+        };
+        let err = evaluate_gate_condition(&cond, r#"{"other": 1}"#).unwrap_err();
+        assert!(
+            err.contains("/score"),
+            "missing-field reason should name the field; got {err}"
+        );
+    }
+
+    #[test]
+    fn evaluate_gate_condition_string_eq_works_against_raw_output() {
+        let cond = GateCondition {
+            field: None,
+            op: GateOp::Eq,
+            value: serde_json::json!("approved"),
+        };
+        // `"approved"` (a JSON string) compares JSON-equal to the parsed
+        // root when the previous output is the literal JSON `"approved"`.
+        assert!(evaluate_gate_condition(&cond, r#""approved""#).is_ok());
+        // Raw (non-JSON) string output also matches via the string fallback.
+        assert!(evaluate_gate_condition(&cond, "approved").is_ok());
+        assert!(evaluate_gate_condition(&cond, "rejected").is_err());
+    }
+
+    #[test]
+    fn evaluate_gate_condition_contains_substring() {
+        let cond = GateCondition {
+            field: None,
+            op: GateOp::Contains,
+            value: serde_json::json!("urgent"),
+        };
+        assert!(evaluate_gate_condition(&cond, "this is urgent work").is_ok());
+        assert!(evaluate_gate_condition(&cond, "this is fine").is_err());
+    }
+
+    /// A predecessor that emitted bare `null` must fail the gate
+    /// closed, regardless of whether `cond.value` happens to also be
+    /// JSON null. Treating `Null == Null` as a pass is the regression
+    /// this test pins down.
+    #[test]
+    fn evaluate_gate_condition_root_null_fails_closed() {
+        let cond_eq_null = GateCondition {
+            field: None,
+            op: GateOp::Eq,
+            value: serde_json::Value::Null,
+        };
+        let err = evaluate_gate_condition(&cond_eq_null, "null").unwrap_err();
+        assert!(
+            err.contains("null") && err.contains("fails closed"),
+            "root-null reason should be explicit: {err}"
+        );
+
+        let cond_eq_value = GateCondition {
+            field: None,
+            op: GateOp::Eq,
+            value: serde_json::json!("ok"),
+        };
+        let err = evaluate_gate_condition(&cond_eq_value, "null").unwrap_err();
+        assert!(
+            err.contains("fails closed"),
+            "root-null reason should fire before op comparison: {err}"
+        );
+    }
+
+    /// Pointer that resolves to JSON null (field present, value
+    /// explicitly null) is treated the same as the root-null case —
+    /// fail-closed. This pins the distinction between "missing" and
+    /// "present-but-null" without letting present-but-null silently
+    /// pass.
+    #[test]
+    fn evaluate_gate_condition_pointer_to_null_fails_closed() {
+        let cond = GateCondition {
+            field: Some("/score".to_string()),
+            op: GateOp::Eq,
+            value: serde_json::Value::Null,
+        };
+        let err = evaluate_gate_condition(&cond, r#"{"score": null}"#).unwrap_err();
+        assert!(
+            err.contains("/score") && err.contains("fails closed"),
+            "pointer-null reason should name field and fail-closed status: {err}"
+        );
+    }
+
+    // --- Transform / Tera tests (#4980 step 3) -----------------------------
+
+    #[test]
+    fn render_transform_template_renders_prev_string() {
+        let vars = std::collections::BTreeMap::new();
+        let out = render_transform_template("hello {{ prev }}", "world", &vars).unwrap();
+        assert_eq!(out, "hello world");
+    }
+
+    #[test]
+    fn render_transform_template_indexes_into_prev_json() {
+        let vars = std::collections::BTreeMap::new();
+        let out =
+            render_transform_template("score={{ prev_json.score }}", r#"{"score":0.95}"#, &vars)
+                .unwrap();
+        assert_eq!(out, "score=0.95");
+    }
+
+    #[test]
+    fn render_transform_template_exposes_workflow_vars() {
+        let mut vars = std::collections::BTreeMap::new();
+        vars.insert("title".to_string(), "Release Notes".to_string());
+        let out = render_transform_template("# {{ vars.title }}", "ignored", &vars).unwrap();
+        assert_eq!(out, "# Release Notes");
+    }
+
+    #[test]
+    fn render_transform_template_missing_variable_returns_error() {
+        // A template that references an undefined variable should
+        // surface as a render error rather than silently producing an
+        // empty placeholder. Tera's default strict mode does this for
+        // us.
+        let vars = std::collections::BTreeMap::new();
+        let err = render_transform_template("hello {{ missing }}", "prev", &vars).unwrap_err();
+        assert!(
+            err.contains("transform render failed"),
+            "expected render-error wrapper, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_transform_template_accepts_clean_template() {
+        assert!(validate_transform_template("hello {{ prev }}").is_ok());
+        assert!(validate_transform_template("{% if x %}y{% endif %}").is_ok());
+    }
+
+    #[test]
+    fn validate_transform_template_rejects_syntax_error() {
+        // Unterminated `{{ prev` — Tera must reject at parse time so
+        // the operator catches it at manifest load, not in production
+        // run history.
+        let err = validate_transform_template("hello {{ prev").unwrap_err();
+        assert!(
+            err.contains("transform template parse failed"),
+            "expected parse-error wrapper, got: {err}"
+        );
+    }
+
+    #[test]
+    fn workflow_validate_surfaces_transform_syntax_errors() {
+        let mut wf = test_workflow();
+        wf.steps.push(WorkflowStep {
+            name: "bad-transform".to_string(),
+            agent: StepAgent::ByName {
+                name: "_op".to_string(),
+            },
+            prompt_template: "{{input}}".to_string(),
+            mode: StepMode::Transform {
+                code: "hello {{ prev".to_string(),
+            },
+            timeout_secs: 30,
+            error_mode: ErrorMode::Fail,
+            output_var: None,
+            inherit_context: None,
+            depends_on: vec![],
+            session_mode: None,
+        });
+        let errs = wf.validate();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].0, "bad-transform");
+        assert!(errs[0].1.contains("transform template parse failed"));
+    }
+
+    /// Build a single-step workflow whose only step uses `mode`.
+    /// Used by the new operator-node `validate()` cases below.
+    fn workflow_with_single_op_step(name: &str, mode: StepMode) -> Workflow {
+        Workflow {
+            id: WorkflowId::new(),
+            name: name.to_string(),
+            description: "validate test".to_string(),
+            steps: vec![WorkflowStep {
+                name: "op".to_string(),
+                agent: StepAgent::ByName {
+                    name: "_op".to_string(),
+                },
+                prompt_template: "{{input}}".to_string(),
+                mode,
+                timeout_secs: 30,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+                session_mode: None,
+            }],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+            input_schema: None,
+        }
+    }
+
+    #[test]
+    fn workflow_validate_rejects_empty_transform_code() {
+        let wf = workflow_with_single_op_step(
+            "empty-transform",
+            StepMode::Transform {
+                code: String::new(),
+            },
+        );
+        let errs = wf.validate();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].1.contains("transform.code is empty"), "{errs:?}");
+    }
+
+    #[test]
+    fn workflow_validate_rejects_zero_wait_duration() {
+        let wf = workflow_with_single_op_step("zero-wait", StepMode::Wait { duration_secs: 0 });
+        let errs = wf.validate();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].1.contains("wait.duration_secs is 0"), "{errs:?}");
+    }
+
+    #[test]
+    fn workflow_validate_rejects_wait_duration_above_cap() {
+        let wf = workflow_with_single_op_step(
+            "huge-wait",
+            StepMode::Wait {
+                duration_secs: MAX_WAIT_SECS + 1,
+            },
+        );
+        let errs = wf.validate();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].1.contains("exceeds cap"), "{errs:?}");
+    }
+
+    #[test]
+    fn workflow_validate_accepts_wait_duration_at_cap() {
+        let wf = workflow_with_single_op_step(
+            "max-wait",
+            StepMode::Wait {
+                duration_secs: MAX_WAIT_SECS,
+            },
+        );
+        assert!(wf.validate().is_empty(), "MAX_WAIT_SECS itself must pass");
+    }
+
+    #[test]
+    fn workflow_validate_rejects_gate_fail_closed_sentinel() {
+        // Exactly the shape `parse_step_mode` produces when the manifest
+        // is missing or malformed: op=Eq, value=Null, no field.
+        let wf = workflow_with_single_op_step(
+            "default-gate",
+            StepMode::Gate {
+                condition: GateCondition {
+                    field: None,
+                    op: GateOp::Eq,
+                    value: serde_json::Value::Null,
+                },
+            },
+        );
+        let errs = wf.validate();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].1.contains("fail-closed default"), "{errs:?}");
+    }
+
+    #[test]
+    fn workflow_validate_accepts_real_gate_against_null() {
+        // A gate that explicitly checks "/field == null" is a legitimate
+        // configuration — only the no-field sentinel should be rejected.
+        let wf = workflow_with_single_op_step(
+            "field-eq-null",
+            StepMode::Gate {
+                condition: GateCondition {
+                    field: Some("/status".to_string()),
+                    op: GateOp::Eq,
+                    value: serde_json::Value::Null,
+                },
+            },
+        );
+        assert!(wf.validate().is_empty(), "{:?}", wf.validate());
+    }
+
+    #[test]
+    fn workflow_validate_rejects_empty_branch_arms() {
+        let wf = workflow_with_single_op_step("empty-branch", StepMode::Branch { arms: vec![] });
+        let errs = wf.validate();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].1.contains("branch.arms is empty"), "{errs:?}");
+    }
+
+    /// Fail-closed at validate time when a DAG (`depends_on`) edge is
+    /// combined with an operator-node `StepMode`. The DAG executor
+    /// (`execute_run_dag`) calls `agent_resolver` unconditionally and
+    /// does not match on `StepMode` — without this guard an operator
+    /// node in a DAG workflow would silently attempt an agent
+    /// dispatch at run time and surface
+    /// `format_missing_agent_error`, not the operator's wait / gate /
+    /// transform / branch behaviour (#4980 review blocking #1).
+    #[test]
+    fn workflow_validate_rejects_operator_node_combined_with_dag_depends_on() {
+        // One canary step per operator-node variant. Each carries a
+        // `depends_on` edge so the DAG executor would be the run-time
+        // dispatcher; the validator must reject every one of them.
+        let cases: Vec<(&str, StepMode)> = vec![
+            ("wait-dag", StepMode::Wait { duration_secs: 5 }),
+            (
+                "gate-dag",
+                StepMode::Gate {
+                    condition: GateCondition {
+                        field: None,
+                        op: GateOp::Eq,
+                        value: serde_json::json!("ok"),
+                    },
+                },
+            ),
+            (
+                "approval-dag",
+                StepMode::Approval {
+                    recipients: vec!["telegram:@pakman".into()],
+                    timeout_secs: None,
+                },
+            ),
+            (
+                "transform-dag",
+                StepMode::Transform {
+                    code: "{{ prev }}".to_string(),
+                },
+            ),
+            (
+                "branch-dag",
+                StepMode::Branch {
+                    arms: vec![BranchArm {
+                        match_value: serde_json::json!("ok"),
+                        then: "downstream".to_string(),
+                    }],
+                },
+            ),
+        ];
+
+        for (name, mode) in cases {
+            let mut wf = workflow_with_single_op_step(name, mode);
+            // Add a producer step so `depends_on` can name something
+            // real; the operator node depends on it.
+            wf.steps.insert(
+                0,
+                WorkflowStep {
+                    name: "producer".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "_producer".to_string(),
+                    },
+                    prompt_template: "{{input}}".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 30,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    depends_on: vec![],
+                    session_mode: None,
+                },
+            );
+            wf.steps[1].depends_on = vec!["producer".to_string()];
+            // Also append a `downstream` step so the Branch case's
+            // target name resolves (validate doesn't dereference it
+            // today but a future check might).
+            wf.steps.push(WorkflowStep {
+                name: "downstream".to_string(),
+                agent: StepAgent::ByName {
+                    name: "_downstream".to_string(),
+                },
+                prompt_template: "{{input}}".to_string(),
+                mode: StepMode::Sequential,
+                timeout_secs: 30,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+                session_mode: None,
+            });
+
+            let errs = wf.validate();
+            assert!(
+                errs.iter().any(|(s, r)| s == "op" && r.contains("DAG")),
+                "case `{name}` must fail validate with a DAG-related reason; got: {errs:?}"
+            );
+        }
+    }
+
+    /// A non-default `prompt_template` on Wait / Gate / Approval /
+    /// Branch is a silent footgun — the executor never reads the field,
+    /// so a typoed manifest just discards the value. Reject at register
+    /// time so the operator sees the typo immediately (#4980 review nit
+    /// #6). Transform is exempt — `prompt_template` is unused for that
+    /// variant but `code` is what carries the template payload.
+    #[test]
+    fn workflow_validate_rejects_non_default_prompt_template_on_operator_nodes() {
+        let cases: Vec<(&str, StepMode)> = vec![
+            ("wait-with-prompt", StepMode::Wait { duration_secs: 5 }),
+            (
+                "gate-with-prompt",
+                StepMode::Gate {
+                    condition: GateCondition {
+                        field: None,
+                        op: GateOp::Eq,
+                        value: serde_json::json!("ok"),
+                    },
+                },
+            ),
+            (
+                "approval-with-prompt",
+                StepMode::Approval {
+                    recipients: vec!["telegram:@pakman".into()],
+                    timeout_secs: None,
+                },
+            ),
+            (
+                "branch-with-prompt",
+                StepMode::Branch {
+                    arms: vec![BranchArm {
+                        match_value: serde_json::json!("ok"),
+                        then: "x".to_string(),
+                    }],
+                },
+            ),
+        ];
+
+        for (name, mode) in cases {
+            let mut wf = workflow_with_single_op_step(name, mode);
+            wf.steps[0].prompt_template = "Analyze this: {{input}}".to_string();
+            let errs = wf.validate();
+            assert!(
+                errs.iter().any(|(_, r)| r.contains("prompt_template")),
+                "case `{name}` must fail with a prompt_template-related reason; got: {errs:?}"
+            );
+        }
+    }
+
+    /// The accepted "default" set for an operator-node step's
+    /// `prompt_template` is `""` (manifest omission) and `"{{input}}"`
+    /// (the HTTP layer's parse-time fallback). Both must pass
+    /// validate.
+    #[test]
+    fn workflow_validate_accepts_default_prompt_template_on_operator_nodes() {
+        let mode_factory = || StepMode::Wait { duration_secs: 5 };
+        for template in ["", "{{input}}"] {
+            let mut wf = workflow_with_single_op_step("op-default-template", mode_factory());
+            wf.steps[0].prompt_template = template.to_string();
+            let errs = wf.validate();
+            assert!(
+                errs.is_empty(),
+                "template `{template}` must pass; got: {errs:?}"
+            );
+        }
+    }
+
+    /// Transform legitimately uses its own `code` field rather than
+    /// `prompt_template`, so a non-default `prompt_template` on a
+    /// Transform step is not a typo and must NOT be rejected by the
+    /// validator.
+    #[test]
+    fn workflow_validate_accepts_non_default_prompt_template_on_transform() {
+        let mut wf = workflow_with_single_op_step(
+            "transform-with-prompt",
+            StepMode::Transform {
+                code: "hello {{ prev }}".to_string(),
+            },
+        );
+        wf.steps[0].prompt_template = "Analyze this: {{input}}".to_string();
+        let errs = wf.validate();
+        assert!(
+            errs.is_empty(),
+            "transform must accept any template: {errs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_step_mode_approval_serialization() {
+        let mode = StepMode::Approval {
+            recipients: vec!["telegram:@pakman".into(), "email:foo@bar".into()],
+            timeout_secs: Some(86400),
+        };
+        let json = serde_json::to_string(&mode).unwrap();
+        let parsed: StepMode = serde_json::from_str(&json).unwrap();
+        match parsed {
+            StepMode::Approval {
+                recipients,
+                timeout_secs,
+            } => {
+                assert_eq!(
+                    recipients,
+                    vec!["telegram:@pakman".to_string(), "email:foo@bar".to_string()]
+                );
+                assert_eq!(timeout_secs, Some(86400));
+            }
+            other => panic!("expected Approval, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_step_mode_approval_timeout_optional() {
+        // `timeout_secs` is `Option<u64>` with `skip_serializing_if = "Option::is_none"`
+        // — verify the absent form round-trips, since the issue's TOML example
+        // does not require the field.
+        let json = r#"{"approval":{"recipients":["telegram:@op"]}}"#;
+        let parsed: StepMode = serde_json::from_str(json).unwrap();
+        match parsed {
+            StepMode::Approval {
+                recipients,
+                timeout_secs,
+            } => {
+                assert_eq!(recipients, vec!["telegram:@op".to_string()]);
+                assert_eq!(timeout_secs, None);
+            }
+            other => panic!("expected Approval, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_step_mode_transform_serialization() {
+        let mode = StepMode::Transform {
+            code: "# {{title}}\n\n{{body}}".to_string(),
+        };
+        let json = serde_json::to_string(&mode).unwrap();
+        let parsed: StepMode = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, StepMode::Transform { code } if code.starts_with("# ")));
+    }
+
+    #[tokio::test]
+    async fn test_step_mode_branch_serialization() {
+        let mode = StepMode::Branch {
+            arms: vec![
+                BranchArm {
+                    match_value: serde_json::json!("approved"),
+                    then: "publish".to_string(),
+                },
+                BranchArm {
+                    match_value: serde_json::json!(0.8),
+                    then: "rewrite".to_string(),
+                },
+                BranchArm {
+                    match_value: serde_json::json!({"status": "ok"}),
+                    then: "ship".to_string(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&mode).unwrap();
+        let parsed: StepMode = serde_json::from_str(&json).unwrap();
+        match parsed {
+            StepMode::Branch { arms } => {
+                assert_eq!(arms.len(), 3);
+                assert_eq!(arms[0].then, "publish");
+                assert_eq!(arms[0].match_value, serde_json::json!("approved"));
+                assert_eq!(arms[1].match_value, serde_json::json!(0.8));
+                assert_eq!(arms[2].match_value, serde_json::json!({"status": "ok"}));
+            }
+            other => panic!("expected Branch, got {other:?}"),
+        }
     }
 
     // ---- load_from_dir_sync tests ----
@@ -4885,7 +7752,7 @@ prompt_template = "do {{x}}"
 
         let received_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
         let rp = received_prompts.clone();
-        let sender = move |_id: AgentId, msg: String| {
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
             let rp = rp.clone();
             async move {
                 rp.lock().unwrap().push(msg.clone());
@@ -4917,7 +7784,7 @@ prompt_template = "do {{x}}"
 
         let received_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
         let rp = received_prompts.clone();
-        let sender = move |_id: AgentId, msg: String| {
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
             let rp = rp.clone();
             async move {
                 rp.lock().unwrap().push(msg.clone());
@@ -4957,6 +7824,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "second".to_string(),
@@ -4970,11 +7838,13 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: Some(false),
                     depends_on: vec![],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -4984,7 +7854,7 @@ prompt_template = "do {{x}}"
 
         let received_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
         let rp = received_prompts.clone();
-        let sender = move |_id: AgentId, msg: String| {
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
             let rp = rp.clone();
             async move {
                 rp.lock().unwrap().push(msg.clone());
@@ -5020,6 +7890,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             },
             WorkflowStep {
                 name: "B".to_string(),
@@ -5033,6 +7904,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec!["A".to_string()],
+                session_mode: None,
             },
             WorkflowStep {
                 name: "C".to_string(),
@@ -5046,6 +7918,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec!["B".to_string()],
+                session_mode: None,
             },
         ];
 
@@ -5077,6 +7950,7 @@ prompt_template = "do {{x}}"
                     output_var: Some("a_result".to_string()),
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "B".to_string(),
@@ -5090,6 +7964,7 @@ prompt_template = "do {{x}}"
                     output_var: Some("b_result".to_string()),
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "C".to_string(),
@@ -5104,18 +7979,20 @@ prompt_template = "do {{x}}"
                     // Explicitly disable context for this step
                     inherit_context: Some(false),
                     depends_on: vec!["A".to_string(), "B".to_string()],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
 
         let received_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
         let rp = received_prompts.clone();
-        let sender = move |_id: AgentId, msg: String| {
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
             let rp = rp.clone();
             async move {
                 rp.lock().unwrap().push(msg.clone());
@@ -5146,6 +8023,7 @@ prompt_template = "do {{x}}"
             output_var: None,
             inherit_context: None,
             depends_on: vec![],
+            session_mode: None,
         };
         let result = WorkflowEngine::build_context_prompt("hello", &step, 0, "wf", &[], true);
         // No previous results => no preamble
@@ -5166,6 +8044,7 @@ prompt_template = "do {{x}}"
             output_var: None,
             inherit_context: None,
             depends_on: vec![],
+            session_mode: None,
         };
         let results = vec![StepResult {
             step_name: "s1".to_string(),
@@ -5205,6 +8084,7 @@ prompt_template = "do {{x}}"
             output_var: None,
             inherit_context: None,
             depends_on: vec![],
+            session_mode: None,
         };
         let results = vec![StepResult {
             step_name: "s1".to_string(),
@@ -5262,6 +8142,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             },
             WorkflowStep {
                 name: "B".to_string(),
@@ -5275,6 +8156,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             },
             WorkflowStep {
                 name: "C".to_string(),
@@ -5288,6 +8170,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec!["A".to_string(), "B".to_string()],
+                session_mode: None,
             },
         ])
         .unwrap();
@@ -5312,6 +8195,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec!["B".to_string()],
+                session_mode: None,
             },
             WorkflowStep {
                 name: "B".to_string(),
@@ -5325,6 +8209,7 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec!["A".to_string()],
+                session_mode: None,
             },
         ];
 
@@ -5352,6 +8237,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "B".to_string(),
@@ -5365,6 +8251,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "C".to_string(),
@@ -5378,11 +8265,13 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec!["A".to_string(), "B".to_string()],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
 
         let template = WorkflowEngine::workflow_to_template(&workflow);
@@ -5416,6 +8305,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "B".to_string(),
@@ -5429,18 +8319,20 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec!["A".to_string()],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
 
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
 
         // Sender always fails
-        let sender = |_id: AgentId, _msg: String| async move {
+        let sender = |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
             Err::<(String, u64, u64), String>("simulated failure".to_string())
         };
 
@@ -5842,7 +8734,7 @@ prompt_template = "do {{x}}"
         let captured_for_sender = Arc::clone(&captured_token);
         let pause_for_sender = Arc::clone(&pause_requested);
 
-        let sender = move |_id: AgentId, msg: String| {
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
             let engine = Arc::clone(&engine_for_sender);
             let captured = Arc::clone(&captured_for_sender);
             let pause_flag = Arc::clone(&pause_for_sender);
@@ -5888,7 +8780,7 @@ prompt_template = "do {{x}}"
             .expect("sender should have captured a token");
 
         // Resume: replay from saved snapshot, executing the remaining step.
-        let sender_resume = |_id: AgentId, msg: String| async move {
+        let sender_resume = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 100_u64, 50_u64))
         };
         let result = engine
@@ -5924,7 +8816,7 @@ prompt_template = "do {{x}}"
             .pause_run(run_id, "before-start pause")
             .await
             .unwrap();
-        let sender = |_id: AgentId, msg: String| async move {
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         engine
@@ -5937,7 +8829,7 @@ prompt_template = "do {{x}}"
 
         let bogus_token = Uuid::new_v4();
         assert_ne!(bogus_token, real_token);
-        let sender2 = |_id: AgentId, msg: String| async move {
+        let sender2 = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         let err = engine
@@ -5960,7 +8852,7 @@ prompt_template = "do {{x}}"
         let wf_id = engine.register(test_workflow()).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
         // No pause requested — run is in Pending.
-        let sender = |_id: AgentId, msg: String| async move {
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         let err = engine
@@ -5992,7 +8884,7 @@ prompt_template = "do {{x}}"
                 .await
                 .unwrap();
             original_hash = WorkflowEngine::hash_resume_token(&plaintext_token);
-            let sender = |_id: AgentId, msg: String| async move {
+            let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
                 Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
             };
             engine
@@ -6110,6 +9002,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "b".into(),
@@ -6121,11 +9014,13 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec!["a".into()],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -6133,7 +9028,7 @@ prompt_template = "do {{x}}"
         // Lodge a pause request *before* execute_run — DAG executor must
         // refuse cleanly rather than silently dropping the request.
         let _ = engine.pause_run(run_id, "dag pause").await.unwrap();
-        let sender = |_id: AgentId, msg: String| async move {
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         let err = engine
@@ -6206,14 +9101,14 @@ prompt_template = "do {{x}}"
         // Pause-before-execute → loop pauses at step 0 → resume runs
         // the workflow to completion.
         let token = engine.pause_run(run_id, "before-start").await.unwrap();
-        let sender = |_id: AgentId, msg: String| async move {
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         engine
             .execute_run(run_id, mock_resolver, sender)
             .await
             .unwrap();
-        let sender2 = |_id: AgentId, msg: String| async move {
+        let sender2 = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         engine
@@ -6225,7 +9120,7 @@ prompt_template = "do {{x}}"
         // must error rather than silently re-running the workflow.
         let run = engine.get_run(run_id).await.unwrap();
         assert!(matches!(run.state, WorkflowRunState::Completed));
-        let sender3 = |_id: AgentId, msg: String| async move {
+        let sender3 = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         let err = engine
@@ -6252,7 +9147,7 @@ prompt_template = "do {{x}}"
 
         // Run is Pending — pause is lodged before any step has executed.
         let token = engine.pause_run(run_id, "pre-start").await.unwrap();
-        let sender = |_id: AgentId, msg: String| async move {
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
             Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
         };
         engine
@@ -6298,8 +9193,9 @@ prompt_template = "do {{x}}"
         let wf_id = engine.register(test_workflow()).await;
         let run_id = engine.create_run(wf_id, "x".to_string()).await.unwrap();
         let token = engine.pause_run(run_id, "atomic-take").await.unwrap();
-        let sender =
-            |_id: AgentId, msg: String| async move { Ok((format!("R:{msg}"), 1_u64, 1_u64)) };
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
+            Ok((format!("R:{msg}"), 1_u64, 1_u64))
+        };
         engine
             .execute_run(run_id, mock_resolver, sender)
             .await
@@ -6544,6 +9440,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "step2".to_string(),
@@ -6557,6 +9454,7 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
                 WorkflowStep {
                     name: "step3".to_string(),
@@ -6570,11 +9468,13 @@ prompt_template = "do {{x}}"
                     output_var: None,
                     inherit_context: None,
                     depends_on: vec![],
+                    session_mode: None,
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -6588,23 +9488,27 @@ prompt_template = "do {{x}}"
         // Spawn execute_run so cancel can race it.
         let handle = tokio::spawn(async move {
             engine_exec
-                .execute_run(run_id, mock_resolver, move |_id: AgentId, _msg: String| {
-                    let gate = gate.clone();
-                    let s1_done = s1_done.clone();
-                    let counter = counter.clone();
-                    async move {
-                        let call = counter.fetch_add(1, Ordering::SeqCst);
-                        if call == 0 {
-                            // step 1: return immediately, signal the driver.
-                            s1_done.notify_one();
-                            Ok(("step1_done".to_string(), 1u64, 1u64))
-                        } else {
-                            // step 2 (or 3): block until the gate opens.
-                            gate.notified().await;
-                            Ok(("step_done".to_string(), 1u64, 1u64))
+                .execute_run(
+                    run_id,
+                    mock_resolver,
+                    move |_id: AgentId, _msg: String, _sm: Option<SessionMode>| {
+                        let gate = gate.clone();
+                        let s1_done = s1_done.clone();
+                        let counter = counter.clone();
+                        async move {
+                            let call = counter.fetch_add(1, Ordering::SeqCst);
+                            if call == 0 {
+                                // step 1: return immediately, signal the driver.
+                                s1_done.notify_one();
+                                Ok(("step1_done".to_string(), 1u64, 1u64))
+                            } else {
+                                // step 2 (or 3): block until the gate opens.
+                                gate.notified().await;
+                                Ok(("step_done".to_string(), 1u64, 1u64))
+                            }
                         }
-                    }
-                })
+                    },
+                )
                 .await
         });
 
@@ -6676,10 +9580,12 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             }],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: Some(1), // 1 second total timeout
+            input_schema: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -6687,11 +9593,14 @@ prompt_template = "do {{x}}"
 
         // execute_run will tokio::time::timeout(1s, inner_fut). The sender
         // sleeps for 3s. We advance time by 2s to fire the timeout.
-        let exec_fut =
-            engine.execute_run(run_id, mock_resolver, |_id: AgentId, _msg: String| async {
+        let exec_fut = engine.execute_run(
+            run_id,
+            mock_resolver,
+            |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 Ok(("done".to_string(), 0u64, 0u64))
-            });
+            },
+        );
 
         // Drive execute_run and advance time concurrently. With time paused
         // the sleep inside the sender won't advance unless we explicitly
@@ -6828,10 +9737,12 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             }],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -6842,9 +9753,13 @@ prompt_template = "do {{x}}"
         // sleep (30s) after the first attempt.
         let handle = tokio::spawn(async move {
             engine_exec
-                .execute_run(run_id, mock_resolver, |_id: AgentId, _msg: String| async {
-                    Err("forced failure".to_string())
-                })
+                .execute_run(
+                    run_id,
+                    mock_resolver,
+                    |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async {
+                        Err("forced failure".to_string())
+                    },
+                )
                 .await
         });
 
@@ -6909,10 +9824,12 @@ prompt_template = "do {{x}}"
                 output_var: None,
                 inherit_context: None,
                 depends_on: vec![],
+                session_mode: None,
             }],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
 
@@ -6932,6 +9849,470 @@ prompt_template = "do {{x}}"
             all_runs.len() <= 200,
             "cancelled runs over the cap must be evictable, retained {} (cap 200)",
             all_runs.len()
+        );
+    }
+
+    // ----------------------------------------------------------------------
+    // StepAgent deserialization — bare-string ergonomics regression tests
+    //
+    // The on-wire shape documented in the workflow issue / PR body is the
+    // bare `agent = "researcher"` form; if the custom `Deserialize` impl
+    // ever regresses to the derived untagged enum, the operator will hit
+    // an opaque untagged-enum error on first run. These tests guard the
+    // contract at the type boundary.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn step_agent_deserializes_bare_string_as_by_name() {
+        let v: StepAgent = serde_json::from_str("\"researcher\"").expect("bare string");
+        match v {
+            StepAgent::ByName { name } => assert_eq!(name, "researcher"),
+            other => panic!("expected ByName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_agent_deserializes_object_by_name() {
+        let v: StepAgent =
+            serde_json::from_str(r#"{"name":"researcher"}"#).expect("object form by name");
+        match v {
+            StepAgent::ByName { name } => assert_eq!(name, "researcher"),
+            other => panic!("expected ByName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_agent_deserializes_object_by_id() {
+        let v: StepAgent =
+            serde_json::from_str(r#"{"id":"agent-uuid-123"}"#).expect("object by id");
+        match v {
+            StepAgent::ById { id } => assert_eq!(id, "agent-uuid-123"),
+            other => panic!("expected ById, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_agent_rejects_garbage_input() {
+        // Number: not a string or object.
+        assert!(serde_json::from_str::<StepAgent>("42").is_err());
+        // Array: not a string or object.
+        assert!(serde_json::from_str::<StepAgent>("[\"researcher\"]").is_err());
+        // Both fields set: ambiguous.
+        assert!(
+            serde_json::from_str::<StepAgent>(r#"{"id":"a","name":"b"}"#).is_err(),
+            "must reject both id and name set"
+        );
+        // Neither field set: empty object.
+        assert!(
+            serde_json::from_str::<StepAgent>("{}").is_err(),
+            "must reject empty object"
+        );
+        // Null is also invalid.
+        assert!(serde_json::from_str::<StepAgent>("null").is_err());
+    }
+
+    #[test]
+    fn step_agent_round_trip_bare_string_through_toml() {
+        // TOML doesn't allow top-level scalar values, so wrap in a struct
+        // that holds a `StepAgent` field. The bare-string form is the form
+        // operators are expected to use in TOML workflow files.
+        #[derive(serde::Deserialize)]
+        struct Wrap {
+            agent: StepAgent,
+        }
+        let parsed: Wrap = toml::from_str(r#"agent = "researcher""#).expect("toml bare string");
+        match parsed.agent {
+            StepAgent::ByName { name } => assert_eq!(name, "researcher"),
+            other => panic!("expected ByName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_agent_round_trip_object_through_toml() {
+        #[derive(serde::Deserialize)]
+        struct Wrap {
+            agent: StepAgent,
+        }
+        let by_name: Wrap =
+            toml::from_str("agent = { name = \"researcher\" }").expect("toml object by name");
+        match by_name.agent {
+            StepAgent::ByName { name } => assert_eq!(name, "researcher"),
+            other => panic!("expected ByName, got {other:?}"),
+        }
+        let by_id: Wrap =
+            toml::from_str("agent = { id = \"agent-uuid-123\" }").expect("toml object by id");
+        match by_id.agent {
+            StepAgent::ById { id } => assert_eq!(id, "agent-uuid-123"),
+            other => panic!("expected ById, got {other:?}"),
+        }
+    }
+
+    // ========================================================================
+    // #4982 — input_schema deserialization (parameter discovery)
+    // ========================================================================
+
+    #[test]
+    fn workflow_input_param_round_trips_through_toml() {
+        // Authoring shape: `[[input_schema]]` blocks in workflow TOML.
+        // Pin the on-wire form so a future serde rename can't silently
+        // diverge from documented author surface.
+        let toml = r#"
+name = "test"
+description = "test"
+steps = []
+
+[[input_schema]]
+name = "topic"
+param_type = "string"
+required = true
+description = "Article topic"
+
+[[input_schema]]
+name = "cover_image"
+param_type = "image"
+required = false
+"#;
+        #[derive(Deserialize)]
+        struct WfFile {
+            #[allow(dead_code)]
+            name: String,
+            #[allow(dead_code)]
+            description: String,
+            #[allow(dead_code)]
+            steps: Vec<WorkflowStep>,
+            input_schema: Option<Vec<WorkflowInputParam>>,
+        }
+        let wf: WfFile = toml::from_str(toml).expect("valid TOML");
+        let schema = wf.input_schema.expect("input_schema parsed");
+        assert_eq!(schema.len(), 2);
+        assert_eq!(schema[0].name, "topic");
+        assert_eq!(schema[0].param_type, "string");
+        assert!(schema[0].required);
+        assert_eq!(schema[0].description.as_deref(), Some("Article topic"));
+        assert_eq!(schema[1].name, "cover_image");
+        assert_eq!(schema[1].param_type, "image");
+        assert!(!schema[1].required);
+    }
+
+    #[test]
+    fn workflow_input_param_required_defaults_to_true_when_absent() {
+        // Operators authoring [[input_schema]] commonly omit `required`
+        // and expect the parameter to be required by default — matches
+        // the auto-detect path's semantics. Pin it explicitly.
+        let toml = r#"
+name = "test"
+description = "test"
+steps = []
+
+[[input_schema]]
+name = "topic"
+"#;
+        #[derive(Deserialize)]
+        struct WfFile {
+            #[allow(dead_code)]
+            name: String,
+            #[allow(dead_code)]
+            description: String,
+            #[allow(dead_code)]
+            steps: Vec<WorkflowStep>,
+            input_schema: Option<Vec<WorkflowInputParam>>,
+        }
+        let wf: WfFile = toml::from_str(toml).expect("valid TOML");
+        let schema = wf.input_schema.expect("input_schema parsed");
+        assert_eq!(schema.len(), 1);
+        assert_eq!(schema[0].name, "topic");
+        assert_eq!(schema[0].param_type, "string");
+        assert!(
+            schema[0].required,
+            "required must default to true so omitting it doesn't silently \
+             make every parameter optional"
+        );
+    }
+
+    #[test]
+    fn workflow_input_schema_round_trips_through_json() {
+        // The HTTP surface (POST /api/workflows) takes JSON. Pin the
+        // JSON shape too so the dashboard / SDK callers can serialize
+        // schemas without surprises.
+        let json = r#"{
+            "name": "demo",
+            "param_type": "file",
+            "required": false,
+            "description": "Optional uploaded report"
+        }"#;
+        let p: WorkflowInputParam = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(p.name, "demo");
+        assert_eq!(p.param_type, "file");
+        assert!(!p.required);
+        // Re-serialize and re-parse so we know the round-trip is
+        // lossless (no fields silently dropped on the way back out).
+        let back = serde_json::to_string(&p).expect("serialize");
+        let again: WorkflowInputParam = serde_json::from_str(&back).expect("re-parse");
+        assert_eq!(p, again);
+    }
+
+    // -----------------------------------------------------------------
+    // #4977 — StepMode::Operator tests
+    // -----------------------------------------------------------------
+
+    /// Build a single-step workflow whose only step uses a
+    /// well-formed [`StepMode::Operator`] mode. Reused by the validate
+    /// happy-path and reject-cases tests below.
+    fn workflow_with_operator_step() -> Workflow {
+        workflow_with_single_op_step(
+            "operator-happy",
+            StepMode::Operator {
+                notify: vec!["telegram:@pakman".to_string()],
+                actions: vec![OperatorAction::Approve, OperatorAction::Reject],
+                timeout_secs: Some(3600),
+                timeout_action: OperatorTimeoutAction::Continue,
+            },
+        )
+    }
+
+    #[test]
+    fn step_mode_operator_round_trip_serde() {
+        // Serde round-trip covering every action variant + a non-trivial
+        // timeout configuration. Mirrors the existing
+        // `test_step_mode_approval_serialization` shape.
+        let mode = StepMode::Operator {
+            notify: vec![
+                "telegram:@pakman".to_string(),
+                "email:foo@bar".to_string(),
+                "dashboard:".to_string(),
+            ],
+            actions: vec![
+                OperatorAction::Approve,
+                OperatorAction::Reject,
+                OperatorAction::Edit,
+                OperatorAction::FreeformInput,
+                OperatorAction::ProvideInput {
+                    field: "revision_notes".to_string(),
+                },
+            ],
+            timeout_secs: Some(86400),
+            timeout_action: OperatorTimeoutAction::Reject,
+        };
+        let json = serde_json::to_string(&mode).expect("serialize");
+        let parsed: StepMode = serde_json::from_str(&json).expect("deserialize");
+        match parsed {
+            StepMode::Operator {
+                notify,
+                actions,
+                timeout_secs,
+                timeout_action,
+            } => {
+                assert_eq!(notify.len(), 3);
+                assert_eq!(actions.len(), 5);
+                assert_eq!(timeout_secs, Some(86400));
+                assert_eq!(timeout_action, OperatorTimeoutAction::Reject);
+                // Verify ProvideInput's `field` round-tripped intact.
+                assert!(actions.iter().any(|a| matches!(
+                    a,
+                    OperatorAction::ProvideInput { field } if field == "revision_notes"
+                )));
+            }
+            other => panic!("expected Operator, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_mode_operator_timeout_optional_round_trip() {
+        // `timeout_secs` is `Option<u64>` with `skip_serializing_if`;
+        // verify the absent form round-trips with the default
+        // `timeout_action = continue` so a minimal manifest works.
+        let json = r#"{"operator":{"notify":["telegram:@op"],"actions":["approve"]}}"#;
+        let parsed: StepMode = serde_json::from_str(json).expect("deserialize minimal");
+        match parsed {
+            StepMode::Operator {
+                notify,
+                actions,
+                timeout_secs,
+                timeout_action,
+            } => {
+                assert_eq!(notify, vec!["telegram:@op".to_string()]);
+                assert_eq!(actions, vec![OperatorAction::Approve]);
+                assert_eq!(timeout_secs, None);
+                assert_eq!(timeout_action, OperatorTimeoutAction::Continue);
+            }
+            other => panic!("expected Operator, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workflow_validate_accepts_well_formed_operator_step() {
+        let wf = workflow_with_operator_step();
+        let errs = wf.validate();
+        assert!(
+            errs.is_empty(),
+            "well-formed operator step must pass validate; got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_validate_rejects_empty_operator_notify() {
+        let wf = workflow_with_single_op_step(
+            "empty-notify",
+            StepMode::Operator {
+                notify: vec![],
+                actions: vec![OperatorAction::Approve],
+                timeout_secs: None,
+                timeout_action: OperatorTimeoutAction::Continue,
+            },
+        );
+        let errs = wf.validate();
+        assert!(
+            errs.iter().any(|(_, r)| r.contains("notify is empty")),
+            "expected empty-notify rejection; got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_validate_rejects_unknown_operator_notify_scheme() {
+        let wf = workflow_with_single_op_step(
+            "bad-scheme",
+            StepMode::Operator {
+                notify: vec!["sms:+15551234567".to_string()],
+                actions: vec![OperatorAction::Approve],
+                timeout_secs: None,
+                timeout_action: OperatorTimeoutAction::Continue,
+            },
+        );
+        let errs = wf.validate();
+        assert!(
+            errs.iter()
+                .any(|(_, r)| r.contains("unknown channel scheme")),
+            "expected unknown-scheme rejection; got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_validate_rejects_zero_operator_timeout() {
+        let wf = workflow_with_single_op_step(
+            "zero-timeout",
+            StepMode::Operator {
+                notify: vec!["telegram:@op".to_string()],
+                actions: vec![OperatorAction::Approve],
+                timeout_secs: Some(0),
+                timeout_action: OperatorTimeoutAction::Continue,
+            },
+        );
+        let errs = wf.validate();
+        assert!(
+            errs.iter()
+                .any(|(_, r)| r.contains("operator.timeout_secs is 0")),
+            "expected zero-timeout rejection; got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_validate_rejects_approve_timeout_without_approve_action() {
+        // Defensive: `timeout_action=approve` without `Approve` in
+        // `actions` is almost certainly an authoring mistake — the
+        // workflow would auto-approve a step the operator was never
+        // allowed to approve.
+        let wf = workflow_with_single_op_step(
+            "approve-mismatch",
+            StepMode::Operator {
+                notify: vec!["telegram:@op".to_string()],
+                actions: vec![OperatorAction::Reject],
+                timeout_secs: Some(60),
+                timeout_action: OperatorTimeoutAction::Approve,
+            },
+        );
+        let errs = wf.validate();
+        assert!(
+            errs.iter()
+                .any(|(_, r)| r.contains("timeout_action=approve requires")),
+            "expected approve-mismatch rejection; got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_validate_rejects_operator_combined_with_dag_depends_on() {
+        // Operator-node + DAG `depends_on` is unsupported (same
+        // contract as the other operator-node variants from #5035 —
+        // the DAG executor never matches on `StepMode`).
+        let mut wf = workflow_with_operator_step();
+        wf.steps.insert(
+            0,
+            WorkflowStep {
+                name: "producer".to_string(),
+                agent: StepAgent::ByName {
+                    name: "_producer".to_string(),
+                },
+                prompt_template: "{{input}}".to_string(),
+                mode: StepMode::Sequential,
+                timeout_secs: 30,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+                session_mode: None,
+            },
+        );
+        wf.steps[1].depends_on = vec!["producer".to_string()];
+        let errs = wf.validate();
+        assert!(
+            errs.iter().any(|(_, r)| r.contains("DAG")),
+            "expected DAG rejection on operator step; got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_validate_rejects_non_default_prompt_template_on_operator() {
+        let mut wf = workflow_with_operator_step();
+        wf.steps[0].prompt_template = "Approve this: {{input}}".to_string();
+        let errs = wf.validate();
+        assert!(
+            errs.iter().any(|(_, r)| r.contains("prompt_template")),
+            "expected prompt_template rejection on operator step; got: {errs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_run_operator_step_pauses_with_resume_token() {
+        // End-to-end skeleton-executor smoke: an operator step must
+        // pause the run, record a `_operator:operator` step result,
+        // and store a resume_token_hash on the run state. We can't
+        // verify the plaintext token from outside `execute_run`
+        // today (the follow-up will surface it via an event); we
+        // just verify the run reached `Paused` with a hash and the
+        // synthetic StepResult landed.
+        let engine = WorkflowEngine::new();
+        let wf = workflow_with_operator_step();
+        let wf_id = engine.register(wf).await;
+        let run_id = engine
+            .create_run(wf_id, "seed-input".to_string())
+            .await
+            .expect("create_run");
+
+        let result = engine
+            .execute_run(run_id, mock_resolver, |_id, _prompt, _mode| async {
+                Ok(("ignored".to_string(), 0u64, 0u64))
+            })
+            .await;
+        // The skeleton executor pauses cleanly — `execute_run` returns
+        // Ok with the input value (pass-through) once Paused state is
+        // observed at the next step boundary.
+        assert!(
+            result.is_ok(),
+            "operator pause should return Ok: {result:?}"
+        );
+
+        let run = engine.get_run(run_id).await.expect("run exists");
+        assert!(
+            matches!(run.state, WorkflowRunState::Paused { .. }),
+            "operator step should leave run Paused, got: {:?}",
+            run.state
+        );
+        // Recorded synthetic step result under the new _operator:operator namespace.
+        assert!(
+            run.step_results
+                .iter()
+                .any(|r| r.agent_name == "_operator:operator"),
+            "expected a _operator:operator step result; got: {:?}",
+            run.step_results
         );
     }
 }

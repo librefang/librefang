@@ -122,4 +122,130 @@ describe("MultiSelectCmdk", () => {
     // other options should appear
     expect(within(list).getByText("beta")).toBeInTheDocument();
   });
+
+  it("renders description metadata under each option (#5049)", async () => {
+    const user = userEvent.setup();
+    function MetaHarness() {
+      const [value, setValue] = useState<string[]>([]);
+      return (
+        <MultiSelectCmdk
+          options={["read_file", "write_file"]}
+          optionMeta={{
+            read_file: { description: "Read a file from the agent workspace" },
+            write_file: { description: "Write bytes to a file" },
+          }}
+          value={value}
+          onChange={(next) =>
+            setValue((prev) => (typeof next === "function" ? next(prev) : next))
+          }
+          placeholder="Search tools…"
+        />
+      );
+    }
+    render(<MetaHarness />);
+    await user.click(screen.getByPlaceholderText("Search tools…"));
+    const list = await screen.findByRole("listbox");
+    expect(within(list).getByText("read_file")).toBeInTheDocument();
+    expect(
+      within(list).getByText("Read a file from the agent workspace"),
+    ).toBeInTheDocument();
+  });
+
+  it("description text matches the search query (#5049)", async () => {
+    const user = userEvent.setup();
+    function MetaHarness() {
+      const [value, setValue] = useState<string[]>([]);
+      return (
+        <MultiSelectCmdk
+          options={["read_file", "write_file"]}
+          optionMeta={{
+            read_file: { description: "Read a workspace file" },
+            write_file: { description: "Persist bytes" },
+          }}
+          value={value}
+          onChange={(next) =>
+            setValue((prev) => (typeof next === "function" ? next(prev) : next))
+          }
+          placeholder="Search…"
+        />
+      );
+    }
+    render(<MetaHarness />);
+    const input = screen.getByPlaceholderText("Search…");
+    await user.click(input);
+    // Search by description keyword that only matches "read_file"
+    await user.type(input, "workspace");
+    const list = await screen.findByRole("listbox");
+    expect(within(list).getByText("read_file")).toBeInTheDocument();
+    expect(within(list).queryByText("write_file")).not.toBeInTheDocument();
+  });
+
+  it("allowFreeText=true commits a typed value with no match on Enter (#5049)", async () => {
+    const user = userEvent.setup();
+    function FreeTextHarness() {
+      const [value, setValue] = useState<string[]>([]);
+      return (
+        <MultiSelectCmdk
+          options={["alpha", "beta"]}
+          value={value}
+          onChange={(next) =>
+            setValue((prev) => (typeof next === "function" ? next(prev) : next))
+          }
+          placeholder="Search…"
+          allowFreeText
+        />
+      );
+    }
+    render(<FreeTextHarness />);
+    const input = screen.getByPlaceholderText("Search…");
+    await user.click(input);
+    await user.type(input, "custom_tool");
+    await user.keyboard("{Enter}");
+    expect(
+      screen.getByRole("button", { name: "Remove custom_tool" }),
+    ).toBeInTheDocument();
+  });
+
+  it("allowFreeText=true does not duplicate an already-selected chip on Enter (#5049)", async () => {
+    const user = userEvent.setup();
+    function FreeTextHarness() {
+      const [value, setValue] = useState<string[]>(["custom_tool"]);
+      return (
+        <MultiSelectCmdk
+          options={["alpha", "beta"]}
+          value={value}
+          onChange={(next) =>
+            setValue((prev) => (typeof next === "function" ? next(prev) : next))
+          }
+          placeholder="Search…"
+          allowFreeText
+        />
+      );
+    }
+    render(<FreeTextHarness />);
+    // Chip starts pre-selected — the input now uses the "Add more…" placeholder.
+    const input = screen.getByPlaceholderText("Add more…");
+    await user.click(input);
+    await user.type(input, "custom_tool");
+    await user.keyboard("{Enter}");
+
+    // Only one chip — Enter on a duplicate must NOT create a second one.
+    expect(
+      screen.getAllByRole("button", { name: "Remove custom_tool" }),
+    ).toHaveLength(1);
+    // Input is cleared so the user can keep typing.
+    expect(input).toHaveValue("");
+  });
+
+  it("allowFreeText=false does NOT commit free text on Enter (#5049)", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    const input = getInput();
+    await user.click(input);
+    await user.type(input, "not_in_catalog");
+    await user.keyboard("{Enter}");
+    expect(
+      screen.queryByRole("button", { name: "Remove not_in_catalog" }),
+    ).not.toBeInTheDocument();
+  });
 });

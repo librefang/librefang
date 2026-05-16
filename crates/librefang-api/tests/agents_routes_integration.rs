@@ -347,6 +347,241 @@ async fn test_patch_agent_without_token_returns_401_when_api_key_set() {
 }
 
 // ---------------------------------------------------------------------------
+// PATCH /api/agents/{id} — schedule field (#4984 / #4986)
+//
+// Refs the linked issue: the dashboard's Schedule tab toggle PATCHed the
+// `schedule` field, but the partial-update handler silently dropped it.
+// These tests pin the contract so a future refactor of `patch_agent`
+// cannot regress the same way.
+// ---------------------------------------------------------------------------
+
+/// Reactive happy path — set schedule to `"reactive"` and confirm the GET
+/// response reflects it. `format_schedule_mode` renders Reactive as
+/// `"manual"`, which is the dashboard-facing string and the read-after-
+/// write assertion this test pins.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_agent_updates_schedule_to_reactive() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "schedule-reactive-target");
+
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            serde_json::json!({"schedule": "reactive"}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(status, StatusCode::OK);
+    // ScheduleMode::Reactive renders as "manual" in the dashboard payload
+    // (see `format_schedule_mode`); this assertion pins that contract.
+    assert_eq!(body["schedule"], "manual", "body={body:?}");
+}
+
+/// Continuous schedule with explicit `check_interval_secs` — the snake-case
+/// JSON shape (`{"continuous":{"check_interval_secs":N}}`) is what the
+/// dashboard's payload normalizer is supposed to emit, and is the same
+/// shape `ScheduleMode` derives via `#[serde(rename_all = "snake_case")]`.
+/// Pin both the wire format AND the read-after-write side effect: GET
+/// must now report the formatted continuous string.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_agent_updates_schedule_to_continuous() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "schedule-continuous-target");
+
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            serde_json::json!({
+                "schedule": {"continuous": {"check_interval_secs": 120}}
+            }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["schedule"], "continuous · 120s", "body={body:?}");
+}
+
+/// Periodic schedule — covers the third non-Reactive variant so the test
+/// matrix isn't strictly Reactive ↔ Continuous (which would let a regression
+/// that only affects Periodic / Proactive land silently).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_agent_updates_schedule_to_periodic() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "schedule-periodic-target");
+
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            serde_json::json!({"schedule": {"periodic": {"cron": "*/15 * * * *"}}}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(status, StatusCode::OK);
+    // ScheduleMode::Periodic { cron } renders as the cron expression itself
+    // (see `format_schedule_mode`); the dashboard shows it verbatim.
+    assert_eq!(body["schedule"], "*/15 * * * *", "body={body:?}");
+}
+
+/// Malformed schedule — string that isn't a known variant must be rejected
+/// with 400, not silently coerced. Pinning this prevents the
+/// dashboard-currently-sends-`"manual"` case from quietly succeeding the
+/// next time someone adds a permissive `serde(other)` fallback to
+/// `ScheduleMode`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_agent_rejects_invalid_schedule_string() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "schedule-bad-string");
+
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            // `"manual"` is the dashboard display string — there's no
+            // `Manual` variant on `ScheduleMode`. The dashboard must
+            // alias it to `"reactive"` on the wire; if it ever stops,
+            // this test catches the regression at the API layer.
+            serde_json::json!({"schedule": "manual"}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
+    assert!(body["error"].is_string());
+}
+
+/// Malformed schedule payload — wrong inner shape (`continuous` without the
+/// nested object) must be rejected with 400. Distinct from the unknown-
+/// variant case above so a regression in either path surfaces on its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_agent_rejects_malformed_schedule_payload() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "schedule-bad-shape");
+
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            // `continuous` is a struct variant — passing a bare string
+            // is a serde shape error, not an unknown variant.
+            serde_json::json!({"schedule": "continuous"}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
+    assert!(body["error"].is_string());
+}
+
+/// Schedule field absent → existing schedule must be preserved. PATCH is
+/// a partial update, so a name-only PATCH should not touch the schedule.
+/// This pins the "unrelated field updates leave schedule alone" guarantee.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_agent_without_schedule_field_preserves_schedule() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "schedule-untouched-target");
+
+    // First, set schedule to a non-default value so "untouched" is observable.
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            serde_json::json!({"schedule": {"continuous": {"check_interval_secs": 60}}}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Then, PATCH a different field. Schedule must NOT revert to default.
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            serde_json::json!({"name": "schedule-untouched-renamed"}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{}", id))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], "schedule-untouched-renamed");
+    assert_eq!(body["schedule"], "continuous · 60s", "body={body:?}");
+}
+
+/// Refs #4984: PATCH from Reactive → Continuous must start the background
+/// loop immediately, and PATCH from Continuous → Reactive must stop it.
+/// Previously the registry was updated but `start_background_for_agent` /
+/// `stop_agent` were never called, so the runtime kept running whatever
+/// schedule was active at daemon start until restart.
+///
+/// We assert against the kernel's `background.active_count()` (via the
+/// kernel handle on `AppState`) rather than waiting for a tick to fire,
+/// because the test harness uses fake LLM models and `tokio::test` runs
+/// don't sleep long enough for the jitter-delayed first tick anyway.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_patch_agent_schedule_starts_and_stops_background_loop() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "schedule-runtime-target");
+
+    // Newly spawned agent defaults to Reactive — no background loop.
+    let baseline_count = h.state.kernel.background_active_count();
+
+    // Reactive → Continuous: a new loop must register.
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            serde_json::json!({"schedule": {"continuous": {"check_interval_secs": 3600}}}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let after_start = h.state.kernel.background_active_count();
+    assert_eq!(
+        after_start,
+        baseline_count + 1,
+        "Reactive→Continuous PATCH must start the background loop (was {baseline_count}, now {after_start})"
+    );
+
+    // Continuous → Reactive: the loop must be stopped.
+    let (status, _) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{}", id),
+            serde_json::json!({"schedule": "reactive"}),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let after_stop = h.state.kernel.background_active_count();
+    assert_eq!(
+        after_stop, baseline_count,
+        "Continuous→Reactive PATCH must stop the background loop (was {after_start}, now {after_stop})"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // DELETE /api/agents/{id} — idempotency (#3509)
 // ---------------------------------------------------------------------------
 
@@ -445,6 +680,239 @@ async fn test_delete_agent_unknown_uuid_is_idempotent_200() {
     .await;
     assert_eq!(status, StatusCode::OK, "body={body:?}");
     assert_eq!(body["status"], "already-deleted", "body={body:?}");
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/agents — re-create an agent with a previously-used name (#4991)
+// ---------------------------------------------------------------------------
+
+/// Refs #4991: deleting an agent and immediately re-creating one with the
+/// same name used to fail with `500 Internal error: Invalid workspace path`.
+///
+/// Root cause: `spawn_agent_inner` rewrites `manifest.workspace` to the
+/// resolved absolute directory (`<workspaces>/agents/<name>`). The manifest
+/// is round-tripped to `agent.toml` on disk; subsequent re-creation feeds
+/// that absolute path back into `resolve_workspace_dir`, which blanket-
+/// rejected anything `is_absolute()` — even when it pointed inside the
+/// workspaces root the helper would have produced itself.
+///
+/// The fix accepts absolute paths under `workspaces_root` while still
+/// rejecting paths outside it (and any `..` / Windows-prefix traversal).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_spawn_agent_with_absolute_workspace_inside_root_succeeds() {
+    let h = boot(TEST_TOKEN).await;
+
+    // Compute the absolute workspace path the kernel itself would assign
+    // to an agent named "recreate-me". This mirrors what
+    // `persist_manifest_to_disk` writes back into `agent.toml` after a
+    // successful spawn — and what gets fed into a subsequent re-spawn.
+    let cfg = h.state.kernel.config_ref();
+    let abs_workspace = cfg.effective_agent_workspaces_dir().join("recreate-me");
+
+    let manifest_toml = format!(
+        r#"
+name = "recreate-me"
+description = "agent with absolute workspace path"
+workspace = "{}"
+
+[model]
+provider = "ollama"
+model = "test-model"
+"#,
+        // TOML basic-string escape: backslashes (Windows paths) must be
+        // doubled so the parser sees a literal path component.
+        abs_workspace.display().to_string().replace('\\', "\\\\"),
+    );
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/agents",
+            serde_json::json!({ "manifest_toml": manifest_toml }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "spawn with absolute workspace inside root must succeed; body={body:?}"
+    );
+    assert_eq!(body["name"], "recreate-me", "body={body:?}");
+}
+
+/// Refs #4991: the full delete-then-recreate flow the issue reporter hit.
+/// Spawn → confirmed DELETE → spawn again under the same name with the
+/// manifest the kernel persisted on the first spawn (i.e. carrying the
+/// resolved absolute workspace path). Without the fix the second spawn
+/// returns `500 spawn_failed / api-error-agent-error`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_recreate_agent_same_name_after_delete_succeeds() {
+    let h = boot(TEST_TOKEN).await;
+
+    // First spawn — let the kernel synthesize the absolute workspace dir,
+    // then read it back from the registry exactly as
+    // `persist_manifest_to_disk` would serialize it.
+    let id1 = spawn_named(&h.state, "recreated");
+    let resolved_workspace = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(id1)
+        .and_then(|e| e.manifest.workspace.clone())
+        .expect("spawn must have set manifest.workspace to an absolute path");
+    assert!(
+        resolved_workspace.is_absolute(),
+        "first spawn should resolve workspace to an absolute path; got {}",
+        resolved_workspace.display()
+    );
+
+    // Confirmed DELETE — purges canonical UUID, drops registry entry,
+    // but leaves the workspace directory on disk (kill_agent does NOT
+    // remove the workspace; the reporter's repro relies on this).
+    let (del_status, del_body) = send(
+        h.app.clone(),
+        delete_confirmed(&format!("/api/agents/{}", id1), Some(TEST_TOKEN)),
+    )
+    .await;
+    assert_eq!(
+        del_status,
+        StatusCode::OK,
+        "DELETE must succeed; body={del_body:?}"
+    );
+    assert_eq!(del_body["status"], "killed", "body={del_body:?}");
+
+    // Second spawn — same name, carrying the absolute workspace that the
+    // first spawn would have written back to agent.toml. This is exactly
+    // what the dashboard form (or template instantiation) replays.
+    let manifest_toml = format!(
+        r#"
+name = "recreated"
+workspace = "{}"
+
+[model]
+provider = "ollama"
+model = "test-model"
+"#,
+        resolved_workspace
+            .display()
+            .to_string()
+            .replace('\\', "\\\\"),
+    );
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/agents",
+            serde_json::json!({ "manifest_toml": manifest_toml }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "recreate after delete must succeed; got {status} body={body:?}"
+    );
+    assert_eq!(body["name"], "recreated", "body={body:?}");
+    // AgentId is a deterministic UUIDv5 derived from the agent name
+    // (`AgentId::new_for_name`), so the recreated agent intentionally
+    // shares its UUID with the deleted one. We only assert the response
+    // carries an agent_id at all — confirming the second spawn went
+    // through the full code path rather than returning a stale 200 from
+    // the idempotency cache.
+    let id2 = body["agent_id"]
+        .as_str()
+        .expect("recreate response must carry the new agent id");
+    assert_eq!(
+        id2,
+        id1.to_string(),
+        "AgentId is name-deterministic; recreated UUID must match the original"
+    );
+}
+
+/// Refs #4991: the security boundary the original blanket `is_absolute()`
+/// reject was protecting must stay closed. An absolute path pointing
+/// **outside** `workspaces_root` is still rejected.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_spawn_agent_with_absolute_workspace_outside_root_rejected() {
+    let h = boot(TEST_TOKEN).await;
+
+    // `/tmp/...` (or `C:\...` on Windows) is always outside the per-test
+    // tempdir workspaces root. Use a platform-appropriate absolute path
+    // so the test is meaningful on both Unix and Windows runners.
+    #[cfg(unix)]
+    let outside = "/tmp/librefang-4991-outside";
+    #[cfg(windows)]
+    let outside = "C:\\librefang-4991-outside";
+
+    let manifest_toml = format!(
+        r#"
+name = "escape-me"
+workspace = "{}"
+
+[model]
+provider = "ollama"
+model = "test-model"
+"#,
+        outside.replace('\\', "\\\\"),
+    );
+
+    let (status, _body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/agents",
+            serde_json::json!({ "manifest_toml": manifest_toml }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "absolute workspace outside the workspaces root must still be rejected"
+    );
+}
+
+/// Refs #4991: even when the absolute path's prefix matches `workspaces_root`,
+/// a `..` component anywhere in the path must still be rejected. Without this
+/// guard, `<workspaces_root>/x/../../escape` would syntactically `starts_with`
+/// the root yet resolve outside it once the OS canonicalizes the path.
+/// `has_unsafe_relative_components` runs *before* the `is_absolute()` branch
+/// in `resolve_workspace_dir`, so any `ParentDir` component fails closed
+/// regardless of which branch would otherwise accept the input.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_spawn_agent_with_absolute_workspace_dotdot_traversal_rejected() {
+    let h = boot(TEST_TOKEN).await;
+
+    // Build an absolute path that starts with the real workspaces root but
+    // contains a `..` segment further down. Without the unsafe-component
+    // check this would slip past the `starts_with(&root)` branch.
+    let cfg = h.state.kernel.config_ref();
+    let root = cfg.effective_agent_workspaces_dir();
+    let traversal = root.join("x").join("..").join("escape");
+
+    let manifest_toml = format!(
+        r#"
+name = "dotdot-escape"
+workspace = "{}"
+
+[model]
+provider = "ollama"
+model = "test-model"
+"#,
+        traversal.display().to_string().replace('\\', "\\\\"),
+    );
+
+    let (status, _body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/agents",
+            serde_json::json!({ "manifest_toml": manifest_toml }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "absolute workspace with `..` traversal must be rejected even when the prefix matches workspaces_root"
+    );
 }
 
 // ---------------------------------------------------------------------------

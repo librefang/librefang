@@ -6732,11 +6732,14 @@ async fn config_reload_lock_not_held_across_long_await_3564() {
 ///      coherent across writes that go through the same handle.
 ///
 /// Serialised because `LIBREFANG_VAULT_KEY` and `LIBREFANG_VAULT_NO_KEYRING`
-/// are process-global; `mcp_oauth_provider` tests in this same crate also
-/// poke `LIBREFANG_VAULT_KEY` without serialisation, so we use the
-/// unnamed `serial` group to gate against any concurrent env-var mutation.
+/// are process-global. Uses the named `serial(librefang_vault_key)` group
+/// shared with every other vault-key-touching test in this crate
+/// (`mcp_oauth_provider::tests::*` and
+/// `install_integration_writes_through_cached_vault_handle` below) so
+/// concurrent env-var mutation never races init's resolve → save →
+/// verify sequence.
 #[tokio::test(flavor = "multi_thread")]
-#[serial_test::serial]
+#[serial_test::serial(librefang_vault_key)]
 async fn vault_cache_reuses_unlocked_handle_across_calls() {
     // 44-char standard base64 of 32 deterministic bytes — produced offline
     // so this test does not pull a new `base64` dev-dep just to construct
@@ -6821,10 +6824,11 @@ async fn vault_cache_reuses_unlocked_handle_across_calls() {
 ///      allocation as the one returned after — the install path must not
 ///      poison or rebuild the cache slot.
 ///
-/// Same `serial_test::serial` group as the other vault tests because
-/// `LIBREFANG_VAULT_KEY` is process-global.
+/// Same `serial_test::serial(librefang_vault_key)` group as every other
+/// vault-key-touching test in this crate because `LIBREFANG_VAULT_KEY`
+/// is process-global.
 #[tokio::test(flavor = "multi_thread")]
-#[serial_test::serial]
+#[serial_test::serial(librefang_vault_key)]
 async fn install_integration_writes_through_cached_vault_handle() {
     const TEST_VAULT_KEY_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
     let _vault_key = set_test_env("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
@@ -7602,6 +7606,7 @@ mod try_summarize_trim_tests {
                     output_tokens: 10,
                     ..Default::default()
                 },
+                actual_provider: None,
             })
         }
     }

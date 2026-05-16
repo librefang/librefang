@@ -479,6 +479,15 @@ impl ChannelAdapter for KeybaseAdapter {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Keybase
+    /// username / device identifier) so the bridge approval listener builds
+    /// the same `keybase:<account_id>` key the router stores in
+    /// `channel_defaults`, scoping ApprovalRequested delivery to the user
+    /// bound to the requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -634,5 +643,20 @@ mod tests {
     fn test_keybase_username_stored() {
         let adapter = KeybaseAdapter::new("alice".to_string(), "key".to_string(), vec![]);
         assert_eq!(adapter.username, "alice");
+    }
+
+    #[test]
+    fn test_keybase_account_id_default_none() {
+        let adapter = KeybaseAdapter::new("alice".to_string(), "key".to_string(), vec![]);
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_keybase_account_id_returns_configured_value() {
+        // #5003: two Keybase users / devices must resolve under distinct
+        // `keybase:<account_id>` keys via the trait override.
+        let adapter = KeybaseAdapter::new("alice".to_string(), "key".to_string(), vec![])
+            .with_account_id(Some("alice-device-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("alice-device-42"));
     }
 }

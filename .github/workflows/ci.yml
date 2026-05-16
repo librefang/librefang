@@ -711,30 +711,59 @@ jobs:
             cargo nextest run $PFLAGS --no-fail-fast --no-tests=pass
           fi
 
-  # ── Windows tests: selective on PR, full on main ───────────────────────────────
+  # ── Windows tests: selective on PR, full on main, 2-way shard on full ─────────
+  # Windows runner I/O + cargo build cost roughly doubles Linux/macOS for the
+  # same workspace, so a single full-run job sits at ~55min on main and tipped
+  # past the 60min ceiling once the runtime crate-split (#3710) added new
+  # compile units. Two shards keep each fire well under budget while staying
+  # cheaper than mirroring Ubuntu's 4 (Windows runner minutes cost 2× Linux).
   test-windows:
-    name: Test / Windows
+    name: Test / Windows (shard ${{ matrix.shard }}/2)
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Skip non-1 shards in selective lane
+        id: gate
+        shell: bash
+        run: |
+          if [ "${{ needs.changes.outputs.full_test }}" != "true" ] && [ "${{ matrix.shard }}" != "1" ]; then
+            echo "Selective lane: only shard 1 runs (no benefit to fan-out for a small affected set)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: steps.gate.outputs.skip != 'true'
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: steps.gate.outputs.skip != 'true'
         with:
           key: test-windows-${{ hashFiles('**/Cargo.lock') }}
       - name: Install nextest
+        if: steps.gate.outputs.skip != 'true'
         uses: taiki-e/install-action@4616abf838e456930a67014fba647f87c185cc6c # nextest
       - name: Ensure dashboard build dir exists
+        if: steps.gate.outputs.skip != 'true'
         run: mkdir -p crates/librefang-api/static/react
         shell: bash
       - name: Run tests
+        if: steps.gate.outputs.skip != 'true'
         shell: bash
         run: |
           if [ "${{ needs.changes.outputs.full_test }}" = "true" ]; then
-            echo "Running workspace tests (full run)…"
-            cargo nextest run --workspace --no-fail-fast
+            echo "Running workspace tests (full run, shard ${{ matrix.shard }}/2)…"
+            # `--partition hash:N/M` deterministically buckets each test into
+            # one of M shards by the hash of its name. Adding tests doesn't
+            # reshuffle the others; deleting tests doesn't either. Stable
+            # buckets are critical for cache hit rates across runs.
+            cargo nextest run --workspace --no-fail-fast \
+              --partition hash:${{ matrix.shard }}/2
           else
             CRATES="${{ needs.changes.outputs.crates }}"
             if [ -z "$CRATES" ]; then

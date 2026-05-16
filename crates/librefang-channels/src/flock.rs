@@ -355,6 +355,15 @@ impl ChannelAdapter for FlockAdapter {
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
+
+    /// Expose the configured multi-bot `account_id` (typically the Flock
+    /// team / app identifier) so the bridge approval listener builds the
+    /// same `flock:<account_id>` key the router stores in `channel_defaults`,
+    /// scoping ApprovalRequested delivery to the team bound to the
+    /// requesting agent (#5003, follow-up to #4985 / #4994).
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -560,5 +569,20 @@ mod tests {
 
         let msg = parse_flock_event(&event, "u:bot001");
         assert!(msg.is_none());
+    }
+
+    #[test]
+    fn test_flock_account_id_default_none() {
+        let adapter = FlockAdapter::new("token".to_string(), 0);
+        assert_eq!(adapter.account_id(), None);
+    }
+
+    #[test]
+    fn test_flock_account_id_returns_configured_value() {
+        // #5003: two Flock teams must resolve under distinct
+        // `flock:<account_id>` keys via the trait override.
+        let adapter =
+            FlockAdapter::new("token".to_string(), 0).with_account_id(Some("team-42".to_string()));
+        assert_eq!(adapter.account_id(), Some("team-42"));
     }
 }

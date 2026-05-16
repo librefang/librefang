@@ -610,6 +610,7 @@ impl LibreFangKernel {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -660,9 +661,15 @@ impl LibreFangKernel {
                 response.usage.cache_read_input_tokens,
                 response.usage.cache_creation_input_tokens,
             );
+            // #4807 review nit 10: honour `actual_provider` so an
+            // aux-chain fail-over bills the slot that did the work.
+            let billed_provider = response
+                .actual_provider
+                .clone()
+                .unwrap_or_else(|| default_model.provider.clone());
             let usage_record = librefang_memory::usage::UsageRecord {
                 agent_id: triggering_agent_id,
-                provider: default_model.provider.clone(),
+                provider: billed_provider,
                 model: default_model.model.clone(),
                 input_tokens: response.usage.input_tokens,
                 output_tokens: response.usage.output_tokens,

@@ -12,33 +12,45 @@ pub mod agent_context;
 pub mod agent_loop;
 pub mod apply_patch;
 pub mod artifact_store;
-pub mod audit;
+pub use librefang_runtime_audit as audit;
 pub mod auth_cooldown;
 pub mod aux_client;
+#[cfg(feature = "browser")]
 pub mod browser;
+#[cfg(not(feature = "browser"))]
+#[path = "browser_stub.rs"]
+pub mod browser;
+#[cfg(feature = "browser")]
+pub mod browser_tools;
 pub mod catalog_sync;
 pub mod channel_registry;
+pub mod chatgpt_oauth;
 pub mod checkpoint_manager;
-pub mod dangerous_command;
-pub use librefang_runtime_oauth::chatgpt_oauth;
 pub mod command_lane;
 pub mod compactor;
 pub mod context_budget;
 pub mod context_compressor;
 pub mod context_engine;
 pub mod context_overflow;
-pub use librefang_runtime_oauth::copilot_oauth;
+pub mod copilot_oauth;
+pub mod dangerous_command;
+#[cfg(feature = "docker-sandbox")]
+pub use librefang_runtime_sandbox_docker as docker_sandbox;
+#[cfg(not(feature = "docker-sandbox"))]
+#[path = "docker_sandbox_stub.rs"]
 pub mod docker_sandbox;
+pub mod gateway_compression;
 pub use librefang_llm_drivers::drivers;
 pub mod embedding;
+pub mod file_read_tracker;
 pub mod graceful_shutdown;
 pub mod history_fold;
 pub mod hooks;
 pub use librefang_http as http_client;
-pub mod interrupt;
-pub use librefang_runtime_wasm::host_functions;
+pub mod host_functions;
 pub mod image_gen;
 pub mod injection_guard;
+pub mod interrupt;
 pub use librefang_kernel_handle as kernel_handle;
 pub mod link_understanding;
 pub use librefang_llm_driver as llm_driver;
@@ -48,7 +60,15 @@ pub use librefang_runtime_mcp as mcp;
 pub mod mcp_migrate;
 pub use librefang_runtime_mcp::mcp_oauth;
 pub mod mcp_server;
+#[cfg(feature = "media")]
+pub use librefang_runtime_media as media;
+#[cfg(not(feature = "media"))]
+#[path = "media_stub.rs"]
 pub mod media;
+#[cfg(feature = "media")]
+pub use librefang_runtime_media::media_understanding;
+#[cfg(not(feature = "media"))]
+#[path = "media_understanding_stub.rs"]
 pub mod media_understanding;
 pub mod model_catalog;
 pub mod model_metadata;
@@ -66,7 +86,7 @@ pub mod python_runtime;
 pub mod registry_sync;
 pub mod reply_directives;
 pub mod routing;
-pub use librefang_runtime_wasm::sandbox;
+pub mod sandbox;
 pub mod session_repair;
 pub mod silent_response;
 pub use silent_response::{is_silent_response, SilentReason};

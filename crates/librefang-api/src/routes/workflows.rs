@@ -109,8 +109,9 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
 }
 use crate::triggers::{Trigger, TriggerId, TriggerPatch, TriggerPattern};
 use crate::workflow::{
-    CancelRunError, ErrorMode, PauseRunError, StepAgent, StepMode, Workflow, WorkflowId,
-    WorkflowRun, WorkflowRunId, WorkflowRunState, WorkflowStep,
+    BranchArm, CancelRunError, ErrorMode, GateCondition, GateOp, PauseRunError, StepAgent,
+    StepMode, Workflow, WorkflowId, WorkflowInputParam, WorkflowRun, WorkflowRunId,
+    WorkflowRunState, WorkflowStep,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -149,11 +150,13 @@ fn workflow_to_json(w: &Workflow) -> serde_json::Value {
                 "error_mode": serde_json::to_value(&s.error_mode).unwrap_or_default(),
                 "output_var": s.output_var,
                 "depends_on": s.depends_on,
+                "session_mode": serde_json::to_value(s.session_mode).unwrap_or(serde_json::Value::Null),
             })
         }).collect::<Vec<_>>(),
         "created_at": w.created_at.to_rfc3339(),
         "layout": w.layout,
         "total_timeout_secs": w.total_timeout_secs,
+        "input_schema": w.input_schema.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null)),
     })
 }
 
@@ -209,6 +212,91 @@ fn parse_step_mode(val: &serde_json::Value, step: &serde_json::Value) -> StepMod
                     max_iterations,
                     until,
                 }
+            }
+            // Operator nodes (#4980). The flat-string forms read their
+            // configuration from sibling fields on the step object —
+            // mirrors the legacy `"conditional"` / `"loop"` shape, so
+            // the dashboard / TOML examples in the issue body can keep
+            // `mode = "wait"` with siblings `duration_secs = 5` etc.
+            "wait" => {
+                let duration_secs = step["duration_secs"].as_u64().unwrap_or_else(|| {
+                    warn!("wait step missing 'duration_secs' field, defaulting to 0");
+                    0
+                });
+                StepMode::Wait { duration_secs }
+            }
+            "gate" => {
+                // The `condition` field is a typed comparator AST
+                // (#4980 step 2). Parse it through serde so a malformed
+                // shape (missing `op`, unknown operator, wrong types)
+                // surfaces as a structured warn rather than silently
+                // defaulting to a passing gate. We fail-closed on error
+                // — `Eq` against `Value::Null` will fail any real input,
+                // making the misconfiguration loud rather than silent.
+                let condition: GateCondition = match step.get("condition") {
+                    Some(c) => match serde_json::from_value(c.clone()) {
+                        Ok(parsed) => parsed,
+                        Err(e) => {
+                            warn!(
+                                "gate step 'condition' failed to parse: {e}; failing closed with Eq=null"
+                            );
+                            GateCondition {
+                                field: None,
+                                op: GateOp::Eq,
+                                value: serde_json::Value::Null,
+                            }
+                        }
+                    },
+                    None => {
+                        warn!("gate step missing 'condition' field; failing closed with Eq=null");
+                        GateCondition {
+                            field: None,
+                            op: GateOp::Eq,
+                            value: serde_json::Value::Null,
+                        }
+                    }
+                };
+                StepMode::Gate { condition }
+            }
+            "approval" => {
+                let recipients: Vec<String> = step["recipients"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let timeout_secs = step["timeout_secs"].as_u64();
+                StepMode::Approval {
+                    recipients,
+                    timeout_secs,
+                }
+            }
+            "transform" => {
+                let code = step["code"]
+                    .as_str()
+                    .unwrap_or_else(|| {
+                        warn!("transform step missing 'code' field, defaulting to empty");
+                        ""
+                    })
+                    .to_string();
+                StepMode::Transform { code }
+            }
+            "branch" => {
+                let arms: Vec<BranchArm> = step["arms"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| {
+                                let then = v["then"].as_str()?.to_string();
+                                let match_value = v.get("match_value").cloned()?;
+                                Some(BranchArm { match_value, then })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                StepMode::Branch { arms }
             }
             _ => StepMode::Sequential,
         };
@@ -324,6 +412,90 @@ fn parse_error_mode(val: &serde_json::Value, step: &serde_json::Value) -> ErrorM
     ErrorMode::Fail
 }
 
+/// Parse an optional per-step `session_mode` from a step JSON object.
+///
+/// Absent or null returns `None` so HTTP callers don't trip on minor schema
+/// quirks; the kernel's resolver ("per-step > manifest > kernel default")
+/// then falls back to the agent manifest or kernel default. Accepted values
+/// for the field are `"persistent"` and `"new"` (the serde rename of
+/// `SessionMode`). Malformed values (typos, wrong types) also fall back to
+/// `None` but log a `WARN` so operators can spot a bad payload — silent
+/// drop is the bug class this PR works to prevent.
+fn parse_step_session_mode(
+    step: &serde_json::Value,
+) -> Option<librefang_types::agent::SessionMode> {
+    let raw = step.get("session_mode")?;
+    if raw.is_null() {
+        return None;
+    }
+    match serde_json::from_value::<librefang_types::agent::SessionMode>(raw.clone()) {
+        Ok(mode) => Some(mode),
+        Err(err) => {
+            tracing::warn!(
+                field = ?raw,
+                error = %err,
+                "ignoring malformed session_mode on workflow step; expected \"persistent\" or \"new\""
+            );
+            None
+        }
+    }
+}
+
+/// Parse the optional `input_schema` JSON field on a workflow payload
+/// (#4982 — gap 2 / parameter discovery).
+///
+/// Accepts:
+/// - `None` / absent / explicit `null` → returns `None` (workflow has no
+///   declared schema; the `workflow_describe` tool will auto-detect from
+///   `{{var}}` placeholders).
+/// - Empty array `[]` → returns `None` (no parameters declared).
+/// - Array of param objects → returns `Some(vec)`. Each malformed entry
+///   logs a `WARN` and is skipped rather than failing the whole request,
+///   matching the lenient style of `parse_step_session_mode`. The kernel
+///   stores whatever survives.
+///
+/// **Absent-vs-empty caveat:** the `None` return collapses three distinct
+/// caller intents — "field absent in JSON", "explicit `null`", and
+/// "explicit empty array `[]`". The PUT (`update_workflow`) handler can
+/// therefore NOT distinguish "remove the schema entirely" from "set to an
+/// empty list"; both clear `input_schema` on the persisted workflow. This
+/// is acceptable because an empty schema is semantically a workflow with
+/// no declared parameters — identical to "no schema declared" — so the
+/// dashboard / agent surface behaves the same in either case. Callers
+/// that need to *preserve* the existing schema MUST omit the key from
+/// the PUT body entirely (see the "PATCH-style" branch in
+/// `update_workflow`). If a future API ever needs to distinguish these
+/// three states, change the return shape (e.g. `Result<Option<_>, _>`
+/// or a custom three-state enum) and update both POST and PUT handlers.
+fn parse_input_schema(val: Option<&serde_json::Value>) -> Option<Vec<WorkflowInputParam>> {
+    let v = val?;
+    if v.is_null() {
+        return None;
+    }
+    let arr = v.as_array()?;
+    if arr.is_empty() {
+        return None;
+    }
+    let mut params: Vec<WorkflowInputParam> = Vec::with_capacity(arr.len());
+    for entry in arr {
+        match serde_json::from_value::<WorkflowInputParam>(entry.clone()) {
+            Ok(p) => params.push(p),
+            Err(err) => {
+                warn!(
+                    entry = ?entry,
+                    error = %err,
+                    "ignoring malformed input_schema entry on workflow payload",
+                );
+            }
+        }
+    }
+    if params.is_empty() {
+        None
+    } else {
+        Some(params)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Workflow routes
 // ---------------------------------------------------------------------------
@@ -392,11 +564,13 @@ pub async fn create_workflow(
             output_var: s["output_var"].as_str().map(String::from),
             inherit_context: s["inherit_context"].as_bool(),
             depends_on,
+            session_mode: parse_step_session_mode(s),
         });
     }
 
     let layout = req.get("layout").cloned();
     let total_timeout_secs = req["total_timeout_secs"].as_u64();
+    let input_schema = parse_input_schema(req.get("input_schema"));
 
     let workflow = Workflow {
         id: WorkflowId::new(),
@@ -406,7 +580,24 @@ pub async fn create_workflow(
         created_at: chrono::Utc::now(),
         layout,
         total_timeout_secs,
+        input_schema,
     };
+
+    // Pre-flight validation: reject manifests with empty Transform code,
+    // unparseable Tera templates, zero / over-cap Wait durations, the
+    // Gate parser's fail-closed sentinel, and empty Branch arms. Without
+    // this, operators only discovered the typo when a real run reached
+    // the bad step.
+    let validation_errs = workflow.validate();
+    if !validation_errs.is_empty() {
+        let detail = validation_errs
+            .iter()
+            .map(|(step, reason)| format!("step '{step}': {reason}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return ApiErrorResponse::bad_request(format!("invalid workflow: {detail}"))
+            .into_json_tuple();
+    }
 
     let id = state.kernel.register_workflow(workflow).await;
     (
@@ -666,6 +857,7 @@ pub async fn update_workflow(
                 output_var: s["output_var"].as_str().map(String::from),
                 inherit_context: s["inherit_context"].as_bool(),
                 depends_on,
+                session_mode: parse_step_session_mode(s),
             });
         }
         parsed_steps
@@ -687,6 +879,14 @@ pub async fn update_workflow(
         existing.total_timeout_secs
     };
 
+    // Same "PATCH-style" semantic for input_schema: an explicit key (even
+    // null / empty array) replaces; an absent key preserves.
+    let input_schema = if req.get("input_schema").is_some() {
+        parse_input_schema(req.get("input_schema"))
+    } else {
+        existing.input_schema.clone()
+    };
+
     let updated = Workflow {
         id: workflow_id,
         name,
@@ -695,7 +895,22 @@ pub async fn update_workflow(
         created_at: existing.created_at,
         layout,
         total_timeout_secs,
+        input_schema,
     };
+
+    // Same pre-flight validation as `create_workflow` — a PATCH that
+    // introduces a bad Transform template / empty Branch arms / etc.
+    // must fail at the route boundary, not silently at run time.
+    let validation_errs = updated.validate();
+    if !validation_errs.is_empty() {
+        let detail = validation_errs
+            .iter()
+            .map(|(step, reason)| format!("step '{step}': {reason}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return ApiErrorResponse::bad_request(format!("invalid workflow: {detail}"))
+            .into_json_tuple();
+    }
 
     if !state
         .kernel
@@ -895,49 +1110,59 @@ pub async fn run_workflow(
         let state_for_resolver = state_clone.clone();
         let state_for_sender = state_clone.clone();
         tokio::spawn(async move {
-            let result = state_clone
-                .kernel
-                .workflow_engine()
-                .execute_run(
-                    run_id_holder,
-                    move |agent_ref| {
-                        use librefang_kernel::workflow::StepAgent;
-                        match agent_ref {
-                            StepAgent::ById { id } => {
-                                let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
-                                let entry =
-                                    state_for_resolver.kernel.agent_registry().get(agent_id)?;
-                                let inherit = entry.manifest.inherit_parent_context;
-                                Some((agent_id, entry.name.clone(), inherit))
+            let result =
+                state_clone
+                    .kernel
+                    .workflow_engine()
+                    .execute_run(
+                        run_id_holder,
+                        move |agent_ref| {
+                            use librefang_kernel::workflow::StepAgent;
+                            match agent_ref {
+                                StepAgent::ById { id } => {
+                                    let agent_id: librefang_types::agent::AgentId =
+                                        id.parse().ok()?;
+                                    let entry =
+                                        state_for_resolver.kernel.agent_registry().get(agent_id)?;
+                                    let inherit = entry.manifest.inherit_parent_context;
+                                    Some((agent_id, entry.name.clone(), inherit))
+                                }
+                                StepAgent::ByName { name } => {
+                                    let entry = state_for_resolver
+                                        .kernel
+                                        .agent_registry()
+                                        .find_by_name(name)?;
+                                    let inherit = entry.manifest.inherit_parent_context;
+                                    Some((entry.id, entry.name.clone(), inherit))
+                                }
                             }
-                            StepAgent::ByName { name } => {
-                                let entry = state_for_resolver
-                                    .kernel
-                                    .agent_registry()
-                                    .find_by_name(name)?;
-                                let inherit = entry.manifest.inherit_parent_context;
-                                Some((entry.id, entry.name.clone(), inherit))
-                            }
-                        }
-                    },
-                    move |agent_id: librefang_types::agent::AgentId, message: String| {
-                        let sc = state_for_sender.clone();
-                        async move {
-                            sc.kernel
-                                .send_message(agent_id, &message)
-                                .await
-                                .map(|r| {
-                                    (
-                                        r.response,
-                                        r.total_usage.input_tokens,
-                                        r.total_usage.output_tokens,
+                        },
+                        move |agent_id: librefang_types::agent::AgentId,
+                              message: String,
+                              session_mode_override: Option<
+                            librefang_types::agent::SessionMode,
+                        >| {
+                            let sc = state_for_sender.clone();
+                            async move {
+                                sc.kernel
+                                    .send_message_with_session_mode(
+                                        agent_id,
+                                        &message,
+                                        session_mode_override,
                                     )
-                                })
-                                .map_err(|e| format!("{e}"))
-                        }
-                    },
-                )
-                .await;
+                                    .await
+                                    .map(|r| {
+                                        (
+                                            r.response,
+                                            r.total_usage.input_tokens,
+                                            r.total_usage.output_tokens,
+                                        )
+                                    })
+                                    .map_err(|e| format!("{e}"))
+                            }
+                        },
+                    )
+                    .await;
             if let Err(e) = result {
                 tracing::warn!(
                     run_id = %run_id_holder,
@@ -1352,11 +1577,19 @@ pub async fn resume_workflow_run(
                 run_id,
                 token,
                 agent_resolver,
-                move |agent_id: librefang_types::agent::AgentId, message: String| {
+                move |agent_id: librefang_types::agent::AgentId,
+                      message: String,
+                      session_mode_override: Option<
+                    librefang_types::agent::SessionMode,
+                >| {
                     let sc = state_for_send_fn.clone();
                     async move {
                         sc.kernel
-                            .send_message(agent_id, &message)
+                            .send_message_with_session_mode(
+                                agent_id,
+                                &message,
+                                session_mode_override,
+                            )
                             .await
                             .map(|r| {
                                 (
@@ -2911,6 +3144,23 @@ pub async fn instantiate_template(
             return ApiErrorResponse::bad_request(e).into_json_tuple();
         }
     };
+
+    // Same pre-flight validation as the direct /workflows endpoints —
+    // an instantiated template can produce a workflow whose Transform
+    // code / Wait duration / etc. is invalid (template-author error),
+    // surface that here rather than at run time.
+    let validation_errs = workflow.validate();
+    if !validation_errs.is_empty() {
+        let detail = validation_errs
+            .iter()
+            .map(|(step, reason)| format!("step '{step}': {reason}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return ApiErrorResponse::bad_request(format!(
+            "template '{id}' instantiated to an invalid workflow: {detail}"
+        ))
+        .into_json_tuple();
+    }
 
     let workflow_id = state.kernel.register_workflow(workflow).await;
     (

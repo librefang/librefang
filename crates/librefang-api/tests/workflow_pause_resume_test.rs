@@ -258,7 +258,9 @@ async fn resume_with_wrong_token_returns_401() {
         .execute_run(
             run_id,
             |_agent| Some((AgentId::new(), "mock".to_string(), false)),
-            |_id: AgentId, _msg: String| async { Ok(("done".to_string(), 0u64, 0u64)) },
+            |_id: AgentId, _msg: String, _sm: Option<librefang_types::agent::SessionMode>| async {
+                Ok(("done".to_string(), 0u64, 0u64))
+            },
         )
         .await
         .expect("execute_run should pause cleanly");
@@ -452,7 +454,9 @@ async fn pause_then_resume_via_http_completes_workflow() {
         .execute_run(
             run_id,
             |_agent| Some((AgentId::new(), "mock".to_string(), false)),
-            |_id: AgentId, _msg: String| async { Ok(("done".to_string(), 0u64, 0u64)) },
+            |_id: AgentId, _msg: String, _sm: Option<librefang_types::agent::SessionMode>| async {
+                Ok(("done".to_string(), 0u64, 0u64))
+            },
         )
         .await
         .expect("execute_run should pause cleanly");
@@ -574,15 +578,20 @@ async fn post_run_wait_true_returns_200_with_output() {
 }
 
 /// POST /run with ?wait=true&timeout_ms=1 on a workflow that can't run
-/// immediately returns 202 (timeout path).
+/// immediately: the handler must not hang or panic. Status is one of
+/// 202 (timeout fired first) / 200 (workflow finished first) /
+/// 422 (workflow surfaced an error first) — all three are valid race
+/// outcomes for a 1ms timeout against a real engine; we just assert
+/// the response is well-formed.
 #[tokio::test(flavor = "multi_thread")]
-async fn post_run_wait_true_with_zero_timeout_returns_202_on_overrun() {
+async fn post_run_wait_true_with_short_timeout_does_not_hang() {
     let h = boot().await;
     let wf_id_str = create_workflow(&h).await;
 
-    // Use an extremely short timeout (1ms) so it almost certainly times out
-    // before the workflow completes (even if it fails quickly, the timeout
-    // fires in the same select branch).
+    // 1ms is deliberately not 0: `timeout_ms=0` is exercised separately
+    // (see `post_run_wait_true_with_zero_timeout_returns_202`) because
+    // a zero duration short-circuits the select! arm deterministically,
+    // whereas 1ms genuinely races the workflow against the timer.
     let path = format!("/api/workflows/{}/run?wait=true&timeout_ms=1", wf_id_str);
     let (status, body) = json_request(
         &h,
@@ -592,14 +601,52 @@ async fn post_run_wait_true_with_zero_timeout_returns_202_on_overrun() {
     )
     .await;
 
-    // On timeout: 202. On immediate completion (success or fail): 200 or 422.
-    // Either is acceptable — what's NOT acceptable is a hang or panic.
-    // We just verify the status is in the expected set.
     assert!(
         matches!(
             status,
             StatusCode::ACCEPTED | StatusCode::OK | StatusCode::UNPROCESSABLE_ENTITY
         ),
-        "unexpected status from timeout run: {status} {body:?}"
+        "unexpected status from short-timeout run: {status} {body:?}"
+    );
+}
+
+/// POST /run with ?wait=true&timeout_ms=0 — `tokio::time::timeout` polls
+/// the run future once before the timer arm; depending on platform
+/// scheduling, either side may resolve first:
+///
+/// * Future Pending on first poll → timer fires immediately (ZERO
+///   elapsed) → 202 (the original intent of `timeout_ms=0`).
+/// * Future Ready on first poll → workflow's synchronous prelude
+///   (e.g. agent-id lookup against a registry that does not contain a
+///   matching entry) surfaces an error before any await point →
+///   422 from the `Some(Err(_))` arm.
+///
+/// On macOS the run path's sync prelude consistently wins the race
+/// (see the panic that triggered #5033 follow-up); on Linux + Windows
+/// the timer arm wins. Both outcomes prove the timer arm was wired —
+/// what we MUST reject is `200 OK`, which would mean the workflow
+/// completed its full run in zero ms (bypassing the timer entirely and
+/// returning a successful payload). That is the regression we pin.
+#[tokio::test(flavor = "multi_thread")]
+async fn post_run_wait_true_with_zero_timeout_does_not_return_ok() {
+    let h = boot().await;
+    let wf_id_str = create_workflow(&h).await;
+
+    let path = format!("/api/workflows/{}/run?wait=true&timeout_ms=0", wf_id_str);
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &path,
+        Some(serde_json::json!({"input": "hello"})),
+    )
+    .await;
+
+    assert!(
+        matches!(
+            status,
+            StatusCode::ACCEPTED | StatusCode::UNPROCESSABLE_ENTITY
+        ),
+        "timeout_ms=0 must not return 200 OK (workflow cannot complete in zero ms); \
+         got: {status} {body:?}"
     );
 }

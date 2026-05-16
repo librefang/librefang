@@ -757,6 +757,7 @@ impl QwenCodeDriver {
                     output_tokens: usage.output_tokens,
                     ..Default::default()
                 },
+                actual_provider: None,
             });
         }
 
@@ -773,6 +774,7 @@ impl QwenCodeDriver {
             stop_reason: StopReason::EndTurn,
             tool_calls: Vec::new(),
             usage,
+            actual_provider: None,
         })
     }
 
@@ -988,6 +990,7 @@ impl QwenCodeDriver {
             stop_reason: StopReason::EndTurn,
             tool_calls: Vec::new(),
             usage: final_usage,
+            actual_provider: None,
         })
     }
 }
@@ -1135,6 +1138,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1188,6 +1192,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1268,6 +1273,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1373,6 +1379,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1421,6 +1428,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1660,6 +1668,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1718,6 +1727,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,

@@ -738,6 +738,7 @@ impl LlmDriver for OllamaDriver {
             stop_reason,
             tool_calls,
             usage,
+            actual_provider: None,
         })
     }
 
@@ -985,6 +986,7 @@ impl LlmDriver for OllamaDriver {
             stop_reason,
             tool_calls,
             usage,
+            actual_provider: None,
         })
     }
 
@@ -1043,6 +1045,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,

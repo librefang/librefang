@@ -589,6 +589,7 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, LlmError
         stop_reason,
         tool_calls,
         usage,
+        actual_provider: None,
     })
 }
 
@@ -851,6 +852,7 @@ pub(crate) async fn stream_gemini_sse(
         stop_reason,
         tool_calls,
         usage,
+        actual_provider: None,
     })
 }
 
@@ -1349,6 +1351,7 @@ impl LlmDriver for GeminiDriver {
                 stop_reason,
                 tool_calls,
                 usage,
+                actual_provider: None,
             });
         }
 
@@ -1546,6 +1549,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1573,6 +1577,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,

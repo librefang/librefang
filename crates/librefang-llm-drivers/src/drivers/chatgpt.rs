@@ -17,7 +17,63 @@ use zeroize::Zeroizing;
 
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmError, StreamEvent};
 use futures::StreamExt;
-use librefang_runtime_oauth::chatgpt_oauth::CHATGPT_BASE_URL;
+// `chatgpt_oauth` lived in `librefang-runtime-oauth` until #3710 Phase 2
+// collapsed that crate back into `librefang-runtime`. The interactive
+// browser/device flows still live there (used by CLI). This file only
+// needs the bits the driver itself touches at runtime: the base URL,
+// the refresh-token endpoint, and the auth-result shape. Inlined here to
+// avoid a circular dep — `librefang-runtime` now depends on
+// `librefang-llm-drivers`, so `llm-drivers` cannot import from it.
+const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api";
+const CHATGPT_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const CHATGPT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+
+struct ChatGptAuthResult {
+    access_token: Zeroizing<String>,
+    expires_in: Option<u64>,
+}
+
+async fn refresh_chatgpt_access_token(refresh_token: &str) -> Result<ChatGptAuthResult, String> {
+    let params = [
+        ("grant_type", "refresh_token"),
+        ("client_id", CHATGPT_CLIENT_ID),
+        ("refresh_token", refresh_token),
+    ];
+
+    let client = librefang_http::proxied_client();
+    let resp = client
+        .post(CHATGPT_TOKEN_URL)
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("Token refresh request failed: {e}"))?;
+
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read refresh response: {e}"))?;
+
+    if !status.is_success() {
+        return Err(format!("Token refresh failed (HTTP {status}): {body}"));
+    }
+
+    let json: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("Failed to parse refresh response JSON: {e}"))?;
+
+    let access_token = json
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing access_token in refresh response".to_string())?
+        .to_string();
+
+    let expires_in = json.get("expires_in").and_then(|v| v.as_u64());
+
+    Ok(ChatGptAuthResult {
+        access_token: Zeroizing::new(access_token),
+        expires_in,
+    })
+}
 use librefang_types::config::ResponseFormat;
 use librefang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use librefang_types::tool::ToolCall;
@@ -302,7 +358,7 @@ impl ChatGptDriver {
         debug!("ChatGPT session token rejected; attempting OAuth refresh (single-flight)");
         let auth = tokio::time::timeout(
             Duration::from_secs(TOKEN_REFRESH_TIMEOUT_SECS),
-            librefang_runtime_oauth::chatgpt_oauth::refresh_access_token(&refresh_tok),
+            refresh_chatgpt_access_token(&refresh_tok),
         )
         .await
         .map_err(|_| {
@@ -827,6 +883,7 @@ impl ChatGptDriver {
             stop_reason,
             tool_calls,
             usage,
+            actual_provider: None,
         })
     }
 
@@ -1222,6 +1279,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1263,6 +1321,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -1295,6 +1354,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: Some(ResponseFormat::Json),
             timeout_secs: None,
             extra_body: None,
@@ -1326,6 +1386,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: Some(ResponseFormat::JsonSchema {
                 name: "answer".to_string(),
                 schema: serde_json::json!({

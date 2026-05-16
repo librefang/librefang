@@ -279,8 +279,25 @@ pub(super) fn safe_path_component(input: &str, fallback: &str) -> String {
 }
 
 pub(super) fn has_unsafe_relative_components(path: &Path) -> bool {
-    path.components()
-        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+    // `ParentDir` (..) is always unsafe — it can escape the workspaces root
+    // after joining regardless of the rest of the path.
+    //
+    // `Prefix` (Windows drive / UNC prefix like `C:` or `\\?\C:`) is unsafe
+    // ONLY when the path is not already absolute. A fully absolute Windows
+    // path *always* begins with a `Prefix` component (e.g. `C:\Users\foo`
+    // decomposes into `Prefix("C:")`, `RootDir`, `Normal("Users")`, …), so
+    // treating `Prefix` as unsafe unconditionally rejects every well-formed
+    // absolute path on Windows — including ones already validated by
+    // `starts_with(workspaces_root)`. What we actually want to block is
+    // drive-relative inputs like `C:foo` where `is_absolute()` is false yet
+    // the components still carry a `Prefix` that would let the path escape
+    // a `<root>.join(rel)` operation.
+    let is_absolute = path.is_absolute();
+    path.components().any(|c| match c {
+        Component::ParentDir => true,
+        Component::Prefix(_) => !is_absolute,
+        _ => false,
+    })
 }
 
 pub(super) fn resolve_workspace_dir(
@@ -298,7 +315,28 @@ pub(super) fn resolve_workspace_dir(
     let root = workspaces_root.to_path_buf();
 
     if let Some(path) = requested {
-        if path.is_absolute() || has_unsafe_relative_components(&path) {
+        // Reject `..` traversal or Windows drive prefixes anywhere in the
+        // requested path — these can escape `workspaces_root` even after
+        // joining and must never be honoured.
+        if has_unsafe_relative_components(&path) {
+            return Err(KernelError::LibreFang(LibreFangError::Internal(
+                "Invalid workspace path".to_string(),
+            )));
+        }
+        // Refs #4991: an absolute path is acceptable iff it lies inside
+        // `workspaces_root`. Spawn previously rewrote `manifest.workspace`
+        // to the resolved absolute directory and `persist_manifest_to_disk`
+        // round-tripped it back into `agent.toml`. Re-spawning the agent
+        // (recreate after delete, template instantiation, daemon restart)
+        // would then feed that absolute path back through this helper and
+        // hit the blanket `is_absolute()` reject below — hence the
+        // user-visible `Internal error: Invalid workspace path` 500 on
+        // recreate with a previously-used name. Accept absolute paths
+        // under the root; everything outside still fails closed.
+        if path.is_absolute() {
+            if path.starts_with(&root) {
+                return Ok(path);
+            }
             return Err(KernelError::LibreFang(LibreFangError::Internal(
                 "Invalid workspace path".to_string(),
             )));

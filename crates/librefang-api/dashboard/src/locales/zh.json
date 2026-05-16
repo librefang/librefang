@@ -137,6 +137,7 @@
     },
     "copy": "复制",
     "add_more": "添加更多…",
+    "press_enter_to_add": "按回车添加 “{{value}}”",
     "always": "始终",
     "auto": "自动",
     "clear_filters": "清除筛选",
@@ -373,6 +374,8 @@
       "tags_placeholder": "beta, research",
       "skills": "技能",
       "skills_placeholder": "留空=可用全部技能",
+      "skills_hint": "留空=可使用全部已安装技能。",
+      "skills_search_placeholder": "搜索已安装的技能…",
       "mcp_servers": "MCP 服务器",
       "mcp_servers_placeholder": "留空=可用全部已连接服务器",
       "live_toml": "TOML 实时预览",
@@ -397,6 +400,7 @@
       "cpu_time_ms": "最长 CPU 时间 (毫秒)",
       "cap_tools": "工具 ID 白名单",
       "cap_tools_hint": "允许调用的工具 ID。留空=不在此层限制。",
+      "cap_tools_search_placeholder": "搜索工具…",
       "memory_read": "内存读取作用域",
       "memory_write": "内存写入作用域",
       "agent_message": "可发消息的智能体",
@@ -1500,6 +1504,7 @@
     "run_history": "运行历史",
     "prompt_sent": "发送的提示词：",
     "output": "输出：",
+    "generated_images": "生成的图片：",
     "loading_details": "正在加载详情…"
   },
   "scheduler": {

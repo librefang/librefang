@@ -113,6 +113,7 @@ impl LibreFangKernel {
             new_messages_start: 0,
             skill_evolution_suggested: false,
             owner_notice: None,
+            actual_provider: None,
         })
     }
 
@@ -188,6 +189,7 @@ impl LibreFangKernel {
             new_messages_start: 0,
             skill_evolution_suggested: false,
             owner_notice: None,
+            actual_provider: None,
         })
     }
 
@@ -555,6 +557,12 @@ impl LibreFangKernel {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let agent_id_str = agent_id.0.to_string();
+            // One pass over `tools` produces both the name list (for the
+            // hook payload + `PromptContext::granted_tools`) and the
+            // description hint map (for `PromptContext::granted_tool_hints`).
+            // Avoids three separate walks per send (#4805 review).
+            let (granted_tool_names, granted_tool_hints) =
+                librefang_runtime::prompt_builder::collect_granted_tool_names_and_hints(&tools);
             let hook_ctx = librefang_runtime::hooks::HookContext {
                 agent_name: &manifest.name,
                 agent_id: agent_id_str.as_str(),
@@ -567,7 +575,7 @@ impl LibreFangKernel {
                     "channel_type": sender_context.map(|s| s.channel.clone()),
                     "is_group": sender_context.map(|s| s.is_group).unwrap_or(false),
                     "is_subagent": is_subagent_flag,
-                    "granted_tools": tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+                    "granted_tools": granted_tool_names,
                 }),
             };
             let dynamic_sections = self.governance.hooks.collect_prompt_sections(&hook_ctx);
@@ -589,7 +597,8 @@ impl LibreFangKernel {
                 agent_name: manifest.name.clone(),
                 agent_description: manifest.description.clone(),
                 base_system_prompt: manifest.model.system_prompt.clone(),
-                granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
+                granted_tools: granted_tool_names,
+                granted_tool_hints,
                 recalled_memories: vec![], // Recalled in agent_loop, not here
                 skill_summary: skill_meta
                     .as_ref()
@@ -674,6 +683,16 @@ impl LibreFangKernel {
                 "prompt_caching".to_string(),
                 serde_json::Value::Bool(cfg.prompt_caching),
             );
+            // Pass the prompt-cache strategy (#4970) as a string —
+            // the agent loop parses it back into a `PromptCacheStrategy`.
+            manifest.metadata.insert(
+                "prompt_cache_strategy".to_string(),
+                serde_json::Value::String(cfg.prompt_cache.strategy.to_string()),
+            );
+            manifest.metadata.insert(
+                "prompt_cache_ttl_hint_secs".to_string(),
+                serde_json::Value::from(cfg.prompt_cache.cache_ttl_hint_secs),
+            );
 
             // Pass privacy config to the agent loop via metadata.
             if let Ok(privacy_json) = serde_json::to_value(&cfg.privacy) {
@@ -717,6 +736,7 @@ impl LibreFangKernel {
                 thinking: None,
                 prompt_caching: false,
                 cache_ttl: None,
+                prompt_cache_strategy: None,
                 response_format: None,
                 timeout_secs: None,
                 extra_body: None,
@@ -925,6 +945,14 @@ impl LibreFangKernel {
         self.agents
             .session_interrupts
             .insert((agent_id, effective_session_id), session_interrupt.clone());
+        // #4976: merge per-agent [compaction] overrides on top of the
+        // kernel-global config so the in-loop ContextCompressor honours
+        // this agent's keep_recent / max_summary_tokens /
+        // token_threshold_ratio.
+        let compaction_snapshot = match manifest.compaction.as_ref() {
+            Some(o) if !o.is_empty() => o.resolve(&cfg.compaction),
+            _ => cfg.compaction.clone(),
+        };
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: false,
             incognito,
@@ -935,6 +963,8 @@ impl LibreFangKernel {
             aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: None,
             tool_results_config: Some(cfg.tool_results.clone()),
+            compaction_config: Some(compaction_snapshot),
+            gateway_compression: Some(cfg.gateway_compression.clone()),
         };
 
         // Build a per-execution MCP pool that includes the agent workspace as
@@ -1146,9 +1176,19 @@ impl LibreFangKernel {
         let attribution_user_id: Option<UserId> =
             sender_context.and_then(|sc| self.security.auth.identify(&sc.channel, &sc.user_id));
         let attribution_channel: Option<String> = sender_context.map(|sc| sc.channel.clone());
+        // #4807 review nit 10: when the LLM fallback chain redirected
+        // the request to an alternative slot, bill the *actual* serving
+        // provider rather than the manifest-nominated one. The agent
+        // loop forwards `actual_provider` off the response's
+        // `CompletionResponse.actual_provider` field, which
+        // `FallbackDriver` / `FallbackChain` populate on success.
+        let billed_provider = result
+            .actual_provider
+            .clone()
+            .unwrap_or_else(|| manifest.model.provider.clone());
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
-            provider: manifest.model.provider.clone(),
+            provider: billed_provider,
             model: model.clone(),
             input_tokens: result.total_usage.input_tokens,
             output_tokens: result.total_usage.output_tokens,

@@ -1453,6 +1453,7 @@ impl LlmDriver for OpenAIDriver {
                 stop_reason,
                 tool_calls,
                 usage,
+                actual_provider: None,
             });
         }
 
@@ -2129,6 +2130,7 @@ impl LlmDriver for OpenAIDriver {
                 stop_reason,
                 tool_calls,
                 usage,
+                actual_provider: None,
             });
         }
 
@@ -2323,6 +2325,7 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
                     output_tokens: 0,
                     ..Default::default()
                 },
+                actual_provider: None,
             });
         }
         return None;
@@ -2337,6 +2340,7 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
             output_tokens: 0,
             ..Default::default()
         },
+        actual_provider: None,
     })
 }
 
@@ -2807,6 +2811,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -2859,6 +2864,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -2914,6 +2920,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -2971,6 +2978,7 @@ mod tests {
                 thinking: None,
                 prompt_caching: false,
                 cache_ttl: None,
+                prompt_cache_strategy: None,
                 response_format: None,
                 timeout_secs: None,
                 extra_body: None,
@@ -3034,6 +3042,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
@@ -3132,6 +3141,7 @@ mod tests {
             thinking: None,
             prompt_caching: false,
             cache_ttl: None,
+            prompt_cache_strategy: None,
             response_format: None,
             timeout_secs: None,
             extra_body: None,
