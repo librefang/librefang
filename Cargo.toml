@@ -27,6 +27,7 @@ members = [
     "crates/librefang-hands",
     "crates/librefang-extensions",
     "crates/librefang-telemetry",
+    "crates/librefang-rl-export",
     "xtask",
     "crates/librefang-testing",
 ]
