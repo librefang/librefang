@@ -4213,11 +4213,58 @@ impl WorkflowEngine {
                     );
 
                     // Advance the cursor so the pause snapshot
-                    // points at the *next* step. The pause-request
-                    // gate at the top of the while loop will then
-                    // observe the pending request and persist
-                    // `paused_step_index = i+1`.
+                    // points at the *next* step. We then drive the
+                    // pause snapshot inline — relying on the
+                    // pause-request gate at the top of the next
+                    // iteration is unsound when the operator step is
+                    // the last step in the workflow: the `while i <
+                    // workflow.steps.len()` condition would fail
+                    // before the gate runs, and the function would
+                    // fall through to the Completed transition with
+                    // an orphan `pause_request` (caught by
+                    // `execute_run_operator_step_pauses_with_resume_token`).
+                    // Mirror the gate's atomic take-and-snapshot
+                    // exactly so the two paths stay in lockstep.
                     i += 1;
+                    let pending_pause = if let Some(mut run) = self.runs.get_mut(&run_id) {
+                        if let Some(pause) = run.pause_request.take() {
+                            run.paused_step_index = Some(i);
+                            run.paused_variables = variables
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                            run.paused_current_input = Some(current_input.clone());
+                            run.state = WorkflowRunState::Paused {
+                                resume_token_hash: pause.resume_token_hash.clone(),
+                                reason: pause.reason.clone(),
+                                paused_at: Utc::now(),
+                            };
+                            Some(pause)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(pause) = pending_pause {
+                        // Persist immediately — same SIGKILL-safety
+                        // reasoning as the loop-top gate.
+                        if let Some(run) = self.runs.get(&run_id) {
+                            self.upsert_run_to_store(&run);
+                        }
+                        info!(
+                            run_id = %run_id,
+                            resume_step = i,
+                            reason = %pause.reason,
+                            "Workflow run paused at operator step boundary"
+                        );
+                        return Ok(current_input);
+                    }
+                    // No pause was actually lodged (idempotency
+                    // branch above declined because a caller-driven
+                    // pause was already pending). Continue so the
+                    // loop-top gate handles that pre-existing pause
+                    // on the next iteration.
                     continue;
                 }
             }
@@ -10133,7 +10180,8 @@ name = "topic"
         );
         let errs = wf.validate();
         assert!(
-            errs.iter().any(|(_, r)| r.contains("unknown channel scheme")),
+            errs.iter()
+                .any(|(_, r)| r.contains("unknown channel scheme")),
             "expected unknown-scheme rejection; got: {errs:?}"
         );
     }
@@ -10240,16 +10288,17 @@ name = "topic"
             .expect("create_run");
 
         let result = engine
-            .execute_run(
-                run_id,
-                mock_resolver,
-                |_id, _prompt, _mode| async { Ok(("ignored".to_string(), 0u64, 0u64)) },
-            )
+            .execute_run(run_id, mock_resolver, |_id, _prompt, _mode| async {
+                Ok(("ignored".to_string(), 0u64, 0u64))
+            })
             .await;
         // The skeleton executor pauses cleanly — `execute_run` returns
         // Ok with the input value (pass-through) once Paused state is
         // observed at the next step boundary.
-        assert!(result.is_ok(), "operator pause should return Ok: {result:?}");
+        assert!(
+            result.is_ok(),
+            "operator pause should return Ok: {result:?}"
+        );
 
         let run = engine.get_run(run_id).await.expect("run exists");
         assert!(
