@@ -1766,9 +1766,9 @@ admin_role = "admin"
             # operator's intent was lost.
             defaul_agent = "research"
         "#;
-        let err = toml::from_str::<KernelConfig>(toml_src)
-            .err()
-            .expect("typo inside [[channels.telegram]] must be rejected by deny_unknown_fields");
+        let err = toml::from_str::<KernelConfig>(toml_src).expect_err(
+            "typo inside [[channels.telegram]] must be rejected by deny_unknown_fields",
+        );
         let msg = err.to_string();
         assert!(
             msg.contains("defaul_agent") || msg.contains("unknown field"),
@@ -1785,8 +1785,7 @@ admin_role = "admin"
             timout_secs = 30
         "#;
         let err = toml::from_str::<KernelConfig>(toml_src)
-            .err()
-            .expect("typo inside [[mcp_servers]] must be rejected by deny_unknown_fields");
+            .expect_err("typo inside [[mcp_servers]] must be rejected by deny_unknown_fields");
         let msg = err.to_string();
         assert!(
             msg.contains("timout_secs") || msg.contains("unknown field"),
