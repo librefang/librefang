@@ -42,6 +42,8 @@ pub enum HotAction {
     ReloadA2aConfig,
     /// Fallback provider chain changed.
     ReloadFallbackProviders,
+    /// Credential pool configuration changed — rebuild pools.
+    ReloadCredentialPools,
     /// Provider base URL overrides changed.
     ReloadProviderUrls,
     /// Default model changed — update in-place without restart.
@@ -361,6 +363,10 @@ pub fn build_reload_plan_with_caps(
 
     if field_changed(&old.fallback_providers, &new.fallback_providers) {
         plan.hot_actions.push(HotAction::ReloadFallbackProviders);
+    }
+
+    if field_changed(&old.credential_pools, &new.credential_pools) {
+        plan.hot_actions.push(HotAction::ReloadCredentialPools);
     }
 
     if field_changed(&old.provider_urls, &new.provider_urls)

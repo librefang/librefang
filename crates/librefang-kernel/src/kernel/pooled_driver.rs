@@ -39,53 +39,119 @@ impl PooledDriver {
             base_config,
         }
     }
-}
 
-#[async_trait]
-impl LlmDriver for PooledDriver {
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let api_key = self.pool.acquire().ok_or_else(|| LlmError::Api {
+    /// Build a DriverConfig patched with the given API key, then get or create
+    /// the inner driver from the cache.
+    fn inner_driver(&self, api_key: &str) -> Result<Arc<dyn LlmDriver>, LlmError> {
+        let mut config = self.base_config.clone();
+        config.api_key = Some(api_key.to_string());
+        self.driver_cache.get_or_create(&config)
+    }
+
+    /// Acquire a key from the pool or return a 503-style error.
+    fn acquire(&self) -> Result<String, LlmError> {
+        self.pool.acquire().ok_or_else(|| LlmError::Api {
             status: 503,
             message:
                 "All credential pool keys exhausted — no available credentials for this provider"
                     .into(),
             code: None,
-        })?;
+        })
+    }
 
-        let mut config = self.base_config.clone();
-        config.api_key = Some(api_key.clone());
+    /// Classify a driver error and report it to the credential pool.
+    ///
+    /// Classification policy:
+    /// - `RateLimit` (429): mark exhausted (caller already retried once for
+    ///   `complete()`; `stream()` has no retry).
+    /// - `CreditExhausted` (402): mark exhausted (1h cooldown).
+    /// - `AuthError` (401/bad key): mark **permanently** exhausted — the key
+    ///   is invalid and must be replaced outside the pool.
+    /// - `HttpError` (other 4xx/5xx including 403): mark exhausted — treat
+    ///   any provider-side error as a reason to rotate.
+    /// - `ModelUnavailable` / `Timeout`: don't mark the key — these are
+    ///   provider-side issues, not key-specific.
+    /// - `ContextTooLong` / `Unknown`: propagate without marking.
+    fn handle_driver_error(&self, api_key: &str, error: &LlmError) {
+        use librefang_llm_driver::llm_errors::FailoverReason;
+        match error.failover_reason() {
+            FailoverReason::RateLimit(_) => {
+                self.pool.mark_exhausted(api_key);
+            }
+            FailoverReason::CreditExhausted => {
+                self.pool.mark_exhausted(api_key);
+            }
+            FailoverReason::AuthError => {
+                self.pool.mark_permanent(api_key);
+            }
+            FailoverReason::HttpError => {
+                self.pool.mark_exhausted(api_key);
+            }
+            FailoverReason::ModelUnavailable | FailoverReason::Timeout => {}
+            FailoverReason::ContextTooLong | FailoverReason::Unknown => {}
+        }
+    }
+}
 
-        let driver = self.driver_cache.get_or_create(&config)?;
+#[async_trait]
+impl LlmDriver for PooledDriver {
+    /// Complete a non-streaming request with automatic 429 retry-once.
+    ///
+    /// If the first attempt returns a rate-limit error, the request is retried
+    /// once with the same key. If the retry also fails (any error, including
+    /// a second 429), the key is marked exhausted and the error is propagated.
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let api_key = self.acquire()?;
+        let driver = self.inner_driver(&api_key)?;
 
+        // Clone before first attempt so the request is still owned for the
+        // potential retry. CompletionRequest wraps messages/tools in Arc, so
+        // clone is cheap (refcount bump, not deep copy).
+        let retry_request = request.clone();
+
+        // First attempt.
         match driver.complete(request).await {
+            Ok(response) => {
+                self.pool.mark_success(&api_key);
+                return Ok(response);
+            }
+            Err(first_err) => {
+                // Retry once on rate-limit, propagate all other errors.
+                let reason = first_err.failover_reason();
+                if !matches!(
+                    reason,
+                    librefang_llm_driver::llm_errors::FailoverReason::RateLimit(_)
+                ) {
+                    self.handle_driver_error(&api_key, &first_err);
+                    return Err(first_err);
+                }
+            }
+        }
+
+        // Retry with the same key.
+        let driver = self.inner_driver(&api_key)?;
+        match driver.complete(retry_request).await {
             Ok(response) => {
                 self.pool.mark_success(&api_key);
                 Ok(response)
             }
-            Err(e) => {
-                self.handle_driver_error(&api_key, &e);
-                Err(e)
+            Err(retry_err) => {
+                self.handle_driver_error(&api_key, &retry_err);
+                Err(retry_err)
             }
         }
     }
 
+    /// Stream a response. Does not retry on 429 (partial stream events cannot
+    /// be replayed), but still marks the key exhausted so the next call picks
+    /// a fresh credential.
     async fn stream(
         &self,
         request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
-        let api_key = self.pool.acquire().ok_or_else(|| LlmError::Api {
-            status: 503,
-            message:
-                "All credential pool keys exhausted — no available credentials for this provider"
-                    .into(),
-            code: None,
-        })?;
-
-        let mut config = self.base_config.clone();
-        config.api_key = Some(api_key.clone());
-
-        let driver = self.driver_cache.get_or_create(&config)?;
+        let api_key = self.acquire()?;
+        let driver = self.inner_driver(&api_key)?;
 
         match driver.stream(request, tx).await {
             Ok(response) => {
@@ -96,40 +162,6 @@ impl LlmDriver for PooledDriver {
                 self.handle_driver_error(&api_key, &e);
                 Err(e)
             }
-        }
-    }
-}
-
-impl PooledDriver {
-    /// Classify a driver error and report it to the credential pool so
-    /// exhausted / invalid keys are rotated out.
-    fn handle_driver_error(&self, api_key: &str, error: &LlmError) {
-        use librefang_llm_driver::llm_errors::FailoverReason;
-        match error.failover_reason() {
-            // Rate-limited: mark exhausted so the pool rotates to another key.
-            // The key becomes available again after the pool's default cooldown
-            // (1 hour).
-            FailoverReason::RateLimit(_) => {
-                self.pool.mark_exhausted(api_key);
-            }
-            // Billing / credit exhausted: mark exhausted with a cooldown so
-            // the key isn't tried again until the billing cycle resets.
-            FailoverReason::CreditExhausted => {
-                self.pool.mark_exhausted(api_key);
-            }
-            // Auth failure: mark exhausted permanently (the pool's cooldown
-            // will prevent reuse for the default TTL; subsequent success
-            // from another path would clear it via mark_success).
-            FailoverReason::AuthError => {
-                self.pool.mark_exhausted(api_key);
-            }
-            // Model unavailable / timeout / http error: don't mark the key as
-            // exhausted — these are provider-side issues, not key-specific.
-            FailoverReason::ModelUnavailable
-            | FailoverReason::Timeout
-            | FailoverReason::HttpError => {}
-            // Context too long / unknown: propagate without marking the key.
-            FailoverReason::ContextTooLong | FailoverReason::Unknown => {}
         }
     }
 }

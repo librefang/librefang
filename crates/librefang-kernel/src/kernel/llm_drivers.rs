@@ -134,10 +134,11 @@ impl LibreFangKernel {
         };
 
         // Check for a credential pool for this provider.
-        // If the pool exists and has at least one available key, create a
-        // PooledDriver that acquires a key from the pool on every call.
-        // If the pool is empty / all keys exhausted, fall through to the
-        // normal single-key path.
+        // When the pool exists and the agent didn't set a custom API key,
+        // create a PooledDriver that acquires keys from the pool on every
+        // call. If the pool is empty / all keys exhausted at call time, the
+        // PooledDriver returns a 503 which triggers fallback to the next
+        // provider (handled by FallbackDriver below).
         // When the agent explicitly sets a custom API key env var, skip the
         // pool and use the agent-specified key directly.
         let pool_opt = if has_custom_key {
@@ -146,12 +147,10 @@ impl LibreFangKernel {
             self.llm
                 .credential_pools
                 .get(agent_provider)
-                .filter(|entry| entry.available_count() > 0)
                 .map(|entry| entry.value().clone())
         };
 
         let primary: Arc<dyn LlmDriver> = if let Some(pool) = pool_opt {
-            // Credential pool is non-empty — wrap in PooledDriver.
             let base_config = make_driver_config(None);
             Arc::new(pooled_driver::PooledDriver::new(
                 pool,
@@ -159,8 +158,8 @@ impl LibreFangKernel {
                 base_config,
             ))
         } else {
-            // No credential pool (or all keys exhausted) — resolve a single
-            // API key the traditional way.
+            // No credential pool — resolve a single API key the traditional
+            // way.
             let api_key = if has_custom_key {
                 manifest
                     .model
