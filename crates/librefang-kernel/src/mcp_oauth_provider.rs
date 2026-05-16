@@ -711,6 +711,94 @@ mod tests {
         );
     }
 
+    /// Regression for #5069: a daemon process that calls `vault_set` twice
+    /// in a row against a previously-uninitialised vault MUST succeed on
+    /// the second call. The first call walks `init() + set()`; the second
+    /// must walk `unlock() + set()` using the same env-supplied master key
+    /// and decrypt the file the first call just wrote.
+    ///
+    /// This mirrors the `auth_start` PKCE-stash sequence
+    /// (`pkce_verifier` → `pkce_state` → `redirect_uri`) where the first
+    /// call lazy-creates the vault and every subsequent call lands on the
+    /// freshly-written file. Pre-fix the second call's `unlock()` failed
+    /// with `aead::Error` because `init()` and `resolve_master_key()`
+    /// duplicated the env / keyring lookup code, so a daemon process that
+    /// raced two readers of the env var (one in init, one in the next
+    /// unlock) could write a file the next unlock could not decrypt. The
+    /// unified-resolution fix removes the duplication, and the new
+    /// post-write verification in `init()` catches any latent divergence
+    /// at the source rather than letting the next caller fail with an
+    /// opaque `aead::Error`.
+    ///
+    /// Uses the unnamed `serial` group so it serialises against every
+    /// other vault-test in this crate that mutates `LIBREFANG_VAULT_KEY`
+    /// (notably `kernel::tests::vault_cache_reuses_unlocked_handle_across_calls`
+    /// and friends, which use the same unnamed group). Concurrent
+    /// env-var mutation would otherwise race with our init's resolve →
+    /// save → verify sequence and the verification would spuriously fire.
+    #[test]
+    #[serial_test::serial]
+    fn vault_set_twice_round_trips_via_env_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        // SAFETY: serial guard prevents env races with other vault tests.
+        let _vault_key = VaultKeyEnvGuard::set(TEST_VAULT_KEY);
+        // SAFETY: same serial guard prevents racing env reads.
+        unsafe {
+            std::env::set_var("LIBREFANG_VAULT_NO_KEYRING", "1");
+        }
+
+        let provider = KernelOAuthProvider::new(home.clone());
+
+        // First call: vault.enc absent → init() + set() lazy-creates it.
+        provider
+            .vault_set("pkce_verifier", "verifier-1")
+            .expect("first vault_set must lazy-init and persist");
+        assert!(
+            home.join("vault.enc").exists(),
+            "first vault_set must have materialised vault.enc"
+        );
+
+        // Second call: vault.enc present → unlock() + set(). This is the
+        // failing path in #5069 — unlock() panicked with aead::Error on
+        // the file the same process wrote ~ms earlier.
+        provider
+            .vault_set("pkce_state", "state-1")
+            .expect("second vault_set must unlock and persist (no aead::Error)");
+
+        // Third call to mirror the third PKCE field in auth_start.
+        provider
+            .vault_set("redirect_uri", "https://example.test/cb")
+            .expect("third vault_set must unlock and persist");
+
+        // Round-trip: every entry written above must be readable through a
+        // fresh provider instance, which exercises the unlock path again.
+        let reader = KernelOAuthProvider::new(home);
+        assert_eq!(
+            reader
+                .vault_get("pkce_verifier")
+                .expect("vault_get pkce_verifier"),
+            Some("verifier-1".to_string())
+        );
+        assert_eq!(
+            reader
+                .vault_get("pkce_state")
+                .expect("vault_get pkce_state"),
+            Some("state-1".to_string())
+        );
+        assert_eq!(
+            reader
+                .vault_get("redirect_uri")
+                .expect("vault_get redirect_uri"),
+            Some("https://example.test/cb".to_string())
+        );
+
+        // SAFETY: same serial-guard rationale.
+        unsafe {
+            std::env::remove_var("LIBREFANG_VAULT_NO_KEYRING");
+        }
+    }
+
     #[test]
     fn clear_tokens_covers_all_stored_fields() {
         // Verifies that ALL_VAULT_FIELDS (used by clear_tokens) covers every field
