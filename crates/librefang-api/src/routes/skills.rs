@@ -4405,6 +4405,7 @@ pub async fn update_mcp_server(
 // `serde_json::Value` for the body schema, which keeps the spec accurate
 // without forcing a downstream derive.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PatchMcpTaintRequest {
     /// When supplied, replaces `taint_scanning` on the existing entry.
     #[serde(default)]
