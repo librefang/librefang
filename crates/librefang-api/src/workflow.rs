@@ -6,6 +6,6 @@
 
 pub use librefang_kernel::workflow::{
     BranchArm, CancelRunError, ErrorMode, GateCondition, GateOp, PauseRunError, ResumeRunError,
-    StepAgent, StepMode, Workflow, WorkflowId, WorkflowRun, WorkflowRunId, WorkflowRunState,
-    WorkflowStep,
+    StepAgent, StepMode, Workflow, WorkflowId, WorkflowInputParam, WorkflowRun, WorkflowRunId,
+    WorkflowRunState, WorkflowStep,
 };

@@ -191,6 +191,52 @@ pub struct Workflow {
     /// also `None` the workflow runs unbounded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_timeout_secs: Option<u64>,
+    /// Optional declared input parameters (#4982 — gap 2 / parameter
+    /// discovery). When set, agents discover these via `workflow_describe`
+    /// in preference to the legacy `{{var}}`-scanning fallback. The list
+    /// is authored in workflow TOML as repeated `[[input_schema]]` tables.
+    ///
+    /// Absent on workflows that pre-date the schema feature; deserializes
+    /// cleanly thanks to `#[serde(default)]`, and existing
+    /// `workflow_describe` calls fall back to auto-detected parameters
+    /// (matching the older `Workflow::to_template()` behaviour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<Vec<WorkflowInputParam>>,
+}
+
+/// One declared input parameter for a workflow (#4982 — gap 2).
+///
+/// Authored as a `[[input_schema]]` block in workflow TOML; surfaced to
+/// agents through the `workflow_describe` tool so the LLM knows what to
+/// pass in `workflow_run` / `workflow_start` input.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkflowInputParam {
+    /// Parameter name — corresponds to the `{{name}}` placeholder key in
+    /// step prompt templates and to the JSON-object key the caller passes
+    /// in the workflow input.
+    pub name: String,
+    /// Expected value type. One of `"string" | "number" | "boolean" |
+    /// "file" | "image" | "agent_id"`. `"file"` / `"image"` document that
+    /// the caller may pass an `{"_artifact": "sha256:<64-hex>"}`
+    /// reference (#4982 — gap 3) that the runtime resolves to the
+    /// artifact-store handle string before the workflow engine
+    /// substitutes it into the step prompt.
+    #[serde(default = "default_input_param_type")]
+    pub param_type: String,
+    /// Whether the caller must supply this parameter.
+    #[serde(default = "default_required")]
+    pub required: bool,
+    /// Optional human-readable description shown in the discovery surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+fn default_input_param_type() -> String {
+    "string".to_string()
+}
+
+fn default_required() -> bool {
+    true
 }
 
 /// A single step in a workflow.
@@ -2118,6 +2164,56 @@ impl WorkflowEngine {
         result
     }
 
+    /// Populate per-key `{{var}}` substitution variables from the workflow's
+    /// input JSON (#4982 — gap 3 / rich invocation).
+    ///
+    /// The runtime (`tool_runner::resolve_workflow_input_artifacts`) already
+    /// rewrote `{"_artifact":"sha256:..."}` references in the input JSON to
+    /// bare handle strings before we see them here, so by the time this
+    /// runs every artifact ref is a plain string.
+    ///
+    /// Conversion rules (per top-level key of an object-shaped input):
+    /// - `string` → used verbatim.
+    /// - `number` / `bool` → `to_string()`.
+    /// - `object` / `array` → compact `serde_json::to_string(&value)`.
+    /// - `null` → empty string (caller asked for the key, accept it as such).
+    ///
+    /// `{{input}}` (the whole-input form) continues to render the original
+    /// blob — this seeding is purely additive. Whatever the workflow's
+    /// existing `output_var` writes still wins on later steps because step
+    /// outputs are inserted into the same map after this call, overwriting
+    /// any seed of the same name (the same shadowing pattern that already
+    /// applies between input-seed and step-output for variables with the
+    /// same name).
+    ///
+    /// No-op when `input` is not an object (e.g. legacy callers passing a
+    /// plain string).
+    fn seed_input_vars_from_json(input: &str, vars: &mut HashMap<String, String>) {
+        let parsed: serde_json::Value = match serde_json::from_str(input) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let obj = match parsed.as_object() {
+            Some(o) => o,
+            None => return,
+        };
+        for (k, v) in obj {
+            let s = match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => String::new(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                    serde_json::to_string(v).unwrap_or_default()
+                }
+            };
+            // Only insert when the key is absent — preserves the existing
+            // "step output_var wins" semantics on resume paths where
+            // `vars` is rehydrated from `paused_variables`.
+            vars.entry(k.clone()).or_insert(s);
+        }
+    }
+
     /// Execute a single step with error mode handling. Returns (output, input_tokens, output_tokens).
     async fn execute_step_with_error_mode<F, Fut>(
         step: &WorkflowStep,
@@ -2807,10 +2903,18 @@ impl WorkflowEngine {
                     );
                     (saved_input, saved_vars, saved_idx)
                 } else {
-                    (input.to_string(), HashMap::new(), 0_usize)
+                    // Fresh start: seed per-key vars from the input JSON so
+                    // that `{{cover}}` / `{{topic}}` (etc.) in step prompts
+                    // resolve from object-shaped input. `{{input}}` keeps
+                    // rendering the whole blob (#4982 — gap 3).
+                    let mut vars = HashMap::new();
+                    Self::seed_input_vars_from_json(input, &mut vars);
+                    (input.to_string(), vars, 0_usize)
                 }
             } else {
-                (input.to_string(), HashMap::new(), 0_usize)
+                let mut vars = HashMap::new();
+                Self::seed_input_vars_from_json(input, &mut vars);
+                (input.to_string(), vars, 0_usize)
             }
         };
         let mut all_outputs: Vec<String> = Vec::new();
@@ -3959,6 +4063,11 @@ impl WorkflowEngine {
 
         let layers = Self::topological_sort(&workflow.steps)?;
         let mut variables: HashMap<String, String> = HashMap::new();
+        // Seed per-key vars from object-shaped input JSON so that DAG step
+        // prompts can substitute `{{cover}}` / `{{topic}}` etc. directly
+        // from the caller's input (#4982 — gap 3 / rich invocation). The
+        // sequential dispatch path performs the same seeding above.
+        Self::seed_input_vars_from_json(input, &mut variables);
         // Track which step names have failed so we can skip dependents
         let mut failed_steps: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut last_output = input.to_string();
@@ -4250,6 +4359,10 @@ impl WorkflowEngine {
 
         let mut preview = Vec::new();
         let mut variables: HashMap<String, String> = HashMap::new();
+        // Mirror execute_run paths: seed per-key vars from JSON input so
+        // dry_run's resolved prompts reflect the real {{var}} substitution
+        // an actual run will perform (#4982 — gap 3).
+        Self::seed_input_vars_from_json(input, &mut variables);
         let mut current_input = input.to_string();
 
         for (i, step) in workflow.steps.iter().enumerate() {
@@ -4578,6 +4691,12 @@ struct WorkflowFile {
     steps: Vec<WorkflowStep>,
     #[serde(default)]
     created_at: Option<DateTime<Utc>>,
+    /// Optional declared parameter list parsed from TOML / YAML
+    /// `[[input_schema]]` blocks (#4982 — gap 2). When absent, the
+    /// `workflow_describe` tool falls back to auto-detecting from
+    /// `{{var}}` placeholders.
+    #[serde(default)]
+    input_schema: Option<Vec<WorkflowInputParam>>,
 }
 
 impl From<WorkflowFile> for Workflow {
@@ -4590,6 +4709,7 @@ impl From<WorkflowFile> for Workflow {
             created_at: f.created_at.unwrap_or_else(Utc::now),
             layout: None,
             total_timeout_secs: None,
+            input_schema: f.input_schema,
         }
     }
 }
@@ -5134,6 +5254,7 @@ impl WorkflowTemplateRegistry {
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         })
     }
 }
@@ -5363,6 +5484,7 @@ mod tests {
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         }
     }
 
@@ -5544,6 +5666,7 @@ mod tests {
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -5605,6 +5728,7 @@ mod tests {
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -5649,6 +5773,7 @@ mod tests {
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "draft".to_string()).await.unwrap();
@@ -5700,6 +5825,7 @@ mod tests {
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -5755,6 +5881,7 @@ mod tests {
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -5810,6 +5937,7 @@ mod tests {
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -5889,6 +6017,7 @@ mod tests {
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "start".to_string()).await.unwrap();
@@ -5969,6 +6098,7 @@ mod tests {
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -5999,6 +6129,249 @@ mod tests {
             &vars,
         );
         assert_eq!(result, "Hello Alice, please do code review on main.rs");
+    }
+
+    /// `seed_input_vars_from_json` pulls each top-level key off an
+    /// object-shaped input JSON and inserts it into the substitution map
+    /// in the form `expand_variables` expects. Covers all value kinds
+    /// (string / number / bool / object / array / null) and the
+    /// "do-nothing for non-object input" case (#4982 — gap 3).
+    #[test]
+    fn seed_input_vars_from_json_covers_value_kinds() {
+        let mut vars: HashMap<String, String> = HashMap::new();
+        let raw = serde_json::json!({
+            "topic": "Rust",
+            "cover": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "count": 7,
+            "ready": true,
+            "absent": serde_json::Value::Null,
+            "meta": { "lang": "en" },
+            "tags": ["a", "b"],
+        })
+        .to_string();
+        WorkflowEngine::seed_input_vars_from_json(&raw, &mut vars);
+        assert_eq!(vars["topic"], "Rust");
+        assert_eq!(
+            vars["cover"],
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        );
+        assert_eq!(vars["count"], "7");
+        assert_eq!(vars["ready"], "true");
+        assert_eq!(vars["absent"], "");
+        // Nested object / array survive as compact JSON so `{{meta}}`
+        // expands to a parseable string in the step prompt.
+        assert_eq!(vars["meta"], r#"{"lang":"en"}"#);
+        assert_eq!(vars["tags"], r#"["a","b"]"#);
+    }
+
+    #[test]
+    fn seed_input_vars_from_json_noop_on_non_object_input() {
+        let mut vars: HashMap<String, String> = HashMap::new();
+        // Plain string (legacy callers).
+        WorkflowEngine::seed_input_vars_from_json("hello world", &mut vars);
+        assert!(vars.is_empty());
+        // Bare JSON string.
+        WorkflowEngine::seed_input_vars_from_json("\"hello\"", &mut vars);
+        assert!(vars.is_empty());
+        // JSON array.
+        WorkflowEngine::seed_input_vars_from_json("[1,2,3]", &mut vars);
+        assert!(vars.is_empty());
+        // Empty string.
+        WorkflowEngine::seed_input_vars_from_json("", &mut vars);
+        assert!(vars.is_empty());
+    }
+
+    /// Pre-existing entries in `vars` (e.g. rehydrated from a paused-run
+    /// snapshot or written by an earlier `output_var`) win over seed
+    /// inserts of the same name — the seed is purely additive.
+    #[test]
+    fn seed_input_vars_from_json_preserves_existing_entries() {
+        let mut vars: HashMap<String, String> = HashMap::new();
+        vars.insert("topic".to_string(), "preexisting".to_string());
+        WorkflowEngine::seed_input_vars_from_json(
+            &serde_json::json!({"topic": "incoming", "fresh": "v"}).to_string(),
+            &mut vars,
+        );
+        assert_eq!(vars["topic"], "preexisting");
+        assert_eq!(vars["fresh"], "v");
+    }
+
+    /// End-to-end engine substitution: a workflow with `{{topic}}` and
+    /// `{{cover}}` placeholders run with JSON object input must produce a
+    /// step prompt where the placeholders are filled with the input values
+    /// (#4982 — gap 3 BLOCKING). This pins the user-facing claim from the
+    /// PR body that an agent passing
+    ///   {"topic":"Rust","cover":"sha256:..."}
+    /// gets `{{topic}}` → "Rust" and `{{cover}}` → the handle string in
+    /// the step the agent receives.
+    #[tokio::test]
+    async fn execute_run_substitutes_per_key_vars_from_object_input() {
+        use std::sync::{Arc, Mutex};
+        let engine = WorkflowEngine::new();
+        let wf = Workflow {
+            id: WorkflowId::new(),
+            name: "rich-input".to_string(),
+            description: "".to_string(),
+            steps: vec![WorkflowStep {
+                name: "render".to_string(),
+                agent: StepAgent::ByName {
+                    name: "writer".to_string(),
+                },
+                prompt_template: "Topic: {{topic}}. Cover: {{cover}}.".to_string(),
+                mode: StepMode::Sequential,
+                timeout_secs: 30,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+                session_mode: None,
+            }],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+            input_schema: Some(vec![
+                WorkflowInputParam {
+                    name: "topic".to_string(),
+                    param_type: "string".to_string(),
+                    required: true,
+                    description: None,
+                },
+                WorkflowInputParam {
+                    name: "cover".to_string(),
+                    param_type: "file".to_string(),
+                    required: true,
+                    description: None,
+                },
+            ]),
+        };
+        let wf_id = engine.register(wf).await;
+
+        // The runtime's `_artifact` resolver runs upstream and lands the
+        // handle string in the input JSON before we see it, so for the
+        // engine-level test we pass the resolved shape directly.
+        let input_json = serde_json::json!({
+            "topic": "Rust",
+            "cover": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        })
+        .to_string();
+        let run_id = engine.create_run(wf_id, input_json).await.unwrap();
+
+        // Capture the prompt the engine would dispatch to the agent.
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&captured);
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
+            let sink = Arc::clone(&sink);
+            async move {
+                sink.lock().unwrap().push(msg.clone());
+                Ok((format!("ack:{msg}"), 1u64, 1u64))
+            }
+        };
+
+        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        assert!(result.is_ok(), "run failed: {:?}", result);
+
+        let prompts = captured.lock().unwrap();
+        assert_eq!(prompts.len(), 1, "exactly one step dispatched");
+        let p = &prompts[0];
+        assert!(
+            p.contains("Topic: Rust"),
+            "{{topic}} must be filled with the input value; got: {p}"
+        );
+        assert!(
+            p.contains(
+                "Cover: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            ),
+            "{{cover}} must be filled with the resolved handle string; got: {p}"
+        );
+        // No literal placeholders survived substitution.
+        assert!(
+            !p.contains("{{topic}}") && !p.contains("{{cover}}"),
+            "no placeholders should remain unsubstituted; got: {p}"
+        );
+    }
+
+    /// Same coverage but on the DAG dispatch path (any step with
+    /// non-empty `depends_on` routes execution through
+    /// `execute_run_dag`). Pins that BLOCKING 1 fix landed on both
+    /// execution branches (#4982 — gap 3).
+    #[tokio::test]
+    async fn execute_run_dag_substitutes_per_key_vars_from_object_input() {
+        use std::sync::{Arc, Mutex};
+        let engine = WorkflowEngine::new();
+        let wf = Workflow {
+            id: WorkflowId::new(),
+            name: "rich-input-dag".to_string(),
+            description: "".to_string(),
+            steps: vec![
+                WorkflowStep {
+                    name: "first".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "a".to_string(),
+                    },
+                    prompt_template: "Topic={{topic}}".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 30,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    depends_on: vec![],
+                    session_mode: None,
+                },
+                WorkflowStep {
+                    name: "second".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "b".to_string(),
+                    },
+                    prompt_template: "Cover={{cover}}".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 30,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    // Non-empty depends_on routes the whole workflow into
+                    // the DAG executor.
+                    depends_on: vec!["first".to_string()],
+                    session_mode: None,
+                },
+            ],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+            input_schema: None,
+        };
+        let wf_id = engine.register(wf).await;
+        let input_json = serde_json::json!({
+            "topic": "Rust",
+            "cover": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        })
+        .to_string();
+        let run_id = engine.create_run(wf_id, input_json).await.unwrap();
+
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&captured);
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
+            let sink = Arc::clone(&sink);
+            async move {
+                sink.lock().unwrap().push(msg.clone());
+                Ok((format!("ack:{msg}"), 1u64, 1u64))
+            }
+        };
+
+        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        assert!(result.is_ok(), "DAG run failed: {:?}", result);
+
+        let prompts = captured.lock().unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert!(
+            prompts.iter().any(|p| p.contains("Topic=Rust")),
+            "DAG step 1 must substitute {{topic}}; got: {prompts:?}"
+        );
+        assert!(
+            prompts.iter().any(|p| p.contains(
+                "Cover=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            )),
+            "DAG step 2 must substitute {{cover}}; got: {prompts:?}"
+        );
     }
 
     #[tokio::test]
@@ -7102,6 +7475,7 @@ prompt_template = "do {{x}}"
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -7242,6 +7616,7 @@ prompt_template = "do {{x}}"
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -7527,6 +7902,7 @@ prompt_template = "do {{x}}"
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
 
         let template = WorkflowEngine::workflow_to_template(&workflow);
@@ -7580,6 +7956,7 @@ prompt_template = "do {{x}}"
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -8274,6 +8651,7 @@ prompt_template = "do {{x}}"
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -8727,6 +9105,7 @@ prompt_template = "do {{x}}"
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -8837,6 +9216,7 @@ prompt_template = "do {{x}}"
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: Some(1), // 1 second total timeout
+            input_schema: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -8993,6 +9373,7 @@ prompt_template = "do {{x}}"
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -9079,6 +9460,7 @@ prompt_template = "do {{x}}"
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         };
         let wf_id = engine.register(wf).await;
 
@@ -9194,5 +9576,109 @@ prompt_template = "do {{x}}"
             StepAgent::ById { id } => assert_eq!(id, "agent-uuid-123"),
             other => panic!("expected ById, got {other:?}"),
         }
+    }
+
+    // ========================================================================
+    // #4982 — input_schema deserialization (parameter discovery)
+    // ========================================================================
+
+    #[test]
+    fn workflow_input_param_round_trips_through_toml() {
+        // Authoring shape: `[[input_schema]]` blocks in workflow TOML.
+        // Pin the on-wire form so a future serde rename can't silently
+        // diverge from documented author surface.
+        let toml = r#"
+name = "test"
+description = "test"
+steps = []
+
+[[input_schema]]
+name = "topic"
+param_type = "string"
+required = true
+description = "Article topic"
+
+[[input_schema]]
+name = "cover_image"
+param_type = "image"
+required = false
+"#;
+        #[derive(Deserialize)]
+        struct WfFile {
+            #[allow(dead_code)]
+            name: String,
+            #[allow(dead_code)]
+            description: String,
+            #[allow(dead_code)]
+            steps: Vec<WorkflowStep>,
+            input_schema: Option<Vec<WorkflowInputParam>>,
+        }
+        let wf: WfFile = toml::from_str(toml).expect("valid TOML");
+        let schema = wf.input_schema.expect("input_schema parsed");
+        assert_eq!(schema.len(), 2);
+        assert_eq!(schema[0].name, "topic");
+        assert_eq!(schema[0].param_type, "string");
+        assert!(schema[0].required);
+        assert_eq!(schema[0].description.as_deref(), Some("Article topic"));
+        assert_eq!(schema[1].name, "cover_image");
+        assert_eq!(schema[1].param_type, "image");
+        assert!(!schema[1].required);
+    }
+
+    #[test]
+    fn workflow_input_param_required_defaults_to_true_when_absent() {
+        // Operators authoring [[input_schema]] commonly omit `required`
+        // and expect the parameter to be required by default — matches
+        // the auto-detect path's semantics. Pin it explicitly.
+        let toml = r#"
+name = "test"
+description = "test"
+steps = []
+
+[[input_schema]]
+name = "topic"
+"#;
+        #[derive(Deserialize)]
+        struct WfFile {
+            #[allow(dead_code)]
+            name: String,
+            #[allow(dead_code)]
+            description: String,
+            #[allow(dead_code)]
+            steps: Vec<WorkflowStep>,
+            input_schema: Option<Vec<WorkflowInputParam>>,
+        }
+        let wf: WfFile = toml::from_str(toml).expect("valid TOML");
+        let schema = wf.input_schema.expect("input_schema parsed");
+        assert_eq!(schema.len(), 1);
+        assert_eq!(schema[0].name, "topic");
+        assert_eq!(schema[0].param_type, "string");
+        assert!(
+            schema[0].required,
+            "required must default to true so omitting it doesn't silently \
+             make every parameter optional"
+        );
+    }
+
+    #[test]
+    fn workflow_input_schema_round_trips_through_json() {
+        // The HTTP surface (POST /api/workflows) takes JSON. Pin the
+        // JSON shape too so the dashboard / SDK callers can serialize
+        // schemas without surprises.
+        let json = r#"{
+            "name": "demo",
+            "param_type": "file",
+            "required": false,
+            "description": "Optional uploaded report"
+        }"#;
+        let p: WorkflowInputParam = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(p.name, "demo");
+        assert_eq!(p.param_type, "file");
+        assert!(!p.required);
+        // Re-serialize and re-parse so we know the round-trip is
+        // lossless (no fields silently dropped on the way back out).
+        let back = serde_json::to_string(&p).expect("serialize");
+        let again: WorkflowInputParam = serde_json::from_str(&back).expect("re-parse");
+        assert_eq!(p, again);
     }
 }

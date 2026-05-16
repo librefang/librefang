@@ -990,19 +990,19 @@ use instead of web_fetch + file_write (which round-trips the entire body through
         // --- Workflow tools ---
         ToolDefinition {
             name: "workflow_run".to_string(),
-            description: "Run a registered workflow pipeline end-to-end. Workflows are multi-step agent pipelines (e.g., bug-triage, code-review, test-generation). Accepts a workflow UUID or name.".to_string(),
+            description: "Run a registered workflow pipeline end-to-end. Workflows are multi-step agent pipelines (e.g., bug-triage, code-review, test-generation). Accepts a workflow UUID or name. Returns {run_id, output, output_json?, step_outputs:[{step_name,output},...]}; output_json is present only when the final step emitted parseable JSON. Input values may reference artifact-store content with {\"_artifact\":\"sha256:<64-hex>\"}; the runtime resolves the reference to the handle string before the workflow engine substitutes it into step prompts.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "workflow_id": { "type": "string", "description": "The workflow UUID or registered name (e.g., 'bug-triage', 'code-review')" },
-                    "input": { "type": "object", "description": "Optional input parameters to pass to the workflow's first step (JSON object)" }
+                    "input": { "type": "object", "description": "Optional input parameters to pass to the workflow's first step (JSON object). Values may be {\"_artifact\":\"sha256:<hash>\"} to pass file/image refs; call workflow_describe first to see typed parameters." }
                 },
                 "required": ["workflow_id"]
             }),
         },
         ToolDefinition {
             name: "workflow_list".to_string(),
-            description: "List all registered workflow definitions. Returns an array of {id, name, description, step_count} objects sorted by name. Use this to discover available workflows before calling workflow_run.".to_string(),
+            description: "List all registered workflow definitions. Returns an array of {id, name, description, step_count, has_input_schema} objects sorted by name. Use this to discover available workflows; call workflow_describe(id) on any entry with has_input_schema=true to learn its parameter shape before invoking it.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -1010,8 +1010,19 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             }),
         },
         ToolDefinition {
+            name: "workflow_describe".to_string(),
+            description: "Describe a workflow's input parameters and step names so the agent knows how to call it. Returns {id, name, description, step_names, input_schema:[{name, param_type, required, description?}]}. param_type is one of 'string'|'number'|'boolean'|'file'|'image'|'agent_id'; 'file'/'image' accept {\"_artifact\":\"sha256:<hash>\"} references at call time. When no [[input_schema]] is declared on the workflow, parameters are auto-detected from {{var}} placeholders in step prompts (every detected var defaults to required=true, param_type=string).".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "workflow_id": { "type": "string", "description": "The workflow UUID or registered name to describe" }
+                },
+                "required": ["workflow_id"]
+            }),
+        },
+        ToolDefinition {
             name: "workflow_status".to_string(),
-            description: "Get the current status of a workflow run. Returns run state (pending/running/paused/completed/failed), timing, output, error, and step details. Use the run_id returned by workflow_run.".to_string(),
+            description: "Get the current status of a workflow run. Returns {run_id, workflow_id, workflow_name, state, started_at, completed_at?, output?, output_json?, error?, step_count, last_step_name?, step_outputs:[{step_name, output},...]}; output_json is present only when the final step emitted parseable JSON. Use the run_id returned by workflow_run or workflow_start.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1022,12 +1033,12 @@ use instead of web_fetch + file_write (which round-trips the entire body through
         },
         ToolDefinition {
             name: "workflow_start".to_string(),
-            description: "Start a workflow asynchronously (fire-and-forget). Returns the run_id immediately without waiting for completion. Use workflow_status to poll progress. Differs from workflow_run which blocks until the workflow finishes.".to_string(),
+            description: "Start a workflow asynchronously (fire-and-forget). Returns the run_id immediately without waiting for completion. When called from an agent loop the kernel auto-tracks the run and injects a [System] [ASYNC_RESULT] line into the originating session on completion (#4983); the agent can also poll via workflow_status. Input may reference artifact-store content with {\"_artifact\":\"sha256:<hash>\"}.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "workflow_id": { "type": "string", "description": "The workflow UUID or registered name (e.g., 'bug-triage', 'code-review')" },
-                    "input": { "type": "object", "description": "Optional input parameters to pass to the workflow's first step (JSON object)" }
+                    "input": { "type": "object", "description": "Optional input parameters to pass to the workflow's first step (JSON object). Values may be {\"_artifact\":\"sha256:<hash>\"} to pass file/image refs; call workflow_describe first to see typed parameters." }
                 },
                 "required": ["workflow_id"]
             }),

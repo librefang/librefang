@@ -1036,6 +1036,7 @@ pub async fn execute_tool_raw(
         // Workflow tools
         "workflow_run" => tool_workflow_run(input, *kernel).await,
         "workflow_list" => tool_workflow_list(*kernel).await,
+        "workflow_describe" => tool_workflow_describe(input, *kernel).await,
         "workflow_status" => tool_workflow_status(input, *kernel).await,
         "workflow_start" => {
             tool_workflow_start(input, *kernel, *caller_agent_id, *session_id).await

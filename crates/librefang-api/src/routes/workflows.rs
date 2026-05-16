@@ -110,7 +110,8 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
 use crate::triggers::{Trigger, TriggerId, TriggerPatch, TriggerPattern};
 use crate::workflow::{
     BranchArm, CancelRunError, ErrorMode, GateCondition, GateOp, PauseRunError, StepAgent,
-    StepMode, Workflow, WorkflowId, WorkflowRun, WorkflowRunId, WorkflowRunState, WorkflowStep,
+    StepMode, Workflow, WorkflowId, WorkflowInputParam, WorkflowRun, WorkflowRunId,
+    WorkflowRunState, WorkflowStep,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -155,6 +156,7 @@ fn workflow_to_json(w: &Workflow) -> serde_json::Value {
         "created_at": w.created_at.to_rfc3339(),
         "layout": w.layout,
         "total_timeout_secs": w.total_timeout_secs,
+        "input_schema": w.input_schema.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null)),
     })
 }
 
@@ -439,6 +441,61 @@ fn parse_step_session_mode(
     }
 }
 
+/// Parse the optional `input_schema` JSON field on a workflow payload
+/// (#4982 — gap 2 / parameter discovery).
+///
+/// Accepts:
+/// - `None` / absent / explicit `null` → returns `None` (workflow has no
+///   declared schema; the `workflow_describe` tool will auto-detect from
+///   `{{var}}` placeholders).
+/// - Empty array `[]` → returns `None` (no parameters declared).
+/// - Array of param objects → returns `Some(vec)`. Each malformed entry
+///   logs a `WARN` and is skipped rather than failing the whole request,
+///   matching the lenient style of `parse_step_session_mode`. The kernel
+///   stores whatever survives.
+///
+/// **Absent-vs-empty caveat:** the `None` return collapses three distinct
+/// caller intents — "field absent in JSON", "explicit `null`", and
+/// "explicit empty array `[]`". The PUT (`update_workflow`) handler can
+/// therefore NOT distinguish "remove the schema entirely" from "set to an
+/// empty list"; both clear `input_schema` on the persisted workflow. This
+/// is acceptable because an empty schema is semantically a workflow with
+/// no declared parameters — identical to "no schema declared" — so the
+/// dashboard / agent surface behaves the same in either case. Callers
+/// that need to *preserve* the existing schema MUST omit the key from
+/// the PUT body entirely (see the "PATCH-style" branch in
+/// `update_workflow`). If a future API ever needs to distinguish these
+/// three states, change the return shape (e.g. `Result<Option<_>, _>`
+/// or a custom three-state enum) and update both POST and PUT handlers.
+fn parse_input_schema(val: Option<&serde_json::Value>) -> Option<Vec<WorkflowInputParam>> {
+    let v = val?;
+    if v.is_null() {
+        return None;
+    }
+    let arr = v.as_array()?;
+    if arr.is_empty() {
+        return None;
+    }
+    let mut params: Vec<WorkflowInputParam> = Vec::with_capacity(arr.len());
+    for entry in arr {
+        match serde_json::from_value::<WorkflowInputParam>(entry.clone()) {
+            Ok(p) => params.push(p),
+            Err(err) => {
+                warn!(
+                    entry = ?entry,
+                    error = %err,
+                    "ignoring malformed input_schema entry on workflow payload",
+                );
+            }
+        }
+    }
+    if params.is_empty() {
+        None
+    } else {
+        Some(params)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Workflow routes
 // ---------------------------------------------------------------------------
@@ -513,6 +570,7 @@ pub async fn create_workflow(
 
     let layout = req.get("layout").cloned();
     let total_timeout_secs = req["total_timeout_secs"].as_u64();
+    let input_schema = parse_input_schema(req.get("input_schema"));
 
     let workflow = Workflow {
         id: WorkflowId::new(),
@@ -522,6 +580,7 @@ pub async fn create_workflow(
         created_at: chrono::Utc::now(),
         layout,
         total_timeout_secs,
+        input_schema,
     };
 
     // Pre-flight validation: reject manifests with empty Transform code,
@@ -820,6 +879,14 @@ pub async fn update_workflow(
         existing.total_timeout_secs
     };
 
+    // Same "PATCH-style" semantic for input_schema: an explicit key (even
+    // null / empty array) replaces; an absent key preserves.
+    let input_schema = if req.get("input_schema").is_some() {
+        parse_input_schema(req.get("input_schema"))
+    } else {
+        existing.input_schema.clone()
+    };
+
     let updated = Workflow {
         id: workflow_id,
         name,
@@ -828,6 +895,7 @@ pub async fn update_workflow(
         created_at: existing.created_at,
         layout,
         total_timeout_secs,
+        input_schema,
     };
 
     // Same pre-flight validation as `create_workflow` — a PATCH that

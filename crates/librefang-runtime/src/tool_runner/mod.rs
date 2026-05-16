@@ -95,9 +95,13 @@ use self::task::{
 };
 use self::web_legacy::{tool_web_fetch_legacy, tool_web_search_legacy};
 use self::wiki::{tool_wiki_get, tool_wiki_search, tool_wiki_write};
+#[cfg(test)]
 use self::workflow::{
-    tool_workflow_cancel, tool_workflow_list, tool_workflow_run, tool_workflow_start,
-    tool_workflow_status,
+    build_workflow_run_result, prepare_workflow_input, resolve_workflow_input_artifacts,
+};
+use self::workflow::{
+    tool_workflow_cancel, tool_workflow_describe, tool_workflow_list, tool_workflow_run,
+    tool_workflow_start, tool_workflow_status,
 };
 
 /// Maximum inter-agent call depth to prevent infinite recursion (A->B->C->...).
