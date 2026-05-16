@@ -443,7 +443,7 @@ LibreFang is organized as a Cargo workspace with 14 crates:
 ### Key Architectural Patterns
 
 - **`KernelHandle` trait**: Defined in `librefang-runtime`, implemented on `LibreFangKernel` in `librefang-kernel`. This avoids circular crate dependencies while enabling inter-agent tools.
-- **Shared memory**: A fixed UUID (`AgentId(Uuid::from_bytes([0..0, 0x01]))`) provides a cross-agent KV namespace.
+- **Per-agent memory**: Each agent has its own isolated memory namespace via the `agent_id` parameter on `MemoryAccess`. The legacy shared namespace (`00000000-…-0001`) is kept for internal kernel subsystems and backward compatibility.
 - **Daemon detection**: The CLI checks `~/.librefang/daemon.json` and pings the health endpoint. If a daemon is running, commands use HTTP; otherwise, they boot an in-process kernel.
 - **Capability-based security**: Every agent operation is checked against the agent's granted capabilities before execution.
 
