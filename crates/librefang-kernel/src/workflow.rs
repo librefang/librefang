@@ -475,14 +475,105 @@ pub enum StepMode {
     /// jumps would let an unbounded loop hide inside a Branch when
     /// steps already have `Loop` semantics for that.
     Branch { arms: Vec<BranchArm> },
+    /// Operator node: human-in-the-loop pause with rich channel
+    /// notification + multi-action vocabulary (#4977). Generalises the
+    /// older [`StepMode::Approval`] variant by carrying:
+    ///
+    /// - `notify`: one or more channel addresses (e.g.
+    ///   `telegram:@pakman`, `email:foo@bar`, `dashboard:`). The
+    ///   scheme prefix selects the channel adapter at delivery time.
+    /// - `actions`: the closed set of operator interactions the
+    ///   workflow author has authorised at this step. See
+    ///   [`OperatorAction`].
+    /// - `timeout_secs`: wall-clock budget before `timeout_action`
+    ///   fires. `None` = wait indefinitely.
+    /// - `timeout_action`: deterministic resolution when the budget
+    ///   expires (see [`OperatorTimeoutAction`]).
+    ///
+    /// **Executor state (#4977 step 1/N)**: this PR ships the types,
+    /// validate path, and a skeleton executor that pauses the run
+    /// using the existing [`WorkflowEngine::pause_run`] mechanism so
+    /// callers can already use the resume-token contract. Channel
+    /// notification dispatch, the timeout watchdog, and the operator
+    /// HTTP actions endpoint are deferred — see the per-arm
+    /// `TODO(#4977 step 2):` markers in the executor.
+    Operator {
+        /// Channel addresses to notify, one per recipient. Format is
+        /// `scheme:target` (e.g. `telegram:@pakman`). Validation
+        /// requires at least one entry and a known scheme prefix.
+        notify: Vec<String>,
+        /// Allowed operator interactions at this step.
+        actions: Vec<OperatorAction>,
+        /// Auto-resolve budget in seconds. `None` = wait forever.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_secs: Option<u64>,
+        /// Deterministic action taken when `timeout_secs` elapses
+        /// without an operator response.
+        #[serde(default)]
+        timeout_action: OperatorTimeoutAction,
+    },
 }
 
-/// Whether `mode` is one of the #4980 operator-node variants
-/// (`Wait` / `Gate` / `Approval` / `Transform` / `Branch`). Used by
-/// [`Workflow::validate`] to fail-closed on operator-node + DAG
-/// combinations, since the DAG executor (`execute_run_dag`) does not
-/// match on `StepMode` and would otherwise route operator nodes
-/// through `agent_resolver`.
+/// Operator interactions a workflow author can authorise at an
+/// [`StepMode::Operator`] step. The set is intentionally closed —
+/// adding a verb requires a wire-format change so dashboards / channel
+/// adapters never see an unknown action mid-flight. Per #4977.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorAction {
+    /// Approve the previous step's output and continue the workflow.
+    Approve,
+    /// Reject the previous step's output and halt the workflow with a
+    /// `Failed` state.
+    Reject,
+    /// Provide free-form text input that becomes this step's output
+    /// and flows into the next step's `{{input}}`.
+    ProvideInput {
+        /// Name of the field the operator is providing — exposed to
+        /// the next step as `{{<field>}}` when `output_var` is unset,
+        /// or under `output_var` when set.
+        field: String,
+    },
+    /// Provide edits / corrections to the previous output. The edited
+    /// payload becomes this step's output.
+    Edit,
+    /// Open-ended freeform input (no field name). Equivalent to
+    /// `ProvideInput { field: "input" }` but kept distinct so the
+    /// dashboard UI can render a plain textbox rather than a
+    /// field-labelled form.
+    FreeformInput,
+}
+
+/// Deterministic resolution when an [`StepMode::Operator`] step's
+/// `timeout_secs` elapses without an operator response. Per #4977.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorTimeoutAction {
+    /// Auto-approve and continue to the next step.
+    Approve,
+    /// Auto-reject and halt the workflow with `Failed`.
+    Reject,
+    /// Halt the workflow with `Failed` and a "timeout" reason. Same
+    /// terminal state as `Reject` but with a distinct reason string
+    /// so the dashboard can distinguish operator vs auto-fail.
+    Fail,
+    /// Leave the run in `Paused` state (the executor already paused
+    /// when entering the operator step). Default — matches the
+    /// existing low-level `pause_run` contract.
+    #[default]
+    Continue,
+}
+
+/// Known channel-address schemes accepted by `OperatorAction.notify`
+/// entries. Kept as a single source of truth so the validator and any
+/// future channel-dispatch table agree on the supported set.
+const OPERATOR_NOTIFY_SCHEMES: &[&str] = &["telegram", "email", "dashboard", "slack", "webhook"];
+
+/// Whether `mode` is one of the operator-node variants (#4980 +
+/// #4977). Used by [`Workflow::validate`] to fail-closed on
+/// operator-node + DAG combinations, since the DAG executor
+/// (`execute_run_dag`) does not match on `StepMode` and would
+/// otherwise route operator nodes through `agent_resolver`.
 fn is_operator_step_mode(mode: &StepMode) -> bool {
     matches!(
         mode,
@@ -491,6 +582,7 @@ fn is_operator_step_mode(mode: &StepMode) -> bool {
             | StepMode::Approval { .. }
             | StepMode::Transform { .. }
             | StepMode::Branch { .. }
+            | StepMode::Operator { .. }
     )
 }
 
@@ -505,6 +597,7 @@ fn operator_step_mode_label(mode: &StepMode) -> &'static str {
         StepMode::Approval { .. } => "approval",
         StepMode::Transform { .. } => "transform",
         StepMode::Branch { .. } => "branch",
+        StepMode::Operator { .. } => "operator",
         StepMode::Sequential => "sequential",
         StepMode::FanOut => "fan_out",
         StepMode::Collect => "collect",
@@ -3985,6 +4078,195 @@ impl WorkflowEngine {
                         }
                     }
                 }
+
+                StepMode::Operator {
+                    notify,
+                    actions,
+                    timeout_secs,
+                    timeout_action,
+                } => {
+                    // #4977 step 1/N — skeleton executor.
+                    //
+                    // What runs today: record a synthetic StepResult
+                    // under the `_operator:operator` agent name
+                    // (matching the `_operator:` namespace from
+                    // #5035), log the configuration for observability,
+                    // and request a pause on the run via the existing
+                    // `pause_request` mechanism. The pause is honored
+                    // by the pause-request gate at the *next* iteration
+                    // of the while loop, so the run transitions to
+                    // `Paused` with a fresh resume token before any
+                    // downstream step executes. Operators / dashboards
+                    // resume the run via the existing `resume_run`
+                    // API once the human has acted.
+                    //
+                    // TODO(#4977 step 2): dispatch channel
+                    // notifications via the channel bridge so the
+                    // configured `notify` recipients actually receive
+                    // the artifact + action buttons. Today the
+                    // skeleton only logs which recipients *would*
+                    // have been notified.
+                    //
+                    // TODO(#4977 step 2): spawn a timeout watchdog
+                    // honouring `timeout_secs` + `timeout_action` so
+                    // a `OperatorTimeoutAction::Approve` / `Reject` /
+                    // `Fail` resolves the pause automatically when
+                    // the budget elapses. Today `timeout_action` is
+                    // recorded on the trace but not enforced.
+                    //
+                    // TODO(#4977 step 2): wire the operator HTTP
+                    // actions endpoint so an operator's
+                    // `OperatorAction::Approve` / `Reject` / `Edit`
+                    // / `ProvideInput` / `FreeformInput` response
+                    // translates into a `resume_run` call with the
+                    // appropriate step output.
+                    let input_trace = Self::truncate_operator_input_trace(&current_input);
+                    let notify_count = notify.len();
+                    let action_count = actions.len();
+                    let timeout_action_label = match timeout_action {
+                        OperatorTimeoutAction::Approve => "approve",
+                        OperatorTimeoutAction::Reject => "reject",
+                        OperatorTimeoutAction::Fail => "fail",
+                        OperatorTimeoutAction::Continue => "continue",
+                    };
+                    let actions_json: Vec<serde_json::Value> = actions
+                        .iter()
+                        .map(|a| serde_json::to_value(a).unwrap_or(serde_json::Value::Null))
+                        .collect();
+                    let output = current_input.clone();
+                    let step_result = StepResult {
+                        step_name: step.name.clone(),
+                        agent_id: String::new(),
+                        agent_name: "_operator:operator".to_string(),
+                        prompt: Self::operator_prompt_trace(
+                            "operator",
+                            serde_json::json!({
+                                "notify": notify,
+                                "actions": actions_json,
+                                "timeout_secs": timeout_secs,
+                                "timeout_action": timeout_action_label,
+                                "input": input_trace,
+                            }),
+                        ),
+                        output: output.clone(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        duration_ms: 0,
+                    };
+                    if let Some(mut r) = self.runs.get_mut(&run_id) {
+                        r.step_results.push(step_result);
+                    }
+                    if let Some(ref var) = step.output_var {
+                        variables.insert(var.clone(), output.clone());
+                    }
+                    all_outputs.push(output);
+
+                    info!(
+                        step = i + 1,
+                        name = %step.name,
+                        notify_count,
+                        action_count,
+                        timeout_secs = ?timeout_secs,
+                        timeout_action = %timeout_action_label,
+                        "Operator step entered — pausing run for human-in-the-loop (#4977 skeleton)"
+                    );
+
+                    // Lodge a pause request. The pause-request gate at
+                    // the top of the next loop iteration atomically
+                    // takes this request, snapshots state, and
+                    // transitions the run to Paused with a resume
+                    // token. We advance `i` past this step *before*
+                    // pausing so the resume picks up at the NEXT
+                    // step, treating the operator's response as the
+                    // operator step's output (already recorded
+                    // above).
+                    let reason = format!(
+                        "operator step '{}' awaiting human response ({} recipient(s), {} action(s))",
+                        step.name, notify_count, action_count,
+                    );
+                    let token = Uuid::new_v4();
+                    let hash = Self::hash_resume_token(&token);
+                    if let Some(mut r) = self.runs.get_mut(&run_id) {
+                        // Only lodge if no caller-driven pause is
+                        // already pending — the operator step's
+                        // pause is implicit and must not clobber a
+                        // pre-existing one (idempotency parity with
+                        // `pause_run`).
+                        if r.pause_request.is_none() {
+                            r.pause_request = Some(PauseRequest {
+                                reason: reason.clone(),
+                                resume_token_hash: hash,
+                            });
+                        }
+                    }
+                    // The plaintext token is not returned to the
+                    // caller of `execute_run` today — it is recorded
+                    // in the structured log + step result trace so
+                    // operators can retrieve it via the dashboard /
+                    // API. The follow-up issue will surface the token
+                    // through a dedicated operator-step event.
+                    info!(
+                        run_id = %run_id,
+                        step = i + 1,
+                        resume_token = %token,
+                        "Operator step pause token generated (capture from logs until step 2 lands)"
+                    );
+
+                    // Advance the cursor so the pause snapshot
+                    // points at the *next* step. We then drive the
+                    // pause snapshot inline — relying on the
+                    // pause-request gate at the top of the next
+                    // iteration is unsound when the operator step is
+                    // the last step in the workflow: the `while i <
+                    // workflow.steps.len()` condition would fail
+                    // before the gate runs, and the function would
+                    // fall through to the Completed transition with
+                    // an orphan `pause_request` (caught by
+                    // `execute_run_operator_step_pauses_with_resume_token`).
+                    // Mirror the gate's atomic take-and-snapshot
+                    // exactly so the two paths stay in lockstep.
+                    i += 1;
+                    let pending_pause = if let Some(mut run) = self.runs.get_mut(&run_id) {
+                        if let Some(pause) = run.pause_request.take() {
+                            run.paused_step_index = Some(i);
+                            run.paused_variables = variables
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                            run.paused_current_input = Some(current_input.clone());
+                            run.state = WorkflowRunState::Paused {
+                                resume_token_hash: pause.resume_token_hash.clone(),
+                                reason: pause.reason.clone(),
+                                paused_at: Utc::now(),
+                            };
+                            Some(pause)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(pause) = pending_pause {
+                        // Persist immediately — same SIGKILL-safety
+                        // reasoning as the loop-top gate.
+                        if let Some(run) = self.runs.get(&run_id) {
+                            self.upsert_run_to_store(&run);
+                        }
+                        info!(
+                            run_id = %run_id,
+                            resume_step = i,
+                            reason = %pause.reason,
+                            "Workflow run paused at operator step boundary"
+                        );
+                        return Ok(current_input);
+                    }
+                    // No pause was actually lodged (idempotency
+                    // branch above declined because a caller-driven
+                    // pause was already pending). Continue so the
+                    // loop-top gate handles that pre-existing pause
+                    // on the next iteration.
+                    continue;
+                }
             }
 
             i += 1;
@@ -4529,6 +4811,23 @@ impl WorkflowEngine {
                         skip_reason: None,
                     });
                 }
+                StepMode::Operator { .. } => {
+                    // Pass-through at preview time — the dry-run
+                    // pipeline does not actually pause, so we surface
+                    // the operator step as a passthrough so any
+                    // following steps see the input the operator
+                    // would have approved. The `notify` / `actions`
+                    // / `timeout_*` fields are on `step.mode` for
+                    // callers that need them. See #4977.
+                    preview.push(DryRunStep {
+                        step_name: step.name.clone(),
+                        agent_name: Some("_operator:operator".to_string()),
+                        agent_found: true,
+                        resolved_prompt: raw_prompt,
+                        skipped: false,
+                        skip_reason: None,
+                    });
+                }
                 _ => {
                     let (agent_name, agent_found) = match agent_resolver(&step.agent) {
                         Some((_, name, _)) => (Some(name), true),
@@ -4974,6 +5273,7 @@ impl Workflow {
                     | StepMode::Gate { .. }
                     | StepMode::Approval { .. }
                     | StepMode::Branch { .. }
+                    | StepMode::Operator { .. }
             ) && !step.prompt_template.is_empty()
                 && step.prompt_template != "{{input}}"
             {
@@ -5039,6 +5339,74 @@ impl Workflow {
                         step.name.clone(),
                         "branch.arms is empty — likely missing from the manifest".to_string(),
                     ));
+                }
+                StepMode::Operator {
+                    notify,
+                    actions,
+                    timeout_secs,
+                    timeout_action,
+                } => {
+                    // 1. Empty notify list — a human-in-the-loop step
+                    //    with no recipients can never resolve except
+                    //    via timeout, which is almost certainly a
+                    //    manifest authoring mistake. Reject up-front.
+                    if notify.is_empty() {
+                        errs.push((
+                            step.name.clone(),
+                            "operator.notify is empty — at least one channel \
+                             recipient is required (e.g. `telegram:@user`)"
+                                .to_string(),
+                        ));
+                    }
+
+                    // 2. Unknown channel-address scheme. The notify
+                    //    entries are `scheme:target`; an unknown
+                    //    scheme would silently drop the notification
+                    //    at delivery time, so fail-closed here.
+                    for entry in notify {
+                        let scheme = entry.split(':').next().unwrap_or("");
+                        if scheme.is_empty() || !OPERATOR_NOTIFY_SCHEMES.contains(&scheme) {
+                            errs.push((
+                                step.name.clone(),
+                                format!(
+                                    "operator.notify entry `{entry}` has unknown \
+                                     channel scheme — supported schemes: {:?}",
+                                    OPERATOR_NOTIFY_SCHEMES
+                                ),
+                            ));
+                        }
+                    }
+
+                    // 3. timeout_secs = 0 is the parser's warn-and-
+                    //    default for a missing field (mirrors the
+                    //    Wait variant's check). A real zero-timeout
+                    //    would also fire immediately on entry, which
+                    //    is a no-op step.
+                    if matches!(timeout_secs, Some(0)) {
+                        errs.push((
+                            step.name.clone(),
+                            "operator.timeout_secs is 0 — likely missing from \
+                             the manifest; omit the field to wait indefinitely"
+                                .to_string(),
+                        ));
+                    }
+
+                    // 4. Defensive: an Approve-on-timeout action only
+                    //    makes sense if the actions vocabulary
+                    //    *includes* Approve. Otherwise the workflow
+                    //    auto-approves a step the operator was never
+                    //    allowed to approve in the first place — a
+                    //    subtle authoring footgun.
+                    if matches!(timeout_action, OperatorTimeoutAction::Approve)
+                        && !actions.iter().any(|a| matches!(a, OperatorAction::Approve))
+                    {
+                        errs.push((
+                            step.name.clone(),
+                            "operator.timeout_action=approve requires `approve` \
+                             to be present in `actions`"
+                                .to_string(),
+                        ));
+                    }
                 }
                 _ => {}
             }
@@ -9681,5 +10049,270 @@ name = "topic"
         let back = serde_json::to_string(&p).expect("serialize");
         let again: WorkflowInputParam = serde_json::from_str(&back).expect("re-parse");
         assert_eq!(p, again);
+    }
+
+    // -----------------------------------------------------------------
+    // #4977 — StepMode::Operator tests
+    // -----------------------------------------------------------------
+
+    /// Build a single-step workflow whose only step uses a
+    /// well-formed [`StepMode::Operator`] mode. Reused by the validate
+    /// happy-path and reject-cases tests below.
+    fn workflow_with_operator_step() -> Workflow {
+        workflow_with_single_op_step(
+            "operator-happy",
+            StepMode::Operator {
+                notify: vec!["telegram:@pakman".to_string()],
+                actions: vec![OperatorAction::Approve, OperatorAction::Reject],
+                timeout_secs: Some(3600),
+                timeout_action: OperatorTimeoutAction::Continue,
+            },
+        )
+    }
+
+    #[test]
+    fn step_mode_operator_round_trip_serde() {
+        // Serde round-trip covering every action variant + a non-trivial
+        // timeout configuration. Mirrors the existing
+        // `test_step_mode_approval_serialization` shape.
+        let mode = StepMode::Operator {
+            notify: vec![
+                "telegram:@pakman".to_string(),
+                "email:foo@bar".to_string(),
+                "dashboard:".to_string(),
+            ],
+            actions: vec![
+                OperatorAction::Approve,
+                OperatorAction::Reject,
+                OperatorAction::Edit,
+                OperatorAction::FreeformInput,
+                OperatorAction::ProvideInput {
+                    field: "revision_notes".to_string(),
+                },
+            ],
+            timeout_secs: Some(86400),
+            timeout_action: OperatorTimeoutAction::Reject,
+        };
+        let json = serde_json::to_string(&mode).expect("serialize");
+        let parsed: StepMode = serde_json::from_str(&json).expect("deserialize");
+        match parsed {
+            StepMode::Operator {
+                notify,
+                actions,
+                timeout_secs,
+                timeout_action,
+            } => {
+                assert_eq!(notify.len(), 3);
+                assert_eq!(actions.len(), 5);
+                assert_eq!(timeout_secs, Some(86400));
+                assert_eq!(timeout_action, OperatorTimeoutAction::Reject);
+                // Verify ProvideInput's `field` round-tripped intact.
+                assert!(actions.iter().any(|a| matches!(
+                    a,
+                    OperatorAction::ProvideInput { field } if field == "revision_notes"
+                )));
+            }
+            other => panic!("expected Operator, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_mode_operator_timeout_optional_round_trip() {
+        // `timeout_secs` is `Option<u64>` with `skip_serializing_if`;
+        // verify the absent form round-trips with the default
+        // `timeout_action = continue` so a minimal manifest works.
+        let json = r#"{"operator":{"notify":["telegram:@op"],"actions":["approve"]}}"#;
+        let parsed: StepMode = serde_json::from_str(json).expect("deserialize minimal");
+        match parsed {
+            StepMode::Operator {
+                notify,
+                actions,
+                timeout_secs,
+                timeout_action,
+            } => {
+                assert_eq!(notify, vec!["telegram:@op".to_string()]);
+                assert_eq!(actions, vec![OperatorAction::Approve]);
+                assert_eq!(timeout_secs, None);
+                assert_eq!(timeout_action, OperatorTimeoutAction::Continue);
+            }
+            other => panic!("expected Operator, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workflow_validate_accepts_well_formed_operator_step() {
+        let wf = workflow_with_operator_step();
+        let errs = wf.validate();
+        assert!(
+            errs.is_empty(),
+            "well-formed operator step must pass validate; got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_validate_rejects_empty_operator_notify() {
+        let wf = workflow_with_single_op_step(
+            "empty-notify",
+            StepMode::Operator {
+                notify: vec![],
+                actions: vec![OperatorAction::Approve],
+                timeout_secs: None,
+                timeout_action: OperatorTimeoutAction::Continue,
+            },
+        );
+        let errs = wf.validate();
+        assert!(
+            errs.iter().any(|(_, r)| r.contains("notify is empty")),
+            "expected empty-notify rejection; got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_validate_rejects_unknown_operator_notify_scheme() {
+        let wf = workflow_with_single_op_step(
+            "bad-scheme",
+            StepMode::Operator {
+                notify: vec!["sms:+15551234567".to_string()],
+                actions: vec![OperatorAction::Approve],
+                timeout_secs: None,
+                timeout_action: OperatorTimeoutAction::Continue,
+            },
+        );
+        let errs = wf.validate();
+        assert!(
+            errs.iter()
+                .any(|(_, r)| r.contains("unknown channel scheme")),
+            "expected unknown-scheme rejection; got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_validate_rejects_zero_operator_timeout() {
+        let wf = workflow_with_single_op_step(
+            "zero-timeout",
+            StepMode::Operator {
+                notify: vec!["telegram:@op".to_string()],
+                actions: vec![OperatorAction::Approve],
+                timeout_secs: Some(0),
+                timeout_action: OperatorTimeoutAction::Continue,
+            },
+        );
+        let errs = wf.validate();
+        assert!(
+            errs.iter()
+                .any(|(_, r)| r.contains("operator.timeout_secs is 0")),
+            "expected zero-timeout rejection; got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_validate_rejects_approve_timeout_without_approve_action() {
+        // Defensive: `timeout_action=approve` without `Approve` in
+        // `actions` is almost certainly an authoring mistake — the
+        // workflow would auto-approve a step the operator was never
+        // allowed to approve.
+        let wf = workflow_with_single_op_step(
+            "approve-mismatch",
+            StepMode::Operator {
+                notify: vec!["telegram:@op".to_string()],
+                actions: vec![OperatorAction::Reject],
+                timeout_secs: Some(60),
+                timeout_action: OperatorTimeoutAction::Approve,
+            },
+        );
+        let errs = wf.validate();
+        assert!(
+            errs.iter()
+                .any(|(_, r)| r.contains("timeout_action=approve requires")),
+            "expected approve-mismatch rejection; got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_validate_rejects_operator_combined_with_dag_depends_on() {
+        // Operator-node + DAG `depends_on` is unsupported (same
+        // contract as the other operator-node variants from #5035 —
+        // the DAG executor never matches on `StepMode`).
+        let mut wf = workflow_with_operator_step();
+        wf.steps.insert(
+            0,
+            WorkflowStep {
+                name: "producer".to_string(),
+                agent: StepAgent::ByName {
+                    name: "_producer".to_string(),
+                },
+                prompt_template: "{{input}}".to_string(),
+                mode: StepMode::Sequential,
+                timeout_secs: 30,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                inherit_context: None,
+                depends_on: vec![],
+                session_mode: None,
+            },
+        );
+        wf.steps[1].depends_on = vec!["producer".to_string()];
+        let errs = wf.validate();
+        assert!(
+            errs.iter().any(|(_, r)| r.contains("DAG")),
+            "expected DAG rejection on operator step; got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_validate_rejects_non_default_prompt_template_on_operator() {
+        let mut wf = workflow_with_operator_step();
+        wf.steps[0].prompt_template = "Approve this: {{input}}".to_string();
+        let errs = wf.validate();
+        assert!(
+            errs.iter().any(|(_, r)| r.contains("prompt_template")),
+            "expected prompt_template rejection on operator step; got: {errs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_run_operator_step_pauses_with_resume_token() {
+        // End-to-end skeleton-executor smoke: an operator step must
+        // pause the run, record a `_operator:operator` step result,
+        // and store a resume_token_hash on the run state. We can't
+        // verify the plaintext token from outside `execute_run`
+        // today (the follow-up will surface it via an event); we
+        // just verify the run reached `Paused` with a hash and the
+        // synthetic StepResult landed.
+        let engine = WorkflowEngine::new();
+        let wf = workflow_with_operator_step();
+        let wf_id = engine.register(wf).await;
+        let run_id = engine
+            .create_run(wf_id, "seed-input".to_string())
+            .await
+            .expect("create_run");
+
+        let result = engine
+            .execute_run(run_id, mock_resolver, |_id, _prompt, _mode| async {
+                Ok(("ignored".to_string(), 0u64, 0u64))
+            })
+            .await;
+        // The skeleton executor pauses cleanly — `execute_run` returns
+        // Ok with the input value (pass-through) once Paused state is
+        // observed at the next step boundary.
+        assert!(
+            result.is_ok(),
+            "operator pause should return Ok: {result:?}"
+        );
+
+        let run = engine.get_run(run_id).await.expect("run exists");
+        assert!(
+            matches!(run.state, WorkflowRunState::Paused { .. }),
+            "operator step should leave run Paused, got: {:?}",
+            run.state
+        );
+        // Recorded synthetic step result under the new _operator:operator namespace.
+        assert!(
+            run.step_results
+                .iter()
+                .any(|r| r.agent_name == "_operator:operator"),
+            "expected a _operator:operator step result; got: {:?}",
+            run.step_results
+        );
     }
 }
