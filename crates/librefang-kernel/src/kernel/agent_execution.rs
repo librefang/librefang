@@ -113,6 +113,7 @@ impl LibreFangKernel {
             new_messages_start: 0,
             skill_evolution_suggested: false,
             owner_notice: None,
+            actual_provider: None,
         })
     }
 
@@ -188,6 +189,7 @@ impl LibreFangKernel {
             new_messages_start: 0,
             skill_evolution_suggested: false,
             owner_notice: None,
+            actual_provider: None,
         })
     }
 
@@ -1167,9 +1169,19 @@ impl LibreFangKernel {
         let attribution_user_id: Option<UserId> =
             sender_context.and_then(|sc| self.security.auth.identify(&sc.channel, &sc.user_id));
         let attribution_channel: Option<String> = sender_context.map(|sc| sc.channel.clone());
+        // #4807 review nit 10: when the LLM fallback chain redirected
+        // the request to an alternative slot, bill the *actual* serving
+        // provider rather than the manifest-nominated one. The agent
+        // loop forwards `actual_provider` off the response's
+        // `CompletionResponse.actual_provider` field, which
+        // `FallbackDriver` / `FallbackChain` populate on success.
+        let billed_provider = result
+            .actual_provider
+            .clone()
+            .unwrap_or_else(|| manifest.model.provider.clone());
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
-            provider: manifest.model.provider.clone(),
+            provider: billed_provider,
             model: model.clone(),
             input_tokens: result.total_usage.input_tokens,
             output_tokens: result.total_usage.output_tokens,
