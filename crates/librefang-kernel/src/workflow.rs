@@ -6680,6 +6680,7 @@ mod tests {
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
+            input_schema: None,
         }
     }
 
