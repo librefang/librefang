@@ -3,6 +3,8 @@
 //! registered workflows, then delegates to the inherent
 //! [`LibreFangKernel::run_workflow`].
 
+use std::sync::OnceLock;
+
 use librefang_runtime::kernel_handle;
 
 use super::super::LibreFangKernel;
@@ -17,6 +19,21 @@ use super::super::LibreFangKernel;
 /// Format: `workflow run timed out after Ns (agent-side default_timeout_secs)`.
 pub(crate) fn render_workflow_timeout_text(timeout_secs: u64) -> String {
     format!("workflow run timed out after {timeout_secs}s (agent-side default_timeout_secs)")
+}
+
+/// Module-level cache for the `{{var}}` placeholder regex used by the
+/// describe-workflow auto-detect path. Compiled exactly once per
+/// process — re-compiling per call (the original site) wastes work on
+/// every `workflow_describe` invocation and shows up under load. The
+/// pattern is a static literal and cannot fail at runtime; we `expect`
+/// rather than fall back to "workflow not found" because a regex
+/// compile failure is a real bug, not a missing workflow (NIT — see
+/// PR #5075 review).
+fn placeholder_regex() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"\{\{(\w+)\}\}").expect("workflow_describe placeholder regex compiles")
+    })
 }
 
 #[async_trait::async_trait]
@@ -59,16 +76,117 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             .list_workflows()
             .await
             .into_iter()
-            .map(|w| kernel_handle::WorkflowSummary {
-                id: w.id.0.to_string(),
-                name: w.name,
-                description: w.description,
-                step_count: w.steps.len(),
+            .map(|w| {
+                // `has_input_schema` is true when either an explicit
+                // `[[input_schema]]` block was authored on the workflow
+                // OR any step's prompt_template references at least one
+                // `{{var}}` placeholder (auto-detect path). The fallback
+                // mirrors `Workflow::to_template()` so the discovery
+                // surface stays consistent across both authoring styles
+                // (#4982 — gap 2).
+                let has_explicit = w
+                    .input_schema
+                    .as_ref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
+                let has_auto = !has_explicit
+                    && w.steps.iter().any(|s| {
+                        s.prompt_template.contains("{{") && s.prompt_template.contains("}}")
+                    });
+                kernel_handle::WorkflowSummary::new(
+                    w.id.0.to_string(),
+                    w.name,
+                    w.description,
+                    w.steps.len(),
+                    has_explicit || has_auto,
+                )
             })
             .collect();
         // Sort by name for deterministic prompt output (#3298).
         summaries.sort_by(|a, b| a.name.cmp(&b.name));
         summaries
+    }
+
+    async fn describe_workflow(
+        &self,
+        workflow_id: &str,
+    ) -> Option<kernel_handle::WorkflowDescription> {
+        use crate::workflow::{WorkflowId, WorkflowInputParam as KernelParam};
+
+        // Resolve UUID or name — mirrors run_workflow's resolution path.
+        let workflows = self.workflows.engine.list_workflows().await;
+        let wf = if let Ok(uuid) = uuid::Uuid::parse_str(workflow_id) {
+            let target = WorkflowId(uuid);
+            workflows.into_iter().find(|w| w.id == target)?
+        } else {
+            let name_lower = workflow_id.to_lowercase();
+            workflows
+                .into_iter()
+                .find(|w| w.name.to_lowercase() == name_lower)?
+        };
+
+        // Resolve the input parameter list: prefer the explicit
+        // `input_schema` when authored, otherwise auto-detect from
+        // `{{var}}` placeholders across all steps (same logic as
+        // `Workflow::to_template()`, kept narrow rather than calling
+        // `to_template` to avoid spinning up the full template
+        // structure for a discovery query).
+        let params: Vec<kernel_handle::WorkflowInputParam> =
+            if let Some(declared) = wf.input_schema.as_ref().filter(|s| !s.is_empty()) {
+                let mut out: Vec<kernel_handle::WorkflowInputParam> = declared
+                    .iter()
+                    .map(|p: &KernelParam| {
+                        kernel_handle::WorkflowInputParam::new(
+                            p.name.clone(),
+                            p.param_type.clone(),
+                            p.required,
+                            p.description.clone(),
+                        )
+                    })
+                    .collect();
+                out.sort_by(|a, b| a.name.cmp(&b.name));
+                out
+            } else {
+                // Auto-detect `{{var}}` placeholders. `{{input}}` is the
+                // workflow-engine reserved name for "previous step output";
+                // skip it so the agent's parameter list contains only
+                // user-supplied keys. Regex is cached at module level so
+                // we don't recompile per call.
+                let re = placeholder_regex();
+                let mut seen = std::collections::BTreeSet::new();
+                for step in &wf.steps {
+                    for cap in re.captures_iter(&step.prompt_template) {
+                        let name = cap[1].to_string();
+                        if name == "input" {
+                            continue;
+                        }
+                        seen.insert(name);
+                    }
+                }
+                seen.into_iter()
+                    .map(|name| {
+                        let description = Some(format!(
+                            "Auto-detected from {{{{{name}}}}} placeholder in step prompt"
+                        ));
+                        kernel_handle::WorkflowInputParam::new(
+                            name,
+                            "string".to_string(),
+                            true,
+                            description,
+                        )
+                    })
+                    .collect()
+            };
+
+        let step_names = wf.steps.iter().map(|s| s.name.clone()).collect();
+
+        Some(kernel_handle::WorkflowDescription::new(
+            wf.id.0.to_string(),
+            wf.name,
+            wf.description,
+            step_names,
+            params,
+        ))
     }
 
     async fn get_workflow_run(&self, run_id: &str) -> Option<kernel_handle::WorkflowRunSummary> {
@@ -92,18 +210,32 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             })
             .unwrap_or_else(|| "unknown".to_string());
 
-        Some(kernel_handle::WorkflowRunSummary {
-            run_id: run.id.0.to_string(),
-            workflow_id: run.workflow_id.0.to_string(),
-            workflow_name: run.workflow_name,
+        // Per-step name + output, trimmed view for #4982 structured-
+        // results delivery. Kept in execution order so the agent can
+        // navigate "stage 3 output" by index. Full
+        // `StepResult { agent_id, prompt, tokens, duration_ms, ... }`
+        // stays kernel-side for dashboard / audit consumers.
+        let step_outputs = run
+            .step_results
+            .iter()
+            .map(|r| kernel_handle::StepOutputSummary::new(r.step_name.clone(), r.output.clone()))
+            .collect();
+
+        let step_count = run.step_results.len();
+        let last_step_name = run.step_results.last().map(|r| r.step_name.clone());
+        Some(kernel_handle::WorkflowRunSummary::new(
+            run.id.0.to_string(),
+            run.workflow_id.0.to_string(),
+            run.workflow_name,
             state,
-            started_at: run.started_at.to_rfc3339(),
-            completed_at: run.completed_at.map(|t| t.to_rfc3339()),
-            output: run.output,
-            error: run.error,
-            step_count: run.step_results.len(),
-            last_step_name: run.step_results.last().map(|r| r.step_name.clone()),
-        })
+            run.started_at.to_rfc3339(),
+            run.completed_at.map(|t| t.to_rfc3339()),
+            run.output,
+            run.error,
+            step_count,
+            last_step_name,
+            step_outputs,
+        ))
     }
 
     async fn start_workflow_async(

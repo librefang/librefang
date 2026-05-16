@@ -1177,4 +1177,5 @@ impl AcpTerminalBridge for ForceHumanCapturingKernel {}
 mod policy;
 mod shell;
 mod skills;
+mod workflow;
 mod workspace;

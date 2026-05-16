@@ -274,6 +274,162 @@ async fn workflow_create_parses_per_step_session_mode() {
     );
 }
 
+/// POST /api/workflows with a well-formed `input_schema` array must
+/// accept it and GET /api/workflows/{id} must round-trip every declared
+/// row verbatim (#4982 — gap 2 parameter discovery). Pins the route
+/// boundary; the kernel-side resolution path is covered by
+/// `workflow_describe_returns_explicit_input_schema` in the kernel
+/// integration tests.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_create_accepts_input_schema_and_round_trips() {
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "with-schema",
+            "description": "input_schema round-trip",
+            "steps": [
+                {"name": "draft", "agent_id": agent_id, "prompt": "Topic={{topic}}"}
+            ],
+            "input_schema": [
+                {"name": "topic", "param_type": "string", "required": true, "description": "Article topic"},
+                {"name": "cover", "param_type": "file",   "required": false}
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"]
+        .as_str()
+        .expect("workflow_id")
+        .to_string();
+
+    let (status, body) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let schema = body["input_schema"].as_array().expect("input_schema array");
+    assert_eq!(schema.len(), 2, "both declared rows must survive");
+    // Lookup by name — POST doesn't promise ordering at the route boundary.
+    let by_name: std::collections::HashMap<&str, &serde_json::Value> = schema
+        .iter()
+        .map(|p| (p["name"].as_str().unwrap(), p))
+        .collect();
+    assert_eq!(by_name["topic"]["param_type"], "string");
+    assert_eq!(by_name["topic"]["required"], true);
+    assert_eq!(by_name["topic"]["description"], "Article topic");
+    assert_eq!(by_name["cover"]["param_type"], "file");
+    assert_eq!(by_name["cover"]["required"], false);
+    // List-view advertises has_input_schema=true so the agent knows to
+    // call workflow_describe before workflow_run.
+    let (status, list_body) = get(&h, "/api/workflows").await;
+    assert_eq!(status, StatusCode::OK);
+    let row = list_body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == wf_id)
+        .expect("created workflow appears in list");
+    assert_eq!(row["name"], "with-schema");
+}
+
+/// PUT /api/workflows/{id} replaces `input_schema` when an explicit
+/// `input_schema` key is supplied (#4982 — gap 2). Pins the documented
+/// "explicit key replaces; absent key preserves" PATCH-style semantics
+/// of `parse_input_schema`.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_update_replaces_input_schema() {
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    // Seed with one schema row.
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "to-update",
+            "steps": [{"name": "s", "agent_id": agent_id, "prompt": "go"}],
+            "input_schema": [
+                {"name": "topic", "param_type": "string", "required": true}
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"].as_str().unwrap().to_string();
+
+    // PUT a different schema — must replace, not merge.
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/workflows/{wf_id}"),
+        Some(serde_json::json!({
+            "input_schema": [
+                {"name": "cover", "param_type": "image", "required": false}
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let (status, body) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let schema = body["input_schema"].as_array().expect("input_schema array");
+    assert_eq!(
+        schema.len(),
+        1,
+        "PUT replaces; old 'topic' row must be gone"
+    );
+    assert_eq!(schema[0]["name"], "cover");
+    assert_eq!(schema[0]["param_type"], "image");
+    assert_eq!(schema[0]["required"], false);
+}
+
+/// POST /api/workflows with a malformed `input_schema` row must skip the
+/// bad row (lenient `parse_input_schema` policy — same shape as
+/// `parse_step_session_mode`) and persist the well-formed rows. Returns
+/// 201 rather than 4xx; the bad row simply doesn't appear in GET. Pins
+/// the documented `parse_input_schema` behavior (#4982 — gap 2).
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_create_skips_malformed_input_schema_rows() {
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "partial-schema",
+            "steps": [{"name": "s", "agent_id": agent_id, "prompt": "go"}],
+            "input_schema": [
+                {"name": "topic", "param_type": "string", "required": true},
+                // Missing the required `name` field — must be skipped.
+                {"param_type": "string", "required": true},
+                {"name": "cover", "param_type": "file", "required": false},
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"].as_str().unwrap().to_string();
+
+    let (status, body) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let schema = body["input_schema"].as_array().expect("input_schema array");
+    assert_eq!(
+        schema.len(),
+        2,
+        "malformed row must be silently skipped, leaving the 2 well-formed rows"
+    );
+    let names: Vec<&str> = schema.iter().map(|p| p["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"topic"));
+    assert!(names.contains(&"cover"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn workflow_create_rejects_missing_steps() {
     let h = boot().await;
