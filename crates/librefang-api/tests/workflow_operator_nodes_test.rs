@@ -92,6 +92,7 @@ fn workflow_with_op_step(name: &str, mode: StepMode) -> Workflow {
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: None,
+        input_schema: None,
     }
 }
 
@@ -756,6 +757,7 @@ fn branch_skip_workflow(literal: &str, target_name: &str, target_template: &str)
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: None,
+        input_schema: None,
     }
 }
 
@@ -1040,6 +1042,7 @@ async fn branch_step_ambiguous_target_halts_with_recorded_reason() {
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: None,
+        input_schema: None,
     };
     let wf_id = workflow.id;
     engine.register(workflow).await;
@@ -1152,6 +1155,7 @@ async fn validate_rejects_dag_workflow_with_operator_node_step() {
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: None,
+        input_schema: None,
     };
     let errs = wf.validate();
     assert!(
@@ -1238,6 +1242,7 @@ async fn dry_run_reports_operator_nodes_as_found_with_synthetic_agent_names() {
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: None,
+        input_schema: None,
     };
     let wf_id = wf.id;
     engine.register(wf).await;
@@ -1322,6 +1327,7 @@ async fn dry_run_marks_unparseable_transform_template_as_skipped() {
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: None,
+        input_schema: None,
     };
     let wf_id = wf.id;
     engine.register(wf).await;
@@ -1419,6 +1425,7 @@ async fn dry_run_transform_advances_current_input_for_downstream_previews() {
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: None,
+        input_schema: None,
     };
     let wf_id = wf.id;
     engine.register(wf).await;
