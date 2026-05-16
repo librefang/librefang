@@ -13,6 +13,7 @@
 
 use super::*;
 use crate::MeteringSubsystemApi;
+use librefang_types::error::LibreFangError;
 
 impl LibreFangKernel {
     /// Per-session stream-event hub (multi-client SSE attach).
@@ -76,20 +77,22 @@ impl LibreFangKernel {
                     if let Err(e) = vault.verify_or_install_sentinel() {
                         match e {
                             librefang_extensions::ExtensionError::VaultKeyMismatch { hint } => {
-                                return Err(KernelError::BootFailed(format!(
+                                return Err(LibreFangError::BootFailed(format!(
                                     "Vault key mismatch — refusing to boot. {hint} \
                                      Recovery: restore the original LIBREFANG_VAULT_KEY env var, \
                                      restore the vault file from backup, or run \
                                      `librefang vault rotate-key` if you intended to rotate."
-                                )));
+                                ))
+                                .into());
                             }
                             other => {
                                 // Sentinel backfill failed for some other
                                 // reason (disk full, permissions). Surface
                                 // it but don't pretend it's a key mismatch.
-                                return Err(KernelError::BootFailed(format!(
+                                return Err(LibreFangError::BootFailed(format!(
                                     "Vault sentinel write failed: {other}"
-                                )));
+                                ))
+                                .into());
                             }
                         }
                     }
@@ -111,13 +114,14 @@ impl LibreFangKernel {
                     // Non-locked unlock failure is almost always wrong-key
                     // (AES-GCM decrypt fails). Refuse to boot — same
                     // rationale as the sentinel-mismatch branch above.
-                    return Err(KernelError::BootFailed(format!(
+                    return Err(LibreFangError::BootFailed(format!(
                         "Vault unlock failed at boot ({e}). This usually means \
                          LIBREFANG_VAULT_KEY does not match the key the vault \
                          was encrypted with. Recovery: restore the original \
                          env var, restore the vault file from backup, or run \
                          `librefang vault rotate-key` if you intended to rotate."
-                    )));
+                    ))
+                    .into());
                 }
             }
         }
@@ -146,9 +150,10 @@ impl LibreFangKernel {
         // with an unusable backend that fails on first tool call.
         // Lost during the kernel/mod split; restored here.
         if let Err(e) = config.tool_exec.validate() {
-            return Err(KernelError::BootFailed(format!(
+            return Err(LibreFangError::BootFailed(format!(
                 "Invalid [tool_exec] config: {e}"
-            )));
+            ))
+            .into());
         }
 
         // Check TOTP configuration consistency
@@ -175,7 +180,7 @@ impl LibreFangKernel {
 
         // Ensure data directory exists
         std::fs::create_dir_all(&config.data_dir)
-            .map_err(|e| KernelError::BootFailed(format!("Failed to create data dir: {e}")))?;
+            .map_err(|e| LibreFangError::BootFailed(format!("Failed to create data dir: {e}")))?;
 
         // Migrate old directory layout (hands/, workspaces/<agent>/) to unified layout
         ensure_workspaces_layout(&config.home_dir)?;
@@ -202,14 +207,14 @@ impl LibreFangKernel {
             config.memory.chunking.clone(),
             config.memory.pool_size,
         )
-        .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?;
+        .map_err(|e| LibreFangError::BootFailed(format!("Memory init failed: {e}")))?;
 
         // Optionally attach an external vector store backend.
         if let Some(ref backend) = config.memory.vector_backend {
             match backend.as_str() {
                 "http" => {
                     let url = config.memory.vector_store_url.as_deref().ok_or_else(|| {
-                        KernelError::BootFailed(
+                        LibreFangError::BootFailed(
                             "vector_backend = \"http\" requires vector_store_url".into(),
                         )
                     })?;
@@ -219,9 +224,10 @@ impl LibreFangKernel {
                 }
                 "sqlite" | "" => { /* default — no external backend */ }
                 other => {
-                    return Err(KernelError::BootFailed(format!(
+                    return Err(LibreFangError::BootFailed(format!(
                         "Unknown vector_backend: {other:?}"
-                    )));
+                    ))
+                    .into());
                 }
             }
         }
@@ -616,7 +622,7 @@ impl LibreFangKernel {
         // to avoid conflicts with UsageStore concurrent writes
         let prompt_store =
             librefang_memory::PromptStore::new_with_path(&db_path, config.memory.pool_size)
-                .map_err(|e| KernelError::BootFailed(format!("Prompt store init failed: {e}")))?;
+                .map_err(|e| LibreFangError::BootFailed(format!("Prompt store init failed: {e}")))?;
 
         let supervisor = Supervisor::new();
         let background = BackgroundExecutor::with_concurrency(
@@ -626,7 +632,7 @@ impl LibreFangKernel {
 
         // Initialize WASM sandbox engine (shared across all WASM agents)
         let wasm_sandbox = WasmSandbox::new()
-            .map_err(|e| KernelError::BootFailed(format!("WASM sandbox init failed: {e}")))?;
+            .map_err(|e| LibreFangError::BootFailed(format!("WASM sandbox init failed: {e}")))?;
 
         // Initialize RBAC authentication manager. Tool groups are passed
         // through so per-user `tool_categories` (RBAC M3) can resolve
@@ -2096,7 +2102,7 @@ system_prompt = "You are a helpful assistant."
                     .map_err(|e| format!("fallback manifest parse error: {e}"))
                 })
                 .map_err(|e| {
-                    KernelError::BootFailed(format!("failed to load assistant template: {e}"))
+                    LibreFangError::BootFailed(format!("failed to load assistant template: {e}"))
                 })?;
             match kernel.spawn_agent(manifest) {
                 Ok(id) => info!(id = %id, "Default assistant spawned"),
