@@ -1540,6 +1540,15 @@ mod tests {
             !allow_err.contains("denied"),
             "with EnvRead(PATH) granted, env_read must not be denied; got: {allow_err}"
         );
+        // Stronger positive assertion: the response must actually carry an
+        // `ok` value, not just be missing the `error` key. A regression
+        // that silently returned `{}` or `{"ok": null}` would pass the
+        // !contains("denied") check alone.
+        assert!(
+            allow.output.get("ok").is_some(),
+            "with EnvRead(PATH) granted, env_read must return an `ok` value; got: {:?}",
+            allow.output
+        );
 
         let deny_cfg = SandboxConfig {
             capabilities: vec![],
@@ -1594,6 +1603,14 @@ mod tests {
         match outcome {
             Err(SandboxError::AbiError(_)) => {
                 // expected — failed grow surfaces as -1 / oversized result
+            }
+            Err(SandboxError::Compilation(msg)) => {
+                // Treat compilation failure as a test bug, not a pass — it
+                // means MEMORY_GROW_WAT itself didn't parse, so this case
+                // never exercised the limiter at all.
+                panic!(
+                    "memory-cap test fixture failed to compile (not a real cap-respect signal): {msg}"
+                );
             }
             Err(other) => {
                 // Any other Err is also fine — the invariant is "memory cap
