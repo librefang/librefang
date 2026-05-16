@@ -11,10 +11,10 @@ Provider-agnostic abstraction mirroring `librefang-llm-drivers`:
 
 ## Where this fits
 
-Extracted from `librefang-runtime` as part of the #3710 god-crate split
-(renamed from the deleted `librefang-runtime-oauth`, whose OAuth code
-collapsed back into the parent runtime crate). `librefang-runtime`
-re-exports this crate at its historical path (`runtime::media`,
+Extracted from `librefang-runtime` as part of the #3710 god-crate split.
+The unrelated `librefang-runtime-oauth` crate was collapsed back into
+the parent runtime in a separate step. `librefang-runtime` re-exports
+this crate at its historical path (`runtime::media`,
 `runtime::media_understanding`), so downstream call sites do not need to
 switch imports. Behind the parent crate's default-on `media` feature.
 
