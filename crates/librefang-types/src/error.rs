@@ -138,6 +138,15 @@ pub enum LibreFangError {
     #[error("Shutdown in progress")]
     ShuttingDown,
 
+    /// The kernel failed to boot.
+    ///
+    /// Migrated from the now-dropped `KernelError::BootFailed(String)` as
+    /// part of #3576: the kernel-side wrapper offered no semantic gain over
+    /// lifting the variant into the shared error enum, and forced every
+    /// boot-path caller to convert at the boundary.
+    #[error("Boot failed: {0}")]
+    BootFailed(String),
+
     /// An I/O error occurred.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -421,5 +430,17 @@ mod tests {
             err.to_string(),
             "Serialization error: length prefix mismatch"
         );
+    }
+
+    /// Regression for #3576: the `BootFailed` variant lifted out of the
+    /// dropped `KernelError::BootFailed(String)` must render with the same
+    /// byte-for-byte `Display` prefix the kernel-side wrapper produced
+    /// (`"Boot failed: <msg>"`), so existing log lines and operator-facing
+    /// surfaces don't shift when the kernel boot path switches to the
+    /// shared variant.
+    #[test]
+    fn boot_failed_display_matches_dropped_kernel_variant() {
+        let err = LibreFangError::BootFailed("vault unlock failed".to_string());
+        assert_eq!(err.to_string(), "Boot failed: vault unlock failed");
     }
 }
