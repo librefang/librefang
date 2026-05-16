@@ -178,6 +178,7 @@ pub fn extract_metadata_url(params: &HashMap<String, String>, server_url: &str) 
 /// * IPv4 private       10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
 /// * IPv4 CGNAT         100.64.0.0/10 (incl. Alibaba Cloud IMDS 100.100.100.200)
 /// * IPv4 link-local    169.254.0.0/16 (covers IMDS 169.254.169.254)
+/// * IPv4 Azure IMDS    192.0.0.192 (legacy Azure metadata endpoint)
 /// * IPv6 loopback      ::1
 /// * IPv6 unique-local  fc00::/7
 /// * IPv6 link-local    fe80::/10
@@ -206,6 +207,11 @@ fn is_ssrf_blocked_host(host: &str) -> bool {
         || (o[0] == 100 && (o[1] & 0xc0) == 64)
         // 169.254.0.0/16 link-local (incl. cloud IMDS 169.254.169.254)
         || (o[0] == 169 && o[1] == 254)
+        // 192.0.0.192 — Azure IMDS alternative endpoint. Public IANA-
+        // assigned (192.0.0.0/24 IETF reserved) but used by Azure for
+        // legacy metadata access; web_fetch::check_ssrf blocks it and
+        // this helper must stay aligned.
+        || (o[0] == 192 && o[1] == 0 && o[2] == 0 && o[3] == 192)
     }
 
     /// IPv4 embedded in an IPv6 address through one of the two forms

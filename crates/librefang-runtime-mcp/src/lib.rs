@@ -3911,6 +3911,9 @@ mod tests {
         );
         assert!(McpConnection::check_ssrf("http://metadata.google.internal/v1/", "test").is_err());
         assert!(McpConnection::check_ssrf("http://metadata.aws.internal/", "test").is_err());
+        // Azure IMDS alternative endpoint — public IANA-assigned IP but
+        // blocked unconditionally to stay aligned with web_fetch::check_ssrf.
+        assert!(McpConnection::check_ssrf("http://192.0.0.192/metadata/instance", "test").is_err());
 
         // Loopback — IPv4, hostname, and IPv6
         assert!(McpConnection::check_ssrf("http://127.0.0.1/admin", "test").is_err());
