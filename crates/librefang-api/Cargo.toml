@@ -215,6 +215,11 @@ librefang-testing = { path = "../librefang-testing" }
 # tool-exec backend integration test (#3332)
 librefang-runtime = { path = "../librefang-runtime" }
 totp-rs = { workspace = true }
+# OIDC `sub` claim enforcement integration test (#5128): generates RSA
+# keypairs in-process, signs JWTs with `jsonwebtoken`, and serves the
+# resulting JWKS over a local axum listener so `validate_jwt_cached` can
+# be driven end-to-end without a live identity provider.
+rsa = { workspace = true }
 
 [lints]
 workspace = true
